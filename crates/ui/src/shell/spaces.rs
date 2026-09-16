@@ -3096,6 +3096,90 @@ mod tests {
         assert_eq!(flat, ["a1", "b1", "home", "a2", "b2"]);
     }
 
+    #[gpui::test]
+    fn by_project_draws_one_section_per_project(cx: &mut gpui::TestAppContext) {
+        use crate::settings::{self, UiSettings};
+        use crate::state::{AppState, EngineBootConfig};
+        use gpui::AppContext as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            settings::init(UiSettings::default(), dir.path(), cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            gpui_base::init(cx);
+            cx.set_global(crate::theme::Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            super::Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, _window, cx| {
+                shell.state.update(cx, |state, _| {
+                    state.spaces = ["a", "b"]
+                        .into_iter()
+                        .map(|id| {
+                            serde_json::from_value(serde_json::json!({
+                                "id": id, "deviceId": "local", "path": format!("/tmp/{id}"),
+                                "gitDetected": false, "createdAt": Utc::now(),
+                            }))
+                            .unwrap()
+                        })
+                        .collect();
+                    state.chats = [("a1", "a", 3), ("b1", "b", 2), ("a2", "a", 1)]
+                        .into_iter()
+                        .map(|(id, space, secs)| {
+                            serde_json::from_value(serde_json::json!({
+                                "id": id, "deviceId": "local", "spaceId": space,
+                                "archived": false,
+                                "createdAt": Utc.timestamp_opt(secs, 0).unwrap(),
+                            }))
+                            .unwrap()
+                        })
+                        .collect();
+                });
+                let theme = crate::theme::Theme::default();
+                let keys = |shell: &mut super::Shell, cx: &mut gpui::Context<super::Shell>| {
+                    shell
+                        .render_active_rows(&theme, cx)
+                        .into_iter()
+                        .map(|(key, _, _)| key)
+                        .collect::<Vec<_>>()
+                };
+
+                shell.settings.space_filter = None;
+                shell.settings.sidebar_organization = SidebarOrganization::InOneList;
+                assert_eq!(keys(shell, cx), ["c:a1", "c:b1", "c:a2"]);
+
+                shell.settings.sidebar_organization = SidebarOrganization::ByProject;
+                assert_eq!(keys(shell, cx), ["g:project:a", "g:project:b"]);
+                assert_eq!(shell.sidebar_visible_order(cx), ["a1", "a2", "b1"]);
+
+                shell.settings.space_filter = Some("a".into());
+                assert_eq!(keys(shell, cx), ["c:a1", "c:a2"]);
+            })
+            .unwrap();
+    }
+
     #[test]
     fn missing_current_device_leaves_group_order_untouched() {
         let mut groups = vec![group("first", 1), group("second", 2)];
