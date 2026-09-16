@@ -1375,6 +1375,18 @@ pub struct Shell {
     /// Surface-tab strip scroll (the strip overflows horizontally, t3
     /// ScrollArea-style; drag drop-math reads the offset back out).
     right_tab_scroll: gpui::ScrollHandle,
+    /// Session tab currently hovered (close button appears on hover).
+    tab_hover: Option<String>,
+    /// Session-tab context menu: (chat id, window position).
+    tab_menu: popover::Popup<(String, Point<Pixels>)>,
+    /// Session-tab drag-reorder in flight (see `tabs::TabDragState`).
+    tab_drag: Option<tabs::TabDragState>,
+    /// Scroll position of the session tab region (drives the edge fades and
+    /// the drop-index math under horizontal overflow).
+    tabs_scroll: gpui::ScrollHandle,
+    /// Chat id last auto-scrolled into view — scroll-to-selected fires once per
+    /// selection change, not every frame (which would fight manual scrolling).
+    tabs_scrolled_to: Option<String>,
     /// Chat outlet vs settings pages.
     route: Route,
     /// Route history behind the titlebar back/forward buttons (§ nav history).
@@ -1744,6 +1756,11 @@ impl Shell {
             right_tabs: std::collections::HashMap::new(),
             right_tab_drag: None,
             right_tab_scroll: gpui::ScrollHandle::new(),
+            tab_hover: None,
+            tab_menu: popover::Popup::default(),
+            tab_drag: None,
+            tabs_scroll: gpui::ScrollHandle::new(),
+            tabs_scrolled_to: None,
             route,
             nav,
             devices_page: None,
@@ -2138,6 +2155,9 @@ impl Shell {
         // Boot landing: the most recent session once the first chats frame
         // syncs (manual selection wins).
         self.boot_select_chat(cx);
+        // Reconcile the device-local tab list (prune against the doc,
+        // selected-chat invariant).
+        self.sync_open_tabs(cx);
         // Heal a dangling sidebar filter (space deleted, possibly elsewhere):
         // fall back to "All" rather than filtering everything out.
         if state.read(cx).spaces_synced
@@ -7178,6 +7198,9 @@ impl Shell {
             overlays.push(popover::modal("rename-chat-dialog", viewport, card));
         }
 
+        if let Some(menu) = self.render_tab_menu(cx) {
+            overlays.push(menu);
+        }
         overlays.extend(self.render_space_overlays(viewport, window, cx));
         if let Some(overlay) = self.render_command_palette(viewport, window, cx) {
             overlays.push(overlay);
