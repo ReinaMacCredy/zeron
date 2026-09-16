@@ -7407,6 +7407,7 @@ impl Shell {
                     new_thread_background_effect,
                     theme,
                     std::path::Path::new(&background.path),
+                    0,
                     cx,
                 )
             });

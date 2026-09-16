@@ -31,10 +31,12 @@ impl Readiness {
         crate::composer_dock::stage(elapsed / (0.120 * crate::motion::speed_scale()), 0.0, 1.0)
     }
 }
-type EffectEntry = (
-    (NewThreadBackgroundEffect, bool),
-    Option<Arc<gpui::RenderImage>>,
-);
+/// Effect, light paper, and the chat blur level (0 = the untouched hero).
+type EffectKey = (NewThreadBackgroundEffect, bool, u8);
+type EffectEntry = (EffectKey, Option<Arc<gpui::RenderImage>>);
+/// Reference column width the blur slider is calibrated against: a level's
+/// pixel radius reads the same after the proxy is cover-fitted to the chat.
+const BLUR_REFERENCE_WIDTH: f32 = 1400.0;
 #[derive(Debug)]
 struct BackgroundLuminance {
     width: u32,
@@ -48,6 +50,7 @@ impl BackgroundLuminance {
         self: &Arc<Self>,
         effect: NewThreadBackgroundEffect,
         light: bool,
+        blur_level: u8,
         cx: &mut gpui::App,
     ) -> Option<Arc<gpui::RenderImage>> {
         let mut effects = self.effects.lock().unwrap();
@@ -58,9 +61,17 @@ impl BackgroundLuminance {
                     effect,
                     NewThreadBackgroundEffect::Dither | NewThreadBackgroundEffect::None
                 ),
+            blur_level,
         );
         if let Some((_, image)) = effects.iter().find(|(cached, _)| *cached == key) {
             return image.clone();
+        }
+        // A slider drag walks through several levels; only the newest blurred
+        // variant per treatment stays resident. The unblurred hero is kept.
+        if blur_level > 0 {
+            effects.retain(|((cached_effect, cached_light, cached_blur), _)| {
+                *cached_blur == 0 || (*cached_effect, *cached_light) != (key.0, key.1)
+            });
         }
         // None marks the single pending job for this source/effect, not a viewport.
         effects.push((key, None));
@@ -87,6 +98,7 @@ impl BackgroundLuminance {
                         NewThreadBackgroundEffect::Ascii => worker.ascii_pixels(light),
                         _ => worker.scanline_pixels(light),
                     };
+                    let pixels = blur_pixels(pixels, blur_level);
                     Arc::new(gpui::RenderImage::new([image::Frame::new(pixels)]))
                 })
                 .await;
@@ -291,14 +303,27 @@ fn background_luminance(path: &Path, cx: &mut gpui::App) -> Option<Arc<Backgroun
 
 /// Safe to call on both routes: loading/decoding/effects happen once off-thread,
 /// before the hero is requested, and never depend on composer/sidebar geometry.
-pub(super) fn prepare(
+/// `blur_level` is [`crate::settings::ChatBackground::blur_level`]; the
+/// new-thread hero always asks for level 0.
+pub(crate) fn prepare(
     effect: NewThreadBackgroundEffect,
     theme: &Theme,
     path: &Path,
+    blur_level: u8,
     cx: &mut gpui::App,
 ) -> Option<Arc<gpui::RenderImage>> {
     let light = matches!(theme.appearance, crate::theme::Appearance::Light);
-    background_luminance(path, cx).and_then(|source| source.raster_image(effect, light, cx))
+    background_luminance(path, cx)
+        .and_then(|source| source.raster_image(effect, light, blur_level, cx))
+}
+
+fn blur_pixels(pixels: image::RgbaImage, blur_level: u8) -> image::RgbaImage {
+    if blur_level == 0 {
+        return pixels;
+    }
+    let radius = blur_level as f32 * crate::settings::CHAT_BACKGROUND_BLUR_STEP;
+    let sigma = radius * pixels.width() as f32 / BLUR_REFERENCE_WIDTH;
+    image::imageops::fast_blur(&pixels, sigma)
 }
 fn dither_color([r, g, b, a]: [u8; 4], threshold: u8) -> [u8; 4] {
     let peak = r.max(g).max(b) as f32;
@@ -350,7 +375,7 @@ mod tests {
         cx.update(|cx| {
             assert!(
                 source
-                    .raster_image(NewThreadBackgroundEffect::None, false, cx)
+                    .raster_image(NewThreadBackgroundEffect::None, false, 0, cx)
                     .is_none()
             )
         });
@@ -359,14 +384,14 @@ mod tests {
             let warm = background_luminance(&path, cx).unwrap();
             assert!(Arc::ptr_eq(&source, &warm));
             let image = warm
-                .raster_image(NewThreadBackgroundEffect::None, false, cx)
+                .raster_image(NewThreadBackgroundEffect::None, false, 0, cx)
                 .unwrap();
             assert_eq!(image.as_bytes(0).unwrap()[..4], [231, 89, 173, 180]);
             for _ in 0..20 {
                 assert!(Arc::ptr_eq(
                     &image,
                     &warm
-                        .raster_image(NewThreadBackgroundEffect::None, false, cx)
+                        .raster_image(NewThreadBackgroundEffect::None, false, 0, cx)
                         .unwrap()
                 ));
             }
@@ -392,7 +417,7 @@ mod tests {
         ] {
             cx.update(|cx| {
                 for _ in 0..100 {
-                    assert!(source.raster_image(effect, false, cx).is_none());
+                    assert!(source.raster_image(effect, false, 0, cx).is_none());
                 }
                 assert_eq!(
                     source
@@ -400,20 +425,20 @@ mod tests {
                         .lock()
                         .unwrap()
                         .iter()
-                        .filter(|(key, _)| *key == (effect, false))
+                        .filter(|(key, _)| *key == (effect, false, 0))
                         .count(),
                     1
                 );
             });
             cx.run_until_parked();
             cx.update(|cx| {
-                let first = source.raster_image(effect, false, cx).unwrap();
+                let first = source.raster_image(effect, false, 0, cx).unwrap();
                 assert_eq!(first.size(0).width.0, 60);
                 assert_eq!(first.size(0).height.0, 32);
                 for _ in 0..100 {
                     assert!(Arc::ptr_eq(
                         &first,
-                        &source.raster_image(effect, false, cx).unwrap()
+                        &source.raster_image(effect, false, 0, cx).unwrap()
                     ));
                 }
             });
@@ -455,13 +480,13 @@ mod tests {
             NewThreadBackgroundEffect::Dither,
         ] {
             cx.update(|cx| {
-                source.raster_image(effect, false, cx);
-                source.raster_image(effect, true, cx);
+                source.raster_image(effect, false, 0, cx);
+                source.raster_image(effect, true, 0, cx);
             });
             cx.run_until_parked();
             cx.update(|cx| {
-                let dark = source.raster_image(effect, false, cx).unwrap();
-                let light = source.raster_image(effect, true, cx).unwrap();
+                let dark = source.raster_image(effect, false, 0, cx).unwrap();
+                let light = source.raster_image(effect, true, 0, cx).unwrap();
                 assert_eq!(
                     Arc::ptr_eq(&dark, &light),
                     effect == NewThreadBackgroundEffect::Dither
@@ -469,16 +494,94 @@ mod tests {
                 for _ in 0..100 {
                     assert!(Arc::ptr_eq(
                         &dark,
-                        &source.raster_image(effect, false, cx).unwrap()
+                        &source.raster_image(effect, false, 0, cx).unwrap()
                     ));
                     assert!(Arc::ptr_eq(
                         &light,
-                        &source.raster_image(effect, true, cx).unwrap()
+                        &source.raster_image(effect, true, 0, cx).unwrap()
                     ));
                 }
             });
         }
         assert_eq!(source.effects.lock().unwrap().len(), 7);
+    }
+
+    #[gpui::test]
+    fn chat_blur_levels_keep_the_hero_and_replace_the_previous_blurred_variant(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let source = fixture();
+        cx.update(|cx| {
+            source.raster_image(NewThreadBackgroundEffect::None, false, 0, cx);
+            source.raster_image(NewThreadBackgroundEffect::None, false, 3, cx);
+        });
+        cx.run_until_parked();
+        let (hero, soft) = cx.update(|cx| {
+            (
+                source
+                    .raster_image(NewThreadBackgroundEffect::None, false, 0, cx)
+                    .unwrap(),
+                source
+                    .raster_image(NewThreadBackgroundEffect::None, false, 3, cx)
+                    .unwrap(),
+            )
+        });
+        assert!(!Arc::ptr_eq(&hero, &soft));
+        assert_eq!(soft.size(0).width.0, 60);
+        cx.update(|cx| {
+            assert!(
+                source
+                    .raster_image(NewThreadBackgroundEffect::None, false, 9, cx)
+                    .is_none()
+            );
+            let keys: Vec<EffectKey> = source
+                .effects
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(key, _)| *key)
+                .collect();
+            assert_eq!(
+                keys,
+                vec![
+                    (NewThreadBackgroundEffect::None, false, 0),
+                    (NewThreadBackgroundEffect::None, false, 9)
+                ]
+            );
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(Arc::ptr_eq(
+                &hero,
+                &source
+                    .raster_image(NewThreadBackgroundEffect::None, false, 0, cx)
+                    .unwrap()
+            ));
+            assert!(
+                source
+                    .raster_image(NewThreadBackgroundEffect::None, false, 9, cx)
+                    .is_some()
+            );
+        });
+    }
+
+    #[test]
+    fn blur_softens_edges_and_keeps_dimensions_and_alpha() {
+        let mut pixels = image::RgbaImage::from_pixel(60, 32, image::Rgba([0, 0, 0, 200]));
+        for x in 30..60 {
+            for y in 0..32 {
+                pixels.put_pixel(x, y, image::Rgba([255, 255, 255, 200]));
+            }
+        }
+        assert_eq!(
+            blur_pixels(pixels.clone(), 0).get_pixel(29, 16).0,
+            [0, 0, 0, 200]
+        );
+        let soft = blur_pixels(pixels, 6);
+        assert_eq!(soft.dimensions(), (60, 32));
+        let edge = soft.get_pixel(29, 16).0;
+        assert!(edge[0] > 0 && edge[0] < 255, "{edge:?}");
+        assert!(soft.pixels().all(|pixel| pixel.0[3] == 200));
     }
 
     #[test]

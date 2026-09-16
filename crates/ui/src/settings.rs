@@ -106,6 +106,78 @@ impl NewThreadBackgroundEffect {
     }
 }
 
+pub const CHAT_BACKGROUND_BLUR_MAX: f32 = 48.0;
+/// Blur is baked into the prepared artwork, so the slider snaps to a few
+/// levels instead of rasterizing every pixel of a drag.
+pub const CHAT_BACKGROUND_BLUR_STEP: f32 = 4.0;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChatBackgroundPlacement {
+    #[default]
+    Hero,
+    Full,
+}
+
+impl ChatBackgroundPlacement {
+    pub const ALL: [Self; 2] = [Self::Hero, Self::Full];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Hero => "Hero",
+            Self::Full => "Full",
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Hero => "Same top crop as new threads, fading out below.",
+            Self::Full => "Covers the whole conversation column.",
+        }
+    }
+}
+
+/// The new-thread artwork shown again behind an open conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ChatBackground {
+    pub enabled: bool,
+    pub placement: ChatBackgroundPlacement,
+    pub opacity: f32,
+    pub blur: f32,
+    pub scrim: bool,
+}
+
+impl Default for ChatBackground {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            placement: ChatBackgroundPlacement::Hero,
+            opacity: 0.2,
+            blur: 24.0,
+            scrim: true,
+        }
+    }
+}
+
+impl ChatBackground {
+    pub fn visible(&self) -> bool {
+        self.enabled && self.opacity > 0.0
+    }
+
+    pub fn blur_level(&self) -> u8 {
+        (self.blur / CHAT_BACKGROUND_BLUR_STEP).round() as u8
+    }
+
+    pub fn clamped(mut self) -> Self {
+        let default = Self::default();
+        self.opacity = clamp_or(self.opacity, 0.0, 1.0, default.opacity);
+        self.blur = clamp_or(self.blur, 0.0, CHAT_BACKGROUND_BLUR_MAX, default.blur);
+        self.blur = (self.blur / CHAT_BACKGROUND_BLUR_STEP).round() * CHAT_BACKGROUND_BLUR_STEP;
+        self
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct GitHistoryColumns {
@@ -366,6 +438,19 @@ pub fn set_new_thread_background_effect(effect: NewThreadBackgroundEffect, cx: &
     }
 }
 
+pub fn update_chat_background(
+    policy: SavePolicy,
+    cx: &mut App,
+    mutate: impl FnOnce(&mut ChatBackground),
+) {
+    if update(policy, cx, |settings| {
+        mutate(&mut settings.chat_background);
+        settings.chat_background = settings.chat_background.clamped();
+    }) {
+        cx.refresh_windows();
+    }
+}
+
 fn remove_managed_new_thread_background(
     background: Option<&NewThreadComposerBackground>,
     backgrounds_dir: &Path,
@@ -621,6 +706,8 @@ pub struct UiSettings {
     pub new_thread_composer_background: Option<NewThreadComposerBackground>,
     /// Non-destructive treatment composited inside the artwork's fade mask.
     pub new_thread_background_effect: NewThreadBackgroundEffect,
+    /// How the same artwork shows behind an open conversation.
+    pub chat_background: ChatBackground,
     /// Pre-theme settings used `accentColor`. Read it once, migrate to
     /// [`Self::accent`], and never write it again.
     #[serde(default, rename = "accentColor", skip_serializing)]
@@ -683,6 +770,7 @@ impl Default for UiSettings {
             surface: zeron_theme::SurfacePreference::default(),
             new_thread_composer_background: None,
             new_thread_background_effect: NewThreadBackgroundEffect::None,
+            chat_background: ChatBackground::default(),
             legacy_accent_color: None,
         }
     }
@@ -1164,6 +1252,7 @@ impl UiSettings {
         );
         self.git_history_column_widths = self.git_history_column_widths.clamped();
         self.git_history_column_order = self.git_history_column_order.normalized();
+        self.chat_background = self.chat_background.clamped();
         self.ui_font_size = self.ui_font_size.normalized();
         self.keymap.heal_jump_slots();
         self.keymap.heal_reserved_composer_shortcuts();
@@ -1319,6 +1408,8 @@ mod tests {
             loaded.new_thread_background_effect,
             NewThreadBackgroundEffect::None
         );
+        assert_eq!(loaded.chat_background, ChatBackground::default());
+        assert!(!loaded.chat_background.visible());
         assert_eq!(loaded.sidebar_width, 300.0);
         assert!(!loaded.sound_enabled);
         for sound in [
@@ -1664,6 +1755,13 @@ mod tests {
                 name: "background.png".into(),
             }),
             new_thread_background_effect: NewThreadBackgroundEffect::Ascii,
+            chat_background: ChatBackground {
+                enabled: true,
+                placement: ChatBackgroundPlacement::Full,
+                opacity: 0.35,
+                blur: 16.0,
+                scrim: false,
+            },
             legacy_accent_color: None,
         };
         settings.save(dir.path()).unwrap();
@@ -1673,10 +1771,36 @@ mod tests {
         assert!(json.contains(r#""codeFencesFitContent": true"#));
         assert!(json.contains(r#""openWebLinksInZeron": false"#));
         assert!(json.contains(r#""newThreadBackgroundEffect": "ascii""#));
+        assert!(json.contains(r#""placement": "full""#));
         assert!(json.contains(r#""terminalFontFamily": "installed:Menlo""#));
         assert!(json.contains(r#""terminalFontSize": 15.0"#));
         assert!(json.contains(r#""codeFontFamily": "geist""#));
         assert!(json.contains(r#""codeFontSize": 11.0"#));
+    }
+
+    #[test]
+    fn chat_background_heals_out_of_range_values_and_snaps_blur_to_levels() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"chatBackground": {"enabled": true, "opacity": 3.0, "blur": 21.0}}"#,
+        )
+        .unwrap();
+        let loaded = UiSettings::load(dir.path()).chat_background;
+        assert!(loaded.visible());
+        assert_eq!(loaded.opacity, 1.0);
+        assert_eq!(loaded.blur, 20.0);
+        assert_eq!(loaded.blur_level(), 5);
+        assert_eq!(loaded.placement, ChatBackgroundPlacement::Hero);
+        assert!(loaded.scrim);
+        let healed = ChatBackground {
+            opacity: f32::NAN,
+            blur: -9.0,
+            ..loaded
+        }
+        .clamped();
+        assert_eq!(healed.opacity, ChatBackground::default().opacity);
+        assert_eq!(healed.blur, 0.0);
     }
 
     #[test]
@@ -2112,7 +2236,8 @@ mod tests {
 
     #[test]
     fn new_project_shortcut_migrates_and_persists() {
-        let mut keymap: KeymapConfig = serde_json::from_str(r#"{"newSession":"mod-alt-n"}"#).unwrap();
+        let mut keymap: KeymapConfig =
+            serde_json::from_str(r#"{"newSession":"mod-alt-n"}"#).unwrap();
         assert_eq!(keymap.get(ShortcutId::NewProject), "mod-shift-n");
         assert_eq!(keymap.get(ShortcutId::NewSession), "mod-alt-n");
         keymap.set(ShortcutId::NewProject, "mod-alt-p".into());
