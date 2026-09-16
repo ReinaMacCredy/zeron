@@ -9,6 +9,7 @@ use zeron_proto::ContextUsage;
 pub fn render(
     usage: Option<ContextUsage>,
     state: gpui::Entity<crate::state::AppState>,
+    composer: gpui::Entity<crate::composer::Composer>,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
     let fraction = usage.and_then(ContextUsage::fraction);
@@ -68,10 +69,16 @@ pub fn render(
         .hover(|s| s.bg(crate::theme::ink(0.05)))
         .child(ring)
         .child(SharedString::from(label))
-        .tooltip(move |_, cx| {
+        // The card carries an action, so it must survive the pointer
+        // travelling into it.
+        .hoverable_tooltip(move |_, cx| {
             cx.new(|cx| UsageCard {
                 _subscription: cx.observe(&state, |_, _, cx| cx.notify()),
+                // The compaction's pending state is composer-local; without
+                // this the button stays live through its own run.
+                _composer_subscription: cx.observe(&composer, |_, _, cx| cx.notify()),
                 state: state.clone(),
+                composer: composer.clone(),
             })
             .into()
         })
@@ -79,7 +86,9 @@ pub fn render(
 
 struct UsageCard {
     state: gpui::Entity<crate::state::AppState>,
+    composer: gpui::Entity<crate::composer::Composer>,
     _subscription: gpui::Subscription,
+    _composer_subscription: gpui::Subscription,
 }
 
 fn details(usage: Option<ContextUsage>) -> String {
@@ -132,6 +141,43 @@ impl Render for UsageCard {
                         self.state.read(cx).context_usage,
                     ))),
             );
+        let reason = self.composer.read(cx).compact_disabled_reason(cx);
+        let composer = self.composer.clone();
+        let card = card
+            .child(
+                div()
+                    .id("compact-context")
+                    .h(px(26.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(6.0))
+                    .border_1()
+                    .border_color(crate::theme::hairline(0.1))
+                    .text_size(px(12.0))
+                    .text_color(theme.text)
+                    .when(reason.is_some(), |button| button.opacity(0.45))
+                    .when(reason.is_none(), |button| {
+                        button
+                            .cursor_pointer()
+                            .hover(|s| s.bg(crate::theme::ink(0.06)))
+                            .on_click(move |_, _, cx| {
+                                composer.update(cx, |composer, cx| {
+                                    composer.request_compaction(None, cx)
+                                });
+                            })
+                    })
+                    .child("Compact context"),
+            )
+            // Never hidden: the reason is why the button is there at all.
+            .when_some(reason, |card, reason| {
+                card.child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme.text_muted.opacity(0.8))
+                        .child(reason),
+                )
+            });
         crate::frost::frosted(crate::popover::CARD_RADIUS, crate::frost::MENU_BLUR, card)
     }
 }

@@ -3932,6 +3932,55 @@ fn slash_token(text: &str, cursor: usize) -> Option<MentionToken> {
     })
 }
 
+/// Zeron's own slash command — the composer runs it, the prompt never
+/// reaches the agent.
+const COMPACT_COMMAND: &str = "compact";
+
+/// `Some(focus)` when the prompt is a `/compact` invocation: the first token
+/// must be exactly `/compact`, and the rest of the line is the focus the
+/// harness compacts around.
+fn compact_focus(text: &str) -> Option<Option<String>> {
+    let rest = text.strip_prefix('/')?.strip_prefix(COMPACT_COMMAND)?;
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let focus = rest.trim();
+    Some((!focus.is_empty()).then(|| focus.to_string()))
+}
+
+/// Zeron's `/compact` rides every harness's list; one that advertises its own
+/// keeps it, so the popup never shows the name twice.
+fn with_compact_entry(mut commands: Vec<SlashCommand>) -> Vec<SlashCommand> {
+    if commands.iter().any(|c| c.name == COMPACT_COMMAND) {
+        return commands;
+    }
+    commands.insert(
+        0,
+        SlashCommand {
+            name: COMPACT_COMMAND.into(),
+            description: "Free up context by summarizing the conversation".into(),
+            input_hint: Some("focus".into()),
+        },
+    );
+    commands
+}
+
+/// The catalog's names live on the engine's harness descriptors, which the
+/// composer never holds; this is the same list, for one sentence of copy.
+fn harness_display_name(harness: HarnessId) -> &'static str {
+    match harness {
+        HarnessId::ClaudeCode => "Claude Code",
+        HarnessId::Codex => "Codex",
+        HarnessId::Cursor => "Cursor",
+        HarnessId::Devin => "Devin",
+        HarnessId::Grok => "Grok",
+        HarnessId::Hermes => "Hermes",
+        HarnessId::Pi => "Pi",
+        HarnessId::Opencode => "OpenCode",
+        HarnessId::Mock => "Mock",
+    }
+}
+
 /// Slash-command completion state: like [`FileMentionState`] but the
 /// candidate list is fetched once per harness (`ListCommands`) and filtered
 /// locally per keystroke — no RPC, debounce, or skeleton churn while typing.
@@ -4032,6 +4081,13 @@ pub struct Composer {
     /// Advertised commands per harness (one `ListCommands` per harness per
     /// composer lifetime; the engine caches discovery on its side too).
     slash_cache: HashMap<HarnessId, Vec<SlashCommand>>,
+    /// How each harness compacts (`native` / `slash` / `none`), cached like
+    /// the command list; `compaction_probed` holds the ids already asked for.
+    compaction_cache: HashMap<HarnessId, SharedString>,
+    compaction_probed: HashSet<HarnessId>,
+    /// The `CompactChat` call in flight; the chat it belongs to lives on
+    /// `AppState::compacting_chat`, which the transcript's trailer reads too.
+    compact_task: Option<Task<()>>,
     /// Slash-popup row scroll — the stack overflows into a wheel/keyboard-
     /// scrollable list once it outgrows the card.
     slash_scroll: gpui::ScrollHandle,
@@ -4215,7 +4271,11 @@ impl Composer {
         // The footer toolbar (checkout kind + ref picker) is rendered INLINE
         // by the composer from picker state — a pickers-side notify (refs
         // loaded, popover toggled, pick made) must repaint the composer too.
-        let pickers_observe = cx.observe(&pickers, |_, _, cx| cx.notify());
+        // The harness can change without an AppState notify (picker switch).
+        let pickers_observe = cx.observe(&pickers, |this: &mut Self, _, cx| {
+            this.ensure_compaction_kind(cx);
+            cx.notify();
+        });
         let picker_focus = cx.subscribe(
             &pickers,
             |this: &mut Self, _, _: &crate::pickers::ReturnComposerFocus, cx| {
@@ -4283,6 +4343,9 @@ impl Composer {
             slash_task: None,
             slash: SlashState::default(),
             slash_cache: HashMap::new(),
+            compaction_cache: HashMap::new(),
+            compaction_probed: HashSet::new(),
+            compact_task: None,
             slash_scroll: gpui::ScrollHandle::new(),
             mention_scroll: gpui::ScrollHandle::new(),
             popup_bar: crate::popover::MenuScrollbarState::default(),
@@ -5424,7 +5487,9 @@ impl Composer {
                 match result {
                     Ok(value) => match serde_json::from_value::<Vec<SlashCommand>>(value) {
                         Ok(commands) => {
-                            composer.slash_cache.insert(harness, commands);
+                            composer
+                                .slash_cache
+                                .insert(harness, with_compact_entry(commands));
                         }
                         Err(err) => tracing::warn!(%err, "slash command decode failed"),
                     },
@@ -5504,6 +5569,10 @@ impl Composer {
         else {
             return;
         };
+        // A command the harness cannot run is shown, not offered.
+        if command.name == COMPACT_COMMAND && self.unsupported_compaction(cx).is_some() {
+            return;
+        }
         self.input.update(cx, |input, cx| {
             input.replace_plain_token(token.range, &format!("/{}", command.name), cx)
         });
@@ -5522,6 +5591,180 @@ impl Composer {
             ..SlashState::default()
         };
         self.sync_mention_controls(cx);
+    }
+
+    // ---- context compaction ------------------------------------------------
+
+    /// One `HarnessCompaction` per harness, cached like the command list —
+    /// the meter's button needs the answer before any popup has opened.
+    fn ensure_compaction_kind(&mut self, cx: &mut Context<Self>) {
+        let Some(harness) = self.pickers.read(cx).resolved(cx).harness else {
+            return;
+        };
+        if !self.compaction_probed.insert(harness) {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.compaction_probed.remove(&harness);
+            return;
+        };
+        let target = {
+            let state = self.state.read(cx);
+            state
+                .selected_chat_row()
+                .map(|chat| chat.device_id.clone())
+                .or_else(|| state.selected_space_row().map(|s| s.device_id.clone()))
+        };
+        cx.spawn(async move |this, cx| {
+            let mut params = serde_json::json!({ "harness": harness });
+            if let (Some(target), Some(object)) = (&target, params.as_object_mut()) {
+                object.insert("targetDeviceId".into(), target.clone().into());
+            }
+            let result = engine
+                .client()
+                .call(methods::HARNESS_COMPACTION, params)
+                .await;
+            this.update(cx, |composer, cx| {
+                match result {
+                    Ok(value) => {
+                        if let Some(kind) = value.get("compaction").and_then(|v| v.as_str()) {
+                            composer
+                                .compaction_cache
+                                .insert(harness, kind.to_string().into());
+                        }
+                    }
+                    Err(err) => {
+                        tracing::debug!(%err, "harness compaction probe failed");
+                        // Unknown stays unknown; the next state change retries.
+                        composer.compaction_probed.remove(&harness);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Why this harness can never compact, if it cannot.
+    fn unsupported_compaction(&self, cx: &App) -> Option<SharedString> {
+        let harness = self.pickers.read(cx).resolved(cx).harness?;
+        (self
+            .compaction_cache
+            .get(&harness)
+            .map(SharedString::as_ref)
+            == Some("none"))
+        .then(|| {
+            format!(
+                "{} does not support compaction",
+                harness_display_name(harness)
+            )
+            .into()
+        })
+    }
+
+    /// The SELECTED chat is compacting. Another chat's compaction must not
+    /// lock this one's composer.
+    pub(crate) fn compacting(&self, cx: &App) -> bool {
+        let state = self.state.read(cx);
+        state.compacting_chat.is_some() && state.compacting_chat == state.selected_chat
+    }
+
+    /// Why compaction is refused right now, if it is — shared by the typed
+    /// command and the context meter's button.
+    pub(crate) fn compact_disabled_reason(&self, cx: &App) -> Option<SharedString> {
+        if self.compacting(cx) {
+            return Some("Compaction in progress".into());
+        }
+        if self.run_live(cx) {
+            return Some("Wait for the current turn to finish".into());
+        }
+        self.unsupported_compaction(cx)
+    }
+
+    fn set_compact_failure(&mut self, message: SharedString, cx: &mut Context<Self>) {
+        self.failure = Some(message);
+        self.failure_key = Some(self.current_key.clone());
+        cx.notify();
+    }
+
+    /// `CompactChat` on the selected chat: the harness compacts its own
+    /// context and the host appends the boundary entry. No `Run` is built and
+    /// no user entry is written, so nothing shows in the transcript until the
+    /// call returns.
+    pub(crate) fn request_compaction(&mut self, focus: Option<String>, cx: &mut Context<Self>) {
+        if let Some(reason) = self.compact_disabled_reason(cx) {
+            self.set_compact_failure(reason, cx);
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.set_compact_failure("Engine not connected".into(), cx);
+            return;
+        };
+        let Some((chat_id, host_device_id)) = self
+            .state
+            .read(cx)
+            .selected_chat_row()
+            .map(|chat| (chat.id.clone(), chat.device_id.clone()))
+        else {
+            self.set_compact_failure("Start a chat before compacting its context.".into(), cx);
+            return;
+        };
+        let mut params = serde_json::json!({
+            "chatId": chat_id,
+            "targetDeviceId": host_device_id,
+        });
+        if let (Some(focus), Some(object)) = (focus, params.as_object_mut()) {
+            object.insert("focus".into(), focus.into());
+        }
+        self.failure = None;
+        let pending = chat_id.clone();
+        self.state.update(cx, |state, cx| {
+            state.compacting_chat = Some(pending);
+            cx.notify();
+        });
+        cx.notify();
+        let key = self.current_key.clone();
+        let pending = chat_id.clone();
+        self.compact_task = Some(cx.spawn(async move |this, cx| {
+            // Outlives the engine's own 120s compaction guard, so the reply
+            // carries the harness's outcome rather than a local timeout.
+            let result = attachments::call_with_timeout(
+                &engine,
+                cx.background_executor(),
+                methods::COMPACT_CHAT,
+                params,
+                Duration::from_secs(180),
+            )
+            .await;
+            this.update(cx, |composer, cx| {
+                composer.state.update(cx, |state, cx| {
+                    // Only ours: a retargeted compaction owns the marker now.
+                    if state.compacting_chat.as_deref() == Some(pending.as_str()) {
+                        state.compacting_chat = None;
+                        cx.notify();
+                    }
+                });
+                // Compacted: the boundary entry arrives through the doc watch.
+                let message = match result {
+                    Ok(value) => (value.get("compacted") != Some(&serde_json::Value::Bool(true)))
+                        .then(|| {
+                            value
+                                .get("message")
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("Nothing to compact")
+                                .to_string()
+                        }),
+                    Err(err) => Some(format!("Compaction failed: {err}")),
+                };
+                if let Some(message) = message {
+                    composer.failure = Some(message.into());
+                    composer.failure_key = Some(key.clone());
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     fn render_slash_popup(
@@ -5583,24 +5826,38 @@ impl Composer {
             );
         } else {
             let mut rows: Vec<gpui::AnyElement> = Vec::with_capacity(self.slash.filtered.len());
+            let unsupported = self.unsupported_compaction(cx);
             for (row_ix, &cmd_ix) in self.slash.filtered.iter().enumerate() {
                 let Some(command) = commands.get(cmd_ix) else {
                     continue;
                 };
                 let selected = self.slash.active == Some(row_ix);
                 let name: SharedString = format!("/{}", command.name).into();
-                let mut description = command.description.clone();
-                if let Some(hint) = &command.input_hint {
-                    if description.is_empty() {
-                        description = format!("<{hint}>");
-                    } else {
-                        description = format!("{description} · <{hint}>");
+                // The reason replaces the description rather than hiding the
+                // row: the entry exists on every harness, so its absence
+                // would read as a bug.
+                let blocked = (command.name == COMPACT_COMMAND)
+                    .then(|| unsupported.clone())
+                    .flatten();
+                let description: SharedString = match blocked {
+                    Some(reason) => reason,
+                    None => {
+                        let mut description = command.description.clone();
+                        if let Some(hint) = &command.input_hint {
+                            if description.is_empty() {
+                                description = format!("<{hint}>");
+                            } else {
+                                description = format!("{description} · <{hint}>");
+                            }
+                        }
+                        description.into()
                     }
-                }
-                let description: SharedString = description.into();
+                };
+                let disabled = command.name == COMPACT_COMMAND && unsupported.is_some();
                 rows.push(
                     crate::popover::menu_row(theme, selected, format!("slash-result-{row_ix}"))
                         .id(("slash-result", row_ix))
+                        .when(disabled, |row| row.opacity(0.45))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.slash.active = Some(row_ix);
                             this.accept_slash(cx);
@@ -5691,6 +5948,7 @@ impl Composer {
     }
 
     fn on_state_changed(&mut self, cx: &mut Context<Self>) {
+        self.ensure_compaction_kind(cx);
         {
             let state = self.state.read(cx);
             let now = chrono::Utc::now();
@@ -5868,7 +6126,7 @@ impl Composer {
     /// New chats need a runnable agent, but may target the device's home
     /// directory without a project. Existing chats carry their own run config.
     fn send_blocked(&self, cx: &App) -> bool {
-        if self.queue_edit_finishing {
+        if self.queue_edit_finishing || self.compacting(cx) {
             return true;
         }
         let state = self.state.read(cx);
@@ -5950,6 +6208,14 @@ impl Composer {
     /// is on), `Mutate createChat` with the `ChatConfig` + cwd, and the model /
     /// reasoning / options on the Run request itself (§1.7).
     fn send(&mut self, text: String, queue: bool, cx: &mut Context<Self>) {
+        // `/compact` is zeron's own command: it becomes an RPC, never a turn,
+        // so it never builds a `Run` and never writes a user entry.
+        if let Some(focus) = compact_focus(&text) {
+            self.input.update(cx, |input, cx| input.set_text("", cx));
+            self.drafts.remove(&self.current_key);
+            self.request_compaction(focus, cx);
+            return;
+        }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.failure = Some("Engine not connected".into());
             self.failure_key = None; // global — meaningful on every chat
@@ -7320,6 +7586,29 @@ impl Render for Composer {
                     })),
                 )
             })
+            .when(self.compacting(cx), |el| {
+                // The compaction writes nothing until it lands, so this chip
+                // is the only sign the chat is doing anything.
+                el.child(
+                    div()
+                        .mx(px(8.0))
+                        .mt(px(6.0))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.text_muted)
+                        .child(crate::loaders::mini_mono_spinner(
+                            "composer-compacting",
+                            2.0,
+                            theme.text_muted,
+                            cx.entity_id(),
+                            cx,
+                        ))
+                        .child("Compacting context…"),
+                )
+            })
             .when_some(queue_notice, |el, (notice, offline)| {
                 // Not a warning box (v0.2.12 feedback: the amber Notice read
                 // as an error and flashed on every blip — pre-grace). One
@@ -7936,7 +8225,12 @@ impl Render for Composer {
                                 .opacity(session_chrome_opacity)
                                 .child(div().flex_1().min_w_0().children(footer.flatten()))
                                 .child(div().flex_none().pr(px(10.0)).child(
-                                    crate::context_usage::render(usage, self.state.clone(), &theme),
+                                    crate::context_usage::render(
+                                        usage,
+                                        self.state.clone(),
+                                        cx.entity(),
+                                        &theme,
+                                    ),
                                 )),
                         )
                     }),
@@ -8523,6 +8817,136 @@ mod tests {
         // Bare "/" with cursor at 0 → closed; cursor after it → open-all.
         assert!(slash_token("/", 0).is_none());
         assert_eq!(slash_token("/", 1).map(|t| t.query), Some(String::new()));
+    }
+
+    #[test]
+    fn compact_is_intercepted_with_its_focus_and_nothing_else_is() {
+        assert_eq!(compact_focus("/compact"), Some(None));
+        assert_eq!(
+            compact_focus("/compact focus on auth"),
+            Some(Some("focus on auth".into()))
+        );
+        // A longer name that merely starts with it is another command.
+        assert!(compact_focus("/compaction").is_none());
+        assert!(compact_focus("/compact-now").is_none());
+        // Not the first token → an ordinary prompt, sent as a turn.
+        assert!(compact_focus("please /compact").is_none());
+        assert!(compact_focus("/goal ship it").is_none());
+    }
+
+    #[test]
+    fn the_compact_entry_never_doubles_a_harness_that_advertises_it() {
+        let advertised = |name: &str| SlashCommand {
+            name: name.into(),
+            description: "harness copy".into(),
+            input_hint: None,
+        };
+        let names = |commands: &[SlashCommand]| -> Vec<String> {
+            commands.iter().map(|c| c.name.clone()).collect()
+        };
+        // Harness advertises it: exactly one row, the harness's own.
+        let merged = with_compact_entry(vec![advertised("compact"), advertised("clear")]);
+        assert_eq!(names(&merged), vec!["compact", "clear"]);
+        assert_eq!(merged[0].description, "harness copy");
+        // Harness does not (cursor advertises nothing at all): zeron's rides.
+        let merged = with_compact_entry(Vec::new());
+        assert_eq!(names(&merged), vec!["compact"]);
+        assert_eq!(
+            merged[0].description,
+            "Free up context by summarizing the conversation"
+        );
+    }
+
+    #[gpui::test]
+    fn compaction_is_refused_with_a_reason_the_surfaces_share(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        handle
+            .update(cx, |composer, _, cx| {
+                assert!(composer.compact_disabled_reason(cx).is_none());
+                // A harness that reports no compaction names itself.
+                composer.state.update(cx, |state, _| {
+                    state.chats = vec![zeron_proto::Chat {
+                        id: "c1".into(),
+                        device_id: "dev".into(),
+                        title: None,
+                        archived: false,
+                        cwd: None,
+                        branch: None,
+                        checkout_id: None,
+                        source_context: None,
+                        config: Some(zeron_proto::ChatConfig {
+                            harness: HarnessId::Cursor,
+                            model: None,
+                            reasoning: None,
+                            model_options: serde_json::Map::new(),
+                            sandbox: SandboxLevel::WorkspaceWrite,
+                        }),
+                        last_message_preview: None,
+                        last_message_at: None,
+                        created_at: chrono::Utc::now(),
+                        harness_session_id: None,
+                        harness_session_cwd: None,
+                        space_id: None,
+                        last_seen_at: None,
+                        room_gen: None,
+                        sidechat_source_chat_id: None,
+                    }];
+                    state.selected_chat = Some("c1".into());
+                });
+                composer
+                    .compaction_cache
+                    .insert(HarnessId::Cursor, "none".into());
+                assert_eq!(
+                    composer.compact_disabled_reason(cx).as_deref(),
+                    Some("Cursor does not support compaction")
+                );
+                assert_eq!(
+                    composer.unsupported_compaction(cx).as_deref(),
+                    Some("Cursor does not support compaction")
+                );
+                // A pending compaction outranks it, and blocks the send button.
+                composer.state.update(cx, |state, _| {
+                    state.compacting_chat = Some("c1".into());
+                });
+                assert_eq!(
+                    composer.compact_disabled_reason(cx).as_deref(),
+                    Some("Compaction in progress")
+                );
+                assert!(composer.send_blocked(cx));
+                // Another chat's compaction never locks this one's composer.
+                composer.state.update(cx, |state, _| {
+                    state.selected_chat = Some("c2".into());
+                });
+                assert!(!composer.compacting(cx));
+                assert!(!composer.send_blocked(cx));
+                assert!(composer.compact_disabled_reason(cx).is_none());
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn submitting_compact_takes_the_rpc_path_not_the_run_path(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        // Without an engine both paths fail, and they fail differently: the
+        // compaction owns the draft (cleared, chat-scoped notice) while a Run
+        // hands it back untouched under the global one.
+        for (text, intercepted) in [("/compact focus on auth", true), ("compact this", false)] {
+            handle
+                .update(cx, |composer, _, cx| {
+                    composer
+                        .input
+                        .update(cx, |input, cx| input.set_text(text, cx));
+                    composer.on_submit(cx);
+                    assert_eq!(composer.input.read(cx).text().is_empty(), intercepted);
+                    assert_eq!(composer.failure_key.is_some(), intercepted);
+                    // Neither builds a Run here, but only the Run path echoes.
+                    assert!(composer.state.read(cx).transcript.is_empty());
+                    assert!(!composer.sending);
+                    composer.failure = None;
+                    composer.failure_key = None;
+                })
+                .unwrap();
+        }
     }
 
     #[test]

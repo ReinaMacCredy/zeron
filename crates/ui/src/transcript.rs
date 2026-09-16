@@ -1026,6 +1026,11 @@ pub enum RowKind {
     ErrorChip {
         message: SharedString,
     },
+    /// A host-written `system` entry (the compaction boundary): centered
+    /// label between two rules, never a bubble and never assistant blocks.
+    Divider {
+        text: SharedString,
+    },
 }
 
 fn generated_image_devices(owner: &str, fallback: &[String]) -> Vec<String> {
@@ -1285,7 +1290,28 @@ pub fn rows_for_entry(
         }];
     }
 
-    // Assistant/system: split parts into block rows, folding consecutive
+    if entry.role == MessageRole::System {
+        let text: String = entry
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                MessagePart::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        return vec![Row {
+            id: entry.id.clone().into(),
+            version: fnv1a(text.as_bytes()),
+            turn_start: true,
+            kind: RowKind::Divider { text: text.into() },
+            entry_id,
+            timestamp: None,
+            copy_text: None,
+        }];
+    }
+
+    // Assistant: split parts into block rows, folding consecutive
     // ordinary tools. Agent/spawn chips flush into their own group so they
     // never share a collapse with Reads/Runs.
     let last_part_ix = entry.parts.len().saturating_sub(1);
@@ -5485,10 +5511,18 @@ impl Transcript {
                 None => &state.transcript,
             })
         };
+        // A compaction holds the session Working with nothing streaming: a
+        // rotating flavour word over it reads as a stalled run.
+        let compacting = self.doc_override.is_none() && {
+            let state = self.state.read(cx);
+            state.compacting_chat.is_some() && state.compacting_chat == self.chat_id
+        };
         let word = if queued {
             "Queued — will send automatically"
         } else if sending {
             "Sending"
+        } else if compacting {
+            "Compacting context"
         } else if consulting {
             "Consulting advisor"
         } else {
@@ -5762,6 +5796,7 @@ impl Transcript {
                 mime_type,
             } => self.render_generated_image(&row.id, owner, path, name, mime_type, cx),
             RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
+            RowKind::Divider { text } => divider_row(text.clone(), &theme),
         };
 
         // Hover-revealed metadata strip: a RESERVED 32px lane under the
@@ -6748,6 +6783,29 @@ fn error_chip(message: SharedString, theme: &Theme) -> AnyElement {
                 .overflow_hidden()
                 .w_full(),
         )
+        .into_any_element()
+}
+
+/// A host-written `system` entry: a hairline rule either side of muted
+/// centered text ("Context compacted · 22.8k → 2.3k tokens"). It marks a
+/// boundary in the conversation, so it belongs to neither speaker's column.
+fn divider_row(text: SharedString, theme: &Theme) -> AnyElement {
+    let rule = || div().flex_1().h(px(1.0)).bg(crate::theme::hairline(0.08));
+    div()
+        .py(px(4.0))
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(px(10.0))
+        .child(rule())
+        .child(
+            div()
+                .flex_none()
+                .text_size(crate::typography::ui_rems(11.5))
+                .text_color(theme.text_muted.opacity(0.7))
+                .child(text),
+        )
+        .child(rule())
         .into_any_element()
 }
 
@@ -8756,6 +8814,27 @@ mod tests {
             id: id.into(),
             text: text.into(),
         }
+    }
+
+    #[test]
+    fn a_system_entry_is_a_divider_not_an_assistant_reply() {
+        let mut entry = assistant(
+            "m1",
+            MessageStatus::Complete,
+            vec![text_part("t0", "Context compacted · 22.8k → 2.3k tokens")],
+        );
+        entry.role = MessageRole::System;
+        let rows = rows_for_entry(&entry, false, &mut parse);
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(
+            &rows[0].kind,
+            RowKind::Divider { text } if text == "Context compacted · 22.8k → 2.3k tokens"
+        ));
+        // No hover strip: a boundary has no author to timestamp or copy.
+        assert!(rows[0].timestamp.is_none());
+        assert!(rows[0].copy_text.is_none());
+        // The working trailer reads the last entry; a boundary never spins.
+        assert!(!consulting_advisor(std::slice::from_ref(&entry)));
     }
 
     #[test]

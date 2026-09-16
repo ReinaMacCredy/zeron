@@ -658,6 +658,11 @@ pub struct AppState {
     /// chat's doc holds them (every device sees the same queue).
     pub queue: Vec<zeron_doc::QueuedMessage>,
     pub context_usage: Option<zeron_proto::ContextUsage>,
+    /// Chat whose context is being compacted, while the `CompactChat` call is
+    /// out. In-process only (the compaction writes nothing until it lands),
+    /// and chat-keyed: the composer follows the selection, so a bare flag
+    /// would claim every other chat was compacting too.
+    pub compacting_chat: Option<String>,
     /// The selected chat's opening `WatchDocMessages` reset has landed. An
     /// empty transcript is otherwise indistinguishable from the pre-replay
     /// gap after selection, where optimistic echoes may already be visible.
@@ -751,6 +756,7 @@ impl AppState {
             transcript: Vec::new(),
             queue: Vec::new(),
             context_usage: None,
+            compacting_chat: None,
             transcript_replayed: false,
             transcript_revision: 0,
             echoes: HashMap::new(),
@@ -3006,6 +3012,7 @@ mod tests {
             space_id: None,
             last_seen_at: None,
             room_gen: None,
+            sidechat_source_chat_id: None,
         }
     }
 
