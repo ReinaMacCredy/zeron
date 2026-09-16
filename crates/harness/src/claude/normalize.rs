@@ -153,6 +153,15 @@ fn tag(parent: &str, event: AgentEvent) -> AgentEvent {
     }
 }
 
+fn advisor_result(id: String, is_error: bool) -> AgentEvent {
+    AgentEvent::ToolResult {
+        id,
+        is_error,
+        output: None,
+        diff: None,
+    }
+}
+
 /// CLI-synthesized text that rides a user frame but is NOT conversation:
 /// `<system-reminder>` context injections and the interruption marker the CLI
 /// stamps into the transcript when a turn (or a subagent) is stopped.
@@ -199,6 +208,15 @@ pub(crate) struct Normalizer {
     /// which then opened as an empty, never-created subagent doc (user
     /// report 2026-08-20).
     agent_spawn_tools: std::collections::HashSet<String>,
+    /// The advisor call still awaiting its answer, per feed (`None` = the
+    /// parent, `Some(spawn id)` = a subagent). The advisor is a SERVER tool:
+    /// its call is a `server_tool_use` block and its answer an
+    /// `advisor_tool_result` block, both on assistant frames — never a
+    /// user-frame `tool_result`. A call the model abandons (a pending client
+    /// tool's result landed first and it re-issued the call — live-observed
+    /// 3 calls, 1 answer) gets no answer frame at all, so the previous call
+    /// settles when the next opens and any survivor settles at turn end.
+    pending_advisor: std::collections::HashMap<Option<String>, String>,
     /// Rotates at each assistant-frame close and at each steer; SessionStarted
     /// carries the first value so folds can attribute deltas from the start.
     assistant_message_id: String,
@@ -213,9 +231,60 @@ impl Normalizer {
             last_model: None,
             agent_tasks: std::collections::HashMap::new(),
             agent_spawn_tools: std::collections::HashSet::new(),
+            pending_advisor: std::collections::HashMap::new(),
             assistant_message_id: new_message_id(),
             session_id: None,
         }
+    }
+
+    fn advisor_events(&mut self, parent: Option<&str>, b: &ContentBlock) -> Vec<AgentEvent> {
+        let feed = parent.map(str::to_owned);
+        let wrap = |event: AgentEvent| match parent {
+            Some(parent) => tag(parent, event),
+            None => event,
+        };
+        match b.kind.as_str() {
+            "server_tool_use" if b.name == "advisor" => {
+                let mut out = Vec::new();
+                if let Some(abandoned) = self.pending_advisor.insert(feed, b.id.clone()) {
+                    out.push(wrap(advisor_result(abandoned, false)));
+                }
+                out.push(wrap(AgentEvent::ToolCall {
+                    id: b.id.clone(),
+                    call: ToolCall::Unknown {
+                        name: zeron_proto::ADVISOR_TOOL_NAME.into(),
+                        input: None,
+                    },
+                }));
+                out
+            }
+            "advisor_tool_result" => {
+                if self.pending_advisor.get(&feed) == Some(&b.tool_use_id) {
+                    self.pending_advisor.remove(&feed);
+                }
+                // Only the redacted success shape has been observed; an
+                // error-shaped answer is assumed to say so in its type.
+                let is_error = b
+                    .content
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| kind.contains("error"));
+                vec![wrap(advisor_result(b.tool_use_id.clone(), is_error))]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn settle_pending_advisors(&mut self) -> Vec<AgentEvent> {
+        let mut pending: Vec<(Option<String>, String)> = self.pending_advisor.drain().collect();
+        pending.sort();
+        pending
+            .into_iter()
+            .map(|(feed, id)| match feed {
+                Some(parent) => tag(&parent, advisor_result(id, false)),
+                None => advisor_result(id, false),
+            })
+            .collect()
     }
 
     /// Rotate the assistant message id for a steer boundary; returns
@@ -377,6 +446,9 @@ impl Normalizer {
                             _ => None,
                         })
                         .collect();
+                    for b in f.message.blocks() {
+                        out.extend(self.advisor_events(Some(parent), &b));
+                    }
                     if let Some(code) = &f.error {
                         out.push(tag(
                             parent,
@@ -445,6 +517,9 @@ impl Normalizer {
                         std::iter::once(call).chain(opening).chain(steer)
                     })
                     .collect();
+                for b in f.message.blocks() {
+                    out.extend(self.advisor_events(None, &b));
+                }
                 self.last_model = f.message.model.clone().or(self.last_model.take());
                 if let Some(usage) = &f.message.usage {
                     let fields = [
@@ -636,7 +711,7 @@ impl Normalizer {
                         session_id: f.session_id,
                     }
                 };
-                let mut out = Vec::new();
+                let mut out = self.settle_pending_advisors();
                 if let Some(window) = window {
                     out.push(AgentEvent::ContextUsage {
                         tokens: None,
@@ -815,6 +890,119 @@ mod tests {
                 }),
             }]
         );
+    }
+
+    fn advisor_call(name: &str) -> ToolCall {
+        ToolCall::Unknown {
+            name: name.into(),
+            input: None,
+        }
+    }
+
+    #[test]
+    fn advisor_server_tool_rides_assistant_frames_and_abandoned_calls_settle() {
+        // Frames as the 2.1.x wire emits them (live log 2026-09-16): the call
+        // is a `server_tool_use` block, the answer an `advisor_tool_result`
+        // on a LATER assistant frame, and a call the model re-issued after a
+        // pending Bash result landed never gets an answer at all.
+        let mut norm = Normalizer::new();
+        let first = crate::claude::wire::parse_frame(
+            r#"{"type":"assistant","message":{"content":[{"type":"server_tool_use","id":"srvtoolu_1","name":"advisor","input":{}}]}}"#,
+        )
+        .expect("parses");
+        let ev: Vec<AgentEvent> = norm
+            .normalize(first, false)
+            .into_iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    AgentEvent::ToolCall { .. } | AgentEvent::ToolResult { .. }
+                )
+            })
+            .collect();
+        assert_eq!(
+            ev,
+            vec![AgentEvent::ToolCall {
+                id: "srvtoolu_1".into(),
+                call: advisor_call("Advisor"),
+            }]
+        );
+
+        let second = crate::claude::wire::parse_frame(
+            r#"{"type":"assistant","message":{"content":[{"type":"server_tool_use","id":"srvtoolu_2","name":"advisor","input":{}}]}}"#,
+        )
+        .expect("parses");
+        let ev: Vec<AgentEvent> = norm
+            .normalize(second, false)
+            .into_iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    AgentEvent::ToolCall { .. } | AgentEvent::ToolResult { .. }
+                )
+            })
+            .collect();
+        assert_eq!(
+            ev,
+            vec![
+                advisor_result("srvtoolu_1".into(), false),
+                AgentEvent::ToolCall {
+                    id: "srvtoolu_2".into(),
+                    call: advisor_call("Advisor"),
+                },
+            ]
+        );
+
+        let answer = crate::claude::wire::parse_frame(
+            r#"{"type":"assistant","message":{"content":[{"type":"advisor_tool_result","tool_use_id":"srvtoolu_2","content":{"type":"advisor_redacted_result","encrypted_content":"EuQf"}}]}}"#,
+        )
+        .expect("parses");
+        let ev: Vec<AgentEvent> = norm
+            .normalize(answer, false)
+            .into_iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    AgentEvent::ToolCall { .. } | AgentEvent::ToolResult { .. }
+                )
+            })
+            .collect();
+        assert_eq!(ev, vec![advisor_result("srvtoolu_2".into(), false)]);
+
+        // Answered: nothing left to settle at turn end.
+        assert!(norm.settle_pending_advisors().is_empty());
+    }
+
+    #[test]
+    fn unanswered_advisor_call_settles_at_turn_end_and_stays_tagged_for_subagents() {
+        let mut norm = Normalizer::new();
+        let call = crate::claude::wire::parse_frame(
+            r#"{"type":"assistant","parent_tool_use_id":"toolu_sub","message":{"content":[{"type":"server_tool_use","id":"srvtoolu_9","name":"advisor","input":{}}]}}"#,
+        )
+        .expect("parses");
+        assert_eq!(
+            norm.normalize(call, false),
+            vec![tag(
+                "toolu_sub",
+                AgentEvent::ToolCall {
+                    id: "srvtoolu_9".into(),
+                    call: advisor_call("Advisor"),
+                }
+            )]
+        );
+        let result = crate::claude::wire::parse_frame(
+            r#"{"type":"result","subtype":"success","session_id":"s1","usage":{"input_tokens":1,"output_tokens":2}}"#,
+        )
+        .expect("parses");
+        let ev = norm.normalize(result, false);
+        assert_eq!(
+            ev.first(),
+            Some(&tag(
+                "toolu_sub",
+                advisor_result("srvtoolu_9".into(), false)
+            ))
+        );
+        assert!(matches!(ev.last(), Some(AgentEvent::Done { .. })));
     }
 
     #[test]

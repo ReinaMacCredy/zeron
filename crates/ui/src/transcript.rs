@@ -840,6 +840,10 @@ fn wrap_cols(line: &str, cols: usize) -> Vec<SharedString> {
 /// per line, MCP/unknown input as pretty-printed JSON. Reuses the output
 /// code-block payload so rendering and height stay one implementation.
 pub fn call_block(call: &ToolCall) -> Option<ToolDetail> {
+    // Nothing to expand: the call has no input and its answer is encrypted.
+    if call.is_advisor() {
+        return None;
+    }
     let text: String = match call {
         ToolCall::Exec { command } => command.clone(),
         ToolCall::ReadFile { path } => path.clone(),
@@ -1739,11 +1743,16 @@ pub fn tool_group_summary(tools: &[ToolItem]) -> String {
     let thoughts = tools.iter().filter(|t| t.is_thought).count();
     // The shared summary answers "used 0 tools" for an empty set — a
     // thought-only group must not inherit that.
-    let base = if pairs.is_empty() {
+    let mut base = if pairs.is_empty() {
         String::new()
     } else {
         zeron_proto::view::tool_group_summary(&pairs)
     };
+    // The shared rule has no resolution bit; while the advisor is still out
+    // the group says so (it is the only chip that waits minutes for an answer).
+    if tools.iter().any(|t| t.call.is_advisor() && !t.resolved) {
+        base = base.replace("onsulted advisor", "onsulting advisor");
+    }
     // Thought chips ride the group (they are UI-synthesized, so the shared
     // view summary never sees them): name them on the collapsed line.
     match (base.is_empty(), thoughts) {
@@ -1980,6 +1989,22 @@ pub fn flavour_word(seed: u64, elapsed_secs: i64) -> &'static str {
 /// A stable per-chat seed.
 pub fn flavour_seed(chat_id: &str) -> u64 {
     fnv1a(chat_id.as_bytes())
+}
+
+/// True while the streaming reply's advisor call is still out. The trailer
+/// names that wait instead of a flavour word: it is the one tool that takes
+/// minutes with nothing streaming, and a rotating "Scheming…" over it read
+/// as a stalled run (user report).
+pub fn consulting_advisor(entries: &[SessionMessageEntry]) -> bool {
+    entries.last().is_some_and(|last| {
+        last.status == Some(MessageStatus::Streaming)
+            && last.parts.iter().any(|part| {
+                matches!(
+                    part,
+                    MessagePart::Tool { call, resolved: false, .. } if call.is_advisor()
+                )
+            })
+    })
 }
 
 /// The working trailer's "Sending…" bridge: true while an in-flight send is
@@ -5453,10 +5478,19 @@ impl Transcript {
             };
             (sending, queued, elapsed, flavour_seed(&chat_id))
         };
+        let consulting = {
+            let state = self.state.read(cx);
+            consulting_advisor(match &self.doc_override {
+                Some(doc_id) => state.sub_transcript(doc_id),
+                None => &state.transcript,
+            })
+        };
         let word = if queued {
             "Queued — will send automatically"
         } else if sending {
             "Sending"
+        } else if consulting {
+            "Consulting advisor"
         } else {
             flavour_word(seed, elapsed_secs)
         };
@@ -6795,6 +6829,7 @@ fn tool_icon_path(call: &ToolCall) -> &'static str {
         ToolCall::WebFetch { .. } | ToolCall::WebSearch { .. } => crate::icons::GLOBAL,
         ToolCall::Todo { .. } => crate::icons::CHECKLIST,
         call if is_agent_call(call) => crate::icons::BOT,
+        call if call.is_advisor() => crate::icons::CHAT_ROUND_LINE,
         ToolCall::Unknown { name, .. } if name == "Wait for agents" => crate::icons::BOT,
         ToolCall::Mcp { .. } | ToolCall::Unknown { .. } => crate::icons::WIDGET,
     }
@@ -11265,6 +11300,108 @@ mod tests {
             ],
         };
         assert_eq!(tool_chip_content(&todo), ("Todo", "1/2 done".to_string()));
+        assert_eq!(
+            tool_chip_content(&ToolCall::Unknown {
+                name: zeron_proto::ADVISOR_TOOL_NAME.into(),
+                input: None
+            }),
+            ("Advisor", String::new())
+        );
+        assert!(
+            call_block(&ToolCall::Unknown {
+                name: zeron_proto::ADVISOR_TOOL_NAME.into(),
+                input: None
+            })
+            .is_none(),
+            "a flat chip: no chevron over a body that repeats the label"
+        );
+    }
+
+    fn advisor_part(id: &str, resolved: bool) -> MessagePart {
+        MessagePart::Tool {
+            id: id.into(),
+            call: ToolCall::Unknown {
+                name: zeron_proto::ADVISOR_TOOL_NAME.into(),
+                input: None,
+            },
+            is_error: false,
+            resolved,
+            output: None,
+            diff: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            diff_stats: None,
+            subagent_ref: None,
+            subagent_status: None,
+            subagent_tail: None,
+        }
+    }
+
+    #[test]
+    fn advisor_group_wording_follows_resolution() {
+        let items = |resolved: bool| -> Vec<ToolItem> {
+            let entry = assistant(
+                "m1",
+                MessageStatus::Streaming,
+                vec![tool_part("t1", "ls"), advisor_part("srvtoolu_1", resolved)],
+            );
+            entry
+                .parts
+                .iter()
+                .filter_map(|p| match p {
+                    MessagePart::Tool {
+                        call,
+                        is_error,
+                        resolved,
+                        ..
+                    } => Some(ToolItem {
+                        call: call.clone(),
+                        is_error: *is_error,
+                        resolved: *resolved,
+                        detail: None,
+                        invocation: None,
+                        output_ref: None,
+                        output_bytes: None,
+                        diff_ref: None,
+                        subagent_ref: None,
+                        subagent_status: None,
+                        subagent_tail: None,
+                        is_thought: false,
+                    }),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            tool_group_summary(&items(false)),
+            "Ran 1 command · consulting advisor"
+        );
+        assert_eq!(
+            tool_group_summary(&items(true)),
+            "Ran 1 command · consulted advisor"
+        );
+    }
+
+    #[test]
+    fn trailer_names_the_advisor_wait_only_while_it_is_out() {
+        let streaming = |resolved: bool| {
+            vec![assistant(
+                "m1",
+                MessageStatus::Streaming,
+                vec![advisor_part("srvtoolu_1", resolved)],
+            )]
+        };
+        assert!(consulting_advisor(&streaming(false)));
+        assert!(!consulting_advisor(&streaming(true)));
+        // A settled entry never spins, whatever its chips say.
+        let settled = vec![assistant(
+            "m1",
+            MessageStatus::Complete,
+            vec![advisor_part("srvtoolu_1", false)],
+        )];
+        assert!(!consulting_advisor(&settled));
+        assert!(!consulting_advisor(&[]));
     }
 
     #[test]

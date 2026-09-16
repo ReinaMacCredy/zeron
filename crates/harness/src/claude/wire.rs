@@ -127,6 +127,8 @@ pub(crate) struct ContentBlock {
     pub tool_use_id: String,
     #[serde(default)]
     pub is_error: Option<bool>,
+    #[serde(default)]
+    pub content: Value,
 }
 
 #[derive(Debug, Default, Deserialize)]

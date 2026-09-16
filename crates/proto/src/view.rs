@@ -427,6 +427,7 @@ fn tool_chip_content_raw(call: &crate::ToolCall) -> (&'static str, String) {
             ("Todo", format!("{done}/{} done", items.len()))
         }
         ToolCall::Mcp { server, tool, .. } => ("MCP", format!("{server} · {tool}")),
+        call if call.is_advisor() => ("Advisor", String::new()),
         // Subagent spawns decode as Unknown named "Agent[: <description>]"
         // (every native driver's convention): label them "Agent" with the
         // description as the detail — "Tool · Agent: scan repo" read as two
@@ -451,6 +452,7 @@ pub fn tool_group_summary(tools: &[(crate::ToolCall, bool)]) -> String {
     let mut searches = 0usize;
     let mut fetches = 0usize;
     let mut todos = 0usize;
+    let mut advisors = 0usize;
     let mut other = 0usize;
     let mut failed = 0usize;
     for (call, is_error) in tools {
@@ -458,6 +460,7 @@ pub fn tool_group_summary(tools: &[(crate::ToolCall, bool)]) -> String {
             failed += 1;
         }
         match call {
+            call if call.is_advisor() => advisors += 1,
             ToolCall::Exec { .. } => commands += 1,
             ToolCall::WriteFile { path, .. } | ToolCall::EditFile { path, .. } => {
                 if !edited.contains(&path.as_str()) {
@@ -497,6 +500,9 @@ pub fn tool_group_summary(tools: &[(crate::ToolCall, bool)]) -> String {
     }
     if todos > 0 {
         segments.push("updated todos".to_string());
+    }
+    if advisors > 0 {
+        segments.push("consulted advisor".to_string());
     }
     if other > 0 {
         segments.push(format!("called {}", plural(other, "tool", "tools")));

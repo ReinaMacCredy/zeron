@@ -250,7 +250,18 @@ impl ToolCall {
             .map(str::trim)
             .filter(|model| !model.is_empty())
     }
+
+    /// Claude's advisor consultation — a SERVER tool whose answer comes back
+    /// encrypted, so the only client-visible facts are that it ran and for
+    /// how long. Decoded as an Unknown named [`ADVISOR_TOOL_NAME`]; the chip
+    /// label, group summary and working trailer key on this.
+    pub fn is_advisor(&self) -> bool {
+        matches!(self, ToolCall::Unknown { name, .. } if name == ADVISOR_TOOL_NAME)
+    }
 }
+
+/// The name the claude driver decodes a `server_tool_use` advisor call into.
+pub const ADVISOR_TOOL_NAME: &str = "Advisor";
 
 /// Spawn-input keys that carry a child model, in precedence order. Drivers
 /// disagree on the spelling, so the lookup is by key set, not by harness —
