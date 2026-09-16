@@ -82,6 +82,7 @@ impl Render for SidebarViewOptionsTooltip {
 
 #[derive(Clone, Copy)]
 enum SidebarViewRow {
+    ByProject,
     ByDevice,
     InOneList,
     LastUpdated,
@@ -97,12 +98,13 @@ impl SidebarViewRow {
     fn closes_menu(self) -> bool {
         matches!(
             self,
-            Self::ByDevice | Self::InOneList | Self::LastUpdated | Self::Created
+            Self::ByProject | Self::ByDevice | Self::InOneList | Self::LastUpdated | Self::Created
         )
     }
 }
 
-const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 7] = [
+const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 8] = [
+    SidebarViewRow::ByProject,
     SidebarViewRow::ByDevice,
     SidebarViewRow::InOneList,
     SidebarViewRow::LastUpdated,
@@ -144,6 +146,44 @@ fn promote_local_device_group<T>(
         let local = groups.remove(index);
         groups.insert(0, local);
     }
+}
+
+/// The chat ids in the order the sidebar draws them: the sorted input
+/// regrouped exactly as `render_active_rows` groups it (project or device
+/// sections in first-seen order, local device promoted), or unchanged when the
+/// organization draws one flat list.
+fn grouped_visible_order(
+    chats: Vec<zeron_proto::Chat>,
+    organization: SidebarOrganization,
+    filtered: bool,
+    local_device_id: Option<&str>,
+) -> Vec<String> {
+    let key = |chat: &zeron_proto::Chat| -> Option<String> {
+        match organization {
+            SidebarOrganization::ByProject if !filtered => {
+                Some(chat.space_id.clone().unwrap_or_else(|| "~".into()))
+            }
+            SidebarOrganization::ByDevice => Some(chat.device_id.clone()),
+            SidebarOrganization::ByProject | SidebarOrganization::InOneList => None,
+        }
+    };
+    let mut groups: Vec<(Option<(String, String)>, Vec<zeron_proto::Chat>)> = Vec::new();
+    for chat in chats {
+        let key = key(&chat).map(|k| (k, String::new()));
+        if let Some((_, existing)) = groups.iter_mut().find(|(group, _)| group == &key) {
+            existing.push(chat);
+        } else {
+            groups.push((key, vec![chat]));
+        }
+    }
+    if organization == SidebarOrganization::ByDevice {
+        promote_local_device_group(&mut groups, local_device_id);
+    }
+    groups
+        .into_iter()
+        .flat_map(|(_, rows)| rows)
+        .map(|chat| chat.id)
+        .collect()
 }
 
 fn sidebar_disclosure_header(theme: &Theme, label: SharedString, chevron: AnyElement) -> gpui::Div {
@@ -578,6 +618,9 @@ impl Shell {
 
     fn activate_sidebar_view_row(&mut self, row: SidebarViewRow, cx: &mut Context<Self>) {
         match row {
+            SidebarViewRow::ByProject => {
+                self.settings.sidebar_organization = SidebarOrganization::ByProject
+            }
             SidebarViewRow::ByDevice => {
                 self.settings.sidebar_organization = SidebarOrganization::ByDevice
             }
@@ -652,6 +695,7 @@ impl Shell {
         let show_pr = self.settings.sidebar_show_pull_request;
 
         let labels = [
+            "By project",
             "By device",
             "In one list",
             "Last updated",
@@ -661,6 +705,7 @@ impl Shell {
             "Harness",
         ];
         let icons = [
+            icons::FOLDER,
             icons::LAPTOP,
             icons::LIST,
             icons::CLOCK_CIRCLE,
@@ -670,6 +715,7 @@ impl Shell {
             icons::BOT,
         ];
         let selected = [
+            organization == SidebarOrganization::ByProject,
             organization == SidebarOrganization::ByDevice,
             organization == SidebarOrganization::InOneList,
             sort == SidebarSort::LastUpdated,
@@ -713,8 +759,8 @@ impl Shell {
                 .into_any_element()
             })
             .collect();
-        let show_rows = rows.split_off(4);
-        let sort_rows = rows.split_off(2);
+        let show_rows = rows.split_off(5);
+        let sort_rows = rows.split_off(3);
         let organization_rows = rows;
 
         popover::popover_card(theme)
@@ -1164,24 +1210,12 @@ impl Shell {
             .map(|(_, chat)| chat.clone())
             .collect();
         chats.sort_by(|left, right| compare_sidebar_chats(self.settings.sidebar_sort, left, right));
-        if self.settings.sidebar_organization != SidebarOrganization::ByDevice {
-            return chats.into_iter().map(|chat| chat.id).collect();
-        }
-        let mut groups: Vec<(Option<(String, String)>, Vec<zeron_proto::Chat>)> = Vec::new();
-        for chat in chats {
-            let key = Some((chat.device_id.clone(), String::new()));
-            if let Some((_, existing)) = groups.iter_mut().find(|(group, _)| group == &key) {
-                existing.push(chat);
-            } else {
-                groups.push((key, vec![chat]));
-            }
-        }
-        promote_local_device_group(&mut groups, state.local_device_id.as_deref());
-        groups
-            .into_iter()
-            .flat_map(|(_, rows)| rows)
-            .map(|chat| chat.id)
-            .collect()
+        grouped_visible_order(
+            chats,
+            self.settings.sidebar_organization,
+            filter.is_some(),
+            state.local_device_id.as_deref(),
+        )
     }
 
     /// The sidebar's Sessions list: every session (idle included) of the
@@ -1232,6 +1266,9 @@ impl Shell {
                         .map(str::to_string);
                     let change_request = state.change_request_for_chat(&chat).cloned();
                     let group = match self.settings.sidebar_organization {
+                        SidebarOrganization::ByProject if filter.is_none() => {
+                            Some((chat.space_id.clone().unwrap_or_else(|| "~".into()), project))
+                        }
                         SidebarOrganization::ByDevice => Some((chat.device_id.clone(), device)),
                         SidebarOrganization::ByProject | SidebarOrganization::InOneList => None,
                     };
@@ -1336,8 +1373,9 @@ impl Shell {
                 continue;
             };
             let organization = match self.settings.sidebar_organization {
+                SidebarOrganization::ByProject => "project",
                 SidebarOrganization::ByDevice => "device",
-                SidebarOrganization::ByProject | SidebarOrganization::InOneList => "list",
+                SidebarOrganization::InOneList => "list",
             };
             let collapse_key = format!("{organization}:{key}");
             let motion_key = format!("group:{collapse_key}");
@@ -2976,8 +3014,8 @@ impl Shell {
 mod tests {
     use chrono::{TimeZone as _, Utc};
 
-    use super::{compare_sidebar_chats, promote_local_device_group};
-    use crate::settings::SidebarSort;
+    use super::{compare_sidebar_chats, grouped_visible_order, promote_local_device_group};
+    use crate::settings::{SidebarOrganization, SidebarSort};
 
     fn group(device: &str, value: u8) -> (Option<(String, String)>, Vec<u8>) {
         (Some((device.into(), device.into())), vec![value])
@@ -3028,6 +3066,34 @@ mod tests {
             .map(|(group, _)| group.as_ref().unwrap().0.as_str())
             .collect();
         assert_eq!(order, ["local", "recent-remote", "older-remote"]);
+    }
+
+    fn chat_in(id: &str, space_id: Option<&str>) -> zeron_proto::Chat {
+        let mut chat = chat(id);
+        chat.space_id = space_id.map(Into::into);
+        chat
+    }
+
+    #[test]
+    fn by_project_visible_order_regroups_interleaved_projects() {
+        let chats = vec![
+            chat_in("a1", Some("a")),
+            chat_in("b1", Some("b")),
+            chat_in("home", None),
+            chat_in("a2", Some("a")),
+            chat_in("b2", Some("b")),
+        ];
+
+        let order =
+            grouped_visible_order(chats.clone(), SidebarOrganization::ByProject, false, None);
+        assert_eq!(order, ["a1", "a2", "b1", "b2", "home"]);
+
+        let filtered =
+            grouped_visible_order(chats.clone(), SidebarOrganization::ByProject, true, None);
+        assert_eq!(filtered, ["a1", "b1", "home", "a2", "b2"]);
+
+        let flat = grouped_visible_order(chats, SidebarOrganization::InOneList, false, None);
+        assert_eq!(flat, ["a1", "b1", "home", "a2", "b2"]);
     }
 
     #[test]

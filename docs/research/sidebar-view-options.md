@@ -157,6 +157,7 @@ Focused first version:
 
 ```text
 Organize
+  By project
   By device
   In one list
 
@@ -170,8 +171,8 @@ Show
   Harness
 ```
 
-Project scope belongs exclusively to the project selector; the legacy
-`By project` organization value normalizes to `In one list`. Defaults preserve
+Project scope belongs to the project selector; `By project` only groups under
+`All projects` and is a no-op while one project is selected. Defaults preserve
 today's presentation (`In one list`, `Last updated`, Branch
 on, Pull request on, Harness on). The view menu mirrors the project selector:
 it uses the same sidebar-inner width and spacing conventions, but aligns its
