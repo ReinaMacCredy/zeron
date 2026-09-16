@@ -3,6 +3,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use gpui::{
     AnyElement, Context, Entity, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement,
@@ -217,6 +218,10 @@ pub struct AppearancePage {
     review_entry: Option<String>,
     library_error: Option<SharedString>,
     background_error: Option<SharedString>,
+    /// Last chat-background raster that reached the preview. A slider step
+    /// asks for a new blur level that is still off-thread; painting this
+    /// instead of nothing keeps the preview from blinking.
+    chat_preview_artwork: Option<Arc<gpui::RenderImage>>,
 }
 
 impl AppearancePage {
@@ -268,6 +273,7 @@ impl AppearancePage {
             review_entry: None,
             library_error: None,
             background_error: None,
+            chat_preview_artwork: None,
         }
     }
 
@@ -805,6 +811,218 @@ impl AppearancePage {
         .detach();
     }
 
+    fn render_chat_background_rows(
+        &mut self,
+        theme: &Theme,
+        ui_settings: &crate::settings::UiSettings,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        use crate::settings::{ChatBackgroundPlacement, SavePolicy, update_chat_background};
+        let chat = ui_settings.chat_background;
+        let switch = |id: &'static str, on: bool| {
+            div()
+                .id(id)
+                .flex_none()
+                .size(px(40.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .child(widgets::toggle_switch(theme, on))
+        };
+        let mut rows = vec![
+            widgets::card_row(theme, false)
+                .child(widgets::row_tile(theme, icons::CHAT_ROUND_LINE))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::row_title(theme, "Chat background"))
+                        .child(widgets::meta_line(
+                            theme,
+                            vec![
+                                div()
+                                    .child("Show the artwork behind open conversations.")
+                                    .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(
+                    switch("chat-background-enabled", chat.enabled).on_click(cx.listener(
+                        move |_, _, _, cx| {
+                            update_chat_background(SavePolicy::Immediate, cx, |chat| {
+                                chat.enabled = !chat.enabled;
+                            });
+                            cx.notify();
+                        },
+                    )),
+                )
+                .into_any_element(),
+        ];
+        if !chat.enabled {
+            return rows;
+        }
+        let artwork = ui_settings
+            .new_thread_composer_background
+            .as_ref()
+            .and_then(|background| {
+                crate::new_thread_background_effects::prepare(
+                    ui_settings.new_thread_background_effect,
+                    theme,
+                    Path::new(&background.path),
+                    chat.blur_level(),
+                    cx,
+                )
+            });
+        if artwork.is_some() {
+            self.chat_preview_artwork = artwork;
+        }
+        rows.push(
+            widgets::card_row(theme, false)
+                .child(chat_background_preview(
+                    theme,
+                    self.chat_preview_artwork.clone(),
+                    chat,
+                ))
+                .into_any_element(),
+        );
+        let placement_controls = ChatBackgroundPlacement::ALL
+            .into_iter()
+            .map(|placement| {
+                choice_chip(
+                    theme,
+                    format!(
+                        "chat-background-placement-{}",
+                        placement.label().to_lowercase()
+                    ),
+                    placement.label(),
+                    placement == chat.placement,
+                )
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    update_chat_background(SavePolicy::Immediate, cx, |chat| {
+                        chat.placement = placement;
+                    });
+                    cx.notify();
+                }))
+            })
+            .collect::<Vec<_>>();
+        rows.push(
+            widgets::card_row(theme, false)
+                .child(widgets::row_tile(theme, icons::TUNING))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::row_title(theme, "Placement"))
+                        .child(widgets::meta_line(
+                            theme,
+                            vec![div().child(chat.placement.description()).into_any_element()],
+                        )),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .ml(px(10.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .children(placement_controls),
+                )
+                .into_any_element(),
+        );
+        rows.push(
+            widgets::card_row(theme, false)
+                .child(widgets::row_tile(theme, icons::TUNING))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::row_title(theme, "Opacity"))
+                        .child(widgets::meta_line(
+                            theme,
+                            vec![
+                                div()
+                                    .child(SharedString::from(format!(
+                                        "{}%",
+                                        (chat.opacity * 100.0).round()
+                                    )))
+                                    .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(slider(
+                    theme,
+                    "chat-background-opacity",
+                    chat.opacity,
+                    |fraction, cx| {
+                        update_chat_background(SavePolicy::Debounced, cx, |chat| {
+                            chat.opacity = fraction;
+                        });
+                    },
+                ))
+                .into_any_element(),
+        );
+        rows.push(
+            widgets::card_row(theme, false)
+                .child(widgets::row_tile(theme, icons::TUNING))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::row_title(theme, "Blur"))
+                        .child(widgets::meta_line(
+                            theme,
+                            vec![
+                                div()
+                                    .child(SharedString::from(format!("{}px", chat.blur)))
+                                    .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(slider(
+                    theme,
+                    "chat-background-blur",
+                    chat.blur / crate::settings::CHAT_BACKGROUND_BLUR_MAX,
+                    |fraction, cx| {
+                        update_chat_background(SavePolicy::Debounced, cx, |chat| {
+                            chat.blur = fraction * crate::settings::CHAT_BACKGROUND_BLUR_MAX;
+                        });
+                    },
+                ))
+                .into_any_element(),
+        );
+        rows.push(
+            widgets::card_row(theme, false)
+                .child(widgets::row_tile(theme, icons::TUNING))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::row_title(theme, "Scrim"))
+                        .child(widgets::meta_line(
+                            theme,
+                            vec![
+                                div()
+                                    .child("Darkens the artwork toward the bottom so text stays readable.")
+                                    .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(
+                    switch("chat-background-scrim", chat.scrim).on_click(cx.listener(
+                        move |_, _, _, cx| {
+                            update_chat_background(SavePolicy::Immediate, cx, |chat| {
+                                chat.scrim = !chat.scrim;
+                            });
+                            cx.notify();
+                        },
+                    )),
+                )
+                .into_any_element(),
+        );
+        rows
+    }
+
     fn remove_new_thread_background(&mut self, cx: &mut Context<Self>) {
         self.background_error = crate::settings::remove_new_thread_composer_background(cx)
             .err()
@@ -1056,11 +1274,25 @@ fn background_effect_choice(
     effect: crate::settings::NewThreadBackgroundEffect,
     selected: bool,
 ) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(SharedString::from(format!(
+    choice_chip(
+        theme,
+        format!(
             "new-thread-background-effect-{}",
             effect.label().to_lowercase()
-        )))
+        ),
+        effect.label(),
+        selected,
+    )
+}
+
+fn choice_chip(
+    theme: &Theme,
+    id: String,
+    label: &'static str,
+    selected: bool,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(SharedString::from(id))
         .h(px(28.0))
         .px(px(9.0))
         .rounded(px(7.0))
@@ -1088,7 +1320,179 @@ fn background_effect_choice(
         .when(!selected, |control| {
             control.hover(|style| style.bg(theme.surface_raised_hover))
         })
-        .child(effect.label())
+        .child(label)
+}
+
+const SLIDER_WIDTH: f32 = 150.0;
+const CHAT_PREVIEW_HEIGHT: f32 = 200.0;
+
+/// Identifies which slider a drag belongs to: every track hears every drag
+/// move of this type, so each one filters on its own id.
+struct SliderDrag(&'static str);
+
+struct SliderGhost;
+
+impl Render for SliderGhost {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
+
+/// Drag-only for now: a press without movement does not start a gpui drag.
+fn slider(
+    theme: &Theme,
+    id: &'static str,
+    fraction: f32,
+    on_change: impl Fn(f32, &mut gpui::App) + 'static,
+) -> gpui::Stateful<gpui::Div> {
+    let fraction = fraction.clamp(0.0, 1.0);
+    div()
+        .id(id)
+        .flex_none()
+        .w(px(SLIDER_WIDTH))
+        .h(px(24.0))
+        .flex()
+        .items_center()
+        .cursor_pointer()
+        .on_drag(
+            SliderDrag(id),
+            |_, _point: gpui::Point<gpui::Pixels>, _, cx| {
+                cx.stop_propagation();
+                cx.new(|_| SliderGhost)
+            },
+        )
+        .on_drag_move::<SliderDrag>(move |event, _, cx| {
+            if event.drag(cx).0 != id {
+                return;
+            }
+            let left = f32::from(event.bounds.left());
+            let width = f32::from(event.bounds.size.width).max(1.0);
+            let next = ((f32::from(event.event.position.x) - left) / width).clamp(0.0, 1.0);
+            on_change(next, cx);
+        })
+        .child(
+            div()
+                .relative()
+                .w_full()
+                .h(px(4.0))
+                .rounded_full()
+                .bg(crate::theme::hairline(0.15))
+                .child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top_0()
+                        .bottom_0()
+                        .w(gpui::relative(fraction))
+                        .rounded_full()
+                        .bg(theme.accent),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(-5.0))
+                        .left(px(fraction * SLIDER_WIDTH - 7.0))
+                        .size(px(14.0))
+                        .rounded_full()
+                        .bg(theme.text)
+                        .border_1()
+                        .border_color(theme.bg),
+                ),
+        )
+}
+
+/// A miniature of the conversation column drawn through the same layer the
+/// shell paints, so the baked blur reads at the same ratio as in the app.
+fn chat_background_preview(
+    theme: &Theme,
+    artwork: Option<Arc<gpui::RenderImage>>,
+    settings: crate::settings::ChatBackground,
+) -> AnyElement {
+    // Until the first raster lands the scrim would darken an empty card.
+    let fade = if artwork.is_some() { 1.0 } else { 0.0 };
+    let line = |width: f32, alpha: f32| {
+        div()
+            .w(gpui::relative(width))
+            .h(px(7.0))
+            .rounded_full()
+            .bg(theme.text.opacity(alpha))
+    };
+    let step = |width: f32| {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .size(px(10.0))
+                    .rounded(px(3.0))
+                    .border_1()
+                    .border_color(theme.border_strong),
+            )
+            .child(line(width, 0.28))
+    };
+    div()
+        .flex_1()
+        .min_w_0()
+        .h(px(CHAT_PREVIEW_HEIGHT))
+        .rounded(px(10.0))
+        .overflow_hidden()
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.bg)
+        .relative()
+        .child(crate::chat_background::layer(
+            artwork,
+            settings,
+            None,
+            crate::chat_background::layer_height(
+                settings.placement,
+                CHAT_PREVIEW_HEIGHT,
+                crate::shell::new_thread_background_height(CHAT_PREVIEW_HEIGHT),
+            ),
+            theme.bg,
+            fade,
+        ))
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .px(px(18.0))
+                .py(px(14.0))
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .ml_auto()
+                        .w(gpui::relative(0.5))
+                        .h(px(24.0))
+                        .rounded(px(9.0))
+                        .bg(theme.surface_raised)
+                        .px(px(9.0))
+                        .flex()
+                        .items_center()
+                        .child(line(0.8, 0.45)),
+                )
+                .child(line(0.72, 0.5))
+                .child(line(0.44, 0.5))
+                .child(step(0.5))
+                .child(step(0.36))
+                .child(
+                    div()
+                        .mt_auto()
+                        .h(px(30.0))
+                        .rounded(px(10.0))
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.surface.opacity(0.92))
+                        .px(px(10.0))
+                        .flex()
+                        .items_center()
+                        .child(line(0.25, 0.3)),
+                ),
+        )
+        .into_any_element()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2731,7 +3135,7 @@ impl Render for AppearancePage {
         let current_accent = appearance::accent(cx);
         let current_surface = appearance::surface(cx);
         let ui_settings = crate::settings::current(cx);
-        let current_background = ui_settings.new_thread_composer_background;
+        let current_background = ui_settings.new_thread_composer_background.clone();
         let current_background_effect = ui_settings.new_thread_background_effect;
         let cards = AppearanceMode::ALL
             .into_iter()
@@ -3011,6 +3415,9 @@ impl Render for AppearancePage {
                     )
                     .into_any_element(),
             );
+        }
+        if background_available {
+            settings_rows.extend(self.render_chat_background_rows(&theme, &ui_settings, cx));
         }
         if let Some(error) = self.background_error.clone() {
             settings_rows.push(

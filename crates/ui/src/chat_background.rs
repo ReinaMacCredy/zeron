@@ -21,10 +21,12 @@ pub(crate) fn layer_height(
 /// `fade` is the route and readiness progress shared by artwork and scrim;
 /// the user's opacity scales only the artwork so the scrim keeps text legible
 /// at every slider position.
+/// `width` is the shell's full conversation canvas; `None` fills the parent,
+/// which is what a miniature preview wants.
 pub(crate) fn layer(
     artwork: Option<Arc<RenderImage>>,
     settings: ChatBackground,
-    width: f32,
+    width: Option<f32>,
     height: f32,
     scrim_color: Hsla,
     fade: f32,
@@ -35,7 +37,10 @@ pub(crate) fn layer(
         .absolute()
         .top_0()
         .left_0()
-        .w(px(width))
+        .map(|layer| match width {
+            Some(width) => layer.w(px(width)),
+            None => layer.w_full(),
+        })
         .h(px(height))
         .overflow_hidden()
         .children(artwork.map(|artwork| {

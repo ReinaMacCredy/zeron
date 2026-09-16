@@ -7489,7 +7489,7 @@ impl Shell {
                 crate::chat_background::layer(
                     chat_artwork,
                     chat_background,
-                    (self.viewport_width - self.sidebar_now()).max(0.0),
+                    Some((self.viewport_width - self.sidebar_now()).max(0.0)),
                     crate::chat_background::layer_height(
                         chat_background.placement,
                         self.viewport_height,
