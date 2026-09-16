@@ -42,6 +42,11 @@ pub mod methods {
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_COMMANDS: &str = "ListCommands";
+    /// How a harness compacts its own context: `native`, `slash` or `none`.
+    pub const HARNESS_COMPACTION: &str = "HarnessCompaction";
+    /// Compact a chat's context in place. Returns once the harness is done —
+    /// there is no live transcript to watch it through.
+    pub const COMPACT_CHAT: &str = "CompactChat";
     pub const QUEUE_COMMAND: &str = "QueueCommand";
     /// Peer-to-peer delivery fallback: the SENDER's engine forwards a queued
     /// command entry (client-minted id and all) straight over the device-room

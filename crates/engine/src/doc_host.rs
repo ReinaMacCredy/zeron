@@ -637,6 +637,27 @@ impl ChatDocHandle {
         })
     }
 
+    /// Append a host-written `system` entry (the compaction boundary marker).
+    pub fn write_system_message(
+        &self,
+        message_id: &str,
+        text: &str,
+        created_at: i64,
+    ) -> Result<(), DocError> {
+        self.doc.push_message(&SessionMessageEntry {
+            id: message_id.to_string(),
+            role: MessageRole::System,
+            parts: vec![MessagePart::Text {
+                id: "t0".into(),
+                text: text.to_string(),
+            }],
+            created_at,
+            device_id: self.device_id.clone(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+        })
+    }
+
     /// Recovery sweep: stamp this device's abandoned `streaming` entries `aborted`, appending
     /// `note` as a visible error part so the transcript says WHY the turn
     /// ended (zeron folded "Run interrupted by backend restart" the same

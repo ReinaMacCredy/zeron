@@ -299,6 +299,18 @@ pub struct SlashCommand {
     pub input_hint: Option<String>,
 }
 
+/// How a harness compacts its own conversation context.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Compaction {
+    /// The driver drives compaction over the agent's own wire (`Harness::compact`).
+    Native,
+    /// Prompt text the agent's CLI interprets itself (claude's `/compact`),
+    /// sent through the ordinary run path.
+    SlashText(String),
+    None,
+}
+
 /// A file modification carried inline on a tool result (ACP
 /// `ToolCallContent::Diff`). `old_text: None` means a new file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -395,6 +407,13 @@ pub enum AgentEvent {
     ContextUsage {
         tokens: Option<u64>,
         window: Option<u64>,
+    },
+    /// The harness compacted its own conversation context. Token counts are
+    /// the harness's own pre/post measurement, absent when it reports none.
+    #[serde(rename_all = "camelCase")]
+    Compacted {
+        pre_tokens: Option<u64>,
+        post_tokens: Option<u64>,
     },
     /// Kept as a harness passthrough (rate-limit probes); never persisted to docs.
     #[serde(rename_all = "camelCase")]

@@ -475,8 +475,11 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
         // AvailableCommands feeds the engine's per-harness command cache, not
         // the transcript. UserMessage becomes its own doc ENTRY (the engine's
         // subagent sink writes it), never a part of the assistant message.
+        // Compacted likewise becomes its own System ENTRY, written by the
+        // engine's compaction sink.
         AgentEvent::AssistantMessageCompleted { .. }
         | AgentEvent::Usage { .. }
+        | AgentEvent::Compacted { .. }
         | AgentEvent::ContextUsage { .. }
         | AgentEvent::AvailableCommands { .. }
         | AgentEvent::UserMessage { .. } => {}

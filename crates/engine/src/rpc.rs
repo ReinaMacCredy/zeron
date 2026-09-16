@@ -92,6 +92,15 @@ struct ListModelsParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct CompactChatParams {
+    chat_id: String,
+    /// Passed to the harness's own compaction command as its focus argument.
+    #[serde(default)]
+    focus: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SetHarnessEnabledParams {
     harness: HarnessId,
     enabled: bool,
@@ -902,6 +911,9 @@ fn forward_deadline(method: &str) -> std::time::Duration {
             Duration::from_secs(15 * 60)
         }
         methods::CREATE_WORKTREE => Duration::from_secs(120),
+        // Outlives the engine's own compaction timeout, so a forwarded call
+        // reports the harness's outcome rather than a transport timeout.
+        methods::COMPACT_CHAT => Duration::from_secs(180),
         _ => Duration::from_secs(30),
     }
 }
@@ -918,6 +930,8 @@ fn forwardable(method: &str) -> bool {
             | methods::SET_HARNESS_ENABLED
             | methods::LIST_MODELS
             | methods::LIST_COMMANDS
+            | methods::HARNESS_COMPACTION
+            | methods::COMPACT_CHAT
             | methods::QUEUE_COMMAND
             | methods::WATCH_DOC_MESSAGES
             // The queue lives on the chat doc, and only its host may send from
@@ -1232,6 +1246,28 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&commands)
+            }
+            methods::HARNESS_COMPACTION => {
+                let p: ListModelsParams = parse_params(params)?;
+                let harness = self
+                    .registry
+                    .resolve(p.harness)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let kind = match harness.compaction() {
+                    zeron_proto::Compaction::Native => "native",
+                    zeron_proto::Compaction::SlashText(_) => "slash",
+                    zeron_proto::Compaction::None => "none",
+                };
+                RpcReply::value(&serde_json::json!({ "compaction": kind }))
+            }
+            methods::COMPACT_CHAT => {
+                let p: CompactChatParams = parse_params(params)?;
+                let outcome = self
+                    .sessions
+                    .compact(&p.chat_id, p.focus)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&outcome)
             }
             methods::QUEUE_COMMAND => {
                 let p: QueueCommandParams = parse_params(params)?;

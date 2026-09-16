@@ -20,8 +20,8 @@ use tokio::sync::{mpsc, oneshot};
 pub use tokio_util::sync::CancellationToken;
 
 use zeron_proto::{
-    AgentEvent, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand, SteeringMode,
-    UserInputAnswer, UserInputQuestion,
+    AgentEvent, Compaction, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand,
+    SteeringMode, UserInputAnswer, UserInputQuestion,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -100,6 +100,24 @@ pub trait Harness: Send + Sync {
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         Err(HarnessError::Protocol(
             "title generation is not supported by this harness".into(),
+        ))
+    }
+
+    /// How this harness compacts its own context — the capability the engine
+    /// routes on, and what the UI reads to enable or explain the affordance.
+    fn compaction(&self) -> Compaction {
+        Compaction::None
+    }
+    /// Compact the session's context over the agent's own wire. Implemented
+    /// only by [`Compaction::Native`] drivers; `SlashText` harnesses compact
+    /// through [`Harness::run`] with the command as the prompt.
+    async fn compact(
+        &self,
+        _request: RunRequest,
+        _controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        Err(HarnessError::Protocol(
+            "compaction is not supported by this harness".into(),
         ))
     }
 

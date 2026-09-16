@@ -49,6 +49,21 @@ pub(crate) struct SystemFrame {
     /// absent on subagent-owned background shell tasks.
     #[serde(default)]
     pub subagent_type: Option<String>,
+    /// `compact_boundary`: the CLI's own measurement of the compaction it
+    /// just performed.
+    #[serde(default)]
+    pub compact_metadata: Option<CompactMetadata>,
+}
+
+/// `system`/`compact_boundary` `compact_metadata` — only the occupancy fields
+/// the context meter needs (`trigger`, `cumulative_dropped_tokens` and
+/// `duration_ms` ride the same object and are ignored).
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct CompactMetadata {
+    #[serde(default)]
+    pub pre_tokens: Option<u64>,
+    #[serde(default)]
+    pub post_tokens: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]

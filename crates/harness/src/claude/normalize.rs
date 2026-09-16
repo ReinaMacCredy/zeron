@@ -354,6 +354,15 @@ impl Normalizer {
                     self.agent_spawn_tools.insert(tool.to_owned());
                     return Vec::new();
                 }
+                // The CLI's own compaction boundary. Must precede the init
+                // gate below, which swallows every other system subtype.
+                if f.subtype == "compact_boundary" {
+                    let meta = f.compact_metadata.unwrap_or_default();
+                    return vec![AgentEvent::Compacted {
+                        pre_tokens: meta.pre_tokens,
+                        post_tokens: meta.post_tokens,
+                    }];
+                }
                 if f.subtype != "init" || self.saw_init {
                     return Vec::new();
                 }
@@ -787,6 +796,72 @@ mod tests {
         let events = normalize_one(raw);
         assert_eq!(events.len(), 2, "usage + done");
         events.into_iter().nth(1).expect("done event")
+    }
+
+    /// Sanitized live frames from claude 2.1.273 running `/compact` under
+    /// `--print --input-format stream-json --output-format stream-json
+    /// --verbose --resume <id>`, in wire order.
+    #[test]
+    fn compact_boundary_is_the_only_event_a_compaction_run_produces() {
+        let mut normalizer = Normalizer::new();
+        let mut feed = |raw: &str| {
+            let frame = crate::claude::wire::parse_frame(raw).expect("frame parses");
+            normalizer.normalize(frame, false)
+        };
+        assert!(matches!(
+            feed(r#"{"type":"system","subtype":"init","model":"m","cwd":"/x","session_id":"s1"}"#)
+                .as_slice(),
+            [AgentEvent::SessionStarted { .. }]
+        ));
+        assert!(
+            feed(r#"{"type":"system","subtype":"status","status":"compacting","session_id":"s1"}"#)
+                .is_empty()
+        );
+        assert!(
+            feed(
+                r#"{"type":"system","subtype":"status","status":null,"compact_result":"success","session_id":"s1"}"#
+            )
+            .is_empty()
+        );
+        // The CLI re-inits after compacting; the dedupe must keep swallowing it.
+        assert!(feed(r#"{"type":"system","subtype":"init","session_id":"s1"}"#).is_empty());
+        assert_eq!(
+            feed(
+                r#"{"type":"system","subtype":"compact_boundary","session_id":"s1","compact_metadata":{"trigger":"manual","pre_tokens":22762,"post_tokens":2326,"cumulative_dropped_tokens":20436,"duration_ms":37695}}"#
+            ),
+            vec![AgentEvent::Compacted {
+                pre_tokens: Some(22762),
+                post_tokens: Some(2326),
+            }]
+        );
+        // The summary rides two user frames — text on an untagged user frame
+        // is never conversation, so the transcript gets nothing.
+        assert!(
+            feed(
+                r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"This session is being continued…"}]}}"#
+            )
+            .is_empty()
+        );
+        assert!(matches!(
+            feed(
+                r#"{"type":"result","subtype":"success","result":"","is_error":false,"num_turns":0,"session_id":"s1"}"#
+            )
+            .as_slice(),
+            [AgentEvent::Usage { .. }, AgentEvent::Done { .. }]
+        ));
+    }
+
+    /// A boundary without metadata (auto-compaction shapes, older CLIs) still
+    /// reports the compaction — the counts are simply unknown.
+    #[test]
+    fn compact_boundary_without_metadata_still_compacts() {
+        assert_eq!(
+            normalize_one(r#"{"type":"system","subtype":"compact_boundary","session_id":"s1"}"#),
+            vec![AgentEvent::Compacted {
+                pre_tokens: None,
+                post_tokens: None,
+            }]
+        );
     }
 
     #[test]

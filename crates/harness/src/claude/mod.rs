@@ -47,7 +47,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
 use zeron_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand,
+    AgentEvent, Compaction, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand,
     SteeringMode, UserInputAnswer, UserInputQuestion,
 };
 
@@ -368,6 +368,11 @@ impl Harness for ClaudeHarness {
     /// Done is the CLI's own terminal frame, for wake turns too.
     fn deterministic_turn_end(&self) -> bool {
         true
+    }
+    /// The CLI compacts itself: `/compact` as prompt text, answered with a
+    /// `system`/`compact_boundary` frame.
+    fn compaction(&self) -> Compaction {
+        Compaction::SlashText("/compact".into())
     }
 
     /// The curated static catalog (see [`catalog`]); requires an installed CLI

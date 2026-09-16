@@ -28,10 +28,10 @@ use zeron_doc::{
     DocError, MessagePart, MessageRole, MessageStatus, STREAM_COMMIT_MS, SegmentWriter, SessionDoc,
     SessionMessageEntry, fold_event_into_parts, sanitize_tool_call,
 };
-use zeron_harness::{CancellationToken, Harness, RunControls, SteerMessage};
+use zeron_harness::{CancellationToken, Harness, HarnessError, RunControls, SteerMessage};
 use zeron_proto::{
-    AgentEvent, DoneStatus, HarnessId, RunRequest, Session, SessionStatus, UserInputAnswer,
-    UserInputQuestion,
+    AgentEvent, Compaction, DoneStatus, HarnessId, RunRequest, Session, SessionStatus,
+    UserInputAnswer, UserInputQuestion,
 };
 
 use crate::doc_host::{ChatDocHandle, DocHost};
@@ -44,6 +44,21 @@ use crate::{EngineError, new_id, now_ms};
 pub struct JournaledEvent {
     pub seq: u64,
     pub event: AgentEvent,
+}
+
+/// Result of a manual context compaction — also the RPC result shape.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactOutcome {
+    pub compacted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pre_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_tokens: Option<u64>,
+    /// What the harness said when it compacted nothing ("Not enough messages
+    /// to compact."), for the caller to surface as a notice.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 /// Outcome of a steer attempt.
@@ -152,6 +167,13 @@ struct Inner {
     /// (zeron kept the same pair on `chats.harness_session_id`). An empty
     /// session id is the "do not resume" tombstone after a rejected resume.
     harness_sessions: Mutex<HashMap<String, HarnessSessionRef>>,
+    /// Chats with a compaction in flight — one per chat, and the reservation
+    /// is taken before the run slot so two RPCs can never both pass the check.
+    compacting: Mutex<std::collections::HashSet<String>>,
+    /// Chats whose last compaction timed out. A retry is refused until the
+    /// chat completes a real turn (t3code `timedOutNativeCompactions`): the
+    /// harness may still be compacting behind the timeout.
+    compaction_timed_out: Mutex<std::collections::HashSet<String>>,
     /// Auto-titler for untitled chats (wired at engine assembly; absent in bare tests).
     titles: OnceLock<crate::titles::TitleGenerator>,
     generated_images: OnceLock<(crate::uploads::Uploads, std::path::PathBuf)>,
@@ -192,6 +214,8 @@ impl SessionsEngine {
                 sessions_tx,
                 last_requests: Mutex::new(HashMap::new()),
                 harness_sessions: Mutex::new(HashMap::new()),
+                compacting: Mutex::new(std::collections::HashSet::new()),
+                compaction_timed_out: Mutex::new(std::collections::HashSet::new()),
                 titles: OnceLock::new(),
                 generated_images: OnceLock::new(),
                 turn_listener: OnceLock::new(),
@@ -634,6 +658,230 @@ impl SessionsEngine {
         Ok(true)
     }
 
+    /// Compact the chat's harness-side context in place.
+    ///
+    /// Not a turn: no user entry, no assistant entry, nothing journaled. On
+    /// success exactly one `system` entry is appended and the context meter is
+    /// reset to the harness's post-compaction measurement. The compaction
+    /// occupies the chat's run slot and reports the chat Working for its whole
+    /// duration, so nothing dispatches underneath it and held queue rows stay
+    /// held until the next real turn.
+    pub async fn compact(
+        &self,
+        chat_id: &str,
+        focus: Option<String>,
+    ) -> Result<CompactOutcome, EngineError> {
+        {
+            let mut pending = lock(&self.inner.compacting);
+            if pending.contains(chat_id) {
+                return Err(EngineError::Other(
+                    "Context compaction is already in progress.".into(),
+                ));
+            }
+            if self.turn_in_flight(chat_id) {
+                return Err(EngineError::Other("Chat is busy".into()));
+            }
+            if lock(&self.inner.compaction_timed_out).contains(chat_id) {
+                return Err(EngineError::Other(
+                    "Context compaction timed out — send a message before trying again.".into(),
+                ));
+            }
+            pending.insert(chat_id.to_string());
+        }
+        let _reservation = CompactionReservation {
+            inner: self.inner.clone(),
+            chat_id: chat_id.to_string(),
+        };
+
+        let (harness_id, mut request) = self.compaction_request(chat_id)?;
+        let harness = self.inner.registry.resolve(harness_id)?;
+        let compaction = harness.compaction();
+        let focus = focus
+            .map(|focus| focus.trim().to_string())
+            .filter(|focus| !focus.is_empty());
+        match &compaction {
+            Compaction::None => {
+                return Err(EngineError::Other(format!(
+                    "{} does not support compaction",
+                    harness.display_name()
+                )));
+            }
+            Compaction::Native => request.prompt = focus.unwrap_or_default(),
+            Compaction::SlashText(command) => {
+                request.prompt = match &focus {
+                    Some(focus) => format!("{command} {focus}"),
+                    None => command.clone(),
+                };
+            }
+        }
+        // The same engine-owned resume the normal dispatch path injects: a
+        // compaction that started a fresh session would compact nothing.
+        request.resume = self.inner.resume_for(chat_id, &request.cwd);
+
+        // Retire a parked warm child so the compaction owns the run slot; a
+        // turn actually in flight was refused above.
+        self.interrupt(chat_id).await?;
+
+        let handle = self.doc_handle(chat_id)?;
+        let run_id = new_id();
+        let run_cwd = request.cwd.clone();
+        let interrupt_token = CancellationToken::new();
+        let _cancel_on_drop = interrupt_token.clone().drop_guard();
+        let (steer_tx, steer_rx) = mpsc::channel::<SteerMessage>(1);
+        let (cancel_tx, mut cancel_rx) = watch::channel(false);
+        let (engine_tx, _engine_rx) = mpsc::unbounded_channel::<AgentEvent>();
+        {
+            let mut runs = lock(&self.inner.runs);
+            if runs.contains_key(chat_id) {
+                return Err(EngineError::Other("Chat is busy".into()));
+            }
+            runs.insert(
+                chat_id.to_string(),
+                RunHandle {
+                    run_id: run_id.clone(),
+                    // Never steerable: a user prompt must not land in the
+                    // compaction's mailbox as this run's next turn.
+                    steerable: false,
+                    runtime_config: RuntimeConfig::from_request(harness_id, &request),
+                    steer_tx,
+                    interrupt_token: interrupt_token.clone(),
+                    cancel: cancel_tx,
+                    engine_tx,
+                    pending_inputs: Arc::new(Mutex::new(HashMap::new())),
+                    routed_steers: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+                },
+            );
+        }
+        self.set_status(chat_id, SessionStatus::Working, true);
+
+        let controls = RunControls {
+            // A compaction must never park on a question.
+            request_input: Box::new(|_questions: Vec<UserInputQuestion>| {
+                let (tx, rx) = oneshot::channel();
+                let _ = tx.send(Vec::new());
+                rx
+            }),
+            steering: steer_rx,
+            interrupt: interrupt_token.clone(),
+        };
+        let started = match &compaction {
+            Compaction::Native => harness.compact(request, controls).await,
+            _ => harness.run(request, controls).await,
+        };
+        let result = match started {
+            Err(err) => Err(EngineError::Harness(err)),
+            Ok(stream) => {
+                match tokio::time::timeout(
+                    COMPACT_TIMEOUT,
+                    drain_compaction(&self.inner, chat_id, &run_cwd, stream, &mut cancel_rx),
+                )
+                .await
+                {
+                    Err(_elapsed) => {
+                        interrupt_token.cancel();
+                        lock(&self.inner.compaction_timed_out).insert(chat_id.to_string());
+                        Err(EngineError::Other("Context compaction timed out.".into()))
+                    }
+                    Ok(drain) => self.settle_compaction(&handle, drain),
+                }
+            }
+        };
+        self.inner.remove_run(chat_id, &run_id);
+        self.set_status(chat_id, SessionStatus::Idle, false);
+        result
+    }
+
+    /// Write the compaction's doc effects: one system entry, then the meter
+    /// reset to the harness's post-compaction occupancy.
+    fn settle_compaction(
+        &self,
+        handle: &ChatDocHandle,
+        drain: CompactionDrain,
+    ) -> Result<CompactOutcome, EngineError> {
+        let Some((pre_tokens, post_tokens)) = drain.compacted else {
+            if let Some(failure) = drain.failure {
+                return Err(EngineError::Other(failure));
+            }
+            return Ok(CompactOutcome {
+                compacted: false,
+                pre_tokens: None,
+                post_tokens: None,
+                message: Some(
+                    drain
+                        .result
+                        .map(|result| result.trim().to_string())
+                        .filter(|result| !result.is_empty())
+                        .unwrap_or_else(|| "Nothing to compact".into()),
+                ),
+            });
+        };
+        // Read the window BEFORE clearing: the meter stores tokens and window
+        // as one atomic value, so the clear takes the window with it.
+        let window = handle.doc().context_usage().and_then(|usage| usage.window);
+        handle.write_system_message(
+            &new_id(),
+            &compaction_note(pre_tokens, post_tokens),
+            now_ms(),
+        )?;
+        handle.doc().clear_context_usage()?;
+        if let Some(post_tokens) = post_tokens {
+            handle
+                .doc()
+                .update_context_usage(Some(post_tokens), window)?;
+        }
+        Ok(CompactOutcome {
+            compacted: true,
+            pre_tokens,
+            post_tokens,
+            message: None,
+        })
+    }
+
+    /// The run configuration a compaction inherits: the chat's last dispatched
+    /// request, else its durable row (the engine may have restarted since the
+    /// last turn). Prompt and resume are the caller's to fill in.
+    fn compaction_request(&self, chat_id: &str) -> Result<(HarnessId, RunRequest), EngineError> {
+        let host = self
+            .inner
+            .doc_host()
+            .ok_or_else(|| EngineError::Other("doc host not wired into sessions engine".into()))?;
+        let mut request = match self.last_request(chat_id) {
+            Some(request) => request,
+            None => {
+                let workspace = self.inner.workspace();
+                let config = workspace
+                    .as_ref()
+                    .and_then(|ws| ws.chat_config(chat_id))
+                    .ok_or_else(|| {
+                        EngineError::Other("This chat has no run configuration yet.".into())
+                    })?;
+                let cwd = workspace
+                    .as_ref()
+                    .and_then(|ws| ws.chat(chat_id).ok().flatten())
+                    .and_then(|chat| chat.cwd)
+                    .unwrap_or_else(|| "~".into());
+                RunRequest {
+                    prompt: String::new(),
+                    harness: Some(config.harness),
+                    model: config.model,
+                    reasoning: config.reasoning,
+                    model_options: config.model_options,
+                    cwd: expand_home(&cwd),
+                    sandbox: config.sandbox,
+                    auto_approve: false,
+                    resume: None,
+                    attachments: Vec::new(),
+                    worktree: None,
+                }
+            }
+        };
+        let harness_id = host.harness_for_request(chat_id, &request);
+        request.attachments.clear();
+        // The checkout the chat runs in already exists; cwd points at it.
+        request.worktree = None;
+        Ok((harness_id, request))
+    }
+
     /// Resolve a pending `request_input` question set. Returns `false` when no such
     /// request is pending (unknown id, or the run already settled).
     pub fn respond_input(
@@ -990,6 +1238,8 @@ impl Inner {
             );
             if let Some(turn) = completed_turn {
                 entry.last_completed_turn = Some(turn);
+                // A completed turn is the retry gate a timed-out compaction waits on.
+                lock(&self.compaction_timed_out).remove(chat_id);
             }
             entry.status = status;
             entry.updated_at = now;
@@ -1128,6 +1378,124 @@ impl Inner {
         if runs.get(chat_id).is_some_and(|h| h.run_id == run_id) {
             runs.remove(chat_id);
         }
+    }
+}
+
+// ── compaction ──────────────────────────────────────────────────────────────
+
+/// A routine compaction of a large context runs tens of seconds (37s measured
+/// live on claude 2.1.273); past this the chat is released and a retry is
+/// refused until its next completed turn.
+const COMPACT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Releases the chat's one-compaction-at-a-time reservation on every exit path.
+struct CompactionReservation {
+    inner: Arc<Inner>,
+    chat_id: String,
+}
+
+impl Drop for CompactionReservation {
+    fn drop(&mut self) {
+        lock(&self.inner.compacting).remove(&self.chat_id);
+    }
+}
+
+#[derive(Default)]
+struct CompactionDrain {
+    /// `(pre_tokens, post_tokens)` from the harness's compaction boundary.
+    compacted: Option<(Option<u64>, Option<u64>)>,
+    result: Option<String>,
+    failure: Option<String>,
+}
+
+/// Consume a compaction run's stream. Deliberately NOT the transcript fold:
+/// nothing here is journaled, broadcast or written as a message part.
+async fn drain_compaction(
+    inner: &Arc<Inner>,
+    chat_id: &str,
+    run_cwd: &str,
+    mut stream: futures::stream::BoxStream<'static, Result<AgentEvent, HarnessError>>,
+    cancel: &mut watch::Receiver<bool>,
+) -> CompactionDrain {
+    let mut drain = CompactionDrain::default();
+    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(15));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        let event = tokio::select! {
+            // A compaction is one long silence, and the UI's staleness gate
+            // would read an untouched Working row as no longer busy.
+            _ = heartbeat.tick() => {
+                inner.touch_session(chat_id);
+                continue;
+            }
+            // Both ends below leave no boundary and no result: without an
+            // explicit failure they would settle as the benign
+            // "Nothing to compact" notice.
+            _ = cancel.changed() => {
+                drain.failure = Some("Context compaction was interrupted.".into());
+                break;
+            }
+            next = stream.next() => match next {
+                Some(Ok(event)) => event,
+                Some(Err(err)) => {
+                    drain.failure = Some(err.to_string());
+                    break;
+                }
+                None => {
+                    drain.failure = Some("harness stream ended without Done".into());
+                    break;
+                }
+            },
+        };
+        match event {
+            AgentEvent::Compacted {
+                pre_tokens,
+                post_tokens,
+            } => drain.compacted = Some((pre_tokens, post_tokens)),
+            AgentEvent::SessionStarted {
+                session_id, cwd, ..
+            } => inner.remember_harness_session(chat_id, &session_id, &cwd),
+            AgentEvent::Error { message } => {
+                drain.failure = Some(message);
+                break;
+            }
+            AgentEvent::Done {
+                session_id,
+                result,
+                error,
+                ..
+            } => {
+                if let Some(session_id) = &session_id {
+                    inner.remember_harness_session(chat_id, session_id, run_cwd);
+                }
+                drain.failure = error;
+                drain.result = result;
+                break;
+            }
+            _ => {}
+        }
+    }
+    drain
+}
+
+/// The system entry's text: the boundary, plus the harness's own before/after
+/// when it reported both.
+fn compaction_note(pre_tokens: Option<u64>, post_tokens: Option<u64>) -> String {
+    match (pre_tokens, post_tokens) {
+        (Some(pre), Some(post)) => format!(
+            "Context compacted · {} → {} tokens",
+            format_tokens(pre),
+            format_tokens(post)
+        ),
+        _ => "Context compacted".into(),
+    }
+}
+
+fn format_tokens(tokens: u64) -> String {
+    if tokens >= 1000 {
+        format!("{:.1}k", tokens as f64 / 1000.0)
+    } else {
+        tokens.to_string()
     }
 }
 
