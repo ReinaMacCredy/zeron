@@ -56,21 +56,9 @@ pub(crate) fn paint(
     cutout: bool,
     window: &mut Window,
 ) {
-    let width = f32::from(bounds.size.width);
-    let height = f32::from(bounds.size.height);
-    let source_size = source.size(0);
-    if width <= 0.0 || height <= 0.0 || source_size.width.0 <= 0 || source_size.height.0 <= 0 {
+    let Some(fitted) = cover_fit(&source, bounds) else {
         return;
-    }
-    let scale = (width / source_size.width.0 as f32).max(height / source_size.height.0 as f32);
-    let fitted_size = size(
-        px(source_size.width.0 as f32 * scale),
-        px(source_size.height.0 as f32 * scale),
-    );
-    let fitted = Bounds::new(
-        bounds.center() - point(fitted_size.width * 0.5, fitted_size.height * 0.5),
-        fitted_size,
-    );
+    };
     let _ = window.paint_image_fitted_masked(
         bounds,
         fitted,
@@ -80,6 +68,58 @@ pub(crate) fn paint(
         false,
         Some(mask(bounds, composer, cutout)),
     );
+}
+
+/// The chat variant: no composer cutout and no reveal pass. `fade_bottom`
+/// keeps the hero placement's full-height dissolve; the full placement paints
+/// the plain cover-fitted image.
+pub(crate) fn paint_chat(
+    source: Arc<RenderImage>,
+    bounds: Bounds<Pixels>,
+    fade_bottom: bool,
+    window: &mut Window,
+) {
+    let Some(fitted) = cover_fit(&source, bounds) else {
+        return;
+    };
+    let _ = window.paint_image_fitted_masked(
+        bounds,
+        fitted,
+        Default::default(),
+        source,
+        0,
+        false,
+        fade_bottom.then(|| bottom_fade_mask(bounds)),
+    );
+}
+
+fn bottom_fade_mask(bounds: Bounds<Pixels>) -> ImageAlphaMask {
+    let height = f32::from(bounds.size.height);
+    ImageAlphaMask {
+        bounds: Bounds::new(point(bounds.left(), bounds.bottom() + px(1.0)), bounds.size),
+        radius: px(0.0),
+        feather: px(1.0),
+        clearance: px(0.0),
+        bottom_fade: Some((bounds.bottom(), px(height.max(1.0)))),
+    }
+}
+
+fn cover_fit(source: &RenderImage, bounds: Bounds<Pixels>) -> Option<Bounds<Pixels>> {
+    let width = f32::from(bounds.size.width);
+    let height = f32::from(bounds.size.height);
+    let source_size = source.size(0);
+    if width <= 0.0 || height <= 0.0 || source_size.width.0 <= 0 || source_size.height.0 <= 0 {
+        return None;
+    }
+    let scale = (width / source_size.width.0 as f32).max(height / source_size.height.0 as f32);
+    let fitted_size = size(
+        px(source_size.width.0 as f32 * scale),
+        px(source_size.height.0 as f32 * scale),
+    );
+    Some(Bounds::new(
+        bounds.center() - point(fitted_size.width * 0.5, fitted_size.height * 0.5),
+        fitted_size,
+    ))
 }
 
 #[cfg(test)]
@@ -218,6 +258,23 @@ mod tests {
         assert_eq!(reveal.radius, px(0.0));
         assert_eq!(reveal.clearance, px(0.0));
         assert_eq!(CUTOUT_REVEAL_OPACITY, 0.5);
+    }
+
+    #[test]
+    fn chat_bottom_fade_matches_the_hero_reveal_fade_without_any_cutout() {
+        let hero = Bounds::new(point(px(0.0), px(0.0)), size(px(1440.0), px(691.2)));
+        let composer = Bounds::new(point(px(352.0), px(406.0)), size(px(736.0), px(124.0)));
+        let chat = bottom_fade_mask(hero);
+        let reveal = mask(hero, composer, false);
+        assert_eq!(chat.bottom_fade, reveal.bottom_fade);
+        assert_eq!(chat.bounds, reveal.bounds);
+        assert_eq!(chat.radius, px(0.0));
+        assert_eq!(chat.clearance, px(0.0));
+        let source = RenderImage::new([image::Frame::new(image::RgbaImage::new(200, 100))]);
+        let fitted = cover_fit(&source, hero).unwrap();
+        assert_eq!(fitted.size.width, px(1440.0));
+        assert_eq!(fitted.size.height, px(720.0));
+        assert!(cover_fit(&source, Bounds::new(hero.origin, size(px(0.0), px(10.0)))).is_none());
     }
 
     #[test]

@@ -860,7 +860,7 @@ fn new_thread_background_opacity(is_frost: bool) -> f32 {
     }
 }
 
-fn new_thread_background_height(viewport_height: f32) -> f32 {
+pub(crate) fn new_thread_background_height(viewport_height: f32) -> f32 {
     (viewport_height.max(0.0) * NEW_THREAD_BACKGROUND_VIEWPORT_RATIO)
         .min(NEW_THREAD_BACKGROUND_MAX_HEIGHT)
 }
@@ -1311,6 +1311,9 @@ pub struct Shell {
     /// Shared route clock and measured prepaint geometry for the persistent composer.
     composer_dock: crate::composer_dock::SharedDock,
     new_thread_artwork_ready: crate::new_thread_background_effects::Readiness,
+    /// The chat layer alternates with the hero by route and carries its own
+    /// blurred image, so sharing one tracker would restart the hero's fade.
+    chat_artwork_ready: crate::new_thread_background_effects::Readiness,
     /// The sidebar's archived accordion (t3code Sidebar): OPEN by default
     /// (user request), session-transient. `archived_shown` pages the
     /// expanded list ("Show more" reveals another page).
@@ -1725,6 +1728,7 @@ impl Shell {
             bottom_stack_has_composer: std::rc::Rc::new(std::cell::Cell::new(false)),
             composer_dock: Default::default(),
             new_thread_artwork_ready: Default::default(),
+            chat_artwork_ready: Default::default(),
             archived_open: true,
             archived_shown: 0,
             archived_hover: None,
@@ -7416,6 +7420,25 @@ impl Shell {
             self.reduced_motion,
             frame_time,
         );
+        let chat_background = ui_settings.chat_background;
+        // A disabled chat background never rasterizes its blurred variant.
+        let chat_artwork = new_thread_background_setting
+            .as_ref()
+            .filter(|_| chat_background.visible())
+            .and_then(|background| {
+                crate::new_thread_background_effects::prepare(
+                    new_thread_background_effect,
+                    theme,
+                    std::path::Path::new(&background.path),
+                    chat_background.blur_level(),
+                    cx,
+                )
+            });
+        let chat_artwork_opacity = self.chat_artwork_ready.opacity(
+            chat_artwork.as_ref().map(|image| image.id),
+            self.reduced_motion,
+            frame_time,
+        );
         let dock_frame =
             self.composer_dock
                 .borrow_mut()
@@ -7456,6 +7479,26 @@ impl Shell {
             self.transcript
                 .update(cx, |transcript, cx| transcript.finish_route_exit(cx));
         }
+        // Crossfades against the hero on the transcript's own route clock, so
+        // both layers paint together only during the handoff.
+        let chat_background_layer =
+            (chat_background.visible() && (has_selection || departing_transcript)).then(|| {
+                if chat_artwork.is_some() && chat_artwork_opacity < 1.0 {
+                    window.request_animation_frame();
+                }
+                crate::chat_background::layer(
+                    chat_artwork,
+                    chat_background,
+                    (self.viewport_width - self.sidebar_now()).max(0.0),
+                    crate::chat_background::layer_height(
+                        chat_background.placement,
+                        self.viewport_height,
+                        new_thread_background_height(self.viewport_height),
+                    ),
+                    theme.bg,
+                    chat_artwork_opacity * dock_frame.transcript(),
+                )
+            });
         let outlet: AnyElement = if has_selection || departing_transcript {
             div()
                 .relative()
@@ -7575,6 +7618,7 @@ impl Shell {
             // it must paint under the overlaid titlebar instead of becoming
             // fully transparent across the titlebar's inset band.
             .children(new_thread_background_layer)
+            .children(chat_background_layer)
             .child(
                 // Full-height underlay: the transcript viewport spans the
                 // whole column, scrolling UNDER the titlebar above and the
