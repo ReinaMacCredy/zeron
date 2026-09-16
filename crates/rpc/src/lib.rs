@@ -47,6 +47,10 @@ pub mod methods {
     /// Compact a chat's context in place. Returns once the harness is done —
     /// there is no live transcript to watch it through.
     pub const COMPACT_CHAT: &str = "CompactChat";
+    /// Create a sidechat of `sourceChatId` under the client-minted `chatId`,
+    /// replying with the created `Chat` row. The first prompt is the caller's
+    /// to send afterwards, as an ordinary `QueueCommand` Run on `chatId`.
+    pub const CREATE_SIDECHAT: &str = "CreateSidechat";
     pub const QUEUE_COMMAND: &str = "QueueCommand";
     /// Peer-to-peer delivery fallback: the SENDER's engine forwards a queued
     /// command entry (client-minted id and all) straight over the device-room

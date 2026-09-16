@@ -158,6 +158,11 @@ pub struct Chat {
     /// dials the room the registry names. Per-chat and instantly revertible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub room_gen: Option<u32>,
+    /// The chat this one is a guarded side conversation of. Set once at
+    /// creation; `None` for an ordinary chat. Nesting is refused, so this
+    /// chat's own id never appears here on a third chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidechat_source_chat_id: Option<String>,
 }
 
 impl Chat {

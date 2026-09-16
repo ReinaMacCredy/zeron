@@ -403,7 +403,13 @@ impl SessionsEngine {
                 // Register acceptance before a fast boundary can retire it.
                 let mut pending = lock(&ledger);
                 let message = SteerMessage {
-                    prompt: request.prompt.clone(),
+                    // The mailbox is the harness's ear: a sidechat's prompt is
+                    // wrapped here, while the doc entry and the ledger (which a
+                    // dying run re-dispatches) keep the typed text.
+                    prompt: self
+                        .inner
+                        .sidechat_harness_prompt(chat_id, &request.prompt)
+                        .unwrap_or_else(|| request.prompt.clone()),
                     message_id: Some(user_id.clone()),
                 };
                 if steer_tx.try_send(message).is_ok() {
@@ -578,7 +584,13 @@ impl SessionsEngine {
         };
         let user_id = message_id.unwrap_or_else(new_id);
         let message = SteerMessage {
-            prompt: prompt.to_string(),
+            // Held-queue release and queued sends reach the harness through
+            // here without ever entering `dispatch`, so a sidechat's wrap has
+            // to happen on this path too.
+            prompt: self
+                .inner
+                .sidechat_harness_prompt(chat_id, prompt)
+                .unwrap_or_else(|| prompt.to_string()),
             message_id: Some(user_id.clone()),
         };
         {
@@ -1061,7 +1073,115 @@ impl SessionsEngine {
     }
 }
 
+/// Ported verbatim from astra `sidechatProviderInput.ts:3-4`.
+const SIDECHAT_BOUNDARY_INSTRUCTION: &str = "You are in a sidechat. Treat all prior conversation as reference-only context. Do not continue any prior task automatically. Do not mutate files, git, or the workspace and do not run workspace-changing commands unless the latest user message explicitly asks you to do so after this boundary. Use this sidechat for focused explanation, safety checks, summaries, and alternatives.";
+
+/// How much of the source transcript a sidechat's first turn carries.
+const SIDECHAT_CONTEXT_BUDGET_CHARS: usize = 48_000;
+
+fn sidechat_prompt(typed: &str, source_copy: &str) -> String {
+    let mut prompt =
+        format!("<sidechat_boundary>\n{SIDECHAT_BOUNDARY_INSTRUCTION}\n</sidechat_boundary>\n\n");
+    if !source_copy.is_empty() {
+        prompt.push_str(&format!(
+            "<sidechat_context>\n{source_copy}\n</sidechat_context>\n\n"
+        ));
+    }
+    prompt.push_str(&format!(
+        "<latest_user_message>\n{typed}\n</latest_user_message>"
+    ));
+    prompt
+}
+
+/// The source chat's prose — user and assistant text only — walked newest-first
+/// until `budget` characters are spent, then joined oldest-first. Tool,
+/// reasoning and error parts are not conversation, and a streaming entry is
+/// half-written; the oldest kept message is truncated from its start so the
+/// text nearest the sidechat's question always survives.
+fn bounded_source_copy(entries: &[SessionMessageEntry], budget: usize) -> String {
+    let mut selected: Vec<String> = Vec::new();
+    let mut remaining = budget;
+    for entry in entries.iter().rev() {
+        if remaining == 0 {
+            break;
+        }
+        if entry.status == Some(MessageStatus::Streaming) {
+            continue;
+        }
+        let role = match entry.role {
+            MessageRole::User => "User",
+            MessageRole::Assistant => "Assistant",
+            MessageRole::System => continue,
+        };
+        let text: String = entry
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                MessagePart::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let separator = if selected.is_empty() { 0 } else { 2 };
+        let retained = last_chars(&format!("{role}: {text}"), remaining);
+        remaining = remaining.saturating_sub(retained.chars().count() + separator);
+        selected.push(retained);
+    }
+    selected.reverse();
+    selected.join("\n\n")
+}
+
+/// The last `max` characters of `text` — whole scalar values, because a byte
+/// slice would panic mid-codepoint.
+fn last_chars(text: &str, max: usize) -> String {
+    let count = text.chars().count();
+    if count <= max {
+        return text.to_string();
+    }
+    text.chars().skip(count - max).collect()
+}
+
 impl Inner {
+    /// What a sidechat's harness receives in place of the typed text: the
+    /// boundary instruction, the source transcript on the first turn, and the
+    /// typed message. `None` for an ordinary chat, which is every chat whose
+    /// row names no source.
+    fn sidechat_harness_prompt(&self, chat_id: &str, typed: &str) -> Option<String> {
+        let source_id = self
+            .workspace()?
+            .chat(chat_id)
+            .ok()
+            .flatten()?
+            .sidechat_source_chat_id?;
+        let host = self.doc_host()?;
+        // First turn = this sidechat has no completed assistant entry yet, so
+        // an interrupted first turn re-sends the copy rather than leaving the
+        // harness with a boundary and no context.
+        let answered = host
+            .open(chat_id)
+            .ok()
+            .and_then(|handle| handle.doc().read_entries().ok())
+            .is_some_and(|entries| {
+                entries.iter().any(|entry| {
+                    entry.role == MessageRole::Assistant
+                        && entry.status == Some(MessageStatus::Complete)
+                })
+            });
+        let copy = if answered {
+            String::new()
+        } else {
+            host.open(&source_id)
+                .ok()
+                .and_then(|handle| handle.doc().read_entries().ok())
+                .map(|entries| bounded_source_copy(&entries, SIDECHAT_CONTEXT_BUDGET_CHARS))
+                .unwrap_or_default()
+        };
+        Some(sidechat_prompt(typed, &copy))
+    }
+
     /// Journal + broadcast one event (the two unconditional legs of the pipeline).
     /// Sanitize before ANY journal/publish path, including nested subagent events.
     async fn prepare_generated_image(
@@ -1812,6 +1932,12 @@ async fn drive_run(
         resume: None,
         ..request.clone()
     });
+    // After the retry snapshot and the titler's capture, both of which want the
+    // typed text: only what crosses into the harness carries the sidechat wrap.
+    let request = match inner.sidechat_harness_prompt(&chat_id, &request.prompt) {
+        Some(prompt) => RunRequest { prompt, ..request },
+        None => request,
+    };
     let mut stream = match harness.run(request, controls).await {
         Ok(stream) => stream,
         Err(err) => {

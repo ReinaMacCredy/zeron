@@ -274,6 +274,7 @@ fn chat(id: &str, device_id: &str) -> Chat {
         space_id: None,
         last_seen_at: None,
         room_gen: None,
+        sidechat_source_chat_id: None,
     }
 }
 
@@ -370,6 +371,21 @@ fn rows_round_trip_and_upsert_refreshes() {
     assert_eq!(chats.len(), 1);
     assert_eq!(chats[0].title, None);
     assert_eq!(chats[0].last_message_preview.as_deref(), Some("hello"));
+}
+
+#[test]
+fn a_sidechat_row_round_trips_its_source() {
+    let mut doc = RegistryDoc::new("dev-a");
+    let mut sidechat = chat("chat-2", "dev-a");
+    sidechat.sidechat_source_chat_id = Some("chat-1".into());
+    doc.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+    doc.upsert_chat(&sidechat).unwrap();
+
+    let chats = doc.read_chats().unwrap();
+    assert_eq!(chats.len(), 2);
+    assert_eq!(chats[0].sidechat_source_chat_id, None);
+    assert_eq!(chats[1].sidechat_source_chat_id.as_deref(), Some("chat-1"));
+    assert_eq!(chats[1], sidechat);
 }
 
 #[test]

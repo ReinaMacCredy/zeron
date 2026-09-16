@@ -885,9 +885,61 @@ impl WorkspaceHost {
                 harness_session_cwd: None,
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
+                sidechat_source_chat_id: None,
             })
         })?;
         Ok(())
+    }
+
+    /// Create a guarded side conversation of `source_chat_id`: a new chat in
+    /// the source's space, cwd, checkout and run configuration, pointing back
+    /// at the source. Its harness session is its own — copying the source's
+    /// would make the sidechat resume (and append to) the source's harness
+    /// conversation, which is exactly what a sidechat must not do.
+    pub fn create_sidechat(
+        &self,
+        source_chat_id: &str,
+        new_chat_id: &str,
+    ) -> Result<Chat, EngineError> {
+        if let Some(existing) = self.read(|doc| doc.chat(new_chat_id))? {
+            return Ok(existing); // idempotent: optimistic client retries never duplicate
+        }
+        let source = self
+            .read(|doc| doc.chat(source_chat_id))?
+            .ok_or_else(|| EngineError::Other(format!("no such chat: {source_chat_id}")))?;
+        if source.sidechat_source_chat_id.is_some() {
+            return Err(EngineError::Other(
+                "nested sidechats are not supported".into(),
+            ));
+        }
+        let seed = source
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .unwrap_or("chat");
+        let chat = Chat {
+            id: new_chat_id.to_string(),
+            device_id: source.device_id.clone(),
+            title: Some(format!("Sidechat: {seed}")),
+            archived: false,
+            cwd: source.cwd.clone(),
+            branch: source.branch.clone(),
+            checkout_id: source.checkout_id.clone(),
+            source_context: None,
+            config: source.config.clone(),
+            last_message_preview: None,
+            last_message_at: None,
+            created_at: Utc::now(),
+            harness_session_id: None,
+            harness_session_cwd: None,
+            room_gen: Some(2),
+            space_id: source.space_id.clone(),
+            last_seen_at: None,
+            sidechat_source_chat_id: Some(source_chat_id.to_string()),
+        };
+        self.mutate(|doc| doc.upsert_chat(&chat))?;
+        Ok(chat)
     }
 
     // ── spaces (Mutate surface + owner stamps) ──────────────────────────────

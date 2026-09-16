@@ -696,6 +696,8 @@ pub(crate) struct RawChat {
     last_seen_at: Option<i64>,
     #[serde(default)]
     room_gen: Option<u32>,
+    #[serde(default)]
+    sidechat_source_chat_id: Option<String>,
 }
 
 /// Decode a chat row's `config` leniently: unknown enum values (a newer
@@ -736,6 +738,7 @@ impl From<RawChat> for Chat {
             space_id: raw.space_id,
             last_seen_at: raw.last_seen_at.map(dt),
             room_gen: raw.room_gen,
+            sidechat_source_chat_id: raw.sidechat_source_chat_id,
         }
     }
 }
@@ -813,6 +816,7 @@ mod tests {
             space_id: None,
             last_seen_at: None,
             room_gen: None,
+            sidechat_source_chat_id: None,
         }
     }
 

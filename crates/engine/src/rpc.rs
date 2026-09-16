@@ -101,6 +101,13 @@ struct CompactChatParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct CreateSidechatParams {
+    source_chat_id: String,
+    chat_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SetHarnessEnabledParams {
     harness: HarnessId,
     enabled: bool,
@@ -1268,6 +1275,14 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&outcome)
+            }
+            methods::CREATE_SIDECHAT => {
+                let p: CreateSidechatParams = parse_params(params)?;
+                let chat = self
+                    .workspace
+                    .create_sidechat(&p.source_chat_id, &p.chat_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&chat)
             }
             methods::QUEUE_COMMAND => {
                 let p: QueueCommandParams = parse_params(params)?;
