@@ -53,8 +53,8 @@ use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc;
 
 use zeron_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice, ReasoningLevel,
-    RunRequest, SlashCommand, SteeringMode, UserInputAnswer, UserInputQuestion,
+    AgentEvent, Compaction, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice,
+    ReasoningLevel, RunRequest, SlashCommand, SteeringMode, UserInputAnswer, UserInputQuestion,
 };
 
 use crate::jsonrpc::{Incoming, RpcClient};
@@ -545,6 +545,11 @@ impl Harness for CodexHarness {
     fn deterministic_turn_end(&self) -> bool {
         true
     }
+    /// `thread/compact/start` on the app-server wire, resolved by
+    /// `thread/compacted` — no prompt text reaches the model.
+    fn compaction(&self) -> Compaction {
+        Compaction::Native
+    }
 
     /// The signed-in account's visible `model/list` is authoritative. A
     /// curated snapshot keeps the picker operational when the experimental
@@ -582,6 +587,14 @@ impl Harness for CodexHarness {
         self.run_with_mode(request, controls, false).await
     }
 
+    async fn compact(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        self.compact_thread(request, controls).await
+    }
+
     async fn run_title(
         &self,
         mut request: RunRequest,
@@ -603,7 +616,6 @@ impl CodexHarness {
         controls: RunControls,
         title_only: bool,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        let exe = self.resolve_executable()?;
         // Yolo mode: danger-full-access + approvalPolicy "never" (set below) —
         // codex's --dangerously-bypass-approvals-and-sandbox equivalent.
         // Parity with the Claude adapter, which auto-approves every
@@ -616,11 +628,79 @@ impl CodexHarness {
         } else {
             zeron_proto::SandboxLevel::DangerFullAccess
         };
+        let AppServer {
+            child,
+            client,
+            incoming,
+            stderr_tail,
+        } = self.spawn_app_server(&request.cwd).await?;
+        let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
+        tokio::spawn(run_session(Session {
+            title_only,
+            child,
+            client,
+            incoming,
+            event_tx,
+            controls,
+            request,
+            interrupt_grace: self.interrupt_grace,
+            kill_grace: self.kill_grace,
+            stderr_tail,
+        }));
+
+        Ok(futures::stream::unfold(event_rx, |mut rx| async move {
+            rx.recv().await.map(|ev| (ev, rx))
+        })
+        .boxed())
+    }
+
+    async fn compact_thread(
+        &self,
+        mut request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let thread_id = request
+            .resume
+            .clone()
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                HarnessError::Protocol("nothing to compact: no codex thread to resume".into())
+            })?;
+        request.sandbox = zeron_proto::SandboxLevel::DangerFullAccess;
+        let AppServer {
+            child,
+            client,
+            incoming,
+            stderr_tail,
+        } = self.spawn_app_server(&request.cwd).await?;
+        let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
+        tokio::spawn(compact_session(CompactSession {
+            child,
+            client,
+            incoming,
+            event_tx,
+            controls,
+            request,
+            thread_id,
+            kill_grace: self.kill_grace,
+            stderr_tail,
+        }));
+
+        Ok(futures::stream::unfold(event_rx, |mut rx| async move {
+            rx.recv().await.map(|ev| (ev, rx))
+        })
+        .boxed())
+    }
+
+    /// Spawn `codex app-server` on the run's cwd and wire its stdio to a
+    /// JSON-RPC client.
+    async fn spawn_app_server(&self, cwd: &str) -> Result<AppServer, HarnessError> {
+        let exe = self.resolve_executable()?;
         let mut cmd = Command::new(&exe);
         cmd.arg("app-server");
         crate::compose_child_path(&mut cmd, &exe);
-        if !request.cwd.is_empty() {
-            cmd.current_dir(&request.cwd);
+        if !cwd.is_empty() {
+            cmd.current_dir(cwd);
         }
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -655,25 +735,20 @@ impl CodexHarness {
         }
 
         let (client, incoming) = RpcClient::new(stdin, stdout);
-        let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
-        tokio::spawn(run_session(Session {
-            title_only,
+        Ok(AppServer {
             child,
             client,
             incoming,
-            event_tx,
-            controls,
-            request,
-            interrupt_grace: self.interrupt_grace,
-            kill_grace: self.kill_grace,
             stderr_tail,
-        }));
-
-        Ok(futures::stream::unfold(event_rx, |mut rx| async move {
-            rx.recv().await.map(|ev| (ev, rx))
         })
-        .boxed())
     }
+}
+
+struct AppServer {
+    child: Child,
+    client: RpcClient,
+    incoming: mpsc::Receiver<Incoming>,
+    stderr_tail: crate::StderrTail,
 }
 
 // ---------------------------------------------------------------------------
@@ -1250,6 +1325,12 @@ async fn run_session(session: Session) {
                         break 'main;
                     }
 
+                    // The parent thread compacted itself mid-run (codex's own
+                    // auto-compaction). Manual compaction runs on its own
+                    // stream in `compact_session`, so there is nothing to
+                    // report here — the next tokenUsage update moves the meter.
+                    "thread/compacted" => {}
+
                     "error" => {
                         // 0.146.x nests it (`params.error.message`); older
                         // builds were flat (`params.message`) — accept both.
@@ -1436,6 +1517,253 @@ async fn run_session(session: Session) {
     if let Some(handle) = escalation {
         handle.abort();
     }
+}
+
+struct CompactSession {
+    child: Child,
+    client: RpcClient,
+    incoming: mpsc::Receiver<Incoming>,
+    event_tx: mpsc::Sender<Result<AgentEvent, HarnessError>>,
+    controls: RunControls,
+    request: RunRequest,
+    /// The thread being compacted (`request.resume`, already validated).
+    thread_id: String,
+    kill_grace: Duration,
+    stderr_tail: crate::StderrTail,
+}
+
+/// How long the post-compaction `thread/tokenUsage/updated` is waited for
+/// after the completion signal; absent within it, `post_tokens` stays unknown.
+const COMPACT_TOKEN_GRACE: Duration = Duration::from_secs(2);
+
+/// Compact one thread: resume it, ask the app server to compact, then read
+/// notifications until it says so. Deliberately NOT [`run_session`] — no turn
+/// is started, no content is streamed, and the only events that reach the
+/// caller are `Compacted` and `Done`.
+async fn compact_session(session: CompactSession) {
+    let CompactSession {
+        mut child,
+        client,
+        mut incoming,
+        event_tx,
+        controls,
+        request,
+        thread_id,
+        kill_grace,
+        stderr_tail,
+    } = session;
+    let RunControls {
+        request_input,
+        steering: _steering,
+        interrupt,
+    } = controls;
+    let request_input = Arc::new(request_input);
+
+    let setup = async {
+        client
+            .request(
+                "initialize",
+                json!({
+                    "clientInfo": {
+                        "name": "zeron-native",
+                        "title": "Zeron",
+                        "version": env!("CARGO_PKG_VERSION"),
+                    },
+                    "capabilities": { "experimentalApi": true },
+                }),
+            )
+            .await?;
+        client.notify("initialized", None);
+
+        let mut resume_params = serde_json::Map::new();
+        resume_params.insert("cwd".into(), Value::String(request.cwd.clone()));
+        resume_params.insert("approvalPolicy".into(), "never".into());
+        resume_params.insert("sandbox".into(), sandbox_mode(request.sandbox).into());
+        if let Some(model) = &request.model {
+            resume_params.insert("model".into(), Value::String(model.clone()));
+        }
+        resume_params.insert("threadId".into(), Value::String(thread_id.clone()));
+        // No fresh-thread fallback: compacting a thread the server could not
+        // resume would compact nothing AND hand the engine a new session id to
+        // remember, losing the chat's real thread.
+        let thread = client
+            .request("thread/resume", Value::Object(resume_params))
+            .await?;
+        let resumed = thread["thread"]["id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .unwrap_or(&thread_id)
+            .to_owned();
+        client
+            .request("thread/compact/start", json!({ "threadId": resumed }))
+            .await?;
+        Ok::<String, HarnessError>(resumed)
+    };
+    let thread_id = tokio::select! {
+        res = setup => match res {
+            Ok(id) => id,
+            Err(e) => {
+                let _ = event_tx
+                    .send(Ok(AgentEvent::Done {
+                        status: DoneStatus::Errored,
+                        result: None,
+                        error: Some(e.to_string()),
+                        session_id: None,
+                    }))
+                    .await;
+                shutdown_child(&mut child, kill_grace).await;
+                return;
+            }
+        },
+        _ = interrupt.cancelled() => {
+            let _ = event_tx
+                .send(Ok(AgentEvent::Done {
+                    status: DoneStatus::Interrupted,
+                    result: None,
+                    error: None,
+                    session_id: None,
+                }))
+                .await;
+            shutdown_child(&mut child, kill_grace).await;
+            return;
+        }
+    };
+
+    let mut pre_tokens: Option<u64> = None;
+    let mut post_tokens: Option<u64> = None;
+    let mut compacted = false;
+    let mut interrupted = false;
+    let mut error: Option<String> = None;
+    // Set once the boundary is seen: the window the post-compaction token
+    // count has to arrive in before the stream settles without it.
+    let mut grace: Option<tokio::time::Instant> = None;
+
+    'main: loop {
+        let deadline = async {
+            match grace {
+                Some(at) => tokio::time::sleep_until(at).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::select! {
+            _ = deadline => break 'main,
+            _ = interrupt.cancelled() => {
+                interrupted = true;
+                break 'main;
+            }
+            _ = event_tx.closed() => break 'main,
+            inc = incoming.recv() => match inc {
+                Some(Incoming::Notification { method, params }) => {
+                    // A child thread's compaction must never settle the
+                    // parent's (the routing table consumes these for runs;
+                    // here the thread id is the whole filter).
+                    if let Some(nthread) = notification_thread_id(&method, &params)
+                        && !nthread.is_empty()
+                        && nthread != thread_id
+                    {
+                        continue;
+                    }
+                    match method.as_str() {
+                        "thread/tokenUsage/updated" => {
+                            let tokens = match normalize::context_usage_event(&params) {
+                                Some(AgentEvent::ContextUsage { tokens, .. }) => tokens,
+                                _ => None,
+                            };
+                            if compacted {
+                                post_tokens = post_tokens.or(tokens);
+                                break 'main;
+                            }
+                            pre_tokens = tokens.or(pre_tokens);
+                        }
+
+                        // Either shape settles the compaction: the thread-level
+                        // notification, or the compaction item's completion.
+                        "thread/compacted" => {
+                            compacted = true;
+                            grace = Some(tokio::time::Instant::now() + COMPACT_TOKEN_GRACE);
+                        }
+                        "item/completed"
+                            if item_type(params.get("item").unwrap_or(&Value::Null))
+                                .to_ascii_lowercase()
+                                .contains("compact") =>
+                        {
+                            compacted = true;
+                            grace = Some(tokio::time::Instant::now() + COMPACT_TOKEN_GRACE);
+                        }
+
+                        "turn/completed" if !compacted => break 'main,
+                        "turn/failed" | "turn/aborted" => {
+                            if !compacted {
+                                error = Some(
+                                    turn_error_message(&params)
+                                        .unwrap_or_else(|| "Codex compaction failed".into()),
+                                );
+                            }
+                            break 'main;
+                        }
+                        "error" => {
+                            if !compacted {
+                                error = Some(
+                                    params
+                                        .pointer("/error/message")
+                                        .and_then(Value::as_str)
+                                        .or_else(|| params.get("message").and_then(Value::as_str))
+                                        .unwrap_or("Codex error")
+                                        .to_owned(),
+                                );
+                            }
+                            break 'main;
+                        }
+                        _ => {}
+                    }
+                }
+
+                Some(Incoming::Request { id, method, params }) => {
+                    handle_server_request(&client, id, &method, &params, true, &request_input);
+                }
+
+                Some(Incoming::Eof) | None => {
+                    if !compacted {
+                        let status = child.try_wait().ok().flatten();
+                        error = Some(crate::crash_message(
+                            "codex app-server",
+                            status,
+                            &stderr_tail,
+                        ));
+                    }
+                    break 'main;
+                }
+            },
+        }
+    }
+
+    if !event_tx.is_closed() {
+        if compacted && !interrupted {
+            let _ = event_tx
+                .send(Ok(AgentEvent::Compacted {
+                    pre_tokens,
+                    post_tokens,
+                }))
+                .await;
+        }
+        let status = if interrupted {
+            DoneStatus::Interrupted
+        } else if error.is_some() {
+            DoneStatus::Errored
+        } else {
+            DoneStatus::Completed
+        };
+        let _ = event_tx
+            .send(Ok(AgentEvent::Done {
+                status,
+                result: None,
+                error,
+                session_id: Some(thread_id.clone()),
+            }))
+            .await;
+    }
+
+    shutdown_child(&mut child, kill_grace).await;
 }
 
 /// Deliver a steer as a fresh `turn/start` on the same thread (the fallback

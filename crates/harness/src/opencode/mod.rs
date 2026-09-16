@@ -49,7 +49,7 @@ use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc;
 
 use zeron_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand,
+    AgentEvent, Compaction, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand,
     SteeringMode, TodoItem, ToolCall, UserInputAnswer, UserInputQuestion,
 };
 
@@ -70,6 +70,9 @@ const HEALTH_POLL: Duration = Duration::from_millis(150);
 /// command endpoint deliberately bypasses this (its response can take the
 /// whole turn and is ignored anyway).
 const CALL_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Bound on `session.summarize`, which blocks for a whole model pass.
+const SUMMARIZE_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Bus reconnect: the server is our own child on loopback, so a dropped
 /// stream with a live process is transient — retry briefly, then treat the
@@ -347,6 +350,10 @@ impl Harness for OpencodeHarness {
     fn deterministic_turn_end(&self) -> bool {
         true
     }
+    /// `session.summarize` on the server's own wire — no prompt is sent.
+    fn compaction(&self) -> Compaction {
+        Compaction::Native
+    }
 
     /// Live discovery off `GET /provider` (what the desktop app populates its
     /// picker from), cached on success. Failures surface — the picker retries.
@@ -365,6 +372,94 @@ impl Harness for OpencodeHarness {
             .get_or_try_init(|| self.probe_commands())
             .await
             .cloned()
+    }
+
+    async fn compact(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let session_id = request
+            .resume
+            .clone()
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                HarnessError::Protocol("nothing to compact: no opencode session to resume".into())
+            })?;
+        let (provider, model) = request
+            .model
+            .as_deref()
+            .and_then(|m| m.split_once('/'))
+            .map(|(p, m)| (p.to_owned(), m.to_owned()))
+            .ok_or_else(|| {
+                HarnessError::Protocol(
+                    "opencode compaction requires a provider/model selection".into(),
+                )
+            })?;
+        let cwd = (!request.cwd.is_empty()).then(|| request.cwd.clone());
+        let mut server = self.server(cwd.as_deref()).await?;
+        // The server refuses to summarize mid-turn; a definite yes is the only
+        // answer worth refusing on (an unreachable status route means "can't
+        // tell", and the engine already gated on its own run bookkeeping).
+        if server
+            .session_running(&session_id, cwd.as_deref())
+            .await
+            .unwrap_or(false)
+        {
+            server.shutdown(self.kill_grace).await;
+            return Err(HarnessError::Protocol(
+                "opencode cannot compact while a turn is running".into(),
+            ));
+        }
+        let kill_grace = self.kill_grace;
+        let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(4);
+        tokio::spawn(async move {
+            let summarize =
+                server.summarize_session(&session_id, cwd.as_deref(), &provider, &model);
+            let outcome = tokio::select! {
+                res = summarize => res.err(),
+                _ = tokio::time::sleep(SUMMARIZE_TIMEOUT) => Some(HarnessError::Protocol(
+                    "opencode compaction did not complete within 10 minutes".into(),
+                )),
+                _ = controls.interrupt.cancelled() => {
+                    let _ = event_tx.send(Ok(AgentEvent::Done {
+                        status: DoneStatus::Interrupted,
+                        result: None,
+                        error: None,
+                        session_id: Some(session_id.clone()),
+                    })).await;
+                    server.shutdown(kill_grace).await;
+                    return;
+                }
+            };
+            if outcome.is_none() {
+                // The server reports no before/after occupancy on this route;
+                // the next turn's message tokens move the meter again.
+                let _ = event_tx
+                    .send(Ok(AgentEvent::Compacted {
+                        pre_tokens: None,
+                        post_tokens: None,
+                    }))
+                    .await;
+            }
+            let _ = event_tx
+                .send(Ok(AgentEvent::Done {
+                    status: if outcome.is_some() {
+                        DoneStatus::Errored
+                    } else {
+                        DoneStatus::Completed
+                    },
+                    result: None,
+                    error: outcome.map(|e| e.to_string()),
+                    session_id: Some(session_id.clone()),
+                }))
+                .await;
+            server.shutdown(kill_grace).await;
+        });
+        Ok(futures::stream::unfold(event_rx, |mut rx| async move {
+            rx.recv().await.map(|ev| (ev, rx))
+        })
+        .boxed())
     }
 
     async fn run(
@@ -746,6 +841,38 @@ impl Server {
         };
         let map = unwrap_data(self.get_json(path, directory).await?);
         Ok(map.get(session_id).is_some())
+    }
+
+    /// Compact the session in place (`session.summarize`). Deliberately
+    /// unbounded: the call blocks for the whole compaction, which outlives
+    /// [`CALL_TIMEOUT`] — the caller owns the deadline and the interrupt.
+    async fn summarize_session(
+        &self,
+        session_id: &str,
+        directory: Option<&str>,
+        provider: &str,
+        model: &str,
+    ) -> Result<(), HarnessError> {
+        let path = match self.protocol().await {
+            Protocol::V1 => format!("/session/{session_id}/summarize"),
+            Protocol::V2 => format!("/api/session/{session_id}/summarize"),
+        };
+        let body = json!({ "providerID": provider, "modelID": model, "auto": false });
+        let req = self.request(reqwest::Method::POST, &path).json(&body);
+        let resp = self
+            .scoped(req, directory)
+            .await
+            .send()
+            .await
+            .map_err(|e| HarnessError::Protocol(format!("opencode POST {path}: {e}")))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(HarnessError::Protocol(post_error_message(
+                &path, status, &text,
+            )));
+        }
+        Ok(())
     }
 
     /// End the live turn.

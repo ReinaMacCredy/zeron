@@ -54,6 +54,10 @@ if has "$line" '"method":"thread/resume"'; then
     emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-resumed\",\"turns\":[{\"items\":[{\"type\":\"collabAgentToolCall\",\"id\":\"spawn-alpha\",\"tool\":\"spawnAgent\",\"status\":\"completed\",\"receiverThreadIds\":[\"child-alpha\"]}]}]}}}"
   elif has "$line" '"threadId":"resume-with-child-v2"'; then
     emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-resumed\",\"turns\":[{\"items\":[{\"type\":\"subAgentActivity\",\"id\":\"spawn-alpha\",\"kind\":\"started\",\"agentThreadId\":\"child-alpha\",\"agentPath\":\"/root/alpha\"},{\"type\":\"subAgentActivity\",\"id\":\"subagent-completed-old\",\"kind\":\"completed\",\"agentThreadId\":\"child-alpha\",\"agentPath\":\"/root/alpha\"}]}]}}}"
+  elif has "$line" '"threadId":"compact-ok"'; then
+    emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-compact-ok\"}}}"
+  elif has "$line" '"threadId":"compact-hang"'; then
+    emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-compact-hang\"}}}"
   elif has "$line" '"threadId":"resume-fail"'; then
     # Missing/foreign rollout: reject, expect the fresh-start fallback.
     emit "{\"id\":$(rid "$line"),\"error\":{\"code\":-32600,\"message\":\"rollout not found\"}}"
@@ -74,6 +78,22 @@ read -r turnline || exit 1
 tid=$(rid "$turnline")
 
 case "$turnline" in
+
+*'"method":"thread/compact/start"'*)
+  # Manual compaction: the driver never starts a turn, it asks the thread it
+  # just resumed to compact itself.
+  if has "$turnline" '"threadId":"th-compact-hang"'; then
+    emit "{\"id\":$tid,\"result\":{}}"
+    # Never answer: the driver must settle through its interrupt.
+    exec sleep 60
+  fi
+  has "$turnline" '"threadId":"th-compact-ok"' || exit 1
+  emit "{\"id\":$tid,\"result\":{}}"
+  emit '{"method":"thread/tokenUsage/updated","params":{"threadId":"th-compact-ok","tokenUsage":{"last":{"totalTokens":120000},"modelContextWindow":200000}}}'
+  emit '{"method":"thread/compacted","params":{"threadId":"th-compact-ok"}}'
+  emit '{"method":"thread/tokenUsage/updated","params":{"threadId":"th-compact-ok","tokenUsage":{"last":{"totalTokens":18000},"modelContextWindow":200000}}}'
+  exec sleep 30
+  ;;
 
 *scenario:image-*)
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"

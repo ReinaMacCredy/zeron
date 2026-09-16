@@ -17,7 +17,8 @@ use zeron_harness::{
     CancellationToken, Harness, HarnessError, OpencodeHarness, RunControls, SteerMessage,
 };
 use zeron_proto::{
-    AgentEvent, DoneStatus, ReasoningLevel, RunRequest, SandboxLevel, ToolCall, UserInputAnswer,
+    AgentEvent, Compaction, DoneStatus, ReasoningLevel, RunRequest, SandboxLevel, ToolCall,
+    UserInputAnswer,
 };
 
 // ---------------------------------------------------------------------------
@@ -41,6 +42,8 @@ struct FakeOpencode {
     /// Leading 500s to answer `POST /session` with (the opencode
     /// lazy-migration crash class: first access 500s, retry succeeds).
     fail_session_creates: Arc<Mutex<u32>>,
+    /// `GET /session/status` body — a session id key means mid-turn.
+    running: Arc<Mutex<Value>>,
 }
 
 impl FakeOpencode {
@@ -56,6 +59,7 @@ impl FakeOpencode {
             providers: Arc::new(Mutex::new(json!({ "all": [], "default": {} }))),
             first_prompt_had_subscriber: Arc::new(Mutex::new(None)),
             fail_session_creates: Arc::new(Mutex::new(0)),
+            running: Arc::new(Mutex::new(json!({}))),
         };
         let accept = fake.clone();
         tokio::spawn(async move {
@@ -222,7 +226,9 @@ impl FakeOpencode {
                 }
             }
             ("GET", "/session/ses_resume") => ("200 OK", json!({ "id": "ses_resume" })),
+            ("GET", "/session/status") => ("200 OK", self.running.lock().unwrap().clone()),
             ("GET", p) if p.starts_with("/session/") => ("404 Not Found", json!({})),
+            ("POST", p) if p.ends_with("/summarize") => ("200 OK", json!(true)),
             ("POST", p) if p.ends_with("/prompt_async") => ("204 No Content", json!({})),
             ("POST", p) if p.ends_with("/abort") => ("200 OK", json!(true)),
             ("POST", p) if p.contains("/permission/") || p.contains("/question/") => {
@@ -964,5 +970,88 @@ async fn repeated_session_create_failure_stops_after_one_retry() {
             status: DoneStatus::Errored,
             ..
         })
+    ));
+}
+
+#[tokio::test]
+async fn compact_summarizes_the_resumed_session_and_reports_a_boundary() {
+    let fake = FakeOpencode::start().await;
+    let harness = harness(&fake);
+    assert_eq!(harness.compaction(), Compaction::Native);
+    let (controls, _, _) = controls();
+    let mut req = request("");
+    req.resume = Some("ses_resume".into());
+    req.model = Some("anthropic/claude-sonnet-4-5".into());
+    let mut stream = harness
+        .compact(req, controls)
+        .await
+        .expect("compact starts");
+    let events = drain_to_done(&mut stream).await;
+    let posts = wait_posts(&fake, "/session/ses_resume/summarize", 1).await;
+    assert_eq!(
+        posts[0],
+        json!({
+            "providerID": "anthropic",
+            "modelID": "claude-sonnet-4-5",
+            "auto": false,
+        })
+    );
+    assert!(
+        matches!(
+            events.first(),
+            Some(AgentEvent::Compacted {
+                pre_tokens: None,
+                post_tokens: None,
+            })
+        ),
+        "the summarize route reports no token counts: {events:?}"
+    );
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                error: None,
+                session_id: Some(id),
+                ..
+            }) if id == "ses_resume"
+        ),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn compact_is_refused_while_the_session_is_mid_turn() {
+    let fake = FakeOpencode::start().await;
+    *fake.running.lock().unwrap() = json!({ "ses_resume": { "type": "busy" } });
+    let (controls, _, _) = controls();
+    let mut req = request("");
+    req.resume = Some("ses_resume".into());
+    req.model = Some("anthropic/claude-sonnet-4-5".into());
+    let err = match harness(&fake).compact(req, controls).await {
+        Ok(_) => panic!("a busy session must not be compacted"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(&err, HarnessError::Protocol(m) if m.contains("while a turn is running")),
+        "{err:?}"
+    );
+    assert!(fake.posts_to("/session/ses_resume/summarize").is_empty());
+}
+
+#[tokio::test]
+async fn compact_without_a_session_or_a_model_is_refused() {
+    let fake = FakeOpencode::start().await;
+    let (no_session, _, _) = controls();
+    assert!(matches!(
+        harness(&fake).compact(request(""), no_session).await,
+        Err(HarnessError::Protocol(m)) if m.contains("nothing to compact")
+    ));
+    let (no_model, _, _) = controls();
+    let mut req = request("");
+    req.resume = Some("ses_resume".into());
+    assert!(matches!(
+        harness(&fake).compact(req, no_model).await,
+        Err(HarnessError::Protocol(m)) if m.contains("provider/model")
     ));
 }

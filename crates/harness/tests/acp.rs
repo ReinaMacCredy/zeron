@@ -11,8 +11,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use zeron_harness::{AcpHarness, CancellationToken, Harness, RunControls, SteerMessage};
 use zeron_proto::{
-    AgentEvent, DoneStatus, HarnessId, RunRequest, SandboxLevel, SteeringMode, TodoItem, ToolCall,
-    UserInputAnswer,
+    AgentEvent, Compaction, DoneStatus, HarnessId, RunRequest, SandboxLevel, SteeringMode,
+    TodoItem, ToolCall, UserInputAnswer,
 };
 
 fn fixture_path() -> PathBuf {
@@ -1052,4 +1052,37 @@ async fn devin_missing_variant_is_bounded_and_never_prompts() {
         "{events:?}"
     );
     assert!(!dir.path().join("prompted").exists());
+}
+
+#[tokio::test]
+async fn compaction_follows_the_agents_advertised_command_list() {
+    let fresh = harness();
+    assert_eq!(
+        fresh.compaction(),
+        Compaction::None,
+        "an unprobed agent reports no capability instead of spawning one"
+    );
+    let commands = fresh.commands().await.expect("discovery succeeds");
+    assert!(commands.iter().any(|c| c.name == "compact"), "{commands:?}");
+    assert_eq!(
+        fresh.compaction(),
+        Compaction::SlashText("/compact".into()),
+        "the agent advertises compact, so the text path is available"
+    );
+
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("fake-acp-nocompact.sh");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
+    }
+    let bare = AcpHarness::grok().with_executable(path);
+    let commands = bare.commands().await.expect("discovery succeeds");
+    assert!(
+        !commands.iter().any(|c| c.name == "compact"),
+        "{commands:?}"
+    );
+    assert_eq!(bare.compaction(), Compaction::None);
 }

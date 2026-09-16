@@ -14,8 +14,8 @@ use zeron_harness::{
     CancellationToken, CodexHarness, Harness, HarnessError, RunControls, SteerMessage,
 };
 use zeron_proto::{
-    AgentEvent, DoneStatus, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, TodoItem,
-    ToolCall, UserInputAnswer, UserInputQuestion,
+    AgentEvent, Compaction, DoneStatus, HarnessId, ReasoningLevel, RunRequest, SandboxLevel,
+    TodoItem, ToolCall, UserInputAnswer, UserInputQuestion,
 };
 
 fn fixture_path() -> PathBuf {
@@ -1155,6 +1155,110 @@ async fn commands_come_from_skills_list() {
         "top-level description is the fallback"
     );
     assert_eq!(h.commands().await.expect("cache hit"), commands);
+}
+
+#[tokio::test]
+async fn compaction_is_native_and_compact_maps_thread_compacted() {
+    let h = harness();
+    assert_eq!(h.compaction(), Compaction::Native);
+    let (controls, _steer, _token) = controls("Yes");
+    let mut req = request("");
+    req.resume = Some("compact-ok".into());
+    let mut stream = h.compact(req, controls).await.expect("compaction starts");
+    let events = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            let event = event.expect("stream event");
+            let done = matches!(event, AgentEvent::Done { .. });
+            events.push(event);
+            if done {
+                break;
+            }
+        }
+        events
+    })
+    .await
+    .expect("compaction finished in time");
+    assert!(
+        matches!(
+            events.first(),
+            Some(AgentEvent::Compacted {
+                pre_tokens: Some(120_000),
+                post_tokens: Some(18_000),
+            })
+        ),
+        "the boundary carries the tokenUsage seen either side of it: {events:?}"
+    );
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                session_id: Some(id),
+                error: None,
+                ..
+            }) if id == "th-compact-ok"
+        ),
+        "Done reports the resumed thread: {events:?}"
+    );
+    assert_eq!(events.len(), 2, "no turn content leaks out: {events:?}");
+}
+
+#[tokio::test]
+async fn compact_without_a_thread_to_resume_is_refused() {
+    let (controls, _steer, _token) = controls("Yes");
+    let started = harness().compact(request(""), controls).await;
+    let err = match started {
+        Ok(_) => panic!("a chat with no codex thread has nothing to compact"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(&err, HarnessError::Protocol(m) if m.contains("nothing to compact")),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn compact_that_never_answers_settles_through_the_interrupt() {
+    let (controls, _steer, token) = controls("Yes");
+    let mut req = request("");
+    req.resume = Some("compact-hang".into());
+    let mut stream = harness()
+        .compact(req, controls)
+        .await
+        .expect("compaction starts");
+    let events = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        token.cancel();
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            let event = event.expect("stream event");
+            let done = matches!(event, AgentEvent::Done { .. });
+            events.push(event);
+            if done {
+                break;
+            }
+        }
+        events
+    })
+    .await
+    .expect("interrupt settles the stream instead of hanging");
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Interrupted,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Compacted { .. })),
+        "an unanswered compaction never claims a boundary: {events:?}"
+    );
 }
 
 /// Live smoke against the real CLI: `cargo test -p zeron-harness --test

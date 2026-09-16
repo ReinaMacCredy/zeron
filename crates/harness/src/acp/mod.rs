@@ -45,8 +45,8 @@ use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc;
 
 use zeron_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice, ReasoningLevel,
-    RunRequest, SlashCommand, SteeringMode, UserInputAnswer, UserInputQuestion,
+    AgentEvent, Compaction, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice,
+    ReasoningLevel, RunRequest, SlashCommand, SteeringMode, UserInputAnswer, UserInputQuestion,
 };
 
 use crate::jsonrpc::{Incoming, RpcClient};
@@ -1116,6 +1116,20 @@ impl Harness for AcpHarness {
     }
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         self.spec.reasoning_levels
+    }
+
+    /// ACP has no compaction call: the agent compacts only if it advertises
+    /// `compact` as one of its own commands, and then only as prompt text.
+    /// Read from the cache alone — this is a sync capability check, so an
+    /// agent whose commands were never probed reports none rather than
+    /// blocking on a discovery spawn.
+    fn compaction(&self) -> Compaction {
+        match self.commands.get() {
+            Some(commands) if commands.iter().any(|c| c.name == "compact") => {
+                Compaction::SlashText("/compact".into())
+            }
+            _ => Compaction::None,
+        }
     }
 
     /// The agent's own CLI, not the adapter: `claude` counts as installed even
