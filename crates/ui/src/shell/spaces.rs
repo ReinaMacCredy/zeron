@@ -1347,6 +1347,7 @@ impl Shell {
         }
 
         let selected = self.state.read(cx).selected_chat.clone();
+        let split = self.split_chat_id().map(str::to_string);
         // Re-checked at render so the chips drop the FRAME a popover opens,
         // not on the next modifier event — the jumps are suppressed under it.
         let jump_hints = self.jump_hints && !self.overlay_owns_keyboard(cx);
@@ -1370,7 +1371,8 @@ impl Shell {
                 } = row;
                 let time_ago: SharedString =
                     format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now).into();
-                let is_selected = selected.as_deref() == Some(chat.id.as_str());
+                let is_selected = selected.as_deref() == Some(chat.id.as_str())
+                    || split.as_deref() == Some(chat.id.as_str());
                 let harness = self
                     .settings
                     .sidebar_show_harness

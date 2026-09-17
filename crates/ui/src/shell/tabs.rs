@@ -36,17 +36,19 @@ pub(super) struct TabDragState {
     prev_over: usize,
 }
 
-/// The dragged-tab payload (gpui drag-and-drop).
-struct TabDragPayload {
+/// The dragged-tab payload (gpui drag-and-drop). `chat_id` is what the split
+/// view's drop zones read; the strip itself reorders by `from`.
+pub(super) struct TabDragPayload {
     from: usize,
+    pub(super) chat_id: String,
     title: SharedString,
     brand: Option<(&'static str, Option<gpui::Hsla>)>,
 }
 
-/// The floating tab rendered at the cursor while dragging.
-struct TabGhost {
-    title: SharedString,
-    brand: Option<(&'static str, Option<gpui::Hsla>)>,
+/// The floating tab rendered at the cursor while dragging (tab or sidebar row).
+pub(super) struct TabGhost {
+    pub(super) title: SharedString,
+    pub(super) brand: Option<(&'static str, Option<gpui::Hsla>)>,
 }
 
 impl Render for TabGhost {
@@ -153,6 +155,7 @@ impl Shell {
     /// (the last selected project, restored from composer defaults) stands.
     pub(super) fn open_new_session(&mut self, cx: &mut Context<Self>) {
         self.snapshot_current_chat(cx);
+        self.close_split(cx);
         self.command_palette = None;
         self.route = Route::Chat;
         self.focus_composer(cx);
@@ -194,12 +197,14 @@ impl Shell {
         };
         let state = self.state.read(cx);
         let now = Utc::now();
+        let split = self.split_chat_id();
         open.iter()
             .filter(|id| {
                 state.chats.iter().any(|c| {
                     &c.id == *id
                         && !c.archived
                         && (state.selected_chat.as_deref() == Some(c.id.as_str())
+                            || split == Some(c.id.as_str())
                             || state.display_status_for(c, now) != ChatIndicator::Idle)
                 })
             })
@@ -241,15 +246,21 @@ impl Shell {
             self.settings.open_tabs = Some(self.sidebar_visible_order(cx));
             changed = true;
         }
+        let split = self.split_chat_id().map(str::to_string);
         let tabs = self.settings.open_tabs.get_or_insert_with(Vec::new);
         let before = tabs.len();
-        tabs.retain(|id| live.contains(id) || selected.as_deref() == Some(id.as_str()));
+        tabs.retain(|id| {
+            live.contains(id)
+                || selected.as_deref() == Some(id.as_str())
+                || split.as_deref() == Some(id.as_str())
+        });
         changed |= tabs.len() != before;
-        if let Some(selected) = &selected
-            && !tabs.contains(selected)
-        {
-            tabs.push(selected.clone());
-            changed = true;
+        // The split's secondary is a tab too: it is on screen.
+        for pinned in selected.iter().chain(split.iter()) {
+            if !tabs.contains(pinned) {
+                tabs.push(pinned.clone());
+                changed = true;
+            }
         }
         if changed {
             self.schedule_save(cx);
@@ -265,9 +276,21 @@ impl Shell {
         if let Some(tabs) = self.settings.open_tabs.as_mut() {
             tabs.retain(|id| id != &chat_id);
         }
+        let split = self.split_chat_id().map(str::to_string);
+        if split.as_deref() == Some(chat_id.as_str()) {
+            self.close_split(cx);
+        }
         if selected.as_deref() == Some(chat_id.as_str()) {
             self.snapshot_current_chat(cx);
-            let next = next_after_close(&order, &chat_id);
+            // Closing the primary of a split: the secondary survives at full
+            // width (not a neighbor, which would swap the closed one back in).
+            let next = match split {
+                Some(split) => {
+                    self.close_split(cx);
+                    Some(split)
+                }
+                None => next_after_close(&order, &chat_id),
+            };
             self.state.update(cx, |s, cx| s.select_chat(next, cx));
         }
         self.schedule_save(cx);
@@ -299,6 +322,12 @@ impl Shell {
             .map(|(_, id)| id.clone())
             .collect();
         self.settings.open_tabs = Some(kept.clone());
+        if self
+            .split_chat_id()
+            .is_some_and(|split| !kept.contains(&split.to_string()))
+        {
+            self.close_split(cx);
+        }
         let selected = self.state.read(cx).selected_chat.clone();
         if let Some(selected) = selected
             && !kept.contains(&selected)
@@ -393,6 +422,7 @@ impl Shell {
                 .collect()
         };
         let selected = self.state.read(cx).selected_chat.clone();
+        let split = self.split_chat_id().map(str::to_string);
         // Keep the selected tab visible: on selection change, scroll it into
         // view (minimal movement — a new session's tab materializes at the far
         // right of an overflowing strip and would otherwise be stranded
@@ -418,7 +448,10 @@ impl Shell {
             tabs.into_iter()
                 .enumerate()
                 .map(|(ix, (id, title, harness, status))| {
-                    let is_selected = selected.as_deref() == Some(id.as_str());
+                    // The split's secondary wears the selected look too: it
+                    // is on screen beside the selected session.
+                    let is_selected = selected.as_deref() == Some(id.as_str())
+                        || split.as_deref() == Some(id.as_str());
                     let is_hovered = hovered.as_deref() == Some(id.as_str());
                     // Hover state lives in Shell (the trailing slot swaps dot ↔
                     // close), so the wash snaps off it too — gpui allows only one
@@ -558,6 +591,7 @@ impl Shell {
                             el.on_drag(
                                 TabDragPayload {
                                     from: ix,
+                                    chat_id: id.clone(),
                                     title: title.clone(),
                                     brand,
                                 },
