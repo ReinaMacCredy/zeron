@@ -140,11 +140,101 @@ impl Shell {
     }
 
     pub(super) fn select_existing_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        // A draft id must never become `selected_chat`: it has no doc to
+        // watch and would read as a promoted session.
+        if self.state.read(cx).is_draft(&chat_id) {
+            return self.open_draft(chat_id, false, cx);
+        }
         self.command_palette = None;
         self.route = Route::Chat;
         self.focus_composer(cx);
         self.state
             .update(cx, |s, cx| s.select_chat(Some(chat_id), cx));
+        cx.notify();
+    }
+
+    /// One door for every tab-shaped identity: a chat opens as a session, a
+    /// draft opens on the canvas, `None` lands on the canvas (a fresh draft
+    /// when the active one is gone). `snapshot`: capture the frame being
+    /// left for the switcher (false under an overlay, which is in the frame).
+    pub(super) fn navigate_to(
+        &mut self,
+        id: Option<String>,
+        snapshot: bool,
+        cx: &mut Context<Self>,
+    ) {
+        match id {
+            Some(id) if self.state.read(cx).is_draft(&id) => self.open_draft(id, snapshot, cx),
+            Some(id) if snapshot => self.open_chat(id, cx),
+            Some(id) => self.select_existing_chat(id, cx),
+            None => {
+                if snapshot {
+                    self.snapshot_current_chat(cx);
+                }
+                self.state.update(cx, |s, cx| {
+                    s.select_chat(None, cx);
+                    s.ensure_draft(cx);
+                });
+                self.freeze_draft_row(cx);
+                cx.notify();
+            }
+        }
+    }
+
+    /// Open a draft from its sidebar row, tab or switcher card.
+    pub(crate) fn open_draft(&mut self, draft_id: String, snapshot: bool, cx: &mut Context<Self>) {
+        if self.state.read(cx).focused_id().as_deref() == Some(draft_id.as_str()) {
+            return;
+        }
+        if snapshot {
+            self.snapshot_current_chat(cx);
+        }
+        self.command_palette = None;
+        self.route = Route::Chat;
+        self.focus_composer(cx);
+        self.state
+            .update(cx, |s, cx| s.open_draft(draft_id.clone(), cx));
+        self.touch_session_mru(&draft_id);
+        self.freeze_draft_row(cx);
+        cx.notify();
+    }
+
+    /// Capture the active draft's row text as it becomes the route (d21).
+    /// No content yet → no row until the next visit.
+    pub(super) fn freeze_draft_row(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.state.read(cx).active_draft.clone() else {
+            return;
+        };
+        match crate::draft_store::entry_prompt(&id, cx) {
+            Some(prompt) => {
+                self.frozen_draft_rows.insert(id, prompt);
+            }
+            None => {
+                self.frozen_draft_rows.remove(&id);
+            }
+        }
+    }
+
+    /// The row's ✕ or closing an empty draft's tab: the session and its
+    /// stored text go; an open draft is replaced by a fresh canvas.
+    pub(super) fn discard_draft(&mut self, draft_id: String, cx: &mut Context<Self>) {
+        let was_focused = self.state.read(cx).focused_id().as_deref() == Some(draft_id.as_str());
+        if let Some(tabs) = self.settings.open_tabs.as_mut() {
+            tabs.retain(|id| id != &draft_id);
+        }
+        self.frozen_draft_rows.remove(&draft_id);
+        self.session_mru.retain(|id| id != &draft_id);
+        self.state
+            .update(cx, |s, cx| s.discard_draft(&draft_id, cx));
+        self.composer
+            .update(cx, |composer, cx| composer.purge_chat(&draft_id, cx));
+        if was_focused {
+            self.state.update(cx, |s, cx| {
+                s.ensure_draft(cx);
+            });
+            self.focus_composer(cx);
+        }
+        self.schedule_save(cx);
         cx.notify();
     }
 
@@ -165,6 +255,10 @@ impl Shell {
         };
         let defaults = crate::settings::composer::ComposerDefaults::load(&self.data_dir);
         self.state.update(cx, |s, cx| {
+            // The draft comes first so the target picks below record onto
+            // IT, never onto an invested draft being left behind (d20).
+            s.select_chat(None, cx);
+            s.new_draft(cx);
             if target.is_some() {
                 s.select_space(target, cx);
             } else if defaults.no_project {
@@ -175,8 +269,8 @@ impl Shell {
                     s.select_device(device, cx);
                 }
             }
-            s.select_chat(None, cx);
         });
+        self.freeze_draft_row(cx);
         cx.notify();
     }
 
@@ -196,12 +290,16 @@ impl Shell {
         let now = Utc::now();
         open.iter()
             .filter(|id| {
-                state.chats.iter().any(|c| {
-                    &c.id == *id
-                        && !c.archived
-                        && (state.selected_chat.as_deref() == Some(c.id.as_str())
-                            || state.display_status_for(c, now) != ChatIndicator::Idle)
-                })
+                // A draft is always a place the user is working in (d18); a
+                // session started in the background shows from its send on.
+                state.is_draft(id)
+                    || state.send_pending(id, now)
+                    || state.chats.iter().any(|c| {
+                        &c.id == *id
+                            && !c.archived
+                            && (state.selected_chat.as_deref() == Some(c.id.as_str())
+                                || state.display_status_for(c, now) != ChatIndicator::Idle)
+                    })
             })
             .cloned()
             .collect()
@@ -224,8 +322,12 @@ impl Shell {
         let (selected, live): (Option<String>, std::collections::HashSet<String>) = {
             let state = self.state.read(cx);
             (
-                state.selected_chat.clone(),
-                state.visible_chats().map(|c| c.id.clone()).collect(),
+                state.focused_id(),
+                state
+                    .visible_chats()
+                    .map(|c| c.id.clone())
+                    .chain(state.draft_sessions.iter().map(|d| d.id.clone()))
+                    .collect(),
             )
         };
         let mut changed = false;
@@ -241,9 +343,24 @@ impl Shell {
             self.settings.open_tabs = Some(self.sidebar_visible_order(cx));
             changed = true;
         }
+        // A background-started session is neither a draft nor a synced chat
+        // until its doc frame lands; its pending send keeps the tab.
+        let pending: Vec<String> = {
+            let state = self.state.read(cx);
+            let now = Utc::now();
+            self.settings
+                .open_tabs
+                .iter()
+                .flatten()
+                .filter(|id| state.send_pending(id, now))
+                .cloned()
+                .collect()
+        };
         let tabs = self.settings.open_tabs.get_or_insert_with(Vec::new);
         let before = tabs.len();
-        tabs.retain(|id| live.contains(id) || selected.as_deref() == Some(id.as_str()));
+        tabs.retain(|id| {
+            live.contains(id) || selected.as_deref() == Some(id.as_str()) || pending.contains(id)
+        });
         changed |= tabs.len() != before;
         if let Some(selected) = &selected
             && !tabs.contains(selected)
@@ -261,14 +378,31 @@ impl Shell {
     /// neighbor; the last tab lands on the new-session canvas.
     pub(super) fn close_session_tab(&mut self, chat_id: String, cx: &mut Context<Self>) {
         let order = self.open_tab_ids(cx);
-        let selected = self.state.read(cx).selected_chat.clone();
+        let (focused, is_draft) = {
+            let state = self.state.read(cx);
+            (state.focused_id(), state.is_draft(&chat_id))
+        };
+        // A draft's tab is the only place an EMPTY draft exists; an invested
+        // one keeps its sidebar row like a session keeps its sidebar entry.
+        if is_draft && !crate::draft_store::has_content(&chat_id, cx) {
+            let was_focused = focused.as_deref() == Some(chat_id.as_str());
+            let next = next_after_close(&order, &chat_id);
+            self.discard_draft(chat_id, cx);
+            if was_focused && let Some(next) = next {
+                self.navigate_to(Some(next), false, cx);
+            }
+            return;
+        }
         if let Some(tabs) = self.settings.open_tabs.as_mut() {
             tabs.retain(|id| id != &chat_id);
         }
-        if selected.as_deref() == Some(chat_id.as_str()) {
-            self.snapshot_current_chat(cx);
+        if focused.as_deref() == Some(chat_id.as_str()) {
+            if is_draft {
+                // Leaving the draft on the canvas would re-open its tab.
+                self.state.update(cx, |s, _| s.active_draft = None);
+            }
             let next = next_after_close(&order, &chat_id);
-            self.state.update(cx, |s, cx| s.select_chat(next, cx));
+            self.navigate_to(next, true, cx);
         }
         self.schedule_save(cx);
         cx.notify();
@@ -299,13 +433,24 @@ impl Shell {
             .map(|(_, id)| id.clone())
             .collect();
         self.settings.open_tabs = Some(kept.clone());
-        let selected = self.state.read(cx).selected_chat.clone();
+        // Closed empty drafts die with their tabs.
+        let closed_empty: Vec<String> = order
+            .iter()
+            .filter(|id| !kept.contains(id))
+            .filter(|id| {
+                self.state.read(cx).is_draft(id) && !crate::draft_store::has_content(id, cx)
+            })
+            .cloned()
+            .collect();
+        for id in closed_empty {
+            self.state.update(cx, |s, cx| s.discard_draft(&id, cx));
+            self.frozen_draft_rows.remove(&id);
+        }
+        let selected = self.state.read(cx).focused_id();
         if let Some(selected) = selected
             && !kept.contains(&selected)
         {
-            self.snapshot_current_chat(cx);
-            self.state
-                .update(cx, |s, cx| s.select_chat(Some(anchor.to_string()), cx));
+            self.navigate_to(Some(anchor.to_string()), true, cx);
         }
         self.schedule_save(cx);
         cx.notify();
@@ -375,11 +520,21 @@ impl Shell {
             SharedString,
             Option<zeron_proto::HarnessId>,
             ChatIndicator,
+            bool,
         )> = {
             let state = self.state.read(cx);
             order
                 .iter()
                 .filter_map(|id| {
+                    if state.is_draft(id) {
+                        return Some((
+                            id.clone(),
+                            SharedString::from("New session"),
+                            None,
+                            ChatIndicator::Idle,
+                            true,
+                        ));
+                    }
                     let chat = state.chats.iter().find(|c| c.id == *id)?;
                     Some((
                         chat.id.clone(),
@@ -388,11 +543,12 @@ impl Shell {
                         )),
                         chat.config.as_ref().map(|c| c.harness),
                         state.display_status_for(chat, now),
+                        false,
                     ))
                 })
                 .collect()
         };
-        let selected = self.state.read(cx).selected_chat.clone();
+        let selected = self.state.read(cx).focused_id();
         // Keep the selected tab visible: on selection change, scroll it into
         // view (minimal movement — a new session's tab materializes at the far
         // right of an overflowing strip and would otherwise be stranded
@@ -417,7 +573,7 @@ impl Shell {
         let tab_elements: Vec<AnyElement> =
             tabs.into_iter()
                 .enumerate()
-                .map(|(ix, (id, title, harness, status))| {
+                .map(|(ix, (id, title, harness, status, is_draft))| {
                     let is_selected = selected.as_deref() == Some(id.as_str());
                     let is_hovered = hovered.as_deref() == Some(id.as_str());
                     // Hover state lives in Shell (the trailing slot swaps dot ↔
@@ -535,7 +691,7 @@ impl Shell {
                         }))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
-                            this.open_chat(select_id.clone(), cx);
+                            this.navigate_to(Some(select_id.clone()), true, cx);
                         }))
                         // Middle-click closes (terminal-tab parity).
                         .on_mouse_down(
@@ -574,6 +730,16 @@ impl Shell {
                                 icon(path).size(px(14.0)).flex_none().text_color(
                                     tint.unwrap_or(theme.text_muted).opacity(glyph_alpha),
                                 ),
+                            )
+                        })
+                        // A draft wears the amber pen where a session wears
+                        // its harness brand (d18).
+                        .when(is_draft, |el| {
+                            el.child(
+                                icon(icons::PEN)
+                                    .size(px(13.0))
+                                    .flex_none()
+                                    .text_color(theme.warning.opacity(glyph_alpha)),
                             )
                         })
                         .child(div().flex_1().min_w_0().truncate().child(title))
@@ -981,6 +1147,7 @@ mod strip_regressions {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             settings::init(settings::UiSettings::default(), dir.path(), cx);
+            crate::draft_store::init(dir.path(), cx);
             crate::history::init(
                 Default::default(),
                 Default::default(),
@@ -1063,14 +1230,153 @@ mod strip_regressions {
                 Some(&["a".to_string()][..])
             );
 
-            // The last tab closes onto the new-session canvas.
+            // The last tab closes onto the new-session canvas — itself a
+            // draft with a tab (d18/d20), so the strip holds that one tab.
             shell.close_session_tab("a".into(), cx);
             shell.on_state_changed(&shell.state.clone(), cx);
             assert_eq!(shell.state.read(cx).selected_chat, None);
-            assert!(shell.open_tab_ids(cx).is_empty());
+            let draft = shell
+                .state
+                .read(cx)
+                .active_draft
+                .clone()
+                .expect("canvas draft");
+            assert_eq!(shell.open_tab_ids(cx), [draft]);
         });
         cx.update(|window, cx| window.draw(cx).clear());
         assert!(cx.debug_bounds("session-tab-a").is_none());
+    }
+
+    fn invest(id: &str, text: &str, cx: &mut gpui::App) {
+        crate::draft_store::set(
+            id,
+            crate::draft_store::DraftEntry {
+                prompt: text.into(),
+                attachments: Vec::new(),
+                appshots: Vec::new(),
+            },
+            cx,
+        );
+    }
+
+    #[gpui::test]
+    fn drafts_are_tabs_and_empty_ones_die_when_left(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.chats_synced = true;
+                state.spaces_synced = true;
+            });
+            // Boot: the canvas is a draft from birth, with a tab (d18/d20).
+            shell.on_state_changed(&shell.state.clone(), cx);
+            let first = shell
+                .state
+                .read(cx)
+                .active_draft
+                .clone()
+                .expect("boot draft");
+            assert_eq!(shell.open_tab_ids(cx), [first.clone()]);
+            // ⌘N on an empty draft reuses it.
+            shell.open_new_session(cx);
+            shell.on_state_changed(&shell.state.clone(), cx);
+            assert_eq!(
+                shell.state.read(cx).active_draft.as_deref(),
+                Some(first.as_str())
+            );
+            assert_eq!(shell.open_tab_ids(cx), [first.clone()]);
+            // ⌘N on an invested draft opens a second one beside it.
+            invest(&first, "keep me", cx);
+            shell.open_new_session(cx);
+            shell.on_state_changed(&shell.state.clone(), cx);
+            let second = shell.state.read(cx).active_draft.clone().unwrap();
+            assert_ne!(second, first);
+            assert_eq!(shell.open_tab_ids(cx), [first.clone(), second.clone()]);
+            // Going back to the invested draft discards the empty one.
+            shell.navigate_to(Some(first.clone()), false, cx);
+            shell.on_state_changed(&shell.state.clone(), cx);
+            assert!(!shell.state.read(cx).is_draft(&second));
+            assert_eq!(shell.open_tab_ids(cx), [first.clone()]);
+            // Closing an invested draft's tab keeps its session (sidebar row)
+            // and lands on a fresh canvas draft.
+            shell.close_session_tab(first.clone(), cx);
+            shell.on_state_changed(&shell.state.clone(), cx);
+            assert!(shell.state.read(cx).is_draft(&first));
+            let fresh = shell.state.read(cx).active_draft.clone().unwrap();
+            assert_ne!(fresh, first);
+            assert_eq!(shell.open_tab_ids(cx), [fresh]);
+            // Discarding drops the session and its stored text.
+            shell.discard_draft(first.clone(), cx);
+            assert!(!shell.state.read(cx).is_draft(&first));
+            assert!(!crate::draft_store::has_content(&first, cx));
+        });
+    }
+
+    #[gpui::test]
+    fn a_draft_promotes_into_the_chat_that_carries_its_id(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.chats_synced = true;
+                state.spaces_synced = true;
+            });
+            shell.on_state_changed(&shell.state.clone(), cx);
+            let draft = shell.state.read(cx).active_draft.clone().unwrap();
+            invest(&draft, "send me", cx);
+            // Send selects the chat minted with the draft's id: the session
+            // is gone, nothing re-keyed, the tab is the same string.
+            shell
+                .state
+                .update(cx, |s, cx| s.select_chat(Some(draft.clone()), cx));
+            shell.on_state_changed(&shell.state.clone(), cx);
+            let state = shell.state.read(cx);
+            assert!(!state.is_draft(&draft));
+            assert_eq!(state.active_draft, None);
+            assert_eq!(state.selected_chat.as_deref(), Some(draft.as_str()));
+            drop(state);
+            // The stored tab list keeps the id through the send→doc-frame
+            // gap (selected exempt), and the strip shows it once the row lands.
+            assert_eq!(
+                shell.settings.open_tabs.as_deref(),
+                Some(&[draft.clone()][..])
+            );
+            shell
+                .state
+                .update(cx, |state, _| state.chats.push(chat(&draft)));
+            shell.on_state_changed(&shell.state.clone(), cx);
+            assert_eq!(shell.open_tab_ids(cx), [draft]);
+        });
+    }
+
+    #[gpui::test]
+    fn background_start_keeps_the_tab_and_mints_the_next_draft(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.chats_synced = true;
+                state.spaces_synced = true;
+            });
+            shell.on_state_changed(&shell.state.clone(), cx);
+            let draft = shell.state.read(cx).active_draft.clone().unwrap();
+            invest(&draft, "run in the background", cx);
+            shell.state.update(cx, |s, cx| {
+                s.record_draft_checkout(Some("feat/x".into()), true, cx);
+                s.begin_pending_send(&draft, "m1", Utc::now());
+                s.start_draft_in_background(&draft, cx);
+            });
+            shell.on_state_changed(&shell.state.clone(), cx);
+            let state = shell.state.read(cx);
+            let next = state.active_draft.clone().expect("next draft");
+            assert_ne!(next, draft);
+            assert_eq!(state.selected_chat, None);
+            assert!(!state.is_draft(&draft));
+            let session = state.draft_session(&next).unwrap();
+            assert_eq!(session.branch.as_deref(), Some("feat/x"));
+            assert!(session.new_worktree);
+            drop(state);
+            // The started session's tab survives on its pending send until
+            // the doc frame lands; the next draft sits beside it.
+            assert_eq!(shell.open_tab_ids(cx), [draft, next]);
+        });
     }
 
     #[gpui::test]

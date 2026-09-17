@@ -496,9 +496,13 @@ impl Shell {
         }
         self.settings.last_space_id = Some(space_id.clone());
         self.state.update(cx, |s, cx| {
-            s.select_space(Some(space_id), cx);
+            // Draft first, so the space records onto the canvas draft and
+            // never onto an invested one being left (see open_new_session).
             s.select_chat(None, cx);
+            s.new_draft(cx);
+            s.select_space(Some(space_id), cx);
         });
+        self.freeze_draft_row(cx);
         self.schedule_save(cx);
         cx.notify();
     }
@@ -1255,6 +1259,167 @@ impl Shell {
             filter.is_some(),
             state.local_device_id.as_deref(),
         )
+    }
+
+    /// Draft rows (t3code SidebarDraftRow): every unsent draft the user has
+    /// invested content in, space-filtered like sessions, two lines — target,
+    /// then the typed prompt — with a discard ✕ on hover. The open draft
+    /// renders its frozen snapshot (or nothing, if it never had one).
+    pub(super) fn render_draft_rows(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Vec<(String, f32, AnyElement)> {
+        let filter = self.settings.space_filter.clone();
+        let rows: Vec<(String, String, String)> = {
+            let state = self.state.read(cx);
+            let focused = state.focused_id();
+            state
+                .draft_sessions
+                .iter()
+                .filter(|d| match filter.as_deref() {
+                    Some(space) => d.space_id.as_deref() == Some(space) && !d.no_project,
+                    None => true,
+                })
+                .filter_map(|d| {
+                    let prompt = if focused.as_deref() == Some(d.id.as_str()) {
+                        self.frozen_draft_rows.get(&d.id).cloned()?
+                    } else {
+                        crate::draft_store::entry_prompt(&d.id, cx)?
+                    };
+                    Some((
+                        d.id.clone(),
+                        super::switcher::draft_target_label(d, state),
+                        transcript::single_line(&prompt),
+                    ))
+                })
+                .collect()
+        };
+        let focused = self.state.read(cx).focused_id();
+        rows.into_iter()
+            .map(|(id, target, prompt)| {
+                let selected = focused.as_deref() == Some(id.as_str());
+                let height = super::chat_row_height(false, false);
+                let element =
+                    self.render_draft_row(id.clone(), target, prompt, selected, theme, cx);
+                (format!("d:{id}"), height, element)
+            })
+            .collect()
+    }
+
+    fn render_draft_row(
+        &self,
+        id: String,
+        target: String,
+        prompt: String,
+        selected: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let row_id = format!("draft-{id}");
+        let hovered = self.chat_status_hover.as_deref() == Some(row_id.as_str());
+        let fade_key = format!("{row_id}-hover");
+        let (hover, text) = (theme.glass_hover(), theme.text);
+        let selected_wash = crate::theme::glass_selected_bg();
+        // Unsent work shares one look with the session rows' pen: an amber
+        // wash at rest, the ordinary selected wash when open.
+        let rest_bg = if selected {
+            selected_wash
+        } else {
+            theme.warning.opacity(0.05)
+        };
+        let hover_bg = if selected { selected_wash } else { hover };
+        let rest_text = if selected { text } else { text.opacity(0.8) };
+        let subline = theme.text_muted.opacity(0.5);
+        let open_id = id.clone();
+        let discard_id = id.clone();
+        let hover_id = row_id.clone();
+        let trailing: AnyElement = if hovered {
+            div()
+                .id(SharedString::from(format!("draft-discard-{id}")))
+                .size(px(18.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(5.0))
+                .hover(|s| s.bg(crate::theme::wash(0.14)))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.discard_draft(discard_id.clone(), cx);
+                }))
+                .child(
+                    icon(icons::CLOSE)
+                        .size(px(11.0))
+                        .text_color(theme.text_muted),
+                )
+                .into_any_element()
+        } else {
+            icon(icons::PEN)
+                .size(px(11.0))
+                .flex_none()
+                .text_color(theme.warning.opacity(0.85))
+                .into_any_element()
+        };
+        div()
+            .id(SharedString::from(row_id.clone()))
+            .h(px(super::chat_row_height(false, false)))
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .rounded(px(8.0))
+            .px(px(Theme::SPACE_SM))
+            .py(px(6.0))
+            .text_color(motion::hover_blend(&fade_key, rest_text, text))
+            .bg(motion::hover_blend(&fade_key, rest_bg, hover_bg))
+            .on_hover({
+                let fade_hover = motion::hover_listener(fade_key.clone());
+                cx.listener(move |this, hovered: &bool, window, cx| {
+                    fade_hover(hovered, window, cx);
+                    if *hovered {
+                        if this.chat_status_hover.as_deref() != Some(hover_id.as_str()) {
+                            this.chat_status_hover = Some(hover_id.clone());
+                            cx.notify();
+                        }
+                    } else if this.chat_status_hover.as_deref() == Some(hover_id.as_str()) {
+                        this.chat_status_hover = None;
+                        cx.notify();
+                    }
+                })
+            })
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.open_draft(open_id.clone(), true, cx);
+            }))
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(Theme::SPACE_SM))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(crate::typography::ui_rems(11.0))
+                            .line_height(px(14.0))
+                            .text_color(subline)
+                            .child(SharedString::from(target)),
+                    )
+                    .child(div().h(px(14.0)).flex().items_center().child(trailing)),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .line_height(px(17.0))
+                    .child(SharedString::from(prompt)),
+            )
+            .into_any_element()
     }
 
     /// The sidebar's Sessions list: every session (idle included) of the
