@@ -9342,6 +9342,7 @@ mod tests {
                             reasoning: None,
                             model_options: Default::default(),
                             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+                            permission_mode: zeron_proto::PermissionMode::Full,
                         })
                     };
                     let mut src = chat_row("src", None);
