@@ -376,20 +376,38 @@ impl Shell {
 
     /// The two drop zones over the conversation column. Mounted only while
     /// a drag is active; GPUI reveals them by the dragged payload's concrete
-    /// type (`drag_over`), so a pane-resize drag never shows them.
+    /// type (`drag_over`), so a pane-resize drag never shows them. The zone
+    /// under the pointer grows and fills (Atlas-style); a drag that cannot
+    /// split (the lone selected session, a draft) dims the whole layer.
     pub(super) fn render_split_drop_zones(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !cx.has_active_drag() {
             return None;
         }
         let theme = Theme::of(cx).clone();
+        let selected = self.state.read(cx).selected_chat.clone();
+        let split_open = self.split.is_some();
+        let state = self.state.clone();
+        let inert = std::rc::Rc::new(move |chat_id: &str, cx: &App| {
+            state.read(cx).is_draft(chat_id)
+                || (!split_open && selected.as_deref() == Some(chat_id))
+        });
         let zone = |side: SplitSide, cx: &mut Context<Self>| {
-            let (id, label) = match side {
-                SplitSide::Left => ("split-drop-left", "Split left"),
-                SplitSide::Right => ("split-drop-right", "Split right"),
+            let (id, group, label) = match side {
+                SplitSide::Left => ("split-drop-left", "split-zone-left", "Split left"),
+                SplitSide::Right => ("split-drop-right", "split-zone-right", "Split right"),
             };
             let accent = theme.accent;
+            let hot = move |style: gpui::StyleRefinement| {
+                style
+                    .w(px(184.0))
+                    .max_h(px(520.0))
+                    .bg(accent.opacity(0.12))
+                    .border_color(accent)
+                    .text_color(theme.text)
+            };
             div()
                 .id(id)
+                .group(group)
                 .flex_1()
                 .min_w_0()
                 .h_full()
@@ -397,10 +415,6 @@ impl Shell {
                 .flex()
                 .items_center()
                 .justify_center()
-                .drag_over::<tabs::TabDragPayload>(move |style, _, _, _| {
-                    style.bg(accent.opacity(0.10))
-                })
-                .drag_over::<SessionRowDrag>(move |style, _, _, _| style.bg(accent.opacity(0.10)))
                 .on_drop::<tabs::TabDragPayload>(cx.listener(
                     move |this, payload: &tabs::TabDragPayload, _, cx| {
                         this.drop_session_on_side(payload.chat_id.clone(), side, cx);
@@ -428,6 +442,12 @@ impl Shell {
                         .text_size(crate::typography::ui_rems(12.0))
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(theme.text_muted)
+                        // Identity drag-over styles give the box a hitbox;
+                        // the GROUP styles (the whole half) do the growing.
+                        .drag_over::<tabs::TabDragPayload>(|style, _, _, _| style)
+                        .drag_over::<SessionRowDrag>(|style, _, _, _| style)
+                        .group_drag_over::<tabs::TabDragPayload>(group, hot)
+                        .group_drag_over::<SessionRowDrag>(group, hot)
                         .child(
                             icon(icons::SPLIT_COLUMNS)
                                 .size(px(18.0))
@@ -438,6 +458,7 @@ impl Shell {
         };
         let left = zone(SplitSide::Left, cx);
         let right = zone(SplitSide::Right, cx);
+        let inert_tab = inert.clone();
         Some(
             div()
                 .id("split-drop-zones")
@@ -450,8 +471,20 @@ impl Shell {
                 .flex_row()
                 .opacity(0.0)
                 .bg(theme.scrim().opacity(0.35))
-                .drag_over::<tabs::TabDragPayload>(|style, _, _, _| style.opacity(1.0))
-                .drag_over::<SessionRowDrag>(|style, _, _, _| style.opacity(1.0))
+                .drag_over::<tabs::TabDragPayload>(move |style, payload, _, cx| {
+                    style.opacity(if inert_tab(&payload.chat_id, cx) {
+                        0.3
+                    } else {
+                        1.0
+                    })
+                })
+                .drag_over::<SessionRowDrag>(move |style, payload, _, cx| {
+                    style.opacity(if inert(&payload.chat_id, cx) {
+                        0.3
+                    } else {
+                        1.0
+                    })
+                })
                 .child(left)
                 .child(right)
                 .into_any_element(),
