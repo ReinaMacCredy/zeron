@@ -4508,6 +4508,9 @@ impl Composer {
     pub fn for_chat(state: Entity<AppState>, chat_id: String, cx: &mut Context<Self>) -> Self {
         let mut composer = Self::new(state, cx);
         composer.current_key = chat_id.clone();
+        composer
+            .pickers
+            .update(cx, |pickers, _| pickers.bind_chat(chat_id.clone()));
         composer.chat_override = Some(chat_id);
         composer
     }
@@ -9314,10 +9317,28 @@ mod tests {
         window
             .update(cx, |composer, _, cx| {
                 composer.state.update(cx, |state, _| {
-                    state.chats = vec![chat_row("src", None), chat_row("side", Some("src"))];
+                    let config = |model: &str| {
+                        Some(zeron_proto::ChatConfig {
+                            harness: zeron_proto::HarnessId::Mock,
+                            model: Some(model.into()),
+                            reasoning: None,
+                            model_options: Default::default(),
+                            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+                        })
+                    };
+                    let mut src = chat_row("src", None);
+                    src.config = config("src-model");
+                    let mut side = chat_row("side", Some("src"));
+                    side.config = config("side-model");
+                    state.chats = vec![src, side];
                     state.selected_chat = Some("src".into());
                 });
                 assert_eq!(composer.bound_chat_id(cx).as_deref(), Some("side"));
+                assert_eq!(
+                    composer.pickers.read(cx).resolved(cx).model.as_deref(),
+                    Some("side-model"),
+                    "the sidechat's pickers resolve its own config, not the source chat's"
+                );
                 assert_eq!(composer.current_key, "side");
                 assert_eq!(
                     composer.bound_chat_row(cx).map(|chat| chat.id.as_str()),
