@@ -441,6 +441,111 @@ impl SettingsSection {
             SettingsSection::Archived => "Archived sessions",
         }
     }
+
+    /// Words the settings search matches on the section itself, for pages
+    /// whose content is a list rather than titled rows.
+    fn keywords(self) -> &'static [&'static str] {
+        match self {
+            SettingsSection::Devices => &["device", "remote"],
+            SettingsSection::Harnesses => {
+                &["agent", "harness", "claude", "codex", "cursor", "opencode"]
+            }
+            SettingsSection::Agents => &["account", "login", "usage", "provider"],
+            SettingsSection::Shortcuts => &["keyboard", "keybinding"],
+            SettingsSection::Appshots => &["screenshot", "capture"],
+            SettingsSection::Archived => &["archive", "old sessions"],
+            _ => &[],
+        }
+    }
+
+    /// The page's titled rows: the title is what a search result shows
+    /// under the section, the keywords are what else finds it.
+    fn rows(self) -> &'static [SettingsSearchRow] {
+        match self {
+            SettingsSection::Harnesses => &[("Session titles", &["title", "automatic"])],
+            SettingsSection::Agents => &[("Add account", &["sign in", "api key"])],
+            SettingsSection::Appearance => &[
+                ("Light theme", &["theme"]),
+                ("Dark theme", &["theme"]),
+                ("Interface font", &["font size"]),
+                ("Terminal font", &["font size"]),
+                ("Code font", &["font size"]),
+                ("Accent color", &["color"]),
+                ("Glass", &["blur", "opacity", "scrim", "frosted"]),
+                ("New thread composer background", &["image"]),
+                ("Chat background", &["image", "placement"]),
+                (
+                    "Background effect",
+                    &["dither", "ascii", "halftone", "scanlines"],
+                ),
+            ],
+            SettingsSection::Files => &[
+                ("Autosave", &["save"]),
+                ("Autosave delay", &["save"]),
+                ("Word wrap", &["editor"]),
+                ("Show all files", &["hidden", "ignored"]),
+            ],
+            SettingsSection::Notifications => &[
+                ("Session sounds", &["sound", "chime"]),
+                ("Task completed", &["sound", "done"]),
+                ("Input required", &["sound", "question"]),
+                ("Errors and disconnections", &["sound"]),
+                ("Desktop notifications", &["banner"]),
+                ("Only when in the background", &["focus"]),
+            ],
+            SettingsSection::Shortcuts => &[
+                ("Send messages with", &["enter", "submit"]),
+                ("Follow-up behavior", &["queue", "steer", "interrupt"]),
+                ("Stop active agent with Escape", &["escape", "cancel"]),
+                ("Save file", &[]),
+                ("Reload browser page", &[]),
+                ("Toggle left sidebar", &[]),
+                ("Toggle right sidebar", &[]),
+                ("Toggle terminal", &[]),
+                ("New session", &[]),
+                ("Next session", &["switcher"]),
+                ("Previous session", &["switcher"]),
+                ("Archive session", &[]),
+                ("Capture Appshot", &["screenshot"]),
+            ],
+            _ => &[],
+        }
+    }
+
+    /// Row titles the query finds on this page, in page order. Empty for an
+    /// empty query: nothing is expanded until the user types.
+    pub fn matching_rows(self, query: &str) -> Vec<&'static str> {
+        let query = query.trim().to_lowercase();
+        if query.is_empty() {
+            return Vec::new();
+        }
+        self.rows()
+            .iter()
+            .filter(|(title, keywords)| search_row_matches(title, keywords, &query))
+            .map(|(title, _)| *title)
+            .collect()
+    }
+
+    /// Case-insensitive substring match over the label, keywords, and rows;
+    /// an empty query matches every section.
+    pub fn matches(self, query: &str) -> bool {
+        let query = query.trim().to_lowercase();
+        query.is_empty()
+            || self.label().to_lowercase().contains(&query)
+            || self.keywords().iter().any(|word| word.contains(&query))
+            || self
+                .rows()
+                .iter()
+                .any(|(title, keywords)| search_row_matches(title, keywords, &query))
+    }
+}
+
+/// A titled settings row and the extra words that find it.
+type SettingsSearchRow = (&'static str, &'static [&'static str]);
+
+/// `query` is already trimmed and lowercased.
+fn search_row_matches(title: &str, keywords: &[&str], query: &str) -> bool {
+    title.to_lowercase().contains(query) || keywords.iter().any(|word| word.contains(query))
 }
 
 /// What the main outlet shows.
@@ -1461,6 +1566,9 @@ pub struct Shell {
     account_usage: Option<AgentAccountsSnapshot>,
     account_usage_task: Option<Task<()>>,
     harnesses_page: Option<Entity<HarnessesPage>>,
+    /// Filters the settings nav; cleared when settings close.
+    settings_search: Entity<ComposerInput>,
+    _settings_search_sub: Subscription,
     shortcuts_sub: Option<Subscription>,
     notifications_sub: Option<Subscription>,
     files_settings_sub: Option<Subscription>,
@@ -1653,6 +1761,13 @@ impl Shell {
         let restored_drafts = crate::draft_store::sessions(cx);
         state.update(cx, |s, _| s.draft_sessions = restored_drafts);
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+        let settings_search =
+            cx.new(|cx| ComposerInput::with_context("Search settings…", "PaletteSearch", cx));
+        let settings_search_sub = cx.subscribe(&settings_search, |_: &mut Shell, _, event, cx| {
+            if matches!(event, ComposerInputEvent::Edited) {
+                cx.notify();
+            }
+        });
         let links = Self::session_links(None, cx);
         transcript.update(cx, |transcript, _| {
             transcript.set_workspace_link_handler(links)
@@ -1862,6 +1977,8 @@ impl Shell {
             account_usage: None,
             account_usage_task: None,
             harnesses_page: None,
+            settings_search,
+            _settings_search_sub: settings_search_sub,
             shortcuts_sub: None,
             notifications_sub: None,
             files_settings_sub: None,
@@ -4117,6 +4234,8 @@ impl Shell {
     }
 
     fn close_settings(&mut self, cx: &mut Context<Self>) {
+        self.settings_search
+            .update(cx, |input, cx| input.set_text("", cx));
         self.route = Route::Chat;
         self.focus_composer(cx);
         self.nav.push(NavEntry::Chat(self.active_chat.clone()));
@@ -4144,6 +4263,8 @@ impl Shell {
         self.suspend_file_images(cx);
         match entry {
             NavEntry::Chat(chat_id) => {
+                self.settings_search
+                    .update(cx, |input, cx| input.set_text("", cx));
                 self.route = Route::Chat;
                 self.focus_composer(cx);
                 let target = (!chat_id.is_empty()).then_some(chat_id);
@@ -4318,6 +4439,7 @@ impl Shell {
                     let keymap = self.settings.keymap.clone();
                     let escape_stops_active_agent = self.settings.escape_stops_active_agent;
                     let composer_send_behavior = self.settings.composer_send_behavior;
+                    let follow_up_behavior = self.settings.follow_up_behavior;
                     let appshots_enabled = self.settings.appshots_enabled;
                     let appshot_sound_enabled = self.settings.appshot_sound_enabled;
                     let appshot_destination = self.settings.appshot_destination;
@@ -4327,6 +4449,7 @@ impl Shell {
                             keymap,
                             escape_stops_active_agent,
                             composer_send_behavior,
+                            follow_up_behavior,
                             appshots_enabled,
                             appshot_sound_enabled,
                             appshot_destination,
@@ -4346,6 +4469,9 @@ impl Shell {
                                 }
                                 ShortcutsEvent::ComposerSendBehaviorChanged(behavior) => {
                                     this.settings.composer_send_behavior = *behavior;
+                                }
+                                ShortcutsEvent::FollowUpBehaviorChanged(behavior) => {
+                                    this.settings.follow_up_behavior = *behavior;
                                 }
                                 ShortcutsEvent::AppshotsChanged {
                                     enabled,
@@ -5876,6 +6002,7 @@ impl Shell {
             SettingsSection::Appshots => icons::MONITOR,
             SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
         };
+        let query = self.settings_search.read(cx).text().to_string();
         // Match the user's dragged sidebar width — the pane container clips to
         // it, so a hardcoded default here left hover washes stopping short of
         // the sidebar's right edge (user-reported). Device identity lives on
@@ -5902,6 +6029,13 @@ impl Shell {
                             .child(SharedString::from("Settings")),
                     )
                     .child(
+                        popover::search_input_frame(
+                            theme,
+                            self.settings_search.clone().into_any_element(),
+                        )
+                        .mb(px(6.0)),
+                    )
+                    .child(
                         div().flex().flex_col().gap(px(2.0)).children(
                             SettingsSection::ALL
                                 .into_iter()
@@ -5909,9 +6043,10 @@ impl Shell {
                                     *item != SettingsSection::Appshots
                                         || crate::appshots::is_desktop()
                                 })
+                                .filter(|item| item.matches(&query))
                                 .map(|item| {
                                     let selected = item == section;
-                                    div()
+                                    let section_row = div()
                                         .id(SharedString::from(format!(
                                             "settings-nav-{}",
                                             item.label()
@@ -5945,7 +6080,31 @@ impl Shell {
                                                 .size(px(16.0))
                                                 .text_color(theme.text_muted),
                                         )
-                                        .child(SharedString::from(item.label()))
+                                        .child(SharedString::from(item.label()));
+                                    // While searching, the rows the query found sit
+                                    // under their section, indented past its icon.
+                                    let hits = item.matching_rows(&query);
+                                    div().flex().flex_col().child(section_row).children(
+                                        hits.into_iter().map(|title| {
+                                            div()
+                                                .id(SharedString::from(format!(
+                                                    "settings-nav-{}-{title}",
+                                                    item.label()
+                                                )))
+                                                .rounded(px(8.0))
+                                                .pl(px(Theme::SPACE_SM + 24.0))
+                                                .pr(px(Theme::SPACE_SM))
+                                                .py(px(4.0))
+                                                .text_size(crate::typography::ui_rems(13.0))
+                                                .text_color(theme.text)
+                                                .cursor_pointer()
+                                                .hover(|s| s.bg(theme.glass_hover()))
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.open_settings(item, cx)
+                                                }))
+                                                .child(SharedString::from(title))
+                                        }),
+                                    )
                                 }),
                         ),
                     ),
@@ -11192,6 +11351,36 @@ impl Render for Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_search_matches_labels_and_row_keywords() {
+        assert!(SettingsSection::ALL.iter().all(|s| s.matches("")));
+        assert!(SettingsSection::Shortcuts.matches("Follow"));
+        assert!(SettingsSection::Shortcuts.matches("steer"));
+        assert!(SettingsSection::Appearance.matches("FONT SIZE"));
+        assert!(SettingsSection::Archived.matches("archived"));
+        assert!(!SettingsSection::Files.matches("steer"));
+        assert!(SettingsSection::ALL.iter().all(|s| !s.matches("zzz")));
+    }
+
+    #[test]
+    fn settings_search_lists_the_rows_it_found_under_the_section() {
+        assert!(SettingsSection::Appearance.matching_rows("").is_empty());
+        assert_eq!(
+            SettingsSection::Appearance.matching_rows("them"),
+            vec!["Light theme", "Dark theme"]
+        );
+        assert_eq!(
+            SettingsSection::Shortcuts.matching_rows("steer"),
+            vec!["Follow-up behavior"]
+        );
+        // A label-only hit expands nothing; the section row stands alone.
+        assert!(
+            SettingsSection::Archived
+                .matching_rows("archived")
+                .is_empty()
+        );
+    }
 
     #[test]
     fn sidebar_drag_nudges_each_edge_once_until_rearmed() {

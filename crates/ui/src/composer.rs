@@ -36,7 +36,7 @@ use crate::attachments::{self, StagedAttachment};
 use crate::motion;
 use crate::notice::{NoticeChipIcon, notice_chip};
 use crate::pickers::Pickers;
-use crate::settings::{ComposerSendBehavior, platform_combo};
+use crate::settings::{ComposerSendBehavior, FollowUpBehavior, platform_combo};
 use crate::state::{AppState, Indicator};
 use crate::theme::Theme;
 
@@ -581,6 +581,18 @@ pub fn send_button_mode(run_live: bool, has_text: bool) -> SendButtonMode {
         (true, true) => SendButtonMode::Queue,
         (true, false) => SendButtonMode::Stop,
     }
+}
+
+/// Whether a busy-turn submit asks the host to steer: the setting, flipped
+/// for one message when the modifier chord submitted it.
+pub fn follow_up_steers(behavior: FollowUpBehavior, inverted: bool) -> bool {
+    (behavior == FollowUpBehavior::Steer) != inverted
+}
+
+/// The modifier chord only inverts the follow-up setting while plain Enter
+/// is the send key; once the chord itself sends, it has nothing to invert.
+pub fn modified_submit_inverts_follow_up(send_behavior: ComposerSendBehavior) -> bool {
+    send_behavior == ComposerSendBehavior::Enter
 }
 
 /// Queue rows are represented by the queue panel until the host promotes them
@@ -6475,6 +6487,10 @@ impl Composer {
     }
 
     fn on_submit(&mut self, cx: &mut Context<Self>) {
+        self.submit(false, cx);
+    }
+
+    fn submit(&mut self, invert_follow_up: bool, cx: &mut Context<Self>) {
         if self.commit_queue_edit(cx) {
             return;
         }
@@ -6497,9 +6513,16 @@ impl Composer {
             SendButtonMode::Stop => self.interrupt_selected(cx),
             _ if no_content => {}
             _ if self.send_blocked(cx) => {}
-            SendButtonMode::Send => self.send(text, false, false, cx),
-            // Busy: keep the message queued until the current turn ends.
-            SendButtonMode::Queue => self.send(text, true, false, cx),
+            SendButtonMode::Send => self.send(text, false, false, false, cx),
+            // Busy: the row joins the queue; whether it also steers the live
+            // turn is the follow-up setting, inverted by the modifier chord.
+            SendButtonMode::Queue => {
+                let steer = follow_up_steers(
+                    crate::settings::current(cx).follow_up_behavior,
+                    invert_follow_up,
+                );
+                self.send(text, true, false, steer, cx)
+            }
         }
     }
 
@@ -6508,7 +6531,7 @@ impl Composer {
     /// Queues instead when the bound chat is already busy, like a submit.
     pub(crate) fn send_prompt(&mut self, prompt: String, cx: &mut Context<Self>) {
         let queue = matches!(self.button_mode(cx), SendButtonMode::Queue);
-        self.send(prompt, queue, false, cx);
+        self.send(prompt, queue, false, false, cx);
     }
 
     /// Cmd/Ctrl+Enter remains an ordinary submit while the composer carries
@@ -6533,11 +6556,16 @@ impl Composer {
             && !self.send_blocked(cx)
             && matches!(self.button_mode(cx), SendButtonMode::Send)
         {
-            self.send(text, false, true, cx);
+            self.send(text, false, true, false, cx);
             return;
         }
         match modified_submit_target(has_content) {
-            ModifiedSubmitTarget::SubmitContent => self.on_submit(cx),
+            ModifiedSubmitTarget::SubmitContent => {
+                let invert = modified_submit_inverts_follow_up(
+                    crate::settings::current(cx).composer_send_behavior,
+                );
+                self.submit(invert, cx)
+            }
             ModifiedSubmitTarget::ActivateLatestQueued => self.activate_latest_queued(cx),
         }
     }
@@ -6557,7 +6585,14 @@ impl Composer {
     /// thread the picked config in: worktree creation (when the isolated toggle
     /// is on), `Mutate createChat` with the `ChatConfig` + cwd, and the model /
     /// reasoning / options on the Run request itself (§1.7).
-    fn send(&mut self, text: String, queue: bool, background: bool, cx: &mut Context<Self>) {
+    fn send(
+        &mut self,
+        text: String,
+        queue: bool,
+        background: bool,
+        steer: bool,
+        cx: &mut Context<Self>,
+    ) {
         // `/compact` is zeron's own command: it becomes an RPC, never a turn,
         // so it never builds a `Run` and never writes a user entry.
         if let Some(focus) = compact_focus(&text) {
@@ -7140,6 +7175,7 @@ impl Composer {
                         "text": queue_text,
                         "attachments": attachment_paths,
                         "holdForTurnEnd": true,
+                        "steerNow": steer,
                     });
                     let reply = engine
                         .client()
@@ -8022,6 +8058,25 @@ impl Render for Composer {
                         .child(div().min_w_0().truncate().child(notice)),
                 ))
             });
+
+        // With Steer as the default, an agent that only takes input between
+        // turns still queues; without this line the queue read as a dropped
+        // steer (user report: "my steer didn't apply until grok finished").
+        let steer_queues = mode == SendButtonMode::Queue
+            && crate::settings::current(cx).follow_up_behavior == FollowUpBehavior::Steer
+            && self.pickers.read(cx).resolved_steering_mode(cx)
+                == Some(zeron_proto::SteeringMode::TurnBoundary);
+        let container = container.when(steer_queues, |el| {
+            el.child(
+                div()
+                    .mx(px(8.0))
+                    .mt(px(6.0))
+                    .text_size(px(11.0))
+                    .line_height(px(14.0))
+                    .text_color(theme.text_faint)
+                    .child("This agent can't be steered mid-turn. Your message will be queued and sent when the current turn finishes."),
+            )
+        });
 
         if wizard_active {
             let wizard = self.render_wizard(cx);
@@ -10393,6 +10448,24 @@ mod tests {
             modified_submit_target(composer_has_content("  ", 0, 0)),
             ModifiedSubmitTarget::ActivateLatestQueued
         );
+    }
+
+    #[test]
+    fn follow_up_setting_decides_steering_and_the_chord_flips_it_once() {
+        assert!(!follow_up_steers(FollowUpBehavior::Queue, false));
+        assert!(follow_up_steers(FollowUpBehavior::Queue, true));
+        assert!(follow_up_steers(FollowUpBehavior::Steer, false));
+        assert!(!follow_up_steers(FollowUpBehavior::Steer, true));
+    }
+
+    #[test]
+    fn the_chord_only_inverts_while_enter_is_the_send_key() {
+        assert!(modified_submit_inverts_follow_up(
+            ComposerSendBehavior::Enter
+        ));
+        assert!(!modified_submit_inverts_follow_up(
+            ComposerSendBehavior::ModEnter
+        ));
     }
 
     #[test]

@@ -2951,6 +2951,16 @@ impl DocHost {
         Ok(true)
     }
 
+    /// A submit that asked to steer. Every refusal (agent without mid-turn
+    /// input, attachments, a failed dispatch that already put the row back)
+    /// degrades to the plain queue the row was just appended to, so the
+    /// caller never has to unwind anything.
+    pub async fn steer_queued_on_submit(&self, chat_id: &str, id: &str) {
+        if let Err(err) = self.steer_queued_now(chat_id, id).await {
+            tracing::debug!(chat = %chat_id, error = %err, "steer on submit left the row queued");
+        }
+    }
+
     /// Promote one held row without ever interrupting a turn. A live,
     /// steerable turn receives it as steering; if that turn has already ended,
     /// it starts normally as the next turn. Unsupported harnesses and
