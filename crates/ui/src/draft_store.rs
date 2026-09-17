@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -118,23 +118,34 @@ struct PersistedAppshot {
 }
 
 pub struct DraftStore {
-    data_dir: PathBuf,
+    data_dir: Option<PathBuf>,
     entries: HashMap<String, DraftEntry>,
     sessions: HashMap<String, DraftSession>,
-    dirty: bool,
+    revision: u64,
+    saved_revision: Arc<Mutex<u64>>,
     save_task: Option<Task<()>>,
 }
 
 impl Global for DraftStore {}
 
+#[cfg(test)]
 pub fn init(data_dir: impl Into<PathBuf>, cx: &mut App) {
     let data_dir = data_dir.into();
-    let (entries, sessions) = load(&data_dir);
+    let loaded = load(&data_dir);
+    init_loaded(data_dir, loaded, cx);
+}
+
+pub(crate) fn init_loaded(
+    data_dir: PathBuf,
+    (entries, sessions): (HashMap<String, DraftEntry>, HashMap<String, DraftSession>),
+    cx: &mut App,
+) {
     cx.set_global(DraftStore {
-        data_dir,
+        data_dir: Some(data_dir),
         entries,
         sessions,
-        dirty: false,
+        revision: 0,
+        saved_revision: Arc::new(Mutex::new(0)),
         save_task: None,
     });
 }
@@ -159,7 +170,7 @@ pub fn set_session(session: DraftSession, cx: &mut App) {
             return;
         }
         store.sessions.insert(session.id.clone(), session);
-        store.dirty = true;
+        store.revision += 1;
     }
     schedule(cx);
 }
@@ -171,7 +182,7 @@ pub fn remove_session(id: &str, cx: &mut App) {
     let removed = {
         let store = cx.global_mut::<DraftStore>();
         let removed = store.sessions.remove(id).is_some();
-        store.dirty |= removed;
+        store.revision += u64::from(removed);
         removed
     };
     if removed {
@@ -179,11 +190,22 @@ pub fn remove_session(id: &str, cx: &mut App) {
     }
 }
 
-/// Every restored or live entry — a composer fills its per-key maps from
-/// this once at construction.
-pub fn entries(cx: &App) -> HashMap<String, DraftEntry> {
+pub(crate) fn ensure(cx: &mut App) {
+    if !cx.has_global::<DraftStore>() {
+        cx.set_global(DraftStore {
+            data_dir: None,
+            entries: HashMap::new(),
+            sessions: HashMap::new(),
+            revision: 0,
+            saved_revision: Arc::new(Mutex::new(0)),
+            save_task: None,
+        });
+    }
+}
+
+pub fn entry(key: &str, cx: &App) -> DraftEntry {
     cx.try_global::<DraftStore>()
-        .map(|store| store.entries.clone())
+        .and_then(|store| store.entries.get(key).cloned())
         .unwrap_or_default()
 }
 
@@ -232,7 +254,7 @@ pub fn set(key: &str, entry: DraftEntry, cx: &mut App) -> bool {
         } else {
             store.entries.remove(key);
         }
-        store.dirty = true;
+        store.revision += 1;
         before != after
     };
     schedule(cx);
@@ -256,7 +278,7 @@ pub fn prune(keep: impl Fn(&str) -> bool, cx: &mut App) {
         store.entries.retain(|key, _| keep(key));
         store.sessions.retain(|key, _| keep(key));
         let removed = store.entries.len() + store.sessions.len() != before;
-        store.dirty |= removed;
+        store.revision += u64::from(removed);
         removed
     };
     if removed {
@@ -271,28 +293,42 @@ fn schedule(cx: &mut App) {
         cx.background_executor()
             .timer(Duration::from_millis(SAVE_DEBOUNCE_MS))
             .await;
-        cx.update(flush);
+        cx.update(|cx| flush(cx).detach());
     });
     cx.global_mut::<DraftStore>().save_task = Some(task);
 }
 
-/// Write the latest entries now. Safe to call at shutdown.
-pub fn flush(cx: &mut App) {
+/// Save a snapshot off the app thread. Await the task at shutdown.
+pub fn flush(cx: &mut App) -> Task<()> {
     if !cx.has_global::<DraftStore>() {
-        return;
+        return Task::ready(());
     }
     let store = cx.global_mut::<DraftStore>();
     store.save_task = None;
-    if !store.dirty {
-        return;
-    }
-    store.dirty = false;
-    if let Err(err) = save(&store.data_dir, &store.entries, &store.sessions) {
-        tracing::warn!(error = %err, "composer-drafts save failed");
-    }
+    let revision = store.revision;
+    let saved_revision = store.saved_revision.clone();
+    let Some(data_dir) = store.data_dir.clone() else {
+        return Task::ready(());
+    };
+    let entries = store.entries.clone();
+    let sessions = store.sessions.clone();
+    cx.background_executor().spawn(async move {
+        // Serialize writes and orphan cleanup. A late older task must not
+        // overwrite a newer snapshot (including the shutdown snapshot).
+        let mut saved = saved_revision.lock().unwrap_or_else(|err| err.into_inner());
+        if revision <= *saved {
+            return;
+        }
+        match save(&data_dir, &entries, &sessions) {
+            Ok(()) => *saved = revision,
+            Err(err) => tracing::warn!(error = %err, "composer-drafts save failed"),
+        }
+    })
 }
 
-fn load(data_dir: &Path) -> (HashMap<String, DraftEntry>, HashMap<String, DraftSession>) {
+pub(crate) fn load(
+    data_dir: &Path,
+) -> (HashMap<String, DraftEntry>, HashMap<String, DraftSession>) {
     let text = match std::fs::read_to_string(data_dir.join(FILE_NAME)) {
         Ok(text) => text,
         Err(_) => return Default::default(),
@@ -495,6 +531,65 @@ mod tests {
                 vec![0x89, b'P', b'N', b'G'],
             )),
         }
+    }
+
+    #[gpui::test]
+    async fn background_saves_keep_the_latest_snapshot(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| init(dir.path(), cx));
+        let saved = cx.update(|cx| cx.global::<DraftStore>().saved_revision.clone());
+        let blocked = saved.lock().unwrap();
+        let first = cx.update(|cx| {
+            set(
+                "chat",
+                DraftEntry {
+                    prompt: "old".into(),
+                    attachments: vec![png()],
+                    ..Default::default()
+                },
+                cx,
+            );
+            flush(cx)
+        });
+        let latest = cx.update(|cx| {
+            set(
+                "chat",
+                DraftEntry {
+                    prompt: "latest".into(),
+                    ..Default::default()
+                },
+                cx,
+            );
+            flush(cx)
+        });
+        // Both app-thread calls returned while the disk writer was blocked.
+        drop(blocked);
+        latest.await;
+        first.await;
+        assert_eq!(load(dir.path()).0["chat"].prompt, "latest");
+        assert!(!dir.path().join(DIR_NAME).join("att-1.png").exists());
+    }
+
+    #[gpui::test]
+    async fn a_failed_save_is_retried_at_shutdown(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| init(dir.path(), cx));
+        std::fs::create_dir(dir.path().join(FILE_NAME)).unwrap();
+        cx.update(|cx| {
+            set(
+                "chat",
+                DraftEntry {
+                    prompt: "keep me".into(),
+                    ..Default::default()
+                },
+                cx,
+            );
+            flush(cx)
+        })
+        .await;
+        std::fs::remove_dir(dir.path().join(FILE_NAME)).unwrap();
+        cx.update(flush).await;
+        assert_eq!(load(dir.path()).0["chat"].prompt, "keep me");
     }
 
     #[test]

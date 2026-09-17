@@ -475,3 +475,18 @@ async fn compaction_retires_a_parked_warm_child_and_resumes_its_session() {
         1
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelling_compaction_releases_its_run_slot() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (core, harness, _requests) = engine_with_one_turn(tmp.path()).await;
+    let (_release, gate) = tokio::sync::oneshot::channel();
+    *harness.gate.lock().unwrap() = Some(gate);
+    let sessions = core.sessions.clone();
+    let compact = tokio::spawn(async move { sessions.compact(CHAT, None).await });
+    wait_for(|| core.sessions.turn_in_flight(CHAT), "compaction starts").await;
+    compact.abort();
+    assert!(compact.await.unwrap_err().is_cancelled());
+    assert!(!core.sessions.turn_in_flight(CHAT));
+    assert!(core.sessions.compact(CHAT, None).await.unwrap().compacted);
+}

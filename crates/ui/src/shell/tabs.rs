@@ -466,19 +466,37 @@ impl Shell {
         };
         let state = self.state.read(cx);
         let now = Utc::now();
-        let pair = self.split_pair.clone();
+        let pair = self.split_pair.as_ref();
+        let chats: std::collections::HashMap<_, _> = state
+            .chats
+            .iter()
+            .map(|chat| (chat.id.as_str(), chat))
+            .collect();
+        let sessions: std::collections::HashMap<_, _> = state
+            .sessions
+            .iter()
+            .map(|session| (session.chat_id.as_str(), session))
+            .collect();
+        let drafts: std::collections::HashSet<_> = state
+            .draft_sessions
+            .iter()
+            .map(|draft| draft.id.as_str())
+            .collect();
         open.iter()
             .filter(|id| {
                 // A draft is always a place the user is working in (d18); a
                 // session started in the background shows from its send on.
-                state.is_draft(id)
+                drafts.contains(id.as_str())
                     || state.send_pending(id, now)
-                    || state.chats.iter().any(|c| {
-                        &c.id == *id
-                            && !c.archived
+                    || chats.get(id.as_str()).is_some_and(|c| {
+                        !c.archived
                             && (state.selected_chat.as_deref() == Some(c.id.as_str())
                                 || pair.as_ref().is_some_and(|p| p.contains(&c.id))
-                                || state.display_status_for(c, now) != ChatIndicator::Idle)
+                                || crate::state::display_status(
+                                    c,
+                                    sessions.get(c.id.as_str()).copied(),
+                                    now,
+                                ) != ChatIndicator::Idle)
                     })
             })
             .cloned()
@@ -631,7 +649,11 @@ impl Shell {
             })
             .map(|(_, id)| id.clone())
             .collect();
-        self.settings.open_tabs = Some(kept.clone());
+        let closed: std::collections::HashSet<_> =
+            order.iter().filter(|id| !kept.contains(id)).collect();
+        if let Some(tabs) = self.settings.open_tabs.as_mut() {
+            tabs.retain(|id| !closed.contains(id));
+        }
         // Closed empty drafts die with their tabs.
         let closed_empty: Vec<String> = order
             .iter()
@@ -743,10 +765,25 @@ impl Shell {
             bool,
         )> = {
             let state = self.state.read(cx);
+            let chats: std::collections::HashMap<_, _> = state
+                .chats
+                .iter()
+                .map(|chat| (chat.id.as_str(), chat))
+                .collect();
+            let sessions: std::collections::HashMap<_, _> = state
+                .sessions
+                .iter()
+                .map(|session| (session.chat_id.as_str(), session))
+                .collect();
+            let drafts: std::collections::HashSet<_> = state
+                .draft_sessions
+                .iter()
+                .map(|draft| draft.id.as_str())
+                .collect();
             order
                 .iter()
                 .filter_map(|id| {
-                    if state.is_draft(id) {
+                    if drafts.contains(id.as_str()) {
                         return Some((
                             id.clone(),
                             SharedString::from("New session"),
@@ -755,14 +792,22 @@ impl Shell {
                             true,
                         ));
                     }
-                    let chat = state.chats.iter().find(|c| c.id == *id)?;
+                    let chat = chats.get(id.as_str())?;
                     Some((
                         chat.id.clone(),
                         SharedString::from(transcript::single_line(
                             &chat.title.clone().unwrap_or_else(|| "New session".into()),
                         )),
                         chat.config.as_ref().map(|c| c.harness),
-                        state.display_status_for(chat, now),
+                        if state.send_pending(&chat.id, now) {
+                            ChatIndicator::Working
+                        } else {
+                            crate::state::display_status(
+                                chat,
+                                sessions.get(chat.id.as_str()).copied(),
+                                now,
+                            )
+                        },
                         false,
                     ))
                 })
@@ -1603,6 +1648,37 @@ mod strip_regressions {
             // The started session's tab survives on its pending send until
             // the doc frame lands; the next draft sits beside it.
             assert_eq!(shell.open_tab_ids(cx), [draft, next]);
+        });
+    }
+
+    #[gpui::test]
+    fn bulk_close_preserves_hidden_idle_tabs(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                state.chats = ["left", "idle", "anchor", "right"].map(chat).to_vec();
+                state.chats_synced = true;
+                state.spaces_synced = true;
+                state.apply_sessions(vec![working("left"), working("anchor"), working("right")]);
+                state.select_chat(Some("anchor".into()), cx);
+            });
+            for (keep_left, keep_right, expected) in [
+                (false, false, vec!["idle", "anchor"]),
+                (true, false, vec!["left", "idle", "anchor"]),
+                (false, true, vec!["idle", "anchor", "right"]),
+            ] {
+                shell.settings.open_tabs = Some(
+                    ["left", "idle", "anchor", "right"]
+                        .map(String::from)
+                        .to_vec(),
+                );
+                shell.close_tabs_around("anchor", keep_left, keep_right, cx);
+                assert_eq!(shell.settings.open_tabs.as_ref().unwrap(), &expected);
+            }
+            shell.state.update(cx, |state, _| {
+                state.apply_sessions(vec![working("idle"), working("anchor"), working("right")]);
+            });
+            assert_eq!(shell.open_tab_ids(cx), ["idle", "anchor", "right"]);
         });
     }
 

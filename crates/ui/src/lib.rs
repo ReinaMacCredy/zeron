@@ -156,100 +156,110 @@ pub fn run_app(config: UiConfig) {
         gpui_tokio::init(cx);
         gpui_base::init(cx);
         let data_dir = config.boot().data_dir.clone();
-        let ui_settings = settings::UiSettings::load(&data_dir);
-        settings::init(ui_settings.clone(), data_dir.clone(), cx);
-        draft_store::init(data_dir.clone(), cx);
-        let font_availability = typography::register_fonts(cx);
-        // Typography first: theme installation reads the effective family, so
-        // the first frame has the final font and palette without a flash.
-        typography::init(
-            ui_settings.ui_font_family.clone(),
-            ui_settings.ui_font_size,
-            ui_settings.terminal_font_family.clone(),
-            ui_settings.terminal_font_size,
-            ui_settings.code_font_family.clone(),
-            ui_settings.code_font_size,
-            font_availability,
-            cx,
-        );
-        theme_library::init(data_dir.clone(), cx);
-        appearance::init(
-            ui_settings.appearance,
-            ui_settings.theme_selection,
-            ui_settings.accent,
-            ui_settings.surface,
-            cx,
-        );
-        history::init(
-            ui_settings.git_history_columns,
-            ui_settings.git_history_column_widths,
-            ui_settings.git_history_column_order,
-            ui_settings.git_history_author_display,
-            cx,
-        );
-        composer::init(cx, ui_settings.composer_send_behavior);
-        appshots::set_enabled(ui_settings.appshots_enabled);
-        terminal::panel::init(cx);
-        app_menus::init(cx);
-        cx.register_url_scheme("zeron").detach();
-
-        let state = cx.new(|_| state::AppState::new());
-        let url_state = state.clone();
+        let draft_dir = data_dir.clone();
+        let drafts = cx
+            .background_executor()
+            .spawn(async move { draft_store::load(&draft_dir) });
         cx.spawn(async move |cx| {
-            while let Some(url) = url_rx.next().await {
-                url_state.update(cx, |state, cx| state.open_deep_link(&url, cx));
-            }
-        })
-        .detach();
-        // Banner clicks land on the notified chat. The AppKit delegate fires
-        // mid-event, so hop through a channel rather than updating inline.
-        let (click_tx, mut click_rx) = futures::channel::mpsc::unbounded::<String>();
-        notify::on_click(move |chat_id| {
-            let _ = click_tx.unbounded_send(chat_id);
-        });
-        let click_state = state.clone();
-        cx.spawn(async move |cx| {
-            while let Some(chat_id) = click_rx.next().await {
-                let _ = cx.update(|cx| open_notified_chat(chat_id, &click_state, cx));
-            }
-        })
-        .detach();
-        state::AppState::bootstrap(state.clone(), config.boot(), cx);
+            let drafts = drafts.await;
+            cx.update(move |cx| {
+                let ui_settings = settings::UiSettings::load(&data_dir);
+                settings::init(ui_settings.clone(), data_dir.clone(), cx);
+                draft_store::init_loaded(data_dir.clone(), drafts, cx);
+                let font_availability = typography::register_fonts(cx);
+                // Typography first: theme installation reads the effective family, so
+                // the first frame has the final font and palette without a flash.
+                typography::init(
+                    ui_settings.ui_font_family.clone(),
+                    ui_settings.ui_font_size,
+                    ui_settings.terminal_font_family.clone(),
+                    ui_settings.terminal_font_size,
+                    ui_settings.code_font_family.clone(),
+                    ui_settings.code_font_size,
+                    font_availability,
+                    cx,
+                );
+                theme_library::init(data_dir.clone(), cx);
+                appearance::init(
+                    ui_settings.appearance,
+                    ui_settings.theme_selection,
+                    ui_settings.accent,
+                    ui_settings.surface,
+                    cx,
+                );
+                history::init(
+                    ui_settings.git_history_columns,
+                    ui_settings.git_history_column_widths,
+                    ui_settings.git_history_column_order,
+                    ui_settings.git_history_author_display,
+                    cx,
+                );
+                composer::init(cx, ui_settings.composer_send_behavior);
+                appshots::set_enabled(ui_settings.appshots_enabled);
+                terminal::panel::init(cx);
+                app_menus::init(cx);
+                cx.register_url_scheme("zeron").detach();
 
-        // Graceful teardown: an in-process engine drains live runs and flushes
-        // doc snapshots before the process exits (remote engines outlive us).
-        let quit_state = state.clone();
-        cx.on_app_quit(move |cx| {
-            settings::flush(cx);
-            draft_store::flush(cx);
-            let shutdown =
-                quit_state.read(cx).engine().cloned().map(|handle| {
-                    gpui_tokio::Tokio::spawn(cx, async move { handle.shutdown().await })
+                let state = cx.new(|_| state::AppState::new());
+                let url_state = state.clone();
+                cx.spawn(async move |cx| {
+                    while let Some(url) = url_rx.next().await {
+                        url_state.update(cx, |state, cx| state.open_deep_link(&url, cx));
+                    }
+                })
+                .detach();
+                // Banner clicks land on the notified chat. The AppKit delegate fires
+                // mid-event, so hop through a channel rather than updating inline.
+                let (click_tx, mut click_rx) = futures::channel::mpsc::unbounded::<String>();
+                notify::on_click(move |chat_id| {
+                    let _ = click_tx.unbounded_send(chat_id);
                 });
-            async move {
-                if let Some(task) = shutdown {
-                    let _ = task.await;
-                }
-            }
+                let click_state = state.clone();
+                cx.spawn(async move |cx| {
+                    while let Some(chat_id) = click_rx.next().await {
+                        let _ = cx.update(|cx| open_notified_chat(chat_id, &click_state, cx));
+                    }
+                })
+                .detach();
+                state::AppState::bootstrap(state.clone(), config.boot(), cx);
+
+                // Graceful teardown: an in-process engine drains live runs and flushes
+                // doc snapshots before the process exits (remote engines outlive us).
+                let quit_state = state.clone();
+                cx.on_app_quit(move |cx| {
+                    settings::flush(cx);
+                    let drafts = draft_store::flush(cx);
+                    let shutdown = quit_state.read(cx).engine().cloned().map(|handle| {
+                        gpui_tokio::Tokio::spawn(cx, async move { handle.shutdown().await })
+                    });
+                    async move {
+                        drafts.await;
+                        if let Some(task) = shutdown {
+                            let _ = task.await;
+                        }
+                    }
+                })
+                .detach();
+
+                cx.set_global(ReopenState {
+                    state: state.clone(),
+                    boot: config.boot(),
+                });
+                open_main_window(state, config.boot(), cx);
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
+                start_appshot_service(config.boot().data_dir, cx);
+                // Native menu bar — macOS gets the standard app menu (About/Services/
+                // Hide/Quit ⌘Q), Edit clipboard verbs routed to the focused input, and
+                // a Window menu (⌘M/⌘W). Without this, `NSApp.mainMenu` stays nil: no
+                // Cmd+Q, and nothing for the system menu bar to show. Set after
+                // `open_main_window` because `Shell::new` ran `apply_keymap`
+                // synchronously, so `set_menus` reads the final bindings for the ⌘-key
+                // equivalents (gpui snapshots the keymap at set time).
+                cx.set_menus(app_menus::app_menus());
+                cx.activate(true);
+            });
         })
         .detach();
-
-        cx.set_global(ReopenState {
-            state: state.clone(),
-            boot: config.boot(),
-        });
-        open_main_window(state, config.boot(), cx);
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
-        start_appshot_service(config.boot().data_dir, cx);
-        // Native menu bar — macOS gets the standard app menu (About/Services/
-        // Hide/Quit ⌘Q), Edit clipboard verbs routed to the focused input, and
-        // a Window menu (⌘M/⌘W). Without this, `NSApp.mainMenu` stays nil: no
-        // Cmd+Q, and nothing for the system menu bar to show. Set after
-        // `open_main_window` because `Shell::new` ran `apply_keymap`
-        // synchronously, so `set_menus` reads the final bindings for the ⌘-key
-        // equivalents (gpui snapshots the keymap at set time).
-        cx.set_menus(app_menus::app_menus());
-        cx.activate(true);
     });
 }
 

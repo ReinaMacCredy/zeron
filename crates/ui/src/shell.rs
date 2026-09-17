@@ -2450,7 +2450,7 @@ impl Shell {
         match state.read(cx).connection {
             ConnectionStatus::Ready => {
                 if self.account_usage.is_none() && self.account_usage_task.is_none() {
-                    self.load_account_usage(cx);
+                    self.load_account_usage(false, cx);
                 }
                 if self.splash == SplashPhase::Visible {
                     self.splash = SplashPhase::FadingOut;
@@ -4128,14 +4128,15 @@ impl Shell {
         }
     }
 
-    /// List this device's agent accounts with a forced usage probe (the
-    /// engine's non-forced list serves only its 60s cache, so anything
-    /// else would leave the sidebar blank after the first minute).
-    fn load_account_usage(&mut self, cx: &mut Context<Self>) {
+    /// Reuse fresh usage, probing only missing or expired slots.
+    fn load_account_usage(&mut self, refresh: bool, cx: &mut Context<Self>) {
+        if self.account_usage_task.is_some() {
+            return;
+        }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        let params = serde_json::json!({ "forceUsage": true });
+        let params = serde_json::json!({ "forceUsage": true, "preferCachedUsage": !refresh });
         self.account_usage_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
@@ -7033,7 +7034,7 @@ impl Shell {
                     this.close_user_menu(cx);
                 } else {
                     this.user_menu.open(());
-                    this.load_account_usage(cx);
+                    this.load_account_usage(false, cx);
                 }
                 cx.notify();
             }))
@@ -7272,7 +7273,7 @@ impl Shell {
                     .cursor_pointer()
                     .text_color(theme.text_muted.opacity(0.6))
                     .hover(|s| s.text_color(theme.text_muted))
-                    .on_click(cx.listener(|this, _, _, cx| this.load_account_usage(cx)))
+                    .on_click(cx.listener(|this, _, _, cx| this.load_account_usage(true, cx)))
                     .child(icon(icons::REFRESH).size(px(10.0)))
                     .child(SharedString::from(if refreshing {
                         "Refreshing…"

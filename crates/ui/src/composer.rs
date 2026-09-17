@@ -4131,9 +4131,6 @@ pub struct Composer {
     /// Composer actions row plus the new-session floating target tab
     /// ([`Pickers::render_new_thread_target_selectors`]).
     pickers: Entity<Pickers>,
-    /// Draft text per chat key ("" = new-chat canvas), surviving navigation;
-    /// mirrored into [`crate::draft_store`] so it survives a restart too.
-    drafts: HashMap<String, String>,
     /// Stale stored drafts are dropped once, after the first chats frame.
     drafts_pruned: bool,
     /// Whether `current_key` is a canvas key (empty or a draft session) —
@@ -4166,7 +4163,7 @@ pub struct Composer {
     slash_cache: HashMap<HarnessId, Vec<SlashCommand>>,
     /// How each harness compacts (`native` / `slash` / `none`), cached like
     /// the command list; `compaction_probed` holds the ids already asked for.
-    compaction_cache: HashMap<HarnessId, SharedString>,
+    compaction_cache: HashMap<HarnessId, zeron_proto::CompactionKind>,
     compaction_probed: HashSet<HarnessId>,
     /// The `CompactChat` call in flight; the chat it belongs to lives on
     /// `AppState::compacting_chat`, which the transcript's trailer reads too.
@@ -4342,6 +4339,7 @@ impl Composer {
     }
 
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        crate::draft_store::ensure(cx);
         cx.on_release(|this, cx| this.release_queue_previews(cx))
             .detach();
         let input = cx.new(|cx| {
@@ -4415,7 +4413,6 @@ impl Composer {
             input,
             queue_edit_draft: None,
             pickers,
-            drafts: HashMap::new(),
             drafts_pruned: false,
             current_is_canvas,
             attachments: HashMap::new(),
@@ -4531,24 +4528,17 @@ impl Composer {
         composer
     }
 
-    /// Fill the per-key maps from the persisted store and show the current
-    /// key's text. The navigation swap only fires on a key CHANGE, so the
-    /// initial key needs this explicit load.
+    /// The store owns inactive drafts; a composer restores its current editor.
     fn restore_drafts(&mut self, cx: &mut Context<Self>) {
-        for (key, entry) in crate::draft_store::entries(cx) {
-            if !entry.prompt.is_empty() {
-                self.drafts.insert(key.clone(), entry.prompt);
-            }
-            if !entry.attachments.is_empty() {
-                self.attachments
-                    .entry(key.clone())
-                    .or_default()
-                    .extend(entry.attachments);
-            }
-            if !entry.appshots.is_empty() {
-                self.appshots.entry(key).or_default().extend(entry.appshots);
-            }
-        }
+        let entry = crate::draft_store::entry(&self.current_key, cx);
+        self.attachments
+            .entry(self.current_key.clone())
+            .or_default()
+            .extend(entry.attachments);
+        self.appshots
+            .entry(self.current_key.clone())
+            .or_default()
+            .extend(entry.appshots);
         self.apply_draft_text(cx);
     }
 
@@ -4561,9 +4551,8 @@ impl Composer {
     }
 
     fn apply_draft_text(&mut self, cx: &mut Context<Self>) {
-        if let Some(text) = self.drafts.get(&self.current_key).cloned()
-            && self.input.read(cx).text().is_empty()
-        {
+        if self.input.read(cx).text().is_empty() {
+            let text = crate::draft_store::entry(&self.current_key, cx).prompt;
             self.input.update(cx, |input, cx| input.set_text(text, cx));
         }
     }
@@ -4604,7 +4593,6 @@ impl Composer {
             .collect();
         self.drafts_pruned = true;
         let keep = |key: &str| live.contains(key);
-        self.drafts.retain(|key, _| keep(key));
         self.attachments.retain(|key, _| keep(key));
         self.appshots.retain(|key, _| keep(key));
         crate::draft_store::prune(keep, cx);
@@ -4615,9 +4603,14 @@ impl Composer {
     /// and its sends run on it.
     pub fn for_chat(state: Entity<AppState>, chat_id: String, cx: &mut Context<Self>) -> Self {
         let mut composer = Self::new(state, cx);
+        composer.attachments.clear();
+        composer.appshots.clear();
         composer.current_key = chat_id.clone();
         composer.current_is_canvas = false;
-        composer.apply_draft_text(cx);
+        composer
+            .input
+            .update(cx, |input, cx| input.set_text(String::new(), cx));
+        composer.restore_drafts(cx);
         composer
             .pickers
             .update(cx, |pickers, _| pickers.bind_chat(chat_id.clone()));
@@ -4881,7 +4874,6 @@ impl Composer {
     pub fn purge_chat(&mut self, chat_id: &str, cx: &mut Context<Self>) {
         self.attachments.remove(chat_id);
         self.appshots.remove(chat_id);
-        self.drafts.remove(chat_id);
         if crate::draft_store::remove(chat_id, cx) {
             cx.emit(ComposerEvent::UnsentChanged);
         }
@@ -5835,27 +5827,32 @@ impl Composer {
                     .map(|s| s.device_id.clone())
             });
         cx.spawn(async move |this, cx| {
-            let mut params = serde_json::json!({ "harness": harness });
-            if let (Some(target), Some(object)) = (&target, params.as_object_mut()) {
-                object.insert("targetDeviceId".into(), target.clone().into());
-            }
+            let params = zeron_proto::HarnessCompactionParams {
+                harness,
+                target_device_id: target,
+            };
             let result = engine
                 .client()
-                .call(methods::HARNESS_COMPACTION, params)
-                .await;
+                .call(
+                    methods::HARNESS_COMPACTION,
+                    serde_json::to_value(params).unwrap(),
+                )
+                .await
+                .and_then(|value| {
+                    serde_json::from_value::<zeron_proto::HarnessCompactionResult>(value)
+                        .map_err(|err| RpcError::Failed(err.to_string()))
+                });
             this.update(cx, |composer, cx| {
                 match result {
-                    Ok(value) => {
-                        if let Some(kind) = value.get("compaction").and_then(|v| v.as_str()) {
-                            composer
-                                .compaction_cache
-                                .insert(harness, kind.to_string().into());
-                        }
-                        if let Some(branching) = value.get("branching").and_then(|v| v.as_bool()) {
-                            composer.state.update(cx, |state, _| {
-                                state.harness_branching.insert(harness, branching);
-                            });
-                        }
+                    Ok(capabilities) => {
+                        composer
+                            .compaction_cache
+                            .insert(harness, capabilities.compaction);
+                        composer.state.update(cx, |state, _| {
+                            state
+                                .harness_branching
+                                .insert(harness, capabilities.branching);
+                        });
                     }
                     Err(err) => {
                         tracing::debug!(%err, "harness compaction probe failed");
@@ -5873,18 +5870,14 @@ impl Composer {
     /// Why this harness can never compact, if it cannot.
     fn unsupported_compaction(&self, cx: &App) -> Option<SharedString> {
         let harness = self.pickers.read(cx).resolved(cx).harness?;
-        (self
-            .compaction_cache
-            .get(&harness)
-            .map(SharedString::as_ref)
-            == Some("none"))
-        .then(|| {
-            format!(
-                "{} does not support compaction",
-                harness_display_name(harness)
-            )
-            .into()
-        })
+        (self.compaction_cache.get(&harness).copied() == Some(zeron_proto::CompactionKind::None))
+            .then(|| {
+                format!(
+                    "{} does not support compaction",
+                    harness_display_name(harness)
+                )
+                .into()
+            })
     }
 
     /// This composer's chat is compacting. Another chat's compaction must not
@@ -6324,12 +6317,15 @@ impl Composer {
                 let old_text = self.input.read(cx).text().to_string();
                 // Text typed on the pre-sync canvas (key "") belongs to the
                 // draft that key becomes once the boot frames land (d20).
+                let target_draft = crate::draft_store::entry(&key, cx);
                 let carry = self.current_key.is_empty()
                     && now_canvas
                     && !key.is_empty()
-                    && self.drafts.get(&key).is_none_or(String::is_empty);
+                    && target_draft.prompt.is_empty();
                 if carry {
-                    self.drafts.remove("");
+                    self.attachments
+                        .insert(key.clone(), target_draft.attachments);
+                    self.appshots.insert(key.clone(), target_draft.appshots);
                     if let Some(staged) = self.attachments.remove("") {
                         self.attachments
                             .entry(key.clone())
@@ -6342,12 +6338,19 @@ impl Composer {
                     crate::draft_store::remove("", cx);
                     old_text
                 } else {
-                    if old_text.is_empty() {
-                        self.drafts.remove(&self.current_key);
-                    } else {
-                        self.drafts.insert(self.current_key.clone(), old_text);
+                    let state = self.state.read(cx);
+                    let keep = !state.chats_synced
+                        || self.current_key.is_empty()
+                        || state.is_draft(&self.current_key)
+                        || state.chats.iter().any(|chat| chat.id == self.current_key)
+                        || state.send_pending(&self.current_key, chrono::Utc::now());
+                    if keep {
+                        self.sync_draft(cx);
                     }
-                    self.drafts.get(&key).cloned().unwrap_or_default()
+                    self.attachments
+                        .insert(key.clone(), target_draft.attachments);
+                    self.appshots.insert(key.clone(), target_draft.appshots);
+                    target_draft.prompt
                 }
             };
             self.current_key = key;
@@ -6597,7 +6600,6 @@ impl Composer {
         // so it never builds a `Run` and never writes a user entry.
         if let Some(focus) = compact_focus(&text) {
             self.input.update(cx, |input, cx| input.set_text("", cx));
-            self.drafts.remove(&self.current_key);
             self.sync_draft(cx);
             self.request_compaction(focus, cx);
             return;
@@ -6606,7 +6608,6 @@ impl Composer {
         // never runs a turn on THIS chat.
         if let Some(prompt) = sidechat_prompt(&text) {
             self.input.update(cx, |input, cx| input.set_text("", cx));
-            self.drafts.remove(&self.current_key);
             self.sync_draft(cx);
             self.request_sidechat(prompt, cx);
             return;
@@ -6874,7 +6875,6 @@ impl Composer {
         });
 
         self.input.update(cx, |input, cx| input.set_text("", cx));
-        self.drafts.remove(&self.current_key);
         self.sync_draft(cx);
         self.failure = None;
         self.sending = true;
@@ -7284,18 +7284,8 @@ impl Composer {
                         restore_key
                     });
                     composer.failure_key = Some(restore_key.clone());
-                    if is_new && composer.current_key != restore_key {
-                        // A re-key swap to the canvas is pending (the
-                        // select_chat(None) above); it loads this draft into
-                        // the input on flush — setting the input directly
-                        // here would be clobbered by that same swap.
-                        composer.drafts.insert(restore_key.clone(), restore_text.clone());
-                    } else {
-                        // Already keyed to the restore target (either an
-                        // existing chat, or the deleted row's watch event
-                        // re-keyed to the canvas before this handler ran —
-                        // no further swap will fire). Set the input directly.
-                        composer.input.update(cx, |input, cx| input.set_text(restore_text, cx));
+                    if composer.current_key == restore_key {
+                        composer.input.update(cx, |input, cx| input.set_text(restore_text.clone(), cx));
                     }
                     if !ordinary_staged.is_empty() {
                         // Merge by id (stashAttachments): files the user staged
@@ -7315,6 +7305,13 @@ impl Composer {
                         composer.attachments.insert(restore_key.clone(), merged);
                     }
                     composer.restore_failed_appshots(&staged_appshots, &err_chat_id, &restore_key);
+                    if crate::draft_store::set(&restore_key, crate::draft_store::DraftEntry {
+                        prompt: restore_text,
+                        attachments: composer.attachments.get(&restore_key).cloned().unwrap_or_default(),
+                        appshots: composer.appshots.get(&restore_key).cloned().unwrap_or_default(),
+                    }, cx) {
+                        cx.emit(ComposerEvent::UnsentChanged);
+                    }
                 }
                 cx.notify();
             })
@@ -9359,7 +9356,7 @@ mod tests {
                 });
                 composer
                     .compaction_cache
-                    .insert(HarnessId::Cursor, "none".into());
+                    .insert(HarnessId::Cursor, zeron_proto::CompactionKind::None);
                 assert_eq!(
                     composer.compact_disabled_reason(cx).as_deref(),
                     Some("Cursor does not support compaction")
@@ -9570,6 +9567,82 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
         assert_eq!(seen.get(), 0);
+    }
+
+    #[gpui::test]
+    fn initial_canvas_carry_preserves_an_attachment_only_draft(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            crate::draft_store::ensure(cx);
+            crate::draft_store::set(
+                "draft-target",
+                crate::draft_store::DraftEntry {
+                    attachments: vec![StagedAttachment {
+                        id: "image".into(),
+                        name: "image.png".into(),
+                        image: std::sync::Arc::new(gpui::Image::from_bytes(
+                            gpui::ImageFormat::Png,
+                            include_bytes!("../../../dist/macos/icon-1024.png").to_vec(),
+                        )),
+                    }],
+                    ..Default::default()
+                },
+                cx,
+            );
+        });
+        let (_dir, main) = composer_focus_window(cx);
+        main.update(cx, |composer, _, cx| {
+            assert!(composer.current_key.is_empty());
+            composer.seed_text("typed on initial canvas".into(), cx);
+            composer.state.update(cx, |state, _| {
+                state.draft_sessions.push(crate::draft_store::DraftSession {
+                    id: "draft-target".into(),
+                    ..Default::default()
+                });
+                state.active_draft = Some("draft-target".into());
+            });
+            composer.on_state_changed(cx);
+            assert_eq!(composer.input.read(cx).text(), "typed on initial canvas");
+            assert_eq!(composer.staged().len(), 1);
+            assert_eq!(
+                crate::draft_store::entry("draft-target", cx)
+                    .attachments
+                    .len(),
+                1
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui::test]
+    fn navigation_restores_the_latest_draft_from_another_composer(cx: &mut gpui::TestAppContext) {
+        let (_dir, main) = composer_focus_window(cx);
+        let state = main
+            .read_with(cx, |composer, _| composer.state.clone())
+            .unwrap();
+        main.update(cx, |composer, _, cx| {
+            state.update(cx, |state, _| {
+                state.chats = vec![chat_row("a", None), chat_row("b", None)];
+                state.selected_chat = Some("a".into());
+            });
+            composer.on_state_changed(cx);
+            composer.seed_text("old draft".into(), cx);
+            state.update(cx, |state, _| state.selected_chat = Some("b".into()));
+            composer.on_state_changed(cx);
+            composer.seed_text("other chat".into(), cx);
+        })
+        .unwrap();
+        let bound = cx.new(|cx| Composer::for_chat(state.clone(), "a".into(), cx));
+        bound.update(cx, |composer, cx| {
+            assert_eq!(composer.input.read(cx).text(), "old draft");
+            composer.seed_text("edited in another pane".into(), cx);
+        });
+        main.update(cx, |composer, _, cx| {
+            state.update(cx, |state, _| state.selected_chat = Some("a".into()));
+            composer.on_state_changed(cx);
+            assert_eq!(composer.input.read(cx).text(), "edited in another pane");
+            assert_eq!(crate::draft_store::entry("b", cx).prompt, "other chat");
+        })
+        .unwrap();
     }
 
     #[gpui::test]

@@ -419,6 +419,25 @@ impl SessionDoc {
             .collect())
     }
 
+    /// Find a completed assistant without materializing message parts. A
+    /// caller's previous match remains usable only while that slot still
+    /// holds a completed assistant (rewinds and imports can replace it).
+    pub fn completed_assistant_index(&self, previous: Option<usize>) -> Option<usize> {
+        let messages = self.doc.get_list("messages");
+        let complete = |index| {
+            let Some(loro::ValueOrContainer::Container(loro::Container::Map(entry))) =
+                messages.get(index)
+            else {
+                return false;
+            };
+            matches!(entry.get("role"), Some(loro::ValueOrContainer::Value(LoroValue::String(role))) if role.as_str() == "assistant")
+                && matches!(entry.get("status"), Some(loro::ValueOrContainer::Value(LoroValue::String(status))) if status.as_str() == "complete")
+        };
+        previous
+            .filter(|&index| complete(index))
+            .or_else(|| (0..messages.len()).rev().find(|&index| complete(index)))
+    }
+
     /// Read the commands ledger.
     ///
     /// Same skip-not-fail policy as `read_entries`: any device can append

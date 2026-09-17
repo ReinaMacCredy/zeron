@@ -37,8 +37,10 @@
 //! `GetCurrentPeriodUsage` call the Cursor app itself makes). Unlike zeron (fetch on every
 //! list, 60s cache), native only hits the network when `force_usage` is set —
 //! the default list stays offline-fast and deterministic; the UI passes
-//! `forceUsage` on page mount/refresh. Cached results (60s TTL) are served to
-//! non-forced lists in between.
+//! `forceUsage` on page mount/refresh. The usage menu also passes
+//! `preferCachedUsage` to probe only expired/missing slots. Cached results
+//! (60s TTL) are served to non-forced lists in between; concurrent probes share
+//! results, including remembered misses.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -231,6 +233,13 @@ impl LoginFlow {
 /// Cached usage probe result: the windows (or a remembered miss) + fetch time.
 type CachedUsage = (Option<UsageSnapshot>, Instant);
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UsageLoad {
+    Cached,
+    IfStale,
+    Refresh,
+}
+
 /// One live usage probe: rate-limit windows plus the plan label the provider
 /// reported alongside them (Codex's usage endpoint carries a live `plan_type`,
 /// which supersedes the login-time JWT claim — plan changes show up here
@@ -247,6 +256,7 @@ struct Inner {
     flows: Mutex<HashMap<String, LoginFlow>>,
     /// `"{harness}:{accountKey}"` → cached usage windows.
     usage_cache: Mutex<HashMap<String, CachedUsage>>,
+    usage_probe_lock: tokio::sync::Mutex<()>,
     /// Slots with a token refresh in flight — a second refresh of the same
     /// (commonly single-use) refresh token would revoke the family.
     inflight_refreshes: Mutex<std::collections::HashSet<String>>,
@@ -285,6 +295,7 @@ impl AgentAccounts {
                 http,
                 flows: Mutex::new(HashMap::new()),
                 usage_cache: Mutex::new(HashMap::new()),
+                usage_probe_lock: tokio::sync::Mutex::new(()),
                 inflight_refreshes: Mutex::new(std::collections::HashSet::new()),
             }),
         }
@@ -294,9 +305,19 @@ impl AgentAccounts {
 
     /// Detect both CLIs, auto-snapshot the live logins, and assemble the view.
     pub async fn list(&self, force_usage: bool) -> Result<AgentAccountsSnapshot, EngineError> {
-        if force_usage {
-            lock(&self.inner.usage_cache).clear();
-        }
+        self.list_with_usage(if force_usage {
+            UsageLoad::Refresh
+        } else {
+            UsageLoad::Cached
+        })
+        .await
+    }
+
+    pub(crate) async fn list_with_usage(
+        &self,
+        usage_load: UsageLoad,
+    ) -> Result<AgentAccountsSnapshot, EngineError> {
+        let requested_at = Instant::now();
         let mut warnings: Vec<AgentAccountWarning> = Vec::new();
         let mut active_keys: HashMap<HarnessId, String> = HashMap::new();
         let mut unreadable: HashMap<HarnessId, Detected> = HashMap::new();
@@ -342,7 +363,9 @@ impl AgentAccounts {
             let slots = self.read_slots(harness);
             for slot in &slots {
                 let active = active_key.as_deref() == Some(slot.account_key.as_str());
-                let usage = self.usage_for(harness, slot, active, force_usage).await;
+                let usage = self
+                    .usage_for(harness, slot, active, usage_load, requested_at)
+                    .await;
                 accounts.push(AgentAccount {
                     id: slot.id.clone(),
                     harness,
@@ -1177,17 +1200,29 @@ impl AgentAccounts {
         harness: HarnessId,
         slot: &Slot,
         is_active: bool,
-        force: bool,
+        usage_load: UsageLoad,
+        requested_at: Instant,
     ) -> Option<UsageSnapshot> {
         let key = format!("{}:{}", harness_slug(harness), slot.account_key);
-        if let Some((usage, at)) = lock(&self.inner.usage_cache).get(&key)
-            && at.elapsed() < USAGE_TTL
-        {
-            return usage.clone();
+        let cached = || {
+            lock(&self.inner.usage_cache)
+                .get(&key)
+                .and_then(|(usage, at)| {
+                    (at.elapsed() < USAGE_TTL
+                        && (usage_load != UsageLoad::Refresh || *at >= requested_at))
+                        .then(|| usage.clone())
+                })
+        };
+        if let Some(usage) = cached() {
+            return usage;
         }
-        if !force {
-            // Non-forced lists never hit the network (see module docs).
+        if usage_load == UsageLoad::Cached {
             return None;
+        }
+        let _probe = self.inner.usage_probe_lock.lock().await;
+        // A concurrent list may already have filled this slot, including a miss.
+        if let Some(usage) = cached() {
+            return usage;
         }
         let usage = match harness {
             HarnessId::ClaudeCode => self.claude_usage(slot, is_active).await,
@@ -2005,6 +2040,131 @@ fn write_file_atomic(file: &Path, bytes: &[u8], secret: bool) -> Result<(), Engi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn usage_fixture(path: &Path) -> (AgentAccounts, Slot) {
+        let accounts = AgentAccounts::new(AgentAccountsConfig {
+            data_dir: path.join("data"),
+            claude_config_dir: path.join("claude"),
+            claude_config_file: path.join("claude.json"),
+            codex_home: path.join("codex"),
+            cursor_sdk_auth_file: path.join("cursor.json"),
+        });
+        let slot: Slot = serde_json::from_value(serde_json::json!({
+            "id": "slot", "harness": "mock", "accountKey": "test",
+            "profile": { "email": "test@example.com", "authKind": "oauth" },
+            "credentials": {}, "savedAt": 0
+        }))
+        .unwrap();
+        (accounts, slot)
+    }
+
+    #[tokio::test]
+    async fn usage_fetch_reuses_fresh_hits_and_misses_but_refresh_bypasses_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let (accounts, slot) = usage_fixture(dir.path());
+        let key = format!("{}:test", harness_slug(HarnessId::Mock));
+        let old = Instant::now() - Duration::from_secs(1);
+        lock(&accounts.inner.usage_cache).insert(
+            key.clone(),
+            (
+                Some(UsageSnapshot {
+                    plan_label: Some("cached".into()),
+                    ..Default::default()
+                }),
+                old,
+            ),
+        );
+        let cached = accounts
+            .usage_for(
+                HarnessId::Mock,
+                &slot,
+                true,
+                UsageLoad::IfStale,
+                Instant::now(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cached.plan_label.as_deref(), Some("cached"));
+        assert_eq!(lock(&accounts.inner.usage_cache)[&key].1, old);
+        assert!(
+            accounts
+                .usage_for(
+                    HarnessId::Mock,
+                    &slot,
+                    true,
+                    UsageLoad::Refresh,
+                    Instant::now()
+                )
+                .await
+                .is_none()
+        );
+        let fetched = lock(&accounts.inner.usage_cache)[&key].1;
+        assert!(fetched > old);
+        assert!(
+            accounts
+                .usage_for(
+                    HarnessId::Mock,
+                    &slot,
+                    true,
+                    UsageLoad::IfStale,
+                    Instant::now()
+                )
+                .await
+                .is_none()
+        );
+        assert_eq!(lock(&accounts.inner.usage_cache)[&key].1, fetched);
+        lock(&accounts.inner.usage_cache).get_mut(&key).unwrap().1 = Instant::now() - USAGE_TTL;
+        accounts
+            .usage_for(
+                HarnessId::Mock,
+                &slot,
+                true,
+                UsageLoad::Cached,
+                Instant::now(),
+            )
+            .await;
+        assert!(lock(&accounts.inner.usage_cache)[&key].1.elapsed() >= USAGE_TTL);
+        accounts
+            .usage_for(
+                HarnessId::Mock,
+                &slot,
+                true,
+                UsageLoad::IfStale,
+                Instant::now(),
+            )
+            .await;
+        assert!(lock(&accounts.inner.usage_cache)[&key].1 > fetched);
+    }
+
+    #[tokio::test]
+    async fn usage_waiter_reuses_a_probe_completed_while_it_waited() {
+        let dir = tempfile::tempdir().unwrap();
+        let (accounts, slot) = usage_fixture(dir.path());
+        let key = format!("{}:test", harness_slug(HarnessId::Mock));
+        let probe = accounts.inner.usage_probe_lock.lock().await;
+        let requested_at = Instant::now();
+        let waiter = accounts.usage_for(
+            HarnessId::Mock,
+            &slot,
+            true,
+            UsageLoad::Refresh,
+            requested_at,
+        );
+        futures::pin_mut!(waiter);
+        assert!(futures::poll!(&mut waiter).is_pending());
+        lock(&accounts.inner.usage_cache).insert(
+            key,
+            (
+                Some(UsageSnapshot {
+                    plan_label: Some("shared".into()),
+                    ..Default::default()
+                }),
+                Instant::now(),
+            ),
+        );
+        drop(probe);
+        assert_eq!(waiter.await.unwrap().plan_label.as_deref(), Some("shared"));
+    }
 
     #[test]
     fn plan_labels() {

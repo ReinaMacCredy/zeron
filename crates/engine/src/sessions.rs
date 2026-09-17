@@ -140,6 +140,68 @@ struct RunHandle {
     routed_steers: Arc<Mutex<std::collections::VecDeque<RoutedSteer>>>,
 }
 
+enum RunMode {
+    Turn { steerable: bool },
+    Compaction,
+}
+
+struct RunSetup {
+    handle: RunHandle,
+    controls: RunControls,
+    engine_rx: mpsc::UnboundedReceiver<AgentEvent>,
+    cancel_rx: watch::Receiver<bool>,
+}
+
+impl RunSetup {
+    fn new(harness_id: HarnessId, request: &RunRequest, mode: RunMode) -> Self {
+        let (steerable, accepts_input, capacity) = match mode {
+            RunMode::Turn { steerable } => (steerable, true, 32),
+            RunMode::Compaction => (false, false, 1),
+        };
+        let (steer_tx, steer_rx) = mpsc::channel(capacity);
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let (engine_tx, engine_rx) = mpsc::unbounded_channel();
+        let pending_inputs: PendingInputs = Arc::new(Mutex::new(HashMap::new()));
+        let pending = pending_inputs.clone();
+        let events = engine_tx.clone();
+        let interrupt_token = CancellationToken::new();
+        let controls = RunControls {
+            request_input: Box::new(move |questions: Vec<UserInputQuestion>| {
+                let (tx, rx) = oneshot::channel();
+                if accepts_input {
+                    let request_id = new_id();
+                    lock(&pending).insert(request_id.clone(), tx);
+                    let _ = events.send(AgentEvent::InputRequested {
+                        request_id,
+                        questions,
+                    });
+                } else {
+                    let _ = tx.send(Vec::new());
+                }
+                rx
+            }),
+            steering: steer_rx,
+            interrupt: interrupt_token.clone(),
+        };
+        Self {
+            handle: RunHandle {
+                run_id: new_id(),
+                steerable,
+                runtime_config: RuntimeConfig::from_request(harness_id, request),
+                steer_tx,
+                interrupt_token,
+                cancel: cancel_tx,
+                engine_tx,
+                pending_inputs,
+                routed_steers: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            },
+            controls,
+            engine_rx,
+            cancel_rx,
+        }
+    }
+}
+
 /// One accepted-but-unconfirmed steer: enough to re-dispatch it verbatim.
 #[derive(Debug, Clone)]
 struct RoutedSteer {
@@ -173,7 +235,8 @@ struct Inner {
     /// and rewind). The durable copy is a `BranchPending` journal record
     /// newer than the chat's last `SessionStarted`; the run that applies it
     /// retires both through its own `SessionStarted`.
-    pending_branches: Mutex<HashMap<String, SessionBranch>>,
+    pending_branches: Mutex<HashMap<String, Option<SessionBranch>>>,
+    sidechat_contexts: Mutex<HashMap<String, SidechatContext>>,
     /// Chats with a compaction in flight — one per chat, and the reservation
     /// is taken before the run slot so two RPCs can never both pass the check.
     compacting: Mutex<std::collections::HashSet<String>>,
@@ -222,6 +285,7 @@ impl SessionsEngine {
                 last_requests: Mutex::new(HashMap::new()),
                 harness_sessions: Mutex::new(HashMap::new()),
                 pending_branches: Mutex::new(HashMap::new()),
+                sidechat_contexts: Mutex::new(HashMap::new()),
                 compacting: Mutex::new(std::collections::HashSet::new()),
                 compaction_timed_out: Mutex::new(std::collections::HashSet::new()),
                 titles: OnceLock::new(),
@@ -494,49 +558,20 @@ impl SessionsEngine {
         self.inner.inject_branch(chat_id, &mut request);
         lock(&self.inner.last_requests).insert(chat_id.to_string(), request.clone());
 
-        let run_id = new_id();
-        let (steer_tx, steer_rx) = mpsc::channel::<SteerMessage>(32);
-        let (cancel_tx, cancel_rx) = watch::channel(false);
-        let (engine_tx, engine_rx) = mpsc::unbounded_channel::<AgentEvent>();
-        let pending_inputs: PendingInputs = Arc::new(Mutex::new(HashMap::new()));
-
-        // Input bridge: the harness asks questions; we mint the request id, park the
-        // resolver for `respond_input`, and surface the event through the run pipeline.
-        let request_input = {
-            let pending = pending_inputs.clone();
-            let engine_tx = engine_tx.clone();
-            Box::new(move |questions: Vec<UserInputQuestion>| {
-                let (tx, rx) = oneshot::channel();
-                let request_id = new_id();
-                lock(&pending).insert(request_id.clone(), tx);
-                let _ = engine_tx.send(AgentEvent::InputRequested {
-                    request_id,
-                    questions,
-                });
-                rx
-            })
-        };
-        let interrupt_token = CancellationToken::new();
-        let controls = RunControls {
-            request_input,
-            steering: steer_rx,
-            interrupt: interrupt_token.clone(),
-        };
-
-        lock(&self.inner.runs).insert(
-            chat_id.to_string(),
-            RunHandle {
-                run_id: run_id.clone(),
+        let RunSetup {
+            handle: run,
+            controls,
+            engine_rx,
+            cancel_rx,
+        } = RunSetup::new(
+            harness_id,
+            &request,
+            RunMode::Turn {
                 steerable: harness.supports_steering(),
-                runtime_config: RuntimeConfig::from_request(harness_id, &request),
-                steer_tx,
-                interrupt_token,
-                cancel: cancel_tx,
-                engine_tx,
-                pending_inputs,
-                routed_steers: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             },
         );
+        let run_id = run.run_id.clone();
+        lock(&self.inner.runs).insert(chat_id.to_string(), run);
         self.set_status(chat_id, SessionStatus::Working, true);
         // AFTER Working (same causal-order guarantee as the steer path): the
         // lastMessageAt bump must never be observable ahead of the live run.
@@ -709,9 +744,10 @@ impl SessionsEngine {
             }
             pending.insert(chat_id.to_string());
         }
-        let _reservation = CompactionReservation {
+        let mut reservation = CompactionReservation {
             inner: self.inner.clone(),
             chat_id: chat_id.to_string(),
+            run_id: None,
         };
 
         let (harness_id, mut request) = self.compaction_request(chat_id)?;
@@ -745,52 +781,30 @@ impl SessionsEngine {
         self.interrupt(chat_id).await?;
 
         let handle = self.doc_handle(chat_id)?;
-        let run_id = new_id();
         let run_cwd = request.cwd.clone();
-        let interrupt_token = CancellationToken::new();
+        let RunSetup {
+            handle: run,
+            controls,
+            engine_rx: _engine_rx,
+            mut cancel_rx,
+        } = RunSetup::new(harness_id, &request, RunMode::Compaction);
+        let interrupt_token = run.interrupt_token.clone();
         let _cancel_on_drop = interrupt_token.clone().drop_guard();
-        let (steer_tx, steer_rx) = mpsc::channel::<SteerMessage>(1);
-        let (cancel_tx, mut cancel_rx) = watch::channel(false);
-        let (engine_tx, _engine_rx) = mpsc::unbounded_channel::<AgentEvent>();
         {
             let mut runs = lock(&self.inner.runs);
             if runs.contains_key(chat_id) {
                 return Err(EngineError::Other("Chat is busy".into()));
             }
-            runs.insert(
-                chat_id.to_string(),
-                RunHandle {
-                    run_id: run_id.clone(),
-                    // Never steerable: a user prompt must not land in the
-                    // compaction's mailbox as this run's next turn.
-                    steerable: false,
-                    runtime_config: RuntimeConfig::from_request(harness_id, &request),
-                    steer_tx,
-                    interrupt_token: interrupt_token.clone(),
-                    cancel: cancel_tx,
-                    engine_tx,
-                    pending_inputs: Arc::new(Mutex::new(HashMap::new())),
-                    routed_steers: Arc::new(Mutex::new(std::collections::VecDeque::new())),
-                },
-            );
+            reservation.run_id = Some(run.run_id.clone());
+            runs.insert(chat_id.to_string(), run);
         }
         self.set_status(chat_id, SessionStatus::Working, true);
 
-        let controls = RunControls {
-            // A compaction must never park on a question.
-            request_input: Box::new(|_questions: Vec<UserInputQuestion>| {
-                let (tx, rx) = oneshot::channel();
-                let _ = tx.send(Vec::new());
-                rx
-            }),
-            steering: steer_rx,
-            interrupt: interrupt_token.clone(),
-        };
         let started = match &compaction {
             Compaction::Native => harness.compact(request, controls).await,
             _ => harness.run(request, controls).await,
         };
-        let result = match started {
+        match started {
             Err(err) => Err(EngineError::Harness(err)),
             Ok(stream) => {
                 match tokio::time::timeout(
@@ -807,10 +821,7 @@ impl SessionsEngine {
                     Ok(drain) => self.settle_compaction(&handle, drain),
                 }
             }
-        };
-        self.inner.remove_run(chat_id, &run_id);
-        self.set_status(chat_id, SessionStatus::Idle, false);
-        result
+        }
     }
 
     /// Write the compaction's doc effects: one system entry, then the meter
@@ -1129,7 +1140,7 @@ impl SessionsEngine {
             // same harness conversation (zeron recoverDraft, sessions.ts:538).
             if let Some((session_id, cwd)) = self.inner.journal_harness_session(&chat_id) {
                 self.inner
-                    .remember_harness_session(&chat_id, &session_id, &cwd);
+                    .cache_harness_session(&chat_id, &session_id, &cwd);
             }
             // The revival prompt: the last user message (idempotent re-dispatch
             // under the SAME id — `write_user_message` dedupes by id, so the
@@ -1356,6 +1367,13 @@ fn last_chars(text: &str, max: usize) -> String {
     text.chars().skip(count - max).collect()
 }
 
+#[derive(Default)]
+struct SidechatContext {
+    completed_assistant: Option<usize>,
+    answer_version: Option<loro::VersionVector>,
+    source: Option<(String, loro::VersionVector, String)>,
+}
+
 impl Inner {
     /// What a sidechat's harness receives in place of the typed text: the
     /// boundary instruction, the source transcript on the first turn, and the
@@ -1369,29 +1387,42 @@ impl Inner {
             .flatten()?
             .sidechat_source_chat_id?;
         let host = self.doc_host()?;
-        // First turn = this sidechat has no completed assistant entry yet, so
-        // an interrupted first turn re-sends the copy rather than leaving the
-        // harness with a boundary and no context.
-        let answered = host
-            .open(chat_id)
-            .ok()
-            .and_then(|handle| handle.doc().read_entries().ok())
-            .is_some_and(|entries| {
-                entries.iter().any(|entry| {
-                    entry.role == MessageRole::Assistant
-                        && entry.status == Some(MessageStatus::Complete)
-                })
-            });
-        let copy = if answered {
-            String::new()
-        } else {
-            host.open(&source_id)
-                .ok()
-                .and_then(|handle| handle.doc().read_entries().ok())
-                .map(|entries| bounded_source_copy(&entries, SIDECHAT_CONTEXT_BUDGET_CHARS))
-                .unwrap_or_default()
+        let handle = host.open(chat_id).ok()?;
+        let mut contexts = lock(&self.sidechat_contexts);
+        let context = contexts.entry(chat_id.to_string()).or_default();
+        let version = handle.doc().doc().oplog_vv();
+        if context.answer_version.as_ref() != Some(&version) {
+            context.completed_assistant = handle
+                .doc()
+                .completed_assistant_index(context.completed_assistant);
+            context.answer_version = Some(version);
+        }
+        if context.completed_assistant.is_some() {
+            context.source = None;
+            return Some(sidechat_prompt(typed, ""));
+        }
+        // An interrupted first turn still carries source context. Refresh the
+        // bounded copy only when its source changes; never cache an open error.
+        let Ok(source) = host.open(&source_id) else {
+            return Some(sidechat_prompt(typed, ""));
         };
-        Some(sidechat_prompt(typed, &copy))
+        let source_version = source.doc().doc().oplog_vv();
+        if context
+            .source
+            .as_ref()
+            .is_none_or(|(id, version, _)| id != &source_id || version != &source_version)
+        {
+            let copy = source
+                .doc()
+                .read_entries()
+                .ok()
+                .map(|entries| bounded_source_copy(&entries, SIDECHAT_CONTEXT_BUDGET_CHARS));
+            let Some(copy) = copy else {
+                return Some(sidechat_prompt(typed, ""));
+            };
+            context.source = Some((source_id, source_version, copy));
+        }
+        Some(sidechat_prompt(typed, &context.source.as_ref()?.2))
     }
 
     /// Journal + broadcast one event (the two unconditional legs of the pipeline).
@@ -1625,7 +1656,12 @@ impl Inner {
         if session_id.is_empty() {
             return;
         }
-        lock(&self.pending_branches).remove(chat_id);
+        lock(&self.pending_branches).insert(chat_id.to_string(), None);
+        self.cache_harness_session(chat_id, session_id, cwd);
+    }
+
+    /// Recovering an older session does not consume a later pending branch.
+    fn cache_harness_session(&self, chat_id: &str, session_id: &str, cwd: &str) {
         lock(&self.harness_sessions).insert(
             chat_id.to_string(),
             HarnessSessionRef {
@@ -1667,7 +1703,7 @@ impl Inner {
         }
         let (session_id, session_cwd) = self.journal_harness_session(chat_id)?;
         // Cache the journal hit (memory + row) so later dispatches skip the scan.
-        self.remember_harness_session(chat_id, &session_id, &session_cwd);
+        self.cache_harness_session(chat_id, &session_id, &session_cwd);
         cwd_ok(&session_cwd).then_some(session_id)
     }
 
@@ -1697,8 +1733,9 @@ impl Inner {
     /// The branch the chat's next run must apply: the live map, else the
     /// journal (a `BranchPending` newer than the last `SessionStarted`).
     fn pending_branch(&self, chat_id: &str) -> Option<SessionBranch> {
-        if let Some(branch) = lock(&self.pending_branches).get(chat_id).cloned() {
-            return Some(branch);
+        let mut branches = lock(&self.pending_branches);
+        if let Some(branch) = branches.get(chat_id) {
+            return branch.clone();
         }
         let events = self.journal.replay(chat_id, 0).ok()?;
         let mut pending = None;
@@ -1711,14 +1748,12 @@ impl Inner {
                 _ => {}
             }
         }
-        if let Some(branch) = &pending {
-            lock(&self.pending_branches).insert(chat_id.to_string(), branch.clone());
-        }
+        branches.insert(chat_id.to_string(), pending.clone());
         pending
     }
 
     fn set_pending_branch(&self, chat_id: &str, branch: SessionBranch) {
-        lock(&self.pending_branches).insert(chat_id.to_string(), branch.clone());
+        lock(&self.pending_branches).insert(chat_id.to_string(), Some(branch.clone()));
         self.publish(
             chat_id,
             &AgentEvent::BranchPending {
@@ -1730,7 +1765,7 @@ impl Inner {
 
     /// Explicit "do not resume": the next run starts a fresh harness session.
     fn tombstone_harness_session(&self, chat_id: &str, cwd: &str) {
-        lock(&self.pending_branches).remove(chat_id);
+        lock(&self.pending_branches).insert(chat_id.to_string(), None);
         lock(&self.harness_sessions).insert(
             chat_id.to_string(),
             HarnessSessionRef {
@@ -1796,10 +1831,13 @@ impl Inner {
         found
     }
 
-    fn remove_run(&self, chat_id: &str, run_id: &str) {
+    fn remove_run(&self, chat_id: &str, run_id: &str) -> bool {
         let mut runs = lock(&self.runs);
         if runs.get(chat_id).is_some_and(|h| h.run_id == run_id) {
             runs.remove(chat_id);
+            true
+        } else {
+            false
         }
     }
 }
@@ -1815,10 +1853,17 @@ const COMPACT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120)
 struct CompactionReservation {
     inner: Arc<Inner>,
     chat_id: String,
+    run_id: Option<String>,
 }
 
 impl Drop for CompactionReservation {
     fn drop(&mut self) {
+        if let Some(run_id) = &self.run_id
+            && self.inner.remove_run(&self.chat_id, run_id)
+        {
+            self.inner
+                .set_status(&self.chat_id, SessionStatus::Idle, false);
+        }
         lock(&self.inner.compacting).remove(&self.chat_id);
     }
 }
@@ -3201,6 +3246,36 @@ async fn drive_run(
 mod tests {
     use super::{RuntimeConfig, subagent_doc_id};
     use zeron_proto::{HarnessId, RunRequest, SandboxLevel};
+
+    #[test]
+    fn pending_branch_caches_misses_and_tracks_lifecycle_updates() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = SessionsEngine::new(
+            "host".into(),
+            Arc::new(RunJournal::open(dir.path().join("journals")).unwrap()),
+            Arc::new(HarnessRegistry::new()),
+        );
+        assert!(sessions.inner.pending_branch("chat").is_none());
+        assert!(matches!(
+            lock(&sessions.inner.pending_branches).get("chat"),
+            Some(None)
+        ));
+        let branch = SessionBranch {
+            keep: Some("reply-1".into()),
+            drop: None,
+        };
+        sessions.inner.set_pending_branch("chat", branch.clone());
+        assert_eq!(sessions.inner.pending_branch("chat"), Some(branch));
+        sessions
+            .inner
+            .remember_harness_session("chat", "session", "/tmp");
+        assert!(sessions.inner.pending_branch("chat").is_none());
+        assert!(matches!(
+            lock(&sessions.inner.pending_branches).get("chat"),
+            Some(None)
+        ));
+    }
 
     #[tokio::test]
     async fn generated_image_failure_is_sanitized_even_inside_subagents() {

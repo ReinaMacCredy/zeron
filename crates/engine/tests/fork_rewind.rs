@@ -388,6 +388,34 @@ async fn fork_survives_an_engine_restart_before_its_first_run() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn rewind_survives_an_engine_restart_before_the_next_run() {
+    let tmp = tempfile::tempdir().unwrap();
+    {
+        let rig = rig(tmp.path(), true).await;
+        rig.turn(SOURCE, "first", "m1").await;
+        rig.turn(SOURCE, "second", "m2").await;
+        rig.core
+            .sessions
+            .rewind_chat(SOURCE, &rig.prompt_id(SOURCE, 2))
+            .await
+            .unwrap();
+        rig.core.shutdown().await;
+    }
+    let rig = rig(tmp.path(), true).await;
+    rig.turn(SOURCE, "after restart", "m3").await;
+    assert_eq!(
+        rig.seen()[0],
+        Seen {
+            resume: Some("sess-1".into()),
+            branch: Some(SessionBranch {
+                keep: Some("uuid-reply-1".into()),
+                drop: Some("uuid-user-2".into()),
+            }),
+        }
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn rewind_truncates_the_doc_and_branches_after_the_previous_reply() {
     let tmp = tempfile::tempdir().unwrap();
     let rig = rig(tmp.path(), true).await;

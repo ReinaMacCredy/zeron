@@ -487,3 +487,49 @@ async fn a_steered_prompt_is_wrapped_too() {
         "the doc entry is the typed text"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cached_context_tracks_source_edits_and_removed_answers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let rig = rig(tmp.path(), false).await;
+    rig.turn(SOURCE, "original context", "src-1").await;
+    rig.core.workspace.create_sidechat(SOURCE, SIDE).unwrap();
+    rig.turn(SIDE, "first question", "side-1").await;
+    let side = rig.core.doc_host.open(SIDE).unwrap();
+    let answer = entries(&rig.core, SIDE).last().unwrap().id.clone();
+    side.doc()
+        .set_message_status(&answer, MessageStatus::Aborted)
+        .unwrap();
+    rig.turn(SOURCE, "new source context", "src-2").await;
+    rig.turn(SIDE, "retry question", "side-2").await;
+    assert!(
+        rig.harness
+            .run_prompts
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .contains("new source context")
+    );
+    rig.turn(SIDE, "follow-up", "side-3").await;
+    assert!(
+        !rig.harness
+            .run_prompts
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .contains("<sidechat_context>")
+    );
+    side.doc().truncate_from("side-1").unwrap();
+    rig.turn(SIDE, "after rewind", "side-4").await;
+    assert!(
+        rig.harness
+            .run_prompts
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .contains("new source context")
+    );
+}

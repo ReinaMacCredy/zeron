@@ -341,6 +341,8 @@ struct ResizeTerminalParams {
 struct ListAgentAccountsParams {
     #[serde(default)]
     force_usage: Option<bool>,
+    #[serde(default)]
+    prefer_cached_usage: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1313,20 +1315,15 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&commands)
             }
             methods::HARNESS_COMPACTION => {
-                let p: ListModelsParams = parse_params(params)?;
+                let p: zeron_proto::HarnessCompactionParams = parse_params(params)?;
                 let harness = self
                     .registry
                     .resolve(p.harness)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
-                let kind = match harness.compaction() {
-                    zeron_proto::Compaction::Native => "native",
-                    zeron_proto::Compaction::SlashText(_) => "slash",
-                    zeron_proto::Compaction::None => "none",
-                };
-                RpcReply::value(&serde_json::json!({
-                    "compaction": kind,
-                    "branching": harness.branching(),
-                }))
+                RpcReply::value(&zeron_proto::HarnessCompactionResult {
+                    compaction: harness.compaction().into(),
+                    branching: harness.branching(),
+                })
             }
             methods::COMPACT_CHAT => {
                 let p: CompactChatParams = parse_params(params)?;
@@ -2323,7 +2320,13 @@ impl RpcService for EngineRpc {
                 let p: ListAgentAccountsParams = parse_params(params)?;
                 let snapshot = self
                     .agent_accounts
-                    .list(p.force_usage.unwrap_or(false))
+                    .list_with_usage(if !p.force_usage.unwrap_or(false) {
+                        crate::agent_accounts::UsageLoad::Cached
+                    } else if p.prefer_cached_usage {
+                        crate::agent_accounts::UsageLoad::IfStale
+                    } else {
+                        crate::agent_accounts::UsageLoad::Refresh
+                    })
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&snapshot)

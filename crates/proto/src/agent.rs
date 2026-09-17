@@ -381,6 +381,40 @@ pub enum Compaction {
     None,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CompactionKind {
+    Native,
+    Slash,
+    None,
+}
+
+impl From<Compaction> for CompactionKind {
+    fn from(compaction: Compaction) -> Self {
+        match compaction {
+            Compaction::Native => Self::Native,
+            Compaction::SlashText(_) => Self::Slash,
+            Compaction::None => Self::None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessCompactionParams {
+    pub harness: HarnessId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_device_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessCompactionResult {
+    pub compaction: CompactionKind,
+    #[serde(default)]
+    pub branching: bool,
+}
+
 /// A file modification carried inline on a tool result (ACP
 /// `ToolCallContent::Diff`). `old_text: None` means a new file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -571,6 +605,50 @@ pub enum AgentEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compaction_capability_keeps_the_existing_wire_shape() {
+        for (capability, wire) in [
+            (Compaction::Native, "native"),
+            (Compaction::SlashText("/compact".into()), "slash"),
+            (Compaction::None, "none"),
+        ] {
+            let result = HarnessCompactionResult {
+                compaction: capability.into(),
+                branching: true,
+            };
+            let json = serde_json::to_value(&result).unwrap();
+            assert_eq!(
+                json,
+                serde_json::json!({"compaction": wire, "branching": true})
+            );
+            assert_eq!(
+                serde_json::from_value::<HarnessCompactionResult>(json)
+                    .unwrap()
+                    .compaction,
+                result.compaction
+            );
+        }
+        let legacy = serde_json::from_value::<HarnessCompactionResult>(
+            serde_json::json!({"compaction": "none"}),
+        )
+        .unwrap();
+        assert!(!legacy.branching);
+        assert!(
+            serde_json::from_value::<HarnessCompactionResult>(
+                serde_json::json!({"compaction": "invalid"})
+            )
+            .is_err()
+        );
+        let params = HarnessCompactionParams {
+            harness: HarnessId::Mock,
+            target_device_id: None,
+        };
+        assert_eq!(
+            serde_json::to_value(params).unwrap(),
+            serde_json::json!({"harness": "mock"})
+        );
+    }
 
     #[test]
     fn agent_event_round_trips() {
