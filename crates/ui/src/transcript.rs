@@ -672,28 +672,11 @@ fn thought_block_lines(block: &Block, indent: usize, out: &mut Vec<Vec<InlineRun
 
 /// A reasoning part as a tool-group chip: "Thought process" header over the
 /// thought's markdown flattened into styled detail lines (analytic height —
-/// the group's fold tween needs it; see [`thought_lines`]). Capped like tool
-/// outputs, with the counted tail. `live` = the part is still streaming
-/// (chip defaults open).
+/// the group's fold tween needs it; see [`thought_lines`]). Never capped:
+/// the thought is the record, and the tail row had no expand affordance.
+/// `live` = the part is still streaming (chip defaults open).
 fn thought_item(tree: &BlockTree, live: bool) -> ToolItem {
-    let mut lines = thought_lines(tree);
-    let truncated_by = lines.len().saturating_sub(OUTPUT_DETAIL_MAX_LINES);
-    if truncated_by > 0 {
-        // Keep the TAIL while streaming (the fresh thinking is the signal);
-        // settled thoughts keep the head like tool outputs do.
-        if live {
-            lines.drain(..truncated_by);
-            // The cut can land on a block separator — drop the orphan blank.
-            while lines
-                .first()
-                .is_some_and(|l| l.iter().all(|r| r.text.trim().is_empty()))
-            {
-                lines.remove(0);
-            }
-        } else {
-            lines.truncate(OUTPUT_DETAIL_MAX_LINES);
-        }
-    }
+    let lines = thought_lines(tree);
     ToolItem {
         call: ToolCall::Unknown {
             name: "Thought process".into(),
@@ -701,12 +684,7 @@ fn thought_item(tree: &BlockTree, live: bool) -> ToolItem {
         },
         is_error: false,
         resolved: !live,
-        detail: (!lines.is_empty()).then(|| {
-            Arc::new(ToolDetail::Thought {
-                lines,
-                truncated_by,
-            })
-        }),
+        detail: (!lines.is_empty()).then(|| Arc::new(ToolDetail::Thought { lines })),
         invocation: None,
         output_ref: None,
         output_bytes: None,
@@ -730,10 +708,8 @@ pub enum ToolDetail {
     /// A thought's markdown, pre-flattened into wrapped STYLED lines — one
     /// fixed-height row each, so the height stays analytic like `Output`
     /// while inline markers render as real styling ([`thought_lines`]).
-    Thought {
-        lines: Vec<Vec<InlineRun>>,
-        truncated_by: usize,
-    },
+    /// Uncapped — see [`thought_item`].
+    Thought { lines: Vec<Vec<InlineRun>> },
     /// A file diff, in the changes pane's model: hunks with 3 lines of
     /// context, dual line numbers, and (for recognized languages) syntax
     /// tokens — rendered by `changes::render_file_body`.
@@ -1111,16 +1087,12 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
                 let bytes: usize = lines.iter().map(|l| l.len()).sum();
                 acc.extend_from_slice(&(bytes as u32).to_le_bytes());
             }
-            Some(ToolDetail::Thought {
-                lines,
-                truncated_by,
-            }) => {
+            Some(ToolDetail::Thought { lines }) => {
                 // Byte-exact plus style bits: a live mend can restyle runs
                 // without changing the flattened length, and the row must
                 // still re-splice.
                 acc.push(4);
                 acc.extend_from_slice(&(lines.len() as u32).to_le_bytes());
-                acc.extend_from_slice(&(*truncated_by as u32).to_le_bytes());
                 for line in lines {
                     for run in line {
                         acc.extend_from_slice(run.text.as_bytes());
@@ -1911,13 +1883,7 @@ pub fn detail_height(detail: &ToolDetail) -> f32 {
             let rows = lines.len() + usize::from(*truncated_by > 0);
             rows as f32 * OUTPUT_LINE_HEIGHT + OUTPUT_BODY_PAD
         }
-        ToolDetail::Thought {
-            lines,
-            truncated_by,
-        } => {
-            let rows = lines.len() + usize::from(*truncated_by > 0);
-            rows as f32 * OUTPUT_LINE_HEIGHT + OUTPUT_BODY_PAD
-        }
+        ToolDetail::Thought { lines } => lines.len() as f32 * OUTPUT_LINE_HEIGHT + OUTPUT_BODY_PAD,
         ToolDetail::Diff { file, .. } => crate::changes::body_height(file),
         ToolDetail::Stats { stats } => stats.len() as f32 * OUTPUT_LINE_HEIGHT + OUTPUT_BODY_PAD,
     };
@@ -7116,10 +7082,7 @@ fn detail_body(
                 block.child(more_lines_row(*truncated_by, theme))
             })
             .into_any_element(),
-        ToolDetail::Thought {
-            lines,
-            truncated_by,
-        } => body
+        ToolDetail::Thought { lines } => body
             .py(px(6.0))
             .text_size(px(TOOL_TEXT_SIZE))
             .children(lines.iter().map(|line| {
@@ -7140,14 +7103,11 @@ fn detail_body(
                         .child(StyledText::new(text).with_runs(runs)),
                 )
             }))
-            .when(*truncated_by > 0, |block| {
-                block.child(more_lines_row(*truncated_by, theme))
-            })
             .into_any_element(),
     }
 }
 
-/// The counted-tail row under a truncated Output/Thought detail.
+/// The counted-tail row under a truncated Output detail.
 fn more_lines_row(truncated_by: usize, theme: &Theme) -> gpui::Div {
     div()
         .h(px(OUTPUT_LINE_HEIGHT))
@@ -9330,6 +9290,21 @@ mod tests {
             panic!("expected a tool group");
         };
         assert!(tools[0].resolved, "a followed thought is settled");
+    }
+
+    #[test]
+    fn thought_detail_is_never_capped() {
+        let text = (0..40).map(|i| format!("line {i}\n\n")).collect::<String>();
+        for live in [true, false] {
+            let item = thought_item(&parse_full(&text), live);
+            let Some(ToolDetail::Thought { lines }) = item.detail.as_deref() else {
+                panic!("expected a thought detail");
+            };
+            let joined: Vec<String> = lines.iter().map(|l| line_string(l)).collect();
+            assert!(joined.contains(&"line 0".to_string()), "{joined:?}");
+            assert!(joined.contains(&"line 39".to_string()), "{joined:?}");
+            assert!(lines.len() > OUTPUT_DETAIL_MAX_LINES);
+        }
     }
 
     fn thought_of(text: &str) -> Vec<Vec<InlineRun>> {
