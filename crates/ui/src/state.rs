@@ -642,6 +642,11 @@ pub struct AppState {
     /// the local device.
     pub selected_device: Option<String>,
     pub selected_chat: Option<String>,
+    /// Pre-session drafts (t3code draft sessions), device-local. The canvas
+    /// is always one of them (d20): `active_draft` names the one the
+    /// composer shows while `selected_chat` is `None`.
+    pub draft_sessions: Vec<crate::draft_store::DraftSession>,
+    pub active_draft: Option<String>,
     /// Boot auto-select happened (or a manual selection superseded it).
     pub auto_selected: bool,
     /// First chats / spaces watch frame has landed — device-local state that
@@ -761,6 +766,8 @@ impl AppState {
             no_project: false,
             selected_device: None,
             selected_chat: None,
+            draft_sessions: Vec::new(),
+            active_draft: None,
             transcript: Vec::new(),
             queue: Vec::new(),
             context_usage: None,
@@ -1470,6 +1477,7 @@ impl AppState {
             self.selected_space = first;
         }
         self.selected_device = Some(device_id);
+        self.record_draft_target(cx);
         cx.notify();
     }
 
@@ -1881,6 +1889,185 @@ impl AppState {
     /// dropping the old task drops its stream receiver, which cancels the doc
     /// watch server-side. Selecting a chat also lands in its space and marks it
     /// seen (a global-list click must switch the tab strip too).
+    // ---- draft sessions ----
+
+    pub fn is_draft(&self, id: &str) -> bool {
+        self.draft_sessions.iter().any(|d| d.id == id)
+    }
+
+    pub fn draft_session(&self, id: &str) -> Option<&crate::draft_store::DraftSession> {
+        self.draft_sessions.iter().find(|d| d.id == id)
+    }
+
+    /// The identity the main area shows: the selected chat, else the draft on
+    /// the canvas. Tabs, the switcher and the composer key all read this.
+    pub fn focused_id(&self) -> Option<String> {
+        self.selected_chat
+            .clone()
+            .or_else(|| self.active_draft.clone())
+    }
+
+    /// The canvas is always a draft (d20): keep the active one, mint if none.
+    pub fn ensure_draft(&mut self, cx: &mut Context<Self>) -> String {
+        if let Some(id) = self.active_draft.clone()
+            && self.is_draft(&id)
+        {
+            return id;
+        }
+        self.mint_draft(cx)
+    }
+
+    /// New session (⌘N): an empty active draft is reused; an invested one
+    /// keeps its sidebar row and a fresh draft opens beside it.
+    pub fn new_draft(&mut self, cx: &mut Context<Self>) -> String {
+        if let Some(id) = self.active_draft.clone()
+            && self.is_draft(&id)
+            && !crate::draft_store::has_content(&id, cx)
+        {
+            return id;
+        }
+        self.mint_draft(cx)
+    }
+
+    fn mint_draft(&mut self, cx: &mut Context<Self>) -> String {
+        let session = crate::draft_store::DraftSession {
+            id: uuid::Uuid::new_v4().to_string(),
+            space_id: self.selected_space_row().map(|s| s.id.clone()),
+            no_project: self.no_project,
+            device_id: self.effective_device_id(),
+            branch: None,
+            new_worktree: false,
+            created_at: Utc::now(),
+        };
+        let id = session.id.clone();
+        crate::draft_store::set_session(session.clone(), cx);
+        self.draft_sessions.push(session);
+        self.active_draft = Some(id.clone());
+        cx.notify();
+        id
+    }
+
+    /// Show a draft on the canvas, restoring the target it was minted (or
+    /// last edited) with. Leaving a chat for it clears the transcript like
+    /// any canvas navigation; leaving an empty draft discards that one.
+    pub fn open_draft(&mut self, id: String, cx: &mut Context<Self>) {
+        let Some(session) = self.draft_session(&id).cloned() else {
+            return;
+        };
+        if self.selected_chat.is_none() {
+            self.leave_draft(cx);
+        }
+        // Target picks record onto `active_draft`; clear it while restoring.
+        self.active_draft = None;
+        if session.no_project {
+            self.select_space(None, cx);
+            if let Some(device) = session.device_id.clone() {
+                self.select_device(device, cx);
+            }
+        } else if let Some(space_id) = session.space_id.clone()
+            && self.space_row(&space_id).is_some()
+        {
+            self.select_space(Some(space_id), cx);
+        }
+        self.active_draft = Some(id);
+        self.select_chat(None, cx);
+        cx.notify();
+    }
+
+    /// Background start (d23): `chat_id`'s draft session is promoted without
+    /// being selected, and the canvas moves on to a fresh draft carrying the
+    /// same target, ref and checkout kind (t3code
+    /// `resolveBackgroundDraftWorkspaceOptions`).
+    pub fn start_draft_in_background(&mut self, chat_id: &str, cx: &mut Context<Self>) -> String {
+        let Some(session) = self.draft_session(chat_id).cloned() else {
+            return self.ensure_draft(cx);
+        };
+        self.discard_draft(chat_id, cx);
+        let next = crate::draft_store::DraftSession {
+            id: uuid::Uuid::new_v4().to_string(),
+            created_at: Utc::now(),
+            ..session
+        };
+        let id = next.id.clone();
+        crate::draft_store::set_session(next.clone(), cx);
+        self.draft_sessions.push(next);
+        self.active_draft = Some(id.clone());
+        cx.notify();
+        id
+    }
+
+    /// The draft leaves the canvas: an invested one keeps its session (and
+    /// sidebar row), an empty one dies (t3code zombie rule).
+    fn leave_draft(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.active_draft.take() else {
+            return;
+        };
+        if !crate::draft_store::has_content(&id, cx) {
+            self.discard_draft(&id, cx);
+        }
+    }
+
+    pub fn discard_draft(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.draft_sessions.retain(|d| d.id != id);
+        crate::draft_store::remove_session(id, cx);
+        crate::draft_store::remove(id, cx);
+        if self.active_draft.as_deref() == Some(id) {
+            self.active_draft = None;
+        }
+        cx.notify();
+    }
+
+    /// Space/device picks made while a draft is on the canvas belong to it.
+    fn record_draft_target(&mut self, cx: &mut Context<Self>) {
+        if self.selected_chat.is_some() {
+            return;
+        }
+        let Some(id) = self.active_draft.clone() else {
+            return;
+        };
+        let space_id = self.selected_space_row().map(|s| s.id.clone());
+        let no_project = self.no_project;
+        let device_id = self.effective_device_id();
+        let Some(session) = self.draft_sessions.iter_mut().find(|d| d.id == id) else {
+            return;
+        };
+        if session.space_id == space_id
+            && session.no_project == no_project
+            && session.device_id == device_id
+        {
+            return;
+        }
+        session.space_id = space_id;
+        session.no_project = no_project;
+        session.device_id = device_id;
+        crate::draft_store::set_session(session.clone(), cx);
+    }
+
+    /// Ref / checkout-kind picks from the composer footer (see
+    /// [`crate::pickers::Pickers`]) belong to the draft on the canvas.
+    pub fn record_draft_checkout(
+        &mut self,
+        branch: Option<String>,
+        new_worktree: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_chat.is_some() {
+            return;
+        }
+        let Some(id) = self.active_draft.clone() else {
+            return;
+        };
+        let Some(session) = self.draft_sessions.iter_mut().find(|d| d.id == id) else {
+            return;
+        };
+        if session.branch == branch && session.new_worktree == new_worktree {
+            return;
+        }
+        session.branch = branch;
+        session.new_worktree = new_worktree;
+        crate::draft_store::set_session(session.clone(), cx);
+    }
+
     pub fn select_chat(&mut self, chat_id: Option<String>, cx: &mut Context<Self>) {
         if self.selected_chat == chat_id {
             // Re-selecting still clears a fresh "completed" badge.
@@ -1888,6 +2075,19 @@ impl AppState {
                 self.mark_chat_seen(&id, cx);
             }
             return;
+        }
+        // Leaving the canvas for a chat. A chat carrying the active draft's
+        // id is that draft's promotion (send mints the chat with it): the
+        // session dies and nothing re-keys. Any other navigation keeps an
+        // invested draft (its sidebar row stays) and drops an empty one.
+        if self.selected_chat.is_none()
+            && let Some(active) = self.active_draft.clone()
+        {
+            if chat_id.as_deref() == Some(active.as_str()) {
+                self.discard_draft(&active, cx);
+            } else {
+                self.leave_draft(cx);
+            }
         }
         self.selected_chat = chat_id.clone();
         self.auto_selected = true;
@@ -1925,6 +2125,9 @@ impl AppState {
             {
                 self.queue_task = Some(spawn_queue_watch(cx, handle, chat_id));
             }
+        }
+        if self.selected_chat.is_none() {
+            self.ensure_draft(cx);
         }
         cx.notify();
     }
@@ -1964,10 +2167,12 @@ impl AppState {
             }
         }
         if self.selected_space == space_id && space_id.is_some() {
+            self.record_draft_target(cx);
             cx.notify();
             return;
         }
         self.selected_space = space_id;
+        self.record_draft_target(cx);
         cx.notify();
     }
 

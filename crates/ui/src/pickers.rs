@@ -726,13 +726,27 @@ impl Pickers {
         // only re-render on their own notify). A selection change also drops
         // the draft picks — they belonged to the previous chat/new-chat canvas.
         let state_observe = cx.observe(&state, |this: &mut Self, state, cx| {
-            let selected = state.read(cx).selected_chat.clone();
+            // The owner is the chat, else the draft on the canvas: switching
+            // drafts drops the picks too, and reloads the ref / checkout
+            // kind that draft was left with.
+            let selected = state.read(cx).focused_id();
             if selected != this.draft_owner {
-                this.draft_owner = selected;
+                this.draft_owner = selected.clone();
                 this.config.harness = None;
                 this.config.model = None;
                 this.config.reasoning = None;
                 this.switch_error = None;
+                let draft = selected
+                    .as_deref()
+                    .and_then(|id| state.read(cx).draft_session(id).cloned());
+                if let Some(draft) = draft {
+                    this.config.branch = draft.branch;
+                    this.config.checkout = if draft.new_worktree {
+                        CheckoutKind::NewWorktree
+                    } else {
+                        CheckoutKind::Local
+                    };
+                }
             }
             // A space switch invalidates the branch draft + cache — the folder
             // (and possibly the device) changed under them.
@@ -791,7 +805,7 @@ impl Pickers {
             .unwrap_or_default();
         // Restore explicit opt-outs as well as project picks before the first frame.
         state.update(cx, |s, _| s.restore_composer_target(&defaults));
-        let draft_owner = state.read(cx).selected_chat.clone();
+        let draft_owner = state.read(cx).focused_id();
         let space_owner = state.read(cx).selected_space.clone();
         let device_owner = state.read(cx).effective_device_id();
         Self {
@@ -1557,8 +1571,19 @@ impl Pickers {
             self.switch_draft_ref(row, cx);
             return;
         }
+        self.record_draft_checkout(cx);
         self.animate_close(cx);
         cx.notify();
+    }
+
+    /// The footer's ref / checkout-kind picks belong to the draft on the
+    /// canvas, so switching drafts (or relaunching) brings them back.
+    fn record_draft_checkout(&mut self, cx: &mut Context<Self>) {
+        let branch = self.config.branch.clone();
+        let new_worktree = self.config.checkout == CheckoutKind::NewWorktree;
+        self.state.update(cx, |s, cx| {
+            s.record_draft_checkout(branch, new_worktree, cx)
+        });
     }
 
     /// Draft-mode checkout switch: `git checkout` in the SPACE's folder
@@ -1603,6 +1628,7 @@ impl Pickers {
                 match result {
                     Ok(_) => {
                         pickers.config.branch = Some(ref_name);
+                        pickers.record_draft_checkout(cx);
                         pickers.animate_close(cx);
                         pickers.ensure_refs(true, cx);
                     }
@@ -1627,6 +1653,7 @@ impl Pickers {
             self.config.branch = None;
         }
         self.config.checkout = kind;
+        self.record_draft_checkout(cx);
         self.animate_close(cx);
         cx.notify();
     }
@@ -5146,6 +5173,8 @@ impl Pickers {
                     )
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
                             .flex()
                             .flex_col()
                             .gap(px(2.0))
