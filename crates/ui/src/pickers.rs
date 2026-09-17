@@ -47,10 +47,11 @@ fn permission_icon(mode: PermissionMode) -> &'static str {
     }
 }
 
+/// One line each at the popover's width — rows must read the same height.
 fn permission_description(mode: PermissionMode) -> &'static str {
     match mode {
-        PermissionMode::Ask => "Always ask before running tools and commands",
-        PermissionMode::Auto => "Only ask for actions detected as potentially unsafe",
+        PermissionMode::Ask => "Always ask before tools and commands",
+        PermissionMode::Auto => "Only ask for actions flagged as unsafe",
         PermissionMode::Full => "Any file, any command, no prompts",
     }
 }
@@ -3257,7 +3258,7 @@ impl Pickers {
                 let content = self.render_permission_popover(cx);
                 Some((
                     PickerKind::Permission,
-                    self.popover_frame(340.0, content, cx),
+                    self.popover_frame(360.0, content, cx),
                 ))
             }
             _ => None,
@@ -3320,10 +3321,7 @@ impl Pickers {
             .flex()
             .flex_col()
             .gap(px(2.0))
-            .child(popover::menu_heading(
-                &theme,
-                "How should agent actions be approved?",
-            ))
+            .child(popover::menu_heading(&theme, "Approve agent actions"))
             .children(PERMISSION_MODES.into_iter().enumerate().map(|(ix, mode)| {
                 let is_selected = current == mode;
                 let tone = if mode == PermissionMode::Full {
@@ -3356,11 +3354,15 @@ impl Pickers {
                         .flex_col()
                         .child(
                             div()
+                                .whitespace_nowrap()
+                                .truncate()
                                 .when(mode == PermissionMode::Full, |el| el.text_color(tone))
                                 .child(SharedString::from(mode.label())),
                         )
                         .child(
                             div()
+                                .whitespace_nowrap()
+                                .truncate()
                                 .text_size(crate::typography::ui_rems(11.0))
                                 .text_color(theme.text_muted)
                                 .child(SharedString::from(permission_description(mode))),
