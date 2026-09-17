@@ -3874,6 +3874,13 @@ pub enum ComposerEvent {
         source_chat_id: String,
         prompt: Option<String>,
     },
+    /// A chat key's unsent-content answer flipped (t3code
+    /// `useThreadHasUnsentDraft`): the sidebar pen needs one repaint, not one
+    /// per keystroke.
+    UnsentChanged,
+    /// A draft was started in the background and the canvas now shows the
+    /// next draft (d23); the shell refreshes its row snapshot and focus.
+    BackgroundStarted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4112,8 +4119,14 @@ pub struct Composer {
     /// Composer actions row plus the new-session floating target tab
     /// ([`Pickers::render_new_thread_target_selectors`]).
     pickers: Entity<Pickers>,
-    /// Draft text per chat key ("" = new-chat canvas), surviving navigation.
+    /// Draft text per chat key ("" = new-chat canvas), surviving navigation;
+    /// mirrored into [`crate::draft_store`] so it survives a restart too.
     drafts: HashMap<String, String>,
+    /// Stale stored drafts are dropped once, after the first chats frame.
+    drafts_pruned: bool,
+    /// Whether `current_key` is a canvas key (empty or a draft session) —
+    /// the kind flips without the key changing when a draft is promoted.
+    current_is_canvas: bool,
     /// Staged-but-unsent attachments per chat key (use-attachments.ts `stash`):
     /// navigating away and back restores them; memory-only, like the original.
     pub(crate) attachments: HashMap<String, Vec<StagedAttachment>>,
@@ -4382,7 +4395,8 @@ impl Composer {
             }
             ComposerInputEvent::PastedPaths(paths) => this.add_paths(paths.clone(), cx),
         });
-        let current_key = state.read(cx).selected_chat.clone().unwrap_or_default();
+        let current_key = state.read(cx).focused_id().unwrap_or_default();
+        let current_is_canvas = state.read(cx).selected_chat.is_none();
         let mut composer = Self {
             state,
             chat_override: None,
@@ -4390,6 +4404,8 @@ impl Composer {
             queue_edit_draft: None,
             pickers,
             drafts: HashMap::new(),
+            drafts_pruned: false,
+            current_is_canvas,
             attachments: HashMap::new(),
             appshots: HashMap::new(),
             appshot_entrances: HashMap::new(),
@@ -4499,7 +4515,87 @@ impl Composer {
                     .extend(staged);
             }
         }
+        composer.restore_drafts(cx);
         composer
+    }
+
+    /// Fill the per-key maps from the persisted store and show the current
+    /// key's text. The navigation swap only fires on a key CHANGE, so the
+    /// initial key needs this explicit load.
+    fn restore_drafts(&mut self, cx: &mut Context<Self>) {
+        for (key, entry) in crate::draft_store::entries(cx) {
+            if !entry.prompt.is_empty() {
+                self.drafts.insert(key.clone(), entry.prompt);
+            }
+            if !entry.attachments.is_empty() {
+                self.attachments
+                    .entry(key.clone())
+                    .or_default()
+                    .extend(entry.attachments);
+            }
+            if !entry.appshots.is_empty() {
+                self.appshots.entry(key).or_default().extend(entry.appshots);
+            }
+        }
+        self.apply_draft_text(cx);
+    }
+
+    /// Capture knob (`ZERON_DRAFT_TEXT`): type into the current key as a
+    /// keystroke would, draft store included.
+    pub(crate) fn seed_text(&mut self, text: String, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| input.set_text(text, cx));
+        self.sync_draft(cx);
+        cx.notify();
+    }
+
+    fn apply_draft_text(&mut self, cx: &mut Context<Self>) {
+        if let Some(text) = self.drafts.get(&self.current_key).cloned()
+            && self.input.read(cx).text().is_empty()
+        {
+            self.input.update(cx, |input, cx| input.set_text(text, cx));
+        }
+    }
+
+    /// Mirror the current key's text and stage into the persisted store
+    /// (d19). Cheap per keystroke — the disk write is debounced there — and
+    /// the sidebar repaints only when the key's has-content answer flips.
+    /// A queue edit displaces the draft; the store keeps the displaced one.
+    fn sync_draft(&mut self, cx: &mut Context<Self>) {
+        if self.editing_queued.is_some() {
+            return;
+        }
+        let entry = crate::draft_store::DraftEntry {
+            prompt: self.input.read(cx).text().to_string(),
+            attachments: self.staged().to_vec(),
+            appshots: self.staged_appshots().to_vec(),
+        };
+        if crate::draft_store::set(&self.current_key, entry, cx) {
+            cx.emit(ComposerEvent::UnsentChanged);
+        }
+    }
+
+    /// Drop stored drafts of chats the doc no longer has. Judged once, after
+    /// the first chats frame — the pre-sync empty list would erase them all.
+    fn prune_drafts(&mut self, cx: &mut Context<Self>) {
+        if self.drafts_pruned || self.chat_override.is_some() {
+            return;
+        }
+        let state = self.state.read(cx);
+        if !state.chats_synced {
+            return;
+        }
+        let live: HashSet<String> = state
+            .chats
+            .iter()
+            .map(|c| c.id.clone())
+            .chain(state.draft_sessions.iter().map(|d| d.id.clone()))
+            .collect();
+        self.drafts_pruned = true;
+        let keep = |key: &str| live.contains(key);
+        self.drafts.retain(|key, _| keep(key));
+        self.attachments.retain(|key, _| keep(key));
+        self.appshots.retain(|key, _| keep(key));
+        crate::draft_store::prune(keep, cx);
     }
 
     /// A composer bound to `chat_id` instead of the selection — the sidechat
@@ -4508,6 +4604,8 @@ impl Composer {
     pub fn for_chat(state: Entity<AppState>, chat_id: String, cx: &mut Context<Self>) -> Self {
         let mut composer = Self::new(state, cx);
         composer.current_key = chat_id.clone();
+        composer.current_is_canvas = false;
+        composer.apply_draft_text(cx);
         composer
             .pickers
             .update(cx, |pickers, _| pickers.bind_chat(chat_id.clone()));
@@ -4648,6 +4746,7 @@ impl Composer {
         }
         self.failure = None;
         self.failure_key = None;
+        self.sync_draft(cx);
         cx.notify();
         true
     }
@@ -4670,6 +4769,7 @@ impl Composer {
             .or_default()
             .extend(staged);
         self.focus_pending = true;
+        self.sync_draft(cx);
         cx.notify();
     }
 
@@ -4726,6 +4826,7 @@ impl Composer {
                 self.attachments.remove(&self.current_key);
             }
         }
+        self.sync_draft(cx);
         cx.notify();
     }
 
@@ -4759,6 +4860,7 @@ impl Composer {
                 self.appshots.remove(&self.current_key);
             }
         }
+        self.sync_draft(cx);
         cx.notify();
     }
 
@@ -4767,6 +4869,10 @@ impl Composer {
     pub fn purge_chat(&mut self, chat_id: &str, cx: &mut Context<Self>) {
         self.attachments.remove(chat_id);
         self.appshots.remove(chat_id);
+        self.drafts.remove(chat_id);
+        if crate::draft_store::remove(chat_id, cx) {
+            cx.emit(ComposerEvent::UnsentChanged);
+        }
         self.state.update(cx, |state, _| {
             state.purge_review_comments(chat_id);
         });
@@ -5180,6 +5286,7 @@ impl Composer {
     }
 
     fn on_input_edited(&mut self, cx: &mut Context<Self>) {
+        self.sync_draft(cx);
         if self.wizard.is_some() {
             if self.mention.token.is_some() || self.mention_task.is_some() {
                 self.reset_mention(None, cx);
@@ -6118,6 +6225,7 @@ impl Composer {
 
     fn on_state_changed(&mut self, cx: &mut Context<Self>) {
         self.ensure_compaction_kind(cx);
+        self.prune_drafts(cx);
         {
             let state = self.state.read(cx);
             let now = chrono::Utc::now();
@@ -6134,7 +6242,11 @@ impl Composer {
             .retain(|chat_id, _| self.interrupting.contains(chat_id));
 
         let editing_id = self.editing_queued.clone();
-        let key = self.bound_chat_id(cx).unwrap_or_default();
+        let key = self
+            .chat_override
+            .clone()
+            .or_else(|| self.state.read(cx).focused_id())
+            .unwrap_or_default();
         let (pending, edited_row_exists) = {
             let s = self.state.read(cx);
             (
@@ -6183,18 +6295,49 @@ impl Composer {
         }
 
         // Draft swap on chat navigation — the input entity itself survives.
-        if key != self.current_key {
+        // A promoted draft keeps its key (the chat was minted with the
+        // draft's id), so the canvas→session morph also fires on the key's
+        // CHANGE OF KIND with the text left alone (send already cleared it).
+        let now_canvas = key.is_empty() || self.state.read(cx).is_draft(&key);
+        let promoted = key == self.current_key && self.current_is_canvas && !now_canvas;
+        if key != self.current_key || promoted {
             let new_thread_launch =
-                self.launching_new_chat && self.current_key.is_empty() && !key.is_empty();
-            let returning_to_new_thread = !self.current_key.is_empty() && key.is_empty();
+                self.launching_new_chat && self.current_is_canvas && !now_canvas;
+            let returning_to_new_thread = !self.current_is_canvas && now_canvas;
             self.launching_new_chat = false;
-            let old_text = self.input.read(cx).text().to_string();
-            if old_text.is_empty() {
-                self.drafts.remove(&self.current_key);
+            self.current_is_canvas = now_canvas;
+            let draft = if promoted {
+                self.input.read(cx).text().to_string()
             } else {
-                self.drafts.insert(self.current_key.clone(), old_text);
-            }
-            let draft = self.drafts.get(&key).cloned().unwrap_or_default();
+                let old_text = self.input.read(cx).text().to_string();
+                // Text typed on the pre-sync canvas (key "") belongs to the
+                // draft that key becomes once the boot frames land (d20).
+                let carry = self.current_key.is_empty()
+                    && now_canvas
+                    && !key.is_empty()
+                    && self.drafts.get(&key).is_none_or(String::is_empty);
+                if carry {
+                    self.drafts.remove("");
+                    if let Some(staged) = self.attachments.remove("") {
+                        self.attachments
+                            .entry(key.clone())
+                            .or_default()
+                            .extend(staged);
+                    }
+                    if let Some(shots) = self.appshots.remove("") {
+                        self.appshots.entry(key.clone()).or_default().extend(shots);
+                    }
+                    crate::draft_store::remove("", cx);
+                    old_text
+                } else {
+                    if old_text.is_empty() {
+                        self.drafts.remove(&self.current_key);
+                    } else {
+                        self.drafts.insert(self.current_key.clone(), old_text);
+                    }
+                    self.drafts.get(&key).cloned().unwrap_or_default()
+                }
+            };
             self.current_key = key;
             // `failure` deliberately survives navigation: chat-scoped
             // failures render only under their own chat (see `failure_key`),
@@ -6233,6 +6376,7 @@ impl Composer {
                 self.route_snap_until = Some(Instant::now() + Duration::from_millis(ROUTE_SNAP_MS));
             }
             self.input.update(cx, |input, cx| input.set_text(draft, cx));
+            self.sync_draft(cx);
         }
 
         // A pending agent question must not take over an active queue edit.
@@ -6353,9 +6497,9 @@ impl Composer {
             SendButtonMode::Stop => self.interrupt_selected(cx),
             _ if no_content => {}
             _ if self.send_blocked(cx) => {}
-            SendButtonMode::Send => self.send(text, false, cx),
+            SendButtonMode::Send => self.send(text, false, false, cx),
             // Busy: keep the message queued until the current turn ends.
-            SendButtonMode::Queue => self.send(text, true, cx),
+            SendButtonMode::Queue => self.send(text, true, false, cx),
         }
     }
 
@@ -6364,25 +6508,48 @@ impl Composer {
     /// Queues instead when the bound chat is already busy, like a submit.
     pub(crate) fn send_prompt(&mut self, prompt: String, cx: &mut Context<Self>) {
         let queue = matches!(self.button_mode(cx), SendButtonMode::Queue);
-        self.send(prompt, queue, cx);
+        self.send(prompt, queue, false, cx);
     }
 
     /// Cmd/Ctrl+Enter remains an ordinary submit while the composer carries
     /// content. With a truly empty composer it instead activates the most
     /// recently queued row, and never turns an empty chord into Stop.
-    fn on_modified_submit(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn on_modified_submit(&mut self, cx: &mut Context<Self>) {
         if self.commit_queue_edit(cx) {
             return;
         }
+        let text = self.input.read(cx).text().trim().to_string();
         let has_content = composer_has_content(
-            self.input.read(cx).text(),
+            &text,
             self.staged().len() + self.staged_appshots().len(),
             self.staged_comments(cx).len(),
         );
+        // On a draft, the modifier chord starts the session in the
+        // background and leaves a fresh draft here (t3code "Start in the
+        // background", d23) — only where the chord is not the plain send.
+        if has_content
+            && self.wizard.is_none()
+            && self.background_submit_available(cx)
+            && !self.send_blocked(cx)
+            && matches!(self.button_mode(cx), SendButtonMode::Send)
+        {
+            self.send(text, false, true, cx);
+            return;
+        }
         match modified_submit_target(has_content) {
             ModifiedSubmitTarget::SubmitContent => self.on_submit(cx),
             ModifiedSubmitTarget::ActivateLatestQueued => self.activate_latest_queued(cx),
         }
+    }
+
+    /// Mod+Enter is the background start only on the main composer's draft
+    /// and only under the Enter send behavior; under Mod+Enter it IS the
+    /// send, and the message-enter table adds no further modifier chords.
+    fn background_submit_available(&self, cx: &App) -> bool {
+        self.chat_override.is_none()
+            && self.bound_chat_id(cx).is_none()
+            && self.state.read(cx).active_draft.is_some()
+            && crate::settings::current(cx).composer_send_behavior == ComposerSendBehavior::Enter
     }
 
     /// Queue a Run doc command with an optimistic echo — or, with the agent
@@ -6390,12 +6557,13 @@ impl Composer {
     /// thread the picked config in: worktree creation (when the isolated toggle
     /// is on), `Mutate createChat` with the `ChatConfig` + cwd, and the model /
     /// reasoning / options on the Run request itself (§1.7).
-    fn send(&mut self, text: String, queue: bool, cx: &mut Context<Self>) {
+    fn send(&mut self, text: String, queue: bool, background: bool, cx: &mut Context<Self>) {
         // `/compact` is zeron's own command: it becomes an RPC, never a turn,
         // so it never builds a `Run` and never writes a user entry.
         if let Some(focus) = compact_focus(&text) {
             self.input.update(cx, |input, cx| input.set_text("", cx));
             self.drafts.remove(&self.current_key);
+            self.sync_draft(cx);
             self.request_compaction(focus, cx);
             return;
         }
@@ -6404,6 +6572,7 @@ impl Composer {
         if let Some(prompt) = sidechat_prompt(&text) {
             self.input.update(cx, |input, cx| input.set_text("", cx));
             self.drafts.remove(&self.current_key);
+            self.sync_draft(cx);
             self.request_sidechat(prompt, cx);
             return;
         }
@@ -6415,9 +6584,18 @@ impl Composer {
         };
         // Chat id: existing selection, or client-minted for the new-chat canvas
         // (the chat then appears from the doc host once the doc materializes).
+        // Chat id: existing selection, or the draft's pre-minted id (d20) so
+        // the tab and every per-key map carry straight over to the session.
         let (chat_id, is_new) = match self.bound_chat_id(cx) {
             Some(id) => (id, false),
-            None => (uuid::Uuid::new_v4().to_string(), true),
+            None => (
+                self.state
+                    .read(cx)
+                    .active_draft
+                    .clone()
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                true,
+            ),
         };
         // Where the new session runs (Current checkout / reuse an existing
         // worktree / fresh worktree off the picked base) — resolved NOW so
@@ -6634,14 +6812,20 @@ impl Composer {
             status: None,
             continuation_of: None,
         };
-        self.launching_new_chat = is_new;
-        if is_new {
+        // Background start (d23): the session is minted and run without
+        // becoming the selection; the canvas moves on to a fresh draft that
+        // keeps this one's target, ref and checkout kind.
+        let background = background && is_new;
+        self.launching_new_chat = is_new && !background;
+        if is_new && !background {
             cx.emit(ComposerEvent::NewThreadTransitionStarted);
         }
         // A queued message is not in the transcript yet — the queue panel is
         // its echo, and it gets a real bubble when the host sends it.
         self.state.update(cx, |s, cx| {
-            if is_new {
+            if background {
+                s.start_draft_in_background(&chat_id, cx);
+            } else if is_new {
                 s.select_chat(Some(chat_id.clone()), cx);
             }
             if should_publish_optimistic_echo(queue) {
@@ -6656,16 +6840,21 @@ impl Composer {
 
         self.input.update(cx, |input, cx| input.set_text("", cx));
         self.drafts.remove(&self.current_key);
+        self.sync_draft(cx);
         self.failure = None;
         self.sending = true;
         // A queued row is represented by the queue panel, not the transcript.
         // Claiming an own-turn anchor for it here would replace the live
-        // turn's runway with an id that has no transcript row yet.
-        if should_publish_optimistic_echo(queue) {
+        // turn's runway with an id that has no transcript row yet. A
+        // background start has no transcript on screen to anchor.
+        if should_publish_optimistic_echo(queue) && !background {
             cx.emit(ComposerEvent::Sent {
                 chat_id: chat_id.clone(),
                 message_id: message_id.clone(),
             });
+        }
+        if background {
+            cx.emit(ComposerEvent::BackgroundStarted);
         }
         cx.notify();
 
@@ -7037,26 +7226,28 @@ impl Composer {
                     // chat restores to the CANVAS (key "") and navigates back
                     // there — the minted chat is gone (deleted above), so
                     // nothing may restore under its key.
-                    let restore_key = if is_new {
-                        String::new()
-                    } else {
-                        err_chat_id.clone()
-                    };
                     composer.failure = Some(message.into());
-                    composer.failure_key = Some(restore_key.clone());
-                    composer.state.update(cx, |s, cx| {
+                    let restore_key = composer.state.update(cx, |s, cx| {
                         s.remove_echo(&err_chat_id, &err_message_id);
                         s.end_pending_send(&err_chat_id, &err_message_id);
                         if is_new && s.selected_chat.as_deref() == Some(err_chat_id.as_str()) {
-                            // Back to the canvas; the navigation draft-swap
-                            // loads the restored draft below.
+                            // Back to the canvas — a fresh draft (the failed
+                            // one was promoted away); the navigation
+                            // draft-swap loads the restored text below.
                             s.select_chat(None, cx);
                         }
+                        let restore_key = if is_new {
+                            s.ensure_draft(cx)
+                        } else {
+                            err_chat_id.clone()
+                        };
                         for comment in &comments {
                             s.add_review_comment(&restore_key, comment.clone());
                         }
                         cx.notify();
+                        restore_key
                     });
+                    composer.failure_key = Some(restore_key.clone());
                     if is_new && composer.current_key != restore_key {
                         // A re-key swap to the canvas is pending (the
                         // select_chat(None) above); it loads this draft into

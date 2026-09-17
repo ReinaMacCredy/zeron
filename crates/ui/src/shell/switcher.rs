@@ -159,6 +159,28 @@ fn thumbnail(frame: CapturedFrame, crop: (u32, u32, u32, u32)) -> Option<Arc<gpu
     )])))
 }
 
+/// "project @ device" for a draft, from the target it was minted onto.
+pub(super) fn draft_target_label(
+    draft: &crate::draft_store::DraftSession,
+    state: &crate::state::AppState,
+) -> String {
+    let folder = draft
+        .space_id
+        .as_deref()
+        .filter(|_| !draft.no_project)
+        .and_then(|id| state.space_row(id))
+        .map(|s| s.display_name().to_string())
+        .unwrap_or_else(|| "~".to_string());
+    match draft
+        .device_id
+        .as_deref()
+        .and_then(|id| state.device_name(id))
+    {
+        Some(device) => format!("{folder} @ {device}"),
+        None => folder,
+    }
+}
+
 impl Shell {
     /// Record a selection for the switcher's order: most recent first.
     pub(super) fn touch_session_mru(&mut self, chat_id: &str) {
@@ -178,7 +200,7 @@ impl Shell {
         {
             return;
         }
-        let Some(chat_id) = self.state.read(cx).selected_chat.clone() else {
+        let Some(chat_id) = self.state.read(cx).focused_id() else {
             return;
         };
         let Some(frame) = capture_window() else {
@@ -248,11 +270,11 @@ impl Shell {
             return;
         };
         if let Some(id) = sw.order.get(sw.hi).cloned()
-            && self.state.read(cx).selected_chat.as_deref() != Some(id.as_str())
+            && self.state.read(cx).focused_id().as_deref() != Some(id.as_str())
         {
-            // Not `open_chat`: the frame on screen is this overlay, not a
+            // No snapshot: the frame on screen is this overlay, not a
             // snapshot-worthy view of the session being left.
-            self.select_existing_chat(id, cx);
+            self.navigate_to(Some(id), false, cx);
         }
         cx.notify();
     }
@@ -284,8 +306,10 @@ impl Shell {
             .map(|(ix, id)| {
                 let state = self.state.read(cx);
                 let chat = state.chats.iter().find(|c| &c.id == id);
+                let draft = state.draft_session(id);
                 let title: SharedString = chat
                     .map(|c| transcript::single_line(c.title.as_deref().unwrap_or("New session")))
+                    .or_else(|| draft.map(|_| "New session".to_string()))
                     .unwrap_or_default()
                     .into();
                 let target: SharedString = chat
@@ -297,6 +321,7 @@ impl Shell {
                         let device = state.device_name(&c.device_id).unwrap_or("Unknown device");
                         format!("{folder} @ {device}")
                     })
+                    .or_else(|| draft.map(|d| draft_target_label(d, state)))
                     .unwrap_or_default()
                     .into();
                 let status = chat
@@ -309,12 +334,16 @@ impl Shell {
                     ChatIndicator::Completed => Some("Done"),
                     ChatIndicator::Idle => None,
                 };
+                // A draft card shows the typed text where an unviewed
+                // session shows its last message (d18).
                 let preview: Option<SharedString> = chat
                     .and_then(|c| c.last_message_preview.clone())
+                    .or_else(|| draft.and_then(|d| crate::draft_store::entry_prompt(&d.id, cx)))
                     .map(|p| transcript::single_line(&p).into());
                 let brand = chat
                     .and_then(|c| c.config.as_ref().map(|c| c.harness))
-                    .map(crate::pickers::harness_brand_icon);
+                    .map(crate::pickers::harness_brand_icon)
+                    .or_else(|| draft.map(|_| (icons::PEN, Some(theme.warning))));
                 let thumb = self.session_thumbs.get(id).cloned();
                 let is_hi = ix == hi;
 

@@ -1428,6 +1428,10 @@ pub struct Shell {
     tabs_scrolled_to: Option<String>,
     /// Sessions in most-recently-selected order (the switcher's card order).
     session_mru: Vec<String>,
+    /// The open draft's sidebar row, frozen at the moment it became the
+    /// route (d21, t3code SidebarDraftBlock): typing never repaints the
+    /// sidebar; a draft never navigated away from has no row at all.
+    frozen_draft_rows: std::collections::HashMap<String, String>,
     /// Last-seen conversation-column thumbnails per chat (switcher cards).
     session_thumbs: std::collections::HashMap<String, std::sync::Arc<gpui::RenderImage>>,
     /// Replaced thumbnails awaiting atlas release on the next render.
@@ -1638,6 +1642,10 @@ impl Shell {
         });
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
         transcript.update(cx, |transcript, _| transcript.retain_for_route_exit());
+        // Invested drafts from the last launch (d19); the canvas itself is
+        // minted fresh once the spaces frame lands.
+        let restored_drafts = crate::draft_store::sessions(cx);
+        state.update(cx, |s, _| s.draft_sessions = restored_drafts);
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
         let links = Self::session_links(None, cx);
         transcript.update(cx, |transcript, _| {
@@ -1672,6 +1680,12 @@ impl Shell {
                     source_chat_id,
                     prompt,
                 } => _this.open_sidechat(source_chat_id.clone(), prompt.clone(), cx),
+                ComposerEvent::UnsentChanged => cx.notify(),
+                ComposerEvent::BackgroundStarted => {
+                    _this.freeze_draft_row(cx);
+                    _this.focus_composer(cx);
+                    cx.notify();
+                }
             }
         });
         // Spawn chips open their subagent's transcript as a right-pane tab.
@@ -1824,6 +1838,7 @@ impl Shell {
             tabs_scroll: gpui::ScrollHandle::new(),
             tabs_scrolled_to: None,
             session_mru: Vec::new(),
+            frozen_draft_rows: std::collections::HashMap::new(),
             session_thumbs: std::collections::HashMap::new(),
             stale_thumbs: Vec::new(),
             switcher: None,
@@ -2225,6 +2240,24 @@ impl Shell {
         // Boot landing: the most recent session once the first chats frame
         // syncs (manual selection wins).
         self.boot_select_chat(cx);
+        // The canvas is a draft from birth (d20) — minted after the spaces
+        // frame so it captures the boot-applied target, and after the boot
+        // landing so a selected session does not leave an orphan behind.
+        if state.read(cx).spaces_synced
+            && state.read(cx).chats_synced
+            && state.read(cx).selected_chat.is_none()
+            && state.read(cx).active_draft.is_none()
+        {
+            state.update(cx, |s, cx| {
+                s.ensure_draft(cx);
+            });
+            // Capture knob: `ZERON_DRAFT_TEXT=<text>` types into the boot
+            // draft (a rig has no synthetic keyboard that reaches gpui).
+            if let Ok(text) = std::env::var("ZERON_DRAFT_TEXT") {
+                self.composer
+                    .update(cx, |composer, cx| composer.seed_text(text, cx));
+            }
+        }
         // Reconcile the device-local tab list (prune against the doc,
         // selected-chat invariant).
         self.sync_open_tabs(cx);
@@ -2328,12 +2361,13 @@ impl Shell {
     /// (user report).
     fn panel_key(&self, cx: &App) -> String {
         if self.active_chat.is_empty() {
-            let space = self
-                .state
-                .read(cx)
-                .selected_space
-                .clone()
-                .unwrap_or_default();
+            let state = self.state.read(cx);
+            // A draft keys by its id — the same string its session will
+            // key by, so the flags ride through promotion.
+            if let Some(draft) = state.active_draft.clone() {
+                return draft;
+            }
+            let space = state.selected_space.clone().unwrap_or_default();
             format!("space-canvas:{space}")
         } else {
             self.active_chat.clone()
@@ -3424,7 +3458,10 @@ impl Shell {
                     t.on_own_queued_send(chat_id.clone(), message_id.clone(), cx)
                 }),
                 // A sidechat cannot spawn one, and it has no new-thread route.
-                ComposerEvent::OpenSidechat { .. } | ComposerEvent::NewThreadTransitionStarted => {}
+                ComposerEvent::OpenSidechat { .. }
+                | ComposerEvent::NewThreadTransitionStarted
+                | ComposerEvent::BackgroundStarted => {}
+                ComposerEvent::UnsentChanged => cx.notify(),
             }
         });
         let source_title = chat
@@ -5440,9 +5477,16 @@ impl Shell {
     /// The titlebar owns new-session creation regardless of sidebar state. It
     /// is useful only while an existing session is selected.
     pub(super) fn titlebar_plus_alpha(&self, cx: &App) -> f32 {
+        // An invested draft is a place to leave: `+` opens another beside it.
+        let state = self.state.read(cx);
+        let leaving_invested_draft = state.selected_chat.is_none()
+            && state
+                .active_draft
+                .as_deref()
+                .is_some_and(|id| crate::draft_store::has_content(id, cx));
         titlebar_new_session_alpha(
             matches!(self.route, Route::Chat),
-            self.state.read(cx).selected_chat.is_some(),
+            state.selected_chat.is_some() || leaving_invested_draft,
         )
     }
 
@@ -5994,6 +6038,7 @@ impl Shell {
             }
         };
         let shows_metadata = branch.is_some() || change_request.is_some();
+        let unsent = crate::draft_store::has_content(&id, cx);
         let queued = queued && !undelivered;
         let working = status == zeron_proto::ChatIndicator::Working && !queued && !undelivered;
         let corner_body: AnyElement = if let Some(label) = jump_label {
@@ -6263,6 +6308,15 @@ impl Shell {
                             )
                         },
                     )
+                    // Unsent text in this chat's composer (t3code's amber pen).
+                    .when(unsent, |el| {
+                        el.child(
+                            icon(icons::PEN)
+                                .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
+                                .flex_none()
+                                .text_color(theme.warning.opacity(0.85)),
+                        )
+                    })
                     .child(
                         div()
                             .flex_1()
@@ -6384,7 +6438,9 @@ impl Shell {
         // Keyed rows: (stable key, estimated height, element) — the key + height
         // list drives the §1.6 resort FLIP diff below (attention-bucket
         // promotions glide; cleared rows just go).
-        let keyed: Vec<(String, f32, AnyElement)> = self.render_active_rows(theme, cx);
+        // Invested drafts sit above every attention bucket (d21).
+        let mut keyed: Vec<(String, f32, AnyElement)> = self.render_draft_rows(theme, cx);
+        keyed.extend(self.render_active_rows(theme, cx));
 
         // Resort glide (§1.6 View Transitions parity): when the ORDER of a live
         // list changes (new activity resort, grouping flip), surviving rows
@@ -10680,6 +10736,23 @@ impl Render for Shell {
                     self.composer
                         .update(cx, |c, cx| c.debug_open_model_switch(window, cx));
                 }
+                // `=background-send`: once the boot draft carries text (see
+                // `ZERON_DRAFT_TEXT`), fire the Mod+Enter background start
+                // (d23) so the strip, sidebar and next draft can be captured.
+                if self.debug_dialog.as_deref() == Some("background-send")
+                    && self.state.read(cx).active_draft.is_some()
+                {
+                    self.debug_dialog = None;
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(4000))
+                            .await;
+                        let _ = this.update(cx, |shell, cx| {
+                            shell.composer.update(cx, |c, cx| c.on_modified_submit(cx));
+                        });
+                    })
+                    .detach();
+                }
                 // `=switcher` (capture knob; no modifier to release): once a
                 // session is selected, let it paint, hop to the next visible
                 // tab so the first session gets a thumbnail, then open the
@@ -10694,13 +10767,13 @@ impl Render for Shell {
                             .await;
                         let _ = this.update(cx, |shell, cx| {
                             let tabs = shell.open_tab_ids(cx);
-                            let selected = shell.state.read(cx).selected_chat.clone();
+                            let selected = shell.state.read(cx).focused_id();
                             if let Some(next) = tabs
                                 .iter()
                                 .find(|id| Some(id.as_str()) != selected.as_deref())
                                 .cloned()
                             {
-                                shell.open_chat(next, cx);
+                                shell.navigate_to(Some(next), true, cx);
                             }
                         });
                         cx.background_executor()
