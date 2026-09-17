@@ -25,6 +25,7 @@ pub mod comments;
 pub mod composer;
 mod composer_dock;
 mod context_usage;
+pub mod draft_store;
 pub mod edge_fade;
 pub mod file_icons;
 pub mod files;
@@ -157,6 +158,7 @@ pub fn run_app(config: UiConfig) {
         let data_dir = config.boot().data_dir.clone();
         let ui_settings = settings::UiSettings::load(&data_dir);
         settings::init(ui_settings.clone(), data_dir.clone(), cx);
+        draft_store::init(data_dir.clone(), cx);
         let font_availability = typography::register_fonts(cx);
         // Typography first: theme installation reads the effective family, so
         // the first frame has the final font and palette without a flash.
@@ -219,6 +221,7 @@ pub fn run_app(config: UiConfig) {
         let quit_state = state.clone();
         cx.on_app_quit(move |cx| {
             settings::flush(cx);
+            draft_store::flush(cx);
             let shutdown =
                 quit_state.read(cx).engine().cloned().map(|handle| {
                     gpui_tokio::Tokio::spawn(cx, async move { handle.shutdown().await })
