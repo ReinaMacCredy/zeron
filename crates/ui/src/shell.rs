@@ -62,6 +62,7 @@ use crate::workspace_links::resolve_workspace_file_link;
 mod command_palette;
 mod spaces;
 mod split;
+mod summary;
 mod switcher;
 mod tabs;
 
@@ -1372,6 +1373,8 @@ pub struct Shell {
     right_terminal: Option<Entity<TerminalPanel>>,
     /// The surface-tab strip's `+` menu (Files / Terminal / Diffs / History rows).
     right_plus: popover::Popup<()>,
+    /// The titlebar's pinned-summary card (outputs / subagents / sources).
+    summary_menu: popover::Popup<()>,
     /// Diff surfaces by id — each tab its own [`Changes`] viewer with its own
     /// scope/base pick and diff watch (multiple diff panels, user request).
     diffs: std::collections::HashMap<u64, Entity<Changes>>,
@@ -1810,6 +1813,7 @@ impl Shell {
             terminal: None,
             right_terminal: None,
             right_plus: popover::Popup::default(),
+            summary_menu: popover::Popup::default(),
             diffs: std::collections::HashMap::new(),
             files: std::collections::HashMap::new(),
             files_subs: std::collections::HashMap::new(),
@@ -7595,6 +7599,13 @@ impl Shell {
         if self.right_plus.get().is_some() {
             return true;
         }
+        if self.summary_menu.is_open() {
+            self.close_summary_menu(cx);
+            return true;
+        }
+        if self.summary_menu.get().is_some() {
+            return true;
+        }
         self.active_changes(cx)
             .is_some_and(|changes| changes.update(cx, |changes, cx| changes.handle_escape(cx)))
     }
@@ -10766,6 +10777,18 @@ impl Render for Shell {
                     self.composer
                         .update(cx, |c, cx| c.debug_open_model_switch(window, cx));
                 }
+                // `=summary` (capture knob): give the selected chat one browser
+                // tab so Outputs has a row, then pop the pinned-summary card.
+                if self.debug_dialog.as_deref() == Some("summary")
+                    && self.state.read(cx).selected_chat.is_some()
+                {
+                    self.debug_dialog = None;
+                    self.add_browser_surface(None, window, cx);
+                    if self.right_pane_open(cx) {
+                        self.toggle_right_pane(cx);
+                    }
+                    self.summary_menu.open(());
+                }
                 // `=background-send`: once the boot draft carries text (see
                 // `ZERON_DRAFT_TEXT`), fire the Mod+Enter background start
                 // (d23) so the strip, sidebar and next draft can be captured.
@@ -13441,6 +13464,96 @@ mod right_tab_mouse_regressions {
 
         shell.read_with(cx, |shell, cx| {
             assert_eq!(shell.resolved_right_active(cx), RightSurface::Subagent(1));
+        });
+    }
+}
+
+#[cfg(test)]
+mod pinned_summary_regressions {
+    use super::*;
+    use gpui::{AppContext, TestAppContext, VisualTestContext};
+
+    struct TriggerHost {
+        shell: Entity<Shell>,
+        _data_dir: tempfile::TempDir,
+    }
+
+    impl Render for TriggerHost {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.shell.update(cx, |shell, cx| {
+                let trigger = shell.render_summary_trigger(cx);
+                shell.titlebar_drag_region(
+                    "pinned-summary-test-titlebar",
+                    div().w(px(400.)).h(px(40.)).child(trigger),
+                    cx,
+                )
+            })
+        }
+    }
+
+    fn setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            let shell = cx.new(|cx| {
+                let state = cx.new(|_| AppState::new());
+                let mut shell = Shell::new(
+                    state,
+                    EngineBootConfig {
+                        data_dir: dir.path().into(),
+                        ipc_port: 0,
+                        edge_url: "http://127.0.0.1:1".into(),
+                        edge_token: None,
+                        org_id: None,
+                        workos_client_id: None,
+                        default_harness: zeron_proto::HarnessId::Mock,
+                    },
+                    cx,
+                );
+                shell.active_chat = "parent".into();
+                shell.add_browser_surface(None, window, cx);
+                // The card must open the pane itself.
+                if shell.right_pane_open(cx) {
+                    shell.toggle_right_pane(cx);
+                }
+                shell
+            });
+            TriggerHost {
+                shell,
+                _data_dir: dir,
+            }
+        });
+        let shell = host.read_with(cx, |host, _| host.shell.clone());
+        cx.update(|window, cx| window.draw(cx).clear());
+        (shell, cx)
+    }
+
+    #[gpui::test]
+    fn output_row_opens_the_pane_on_that_surface_and_escape_closes(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.read_with(cx, |shell, cx| assert!(!shell.right_pane_open(cx)));
+        let trigger = cx.debug_bounds("pinned-summary").unwrap().center();
+        cx.simulate_click(trigger, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, _| assert!(shell.summary_menu.is_open()));
+        cx.update(|window, cx| window.draw(cx).clear());
+        let row = cx
+            .debug_bounds("pinned-summary-output-0")
+            .expect("browser tab listed under Outputs")
+            .center();
+        cx.simulate_click(row, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, cx| {
+            assert!(shell.right_pane_open(cx));
+            assert_eq!(shell.resolved_right_active(cx), RightSurface::Browser(1));
+            assert!(!shell.summary_menu.is_open());
+        });
+        shell.update(cx, |shell, cx| {
+            shell.summary_menu.open(());
+            assert!(shell.capture_escape_surface(cx));
+            assert!(!shell.summary_menu.is_open());
         });
     }
 }

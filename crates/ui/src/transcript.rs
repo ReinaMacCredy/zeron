@@ -392,6 +392,16 @@ fn is_spawn_link(item: &ToolItem) -> bool {
     is_agent_call(&item.call) && item.subagent_ref.is_some()
 }
 
+/// One spawned subagent as the pinned summary lists it: what a spawn chip
+/// needs to open the tab, plus the lifecycle for the done/working tally.
+#[derive(Debug, Clone)]
+pub(crate) struct SubagentSummary {
+    pub chat_id: String,
+    pub doc_id: String,
+    pub title: SharedString,
+    pub status: Option<SubagentStatus>,
+}
+
 /// Ordinary tool groups fold behind a summary header; agent/spawn chips
 /// render as their own always-open row.
 fn tool_group_collapses(tools: &[ToolItem]) -> bool {
@@ -3861,6 +3871,70 @@ impl Transcript {
     /// more than [`SCROLL_BUTTON_THRESHOLD_PX`] off the end, unpinned).
     pub fn jump_button_shown(&self) -> bool {
         self.show_jump_button
+    }
+
+    /// Every subagent this transcript spawned, in transcript order — the
+    /// spawn chips are the only index (no listing endpoint).
+    pub(crate) fn subagent_summaries(&self) -> Vec<SubagentSummary> {
+        let chat_id = self.chat_id.clone().unwrap_or_default();
+        self.rows
+            .iter()
+            .filter_map(|row| match &row.kind {
+                RowKind::ToolGroup { tools, .. } => Some(tools.clone()),
+                _ => None,
+            })
+            .flat_map(|tools| {
+                tools
+                    .iter()
+                    .filter(|tool| is_spawn_link(tool))
+                    .filter_map(|tool| {
+                        Some(SubagentSummary {
+                            chat_id: chat_id.clone(),
+                            doc_id: tool.subagent_ref.clone()?.to_string(),
+                            title: subagent_tab_title(&tool.call),
+                            status: tool.subagent_status,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// Every image the user attached to a prompt, in transcript order.
+    pub(crate) fn user_attachments(&self) -> Vec<crate::attachments::UserImageAttachment> {
+        self.rows
+            .iter()
+            .filter_map(|row| match &row.kind {
+                RowKind::User { attachments, .. } => Some(attachments.iter().cloned()),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    /// Open the image viewer on one user attachment — the same path a click on
+    /// its bubble thumbnail takes. A thumbnail that has not loaded yet only
+    /// starts its load; the caller's click is then a no-op.
+    pub(crate) fn preview_attachment(
+        &mut self,
+        attachment: &crate::attachments::UserImageAttachment,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let device_ids = self.attachment_device_ids(cx);
+        let crate::attachments::AttachmentSnapshot::Loaded(image) =
+            self.attachment_state(&device_ids, &attachment.path, None, cx)
+        else {
+            return false;
+        };
+        let preview =
+            crate::attachments::PreviewImage::new(attachment.name.clone(), image.image.clone());
+        self.attachment_preview_return_focus = window.focused(cx);
+        preview.viewer.reset();
+        self.attachment_preview = Some(preview);
+        window.focus(&self.attachment_preview_focus, cx);
+        cx.notify();
+        true
     }
 
     /// The scroll-to-bottom pill's click: glide back to the end and re-pin.
