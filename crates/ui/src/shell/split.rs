@@ -243,12 +243,14 @@ impl Shell {
         }
         let selected = self.state.read(cx).selected_chat.clone();
         let split = self.split.as_ref().map(|s| (s.chat_id.clone(), s.side));
-        match split_drop(
+        let verdict = split_drop(
             &chat_id,
             side,
             selected.as_deref(),
             split.as_ref().map(|(id, side)| (id.as_str(), *side)),
-        ) {
+        );
+        tracing::info!(chat = %chat_id, ?side, ?selected, ?split, ?verdict, "split: drop verdict");
+        match verdict {
             SplitDrop::Open => self.open_split(chat_id, side, cx),
             SplitDrop::Swap => {
                 // Selecting the secondary's chat swaps through the selection
@@ -355,6 +357,7 @@ impl Shell {
         Some(
             div()
                 .id("split-pane")
+                .debug_selector(|| "split-pane".into())
                 .h_full()
                 .flex_1()
                 .min_w_0()
@@ -407,21 +410,28 @@ impl Shell {
             };
             div()
                 .id(id)
+                .debug_selector(|| id.to_string())
                 .group(group)
                 .flex_1()
                 .min_w_0()
                 .h_full()
-                .p(px(24.0))
+                .px(px(32.0))
+                .py(px(24.0))
                 .flex()
                 .items_center()
-                .justify_center()
+                // The boxes hug the column's outer edges (Atlas): the middle
+                // stays clear so the drag ghost reads over the transcript.
+                .when(side == SplitSide::Left, |el| el.justify_start())
+                .when(side == SplitSide::Right, |el| el.justify_end())
                 .on_drop::<tabs::TabDragPayload>(cx.listener(
                     move |this, payload: &tabs::TabDragPayload, _, cx| {
+                        tracing::info!(chat = %payload.chat_id, ?side, "split: tab dropped");
                         this.drop_session_on_side(payload.chat_id.clone(), side, cx);
                     },
                 ))
                 .on_drop::<SessionRowDrag>(cx.listener(
                     move |this, payload: &SessionRowDrag, _, cx| {
+                        tracing::info!(chat = %payload.chat_id, ?side, "split: row dropped");
                         this.drop_session_on_side(payload.chat_id.clone(), side, cx);
                     },
                 ))
@@ -489,6 +499,199 @@ impl Shell {
                 .child(right)
                 .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+mod drag_regressions {
+    use super::*;
+    use gpui::{AppContext, TestAppContext, VisualTestContext};
+
+    fn chat(id: &str) -> zeron_proto::Chat {
+        zeron_proto::Chat {
+            id: id.into(),
+            device_id: "dev".into(),
+            title: Some(id.into()),
+            archived: false,
+            cwd: None,
+            branch: None,
+            checkout_id: None,
+            source_context: None,
+            config: None,
+            last_message_preview: None,
+            last_message_at: None,
+            created_at: chrono::Utc::now(),
+            harness_session_id: None,
+            harness_session_cwd: None,
+            space_id: None,
+            last_seen_at: None,
+            room_gen: None,
+            sidechat_source_chat_id: None,
+        }
+    }
+
+    fn boot_config(dir: &tempfile::TempDir) -> EngineBootConfig {
+        EngineBootConfig {
+            data_dir: dir.path().into(),
+            ipc_port: 0,
+            edge_url: "http://127.0.0.1:1".into(),
+            edge_token: None,
+            org_id: None,
+            workos_client_id: None,
+            default_harness: zeron_proto::HarnessId::Mock,
+        }
+    }
+
+    fn seed(shell: &Shell, cx: &mut Context<Shell>) {
+        shell.state.update(cx, |state, _| {
+            state.chats = vec![chat("a"), chat("b")];
+            state.chats_synced = true;
+            state.spaces_synced = true;
+            state.selected_chat = Some("a".into());
+        });
+    }
+
+    fn init(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+    }
+
+    /// A sidebar row beside a conversation column with the split drop zones:
+    /// the production row and zone elements, driven by the real Shell. (The
+    /// full page caches the sidebar view, which hides row bounds from
+    /// `debug_bounds`; the tab test below drives the full page instead.)
+    struct RowHost {
+        shell: Entity<Shell>,
+        _data_dir: tempfile::TempDir,
+    }
+
+    impl Render for RowHost {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.shell.update(cx, |shell, cx| {
+                let theme = Theme::of(cx).clone();
+                let row = shell.render_chat_row(
+                    "b".into(),
+                    "Second".into(),
+                    "1m".into(),
+                    "proj".into(),
+                    None,
+                    None,
+                    None,
+                    zeron_proto::ChatIndicator::Idle,
+                    false,
+                    false,
+                    None,
+                    None,
+                    &theme,
+                    cx,
+                );
+                let zones = shell.render_split_drop_zones(cx);
+                div()
+                    .flex()
+                    .flex_row()
+                    .w(px(1000.))
+                    .h(px(500.))
+                    .child(div().w(px(240.)).child(row))
+                    .child(div().relative().flex_1().h_full().children(zones))
+            })
+        }
+    }
+
+    #[gpui::test]
+    fn dragging_a_sidebar_row_onto_the_right_zone_opens_the_split(cx: &mut TestAppContext) {
+        init(cx);
+        let dir = tempfile::tempdir().unwrap();
+        let (host, cx) = cx.add_window_view(|_, cx| {
+            let shell = cx.new(|cx| {
+                let state = cx.new(|_| AppState::new());
+                let shell = Shell::new(state, boot_config(&dir), cx);
+                seed(&shell, cx);
+                shell
+            });
+            RowHost {
+                shell,
+                _data_dir: dir,
+            }
+        });
+        let shell = host.read_with(cx, |host, _| host.shell.clone());
+        cx.update(|window, cx| window.draw(cx).clear());
+        let start = cx.debug_bounds("chat-b").unwrap().center();
+        cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(
+            start + gpui::point(px(12.), px(12.)),
+            Some(MouseButton::Left),
+            gpui::Modifiers::default(),
+        );
+        cx.update(|_, cx| assert!(cx.has_active_drag(), "row drag did not start"));
+        cx.update(|window, cx| window.draw(cx).clear());
+        let zone = cx
+            .debug_bounds("split-drop-right")
+            .expect("drop zones mount while the row is dragged")
+            .center();
+        cx.simulate_mouse_move(zone, Some(MouseButton::Left), gpui::Modifiers::default());
+        cx.simulate_mouse_up(zone, MouseButton::Left, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.split_chat_id(), Some("b"));
+            assert_eq!(shell.split.as_ref().map(|s| s.side), Some(SplitSide::Right));
+        });
+    }
+
+    /// The real Shell as the window root (gate forced Ready): a strip tab
+    /// dragged onto the left zone opens the split and the pane renders.
+    #[gpui::test]
+    fn dragging_a_strip_tab_onto_the_left_zone_opens_the_split(cx: &mut TestAppContext) {
+        init(cx);
+        let dir = tempfile::tempdir().unwrap();
+        let (shell, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            let mut shell = Shell::new(state, boot_config(&dir), cx);
+            shell.debug_gate = Some(GatePhase::Ready);
+            seed(&shell, cx);
+            shell.settings.open_tabs = Some(vec!["a".into(), "b".into()]);
+            shell.state.update(cx, |state, _| {
+                state.sessions.push(zeron_proto::Session {
+                    last_completed_turn: None,
+                    chat_id: "b".into(),
+                    device_id: "dev".into(),
+                    status: zeron_proto::SessionStatus::Working,
+                    started_at: None,
+                    updated_at: chrono::Utc::now(),
+                });
+            });
+            std::mem::forget(dir);
+            shell
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        let start = cx
+            .debug_bounds("session-tab-b")
+            .expect("tab for b on the strip")
+            .center();
+        cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(
+            start + gpui::point(px(0.), px(60.)),
+            Some(MouseButton::Left),
+            gpui::Modifiers::default(),
+        );
+        cx.update(|_, cx| assert!(cx.has_active_drag(), "tab drag did not start"));
+        cx.update(|window, cx| window.draw(cx).clear());
+        let zone = cx
+            .debug_bounds("split-drop-left")
+            .expect("drop zones mount while the tab is dragged")
+            .center();
+        cx.simulate_mouse_move(zone, Some(MouseButton::Left), gpui::Modifiers::default());
+        cx.simulate_mouse_up(zone, MouseButton::Left, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.split_chat_id(), Some("b"));
+            assert_eq!(shell.split.as_ref().map(|s| s.side), Some(SplitSide::Left));
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(
+            cx.debug_bounds("split-pane").is_some(),
+            "secondary pane not rendered"
+        );
     }
 }
 

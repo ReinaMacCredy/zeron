@@ -6389,6 +6389,7 @@ impl Shell {
         };
         div()
             .id(SharedString::from(row_id.clone()))
+            .debug_selector(|| row_id.clone())
             .h(px(chat_row_height(
                 branch.is_some(),
                 change_request.is_some(),
@@ -8456,18 +8457,35 @@ impl Shell {
                 if chat_artwork.is_some() && chat_artwork_opacity < 1.0 {
                     window.request_animation_frame();
                 }
-                crate::chat_background::layer(
+                let full_width = (self.viewport_width - self.sidebar_now()).max(0.0);
+                let height = crate::chat_background::layer_height(
+                    chat_background.placement,
+                    self.viewport_height,
+                    new_thread_background_height(self.viewport_height),
+                );
+                let layer = crate::chat_background::layer(
                     chat_artwork,
                     chat_background,
-                    Some((self.viewport_width - self.sidebar_now()).max(0.0)),
-                    crate::chat_background::layer_height(
-                        chat_background.placement,
-                        self.viewport_height,
-                        new_thread_background_height(self.viewport_height),
-                    ),
+                    Some(full_width),
+                    height,
                     theme.bg,
                     chat_artwork_opacity * dock_frame.transcript(),
-                )
+                );
+                // The artwork spans the whole conversation column. With the
+                // split's secondary pane on the LEFT this column starts mid-
+                // way, so slide the layer back under that pane (the card clips
+                // the overhang); on the right the layer already runs under it.
+                match self.split.as_ref().map(|s| s.side) {
+                    Some(split::SplitSide::Left) => div()
+                        .absolute()
+                        .top_0()
+                        .left(px(-main_content_width))
+                        .w(px(full_width))
+                        .h(px(height))
+                        .child(layer)
+                        .into_any_element(),
+                    _ => layer,
+                }
             });
         let outlet: AnyElement = if has_selection || departing_transcript {
             div()
