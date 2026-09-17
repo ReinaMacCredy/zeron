@@ -6,6 +6,7 @@
 //! - busy agent that only takes input at a turn boundary → the queue HOLDS,
 //!   and flushes when the turn ends;
 //! - busy agent, including one that takes input mid-turn → held until turn end;
+//! - a submit flagged `steerNow` → steers a mid-turn agent, otherwise holds;
 //! - "send now" → interrupts whatever is running.
 
 use std::sync::{Arc, Mutex};
@@ -599,8 +600,92 @@ async fn queued_text_waits_for_a_steerable_turn_even_with_legacy_policy() {
     core.shutdown().await;
 }
 
-/// The legacy explicit-steer RPC remains compatible with older clients;
-/// current clients offer only Send now.
+/// A submit with `steerNow` reaches a steerable live turn without waiting
+/// for it to end, and without interrupting it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_steer_now_submit_steers_a_live_steerable_turn() {
+    let (core, harness, prompts) = setup(SteeringMode::StepBoundary).await;
+    let client = zeron_rpc::memory_client(core.rpc_service());
+
+    core.doc_host
+        .queue_message(CHAT, "opening", Vec::new())
+        .expect("queue opening");
+    wait_for(
+        || prompts.lock().unwrap().iter().any(|p| p == "opening"),
+        "the first turn to start",
+    )
+    .await;
+
+    client
+        .call(
+            zeron_rpc::methods::QUEUE_MESSAGE,
+            serde_json::json!({
+                "chatId": CHAT,
+                "text": "mid-turn",
+                "holdForTurnEnd": true,
+                "steerNow": true,
+            }),
+        )
+        .await
+        .expect("queue steer-now message");
+    wait_for(
+        || user_messages(&core).iter().any(|m| m == "mid-turn"),
+        "the submit to steer the live turn",
+    )
+    .await;
+    assert!(queue_texts(&core).is_empty());
+    assert!(core.sessions.turn_in_flight(CHAT), "steering never interrupts");
+
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
+/// The same submit against an agent that only takes input between turns is
+/// an ordinary queue row: held, then flushed at turn end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_steer_now_submit_holds_for_a_turn_boundary_agent() {
+    let (core, harness, prompts) = setup(SteeringMode::TurnBoundary).await;
+    let client = zeron_rpc::memory_client(core.rpc_service());
+
+    core.doc_host
+        .queue_message(CHAT, "opening", Vec::new())
+        .expect("queue opening");
+    wait_for(
+        || prompts.lock().unwrap().iter().any(|p| p == "opening"),
+        "the first turn to start",
+    )
+    .await;
+
+    client
+        .call(
+            zeron_rpc::methods::QUEUE_MESSAGE,
+            serde_json::json!({
+                "chatId": CHAT,
+                "text": "mid-turn",
+                "holdForTurnEnd": true,
+                "steerNow": true,
+            }),
+        )
+        .await
+        .expect("queue steer-now message");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(queue_texts(&core), vec!["mid-turn"]);
+    assert!(!user_messages(&core).iter().any(|m| m == "mid-turn"));
+
+    let _ = harness.finish.send(());
+    wait_for(
+        || prompts.lock().unwrap().iter().any(|p| p == "mid-turn"),
+        "the held row to flush at turn end",
+    )
+    .await;
+    assert!(queue_texts(&core).is_empty());
+
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
+/// The explicit-steer RPC promotes a held row on its own; queue rows offer
+/// only Send now, but a Steer follow-up submit rides this same path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn held_policy_keeps_a_steerable_message_visible_until_steer_now() {
     let (core, harness, prompts) = setup(SteeringMode::StepBoundary).await;

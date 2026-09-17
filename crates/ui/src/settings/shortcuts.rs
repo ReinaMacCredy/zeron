@@ -15,7 +15,8 @@ use crate::popover::{self, ScrollRailHost};
 mod appshots_page;
 use crate::settings::widgets;
 use crate::settings::{
-    ComposerSendBehavior, KeymapConfig, ShortcutId, combo_from_keystroke, display_combo,
+    ComposerSendBehavior, FollowUpBehavior, KeymapConfig, ShortcutId, combo_from_keystroke,
+    display_combo,
 };
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -49,6 +50,8 @@ pub enum ShortcutsEvent {
     EscapeStopsActiveAgentChanged(bool),
     /// The composer send behavior changed — persist + re-apply.
     ComposerSendBehaviorChanged(ComposerSendBehavior),
+    /// Busy-turn submits queue or steer by default — persist it locally.
+    FollowUpBehaviorChanged(FollowUpBehavior),
     AppshotsChanged {
         enabled: bool,
         sound_enabled: bool,
@@ -64,6 +67,7 @@ pub struct ShortcutsPage {
     keymap: KeymapConfig,
     escape_stops_active_agent: bool,
     composer_send_behavior: ComposerSendBehavior,
+    follow_up_behavior: FollowUpBehavior,
     recording: Option<ShortcutId>,
     recording_blur: Option<gpui::Subscription>,
     recording_interceptor: Option<gpui::Subscription>,
@@ -90,6 +94,7 @@ impl ShortcutsPage {
         keymap: KeymapConfig,
         escape_stops_active_agent: bool,
         composer_send_behavior: ComposerSendBehavior,
+        follow_up_behavior: FollowUpBehavior,
         appshots_enabled: bool,
         appshot_sound_enabled: bool,
         appshot_destination: AppshotDestination,
@@ -104,6 +109,7 @@ impl ShortcutsPage {
             keymap,
             escape_stops_active_agent,
             composer_send_behavior,
+            follow_up_behavior,
             recording: None,
             recording_blur: None,
             recording_interceptor: None,
@@ -182,6 +188,14 @@ impl ShortcutsPage {
             self.composer_send_behavior = behavior;
             self.conflict_notice = None;
             cx.emit(ShortcutsEvent::ComposerSendBehaviorChanged(behavior));
+            cx.notify();
+        }
+    }
+
+    fn set_follow_up_behavior(&mut self, behavior: FollowUpBehavior, cx: &mut Context<Self>) {
+        if self.follow_up_behavior != behavior {
+            self.follow_up_behavior = behavior;
+            cx.emit(ShortcutsEvent::FollowUpBehaviorChanged(behavior));
             cx.notify();
         }
     }
@@ -459,6 +473,20 @@ pub fn modifier_send_label(is_macos: bool) -> &'static str {
     if is_macos { "⌘ Enter" } else { "Ctrl Enter" }
 }
 
+/// The per-message override rides the modifier chord, which is the send key
+/// itself once "Send messages with" moves to it — say so instead of promising
+/// a chord that cannot invert anything.
+pub fn follow_up_description(send_behavior: ComposerSendBehavior, modifier_label: &str) -> String {
+    match send_behavior {
+        ComposerSendBehavior::Enter => format!(
+            "Queue follow-ups while the agent runs, or steer the current run. Press {modifier_label} to do the opposite for one message."
+        ),
+        ComposerSendBehavior::ModEnter => format!(
+            "Queue follow-ups while the agent runs, or steer the current run. {modifier_label} is the send key, so every message follows this setting."
+        ),
+    }
+}
+
 /// The page's sections, in display order. [`group`] is a total match, so every
 /// [`ShortcutId::ALL`] entry lands in exactly one — a shortcut added later
 /// extends the match and appears on the page by construction
@@ -532,9 +560,11 @@ impl Render for ShortcutsPage {
         let recording = self.recording;
         let escape_stops_active_agent = self.escape_stops_active_agent;
         let send_behavior = self.composer_send_behavior;
+        let follow_up_behavior = self.follow_up_behavior;
         let customized = self.keymap != KeymapConfig::default()
             || escape_stops_active_agent
-            || send_behavior != ComposerSendBehavior::default();
+            || send_behavior != ComposerSendBehavior::default()
+            || follow_up_behavior != FollowUpBehavior::default();
         let modifier_label = modifier_send_label(cfg!(target_os = "macos"));
 
         let escape_behavior_row = widgets::section_card(&theme).child(
@@ -671,6 +701,79 @@ impl Render for ShortcutsPage {
                             ),
                     )
                     .child(send_behavior_control),
+            )
+            .child(
+                widgets::card_row(&theme, false)
+                    .min_h(px(84.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(widgets::row_title(&theme, "Follow-up behavior"))
+                            .child(
+                                div()
+                                    .mt(px(4.0))
+                                    .max_w(px(430.0))
+                                    .text_size(px(11.5))
+                                    .line_height(px(17.0))
+                                    .text_color(theme.text_muted.opacity(0.65))
+                                    .child(SharedString::from(follow_up_description(
+                                        send_behavior,
+                                        modifier_label,
+                                    ))),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("follow-up-behavior")
+                            .flex_none()
+                            .flex()
+                            .flex_row()
+                            .rounded(px(9.0))
+                            .p(px(2.0))
+                            .bg(crate::theme::ink(0.04))
+                            .children(
+                                [
+                                    (FollowUpBehavior::Queue, "Queue"),
+                                    (FollowUpBehavior::Steer, "Steer"),
+                                ]
+                                .into_iter()
+                                .enumerate()
+                                .map(|(ix, (behavior, label))| {
+                                    let selected = follow_up_behavior == behavior;
+                                    div()
+                                        .id(("follow-up-option", ix))
+                                        .min_w(px(72.0))
+                                        .px(px(12.0))
+                                        .py(px(6.0))
+                                        .rounded(px(7.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_size(px(12.0))
+                                        .text_color(if selected {
+                                            theme.text
+                                        } else {
+                                            theme.text_muted
+                                        })
+                                        .when(selected, |el| {
+                                            el.bg(theme.bg)
+                                                .border_1()
+                                                .border_color(theme.border.opacity(0.8))
+                                        })
+                                        .when(!selected, |el| {
+                                            el.cursor_pointer()
+                                                .hover(|s| s.text_color(theme.text))
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.set_follow_up_behavior(behavior, cx)
+                                                }))
+                                        })
+                                        .child(SharedString::from(label))
+                                }),
+                            ),
+                    ),
             );
         // One card per group, each under its small section label — the flat
         // 16-row table read as one undifferentiated wall. `ix` (the id's
@@ -779,6 +882,10 @@ impl Render for ShortcutsPage {
                                                             ComposerSendBehavior::Enter,
                                                             cx,
                                                         );
+                                                        this.set_follow_up_behavior(
+                                                            FollowUpBehavior::Queue,
+                                                            cx,
+                                                        );
                                                     }),
                                                 )
                                             })
@@ -835,6 +942,7 @@ mod tests {
                 KeymapConfig::default(),
                 false,
                 ComposerSendBehavior::default(),
+                FollowUpBehavior::default(),
                 false,
                 false,
                 AppshotDestination::Automatic,
@@ -928,6 +1036,7 @@ mod tests {
                 KeymapConfig::default(),
                 false,
                 ComposerSendBehavior::default(),
+                FollowUpBehavior::default(),
                 false,
                 true,
                 AppshotDestination::Automatic,

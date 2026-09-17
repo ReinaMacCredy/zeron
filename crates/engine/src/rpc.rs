@@ -160,6 +160,10 @@ struct QueueMessageParams {
     /// supports mid-turn steering.
     #[serde(default)]
     hold_for_turn_end: bool,
+    /// Steer the row into the live turn right away when the harness can take
+    /// it; otherwise it stays queued exactly like a plain submit.
+    #[serde(default)]
+    steer_now: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1423,6 +1427,9 @@ impl RpcService for EngineRpc {
                         p.hold_for_turn_end,
                     )
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
+                if p.steer_now {
+                    self.doc_host.steer_queued_on_submit(&p.chat_id, &id).await;
+                }
                 RpcReply::value(&serde_json::json!({ "id": id }))
             }
             methods::UPDATE_QUEUED_MESSAGE => {
