@@ -84,6 +84,7 @@ fn request(prompt: &str, cwd: &str) -> RunRequest {
         model_options: serde_json::Map::new(),
         cwd: cwd.into(),
         sandbox: SandboxLevel::ReadOnly,
+        permission_mode: zeron_proto::PermissionMode::Full,
         auto_approve: false,
         attachments: Vec::new(),
         resume: None,

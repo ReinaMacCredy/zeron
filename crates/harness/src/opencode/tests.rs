@@ -1,5 +1,23 @@
 use super::*;
 
+#[test]
+fn auto_mode_allows_workspace_edits_and_asks_for_the_rest() {
+    assert_eq!(
+        permission_kind(&json!({"id":"p","type":"edit","sessionID":"s"})),
+        Some("edit")
+    );
+    assert_eq!(
+        permission_kind(&json!({"id":"p","action":"external_directory"})),
+        Some("external_directory")
+    );
+    assert_eq!(permission_kind(&json!({"id":"p"})), None);
+    assert!(auto_allows("edit"));
+    assert!(auto_allows("read"));
+    assert!(!auto_allows("bash"));
+    assert!(!auto_allows("webfetch"));
+    assert!(!auto_allows("external_directory"));
+}
+
 /// Real HTTP/SSE transport with explicitly ordered turn events. No provider or
 /// installed CLI is involved, so duplicate completion frames are reproducible.
 struct TurnWire {
@@ -142,7 +160,7 @@ impl TurnWire {
                 interrupt: interrupt.clone(),
             },
             request: serde_json::from_value(
-                json!({"prompt":"first", "cwd":"", "sandbox":"workspace-write", "autoApprove": auto_approve, "model": if v2 { Some("opencode/muse") } else { None }, "reasoning": "low"}),
+                json!({"prompt":"first", "cwd":"", "sandbox":"workspace-write", "autoApprove": auto_approve, "permissionMode": if auto_approve { "full" } else { "ask" }, "model": if v2 { Some("opencode/muse") } else { None }, "reasoning": "low"}),
             )
             .unwrap(),
             interrupt_grace: Duration::from_secs(2),

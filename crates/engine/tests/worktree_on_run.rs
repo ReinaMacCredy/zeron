@@ -116,6 +116,7 @@ fn run_payload(message_id: &str, repo_path: &str) -> SessionCommandPayload {
             // Fallback for hosts that predate the spec: the repo's own folder.
             cwd: repo_path.into(),
             sandbox: SandboxLevel::WorkspaceWrite,
+            permission_mode: zeron_proto::PermissionMode::Full,
             auto_approve: true,
             attachments: Vec::new(),
             resume: None,

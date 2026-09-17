@@ -6,7 +6,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::{HarnessId, ReasoningLevel, SandboxLevel};
+use crate::{HarnessId, PermissionMode, ReasoningLevel, SandboxLevel};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -91,6 +91,10 @@ pub struct ChatConfig {
     #[serde(default)]
     pub model_options: serde_json::Map<String, serde_json::Value>,
     pub sandbox: SandboxLevel,
+    /// See [`PermissionMode`]. Serde-defaulted (Full) so rows written before
+    /// the field existed keep today's unattended behavior.
+    #[serde(default)]
+    pub permission_mode: PermissionMode,
 }
 
 /// Immutable-at-run-start repository context owned by one conversation.

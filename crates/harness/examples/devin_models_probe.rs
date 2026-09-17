@@ -43,6 +43,7 @@ async fn main() -> anyhow::Result<()> {
         model_options: Default::default(),
         cwd: std::env::current_dir()?.to_string_lossy().into_owned(),
         sandbox: SandboxLevel::ReadOnly,
+        permission_mode: zeron_proto::PermissionMode::Full,
         auto_approve: true,
         attachments: Vec::new(),
         worktree: None,

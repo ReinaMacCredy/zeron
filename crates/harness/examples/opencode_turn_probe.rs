@@ -30,6 +30,7 @@ async fn main() {
         model_options: serde_json::Map::new(),
         cwd: cwd.into(),
         sandbox: SandboxLevel::WorkspaceWrite,
+        permission_mode: zeron_proto::PermissionMode::Full,
         auto_approve: true,
         attachments: Vec::new(),
         resume: None,

@@ -4150,6 +4150,7 @@ impl DocHost {
                         reasoning: request.reasoning,
                         model_options: request.model_options.clone(),
                         sandbox: request.sandbox,
+                        permission_mode: request.permission_mode,
                     };
                     if let Err(err) = ws.set_chat_config(chat_id, &config) {
                         tracing::warn!(chat = %chat_id, error = %err, "run-config backfill failed");
@@ -4487,6 +4488,10 @@ impl DocHost {
                 .map(|c| c.sandbox)
                 .unwrap_or(zeron_proto::SandboxLevel::WorkspaceWrite),
             auto_approve: false,
+            permission_mode: config
+                .as_ref()
+                .map(|c| c.permission_mode)
+                .unwrap_or_default(),
             attachments: Vec::new(),
             resume: None,
             worktree: None,

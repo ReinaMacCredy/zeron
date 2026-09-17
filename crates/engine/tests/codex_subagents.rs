@@ -60,6 +60,7 @@ async fn check_persistence(
         model_options: Default::default(),
         cwd: dir.path().display().to_string(),
         sandbox: SandboxLevel::ReadOnly,
+        permission_mode: zeron_proto::PermissionMode::Full,
         auto_approve: true,
         attachments: vec![],
         worktree: None,
