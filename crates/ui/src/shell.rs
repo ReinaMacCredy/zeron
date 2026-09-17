@@ -61,6 +61,7 @@ use crate::workspace_links::resolve_workspace_file_link;
 
 mod command_palette;
 mod spaces;
+mod split;
 mod switcher;
 mod tabs;
 
@@ -1543,6 +1544,8 @@ pub struct Shell {
     stale_thumbs: Vec<std::sync::Arc<gpui::RenderImage>>,
     /// The Ctrl+Tab switcher while its modifier is held.
     switcher: Option<switcher::Switcher>,
+    /// The split view's secondary pane beside the selected session.
+    split: Option<split::SplitPane>,
     /// Chat outlet vs settings pages.
     route: Route,
     /// Route history behind the titlebar back/forward buttons (§ nav history).
@@ -1957,6 +1960,7 @@ impl Shell {
             session_thumbs: std::collections::HashMap::new(),
             stale_thumbs: Vec::new(),
             switcher: None,
+            split: None,
             route,
             nav,
             devices_page: None,
@@ -2377,6 +2381,7 @@ impl Shell {
         }
         // Reconcile the device-local tab list (prune against the doc,
         // selected-chat invariant).
+        self.prune_split(cx);
         self.sync_open_tabs(cx);
         // Heal a dangling sidebar filter (space deleted, possibly elsewhere):
         // fall back to "All" rather than filtering everything out.
@@ -2398,7 +2403,12 @@ impl Shell {
             if !selected.is_empty() {
                 self.touch_session_mru(&selected);
             }
-            self.active_chat = selected;
+            let previous = std::mem::replace(&mut self.active_chat, selected.clone());
+            self.reconcile_split_with_selection(
+                Some(selected.as_str()).filter(|s| !s.is_empty()),
+                Some(previous.as_str()),
+                cx,
+            );
             // Route history: a chat switch is a navigation. The very first
             // selection off the untouched boot canvas REPLACES that entry —
             // zeron's `/` route redirected into the last-used chat, leaving no
@@ -6416,6 +6426,26 @@ impl Shell {
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.open_chat(select_id.clone(), cx);
             }))
+            // Sidebar rows drag into the split view's drop zones (the
+            // palette's copies do not).
+            .when(
+                search_query.is_none() && !archived && crate::click_activation_drag_enabled(),
+                |el| {
+                    el.on_drag(
+                        split::SessionRowDrag {
+                            chat_id: id.clone(),
+                            title: title.clone(),
+                            brand: harness.map(crate::pickers::harness_brand_icon),
+                        },
+                        |payload, _point, _, cx| {
+                            let title = payload.title.clone();
+                            let brand = payload.brand;
+                            cx.stop_propagation();
+                            cx.new(|_| tabs::TabGhost { title, brand })
+                        },
+                    )
+                },
+            )
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
@@ -10942,6 +10972,46 @@ impl Render for Shell {
                     })
                     .detach();
                 }
+                // `=split` (capture knob; the drag gesture has no input-free
+                // path): once a session is selected, open the next sidebar
+                // session as the split view's secondary pane — polling a few
+                // seconds, since a seeded second chat may land after boot.
+                if self.debug_dialog.as_deref() == Some("split")
+                    && self.state.read(cx).selected_chat.is_some()
+                {
+                    self.debug_dialog = None;
+                    cx.spawn(async move |this, cx| {
+                        for _ in 0..15 {
+                            cx.background_executor()
+                                .timer(Duration::from_millis(1000))
+                                .await;
+                            let opened = this
+                                .update(cx, |shell, cx| {
+                                    let order = shell.sidebar_visible_order(cx);
+                                    let selected = shell.state.read(cx).selected_chat.clone();
+                                    let next = order
+                                        .iter()
+                                        .find(|id| Some(id.as_str()) != selected.as_deref())
+                                        .cloned();
+                                    if let Some(next) = next {
+                                        shell.drop_session_on_side(
+                                            next,
+                                            split::SplitSide::Right,
+                                            cx,
+                                        );
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                })
+                                .unwrap_or(true);
+                            if opened {
+                                break;
+                            }
+                        }
+                    })
+                    .detach();
+                }
                 // MessageRail width gate: hide below 48rem of main-panel width.
                 let viewport = f32::from(window.viewport_size().width);
                 self.viewport_height = f32::from(window.viewport_size().height);
@@ -10959,8 +11029,15 @@ impl Render for Shell {
                 if panel_handoff {
                     self.motion_active.set(true);
                 }
+                let split_open = on_chat && self.split.is_some();
                 let main_target_width =
                     conversation_width(viewport, self.sidebar_target(), right_target_width);
+                // The secondary pane takes half the column (fixed 50/50).
+                let main_target_width = if split_open {
+                    main_target_width / 2.0
+                } else {
+                    main_target_width
+                };
                 let main_transition = self.active_tween_endpoints(self.main_takeover_tween);
                 let main_content_width =
                     stable_panel_content_width(main_target_width, main_transition);
@@ -11051,13 +11128,30 @@ impl Render for Shell {
                 } else {
                     main
                 };
+                let split_side = self.split.as_ref().map(|s| s.side).filter(|_| on_chat);
+                let split_pane = split_side.and_then(|_| self.render_split_pane(cx));
+                let drop_zones = on_chat.then(|| self.render_split_drop_zones(cx)).flatten();
+                let mut columns: Vec<AnyElement> = Vec::with_capacity(2);
+                match (split_side, split_pane) {
+                    (Some(split::SplitSide::Left), Some(pane)) => {
+                        columns.push(pane);
+                        columns.push(main);
+                    }
+                    (Some(split::SplitSide::Right), Some(pane)) => {
+                        columns.push(main);
+                        columns.push(pane);
+                    }
+                    _ => columns.push(main),
+                }
                 let card: AnyElement = div()
                     .flex_1()
                     .min_w_0()
+                    .relative()
                     .flex()
                     .flex_row()
                     .overflow_hidden()
-                    .child(main)
+                    .children(columns)
+                    .children(drop_zones)
                     .into_any_element();
                 // The whole app page is one keyed `animate-in` entrance (zeron
                 // App.tsx `<div key={phase} className="animate-in h-full">`):
