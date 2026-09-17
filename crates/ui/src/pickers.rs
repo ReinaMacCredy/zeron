@@ -4694,13 +4694,18 @@ impl Render for Pickers {
             .absolute()
             .inset_0(),
         );
+        // On the new-chat canvas the chip sits at the pill's LEFT, so it is
+        // start-anchored there: its width follows the selected model's name
+        // and traits suffix, and an end-anchored card slid sideways on every
+        // pick (user report). In a session the chip is right-aligned and the
+        // end anchor is the stable edge.
         let model_chip = if new_chat {
             if overlay
                 .as_ref()
                 .is_some_and(|(kind, _)| *kind == PickerKind::HarnessModel)
                 && let Some((_, content)) = overlay.take()
             {
-                model_chip.child(popover::anchored_menu_below_end(
+                model_chip.child(popover::anchored_menu_below(
                     "model-popover",
                     content,
                     closing,

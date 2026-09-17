@@ -109,7 +109,7 @@ const ACTIVITY_BRANCH_END_X: f32 = 28.0;
 const ACTIVITY_ICON_LEFT: f32 = 32.0;
 const ACTIVITY_ICON_SIZE: f32 = 16.0;
 const TOOL_TEXT_SIZE: f32 = 12.0;
-const TOOL_LABEL_SIZE: f32 = TOOL_TEXT_SIZE;
+const TOOL_LABEL_SIZE: f32 = 13.0;
 const TOOL_LABEL_LINE_HEIGHT: f32 = 18.0;
 const TOOL_GROUP_HEADER_HEIGHT: f32 = 26.0;
 /// Compact rows retain the analytic heights used by row and group folds.
