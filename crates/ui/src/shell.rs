@@ -1529,6 +1529,8 @@ pub struct Shell {
     tab_menu: popover::Popup<(String, Point<Pixels>)>,
     /// Session-tab drag-reorder in flight (see `tabs::TabDragState`).
     tab_drag: Option<tabs::TabDragState>,
+    /// Which split drop zone the pointer is over while a session is dragged.
+    split_drop_hot: Option<split::SplitDropHot>,
     /// Scroll position of the session tab region (drives the edge fades and
     /// the drop-index math under horizontal overflow).
     tabs_scroll: gpui::ScrollHandle,
@@ -1957,6 +1959,7 @@ impl Shell {
             tab_hover: None,
             tab_menu: popover::Popup::default(),
             tab_drag: None,
+            split_drop_hot: None,
             tabs_scroll: gpui::ScrollHandle::new(),
             tabs_scrolled_to: None,
             session_mru: Vec::new(),

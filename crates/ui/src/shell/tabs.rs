@@ -96,6 +96,172 @@ pub(super) fn next_after_close(order: &[String], closed: &str) -> Option<String>
     })
 }
 
+/// Sliding transform while a sibling is dragged over: animate 150ms between
+/// committed offsets. `slots` is how many tab slots the element spans.
+fn slide_tab<E: gpui::Element + gpui::Styled + 'static>(
+    tab_el: E,
+    ix: usize,
+    id: String,
+    slots: usize,
+    drag: Option<(usize, usize, usize, usize)>,
+) -> AnyElement {
+    match drag {
+        Some((from, over, epoch, prev_over)) if ix != from => {
+            let slot = SESSION_TAB_WIDTH + TAB_GAP;
+            let target = slide_offset(ix, from, over) * slot;
+            let start = slide_offset(ix, from, prev_over) * slot;
+            div()
+                .relative()
+                .child(tab_el.with_animation(
+                    SharedString::from(format!("session-tab-slide-{id}-{epoch}")),
+                    TAB_SLIDE.animation(),
+                    move |el, t| el.left(px(motion::lerp(start, target, t))),
+                ))
+                .into_any_element()
+        }
+        // The dragged tab is represented by the cursor ghost; its flow slot
+        // renders as an INVISIBLE spacer. A dimmed tab here overlapped
+        // whatever sibling slid into the vacated slot (slide_offset moves one
+        // tab exactly there — user-reported double-exposure).
+        Some((from, ..)) if ix == from => div()
+            .w(px(
+                SESSION_TAB_WIDTH * slots as f32 + TAB_GAP * (slots - 1) as f32
+            ))
+            .h(px(28.0))
+            .flex_none()
+            .into_any_element(),
+        _ => tab_el.into_any_element(),
+    }
+}
+
+/// The split's double chip: both sessions in one selected pill, left half
+/// for the left pane. A half clicks, drags (into the drop zones or along
+/// the strip) and middle-closes like a tab; the pane header carries the
+/// split's own close.
+fn split_tab_chip(
+    ix: usize,
+    halves: [(
+        String,
+        SharedString,
+        Option<zeron_proto::HarnessId>,
+        ChatIndicator,
+    ); 2],
+    selected: Option<&str>,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> gpui::Stateful<gpui::Div> {
+    let mut chip = div()
+        .id("session-tab-split")
+        .w(px(SESSION_TAB_WIDTH * 2.0 + TAB_GAP))
+        .h(px(28.0))
+        .flex_none()
+        .flex()
+        .flex_row()
+        .items_center()
+        .rounded(px(8.0))
+        .text_size(px(12.0))
+        .bg(crate::theme::glass_selected_bg())
+        .shadow(crate::theme::glass_selected_shadows())
+        .block_mouse_except_scroll()
+        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default());
+    for (n, (id, title, harness, status)) in halves.into_iter().enumerate() {
+        if n == 1 {
+            chip = chip.child(
+                div()
+                    .w(px(1.0))
+                    .h(px(16.0))
+                    .flex_none()
+                    .bg(theme.border_strong),
+            );
+        }
+        let is_primary = selected == Some(id.as_str());
+        let brand = harness.map(crate::pickers::harness_brand_icon);
+        let dot = spaces::status_dot_color(status, theme);
+        let select_id = id.clone();
+        let middle_id = id.clone();
+        let menu_id = id.clone();
+        chip = chip.child(
+            div()
+                .id(SharedString::from(format!("session-tab-{id}")))
+                .debug_selector(|| format!("session-tab-{id}"))
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .pl(px(8.0))
+                .pr(px(6.0))
+                .rounded(px(8.0))
+                .text_color(if is_primary {
+                    theme.text
+                } else {
+                    theme.text.opacity(0.7)
+                })
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.navigate_to(Some(select_id.clone()), true, cx);
+                }))
+                .on_mouse_down(
+                    MouseButton::Middle,
+                    cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.close_session_tab(middle_id.clone(), cx);
+                    }),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.tab_menu.open((menu_id.clone(), event.position));
+                        cx.notify();
+                    }),
+                )
+                .when(crate::click_activation_drag_enabled(), |el| {
+                    el.on_drag(
+                        TabDragPayload {
+                            from: ix,
+                            chat_id: id.clone(),
+                            title: title.clone(),
+                            brand,
+                        },
+                        |payload, _point, _, cx| {
+                            let title = payload.title.clone();
+                            let brand = payload.brand;
+                            cx.stop_propagation();
+                            cx.new(|_| TabGhost { title, brand })
+                        },
+                    )
+                })
+                .when_some(brand, |el, (path, tint)| {
+                    el.child(
+                        icon(path)
+                            .size(px(14.0))
+                            .flex_none()
+                            .text_color(tint.unwrap_or(theme.text_muted).opacity(0.9)),
+                    )
+                })
+                .child(div().flex_1().min_w_0().truncate().child(title))
+                .when(status == ChatIndicator::Working, |el| {
+                    el.child(loaders::mini_glyph_spinner(
+                        format!("tab-working-{id}"),
+                        2.0,
+                        theme.glyph,
+                        cx.entity_id(),
+                        cx,
+                    ))
+                })
+                .when(
+                    !matches!(status, ChatIndicator::Idle | ChatIndicator::Working),
+                    |el| el.child(div().size(px(6.0)).rounded_full().bg(dot)),
+                ),
+        );
+    }
+    chip
+}
+
 pub(super) fn right_pane_expand_icon(expanded: bool) -> &'static str {
     if expanded {
         icons::COLLAPSE_ARROWS
@@ -544,7 +710,30 @@ impl Shell {
         if self.tab_drag.is_some() && !cx.has_active_drag() {
             self.tab_drag = None;
         }
-        let order: Vec<String> = self.open_tab_ids(cx);
+        let mut order: Vec<String> = self.open_tab_ids(cx);
+        // A split's two sessions share ONE double chip (Atlas): the secondary
+        // moves next to the selected one, on the side it is shown on, and
+        // the pair spends exactly two slots so the drop-index math holds.
+        let group: Option<(String, String)> = self.split.as_ref().and_then(|split| {
+            let primary = self.state.read(cx).selected_chat.clone()?;
+            let primary_ix = order.iter().position(|id| *id == primary)?;
+            order.iter().position(|id| *id == split.chat_id)?;
+            order.retain(|id| *id != split.chat_id);
+            let primary_ix = order
+                .iter()
+                .position(|id| *id == primary)
+                .unwrap_or(primary_ix);
+            Some(match split.side {
+                super::split::SplitSide::Left => {
+                    order.insert(primary_ix, split.chat_id.clone());
+                    (split.chat_id.clone(), primary)
+                }
+                super::split::SplitSide::Right => {
+                    order.insert(primary_ix + 1, split.chat_id.clone());
+                    (primary, split.chat_id.clone())
+                }
+            })
+        });
         let tabs: Vec<(
             String,
             SharedString,
@@ -601,10 +790,36 @@ impl Shell {
             .as_ref()
             .map(|d| (d.from, d.over, d.epoch, d.prev_over));
 
+        let tabs_by_id: std::collections::HashMap<
+            String,
+            (SharedString, Option<zeron_proto::HarnessId>, ChatIndicator),
+        > = tabs
+            .iter()
+            .map(|(id, title, harness, status, _)| (id.clone(), (title.clone(), *harness, *status)))
+            .collect();
         let tab_elements: Vec<AnyElement> =
             tabs.into_iter()
                 .enumerate()
-                .map(|(ix, (id, title, harness, status, is_draft))| {
+                .filter_map(|(ix, (id, title, harness, status, is_draft))| {
+                    if let Some((left, right)) = &group {
+                        if id == *right {
+                            // Drawn as the second half of the chip below.
+                            return None;
+                        }
+                        if id == *left {
+                            let chip = split_tab_chip(
+                                ix,
+                                [left, right].map(|id| {
+                                    let (title, harness, status) = tabs_by_id[id].clone();
+                                    (id.clone(), title, harness, status)
+                                }),
+                                selected.as_deref(),
+                                &theme,
+                                cx,
+                            );
+                            return Some(slide_tab(chip, ix, id.clone(), 2, drag));
+                        }
+                    }
                     // The split's secondary wears the selected look too: it
                     // is on screen beside the selected session.
                     let is_selected = selected.as_deref() == Some(id.as_str())
@@ -780,34 +995,7 @@ impl Shell {
                         .child(div().flex_1().min_w_0().truncate().child(title))
                         .child(trailing);
 
-                    // Sliding transform while a sibling is dragged over: animate
-                    // 150ms between committed offsets.
-                    match drag {
-                        Some((from, over, epoch, prev_over)) if ix != from => {
-                            let slot = SESSION_TAB_WIDTH + TAB_GAP;
-                            let target = slide_offset(ix, from, over) * slot;
-                            let start = slide_offset(ix, from, prev_over) * slot;
-                            div()
-                                .relative()
-                                .child(tab_el.with_animation(
-                                    SharedString::from(format!("session-tab-slide-{id}-{epoch}")),
-                                    TAB_SLIDE.animation(),
-                                    move |el, t| el.left(px(motion::lerp(start, target, t))),
-                                ))
-                                .into_any_element()
-                        }
-                        // The dragged tab is represented by the cursor ghost; its
-                        // flow slot renders as an INVISIBLE spacer. A dimmed tab
-                        // here overlapped whatever sibling slid into the vacated
-                        // slot (slide_offset moves one tab exactly there —
-                        // user-reported double-exposure).
-                        Some((from, ..)) if ix == from => div()
-                            .w(px(SESSION_TAB_WIDTH))
-                            .h(px(28.0))
-                            .flex_none()
-                            .into_any_element(),
-                        _ => tab_el.into_any_element(),
-                    }
+                    Some(slide_tab(tab_el, ix, id, 1, drag))
                 })
                 .collect();
 

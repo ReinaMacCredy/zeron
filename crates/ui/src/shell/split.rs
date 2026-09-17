@@ -36,6 +36,15 @@ pub(super) struct SessionRowDrag {
     pub(super) brand: Option<(&'static str, Option<gpui::Hsla>)>,
 }
 
+/// Which drop zone the pointer is over during a drag; `epoch` keys the
+/// grow/shrink animation restarts (the tab strip's slide idiom).
+#[derive(Debug, Default)]
+pub(super) struct SplitDropHot {
+    pub(super) hot: Option<SplitSide>,
+    pub(super) prev: Option<SplitSide>,
+    pub(super) epoch: usize,
+}
+
 /// What a drop on `side` does, given the current selection and split. Pure.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum SplitDrop {
@@ -268,6 +277,18 @@ impl Shell {
         }
     }
 
+    /// Pointer moved over a zone while dragging: restart the grow/shrink
+    /// animation only on a change of side.
+    fn set_split_drop_hot(&mut self, side: SplitSide, cx: &mut Context<Self>) {
+        let state = self.split_drop_hot.get_or_insert_with(Default::default);
+        if state.hot != Some(side) {
+            state.prev = state.hot;
+            state.hot = Some(side);
+            state.epoch += 1;
+            cx.notify();
+        }
+    }
+
     /// The secondary pane: a header (brand, title, close) under the
     /// titlebar band, the live transcript, its own composer.
     pub(super) fn render_split_pane(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -380,10 +401,12 @@ impl Shell {
     /// The two drop zones over the conversation column. Mounted only while
     /// a drag is active; GPUI reveals them by the dragged payload's concrete
     /// type (`drag_over`), so a pane-resize drag never shows them. The zone
-    /// under the pointer grows and fills (Atlas-style); a drag that cannot
-    /// split (the lone selected session, a draft) dims the whole layer.
+    /// under the pointer grows and fills (Atlas-style) on a 150ms curve; a
+    /// drag that cannot split (the lone selected session, a draft) dims the
+    /// whole layer.
     pub(super) fn render_split_drop_zones(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !cx.has_active_drag() {
+            self.split_drop_hot = None;
             return None;
         }
         let theme = Theme::of(cx).clone();
@@ -394,24 +417,59 @@ impl Shell {
             state.read(cx).is_draft(chat_id)
                 || (!split_open && selected.as_deref() == Some(chat_id))
         });
+        let (hot, prev, epoch) = self
+            .split_drop_hot
+            .as_ref()
+            .map(|h| (h.hot, h.prev, h.epoch))
+            .unwrap_or((None, None, 0));
         let zone = |side: SplitSide, cx: &mut Context<Self>| {
-            let (id, group, label) = match side {
-                SplitSide::Left => ("split-drop-left", "split-zone-left", "Split left"),
-                SplitSide::Right => ("split-drop-right", "split-zone-right", "Split right"),
+            let (id, label) = match side {
+                SplitSide::Left => ("split-drop-left", "Split left"),
+                SplitSide::Right => ("split-drop-right", "Split right"),
             };
-            let accent = theme.accent;
-            let hot = move |style: gpui::StyleRefinement| {
-                style
-                    .w(px(184.0))
-                    .max_h(px(520.0))
-                    .bg(accent.opacity(0.12))
-                    .border_color(accent)
-                    .text_color(theme.text)
+            let is_hot = hot == Some(side);
+            let was_hot = prev == Some(side);
+            let size = |hot: bool| if hot { (184.0, 520.0) } else { (148.0, 420.0) };
+            let (from_w, from_h) = size(was_hot);
+            let (to_w, to_h) = size(is_hot);
+            let (border, bg, text) = if is_hot {
+                (theme.accent, theme.accent.opacity(0.12), theme.text)
+            } else {
+                (
+                    theme.border_strong,
+                    crate::theme::wash(0.0),
+                    theme.text_muted,
+                )
             };
+            let card = div()
+                .max_h(px(to_h))
+                .h_full()
+                .rounded(px(14.0))
+                .border_1()
+                .border_dashed()
+                .border_color(border)
+                .bg(bg)
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(10.0))
+                .text_size(crate::typography::ui_rems(12.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(text)
+                .child(icon(icons::SPLIT_COLUMNS).size(px(18.0)).text_color(text))
+                .child(SharedString::from(label))
+                .with_animation(
+                    SharedString::from(format!("{id}-grow-{epoch}")),
+                    TAB_SLIDE.animation(),
+                    move |el, t| {
+                        el.w(px(motion::lerp(from_w, to_w, t)))
+                            .max_h(px(motion::lerp(from_h, to_h, t)))
+                    },
+                );
             div()
                 .id(id)
                 .debug_selector(|| id.to_string())
-                .group(group)
                 .flex_1()
                 .min_w_0()
                 .h_full()
@@ -423,6 +481,12 @@ impl Shell {
                 // stays clear so the drag ghost reads over the transcript.
                 .when(side == SplitSide::Left, |el| el.justify_start())
                 .when(side == SplitSide::Right, |el| el.justify_end())
+                .on_drag_move::<tabs::TabDragPayload>(cx.listener(move |this, _, _, cx| {
+                    this.set_split_drop_hot(side, cx);
+                }))
+                .on_drag_move::<SessionRowDrag>(cx.listener(move |this, _, _, cx| {
+                    this.set_split_drop_hot(side, cx);
+                }))
                 .on_drop::<tabs::TabDragPayload>(cx.listener(
                     move |this, payload: &tabs::TabDragPayload, _, cx| {
                         tracing::info!(chat = %payload.chat_id, ?side, "split: tab dropped");
@@ -435,36 +499,7 @@ impl Shell {
                         this.drop_session_on_side(payload.chat_id.clone(), side, cx);
                     },
                 ))
-                .child(
-                    div()
-                        .w(px(148.0))
-                        .max_h(px(420.0))
-                        .h_full()
-                        .rounded(px(14.0))
-                        .border_1()
-                        .border_dashed()
-                        .border_color(theme.border_strong)
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .justify_center()
-                        .gap(px(10.0))
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.text_muted)
-                        // Identity drag-over styles give the box a hitbox;
-                        // the GROUP styles (the whole half) do the growing.
-                        .drag_over::<tabs::TabDragPayload>(|style, _, _, _| style)
-                        .drag_over::<SessionRowDrag>(|style, _, _, _| style)
-                        .group_drag_over::<tabs::TabDragPayload>(group, hot)
-                        .group_drag_over::<SessionRowDrag>(group, hot)
-                        .child(
-                            icon(icons::SPLIT_COLUMNS)
-                                .size(px(18.0))
-                                .text_color(theme.text_muted),
-                        )
-                        .child(SharedString::from(label)),
-                )
+                .child(card)
         };
         let left = zone(SplitSide::Left, cx);
         let right = zone(SplitSide::Right, cx);
