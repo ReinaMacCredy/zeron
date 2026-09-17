@@ -24,6 +24,8 @@ use zeron_proto::ChatIndicator;
 pub(super) const SESSION_TAB_WIDTH: f32 = 140.0;
 /// Flex gap between tabs — part of the drop-index slot width.
 const TAB_GAP: f32 = 4.0;
+/// Width of one fixed trailing titlebar button (summary, right-pane toggle).
+const TITLEBAR_FIXED_BUTTON: f32 = 28.0;
 /// Width of the overflow edge fades. Wide enough that per-glyph fade steps
 /// (title text fades glyph-by-glyph on glass) stay gentle.
 const FADE_WIDTH: f32 = 36.0;
@@ -786,11 +788,13 @@ impl Shell {
                 // options that used to live here moved into the pane's own
                 // second row; expand stays in this band (user request).
                 let tabs = self.render_right_tab_strip(cx);
-                // The toggle is the fixed right-edge anchor, like the left
-                // sidebar control. Only the tabs + expand section reveals to
-                // its left; including the toggle in this animated width
-                // compressed both icons into the same clipped box at open.
-                let animated_width = ((right_now - pr).min(avail) - 28.0).max(0.0);
+                // The summary + toggle pair is the fixed right-edge anchor,
+                // like the left sidebar control. Only the tabs + expand
+                // section reveals to its left; including the toggle in this
+                // animated width compressed both icons into the same clipped
+                // box at open.
+                let animated_width =
+                    ((right_now - pr).min(avail) - 2.0 * TITLEBAR_FIXED_BUTTON).max(0.0);
                 controls = controls.child(
                     div()
                         .w(px(animated_width))
@@ -826,6 +830,7 @@ impl Shell {
             // controls reveal to its left.
             Some(
                 controls
+                    .child(self.render_summary_trigger(cx))
                     .child(header_icon_button(
                         "toggle-changes",
                         icons::SIDEBAR_MINIMALISTIC,
