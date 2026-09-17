@@ -2263,7 +2263,9 @@ impl Shell {
     // ---- layout state ----
 
     fn sidebar_target(&self) -> f32 {
-        if self.settings.sidebar_collapsed {
+        // Settings navigation lives in the sidebar, so the chat collapse
+        // state must not hide it there (user report).
+        if self.settings.sidebar_collapsed && !matches!(self.route, Route::Settings(_)) {
             0.0
         } else {
             self.settings.sidebar_width
@@ -2329,6 +2331,11 @@ impl Shell {
     }
 
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        // The settings sidebar is pinned; flipping the flag here would only
+        // change what the chat route shows after Back.
+        if matches!(self.route, Route::Settings(_)) {
+            return;
+        }
         let from = self.sidebar_now();
         self.sidebar_edge_bounce = None;
         self.sidebar_resize_edge = None;
