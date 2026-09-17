@@ -37,6 +37,11 @@ struct TestHarness {
     /// When set, the next run reports no anchors (a driver from before
     /// anchors shipped).
     silent: AtomicBool,
+    /// True makes a completed turn PARK its run in the chat's slot, the way
+    /// every real steerable harness does; the child ends on its interrupt.
+    steerable: AtomicBool,
+    /// How many parked children were retired through their interrupt token.
+    retired: Arc<AtomicUsize>,
 }
 
 impl TestHarness {
@@ -46,6 +51,8 @@ impl TestHarness {
             turns: AtomicUsize::new(0),
             branching,
             silent: AtomicBool::new(false),
+            steerable: AtomicBool::new(false),
+            retired: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
@@ -59,7 +66,7 @@ impl Harness for TestHarness {
         "Brancher"
     }
     fn supports_steering(&self) -> bool {
-        false
+        self.steerable.load(Ordering::SeqCst)
     }
     fn steering_mode(&self) -> SteeringMode {
         SteeringMode::TurnBoundary
@@ -76,7 +83,7 @@ impl Harness for TestHarness {
     async fn run(
         &self,
         request: RunRequest,
-        _controls: RunControls,
+        controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         self.runs.lock().unwrap().push(Seen {
             resume: request.resume.clone(),
@@ -124,7 +131,24 @@ impl Harness for TestHarness {
             error: None,
             session_id: Some(session_id),
         });
-        Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
+        let events = futures::stream::iter(events.into_iter().map(Ok));
+        if !self.steerable.load(Ordering::SeqCst) {
+            return Ok(events.boxed());
+        }
+        let interrupt = controls.interrupt.clone();
+        let retired = self.retired.clone();
+        Ok(events
+            .chain(futures::stream::once(async move {
+                interrupt.cancelled().await;
+                retired.fetch_add(1, Ordering::SeqCst);
+                Ok(AgentEvent::Done {
+                    status: DoneStatus::Interrupted,
+                    result: None,
+                    error: None,
+                    session_id: None,
+                })
+            }))
+            .boxed())
     }
 }
 
@@ -376,6 +400,7 @@ async fn rewind_truncates_the_doc_and_branches_after_the_previous_reply() {
         .core
         .sessions
         .rewind_chat(SOURCE, &rig.prompt_id(SOURCE, 2))
+        .await
         .expect("rewind");
     assert_eq!(outcome.prompt, "second");
     assert_eq!(outcome.removed, 4);
@@ -406,6 +431,42 @@ async fn rewind_truncates_the_doc_and_branches_after_the_previous_reply() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn rewind_retires_a_parked_persistent_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let rig = rig(tmp.path(), true).await;
+    rig.turn(SOURCE, "first", "m1").await;
+    rig.turn(SOURCE, "second", "m2").await;
+    // The third turn parks its child in the run slot, like claude does.
+    rig.harness.steerable.store(true, Ordering::SeqCst);
+    rig.turn(SOURCE, "third", "m3").await;
+    assert_eq!(rig.harness.retired.load(Ordering::SeqCst), 0);
+
+    let outcome = rig
+        .core
+        .sessions
+        .rewind_chat(SOURCE, &rig.prompt_id(SOURCE, 4))
+        .await
+        .expect("a parked session is not a running turn");
+    assert_eq!(outcome.prompt, "third");
+    assert_eq!(outcome.removed, 2);
+    assert_eq!(rig.harness.retired.load(Ordering::SeqCst), 1);
+    assert_eq!(entries(&rig.core, SOURCE).len(), 4);
+
+    rig.turn(SOURCE, "third, take two", "m4").await;
+    assert_eq!(
+        rig.seen()[3],
+        Seen {
+            resume: Some("sess-1".into()),
+            branch: Some(SessionBranch {
+                keep: Some("uuid-reply-2".into()),
+                drop: Some("uuid-user-3".into()),
+            }),
+        },
+        "the retired child's mailbox must not take the prompt: the branch rides a fresh run"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn rewind_before_the_first_prompt_starts_fresh() {
     let tmp = tempfile::tempdir().unwrap();
     let rig = rig(tmp.path(), true).await;
@@ -415,6 +476,7 @@ async fn rewind_before_the_first_prompt_starts_fresh() {
         .core
         .sessions
         .rewind_chat(SOURCE, &rig.prompt_id(SOURCE, 0))
+        .await
         .expect("rewind");
     assert_eq!(outcome.prompt, "first");
     assert!(entries(&rig.core, SOURCE).is_empty());
@@ -450,6 +512,7 @@ async fn refusals_leave_the_doc_alone() {
         .core
         .sessions
         .rewind_chat(SOURCE, &rig.prompt_id(SOURCE, 2))
+        .await
         .expect_err("no anchor before the tracked prompt");
     assert!(err.to_string().contains("No checkpoint"), "{err}");
     assert_eq!(entries(&rig.core, SOURCE), before);
@@ -458,6 +521,7 @@ async fn refusals_leave_the_doc_alone() {
         .core
         .sessions
         .rewind_chat(SOURCE, &rig.reply_id(SOURCE, 3))
+        .await
         .expect_err("a reply is not a rewind point");
     assert!(err.to_string().contains("no longer"), "{err}");
     assert_eq!(entries(&rig.core, SOURCE), before);
@@ -479,6 +543,7 @@ async fn a_harness_without_branching_refuses_both() {
         .core
         .sessions
         .rewind_chat(SOURCE, &rig.prompt_id(SOURCE, 0))
+        .await
         .expect_err("rewind refused");
     assert!(err.to_string().contains("cannot fork or rewind"), "{err}");
     assert_eq!(entries(&rig.core, SOURCE).len(), 2);

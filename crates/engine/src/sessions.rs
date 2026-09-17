@@ -924,11 +924,17 @@ impl SessionsEngine {
     /// Rewind `chat_id` to before the user entry `entry_id`: the doc loses
     /// that entry and everything after it, the context meter clears, and the
     /// next run branches the harness session after the previous reply. The
-    /// removed prompt comes back for the composer.
-    pub fn rewind_chat(&self, chat_id: &str, entry_id: &str) -> Result<RewindOutcome, EngineError> {
+    /// removed prompt comes back for the composer. A warm child parked
+    /// between turns is retired: the branch rides the next run's resume, and
+    /// a live mailbox would take the next prompt on the unbranched session.
+    pub async fn rewind_chat(
+        &self,
+        chat_id: &str,
+        entry_id: &str,
+    ) -> Result<RewindOutcome, EngineError> {
         let (host, _ws) = self.branch_context()?;
         let harness = self.branching_harness(&host, chat_id)?;
-        if self.turn_in_flight(chat_id) || lock(&self.inner.runs).contains_key(chat_id) {
+        if self.turn_in_flight(chat_id) {
             return Err(EngineError::Other(
                 "Stop the running turn before rewinding.".into(),
             ));
@@ -953,6 +959,14 @@ impl SessionsEngine {
                 ))
             })?),
         };
+        // Before the branch is recorded: the retiring run's Done may still
+        // remember a session id, which clears any pending branch.
+        self.interrupt(chat_id).await?;
+        if lock(&self.inner.runs).contains_key(chat_id) {
+            return Err(EngineError::Other(
+                "Stop the running turn before rewinding.".into(),
+            ));
+        }
         let prompt = entry_text(&entries[ix]);
         let removed = handle.doc().truncate_from(entry_id)?;
         let _ = handle.doc().clear_context_usage();

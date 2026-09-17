@@ -1309,6 +1309,7 @@ impl RpcService for EngineRpc {
                 let outcome = self
                     .sessions
                     .rewind_chat(&p.chat_id, &p.entry_id)
+                    .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&outcome)
             }
