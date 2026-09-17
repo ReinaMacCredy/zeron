@@ -476,6 +476,9 @@ pub enum RightSurface {
     /// A subagent's transcript, read-only (per-subagent viz) — the handle
     /// keys [`Shell::subagent_tabs`].
     Subagent(u64),
+    /// The chat's side conversation: its transcript and its own composer —
+    /// the handle keys [`Shell::sidechat_tabs`].
+    Sidechat(u64),
 }
 
 fn push_unique_right_surface(tabs: &mut Vec<RightSurface>, surface: RightSurface) -> bool {
@@ -1262,6 +1265,19 @@ struct SubagentTab {
     _events: Subscription,
 }
 
+/// One right-pane sidechat tab: the sidechat's chat id, its source's title
+/// for the context note, and the transcript + composer bound to that chat.
+struct SidechatTab {
+    chat_id: String,
+    source_title: SharedString,
+    transcript: Entity<Transcript>,
+    composer: Entity<Composer>,
+    /// Spawn chips inside the sidechat's transcript open their own tabs.
+    _events: Subscription,
+    /// The tab's own sends anchor in the TAB's transcript, not the main one.
+    _composer_events: Subscription,
+}
+
 /// Sidebar render identity lets transcript/caret frames reuse its GPUI scene.
 /// State and event handlers stay on Shell. Explicit Shell notifications still
 /// invalidate the sidebar, including selection, menus, theme and navigation.
@@ -1365,6 +1381,13 @@ pub struct Shell {
     /// [`Transcript`] pinned to its subagent doc.
     subagent_tabs: std::collections::HashMap<u64, SubagentTab>,
     subagent_seq: u64,
+    /// Sidechat surfaces by id — each tab a live transcript over the
+    /// sidechat's own chat doc plus a composer bound to it.
+    sidechat_tabs: std::collections::HashMap<u64, SidechatTab>,
+    sidechat_seq: u64,
+    /// `CreateSidechat` in flight for this source chat. A second click while
+    /// it is out would mint a second sidechat (the id is client-minted).
+    sidechat_create: Option<(String, Task<()>)>,
     browsers: std::collections::HashMap<u64, Entity<crate::browser::BrowserSurface>>,
     browser_subs: std::collections::HashMap<u64, Subscription>,
     browser_seq: u64,
@@ -1617,6 +1640,10 @@ impl Shell {
                         t.on_own_queued_send(chat_id.clone(), message_id.clone(), cx)
                     });
                 }
+                ComposerEvent::OpenSidechat {
+                    source_chat_id,
+                    prompt,
+                } => _this.open_sidechat(source_chat_id.clone(), prompt.clone(), cx),
             }
         });
         // Spawn chips open their subagent's transcript as a right-pane tab.
@@ -1752,6 +1779,9 @@ impl Shell {
             diff_seq: 0,
             subagent_tabs: std::collections::HashMap::new(),
             subagent_seq: 0,
+            sidechat_tabs: std::collections::HashMap::new(),
+            sidechat_seq: 0,
+            sidechat_create: None,
             browsers: std::collections::HashMap::new(),
             browser_subs: std::collections::HashMap::new(),
             browser_seq: 0,
@@ -2411,6 +2441,10 @@ impl Shell {
                     .subagent_tabs
                     .get(id)
                     .map(|tab| (*surface, tab.title.clone(), false, None)),
+                RightSurface::Sidechat(id) => self
+                    .sidechat_tabs
+                    .get(id)
+                    .map(|_| (*surface, SharedString::from("Sidechat"), false, None)),
                 RightSurface::Browser(id) => self.browsers.get(id).map(|browser| {
                     let browser = browser.read(cx);
                     (
@@ -2440,6 +2474,7 @@ impl Shell {
             | RightSurface::Diff(_)
             | RightSurface::Terminal(_)
             | RightSurface::Subagent(_)
+            | RightSurface::Sidechat(_)
             | RightSurface::Browser(_) => {
                 return None;
             }
@@ -2542,7 +2577,7 @@ impl Shell {
             }
             // The tab's feed (watch or snapshot) runs from open to close —
             // activation needs no revalidation.
-            RightSurface::Subagent(_) | RightSurface::Browser(_) => {}
+            RightSurface::Subagent(_) | RightSurface::Sidechat(_) | RightSurface::Browser(_) => {}
             RightSurface::Picker => {}
         }
         cx.notify();
@@ -3092,6 +3127,198 @@ impl Shell {
         self.set_right_active(RightSurface::Subagent(id), cx);
     }
 
+    /// The chat a sidechat would be opened FOR: the selected one, unless it
+    /// is itself a sidechat (nesting is refused engine-side too).
+    fn sidechat_source_chat(&self, cx: &App) -> Option<String> {
+        let chat = self.state.read(cx).selected_chat_row()?;
+        chat.sidechat_source_chat_id
+            .is_none()
+            .then(|| chat.id.clone())
+    }
+
+    /// The one way a sidechat tab opens — picker row, footer pill and
+    /// `/sidechat` all land here. Existing tab → focus it; existing sidechat
+    /// row → open a tab on it; neither → mint an id, `CreateSidechat`, open.
+    /// `prompt` starts the sidechat's first turn once its tab exists.
+    fn open_sidechat(
+        &mut self,
+        source_chat_id: String,
+        prompt: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.right_pane_open(cx) {
+            self.toggle_right_pane(cx);
+        }
+        let existing = self
+            .sidechat_tabs
+            .iter()
+            .find(|(_, tab)| {
+                self.state.read(cx).chats.iter().any(|chat| {
+                    chat.id == tab.chat_id
+                        && chat.sidechat_source_chat_id.as_deref() == Some(source_chat_id.as_str())
+                })
+            })
+            .map(|(&id, _)| id);
+        if let Some(id) = existing {
+            self.set_right_active(RightSurface::Sidechat(id), cx);
+            self.send_into_sidechat(id, prompt, cx);
+            return;
+        }
+        if let Some(chat) = self
+            .state
+            .read(cx)
+            .latest_sidechat_of(&source_chat_id)
+            .cloned()
+        {
+            let id = self.add_sidechat_surface(&chat, cx);
+            self.send_into_sidechat(id, prompt, cx);
+            return;
+        }
+        if self
+            .sidechat_create
+            .as_ref()
+            .is_some_and(|(pending, _)| *pending == source_chat_id)
+        {
+            return; // a creation is already out for this chat
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let host_device_id = self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .find(|chat| chat.id == source_chat_id)
+            .map(|chat| chat.device_id.clone());
+        let mut params = serde_json::json!({
+            "sourceChatId": source_chat_id,
+            "chatId": uuid::Uuid::new_v4().to_string(),
+        });
+        if let (Some(device), Some(object)) = (host_device_id, params.as_object_mut()) {
+            object.insert("targetDeviceId".into(), device.into());
+        }
+        let pending_for = source_chat_id.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let reply = crate::attachments::call_with_timeout(
+                &engine,
+                cx.background_executor(),
+                methods::CREATE_SIDECHAT,
+                params,
+                Duration::from_secs(30),
+            )
+            .await;
+            this.update(cx, |shell, cx| {
+                shell.sidechat_create = None;
+                match reply.map_err(|e| e.to_string()).and_then(|value| {
+                    serde_json::from_value::<zeron_proto::Chat>(value).map_err(|e| e.to_string())
+                }) {
+                    Ok(chat) => {
+                        // The chat row reaches the sidebar through the
+                        // workspace watch; the tab needs it now.
+                        shell.state.update(cx, |state, cx| {
+                            if !state.chats.iter().any(|row| row.id == chat.id) {
+                                state.chats.push(chat.clone());
+                                cx.notify();
+                            }
+                        });
+                        let id = shell.add_sidechat_surface(&chat, cx);
+                        shell.send_into_sidechat(id, prompt, cx);
+                    }
+                    Err(err) => tracing::warn!(%err, "CreateSidechat failed"),
+                }
+                cx.notify();
+            })
+            .ok();
+        });
+        self.sidechat_create = Some((pending_for, task));
+    }
+
+    /// Build the tab: a live transcript over the sidechat's own chat doc (a
+    /// sidechat is an ordinary chat, so the doc id IS the chat id) and a
+    /// composer bound to it.
+    fn add_sidechat_surface(&mut self, chat: &zeron_proto::Chat, cx: &mut Context<Self>) -> u64 {
+        self.sidechat_seq += 1;
+        let id = self.sidechat_seq;
+        let chat_id = chat.id.clone();
+        let transcript =
+            cx.new(|cx| Transcript::for_doc(self.state.clone(), chat_id.clone(), true, cx));
+        let links = Self::session_links(Some(self.active_chat.clone()), cx);
+        transcript.update(cx, |transcript, _| {
+            transcript.set_workspace_link_handler(links)
+        });
+        let events = cx.subscribe(&transcript, Self::on_transcript_event);
+        self.state
+            .update(cx, |s, cx| s.watch_subagent_doc(chat_id.clone(), cx));
+        let composer = cx.new(|cx| Composer::for_chat(self.state.clone(), chat_id.clone(), cx));
+        let composer_events = cx.subscribe(&composer, {
+            let transcript = transcript.clone();
+            move |_this: &mut Shell, _, event: &ComposerEvent, cx| match event {
+                ComposerEvent::Sent {
+                    chat_id,
+                    message_id,
+                } => transcript.update(cx, |t, cx| {
+                    t.on_own_send(chat_id.clone(), message_id.clone(), cx)
+                }),
+                ComposerEvent::Queued {
+                    chat_id,
+                    message_id,
+                } => transcript.update(cx, |t, cx| {
+                    t.on_own_queued_send(chat_id.clone(), message_id.clone(), cx)
+                }),
+                // A sidechat cannot spawn one, and it has no new-thread route.
+                ComposerEvent::OpenSidechat { .. } | ComposerEvent::NewThreadTransitionStarted => {}
+            }
+        });
+        let source_title = chat
+            .sidechat_source_chat_id
+            .as_deref()
+            .and_then(|source| {
+                self.state
+                    .read(cx)
+                    .chats
+                    .iter()
+                    .find(|row| row.id == source)
+                    .and_then(|row| row.title.clone())
+            })
+            .unwrap_or_else(|| "this chat".to_string());
+        self.sidechat_tabs.insert(
+            id,
+            SidechatTab {
+                chat_id: chat_id.clone(),
+                source_title: source_title.into(),
+                transcript,
+                composer,
+                _events: events,
+                _composer_events: composer_events,
+            },
+        );
+        // The source composer's pill watches this set.
+        self.state.update(cx, |state, cx| {
+            state.open_sidechat_tabs.insert(chat_id);
+            cx.notify();
+        });
+        let key = self.panel_key(cx);
+        self.right_tabs
+            .entry(key)
+            .or_default()
+            .push(RightSurface::Sidechat(id));
+        self.set_right_active(RightSurface::Sidechat(id), cx);
+        id
+    }
+
+    /// The first turn of a `/sidechat <prompt>`: the tab's own composer sends
+    /// it, so the Run is built from the SIDECHAT's row, not the source's.
+    fn send_into_sidechat(&mut self, id: u64, prompt: Option<String>, cx: &mut Context<Self>) {
+        let Some(prompt) = prompt.filter(|prompt| !prompt.trim().is_empty()) else {
+            return;
+        };
+        let Some(composer) = self.sidechat_tabs.get(&id).map(|tab| tab.composer.clone()) else {
+            return;
+        };
+        composer.update(cx, |composer, cx| composer.send_prompt(prompt, cx));
+    }
+
     /// Fetch a finished subagent's frozen transcript blob
     /// (`{chat_id}/{doc_id}`); on ANY failure fall back to watching the doc
     /// — the blob upload is best-effort engine-side.
@@ -3188,6 +3415,17 @@ impl Shell {
                 if let Some(tab) = self.subagent_tabs.remove(&id) {
                     self.state
                         .update(cx, |s, _| s.unwatch_subagent_doc(&tab.doc_id));
+                }
+            }
+            RightSurface::Sidechat(id) => {
+                // Same teardown; the source composer's pill takes over as the
+                // way back in.
+                if let Some(tab) = self.sidechat_tabs.remove(&id) {
+                    self.state.update(cx, |s, cx| {
+                        s.unwatch_subagent_doc(&tab.chat_id);
+                        s.open_sidechat_tabs.remove(&tab.chat_id);
+                        cx.notify();
+                    });
                 }
             }
             RightSurface::Picker => {}
@@ -8153,6 +8391,33 @@ impl Shell {
                         .children(pill)
                         .into_any_element()
                 }
+                RightSurface::Sidechat(id) if self.sidechat_tabs.contains_key(&id) => {
+                    let tab = self.sidechat_tabs.get(&id).expect("checked");
+                    let (transcript, composer, source_title) = (
+                        tab.transcript.clone(),
+                        tab.composer.clone(),
+                        tab.source_title.clone(),
+                    );
+                    div()
+                        .size_full()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .flex_none()
+                                .px(px(12.0))
+                                .py(px(8.0))
+                                .text_size(crate::typography::ui_rems(11.0))
+                                .text_color(theme.text_muted)
+                                .truncate()
+                                .child(SharedString::from(format!(
+                                    "Sidechat of {source_title} · source transcript copied as reference-only context"
+                                ))),
+                        )
+                        .child(div().flex_1().min_h_0().child(transcript))
+                        .child(div().flex_none().child(composer))
+                        .into_any_element()
+                }
                 _ => self.render_surface_picker(cx),
             }
         } else {
@@ -8270,6 +8535,16 @@ impl Shell {
                             }),
                         ),
                     )
+                    .when(self.sidechat_source_chat(cx).is_some(), |el| {
+                        el.child(
+                            row("surface-card-sidechat", icons::CHAT_ROUND_LINE, "Sidechat")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if let Some(source) = this.sidechat_source_chat(cx) {
+                                        this.open_sidechat(source, None, cx);
+                                    }
+                                })),
+                        )
+                    })
                     // Git surfaces only where there IS git — the pane itself
                     // no longer gates on it (terminals work anywhere).
                     .when(self.space_git_detected(cx), |el| {
@@ -8475,6 +8750,7 @@ impl Shell {
                     })
                     .unwrap_or(icons::LIST),
                 RightSurface::Subagent(_) => icons::BOT,
+                RightSurface::Sidechat(_) => icons::CHAT_ROUND_LINE,
                 RightSurface::Terminal(_) => icons::TERMINAL,
                 RightSurface::Browser(_) => icons::GLOBE,
                 RightSurface::Picker => icons::PLUS,
@@ -8803,6 +9079,24 @@ impl Shell {
                                 )
                                 .child(SharedString::from("Terminal")),
                         )
+                        .when(self.sidechat_source_chat(cx).is_some(), |menu| {
+                            menu.child(
+                                popover::menu_row(&theme, false, "right-plus-sidechat")
+                                    .id("right-plus-sidechat-row")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        if let Some(source) = this.sidechat_source_chat(cx) {
+                                            this.open_sidechat(source, None, cx);
+                                        }
+                                        this.close_right_plus(cx);
+                                    }))
+                                    .child(
+                                        icon(icons::CHAT_ROUND_LINE)
+                                            .size(px(13.0))
+                                            .text_color(theme.text_muted),
+                                    )
+                                    .child(SharedString::from("Sidechat")),
+                            )
+                        })
                         .when(self.space_git_detected(cx), |menu| {
                             menu.child(
                                 popover::menu_row(&theme, false, "right-plus-diff")
@@ -10993,6 +11287,11 @@ mod tests {
         assert_eq!(panels.get("a").right_active, RightSurface::Terminal(7));
         panels.update("a", |p| p.right_active = RightSurface::Files);
         assert_eq!(panels.get("a").right_active, RightSurface::Files);
+        panels.update("a", |p| p.right_active = RightSurface::Sidechat(2));
+        assert_eq!(panels.get("a").right_active, RightSurface::Sidechat(2));
+        // Distinct per handle, and never confused with another surface kind.
+        assert_ne!(RightSurface::Sidechat(2), RightSurface::Sidechat(3));
+        assert_ne!(RightSurface::Sidechat(2), RightSurface::Subagent(2));
     }
 
     #[test]
@@ -12286,6 +12585,69 @@ mod right_tab_mouse_regressions {
         let shell = host.read_with(cx, |host, _| host.shell.clone());
         cx.update(|window, cx| window.draw(cx).clear());
         (shell, cx)
+    }
+
+    #[gpui::test]
+    fn an_existing_sidechat_opens_one_tab_and_closing_it_releases_the_chat(
+        cx: &mut TestAppContext,
+    ) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                let mut source = zeron_proto::Chat {
+                    id: "parent".into(),
+                    device_id: "dev".into(),
+                    title: Some("Parent".into()),
+                    archived: false,
+                    cwd: None,
+                    branch: None,
+                    checkout_id: None,
+                    source_context: None,
+                    config: None,
+                    last_message_preview: None,
+                    last_message_at: None,
+                    created_at: chrono::Utc::now(),
+                    harness_session_id: None,
+                    harness_session_cwd: None,
+                    space_id: None,
+                    last_seen_at: None,
+                    room_gen: None,
+                    sidechat_source_chat_id: None,
+                };
+                let mut side = source.clone();
+                side.id = "side".into();
+                side.title = Some("Sidechat: Parent".into());
+                side.sidechat_source_chat_id = Some("parent".into());
+                source.title = Some("Parent".into());
+                state.chats = vec![source, side];
+                state.selected_chat = Some("parent".into());
+            });
+            shell.open_sidechat("parent".into(), None, cx);
+            assert_eq!(shell.resolved_right_active(cx), RightSurface::Sidechat(1));
+            assert_eq!(shell.sidechat_tabs.len(), 1);
+            assert!(shell.state.read(cx).open_sidechat_tabs.contains("side"));
+            // A second ask reuses the tab instead of opening another, and its
+            // prompt is handed to the TAB's composer (which, with no engine
+            // here, fails on its own chat rather than building a Run).
+            shell.open_sidechat("parent".into(), Some("compare".into()), cx);
+            assert_eq!(shell.sidechat_tabs.len(), 1);
+            let composer = shell.sidechat_tabs[&1].composer.clone();
+            composer.read_with(cx, |composer, cx| {
+                assert_eq!(composer.bound_chat_id(cx).as_deref(), Some("side"));
+                assert_eq!(composer.failure.as_deref(), Some("Engine not connected"));
+            });
+        });
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.close_right_surface(RightSurface::Sidechat(1), window, cx)
+            })
+        });
+        shell.read_with(cx, |shell, cx| {
+            assert!(shell.sidechat_tabs.is_empty());
+            assert!(!shell.state.read(cx).open_sidechat_tabs.contains("side"));
+            // Falls back to the remaining tabs, never a dead surface.
+            assert_ne!(shell.resolved_right_active(cx), RightSurface::Sidechat(1));
+        });
     }
 
     #[gpui::test]
