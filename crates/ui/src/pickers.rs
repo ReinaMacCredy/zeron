@@ -894,6 +894,16 @@ impl Pickers {
         state.chats.iter().find(|chat| chat.id == id)
     }
 
+    /// The project the git pickers act on: the chat's own (a bound
+    /// composer's chat may live in another project than the selection),
+    /// else the selected project (the new-chat canvas).
+    fn space_row<'a>(&self, cx: &'a App) -> Option<&'a zeron_proto::Space> {
+        let state = self.state.read(cx);
+        self.chat_row(cx)
+            .and_then(|chat| state.space_for_chat(chat))
+            .or_else(|| state.selected_space_row())
+    }
+
     /// Harness is locked once the chat exists (feature-inventory §1.7).
     fn harness_locked(&self, cx: &App) -> bool {
         self.chat_id(cx).is_some()
@@ -1480,7 +1490,7 @@ impl Pickers {
     /// Rows carry checkout state (`current`, `worktreePath`) so the picker can
     /// tag refs and the checkout-kind selector can offer worktree reuse.
     fn ensure_refs(&mut self, force: bool, cx: &mut Context<Self>) {
-        let Some(space) = self.state.read(cx).selected_space_row().cloned() else {
+        let Some(space) = self.space_row(cx).cloned() else {
             return;
         };
         if !space.git_detected {
@@ -1593,7 +1603,7 @@ impl Pickers {
         if self.switching.is_some() {
             return; // one switch at a time
         }
-        let Some(space) = self.state.read(cx).selected_space_row().cloned() else {
+        let Some(space) = self.space_row(cx).cloned() else {
             return;
         };
         let Some(engine) = self.engine(cx) else {
@@ -2916,11 +2926,7 @@ impl Pickers {
         &mut self,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let git = self
-            .state
-            .read(cx)
-            .selected_space_row()
-            .is_some_and(|space| space.git_detected);
+        let git = self.space_row(cx).is_some_and(|space| space.git_detected);
         if !git {
             return None;
         }
@@ -2989,8 +2995,8 @@ impl Pickers {
         // half-empty locked state.
         let (space, session, change_request) = {
             let session = self.chat_row(cx).cloned();
+            let space = self.space_row(cx).cloned();
             let state = self.state.read(cx);
-            let space = state.selected_space_row().cloned();
             let change_request = session
                 .as_ref()
                 .and_then(|chat| state.change_request_for_chat(chat).cloned());
@@ -3311,7 +3317,7 @@ impl Pickers {
     /// "Showing X of Y refs" footer when the list is capped.
     fn render_branch_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
-        if self.state.read(cx).selected_space_row().is_none() {
+        if self.space_row(cx).is_none() {
             return div()
                 .p(px(Theme::SPACE_SM))
                 .text_size(crate::typography::ui_rems(12.0))

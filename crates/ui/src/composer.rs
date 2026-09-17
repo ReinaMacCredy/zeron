@@ -8631,23 +8631,24 @@ impl Render for Composer {
             session_chrome
         };
         let container = if bottom_slot > 0.0 {
-            // The pickers follow the SELECTION and write their picks back to
-            // that chat's row, so a bound composer shows no footer: changing
-            // the model there would reconfigure the source chat.
-            let footer =
-                (session_chrome_opacity > 0.0 && self.chat_override.is_none()).then(|| {
-                    self.pickers
-                        .update(cx, |pickers, cx| pickers.render_footer(cx))
-                });
-            let usage = self.state.read(cx).context_usage;
+            // The pickers carry the composer's chat binding, so a bound
+            // composer's footer reads and writes ITS chat (split partner,
+            // sidechat), never the selection's.
+            let footer = (session_chrome_opacity > 0.0).then(|| {
+                self.pickers
+                    .update(cx, |pickers, cx| pickers.render_footer(cx))
+            });
+            // Context usage is tracked for the selected chat's watch only.
+            let usage = self
+                .chat_override
+                .is_none()
+                .then(|| self.state.read(cx).context_usage)
+                .flatten();
             let sidechat_pill = self.render_sidechat_pill(&theme, cx);
-            // Same rule as the footer: the pickers follow the SELECTION, so a
-            // bound composer shows no permission chip either.
-            let permission_chip = (session_chrome_opacity > 0.0 && self.chat_override.is_none())
-                .then(|| {
-                    self.pickers
-                        .update(cx, |pickers, cx| pickers.render_permission_chip(cx))
-                });
+            let permission_chip = (session_chrome_opacity > 0.0).then(|| {
+                self.pickers
+                    .update(cx, |pickers, cx| pickers.render_permission_chip(cx))
+            });
             container.child(
                 div()
                     .w_full()
