@@ -1803,7 +1803,7 @@ async fn run_session(session: Session) {
                             dir,
                             event_tx: &event_tx,
                             request_input: &request_input,
-                            auto_approve: request.auto_approve,
+                            permission_mode: request.permission_mode,
                             main_feed: &mut main_feed,
                             children: &mut children,
                             pending_spawns: &mut pending_spawns,
@@ -2137,7 +2137,7 @@ struct BusCtx<'a> {
     dir: Option<&'a str>,
     event_tx: &'a mpsc::Sender<Result<AgentEvent, HarnessError>>,
     request_input: &'a Arc<RequestInput>,
-    auto_approve: bool,
+    permission_mode: zeron_proto::PermissionMode,
     main_feed: &'a mut SessionFeed,
     children: &'a mut HashMap<String, ChildRun>,
     pending_spawns: &'a mut VecDeque<PendingSpawn>,
@@ -2145,6 +2145,22 @@ struct BusCtx<'a> {
     turn: &'a mut TurnState,
     pending_usage: &'a mut Option<AgentEvent>,
     context_windows: &'a HashMap<String, u64>,
+}
+
+/// The permission kind a `permission.asked` names: 1.x `type`, 2.x `action`
+/// (both observed live), `permission` tolerated.
+fn permission_kind(props: &Value) -> Option<&str> {
+    ["type", "action", "permission"]
+        .iter()
+        .find_map(|k| props.get(*k).and_then(Value::as_str))
+        .filter(|k| !k.is_empty())
+}
+
+/// Auto mode lets the agent read and edit inside its workspace without
+/// asking; everything else (bash, network, outside the workspace, unknown
+/// kinds) asks.
+fn auto_allows(kind: &str) -> bool {
+    matches!(kind, "edit" | "write" | "read" | "glob" | "grep" | "list")
 }
 
 /// Wrap an event as subagent-attributed traffic.
@@ -2189,7 +2205,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
         dir,
         event_tx,
         request_input,
-        auto_approve,
+        permission_mode,
         main_feed,
         children,
         pending_spawns,
@@ -2526,9 +2542,21 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
             let dir_owned = dir.map(str::to_owned);
             let protocol_cell = server.protocol.clone();
             let permission_input = Arc::clone(request_input);
+            let kind = permission_kind(props);
+            // Full never asks; Auto lets workspace edits/reads through and
+            // asks for the rest (commands, network, outside the workspace);
+            // Ask asks for everything. An unnamed kind is never auto-allowed.
+            let auto_allowed = match permission_mode {
+                zeron_proto::PermissionMode::Full => true,
+                zeron_proto::PermissionMode::Auto => kind.is_some_and(auto_allows),
+                zeron_proto::PermissionMode::Ask => false,
+            };
             let question = UserInputQuestion {
                 id: format!("permission:{id}"),
-                header: "Permission".into(),
+                header: match kind {
+                    Some(kind) => format!("Allow {kind}?"),
+                    None => "Permission".into(),
+                },
                 question: format!("Allow this OpenCode request once? {}", props),
                 options: vec!["No".into(), "Yes".into()],
                 multi_select: false,
@@ -2542,7 +2570,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                     stderr_tail: crate::StderrTail::default(),
                     protocol: protocol_cell,
                 };
-                let allowed = auto_approve
+                let allowed = auto_allowed
                     || (permission_input)(vec![question.clone()])
                         .await
                         .unwrap_or_default()

@@ -50,6 +50,7 @@ async fn silent_npm_enoent_death_surfaces_decoded_error() {
         model_options: serde_json::Map::new(),
         cwd: "/tmp".into(),
         sandbox: SandboxLevel::WorkspaceWrite,
+        permission_mode: zeron_proto::PermissionMode::Full,
         auto_approve: true,
         attachments: Vec::new(),
         worktree: None,

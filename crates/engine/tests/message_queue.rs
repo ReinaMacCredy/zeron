@@ -1477,6 +1477,7 @@ async fn queued_turn_uses_current_config_at_turn_end_and_send_now() {
             reasoning: Some(ReasoningLevel::Medium),
             model_options: Default::default(),
             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+            permission_mode: zeron_proto::PermissionMode::Full,
         };
         core.workspace.set_chat_config(CHAT, &config).unwrap();
         core.doc_host

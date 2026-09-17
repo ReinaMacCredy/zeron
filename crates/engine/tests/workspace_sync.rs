@@ -152,6 +152,7 @@ fn run_request(prompt: &str) -> RunRequest {
         model_options: Default::default(),
         cwd: "/tmp".into(),
         sandbox: SandboxLevel::WorkspaceWrite,
+        permission_mode: zeron_proto::PermissionMode::Full,
         auto_approve: true,
         attachments: Vec::new(),
         worktree: None,
@@ -565,6 +566,7 @@ async fn chat_config_selects_the_run_harness() {
                 reasoning: None,
                 model_options: Default::default(),
                 sandbox: SandboxLevel::WorkspaceWrite,
+                permission_mode: zeron_proto::PermissionMode::Full,
             }),
             None,
         )

@@ -10,10 +10,12 @@
 //!   transport the Claude Agent SDK's `query()` drives, and was re-validated
 //!   live against 2.1.228: `can_use_tool` control requests arrive and
 //!   allow/deny responses are honored). The alternative channel — an MCP
-//!   permission tool — needs a server process and was rejected. Tool calls
-//!   auto-allow (zeron sessions run unattended, parity with the ACP
-//!   harness's preferred-allow behavior); `AskUserQuestion` round-trips
-//!   through [`RunControls::request_input`].
+//!   permission tool — needs a server process and was rejected. The run's
+//!   [`zeron_proto::PermissionMode`] picks the CLI mode (Ask → `default`,
+//!   Auto → `acceptEdits`, Full → `bypassPermissions`) and whether a
+//!   `can_use_tool` auto-allows (Full) or becomes an Allow/Deny question;
+//!   `AskUserQuestion` always round-trips through
+//!   [`RunControls::request_input`].
 //! - DONE is the CLI's own `result` frame, eagerly: background work (a
 //!   spawned subagent) never holds the turn. The CLI natively runs a second
 //!   wake turn when a background task finishes — a fresh `init` (same
@@ -198,15 +200,20 @@ impl ClaudeHarness {
         if let Some(effort) = to_effort(request.reasoning, request.model.as_deref()) {
             cmd.args(["--effort", effort]);
         }
-        if request.auto_approve {
-            cmd.args([
-                "--permission-mode",
-                "bypassPermissions",
-                "--dangerously-skip-permissions",
-            ]);
-        } else {
-            cmd.args(["--permission-mode", "default"]);
-        }
+        // The CLI decides what asks under each mode (default asks for
+        // everything but its own read-only safe list, acceptEdits also lets
+        // file edits through; the interactive `auto` mode is silently
+        // downgraded to `default` in print mode — all verified live against
+        // 2.1.274); every `can_use_tool` that does reach stdio is a question
+        // for the user unless the mode is Full, where the handler auto-allows
+        // — Full keeps the `default` flag zeron always ran with, so the
+        // unattended path is byte-for-byte the old one (`bypassPermissions`
+        // would also be refused under a managed disableBypassPermissionsMode).
+        let cli_mode = match request.permission_mode {
+            zeron_proto::PermissionMode::Ask | zeron_proto::PermissionMode::Full => "default",
+            zeron_proto::PermissionMode::Auto => "acceptEdits",
+        };
+        cmd.args(["--permission-mode", cli_mode]);
         if let Some(resume) = &request.resume {
             cmd.arg(format!("--resume={resume}"));
             // A branch runs on a COPY of the resumed session cut at the kept
@@ -515,6 +522,7 @@ impl ClaudeHarness {
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         tokio::spawn(run_session(Session {
             title_only,
+            permission_mode: request.permission_mode,
             child,
             stdout_lines: BufReader::new(stdout).lines(),
             stdin_tx,
@@ -639,6 +647,7 @@ async fn stdin_writer(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<Std
 
 struct Session {
     title_only: bool,
+    permission_mode: zeron_proto::PermissionMode,
     child: Child,
     stdout_lines: tokio::io::Lines<BufReader<crate::process::ChildStdout>>,
     stdin_tx: mpsc::UnboundedSender<StdinMsg>,
@@ -656,6 +665,7 @@ struct Session {
 async fn run_session(session: Session) {
     let Session {
         title_only,
+        permission_mode,
         mut child,
         mut stdout_lines,
         stdin_tx,
@@ -703,7 +713,7 @@ async fn run_session(session: Session) {
                             }));
                             let _ = stdin_tx.send(StdinMsg::Line(line));
                         } else {
-                            handle_control_request(req, &request_input, &stdin_tx);
+                            handle_control_request(req, permission_mode, &request_input, &stdin_tx);
                         }
                         continue;
                     }
@@ -810,15 +820,18 @@ type RequestInputFn = Box<
         + Sync,
 >;
 
-/// Serve one `can_use_tool` control request. Every tool is auto-approved
-/// (unattended parity — the CLI still blocks until SOME response arrives, so
-/// every request must be answered); `AskUserQuestion` is intercepted —
-/// surface the questions through the engine's input bridge (which owns the
-/// `InputRequested`/`InputResolved` lifecycle), wait for the user's answers
-/// (in a subtask so the frame loop keeps flowing), and hand them back keyed
-/// by question text, as the tool expects.
+/// Serve one `can_use_tool` control request. The CLI blocks until SOME
+/// response arrives, so every request must be answered. Under Full every
+/// tool is auto-approved (the unattended behavior); under Ask/Auto a tool
+/// request becomes an Allow/Deny question for the user. `AskUserQuestion`
+/// is intercepted in every mode — surface the questions through the
+/// engine's input bridge (which owns the `InputRequested`/`InputResolved`
+/// lifecycle), wait for the user's answers (in a subtask so the frame loop
+/// keeps flowing), and hand them back keyed by question text, as the tool
+/// expects.
 fn handle_control_request(
     req: ControlRequestFrame,
+    permission_mode: zeron_proto::PermissionMode,
     request_input: &Arc<RequestInputFn>,
     stdin_tx: &mpsc::UnboundedSender<StdinMsg>,
 ) {
@@ -830,8 +843,32 @@ fn handle_control_request(
         return;
     }
     if req.request.tool_name != "AskUserQuestion" {
-        let line = control_response_line(&req.request_id, allow_response(req.request.input));
-        let _ = stdin_tx.send(StdinMsg::Line(line));
+        if permission_mode == zeron_proto::PermissionMode::Full {
+            let line = control_response_line(&req.request_id, allow_response(req.request.input));
+            let _ = stdin_tx.send(StdinMsg::Line(line));
+            return;
+        }
+        let request_input = Arc::clone(request_input);
+        let stdin_tx = stdin_tx.clone();
+        tokio::spawn(async move {
+            let question = permission_question(&req.request.tool_name, &req.request.input);
+            // A dropped sender (caller went away) degrades to a deny so the
+            // agent is unblocked — never silently allowed.
+            let answers = (request_input)(vec![question.clone()])
+                .await
+                .unwrap_or_default();
+            let allowed = answers.iter().any(|a| {
+                a.question_id == question.id
+                    && a.labels.iter().any(|l| l.eq_ignore_ascii_case("allow"))
+            });
+            let response = if allowed {
+                allow_response(req.request.input)
+            } else {
+                wire::deny_response("The user denied this tool use.")
+            };
+            let line = control_response_line(&req.request_id, response);
+            let _ = stdin_tx.send(StdinMsg::Line(line));
+        });
         return;
     }
     let request_input = Arc::clone(request_input);
@@ -854,6 +891,26 @@ fn handle_control_request(
         let line = control_response_line(&request_id, allow_response(updated));
         let _ = stdin_tx.send(StdinMsg::Line(line));
     });
+}
+
+/// The Allow/Deny question a tool permission becomes under Ask/Auto: the
+/// command for Bash, the path for file tools, the raw input otherwise.
+fn permission_question(tool_name: &str, input: &Value) -> UserInputQuestion {
+    let detail = input
+        .get("command")
+        .or_else(|| input.get("file_path"))
+        .or_else(|| input.get("path"))
+        .or_else(|| input.get("url"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| input.to_string());
+    UserInputQuestion {
+        id: uuid::Uuid::new_v4().to_string(),
+        header: format!("Allow {tool_name}?"),
+        question: format!("Claude wants to use {tool_name}: {detail}"),
+        options: vec!["Allow".into(), "Deny".into()],
+        multi_select: false,
+    }
 }
 
 /// Parse Claude's `AskUserQuestion` tool input into [`UserInputQuestion`]s
@@ -945,6 +1002,7 @@ mod tests {
                 model_options: serde_json::Map::new(),
                 cwd: String::new(),
                 sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+                permission_mode: zeron_proto::PermissionMode::Full,
                 auto_approve: false,
                 resume: None,
                 attachments: Vec::new(),
@@ -979,6 +1037,68 @@ mod tests {
         assert_eq!(build(None), (Some("claude-fable-5-1".into()), false));
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn permission_mode_selects_the_cli_flags() {
+        use zeron_proto::PermissionMode;
+        let harness = ClaudeHarness::new();
+        let exe = PathBuf::from("/bin/claude");
+        let args = |mode: PermissionMode| -> Vec<String> {
+            let request = RunRequest {
+                prompt: String::new(),
+                harness: None,
+                model: None,
+                reasoning: None,
+                model_options: serde_json::Map::new(),
+                cwd: String::new(),
+                sandbox: mode.sandbox(),
+                permission_mode: mode,
+                auto_approve: false,
+                resume: None,
+                attachments: Vec::new(),
+                worktree: None,
+                branch: None,
+            };
+            harness
+                .build_command(&exe, &request)
+                .as_std()
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        let mode_of = |args: &[String]| {
+            args.iter()
+                .position(|a| a == "--permission-mode")
+                .map(|i| args[i + 1].clone())
+        };
+        let ask = args(PermissionMode::Ask);
+        assert_eq!(mode_of(&ask).as_deref(), Some("default"));
+        assert!(!ask.iter().any(|a| a == "--dangerously-skip-permissions"));
+        let auto = args(PermissionMode::Auto);
+        assert_eq!(mode_of(&auto).as_deref(), Some("acceptEdits"));
+        assert!(!auto.iter().any(|a| a == "--dangerously-skip-permissions"));
+        // Full is the pre-mode wire: `default` plus the handler's auto-allow.
+        let full = args(PermissionMode::Full);
+        assert_eq!(mode_of(&full).as_deref(), Some("default"));
+        assert!(!full.iter().any(|a| a == "--dangerously-skip-permissions"));
+    }
+
+    #[test]
+    fn permission_question_names_the_command_or_path() {
+        let q = permission_question(
+            "Bash",
+            &json!({"command": "rm -rf build", "description": "x"}),
+        );
+        assert_eq!(q.header, "Allow Bash?");
+        assert!(q.question.contains("rm -rf build"));
+        assert_eq!(q.options, vec!["Allow".to_string(), "Deny".to_string()]);
+        let q = permission_question("Edit", &json!({"file_path": "/a/b.rs", "old_string": "x"}));
+        assert!(q.question.contains("/a/b.rs"));
+        let q = permission_question("WebSearch", &json!({"query": "zeron"}));
+        assert!(q.question.contains("zeron"));
+        assert_eq!(wire::deny_response("no")["behavior"], "deny");
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_branch_forks_the_resumed_session_at_the_kept_reply() {
@@ -992,6 +1112,7 @@ mod tests {
             model_options: serde_json::Map::new(),
             cwd: String::new(),
             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+            permission_mode: zeron_proto::PermissionMode::Full,
             auto_approve: false,
             resume: Some("sess-a".into()),
             attachments: Vec::new(),

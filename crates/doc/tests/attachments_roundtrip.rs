@@ -14,6 +14,7 @@ fn run_request_attachments_survive_command_round_trip() {
         model_options: Default::default(),
         cwd: "/tmp".into(),
         sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+        permission_mode: zeron_proto::PermissionMode::Full,
         auto_approve: true,
         attachments: vec!["/tmp/a.png".into()],
         worktree: None,

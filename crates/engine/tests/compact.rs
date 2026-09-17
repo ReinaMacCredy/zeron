@@ -185,6 +185,7 @@ fn run_payload(message_id: &str, cwd: &str) -> SessionCommandPayload {
             model_options: Default::default(),
             cwd: cwd.into(),
             sandbox: SandboxLevel::WorkspaceWrite,
+            permission_mode: zeron_proto::PermissionMode::Full,
             auto_approve: true,
             attachments: Vec::new(),
             resume: None,

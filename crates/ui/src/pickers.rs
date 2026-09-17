@@ -22,7 +22,8 @@ use gpui::{
 
 use zeron_engine::registry::HarnessDescriptor;
 use zeron_proto::{
-    ChatConfig, FolderListing, HarnessId, Model, ReasoningLevel, RepoRef, SandboxLevel, Space,
+    ChatConfig, FolderListing, HarnessId, Model, PermissionMode, ReasoningLevel, RepoRef,
+    SandboxLevel, Space,
 };
 use zeron_rpc::methods;
 
@@ -30,6 +31,29 @@ use zeron_rpc::methods;
 /// footer; a flat cap + "Showing X of Y refs" reads the same without
 /// pagination plumbing).
 const MAX_REF_ROWS: usize = 300;
+
+/// Row order of the permission dropdown (least to most permissive).
+const PERMISSION_MODES: [PermissionMode; 3] = [
+    PermissionMode::Ask,
+    PermissionMode::Auto,
+    PermissionMode::Full,
+];
+
+fn permission_icon(mode: PermissionMode) -> &'static str {
+    match mode {
+        PermissionMode::Ask => crate::icons::CHECKLIST,
+        PermissionMode::Auto => crate::icons::BOT,
+        PermissionMode::Full => crate::icons::DANGER_TRIANGLE,
+    }
+}
+
+fn permission_description(mode: PermissionMode) -> &'static str {
+    match mode {
+        PermissionMode::Ask => "Always ask before running tools and commands",
+        PermissionMode::Auto => "Only ask for actions detected as potentially unsafe",
+        PermissionMode::Full => "Any file, any command, no prompts",
+    }
+}
 
 /// A triangle from the last point in the active trigger to the near edge
 /// of its submenu. Mirroring the edge handles menus placed on either side.
@@ -125,6 +149,9 @@ pub struct DraftConfig {
     pub branch: Option<String>,
     /// Where the new session runs (the t3code env-mode).
     pub checkout: CheckoutKind,
+    /// How the new session's agent actions are approved (defaults to Full —
+    /// the unattended behavior every chat had before the chip existed).
+    pub permission_mode: PermissionMode,
 }
 
 /// Where a new session runs (t3code's env-mode: `local | worktree`). "Current
@@ -164,6 +191,7 @@ pub struct ResolvedRunConfig {
     pub model: Option<String>,
     pub reasoning: Option<ReasoningLevel>,
     pub model_options: serde_json::Map<String, serde_json::Value>,
+    pub permission_mode: PermissionMode,
 }
 
 impl ResolvedRunConfig {
@@ -175,6 +203,7 @@ impl ResolvedRunConfig {
             reasoning: self.reasoning,
             model_options: self.model_options.clone(),
             sandbox: SandboxLevel::WorkspaceWrite,
+            permission_mode: self.permission_mode,
         })
     }
 }
@@ -484,6 +513,9 @@ pub enum PickerKind {
     /// New-session canvas only: the device project-less sessions run on (a
     /// project pick implies its own host and overrides this).
     Device,
+    /// The approval-mode dropdown beside the context ring (Ask for approval
+    /// | Approve for me | Full access) — one setting for every harness.
+    Permission,
 }
 
 pub(crate) struct ReturnComposerFocus;
@@ -688,6 +720,7 @@ impl Pickers {
             Some("checkout") => Some(PickerKind::Checkout),
             Some("project") => Some(PickerKind::Space),
             Some("device") => Some(PickerKind::Device),
+            Some("permission") => Some(PickerKind::Permission),
             _ => None,
         };
         let mut open = popover::Popup::default();
@@ -922,7 +955,31 @@ impl Pickers {
                 .or_else(|| self.effective_model_id(cx).map(str::to_string)),
             reasoning: self.effective_reasoning(cx),
             model_options: self.explicit_options(cx),
+            permission_mode: self.effective_permission_mode(cx),
         }
+    }
+
+    /// The selected chat's recorded mode, else the draft's.
+    pub fn effective_permission_mode(&self, cx: &App) -> PermissionMode {
+        let state = self.state.read(cx);
+        if state.selected_chat.is_some() {
+            return state
+                .selected_chat_row()
+                .and_then(|c| c.config.as_ref())
+                .map(|c| c.permission_mode)
+                .unwrap_or_default();
+        }
+        self.config.permission_mode
+    }
+
+    fn pick_permission(&mut self, mode: PermissionMode, cx: &mut Context<Self>) {
+        if self.state.read(cx).selected_chat.is_some() {
+            self.update_chat_config(cx, |config| config.permission_mode = mode);
+        } else {
+            self.config.permission_mode = mode;
+        }
+        self.animate_close(cx);
+        cx.notify();
     }
 
     // ---- open/close ----
@@ -1048,6 +1105,10 @@ impl Pickers {
             PickerKind::HarnessModel => self.selected_model_index(cx),
             PickerKind::Space => self.selected_space_index(cx),
             PickerKind::Device => self.selected_device_index(cx),
+            PickerKind::Permission => PERMISSION_MODES
+                .iter()
+                .position(|m| *m == self.effective_permission_mode(cx))
+                .unwrap_or(0),
         };
         if kind == PickerKind::HarnessModel {
             // scroll_to_item below may land anywhere; the first note of the
@@ -1107,7 +1168,7 @@ impl Pickers {
                 self.prefetch_models(true, cx);
             }
             // Projects and devices are already synced state — nothing to load.
-            PickerKind::Space | PickerKind::Device => {}
+            PickerKind::Space | PickerKind::Device | PickerKind::Permission => {}
         }
         cx.notify();
     }
@@ -2334,6 +2395,7 @@ impl Pickers {
                     }
                     Some(PickerKind::Space) => self.filtered_space_rows(cx).len() + 1,
                     Some(PickerKind::Device) => self.filtered_device_rows(cx).len(),
+                    Some(PickerKind::Permission) => PERMISSION_MODES.len(),
                     None => 0,
                 };
                 let current = (self.active != NO_ACTIVE_ROW).then_some(self.active);
@@ -2361,6 +2423,10 @@ impl Pickers {
                         CheckoutKind::NewWorktree
                     };
                     self.pick_checkout(kind, cx);
+                } else if self.open_kind() == Some(PickerKind::Permission) {
+                    if let Some(mode) = PERMISSION_MODES.get(self.active) {
+                        self.pick_permission(*mode, cx);
+                    }
                 } else {
                     self.on_search_submit(cx);
                 }
@@ -2395,6 +2461,7 @@ impl Pickers {
             PickerKind::HarnessModel => "picker-model",
             PickerKind::Space => "picker-space",
             PickerKind::Device => "picker-device",
+            PickerKind::Permission => "picker-permission",
         };
         let open = self.open_kind() == Some(kind);
         // Ghost pill (zeron composer/styles.tsx `pill`): `h-8 rounded-lg px-2.5
@@ -2995,7 +3062,7 @@ impl Pickers {
                             this.ensure_harnesses(false, cx);
                         }
                         // Projects/devices load nothing; no retry surface exists.
-                        PickerKind::Space | PickerKind::Device => {}
+                        PickerKind::Space | PickerKind::Device | PickerKind::Permission => {}
                     }))
                     .child(SharedString::from("Retry")),
             )
@@ -3176,6 +3243,139 @@ impl Pickers {
             );
         }
         popover.into_any_element()
+    }
+
+    /// The approval-mode chip the composer places beside the context ring,
+    /// with its dropdown attached while open. Full access wears the warning
+    /// tone so an unattended chat reads as such without opening anything.
+    pub fn render_permission_chip(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::of(cx).clone();
+        let mode = self.effective_permission_mode(cx);
+        let closing = self.open.closing_since();
+        let mut overlay: Option<(PickerKind, AnyElement)> = match self.mounted_kind() {
+            Some(PickerKind::Permission) => {
+                let content = self.render_permission_popover(cx);
+                Some((
+                    PickerKind::Permission,
+                    self.popover_frame(340.0, content, cx),
+                ))
+            }
+            _ => None,
+        };
+        let open = self.open_kind() == Some(PickerKind::Permission);
+        let tone = if mode == PermissionMode::Full {
+            theme.warning
+        } else {
+            theme.text_muted
+        };
+        let chip = div()
+            .id("picker-permission")
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(5.0))
+            .h(px(24.0))
+            .px(px(6.0))
+            .rounded(px(6.0))
+            .text_size(px(11.0))
+            .text_color(tone)
+            .bg(if open {
+                crate::theme::ink(0.05)
+            } else {
+                gpui::transparent_black()
+            })
+            .hover(|s| s.bg(crate::theme::ink(0.05)))
+            .cursor_pointer()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, _, _| {
+                    this.open
+                        .note_trigger_press_matching(|open| *open == PickerKind::Permission)
+                }),
+            )
+            .on_click(
+                cx.listener(|this, _, window, cx| this.toggle(PickerKind::Permission, window, cx)),
+            )
+            .child(
+                crate::icons::icon(permission_icon(mode))
+                    .size(px(12.0))
+                    .text_color(tone),
+            )
+            .child(SharedString::from(mode.label()));
+        attach_overlay_end(
+            chip,
+            &mut overlay,
+            PickerKind::Permission,
+            "permission-popover",
+            closing,
+        )
+        .into_any_element()
+    }
+
+    fn render_permission_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::of(cx).for_popup();
+        let current = self.effective_permission_mode(cx);
+        let active = self.active;
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .child(popover::menu_heading(
+                &theme,
+                "How should agent actions be approved?",
+            ))
+            .children(PERMISSION_MODES.into_iter().enumerate().map(|(ix, mode)| {
+                let is_selected = current == mode;
+                let tone = if mode == PermissionMode::Full {
+                    theme.warning
+                } else {
+                    theme.text_muted
+                };
+                popover::menu_row_nav(
+                    &theme,
+                    is_selected,
+                    ix == active,
+                    format!("permission-row-{ix}"),
+                )
+                .id(("permission-row", ix))
+                .items_start()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.pick_permission(mode, cx);
+                }))
+                .child(
+                    crate::icons::icon(permission_icon(mode))
+                        .size(px(14.0))
+                        .mt(px(2.0))
+                        .text_color(tone),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .when(mode == PermissionMode::Full, |el| el.text_color(tone))
+                                .child(SharedString::from(mode.label())),
+                        )
+                        .child(
+                            div()
+                                .text_size(crate::typography::ui_rems(11.0))
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(permission_description(mode))),
+                        ),
+                )
+                .when(is_selected, |el| {
+                    el.child(
+                        crate::icons::icon(crate::icons::CHECK)
+                            .size(px(14.0))
+                            .mt(px(2.0))
+                            .text_color(theme.text_muted),
+                    )
+                })
+            }))
+            .into_any_element()
     }
 
     /// The checkout-kind dropdown (t3code BranchToolbarEnvModeSelector): two
@@ -4634,7 +4834,8 @@ impl Render for Pickers {
             Some(PickerKind::Branch)
             | Some(PickerKind::Checkout)
             | Some(PickerKind::Space)
-            | Some(PickerKind::Device) => None,
+            | Some(PickerKind::Device)
+            | Some(PickerKind::Permission) => None,
             Some(PickerKind::HarnessModel) => {
                 let content = self.render_harness_model_popover(cx);
                 Some((

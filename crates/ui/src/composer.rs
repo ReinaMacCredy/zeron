@@ -6425,6 +6425,7 @@ impl Composer {
             resolved.model = config.model;
             resolved.reasoning = config.reasoning;
             resolved.model_options = config.model_options;
+            resolved.permission_mode = config.permission_mode;
         }
         let existing_cwd = self.bound_chat_row(cx).and_then(|c| c.cwd.clone());
         // The PROJECT fixes the new chat's device + base folder — sessions are
@@ -6963,6 +6964,7 @@ impl Composer {
                         model_options: resolved.model_options.clone(),
                         cwd,
                         sandbox: SandboxLevel::WorkspaceWrite,
+                        permission_mode: resolved.permission_mode,
                         auto_approve: false,
                         resume: None,
                         attachments: attachment_paths,
@@ -8383,6 +8385,13 @@ impl Render for Composer {
                 });
             let usage = self.state.read(cx).context_usage;
             let sidechat_pill = self.render_sidechat_pill(&theme, cx);
+            // Same rule as the footer: the pickers follow the SELECTION, so a
+            // bound composer shows no permission chip either.
+            let permission_chip = (session_chrome_opacity > 0.0 && self.chat_override.is_none())
+                .then(|| {
+                    self.pickers
+                        .update(cx, |pickers, cx| pickers.render_permission_chip(cx))
+                });
             container.child(
                 div()
                     .w_full()
@@ -8421,6 +8430,7 @@ impl Render for Composer {
                                         .items_center()
                                         .gap(px(4.0))
                                         .children(sidechat_pill)
+                                        .children(permission_chip)
                                         .child(crate::context_usage::render(
                                             usage,
                                             self.state.clone(),
@@ -9076,6 +9086,7 @@ mod tests {
                             reasoning: None,
                             model_options: serde_json::Map::new(),
                             sandbox: SandboxLevel::WorkspaceWrite,
+                            permission_mode: zeron_proto::PermissionMode::Full,
                         }),
                         last_message_preview: None,
                         last_message_at: None,

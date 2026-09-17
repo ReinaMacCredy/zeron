@@ -15,12 +15,14 @@
 //! - Notifications map to [`AgentEvent`]s: agentMessage/reasoning deltas (both
 //!   `delta`/`textDelta` spellings), item lifecycles → typed ToolCall/ToolResult,
 //!   `thread/tokenUsage/updated` → Usage, turn/completed|failed|aborted → Done.
-//! - Approvals + sandbox: yolo mode. The wire policy is always `"never"` and
-//!   the sandbox is forced to `danger-full-access` — parity with the Claude
-//!   adapter's auto-approve-everything (unattended runs). Stray
-//!   `item/commandExecution/requestApproval` +
-//!   `item/fileChange/requestApproval` still round-trip through
-//!   [`RunControls::request_input`] as a synthesized yes/no question.
+//! - Approvals + sandbox follow the run's [`zeron_proto::PermissionMode`]:
+//!   Full is yolo (`approvalPolicy: "never"` + `danger-full-access`, the
+//!   unattended behavior), Auto is codex's own auto mode (`on-request` +
+//!   `workspace-write`), Ask is `untrusted` + `workspace-write`. Under
+//!   Ask/Auto the `item/commandExecution/requestApproval` +
+//!   `item/fileChange/requestApproval` requests round-trip through
+//!   [`RunControls::request_input`] as a synthesized yes/no question; under
+//!   Full a stray one is accepted outright.
 //! - Subagents are full child app-server threads. Parent spawn items establish
 //!   their stable ownership; content arriving before the spawn is buffered.
 //!   A registered child's notifications route through an EXPLICIT table
@@ -61,7 +63,9 @@ use zeron_proto::{
 use crate::jsonrpc::{Incoming, RpcClient};
 use crate::process::{Child, Command, Stdio};
 use crate::{Harness, HarnessError, RunControls};
-use catalog::{REASONING_LEVELS, sandbox_mode, sandbox_policy_value, static_models, to_effort};
+use catalog::{
+    REASONING_LEVELS, approval_policy, sandbox_mode, sandbox_policy_value, static_models, to_effort,
+};
 use normalize::{
     ChildRoute, Phase, ReasoningStream, delta_text, item_id, item_type, notification_thread_id,
     route_child_notification, turn_error_message, turn_id, usage_event,
@@ -621,17 +625,16 @@ impl CodexHarness {
         controls: RunControls,
         title_only: bool,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        // Yolo mode: danger-full-access + approvalPolicy "never" (set below) —
-        // codex's --dangerously-bypass-approvals-and-sandbox equivalent.
-        // Parity with the Claude adapter, which auto-approves every
-        // can_use_tool and so effectively grants full access. This also
-        // sidesteps codex ≤0.144.x's workspace-write bug where a linked
-        // worktree on a slash-named branch derives a malformed mount that
-        // kills every command.
+        // The sandbox follows the permission mode (Full = danger-full-access,
+        // codex's --dangerously-bypass-approvals-and-sandbox equivalent
+        // together with approvalPolicy "never" below). Codex ≤0.144.x had a
+        // workspace-write bug where a linked worktree on a slash-named branch
+        // derived a malformed mount that killed every command; re-probed
+        // clean on 0.154.0, so Ask/Auto run workspace-write.
         request.sandbox = if title_only {
             zeron_proto::SandboxLevel::ReadOnly
         } else {
-            zeron_proto::SandboxLevel::DangerFullAccess
+            request.permission_mode.sandbox()
         };
         let AppServer {
             child,
@@ -871,14 +874,17 @@ async fn run_session(session: Session) {
     let request_input = Arc::new(request_input);
 
     // ---- wire params ------------------------------------------------------
-    // Parity with the Claude adapter, which auto-approves every `can_use_tool`
-    // regardless of `auto_approve` (zeron sessions run unattended; combined
-    // with the danger-full-access override above this is codex's yolo mode):
-    // never surface wire approvals. "on-request" turned
-    // every command into a yes/no question (user report: "asking me for
-    // approval at every step"). The approval-as-input plumbing below stays for
-    // stray requests and a future explicit permission-mode setting.
-    let approval_policy = "never";
+    // Full never surfaces wire approvals (with the sandbox above this is
+    // codex's yolo mode). Under Ask/Auto every approval the server raises
+    // becomes a yes/no question through the input bridge — and "on-request"
+    // once turned every command into a yes/no question (user report: "asking
+    // me for approval at every step"), so Auto may prompt often. A title-only
+    // run has no tools at all, so it keeps the pre-mode wire ("never").
+    let approval_policy = if title_only {
+        "never"
+    } else {
+        approval_policy(request.permission_mode)
+    };
     let effort = to_effort(request.reasoning);
     // Service tier rides thread-start and every turn (mirrors the Codex IDE
     // client). "default" means Standard — omit it entirely.
@@ -1391,7 +1397,7 @@ async fn run_session(session: Session) {
                         id,
                         &method,
                         &params,
-                        request.auto_approve,
+                        request.permission_mode.auto_approve(),
                         &request_input,
                     );
                 }

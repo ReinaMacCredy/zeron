@@ -254,6 +254,7 @@ async fn turn(core: &EngineCore, cwd: &std::path::Path, live: bool, second: bool
                 model_options: Default::default(),
                 cwd: cwd.display().to_string(),
                 sandbox: SandboxLevel::ReadOnly,
+                permission_mode: zeron_proto::PermissionMode::Full,
                 auto_approve: true,
                 attachments: vec![],
                 worktree: None,

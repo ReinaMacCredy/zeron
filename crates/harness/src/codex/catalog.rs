@@ -5,7 +5,9 @@
 //! (experimentalApi). This snapshot is the failure/offline fallback, kept in
 //! newest-first order so a picker remains useful when discovery cannot run.
 
-use zeron_proto::{Model, ModelOption, ModelOptionChoice, ReasoningLevel, SandboxLevel};
+use zeron_proto::{
+    Model, ModelOption, ModelOptionChoice, PermissionMode, ReasoningLevel, SandboxLevel,
+};
 
 /// The unified reasoning ladder Codex accepts (`minimal` is offered but clamped
 /// on the wire — see [`to_effort`]).
@@ -33,6 +35,18 @@ pub(crate) fn to_effort(reasoning: Option<ReasoningLevel>) -> Option<&'static st
         ReasoningLevel::Max => "max",
         ReasoningLevel::Ultra => "ultra",
     })
+}
+
+/// `thread/start` / `turn/start`'s `approvalPolicy` for a permission mode.
+/// `untrusted` asks for everything but codex's own trusted read-only
+/// commands; `on-request` is codex's Auto (the sandbox fences, escalations
+/// ask); `never` is yolo.
+pub(crate) fn approval_policy(mode: PermissionMode) -> &'static str {
+    match mode {
+        PermissionMode::Ask => "untrusted",
+        PermissionMode::Auto => "on-request",
+        PermissionMode::Full => "never",
+    }
 }
 
 /// `thread/start`'s `sandbox` param (kebab-case wire words).
@@ -202,6 +216,25 @@ pub(crate) fn static_models() -> Vec<Model> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn permission_mode_maps_to_codex_policy_and_sandbox() {
+        assert_eq!(approval_policy(PermissionMode::Ask), "untrusted");
+        assert_eq!(approval_policy(PermissionMode::Auto), "on-request");
+        assert_eq!(approval_policy(PermissionMode::Full), "never");
+        assert_eq!(
+            sandbox_mode(PermissionMode::Ask.sandbox()),
+            "workspace-write"
+        );
+        assert_eq!(
+            sandbox_mode(PermissionMode::Auto.sandbox()),
+            "workspace-write"
+        );
+        assert_eq!(
+            sandbox_mode(PermissionMode::Full.sandbox()),
+            "danger-full-access"
+        );
+    }
 
     #[test]
     fn effort_clamps_like_codex_ts() {

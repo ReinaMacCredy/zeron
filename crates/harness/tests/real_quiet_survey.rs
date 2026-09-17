@@ -61,6 +61,7 @@ async fn probe_once(harness: AcpHarness) -> ProbeOutcome {
         model_options: serde_json::Map::new(),
         cwd: std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()),
         sandbox: SandboxLevel::WorkspaceWrite,
+        permission_mode: zeron_proto::PermissionMode::Full,
         auto_approve: true,
         attachments: Vec::new(),
         worktree: None,

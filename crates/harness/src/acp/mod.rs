@@ -1458,6 +1458,7 @@ fn config_option_sets(
     model: Option<&str>,
     efforts: &[&'static str],
     model_options: &serde_json::Map<String, Value>,
+    permission_mode: zeron_proto::PermissionMode,
 ) -> Vec<(String, Value)> {
     let Some(options) = session_response
         .get("configOptions")
@@ -1490,31 +1491,24 @@ fn config_option_sets(
             ("select", Some("model")) => model
                 .and_then(|m| pick_model_value(m, &available, context_1m))
                 .map(Value::String),
-            // Unattended parity with the retired custom adapters (claude
-            // bypassPermissions / codex approvalPolicy never): pick the
-            // no-prompts mode when the agent offers one. claude-agent-acp
-            // calls it `bypassPermissions`, codex-acp `agent-full-access`
-            // (approvalPolicy "never" + danger-full-access sandbox), Devin
-            // `bypass`. Cursor instead exposes agent/plan/ask — those arrive
-            // as a Traits "Mode" option and win when the run selected one.
+            // The agent's mode select carries its approval policy. A run's
+            // explicit Traits "Mode" pick (Cursor's agent/plan/ask) wins;
+            // otherwise the permission mode picks by preference list — Full
+            // is the no-prompts mode (claude-agent-acp `bypassPermissions`,
+            // codex-acp `agent-full-access`, Devin `bypass`), Auto the
+            // agent's own auto mode, Ask its ask-everything mode. An agent
+            // that offers no match keeps its default and the permission
+            // handler below still routes its requests by mode.
             ("select", Some("mode")) => model_options
                 .get("mode")
                 .and_then(Value::as_str)
                 .filter(|c| available.contains(c))
                 .map(|c| Value::String(c.to_owned()))
                 .or_else(|| {
-                    [
-                        "bypassPermissions",
-                        "bypass_permissions",
-                        "bypass",
-                        "yolo",
-                        "agent-full-access",
-                        "danger-full-access",
-                        "full-access",
-                    ]
-                    .into_iter()
-                    .find(|v| available.contains(v))
-                    .map(|v| Value::String(v.to_owned()))
+                    mode_preferences(permission_mode)
+                        .iter()
+                        .find(|v| available.contains(v))
+                        .map(|v| Value::String((*v).to_owned()))
                 }),
             ("select", Some("thought_level")) => efforts
                 .iter()
@@ -1678,12 +1672,30 @@ fn prompt_turn(
     })
 }
 
+/// The agent mode values each permission mode prefers, most specific first
+/// (claude-agent-acp, codex-acp, Devin, generic spellings).
+fn mode_preferences(mode: zeron_proto::PermissionMode) -> &'static [&'static str] {
+    match mode {
+        zeron_proto::PermissionMode::Ask => &["default", "ask", "askPermissions", "read-only"],
+        zeron_proto::PermissionMode::Auto => &["acceptEdits", "accept_edits", "auto", "agent"],
+        zeron_proto::PermissionMode::Full => &[
+            "bypassPermissions",
+            "bypass_permissions",
+            "bypass",
+            "yolo",
+            "agent-full-access",
+            "danger-full-access",
+            "full-access",
+        ],
+    }
+}
+
 /// Answer a server→client request. Permission requests are auto-accepted with
-/// the agent's preferred allow option — parity with the claude harness's
-/// bypassPermissions and the codex harness's approvalPolicy "never" (zeron
-/// sessions run unattended). Everything else (fs, terminal, elicitation) was
-/// declined at initialize, so a stray request gets method-not-found rather
-/// than wedging the agent.
+/// the agent's preferred allow option — the Full-mode path (parity with the
+/// claude harness's bypassPermissions and the codex harness's approvalPolicy
+/// "never"). Everything else (fs, terminal, elicitation) was declined at
+/// initialize, so a stray request gets method-not-found rather than wedging
+/// the agent.
 fn handle_server_request(
     client: &RpcClient,
     id: Value,
@@ -1736,28 +1748,36 @@ fn is_user_question(options: &[Value]) -> bool {
     })
 }
 
-/// The live-run request handler: tool permissions auto-accept like
-/// [`handle_server_request`], but question-shaped requests block on the
-/// engine's input bridge (in a subtask so the message loop keeps flowing)
-/// and answer with the option whose name matches the chosen label. A dropped
-/// resolver degrades to `cancelled` — never a silent allow.
+/// The live-run request handler: under Full, tool permissions auto-accept
+/// like [`handle_server_request`]; under Ask/Auto they become a question
+/// too. Question-shaped requests (and, under Ask/Auto, tool permissions)
+/// block on the engine's input bridge (in a subtask so the message loop
+/// keeps flowing) and answer with the option whose name matches the chosen
+/// label. A tool permission never offers the agent's `allow_always` options
+/// (an approval must not persist a grant). A dropped resolver degrades to
+/// `cancelled` — never a silent allow.
 fn handle_server_request_live(
     client: &RpcClient,
     id: Value,
     method: &str,
     params: &Value,
+    permission_mode: zeron_proto::PermissionMode,
     request_input: &std::sync::Arc<RequestInputFn>,
 ) -> Vec<AgentEvent> {
     if method != "session/request_permission" {
         return handle_server_request(client, id, method, params);
     }
-    let options: Vec<Value> = params
+    let mut options: Vec<Value> = params
         .get("options")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    if !is_user_question(&options) {
+    let tool_permission = !is_user_question(&options);
+    if tool_permission && permission_mode == zeron_proto::PermissionMode::Full {
         return handle_server_request(client, id, method, params);
+    }
+    if tool_permission {
+        options.retain(|o| o.get("kind").and_then(Value::as_str) != Some("allow_always"));
     }
     let names: Vec<String> = options
         .iter()
@@ -2040,6 +2060,7 @@ async fn run_session(session: Session) {
             requested_model,
             &efforts,
             &request.model_options,
+            request.permission_mode,
         ) {
             let mut params = serde_json::Map::new();
             params.insert("sessionId".into(), session_id.clone().into());
@@ -2354,6 +2375,7 @@ async fn run_session(session: Session) {
                                 id,
                                 &method,
                                 &params,
+                                request.permission_mode,
                                 &request_input,
                             ) {
                                 if !send(&event_tx, ev).await {
@@ -2526,6 +2548,7 @@ async fn run_session(session: Session) {
                         id,
                         &method,
                         &params,
+                        request.permission_mode,
                         &request_input,
                     ) {
                         if !send(&event_tx, ev).await {
@@ -2635,6 +2658,7 @@ async fn run_session(session: Session) {
                                         id,
                                         &method,
                                         &params,
+                                        request.permission_mode,
                                         &request_input,
                                     ) {
                                         if !send(&event_tx, ev).await {
@@ -3042,6 +3066,7 @@ async fn run_session(session: Session) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeron_proto::PermissionMode;
 
     #[test]
     fn devin_initialize_enables_only_the_supported_subagent_stream() {
@@ -3109,7 +3134,13 @@ mod tests {
         // Model switch + effort preference list; fastMode untouched without a
         // model-option selection.
         assert_eq!(
-            config_option_sets(&response, Some("claude-opus-5"), &["medium"], &no_opts),
+            config_option_sets(
+                &response,
+                Some("claude-opus-5"),
+                &["medium"],
+                &no_opts,
+                PermissionMode::Full
+            ),
             vec![
                 ("model".to_owned(), json!({ "value": "claude-opus-5" })),
                 ("effort".to_owned(), json!({ "value": "medium" })),
@@ -3117,7 +3148,13 @@ mod tests {
         );
         // Effort preference order: first ADVERTISED candidate wins.
         assert_eq!(
-            config_option_sets(&response, None, &["xhigh", "max"], &no_opts),
+            config_option_sets(
+                &response,
+                None,
+                &["xhigh", "max"],
+                &no_opts,
+                PermissionMode::Full
+            ),
             vec![("effort".to_owned(), json!({ "value": "max" }))]
         );
         // contextWindow=1m composes the [1m] model id; fastMode=on matches the
@@ -3126,7 +3163,13 @@ mod tests {
         opts.insert("contextWindow".into(), json!("1m"));
         opts.insert("fastMode".into(), json!("on"));
         assert_eq!(
-            config_option_sets(&response, Some("claude-opus-5"), &["high"], &opts),
+            config_option_sets(
+                &response,
+                Some("claude-opus-5"),
+                &["high"],
+                &opts,
+                PermissionMode::Full
+            ),
             vec![
                 ("model".to_owned(), json!({ "value": "claude-opus-5[1m]" })),
                 (
@@ -3137,16 +3180,34 @@ mod tests {
         );
         // Already-current values and unadvertised models set nothing.
         assert_eq!(
-            config_option_sets(&response, Some("claude-sonnet-5"), &["high"], &no_opts),
+            config_option_sets(
+                &response,
+                Some("claude-sonnet-5"),
+                &["high"],
+                &no_opts,
+                PermissionMode::Full
+            ),
             Vec::new()
         );
         assert_eq!(
-            config_option_sets(&response, Some("gpt-5.6-sol"), &[], &no_opts),
+            config_option_sets(
+                &response,
+                Some("gpt-5.6-sol"),
+                &[],
+                &no_opts,
+                PermissionMode::Full
+            ),
             Vec::new()
         );
         // No configOptions advertised → nothing to set.
         assert_eq!(
-            config_option_sets(&json!({"sessionId": "s"}), Some("x"), &["high"], &no_opts),
+            config_option_sets(
+                &json!({"sessionId": "s"}),
+                Some("x"),
+                &["high"],
+                &no_opts,
+                PermissionMode::Full
+            ),
             Vec::new()
         );
     }
@@ -3467,8 +3528,52 @@ mod tests {
         });
         let no_opts = serde_json::Map::new();
         assert_eq!(
-            config_option_sets(&codex, None, &[], &no_opts),
+            config_option_sets(&codex, None, &[], &no_opts, PermissionMode::Full),
             vec![("mode".to_owned(), json!({ "value": "agent-full-access" }))]
+        );
+        // Auto is the agent's own default here (already current → no set);
+        // Ask falls to the read-only mode; the handler still routes
+        // permission requests by mode either way.
+        assert_eq!(
+            config_option_sets(&codex, None, &[], &no_opts, PermissionMode::Auto),
+            Vec::new()
+        );
+        assert_eq!(
+            config_option_sets(&codex, None, &[], &no_opts, PermissionMode::Ask),
+            vec![("mode".to_owned(), json!({ "value": "read-only" }))]
+        );
+    }
+
+    #[test]
+    fn claude_acp_mode_select_follows_the_permission_mode() {
+        let claude = json!({
+            "sessionId": "s",
+            "configOptions": [{
+                "id": "mode",
+                "name": "Mode",
+                "category": "mode",
+                "type": "select",
+                "currentValue": "default",
+                "options": [
+                    { "value": "default" },
+                    { "value": "acceptEdits" },
+                    { "value": "plan" },
+                    { "value": "bypassPermissions" },
+                ],
+            }],
+        });
+        let no_opts = serde_json::Map::new();
+        assert_eq!(
+            config_option_sets(&claude, None, &[], &no_opts, PermissionMode::Full),
+            vec![("mode".to_owned(), json!({ "value": "bypassPermissions" }))]
+        );
+        assert_eq!(
+            config_option_sets(&claude, None, &[], &no_opts, PermissionMode::Auto),
+            vec![("mode".to_owned(), json!({ "value": "acceptEdits" }))]
+        );
+        assert_eq!(
+            config_option_sets(&claude, None, &[], &no_opts, PermissionMode::Ask),
+            Vec::new()
         );
     }
 

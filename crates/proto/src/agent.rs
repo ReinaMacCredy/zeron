@@ -48,6 +48,47 @@ pub enum SandboxLevel {
     DangerFullAccess,
 }
 
+/// How a chat's agent actions are approved — one setting shared by every
+/// harness, each mapping it onto its own approval/sandbox wire. The sole
+/// source harnesses read; the older `sandbox` and `auto_approve` fields on
+/// the same structs are no longer consulted and stay on the wire only so
+/// peers on an older build still decode the row (a config they can't decode
+/// is dropped wholesale — see the lenient chat-config decode in the doc
+/// crate).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PermissionMode {
+    /// Every tool and command asks first.
+    Ask,
+    /// The harness's own "auto" mode: edits inside the workspace run, anything
+    /// it flags as unsafe (commands, network, outside the workspace) asks.
+    Auto,
+    /// No prompts at all — the pre-existing unattended behavior.
+    #[default]
+    Full,
+}
+
+impl PermissionMode {
+    pub fn sandbox(self) -> SandboxLevel {
+        match self {
+            PermissionMode::Ask | PermissionMode::Auto => SandboxLevel::WorkspaceWrite,
+            PermissionMode::Full => SandboxLevel::DangerFullAccess,
+        }
+    }
+
+    pub fn auto_approve(self) -> bool {
+        matches!(self, PermissionMode::Full)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PermissionMode::Ask => "Ask for approval",
+            PermissionMode::Auto => "Approve for me",
+            PermissionMode::Full => "Full access",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SteeringMode {
@@ -107,6 +148,10 @@ pub struct RunRequest {
     pub sandbox: SandboxLevel,
     #[serde(default)]
     pub auto_approve: bool,
+    /// See [`PermissionMode`]. Additive + serde-defaulted (Full) for wire
+    /// compat: an old client's request runs exactly as before.
+    #[serde(default)]
+    pub permission_mode: PermissionMode,
     /// Harness-native session id to resume, if any.
     pub resume: Option<String>,
     /// Absolute paths of image attachments already staged on the run device
@@ -634,6 +679,22 @@ mod tests {
         assert_eq!(json["worktree"]["repoPath"], "/repos/comet");
         let round: RunRequest = serde_json::from_value(json).unwrap();
         assert_eq!(round.worktree, req.worktree);
+    }
+
+    #[test]
+    fn run_request_permission_mode_defaults_to_full() {
+        // Old-wire JSON without the field runs unattended, exactly as before.
+        let old = r#"{"prompt":"p","model":null,"reasoning":null,"cwd":".","sandbox":"workspace-write","resume":null}"#;
+        let req: RunRequest = serde_json::from_str(old).unwrap();
+        assert_eq!(req.permission_mode, PermissionMode::Full);
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["permissionMode"], "full");
+        let round: RunRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(round.permission_mode, PermissionMode::Full);
+        assert_eq!(
+            serde_json::to_string(&PermissionMode::Ask).unwrap(),
+            "\"ask\""
+        );
     }
 
     #[test]

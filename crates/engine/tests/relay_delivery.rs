@@ -250,6 +250,7 @@ async fn rows_dark_command_delivers_over_the_peer_relay_exactly_once() {
             model_options: Default::default(),
             cwd: "~".into(),
             sandbox: SandboxLevel::WorkspaceWrite,
+            permission_mode: zeron_proto::PermissionMode::Full,
             auto_approve: true,
             attachments: Vec::new(),
             worktree: None,

@@ -179,6 +179,7 @@ async fn exercise_projectless(command_first: bool) {
                         model_options: Default::default(),
                         cwd: "~".into(),
                         sandbox: SandboxLevel::WorkspaceWrite,
+                        permission_mode: zeron_proto::PermissionMode::Full,
                         auto_approve: true,
                         attachments: Vec::new(),
                         worktree: None,

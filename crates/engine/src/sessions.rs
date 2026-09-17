@@ -95,6 +95,7 @@ struct RuntimeConfig {
     cwd: String,
     sandbox: zeron_proto::SandboxLevel,
     auto_approve: bool,
+    permission_mode: zeron_proto::PermissionMode,
     worktree: Option<zeron_proto::WorktreeSpec>,
 }
 
@@ -108,6 +109,7 @@ impl RuntimeConfig {
             cwd: request.cwd.clone(),
             sandbox: request.sandbox,
             auto_approve: request.auto_approve,
+            permission_mode: request.permission_mode,
             worktree: request.worktree.clone(),
         }
     }
@@ -1048,6 +1050,7 @@ impl SessionsEngine {
                     model_options: config.model_options,
                     cwd: expand_home(&cwd),
                     sandbox: config.sandbox,
+                    permission_mode: config.permission_mode,
                     auto_approve: false,
                     resume: None,
                     attachments: Vec::new(),
@@ -1186,6 +1189,7 @@ impl SessionsEngine {
                             model_options: Default::default(),
                             cwd,
                             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+                            permission_mode: zeron_proto::PermissionMode::Full,
                             auto_approve: false,
                             attachments: Vec::new(),
                             resume: None,
@@ -3255,6 +3259,7 @@ mod tests {
             model_options: serde_json::Map::new(),
             cwd: "/tmp".into(),
             sandbox: SandboxLevel::WorkspaceWrite,
+            permission_mode: zeron_proto::PermissionMode::Full,
             auto_approve: true,
             resume: None,
             attachments: Vec::new(),

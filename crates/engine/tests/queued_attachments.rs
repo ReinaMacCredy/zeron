@@ -127,6 +127,7 @@ fn run_payload(message_id: &str, pending_ref: &str) -> SessionCommandPayload {
             model_options: Default::default(),
             cwd: "~".into(),
             sandbox: SandboxLevel::WorkspaceWrite,
+            permission_mode: zeron_proto::PermissionMode::Full,
             auto_approve: true,
             attachments: vec![pending_ref.to_string()],
             worktree: None,
