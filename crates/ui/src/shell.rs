@@ -61,6 +61,7 @@ use crate::workspace_links::resolve_workspace_file_link;
 
 mod command_palette;
 mod spaces;
+mod switcher;
 mod tabs;
 
 use spaces::{AddSpaceFlow, RenameSpaceDialog};
@@ -1425,6 +1426,14 @@ pub struct Shell {
     /// Chat id last auto-scrolled into view — scroll-to-selected fires once per
     /// selection change, not every frame (which would fight manual scrolling).
     tabs_scrolled_to: Option<String>,
+    /// Sessions in most-recently-selected order (the switcher's card order).
+    session_mru: Vec<String>,
+    /// Last-seen conversation-column thumbnails per chat (switcher cards).
+    session_thumbs: std::collections::HashMap<String, std::sync::Arc<gpui::RenderImage>>,
+    /// Replaced thumbnails awaiting atlas release on the next render.
+    stale_thumbs: Vec<std::sync::Arc<gpui::RenderImage>>,
+    /// The Ctrl+Tab switcher while its modifier is held.
+    switcher: Option<switcher::Switcher>,
     /// Chat outlet vs settings pages.
     route: Route,
     /// Route history behind the titlebar back/forward buttons (§ nav history).
@@ -1809,6 +1818,10 @@ impl Shell {
             tab_drag: None,
             tabs_scroll: gpui::ScrollHandle::new(),
             tabs_scrolled_to: None,
+            session_mru: Vec::new(),
+            session_thumbs: std::collections::HashMap::new(),
+            stale_thumbs: Vec::new(),
+            switcher: None,
             route,
             nav,
             devices_page: None,
@@ -2225,6 +2238,9 @@ impl Shell {
         }
         if selected != self.active_chat {
             self.suspend_file_images(cx);
+            if !selected.is_empty() {
+                self.touch_session_mru(&selected);
+            }
             self.active_chat = selected;
             // Route history: a chat switch is a navigation. The very first
             // selection off the untouched boot canvas REPLACES that entry —
@@ -4401,6 +4417,7 @@ impl Shell {
     /// stranding it over a session the user never picked.
     pub(super) fn overlay_owns_keyboard(&self, cx: &App) -> bool {
         self.command_palette.is_some()
+            || self.switcher.is_some()
             || self.branch_modal.is_some()
             || self.add_space.is_some()
             || self.composer.read(cx).pickers().read(cx).is_open()
@@ -4409,6 +4426,15 @@ impl Shell {
     /// Track held modifiers for sidebar jump hints and the queue's submit hint.
     /// Only a visibility change repaints; modifier traffic is otherwise constant.
     fn on_modifiers_changed(&mut self, event: &ModifiersChangedEvent, cx: &mut Context<Self>) {
+        // The switcher lives on the held modifier (macOS Cmd+Tab): letting
+        // go lands on the highlighted session.
+        if self.switcher.is_some()
+            && !event.modifiers.control
+            && !event.modifiers.platform
+            && !event.modifiers.alt
+        {
+            self.switcher_commit(cx);
+        }
         self.update_jump_hints(&event.modifiers, cx);
     }
 
@@ -7294,6 +7320,11 @@ impl Shell {
             cx.stop_propagation();
             return;
         }
+        if event.keystroke.key == "escape" && self.switcher.is_some() {
+            self.switcher_close(cx);
+            cx.stop_propagation();
+            return;
+        }
         if event.keystroke.key == "escape" && self.capture_escape_surface(cx) {
             cx.stop_propagation();
         }
@@ -7577,6 +7608,9 @@ impl Shell {
             overlays.push(menu);
         }
         overlays.extend(self.render_space_overlays(viewport, window, cx));
+        if let Some(overlay) = self.render_switcher(viewport, window, cx) {
+            overlays.push(overlay);
+        }
         if let Some(overlay) = self.render_command_palette(viewport, window, cx) {
             overlays.push(overlay);
         }
@@ -10334,10 +10368,10 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| {
                 this.open_settings(SettingsSection::Devices, cx)
             }))
-            // Chat-scoped, unlike new-session — `cycle_session` holds the guard
+            // Chat-scoped, unlike new-session — `switcher_step` holds the guard
             // and says why.
-            .on_action(cx.listener(|this, _: &NextSession, _, cx| this.cycle_session(true, cx)))
-            .on_action(cx.listener(|this, _: &PrevSession, _, cx| this.cycle_session(false, cx)))
+            .on_action(cx.listener(|this, _: &NextSession, _, cx| this.switcher_step(true, cx)))
+            .on_action(cx.listener(|this, _: &PrevSession, _, cx| this.switcher_step(false, cx)))
             .on_action(cx.listener(|this, _: &ToggleChanges, window, cx| {
                 if matches!(this.route, Route::Chat) {
                     this.toggle_right_pane(cx);
@@ -10434,6 +10468,36 @@ impl Render for Shell {
                     self.debug_dialog = None;
                     self.composer
                         .update(cx, |c, cx| c.debug_open_model_switch(window, cx));
+                }
+                // `=switcher` (capture knob; no modifier to release): once a
+                // session is selected, let it paint, hop to the next visible
+                // tab so the first session gets a thumbnail, then open the
+                // Ctrl+Tab switcher.
+                if self.debug_dialog.as_deref() == Some("switcher")
+                    && self.state.read(cx).selected_chat.is_some()
+                {
+                    self.debug_dialog = None;
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(4000))
+                            .await;
+                        let _ = this.update(cx, |shell, cx| {
+                            let tabs = shell.open_tab_ids(cx);
+                            let selected = shell.state.read(cx).selected_chat.clone();
+                            if let Some(next) = tabs
+                                .iter()
+                                .find(|id| Some(id.as_str()) != selected.as_deref())
+                                .cloned()
+                            {
+                                shell.open_chat(next, cx);
+                            }
+                        });
+                        cx.background_executor()
+                            .timer(Duration::from_millis(4000))
+                            .await;
+                        let _ = this.update(cx, |shell, cx| shell.switcher_step(true, cx));
+                    })
+                    .detach();
                 }
                 // MessageRail width gate: hide below 48rem of main-panel width.
                 let viewport = f32::from(window.viewport_size().width);

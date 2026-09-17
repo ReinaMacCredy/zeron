@@ -78,31 +78,6 @@ impl Render for TabGhost {
     }
 }
 
-/// The chat one step from `selected` in the sidebar `order`, wrapping at both
-/// ends. Pure.
-///
-/// With nothing selected — the new-session canvas — cycling enters the list at
-/// the end it would have wrapped to: the first row going forward, the last
-/// going back. A selection that has since left the list (archived from another
-/// device mid-cycle) is treated the same way rather than dead-ending.
-pub(super) fn cycle_target(
-    order: &[String],
-    selected: Option<&str>,
-    forward: bool,
-) -> Option<String> {
-    if order.is_empty() {
-        return None;
-    }
-    let at = selected.and_then(|id| order.iter().position(|c| c == id));
-    let next = match (at, forward) {
-        (Some(at), true) => (at + 1) % order.len(),
-        (Some(at), false) => (at + order.len() - 1) % order.len(),
-        (None, true) => 0,
-        (None, false) => order.len() - 1,
-    };
-    Some(order[next].clone())
-}
-
 /// The neighbor to select after closing `closed`: the next tab, else the
 /// previous, else `None` (last tab → new-session canvas). Pure.
 pub(super) fn next_after_close(order: &[String], closed: &str) -> Option<String> {
@@ -134,29 +109,6 @@ impl Shell {
         });
     }
 
-    /// Ctrl+Tab / Ctrl+Shift+Tab: step through the sidebar's Sessions list in
-    /// the order it is drawn. Selection is immediate (no MRU overlay held open
-    /// on the modifier) — one press, one session.
-    ///
-    /// Chat-scoped chrome, like the panel toggles: gpui dispatches a matched
-    /// binding before any `on_key_down`, so an unscoped cycle would fire
-    /// underneath Settings (yanking the user off the page mid-record, since
-    /// these are the very keys the shortcuts table invites them to press) or
-    /// underneath the add-space palette, stranding the overlay over a session
-    /// they never picked.
-    pub(super) fn cycle_session(&mut self, forward: bool, cx: &mut Context<Self>) {
-        if !matches!(self.route, Route::Chat) || self.overlay_owns_keyboard(cx) {
-            return;
-        }
-        // The same list `render_active_rows` draws and the jump shortcuts
-        // count — one function, so neither can drift from the screen.
-        let order = self.sidebar_visible_order(cx);
-        let selected = self.state.read(cx).selected_chat.clone();
-        if let Some(target) = cycle_target(&order, selected.as_deref(), forward) {
-            self.open_chat(target, cx);
-        }
-    }
-
     /// Boot landing: the most recently active visible chat once the first
     /// chats frame has synced (manual selection wins; no chats → the
     /// new-session canvas shows).
@@ -179,7 +131,15 @@ impl Shell {
     }
 
     /// Open a session from the sidebar: select it, the main area follows.
+    /// The session being left is snapshotted first for the switcher.
     pub(crate) fn open_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        if self.state.read(cx).selected_chat.as_deref() != Some(chat_id.as_str()) {
+            self.snapshot_current_chat(cx);
+        }
+        self.select_existing_chat(chat_id, cx);
+    }
+
+    pub(super) fn select_existing_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
         self.command_palette = None;
         self.route = Route::Chat;
         self.focus_composer(cx);
@@ -192,6 +152,7 @@ impl Shell {
     /// re-homes the canvas onto that project; under "All" the current pick
     /// (the last selected project, restored from composer defaults) stands.
     pub(super) fn open_new_session(&mut self, cx: &mut Context<Self>) {
+        self.snapshot_current_chat(cx);
         self.command_palette = None;
         self.route = Route::Chat;
         self.focus_composer(cx);
@@ -305,6 +266,7 @@ impl Shell {
             tabs.retain(|id| id != &chat_id);
         }
         if selected.as_deref() == Some(chat_id.as_str()) {
+            self.snapshot_current_chat(cx);
             let next = next_after_close(&order, &chat_id);
             self.state.update(cx, |s, cx| s.select_chat(next, cx));
         }
@@ -341,6 +303,7 @@ impl Shell {
         if let Some(selected) = selected
             && !kept.contains(&selected)
         {
+            self.snapshot_current_chat(cx);
             self.state
                 .update(cx, |s, cx| s.select_chat(Some(anchor.to_string()), cx));
         }
@@ -970,73 +933,6 @@ impl Shell {
 }
 
 #[cfg(test)]
-mod cycle_tests {
-    use super::*;
-
-    fn order(ids: &[&str]) -> Vec<String> {
-        ids.iter().map(|id| id.to_string()).collect()
-    }
-
-    #[test]
-    fn steps_forward_and_back_through_the_list() {
-        let list = order(&["a", "b", "c"]);
-        assert_eq!(cycle_target(&list, Some("a"), true).as_deref(), Some("b"));
-        assert_eq!(cycle_target(&list, Some("b"), true).as_deref(), Some("c"));
-        assert_eq!(cycle_target(&list, Some("c"), false).as_deref(), Some("b"));
-        assert_eq!(cycle_target(&list, Some("b"), false).as_deref(), Some("a"));
-    }
-
-    #[test]
-    fn wraps_at_both_ends() {
-        let list = order(&["a", "b", "c"]);
-        assert_eq!(cycle_target(&list, Some("c"), true).as_deref(), Some("a"));
-        assert_eq!(cycle_target(&list, Some("a"), false).as_deref(), Some("c"));
-    }
-
-    #[test]
-    fn a_single_session_cycles_to_itself() {
-        // Not a no-op by accident: with one row both directions must resolve,
-        // so the shortcut never looks broken by dead-ending on `None`.
-        let list = order(&["only"]);
-        assert_eq!(
-            cycle_target(&list, Some("only"), true).as_deref(),
-            Some("only")
-        );
-        assert_eq!(
-            cycle_target(&list, Some("only"), false).as_deref(),
-            Some("only")
-        );
-    }
-
-    #[test]
-    fn no_selection_enters_the_list_from_the_matching_end() {
-        let list = order(&["a", "b", "c"]);
-        assert_eq!(cycle_target(&list, None, true).as_deref(), Some("a"));
-        assert_eq!(cycle_target(&list, None, false).as_deref(), Some("c"));
-        assert_eq!(
-            cycle_target(&list, Some("gone"), true).as_deref(),
-            Some("a")
-        );
-        assert_eq!(
-            cycle_target(&list, Some("gone"), false).as_deref(),
-            Some("c")
-        );
-    }
-
-    #[test]
-    fn an_empty_list_has_nothing_to_select() {
-        assert_eq!(cycle_target(&[], None, true), None);
-        assert_eq!(cycle_target(&[], Some("a"), true), None);
-    }
-
-    // Cycling walks the rows the sidebar is drawing, not every chat: that
-    // guarantee is structural now — `cycle_session` reads the same
-    // `AppState::sidebar_chats` the sidebar and the jump shortcuts read, and
-    // `jump_slots_count_the_rows_the_sidebar_draws` (state.rs) covers the
-    // space-filter behaviour for all of them.
-}
-
-#[cfg(test)]
 mod strip_regressions {
     use super::*;
     use gpui::{AppContext, TestAppContext, VisualTestContext};
@@ -1157,10 +1053,15 @@ mod strip_regressions {
             shell.open_chat("b".into(), cx);
             shell.on_state_changed(&shell.state.clone(), cx);
             shell.open_chat("a".into(), cx);
-            shell.state.update(cx, |state, _| state.chats[1].archived = true);
+            shell
+                .state
+                .update(cx, |state, _| state.chats[1].archived = true);
             shell.on_state_changed(&shell.state.clone(), cx);
             assert_eq!(shell.open_tab_ids(cx), ["a"]);
-            assert_eq!(shell.settings.open_tabs.as_deref(), Some(&["a".to_string()][..]));
+            assert_eq!(
+                shell.settings.open_tabs.as_deref(),
+                Some(&["a".to_string()][..])
+            );
 
             // The last tab closes onto the new-session canvas.
             shell.close_session_tab("a".into(), cx);
@@ -1211,6 +1112,55 @@ mod strip_regressions {
         });
         cx.update(|window, cx| window.draw(cx).clear());
         assert!(cx.debug_bounds("session-tab-quiet").is_some());
+    }
+
+    #[gpui::test]
+    fn switcher_opens_on_the_previous_session_and_commits_on_release(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                state.chats = vec![chat("a"), chat("b"), chat("c")];
+                state.chats_synced = true;
+                state.spaces_synced = true;
+                state.apply_sessions(vec![working("a"), working("b"), working("c")]);
+                state.select_chat(Some("a".into()), cx);
+            });
+            shell.on_state_changed(&shell.state.clone(), cx);
+            for id in ["c", "b"] {
+                shell.open_chat(id.into(), cx);
+                shell.on_state_changed(&shell.state.clone(), cx);
+            }
+            assert_eq!(shell.session_mru, ["b", "c", "a"]);
+
+            // First press: the overlay opens with the previous session
+            // highlighted, cards in most-recently-used order.
+            shell.switcher_step(true, cx);
+            let sw = shell.switcher.as_ref().expect("switcher open");
+            assert_eq!(sw.order, ["b", "c", "a"]);
+            assert_eq!(sw.hi, 1);
+            // Second press moves on; a back press returns.
+            shell.switcher_step(true, cx);
+            assert_eq!(shell.switcher.as_ref().unwrap().hi, 2);
+            shell.switcher_step(false, cx);
+            assert_eq!(shell.switcher.as_ref().unwrap().hi, 1);
+
+            // Letting go of every modifier lands on the highlight.
+            shell.on_modifiers_changed(
+                &gpui::ModifiersChangedEvent {
+                    modifiers: gpui::Modifiers::default(),
+                    capslock: gpui::Capslock::default(),
+                },
+                cx,
+            );
+            assert!(shell.switcher.is_none());
+            assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("c"));
+
+            // Escape leaves the selection alone.
+            shell.switcher_step(true, cx);
+            shell.switcher_close(cx);
+            assert!(shell.switcher.is_none());
+            assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("c"));
+        });
     }
 }
 

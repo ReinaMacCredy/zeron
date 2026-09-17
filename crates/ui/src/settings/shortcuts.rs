@@ -506,9 +506,11 @@ fn description(id: ShortcutId) -> &'static str {
         ShortcutId::ToggleTerminal => "Show or hide the terminal for the current session.",
         ShortcutId::NewSession => "Open a blank session canvas to start a new session.",
         ShortcutId::NewProject => "Open the new project dialog.",
-        ShortcutId::NextSession => "Select the next session in the sidebar, wrapping at the end.",
+        ShortcutId::NextSession => {
+            "Open the session switcher on the previous session; press again to move on, release to switch."
+        }
         ShortcutId::PrevSession => {
-            "Select the previous session in the sidebar, wrapping at the start."
+            "Open the session switcher on the least recent session; press again to move back, release to switch."
         }
         ShortcutId::ArchiveSession => "Move the current session to the archived shelf.",
         // One line per slot would repeat itself nine times; the ordinal is
