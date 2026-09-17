@@ -663,6 +663,10 @@ pub struct AppState {
     /// and chat-keyed: the composer follows the selection, so a bare flag
     /// would claim every other chat was compacting too.
     pub compacting_chat: Option<String>,
+    /// Sidechat ids with an open right-pane tab. The source chat's composer
+    /// reads it to decide whether to offer its reopen pill; the shell owns
+    /// the writes (tab opened / closed).
+    pub open_sidechat_tabs: HashSet<String>,
     /// The selected chat's opening `WatchDocMessages` reset has landed. An
     /// empty transcript is otherwise indistinguishable from the pre-replay
     /// gap after selection, where optimistic echoes may already be visible.
@@ -757,6 +761,7 @@ impl AppState {
             queue: Vec::new(),
             context_usage: None,
             compacting_chat: None,
+            open_sidechat_tabs: HashSet::new(),
             transcript_replayed: false,
             transcript_revision: 0,
             echoes: HashMap::new(),
@@ -1591,6 +1596,16 @@ impl AppState {
     pub fn selected_chat_row(&self) -> Option<&Chat> {
         let id = self.selected_chat.as_deref()?;
         self.chats.iter().find(|c| c.id == id)
+    }
+
+    /// The newest sidechat of `chat_id`, if the chat has any. Newest by
+    /// creation, not by activity: the pill and the picker row both reopen the
+    /// most recently STARTED side conversation.
+    pub fn latest_sidechat_of(&self, chat_id: &str) -> Option<&Chat> {
+        self.chats
+            .iter()
+            .filter(|c| c.sidechat_source_chat_id.as_deref() == Some(chat_id))
+            .max_by_key(|c| c.created_at)
     }
 
     /// The chat the Archive session shortcut acts on: the selected one, unless

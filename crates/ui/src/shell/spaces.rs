@@ -152,6 +152,45 @@ fn promote_local_device_group<T>(
 /// regrouped exactly as `render_active_rows` groups it (project or device
 /// sections in first-seen order, local device promoted), or unchanged when the
 /// organization draws one flat list.
+/// Sidechats sit under their source, in the order they already had. A
+/// sidechat whose source is missing from the list renders flat rather than
+/// hidden — it is otherwise unreachable from the sidebar. `true` marks a row
+/// that renders nested.
+fn nest_sidechats<T>(rows: Vec<T>, chat: impl Fn(&T) -> &zeron_proto::Chat) -> Vec<(T, bool)> {
+    let ids: std::collections::HashSet<String> =
+        rows.iter().map(|row| chat(row).id.clone()).collect();
+    let owners: Vec<String> = rows.iter().map(|row| chat(row).id.clone()).collect();
+    let sources: Vec<Option<String>> = rows
+        .iter()
+        .map(|row| {
+            chat(row)
+                .sidechat_source_chat_id
+                .clone()
+                .filter(|source| ids.contains(source))
+        })
+        .collect();
+    let mut slots: Vec<Option<T>> = rows.into_iter().map(Some).collect();
+    let mut nested = Vec::with_capacity(slots.len());
+    for index in 0..slots.len() {
+        if sources[index].is_some() {
+            continue;
+        }
+        let Some(row) = slots[index].take() else {
+            continue;
+        };
+        nested.push((row, false));
+        for child in 0..slots.len() {
+            if sources[child].as_deref() == Some(owners[index].as_str())
+                && let Some(row) = slots[child].take()
+            {
+                nested.push((row, true));
+            }
+        }
+    }
+    nested.extend(slots.into_iter().flatten().map(|row| (row, false)));
+    nested
+}
+
 fn grouped_visible_order(
     chats: Vec<zeron_proto::Chat>,
     organization: SidebarOrganization,
@@ -181,8 +220,8 @@ fn grouped_visible_order(
     }
     groups
         .into_iter()
-        .flat_map(|(_, rows)| rows)
-        .map(|chat| chat.id)
+        .flat_map(|(_, rows)| nest_sidechats(rows, |chat| chat))
+        .map(|(chat, _)| chat.id)
         .collect()
 }
 
@@ -1318,8 +1357,9 @@ impl Shell {
         let mut slot = 0usize;
         let mut rendered = Vec::new();
         for (group, rows) in groups {
+            let rows = nest_sidechats(rows, |row| &row.chat);
             let mut rendered_rows = Vec::with_capacity(rows.len());
-            for row in rows {
+            for (row, nested) in rows {
                 let ActiveChatRow {
                     status,
                     chat,
@@ -1365,6 +1405,28 @@ impl Shell {
                     theme,
                     cx,
                 );
+                // Nesting is a left inset plus the ↳ mark — the row itself is
+                // an ordinary chat row and opens like one.
+                let element = if nested {
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(2.0))
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(px(12.0))
+                                .text_size(crate::typography::ui_rems(11.0))
+                                .text_color(theme.text_faint)
+                                .child(SharedString::from("↳")),
+                        )
+                        .child(div().flex_1().min_w_0().child(element))
+                        .into_any_element()
+                } else {
+                    element
+                };
                 rendered_rows.push((format!("c:{}", chat.id), height, element));
             }
 
@@ -3014,7 +3076,9 @@ impl Shell {
 mod tests {
     use chrono::{TimeZone as _, Utc};
 
-    use super::{compare_sidebar_chats, grouped_visible_order, promote_local_device_group};
+    use super::{
+        compare_sidebar_chats, grouped_visible_order, nest_sidechats, promote_local_device_group,
+    };
     use crate::settings::{SidebarOrganization, SidebarSort};
 
     fn group(device: &str, value: u8) -> (Option<(String, String)>, Vec<u8>) {
@@ -3095,6 +3159,47 @@ mod tests {
 
         let flat = grouped_visible_order(chats, SidebarOrganization::InOneList, false, None);
         assert_eq!(flat, ["a1", "b1", "home", "a2", "b2"]);
+    }
+
+    #[test]
+    fn sidechats_render_under_their_source_and_orphans_stay_flat() {
+        let sidechat_of = |id: &str, source: &str| {
+            let mut chat = chat(id);
+            chat.sidechat_source_chat_id = Some(source.into());
+            chat
+        };
+        let rows = vec![
+            sidechat_of("s2", "src"),
+            chat("other"),
+            sidechat_of("s1", "src"),
+            chat("src"),
+            sidechat_of("orphan", "gone"),
+        ];
+
+        let nested = nest_sidechats(rows, |chat| chat);
+        let order: Vec<(&str, bool)> = nested
+            .iter()
+            .map(|(chat, nested)| (chat.id.as_str(), *nested))
+            .collect();
+        // Both sidechats follow their source, in their own list order; the
+        // one whose source is absent keeps its place, unindented.
+        assert_eq!(
+            order,
+            [
+                ("other", false),
+                ("src", false),
+                ("s2", true),
+                ("s1", true),
+                ("orphan", false),
+            ]
+        );
+
+        // The jump order the sidebar hands the shortcuts matches the screen.
+        let chats = vec![chat("src"), sidechat_of("s1", "src"), chat("other")];
+        assert_eq!(
+            grouped_visible_order(chats, SidebarOrganization::InOneList, false, None),
+            ["src", "s1", "other"]
+        );
     }
 
     #[gpui::test]

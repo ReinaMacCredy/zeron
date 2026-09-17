@@ -3866,6 +3866,14 @@ pub enum ComposerEvent {
     /// yet: the transcript remembers the stable id and promotes it to an
     /// own-turn anchor only when the host materializes the matching bubble.
     Queued { chat_id: String, message_id: String },
+    /// `/sidechat` (or the footer pill): open the source chat's side
+    /// conversation in the right pane, creating it when there is none, and
+    /// start its first turn with `prompt` when one was typed. The shell owns
+    /// the tab, so the composer can only ask.
+    OpenSidechat {
+        source_chat_id: String,
+        prompt: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3936,16 +3944,32 @@ fn slash_token(text: &str, cursor: usize) -> Option<MentionToken> {
 /// reaches the agent.
 const COMPACT_COMMAND: &str = "compact";
 
+/// Zeron's second own command — it opens a side conversation instead of
+/// running a turn on this chat.
+const SIDECHAT_COMMAND: &str = "sidechat";
+
+/// `Some(argument)` when the prompt invokes zeron's own `command`: the first
+/// token must be exactly `/command`, and the rest of the line is its argument.
+fn app_command_argument(text: &str, command: &str) -> Option<Option<String>> {
+    let rest = text.strip_prefix('/')?.strip_prefix(command)?;
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let argument = rest.trim();
+    Some((!argument.is_empty()).then(|| argument.to_string()))
+}
+
 /// `Some(focus)` when the prompt is a `/compact` invocation: the first token
 /// must be exactly `/compact`, and the rest of the line is the focus the
 /// harness compacts around.
 fn compact_focus(text: &str) -> Option<Option<String>> {
-    let rest = text.strip_prefix('/')?.strip_prefix(COMPACT_COMMAND)?;
-    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
-        return None;
-    }
-    let focus = rest.trim();
-    Some((!focus.is_empty()).then(|| focus.to_string()))
+    app_command_argument(text, COMPACT_COMMAND)
+}
+
+/// `Some(prompt)` when the prompt is a `/sidechat` invocation: bare opens the
+/// side conversation, and the rest of the line is its first turn.
+fn sidechat_prompt(text: &str) -> Option<Option<String>> {
+    app_command_argument(text, SIDECHAT_COMMAND)
 }
 
 /// Zeron's `/compact` rides every harness's list; one that advertises its own
@@ -3963,6 +3987,35 @@ fn with_compact_entry(mut commands: Vec<SlashCommand>) -> Vec<SlashCommand> {
         },
     );
     commands
+}
+
+/// Same ride as `/compact`: zeron's `/sidechat` joins every harness's list
+/// unless the harness already advertises that name.
+fn with_sidechat_entry(mut commands: Vec<SlashCommand>) -> Vec<SlashCommand> {
+    if commands.iter().any(|c| c.name == SIDECHAT_COMMAND) {
+        return commands;
+    }
+    commands.insert(
+        0,
+        SlashCommand {
+            name: SIDECHAT_COMMAND.into(),
+            description: "Ask about this chat on the side, without touching it".into(),
+            input_hint: Some("prompt".into()),
+        },
+    );
+    commands
+}
+
+/// The pill names the sidechat once: the engine titles a sidechat
+/// `Sidechat: <source>`, and the pill's own prefix would double it.
+fn sidechat_pill_label(title: Option<&str>) -> String {
+    let title = title.unwrap_or_default().trim();
+    let body = title.strip_prefix("Sidechat:").unwrap_or(title).trim();
+    if body.is_empty() {
+        "Sidechat".to_string()
+    } else {
+        format!("Sidechat: {body}")
+    }
 }
 
 /// The catalog's names live on the engine's harness descriptors, which the
@@ -4048,6 +4101,11 @@ fn slash_error_message(err: &RpcError) -> SharedString {
 
 pub struct Composer {
     pub(crate) state: Entity<AppState>,
+    /// The chat this composer writes to, when it is NOT the selected one: a
+    /// sidechat tab hosts its own composer under the source chat's route.
+    /// Every `selected_chat` read goes through [`Self::bound_chat_id`], so
+    /// this one field redirects the whole composer.
+    pub(crate) chat_override: Option<String>,
     pub(crate) input: Entity<ComposerInput>,
     /// Draft displaced while a queued message occupies the composer.
     pub(crate) queue_edit_draft: Option<(String, Vec<StagedAttachment>, Vec<CapturedAppshot>)>,
@@ -4327,6 +4385,7 @@ impl Composer {
         let current_key = state.read(cx).selected_chat.clone().unwrap_or_default();
         let mut composer = Self {
             state,
+            chat_override: None,
             input,
             queue_edit_draft: None,
             pickers,
@@ -4441,6 +4500,33 @@ impl Composer {
             }
         }
         composer
+    }
+
+    /// A composer bound to `chat_id` instead of the selection — the sidechat
+    /// tab's input. Its drafts, attachments and failures key off that chat,
+    /// and its sends run on it.
+    pub fn for_chat(state: Entity<AppState>, chat_id: String, cx: &mut Context<Self>) -> Self {
+        let mut composer = Self::new(state, cx);
+        composer.current_key = chat_id.clone();
+        composer.chat_override = Some(chat_id);
+        composer
+    }
+
+    /// The chat every read in this composer means: the bound one, else the
+    /// selection (`None` = the new-chat canvas).
+    pub(crate) fn bound_chat_id(&self, cx: &App) -> Option<String> {
+        self.chat_override
+            .clone()
+            .or_else(|| self.state.read(cx).selected_chat.clone())
+    }
+
+    fn bound_chat_row<'a>(&self, cx: &'a App) -> Option<&'a zeron_proto::Chat> {
+        let state = self.state.read(cx);
+        let id = self
+            .chat_override
+            .as_deref()
+            .or(state.selected_chat.as_deref())?;
+        state.chats.iter().find(|chat| chat.id == id)
     }
 
     /// Capture-knob passthrough (`ZERON_OPEN_DIALOG=model`): open the
@@ -5153,7 +5239,7 @@ impl Composer {
             let state = self.state.read(cx);
             let mut params = serde_json::Map::new();
             params.insert("query".into(), token.query.clone().into());
-            let target = if let Some(chat) = state.selected_chat_row() {
+            let target = if let Some(chat) = self.bound_chat_row(cx) {
                 params.insert("chatId".into(), chat.id.clone().into());
                 Some(chat.device_id.clone())
             } else if let Some(space) = state.selected_space_row() {
@@ -5465,13 +5551,15 @@ impl Composer {
             self.slash.loading = false;
             return;
         };
-        let target = {
-            let state = self.state.read(cx);
-            state
-                .selected_chat_row()
-                .map(|chat| chat.device_id.clone())
-                .or_else(|| state.selected_space_row().map(|s| s.device_id.clone()))
-        };
+        let target = self
+            .bound_chat_row(cx)
+            .map(|chat| chat.device_id.clone())
+            .or_else(|| {
+                self.state
+                    .read(cx)
+                    .selected_space_row()
+                    .map(|s| s.device_id.clone())
+            });
         let request = self.slash.request;
         self.slash_task = Some(cx.spawn(async move |this, cx| {
             let mut params = serde_json::json!({ "harness": harness });
@@ -5489,7 +5577,7 @@ impl Composer {
                         Ok(commands) => {
                             composer
                                 .slash_cache
-                                .insert(harness, with_compact_entry(commands));
+                                .insert(harness, with_sidechat_entry(with_compact_entry(commands)));
                         }
                         Err(err) => tracing::warn!(%err, "slash command decode failed"),
                     },
@@ -5608,13 +5696,15 @@ impl Composer {
             self.compaction_probed.remove(&harness);
             return;
         };
-        let target = {
-            let state = self.state.read(cx);
-            state
-                .selected_chat_row()
-                .map(|chat| chat.device_id.clone())
-                .or_else(|| state.selected_space_row().map(|s| s.device_id.clone()))
-        };
+        let target = self
+            .bound_chat_row(cx)
+            .map(|chat| chat.device_id.clone())
+            .or_else(|| {
+                self.state
+                    .read(cx)
+                    .selected_space_row()
+                    .map(|s| s.device_id.clone())
+            });
         cx.spawn(async move |this, cx| {
             let mut params = serde_json::json!({ "harness": harness });
             if let (Some(target), Some(object)) = (&target, params.as_object_mut()) {
@@ -5663,11 +5753,11 @@ impl Composer {
         })
     }
 
-    /// The SELECTED chat is compacting. Another chat's compaction must not
+    /// This composer's chat is compacting. Another chat's compaction must not
     /// lock this one's composer.
     pub(crate) fn compacting(&self, cx: &App) -> bool {
         let state = self.state.read(cx);
-        state.compacting_chat.is_some() && state.compacting_chat == state.selected_chat
+        state.compacting_chat.is_some() && state.compacting_chat == self.bound_chat_id(cx)
     }
 
     /// Why compaction is refused right now, if it is — shared by the typed
@@ -5682,7 +5772,7 @@ impl Composer {
         self.unsupported_compaction(cx)
     }
 
-    fn set_compact_failure(&mut self, message: SharedString, cx: &mut Context<Self>) {
+    fn set_chat_failure(&mut self, message: SharedString, cx: &mut Context<Self>) {
         self.failure = Some(message);
         self.failure_key = Some(self.current_key.clone());
         cx.notify();
@@ -5694,20 +5784,18 @@ impl Composer {
     /// call returns.
     pub(crate) fn request_compaction(&mut self, focus: Option<String>, cx: &mut Context<Self>) {
         if let Some(reason) = self.compact_disabled_reason(cx) {
-            self.set_compact_failure(reason, cx);
+            self.set_chat_failure(reason, cx);
             return;
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.set_compact_failure("Engine not connected".into(), cx);
+            self.set_chat_failure("Engine not connected".into(), cx);
             return;
         };
         let Some((chat_id, host_device_id)) = self
-            .state
-            .read(cx)
-            .selected_chat_row()
+            .bound_chat_row(cx)
             .map(|chat| (chat.id.clone(), chat.device_id.clone()))
         else {
-            self.set_compact_failure("Start a chat before compacting its context.".into(), cx);
+            self.set_chat_failure("Start a chat before compacting its context.".into(), cx);
             return;
         };
         let mut params = serde_json::json!({
@@ -5765,6 +5853,72 @@ impl Composer {
             })
             .ok();
         }));
+    }
+
+    // ---- sidechats ---------------------------------------------------------
+
+    /// Ask the shell to open this chat's side conversation — from `/sidechat`
+    /// or from the footer pill. The shell owns the right pane, the creation
+    /// RPC and the first turn; the composer only names the source.
+    pub(crate) fn request_sidechat(&mut self, prompt: Option<String>, cx: &mut Context<Self>) {
+        let Some((source_chat_id, nested)) = self
+            .bound_chat_row(cx)
+            .map(|chat| (chat.id.clone(), chat.sidechat_source_chat_id.is_some()))
+        else {
+            self.set_chat_failure("Start a chat before opening a sidechat.".into(), cx);
+            return;
+        };
+        if nested {
+            self.set_chat_failure("Nested sidechats are not supported".into(), cx);
+            return;
+        }
+        self.failure = None;
+        cx.emit(ComposerEvent::OpenSidechat {
+            source_chat_id,
+            prompt,
+        });
+        cx.notify();
+    }
+
+    /// The reopen pill: this chat's newest sidechat, while its tab is closed.
+    fn render_sidechat_pill(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        if self.chat_override.is_some() {
+            return None;
+        }
+        let chat_id = self.bound_chat_id(cx)?;
+        let state = self.state.read(cx);
+        let sidechat = state.latest_sidechat_of(&chat_id)?;
+        if state.open_sidechat_tabs.contains(&sidechat.id) {
+            return None;
+        }
+        let label: SharedString = sidechat_pill_label(sidechat.title.as_deref()).into();
+        Some(
+            div()
+                .id("composer-sidechat-pill")
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(5.0))
+                .h(px(24.0))
+                .px(px(6.0))
+                .rounded(px(6.0))
+                .text_size(px(11.0))
+                .text_color(theme.text_muted)
+                .hover(|s| s.bg(crate::theme::ink(0.05)))
+                .cursor_pointer()
+                .child(
+                    crate::icons::icon(crate::icons::CHAT_ROUND_LINE)
+                        .size(px(12.0))
+                        .text_color(theme.text_muted),
+                )
+                .child(label)
+                .on_click(cx.listener(|this, _, _, cx| this.request_sidechat(None, cx)))
+                .into_any_element(),
+        )
     }
 
     fn render_slash_popup(
@@ -5965,11 +6119,17 @@ impl Composer {
             .retain(|chat_id, _| self.interrupting.contains(chat_id));
 
         let editing_id = self.editing_queued.clone();
-        let (key, pending, edited_row_exists) = {
+        let key = self.bound_chat_id(cx).unwrap_or_default();
+        let (pending, edited_row_exists) = {
             let s = self.state.read(cx);
             (
-                s.selected_chat.clone().unwrap_or_default(),
-                pending_input_request(&s.transcript),
+                // `state.transcript` and `state.queue` belong to the SELECTED
+                // chat; a bound composer would otherwise answer the source
+                // chat's question from the sidechat's input.
+                self.chat_override
+                    .is_none()
+                    .then(|| pending_input_request(&s.transcript))
+                    .flatten(),
                 editing_id
                     .as_ref()
                     .is_none_or(|id| s.queue.iter().any(|item| item.id == *id)),
@@ -6113,12 +6273,12 @@ impl Composer {
     }
 
     pub(crate) fn run_live(&self, cx: &App) -> bool {
-        let s = self.state.read(cx);
-        let Some(chat_id) = s.selected_chat.as_deref() else {
+        let Some(chat_id) = self.bound_chat_id(cx) else {
             return false;
         };
+        let s = self.state.read(cx);
         matches!(
-            s.indicator_for(chat_id, chrono::Utc::now()),
+            s.indicator_for(&chat_id, chrono::Utc::now()),
             Indicator::Working | Indicator::AwaitingInput
         )
     }
@@ -6133,7 +6293,7 @@ impl Composer {
         if state.review_comment_flush_pending(&self.current_key) {
             return true;
         }
-        if state.selected_chat.is_some() {
+        if self.bound_chat_id(cx).is_some() {
             return false;
         }
         // New-chat canvas: needs a runnable agent. The
@@ -6184,6 +6344,14 @@ impl Composer {
         }
     }
 
+    /// Send `prompt` as this composer's turn without it ever being typed —
+    /// the sidechat tab's first turn, handed over by `/sidechat <prompt>`.
+    /// Queues instead when the bound chat is already busy, like a submit.
+    pub(crate) fn send_prompt(&mut self, prompt: String, cx: &mut Context<Self>) {
+        let queue = matches!(self.button_mode(cx), SendButtonMode::Queue);
+        self.send(prompt, queue, cx);
+    }
+
     /// Cmd/Ctrl+Enter remains an ordinary submit while the composer carries
     /// content. With a truly empty composer it instead activates the most
     /// recently queued row, and never turns an empty chord into Stop.
@@ -6216,6 +6384,14 @@ impl Composer {
             self.request_compaction(focus, cx);
             return;
         }
+        // `/sidechat` is zeron's own too: it opens a side conversation and
+        // never runs a turn on THIS chat.
+        if let Some(prompt) = sidechat_prompt(&text) {
+            self.input.update(cx, |input, cx| input.set_text("", cx));
+            self.drafts.remove(&self.current_key);
+            self.request_sidechat(prompt, cx);
+            return;
+        }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.failure = Some("Engine not connected".into());
             self.failure_key = None; // global — meaningful on every chat
@@ -6224,7 +6400,7 @@ impl Composer {
         };
         // Chat id: existing selection, or client-minted for the new-chat canvas
         // (the chat then appears from the doc host once the doc materializes).
-        let (chat_id, is_new) = match self.state.read(cx).selected_chat.clone() {
+        let (chat_id, is_new) = match self.bound_chat_id(cx) {
             Some(id) => (id, false),
             None => (uuid::Uuid::new_v4().to_string(), true),
         };
@@ -6234,12 +6410,18 @@ impl Composer {
         let plan = self.pickers.read(cx).checkout_plan();
         // Fully-resolved model/reasoning/options — concrete values (chat config
         // or defaults), so the engine never has to guess a "default".
-        let resolved = self.pickers.read(cx).resolved(cx);
-        let existing_cwd = self
-            .state
-            .read(cx)
-            .selected_chat_row()
-            .and_then(|c| c.cwd.clone());
+        let mut resolved = self.pickers.read(cx).resolved(cx);
+        // The pickers follow the SELECTION; a bound composer runs its own
+        // chat's configuration instead of the source chat's.
+        if self.chat_override.is_some()
+            && let Some(config) = self.bound_chat_row(cx).and_then(|chat| chat.config.clone())
+        {
+            resolved.harness = Some(config.harness);
+            resolved.model = config.model;
+            resolved.reasoning = config.reasoning;
+            resolved.model_options = config.model_options;
+        }
+        let existing_cwd = self.bound_chat_row(cx).and_then(|c| c.cwd.clone());
         // The PROJECT fixes the new chat's device + base folder — sessions are
         // minted onto the project's device, not necessarily this one. With no
         // project ("Don't work in a project") the composer's device pick is
@@ -6252,9 +6434,7 @@ impl Composer {
                 .clone()
                 .unwrap_or_else(|| "local".to_string())
         } else {
-            self.state
-                .read(cx)
-                .selected_chat_row()
+            self.bound_chat_row(cx)
                 .map(|c| c.device_id.clone())
                 .or_else(|| local_device_id.clone())
                 .unwrap_or_else(|| "local".to_string())
@@ -6266,10 +6446,7 @@ impl Composer {
                 .clone()
                 .filter(|id| local_device_id.as_deref() != Some(id.as_str()))
         } else {
-            self.state
-                .read(cx)
-                .selected_chat_row()
-                .map(|c| c.device_id.clone())
+            self.bound_chat_row(cx).map(|c| c.device_id.clone())
         };
         let space_id = space.as_ref().map(|s| s.id.clone());
         let space_path = space.as_ref().map(|s| s.path.clone());
@@ -6901,7 +7078,7 @@ impl Composer {
     }
 
     pub(crate) fn interrupt_selected(&mut self, cx: &mut Context<Self>) {
-        let Some(chat_id) = self.state.read(cx).selected_chat.clone() else {
+        let Some(chat_id) = self.bound_chat_id(cx) else {
             return;
         };
         self.interrupt_chat(chat_id, cx);
@@ -7009,7 +7186,7 @@ impl Composer {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        let Some(chat_id) = self.state.read(cx).selected_chat.clone() else {
+        let Some(chat_id) = self.bound_chat_id(cx) else {
             return;
         };
         let request_id = wizard.request_id.clone();
@@ -7492,7 +7669,7 @@ impl Render for Composer {
         }
         // New chats render expanded regardless of `expanded_mode` (see below),
         // so a mode flip there changes nothing visible — never morph it.
-        let new_chat = self.state.read(cx).selected_chat.is_none();
+        let new_chat = self.bound_chat_id(cx).is_none();
         // Morph clock in ms; dividing by the measurement knob stretches the
         // timeline exactly like shell.rs eval_tween's scaled duration.
         let now_ms = self.morph_clock.elapsed().as_secs_f32() * 1000.0 / motion::speed_scale();
@@ -7527,8 +7704,9 @@ impl Render for Composer {
         // reconnect) instead of letting the button imply instant delivery.
         let queue_notice: Option<(SharedString, bool)> = {
             use zeron_proto::ConnectivityState as S;
+            let bound_chat = self.bound_chat_id(cx);
             let state = self.state.read(cx);
-            let degraded = match state.selected_chat.as_deref() {
+            let degraded = match bound_chat.as_deref() {
                 Some(id) => state.chat_delivery_degraded(id),
                 None => {
                     // New-chat canvas: judge by the picked target device.
@@ -8189,11 +8367,16 @@ impl Render for Composer {
             session_chrome
         };
         let container = if bottom_slot > 0.0 {
-            let footer = (session_chrome_opacity > 0.0).then(|| {
-                self.pickers
-                    .update(cx, |pickers, cx| pickers.render_footer(cx))
-            });
+            // The pickers follow the SELECTION and write their picks back to
+            // that chat's row, so a bound composer shows no footer: changing
+            // the model there would reconfigure the source chat.
+            let footer =
+                (session_chrome_opacity > 0.0 && self.chat_override.is_none()).then(|| {
+                    self.pickers
+                        .update(cx, |pickers, cx| pickers.render_footer(cx))
+                });
             let usage = self.state.read(cx).context_usage;
+            let sidechat_pill = self.render_sidechat_pill(&theme, cx);
             container.child(
                 div()
                     .w_full()
@@ -8224,14 +8407,21 @@ impl Render for Composer {
                                 .items_center()
                                 .opacity(session_chrome_opacity)
                                 .child(div().flex_1().min_w_0().children(footer.flatten()))
-                                .child(div().flex_none().pr(px(10.0)).child(
-                                    crate::context_usage::render(
-                                        usage,
-                                        self.state.clone(),
-                                        cx.entity(),
-                                        &theme,
-                                    ),
-                                )),
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .pr(px(10.0))
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(4.0))
+                                        .children(sidechat_pill)
+                                        .child(crate::context_usage::render(
+                                            usage,
+                                            self.state.clone(),
+                                            cx.entity(),
+                                            &theme,
+                                        )),
+                                ),
                         )
                     }),
             )
@@ -8947,6 +9137,191 @@ mod tests {
                 })
                 .unwrap();
         }
+    }
+
+    fn chat_row(id: &str, sidechat_of: Option<&str>) -> zeron_proto::Chat {
+        zeron_proto::Chat {
+            id: id.into(),
+            device_id: "dev".into(),
+            title: Some(format!("Sidechat: {id}")),
+            archived: false,
+            cwd: None,
+            branch: None,
+            checkout_id: None,
+            source_context: None,
+            config: None,
+            last_message_preview: None,
+            last_message_at: None,
+            created_at: chrono::Utc::now(),
+            harness_session_id: None,
+            harness_session_cwd: None,
+            space_id: None,
+            last_seen_at: None,
+            room_gen: None,
+            sidechat_source_chat_id: sidechat_of.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn sidechat_is_intercepted_with_its_prompt_and_nothing_else_is() {
+        assert_eq!(sidechat_prompt("/sidechat"), Some(None));
+        assert_eq!(
+            sidechat_prompt("/sidechat compare the two"),
+            Some(Some("compare the two".into()))
+        );
+        // A longer name that merely starts with it is another command.
+        assert!(sidechat_prompt("/sidechats").is_none());
+        assert!(sidechat_prompt("/sidechat-now").is_none());
+        // Not the first token → an ordinary prompt, sent as a turn.
+        assert!(sidechat_prompt("ask in a /sidechat").is_none());
+        assert!(sidechat_prompt("/compact").is_none());
+    }
+
+    #[test]
+    fn the_sidechat_entry_never_doubles_a_harness_that_advertises_it() {
+        let advertised = |name: &str| SlashCommand {
+            name: name.into(),
+            description: "harness copy".into(),
+            input_hint: None,
+        };
+        let names = |commands: &[SlashCommand]| -> Vec<String> {
+            commands.iter().map(|c| c.name.clone()).collect()
+        };
+        let merged = with_sidechat_entry(vec![advertised("sidechat"), advertised("clear")]);
+        assert_eq!(names(&merged), vec!["sidechat", "clear"]);
+        assert_eq!(merged[0].description, "harness copy");
+        // The popup's real list: both zeron commands ride, each exactly once.
+        let merged = with_sidechat_entry(with_compact_entry(Vec::new()));
+        assert_eq!(names(&merged), vec!["sidechat", "compact"]);
+        assert_eq!(
+            merged[0].description,
+            "Ask about this chat on the side, without touching it"
+        );
+    }
+
+    #[test]
+    fn the_pill_names_the_sidechat_once() {
+        assert_eq!(
+            sidechat_pill_label(Some("Sidechat: Fix the parser")),
+            "Sidechat: Fix the parser"
+        );
+        assert_eq!(
+            sidechat_pill_label(Some("Fix the parser")),
+            "Sidechat: Fix the parser"
+        );
+        assert_eq!(sidechat_pill_label(None), "Sidechat");
+        assert_eq!(sidechat_pill_label(Some("Sidechat:")), "Sidechat");
+    }
+
+    #[gpui::test]
+    fn submitting_sidechat_asks_for_the_tab_and_never_builds_a_run(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        let composer = handle.root(cx).unwrap();
+        let seen: std::rc::Rc<std::cell::RefCell<Vec<(String, Option<String>)>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        cx.update(|cx| {
+            let seen = seen.clone();
+            cx.subscribe(&composer, move |_, event: &ComposerEvent, _| {
+                if let ComposerEvent::OpenSidechat {
+                    source_chat_id,
+                    prompt,
+                } = event
+                {
+                    seen.borrow_mut()
+                        .push((source_chat_id.clone(), prompt.clone()));
+                }
+            })
+            .detach();
+        });
+        cx.run_until_parked();
+        handle
+            .update(cx, |composer, _, cx| {
+                composer.state.update(cx, |state, _| {
+                    state.chats = vec![chat_row("src", None), chat_row("side", Some("src"))];
+                    state.selected_chat = Some("src".into());
+                });
+                for text in ["/sidechat", "/sidechat compare"] {
+                    composer
+                        .input
+                        .update(cx, |input, cx| input.set_text(text, cx));
+                    composer.on_submit(cx);
+                    // Intercepted: draft cleared, no echo, no send in flight.
+                    assert!(composer.input.read(cx).text().is_empty());
+                    assert!(composer.state.read(cx).transcript.is_empty());
+                    assert!(!composer.sending);
+                    assert!(composer.failure.is_none());
+                }
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            seen.borrow().as_slice(),
+            [
+                ("src".to_string(), None),
+                ("src".to_string(), Some("compare".to_string()))
+            ]
+        );
+    }
+
+    #[gpui::test]
+    fn a_sidechat_refuses_to_open_one_of_its_own(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        let composer = handle.root(cx).unwrap();
+        let seen = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        cx.update(|cx| {
+            let seen = seen.clone();
+            cx.subscribe(&composer, move |_, event: &ComposerEvent, _| {
+                if matches!(event, ComposerEvent::OpenSidechat { .. }) {
+                    seen.set(seen.get() + 1);
+                }
+            })
+            .detach();
+        });
+        cx.run_until_parked();
+        handle
+            .update(cx, |composer, _, cx| {
+                composer.state.update(cx, |state, _| {
+                    state.chats = vec![chat_row("src", None), chat_row("side", Some("src"))];
+                    state.selected_chat = Some("side".into());
+                });
+                composer
+                    .input
+                    .update(cx, |input, cx| input.set_text("/sidechat compare", cx));
+                composer.on_submit(cx);
+                assert_eq!(
+                    composer.failure.as_deref(),
+                    Some("Nested sidechats are not supported")
+                );
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(seen.get(), 0);
+    }
+
+    #[gpui::test]
+    fn a_bound_composer_reads_its_own_chat_not_the_selection(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        let state = handle
+            .read_with(cx, |composer, _| composer.state.clone())
+            .unwrap();
+        let window = cx.add_window(|_, cx| Composer::for_chat(state.clone(), "side".into(), cx));
+        window
+            .update(cx, |composer, _, cx| {
+                composer.state.update(cx, |state, _| {
+                    state.chats = vec![chat_row("src", None), chat_row("side", Some("src"))];
+                    state.selected_chat = Some("src".into());
+                });
+                assert_eq!(composer.bound_chat_id(cx).as_deref(), Some("side"));
+                assert_eq!(composer.current_key, "side");
+                assert_eq!(
+                    composer.bound_chat_row(cx).map(|chat| chat.id.as_str()),
+                    Some("side")
+                );
+                // A chat-navigation notify must not re-key it to the selection.
+                composer.on_state_changed(cx);
+                assert_eq!(composer.current_key, "side");
+            })
+            .unwrap();
     }
 
     #[test]
