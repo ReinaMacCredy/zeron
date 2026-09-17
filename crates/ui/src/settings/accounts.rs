@@ -138,6 +138,124 @@ pub fn provider_accounts(
         .collect()
 }
 
+/// The accounts the sidebar user row summarizes (docs/research/usage-mini):
+/// per provider in [`PROVIDERS`] order, the active account, and only when a
+/// usage probe has landed — a cold engine cache draws nothing rather than a
+/// row of "0%". Pure.
+pub fn sidebar_accounts(snapshot: &AgentAccountsSnapshot) -> Vec<&AgentAccount> {
+    PROVIDERS
+        .iter()
+        .filter_map(|(harness, _, _)| {
+            snapshot
+                .accounts
+                .iter()
+                .find(|a| a.harness == *harness && a.active && !a.usage_windows.is_empty())
+        })
+        .collect()
+}
+
+/// The account's most-used window — the limit that bites first. Pure.
+pub fn worst_fraction(account: &AgentAccount) -> f32 {
+    account
+        .usage_windows
+        .iter()
+        .map(|w| w.used_fraction.clamp(0.0, 1.0))
+        .fold(0.0, f32::max)
+}
+
+/// Brand tint for a provider's usage dot (the Claude mark's orange; the
+/// OpenAI mark is monochrome, so Codex takes the text colour).
+pub fn provider_tint(harness: HarnessId, theme: &Theme) -> Hsla {
+    match harness {
+        HarnessId::Codex => theme.text,
+        HarnessId::Cursor => theme.text_muted,
+        _ => crate::icons::claude_brand(),
+    }
+}
+
+/// The 5px usage track with its level-coloured fill (shared by the settings
+/// meter, the sidebar mini and the account-menu section).
+pub fn usage_bar(fraction: f32, theme: &Theme) -> gpui::Div {
+    let fraction = fraction.clamp(0.0, 1.0);
+    let level = usage_level(fraction);
+    let fill = usage_color(level, theme).opacity(match level {
+        UsageLevel::Normal => 0.8,
+        _ => 0.85,
+    });
+    div()
+        .h(px(5.0))
+        .rounded_full()
+        .overflow_hidden()
+        .bg(crate::theme::ink(0.07))
+        .when(fraction > 0.0, |el| {
+            el.child(
+                div()
+                    .h_full()
+                    // A 1.5% floor keeps tiny non-zero usage visible
+                    // (zeron `max(used, 1.5)%`).
+                    .w(gpui::relative(fraction.max(0.015)))
+                    .rounded_full()
+                    .bg(fill),
+            )
+        })
+}
+
+/// [`AccountsPage::render_usage_meter`] at account-menu width (a 240px
+/// card): short label, bare "NN%", the reset without its "resets " prefix.
+pub fn compact_usage_meter(
+    window: &zeron_proto::AgentUsageWindow,
+    theme: &Theme,
+    now: DateTime<Utc>,
+) -> AnyElement {
+    let fraction = window.used_fraction.clamp(0.0, 1.0);
+    let level = usage_level(fraction);
+    let pct_color = match level {
+        UsageLevel::Normal => theme.text_muted.opacity(0.7),
+        _ => usage_color(level, theme),
+    };
+    let reset = format_reset(window.resets_at, now)
+        .map(|r| r.strip_prefix("resets ").map(str::to_owned).unwrap_or(r));
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .text_size(crate::typography::ui_rems(11.0))
+        .text_color(theme.text_muted.opacity(0.7))
+        .child(
+            div()
+                .w(px(40.0))
+                .flex_none()
+                .truncate()
+                .child(SharedString::from(window.label.clone())),
+        )
+        .child(usage_bar(fraction, theme).flex_1().min_w(px(40.0)))
+        .child(
+            div()
+                .w(px(30.0))
+                .flex_none()
+                .text_right()
+                .text_color(pct_color)
+                .child(SharedString::from(format!(
+                    "{}%",
+                    (fraction * 100.0).round() as u32
+                ))),
+        )
+        .when_some(reset, |el, reset| {
+            el.child(
+                div()
+                    .w(px(48.0))
+                    .flex_none()
+                    .text_right()
+                    .truncate()
+                    .text_size(crate::typography::ui_rems(10.0))
+                    .text_color(theme.text_muted.opacity(0.45))
+                    .child(SharedString::from(reset)),
+            )
+        })
+        .into_any_element()
+}
+
 // ---------------------------------------------------------------------------
 // Entity
 // ---------------------------------------------------------------------------
@@ -704,11 +822,6 @@ impl AccountsPage {
         now: DateTime<Utc>,
     ) -> AnyElement {
         let fraction = window.used_fraction.clamp(0.0, 1.0);
-        let level = usage_level(fraction);
-        let fill = usage_color(level, theme).opacity(match level {
-            UsageLevel::Normal => 0.8,
-            _ => 0.85,
-        });
         let reset = format_reset(window.resets_at, now);
         div()
             .flex()
@@ -725,25 +838,10 @@ impl AccountsPage {
                     .child(SharedString::from(window.label.clone())),
             )
             .child(
-                div()
+                usage_bar(fraction, theme)
                     .flex_1()
                     .min_w(px(56.0))
-                    .max_w(px(230.0))
-                    .h(px(5.0))
-                    .rounded_full()
-                    .overflow_hidden()
-                    .bg(crate::theme::ink(0.07))
-                    .when(fraction > 0.0, |el| {
-                        el.child(
-                            div()
-                                .h_full()
-                                // A 1.5% floor keeps tiny non-zero usage
-                                // visible (zeron `max(used, 1.5)%`).
-                                .w(gpui::relative(fraction.max(0.015)))
-                                .rounded_full()
-                                .bg(fill),
-                        )
-                    }),
+                    .max_w(px(230.0)),
             )
             .child(
                 div()
@@ -1617,5 +1715,54 @@ mod tests {
         );
         assert_eq!(provider_accounts(&snapshot, HarnessId::Codex).len(), 1);
         assert!(provider_accounts(&snapshot, HarnessId::Cursor).is_empty());
+    }
+
+    #[test]
+    fn sidebar_summarizes_the_active_probed_account_per_provider() {
+        let window = |label: &str, used: f32| zeron_proto::AgentUsageWindow {
+            label: label.into(),
+            used_fraction: used,
+            resets_at: None,
+        };
+        let account = |id: &str, harness: HarnessId, active: bool, windows| AgentAccount {
+            id: id.into(),
+            harness,
+            email: None,
+            plan_label: None,
+            active,
+            usage_windows: windows,
+            display_name: None,
+            organization: None,
+            auth_kind: None,
+            switchable: true,
+            saved_at: None,
+        };
+        let snapshot = AgentAccountsSnapshot {
+            accounts: vec![
+                // Inactive slots never drive the sidebar, however full.
+                account(
+                    "c1",
+                    HarnessId::ClaudeCode,
+                    false,
+                    vec![window("Week", 0.99)],
+                ),
+                account(
+                    "c2",
+                    HarnessId::ClaudeCode,
+                    true,
+                    vec![window("Session", 0.10), window("Week", 0.25)],
+                ),
+                account("x1", HarnessId::Codex, true, vec![window("Week", 0.54)]),
+                // Active but unprobed (cold cache): skipped, not "0%".
+                account("u1", HarnessId::Cursor, true, vec![]),
+            ],
+            warnings: vec![],
+        };
+        let rows = sidebar_accounts(&snapshot);
+        let ids: Vec<&str> = rows.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["c2", "x1"]);
+        assert_eq!(worst_fraction(rows[0]), 0.25);
+        assert_eq!(worst_fraction(rows[1]), 0.54);
+        assert!(sidebar_accounts(&AgentAccountsSnapshot::default()).is_empty());
     }
 }
