@@ -20,6 +20,7 @@ use gpui::{
     Subscription, Task, Window, div, prelude::*, px,
 };
 
+use zeron_doc::MessageRole;
 use zeron_engine::registry::HarnessDescriptor;
 use zeron_proto::{
     ChatConfig, FolderListing, HarnessId, Model, ReasoningLevel, RepoRef, SandboxLevel, Space,
@@ -511,6 +512,50 @@ struct SettingGroup {
     choices: Vec<SettingChoice>,
 }
 
+/// A mid-chat model pick awaiting the switch-model dialog's answer.
+#[derive(Clone, Debug, PartialEq)]
+struct PendingModelSwitch {
+    model_id: String,
+    from: String,
+    to: String,
+}
+
+/// A model pick on an existing chat warns before it lands only when there
+/// is history for the harness to re-read and the pick is a real change.
+fn needs_switch_warning(has_history: bool, current: Option<&str>, next: &str) -> bool {
+    has_history && current != Some(next)
+}
+
+/// The switch-model dialog's body, in the harness's own terms: Claude Code
+/// re-reads the whole cached history on the next turn; Codex warns of
+/// degraded performance and an automatic compaction.
+fn switch_warning(harness: Option<HarnessId>, to: &str) -> String {
+    match harness {
+        Some(HarnessId::ClaudeCode) => format!(
+            "This conversation is cached for the current model. Switching to {to} means the full history gets re-read on your next message."
+        ),
+        Some(HarnessId::Codex) => "Changing models mid-conversation will degrade performance. Context may automatically compact.".into(),
+        _ => format!(
+            "Changing models mid-conversation may degrade performance. Switching to {to} means the full history gets re-read on your next message."
+        ),
+    }
+}
+
+/// The transcript divider's hover hint once the switch has happened.
+fn switch_hint(harness: Option<HarnessId>) -> &'static str {
+    match harness {
+        Some(HarnessId::ClaudeCode) => {
+            "Changing models mid-conversation drops the prompt cache. The full history is re-read on the next message."
+        }
+        Some(HarnessId::Codex) => {
+            "Changing models mid-conversation will degrade performance. Context may automatically compact."
+        }
+        _ => {
+            "Changing models mid-conversation may degrade performance. The full history is re-read on the next message."
+        }
+    }
+}
+
 pub struct Pickers {
     state: Entity<AppState>,
     config: DraftConfig,
@@ -577,6 +622,8 @@ pub struct Pickers {
     /// keyboard nav drives the data-side-opened popover (headless rigs have
     /// no synthetic pointer, but synthetic keys do arrive).
     boot_focus_pending: bool,
+    /// `ZERON_OPEN_DIALOG=model-switch` arrived before the catalog had rows.
+    boot_switch_pending: bool,
     load_task: Option<Task<()>>,
     /// Own slot: the refs load runs concurrently with the eager
     /// harness/model loads — sharing `load_task` would abort one mid-flight.
@@ -587,6 +634,9 @@ pub struct Pickers {
     /// Last mid-session switch failure (shown in the ref popover).
     switch_error: Option<String>,
     mutate_task: Option<Task<()>>,
+    /// A model pick on a chat with history, parked behind the switch-model
+    /// dialog until the user confirms or backs out.
+    pending_model_switch: Option<PendingModelSwitch>,
     _search_events: Subscription,
     _state_observe: Subscription,
     _catalog_observe: Subscription,
@@ -741,12 +791,14 @@ impl Pickers {
             search_reset_muted: false,
             focus: cx.focus_handle(),
             boot_focus_pending: boot_open.is_some(),
+            boot_switch_pending: false,
             load_task: None,
             refs_task: None,
             switching: None,
             switch_task: None,
             switch_error: None,
             mutate_task: None,
+            pending_model_switch: None,
             _search_events: search_events,
             _state_observe: state_observe,
             _catalog_observe: catalog_observe,
@@ -955,6 +1007,7 @@ impl Pickers {
     /// Outside clicks and navigation keep focus at the clicked destination.
     fn dismiss(&mut self, cx: &mut Context<Self>) {
         self.cancel_setting_hover();
+        self.pending_model_switch = None;
         self.setting_menu = None;
         self.setting_bounds = None;
         self.menu_bar = popover::MenuScrollbarState::default();
@@ -990,6 +1043,24 @@ impl Pickers {
         if self.open_kind() != Some(PickerKind::HarnessModel) {
             self.toggle(PickerKind::HarnessModel, window, cx);
         }
+    }
+
+    /// Capture knob (`ZERON_OPEN_DIALOG=model-switch`): open the model menu
+    /// and pick the first row that is not the current model, so the
+    /// switch-model dialog renders without a pointer. Deferred to this
+    /// picker's own render until the catalog has a row to pick (the shell
+    /// does not re-render on catalog loads).
+    pub fn debug_open_model_switch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Open first: the rail (and so the visible rows) is primed on open.
+        self.open_model_menu(window, cx);
+        let current = self.selected_model_index(cx);
+        let Some(ix) = (0..self.model_rows_len(cx)).find(|&ix| ix != current) else {
+            self.boot_switch_pending = true;
+            return;
+        };
+        self.boot_switch_pending = false;
+        self.activate_model_index(ix, cx);
+        cx.notify();
     }
 
     fn toggle(&mut self, kind: PickerKind, window: &mut Window, cx: &mut Context<Self>) {
@@ -1491,9 +1562,39 @@ impl Pickers {
         // share one popover now, and adjusting the tray right after choosing
         // a model is the expected flow. Esc, click-out, or the chip close it.
         if self.state.read(cx).selected_chat.is_some() {
+            // A chat the harness has already read: the switch costs the next
+            // turn a full re-read, so it waits behind the dialog. Not yet
+            // replayed and pending echoes both count as history — a fresh
+            // chat must not warn, a just-sent one must not skip.
+            let state = self.state.read(cx);
+            let has_history = !state.transcript_replayed
+                || !state.pending_echoes().is_empty()
+                || state
+                    .transcript
+                    .iter()
+                    .any(|entry| entry.role != MessageRole::System);
+            let current = self
+                .selected_model(cx)
+                .map(|m| m.id.as_str())
+                .or_else(|| self.effective_model_id(cx));
+            if needs_switch_warning(has_history, current, &model_id) {
+                let label = |id: &str| {
+                    self.effective_harness(cx)
+                        .and_then(|h| self.models.get(&h))
+                        .and_then(|l| l.ready())
+                        .and_then(|models| models.iter().find(|m| m.id == id))
+                        .map(|m| m.label.clone())
+                        .unwrap_or_else(|| id.to_string())
+                };
+                let from = current.map(|id| label(id)).unwrap_or_default();
+                let to = label(&model_id);
+                self.pending_model_switch = Some(PendingModelSwitch { model_id, from, to });
+                cx.notify();
+                return;
+            }
             // Existing chat: persist to the chat row (Mutate setChatConfig) —
             // survives restarts and syncs; next runs in this chat use it.
-            self.update_chat_config(cx, move |config| config.model = Some(model_id));
+            self.update_chat_config(cx, None, move |config| config.model = Some(model_id));
         } else {
             // New chat: draft pick + sticky last-used memory for this harness.
             self.config.model = Some(model_id.clone());
@@ -1512,10 +1613,32 @@ impl Pickers {
         cx.notify();
     }
 
+    /// The dialog's "Yes": land the parked pick and mark it in the transcript.
+    fn confirm_model_switch(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_model_switch.take() else {
+            return;
+        };
+        let harness = self.effective_harness(cx);
+        let note = (
+            format!("Model changed from {} to {}.", pending.from, pending.to),
+            switch_hint(harness).to_string(),
+        );
+        self.update_chat_config(cx, Some(note), move |config| {
+            config.model = Some(pending.model_id)
+        });
+        self.animate_close(cx);
+        cx.notify();
+    }
+
+    fn cancel_model_switch(&mut self, cx: &mut Context<Self>) {
+        self.pending_model_switch = None;
+        cx.notify();
+    }
+
     fn pick_reasoning(&mut self, level: ReasoningLevel, cx: &mut Context<Self>) {
         // Always a concrete selection (no toggle-back-to-default).
         if self.state.read(cx).selected_chat.is_some() {
-            self.update_chat_config(cx, move |config| config.reasoning = Some(level));
+            self.update_chat_config(cx, None, move |config| config.reasoning = Some(level));
         } else {
             self.config.reasoning = Some(level);
             self.defaults.reasoning = Some(level);
@@ -1532,7 +1655,7 @@ impl Pickers {
         cx: &mut Context<Self>,
     ) {
         if self.state.read(cx).selected_chat.is_some() {
-            self.update_chat_config(cx, move |config| {
+            self.update_chat_config(cx, None, move |config| {
                 if default {
                     config.model_options.remove(&option_id);
                 } else {
@@ -1565,7 +1688,15 @@ impl Pickers {
     /// (LWW workspace write — restarts and other devices see it). The written
     /// row always carries the CONCRETE resolved model/reasoning, with the
     /// reasoning re-clamped to the (possibly just-changed) model's ladder.
-    fn update_chat_config(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut ChatConfig)) {
+    /// `note` = `(text, hint)` for a transcript divider the engine appends
+    /// once the config lands (one mutate: `mutate_task` is a single slot, and
+    /// a second spawn would drop the first mid-flight).
+    fn update_chat_config(
+        &mut self,
+        cx: &mut Context<Self>,
+        note: Option<(String, String)>,
+        change: impl FnOnce(&mut ChatConfig),
+    ) {
         let Some(chat_id) = self.state.read(cx).selected_chat.clone() else {
             return;
         };
@@ -1623,11 +1754,14 @@ impl Pickers {
             return;
         };
         self.mutate_task = Some(cx.spawn(async move |_, _| {
-            let params = serde_json::json!({
+            let mut params = serde_json::json!({
                 "op": "setChatConfig",
                 "chatId": chat_id,
                 "config": config,
             });
+            if let Some((text, hint)) = note {
+                params["note"] = serde_json::json!({ "text": text, "hint": hint });
+            }
             if let Err(err) = engine.client().call(methods::MUTATE, params).await {
                 tracing::warn!(error = %err, "setChatConfig mutate failed");
             }
@@ -2264,6 +2398,17 @@ impl Pickers {
         if !self.open.is_open() {
             return;
         }
+        // The switch-model dialog owns every key while it is up: its numbered
+        // options, Enter on the default "Yes", Escape to back out.
+        if self.pending_model_switch.is_some() {
+            match event.keystroke.key.as_str() {
+                "1" | "enter" => self.confirm_model_switch(cx),
+                "2" | "escape" => self.cancel_model_switch(cx),
+                _ => {}
+            }
+            cx.stop_propagation();
+            return;
+        }
         if self.setting_menu.is_some() {
             match event.keystroke.key.as_str() {
                 "escape" | "left" => {
@@ -2897,6 +3042,9 @@ impl Pickers {
             )
             .on_mouse_down_out(
                 cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                    if this.pending_model_switch.is_some() {
+                        return;
+                    }
                     if this.setting_menu.is_some()
                         && this
                             .setting_bounds
@@ -2942,6 +3090,11 @@ impl Pickers {
             )
             .on_mouse_down_out(
                 cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                    // The dialog's card and scrim sit outside the popover;
+                    // a click on "Yes" must not close the picker under it.
+                    if this.pending_model_switch.is_some() {
+                        return;
+                    }
                     if this.setting_menu.is_some()
                         && this
                             .setting_bounds
@@ -4552,6 +4705,9 @@ impl Render for Pickers {
         // opens, and rail switches inside the picker are instant.
         self.ensure_harnesses(false, cx);
         self.prefetch_models(false, cx);
+        if self.boot_switch_pending {
+            self.debug_open_model_switch(window, cx);
+        }
         // A popover opened data-side (ZERON_OPEN_PICKER) never went through
         // `toggle`, so kick its loads here (all ensure_* are idempotent).
         if matches!(
@@ -4722,6 +4878,9 @@ impl Render for Pickers {
                 closing,
             )
         };
+        let dialog = self.pending_model_switch.clone().map(|pending| {
+            self.render_model_switch_dialog(&pending, window.viewport_size(), &theme, cx)
+        });
         div()
             .flex()
             .flex_row()
@@ -4734,6 +4893,94 @@ impl Render for Pickers {
             .min_w_0()
             .gap(px(4.0))
             .child(model_chip)
+            .children(dialog)
+    }
+}
+
+impl Pickers {
+    /// The switch-model dialog (Claude Code's `Switch model?` prompt): why
+    /// the next turn costs more, then the two numbered answers the keyboard
+    /// handler mirrors (`1`/Enter confirm, `2`/Escape back out).
+    fn render_model_switch_dialog(
+        &self,
+        pending: &PendingModelSwitch,
+        viewport: gpui::Size<gpui::Pixels>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let body = switch_warning(self.effective_harness(cx), &pending.to);
+        let option =
+            |number: &'static str, title: String, detail: String, fade_key: &'static str| {
+                popover::menu_row(theme, false, fade_key)
+                    .id(fade_key)
+                    .items_start()
+                    .py(px(8.0))
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(16.0))
+                            .text_color(theme.text_muted.opacity(0.6))
+                            .child(number),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(div().text_color(theme.text).child(title))
+                            .child(
+                                div()
+                                    .text_size(crate::typography::ui_rems(12.0))
+                                    .text_color(theme.text_muted)
+                                    .child(detail),
+                            ),
+                    )
+            };
+        let yes = option(
+            "1.",
+            format!("Yes, switch to {}", pending.to),
+            "Applies to this chat only. The change is marked in the transcript.".into(),
+            "model-switch-yes",
+        )
+        .on_click(cx.listener(|this, _, _, cx| this.confirm_model_switch(cx)));
+        let no = option(
+            "2.",
+            "No, go back".into(),
+            format!("Keep {} for this chat.", pending.from),
+            "model-switch-no",
+        )
+        .on_click(cx.listener(|this, _, _, cx| this.cancel_model_switch(cx)));
+        let card = popover::dialog_card(theme)
+            .child(popover::dialog_title(theme, "Switch model?"))
+            .child(
+                div()
+                    .mt(px(6.0))
+                    .text_size(crate::typography::ui_rems(12.5))
+                    .text_color(theme.warning)
+                    .child("Your next response will be slower and use more tokens"),
+            )
+            .child(div().mt(px(8.0)).child(popover::dialog_body(theme, body)))
+            .child(
+                div()
+                    .mt(px(14.0))
+                    .pt(px(8.0))
+                    .border_t_1()
+                    .border_color(crate::theme::hairline(0.08))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(yes)
+                    .child(no),
+            )
+            .child(
+                div()
+                    .mt(px(10.0))
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(theme.text_muted.opacity(0.6))
+                    .child("1 · 2 choose · ↵ confirm · esc cancel"),
+            )
+            .into_any_element();
+        popover::modal("model-switch-dialog", viewport, card)
     }
 }
 
@@ -4741,6 +4988,22 @@ impl Render for Pickers {
 mod tests {
     use super::*;
     use zeron_proto::{FolderEntry, Model, ModelOption, ModelOptionChoice};
+
+    #[test]
+    fn a_model_pick_warns_only_on_a_chat_with_history_and_a_real_change() {
+        assert!(needs_switch_warning(true, Some("fable"), "opus"));
+        assert!(needs_switch_warning(true, None, "opus"));
+        assert!(!needs_switch_warning(true, Some("opus"), "opus"));
+        assert!(!needs_switch_warning(false, Some("fable"), "opus"));
+    }
+
+    #[test]
+    fn switch_copy_speaks_the_harness_own_terms() {
+        assert!(switch_warning(Some(HarnessId::ClaudeCode), "Opus 5").contains("cached"));
+        assert!(switch_warning(Some(HarnessId::Codex), "GPT-5.6 Luna").contains("compact"));
+        assert!(switch_warning(Some(HarnessId::Mock), "Mock B").contains("Mock B"));
+        assert!(switch_hint(None).contains("re-read"));
+    }
 
     #[gpui::test]
     fn workspace_footer_pair_keeps_its_leading_edge_and_gap(cx: &mut gpui::TestAppContext) {

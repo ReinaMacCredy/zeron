@@ -644,13 +644,33 @@ impl ChatDocHandle {
         text: &str,
         created_at: i64,
     ) -> Result<(), DocError> {
+        self.write_system_note(message_id, text, None, created_at)
+    }
+
+    /// [`Self::write_system_message`] with an optional second text part: the
+    /// transcript renders a system entry's first text part as the divider
+    /// label and any second one as the hover hint behind its info glyph.
+    pub fn write_system_note(
+        &self,
+        message_id: &str,
+        text: &str,
+        hint: Option<&str>,
+        created_at: i64,
+    ) -> Result<(), DocError> {
+        let mut parts = vec![MessagePart::Text {
+            id: "t0".into(),
+            text: text.to_string(),
+        }];
+        if let Some(hint) = hint {
+            parts.push(MessagePart::Text {
+                id: "t1".into(),
+                text: hint.to_string(),
+            });
+        }
         self.doc.push_message(&SessionMessageEntry {
             id: message_id.to_string(),
             role: MessageRole::System,
-            parts: vec![MessagePart::Text {
-                id: "t0".into(),
-                text: text.to_string(),
-            }],
+            parts,
             created_at,
             device_id: self.device_id.clone(),
             status: Some(MessageStatus::Complete),
@@ -3814,7 +3834,7 @@ impl DocHost {
     /// ours; a chat with no row is claimable (claim-on-first-command). Without a
     /// wired workspace host (bare-DocHost tests) every open chat is ours — M2's
     /// behavior, now the degenerate case.
-    fn is_host(&self, chat_id: &str) -> bool {
+    pub(crate) fn is_host(&self, chat_id: &str) -> bool {
         self.workspace().is_none_or(|ws| ws.is_host(chat_id))
     }
 

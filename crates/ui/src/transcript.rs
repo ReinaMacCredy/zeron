@@ -1002,10 +1002,12 @@ pub enum RowKind {
     ErrorChip {
         message: SharedString,
     },
-    /// A host-written `system` entry (the compaction boundary): centered
-    /// label between two rules, never a bubble and never assistant blocks.
+    /// A host-written `system` entry (the compaction boundary, the
+    /// model-switch marker): centered label between two rules, never a
+    /// bubble and never assistant blocks. `hint` sits behind an info glyph.
     Divider {
         text: SharedString,
+        hint: Option<SharedString>,
     },
 }
 
@@ -1263,20 +1265,24 @@ pub fn rows_for_entry(
     }
 
     if entry.role == MessageRole::System {
-        let text: String = entry
-            .parts
-            .iter()
-            .filter_map(|p| match p {
-                MessagePart::Text { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
+        // First text part = the divider label, second = its hover hint
+        // (`ChatDocHandle::write_system_note`).
+        let mut texts = entry.parts.iter().filter_map(|p| match p {
+            MessagePart::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        });
+        let text = texts.next().unwrap_or_default().to_string();
+        let hint = texts
+            .next()
+            .map(|hint| SharedString::from(hint.to_string()));
         return vec![Row {
             id: entry.id.clone().into(),
             version: fnv1a(text.as_bytes()),
             turn_start: true,
-            kind: RowKind::Divider { text: text.into() },
+            kind: RowKind::Divider {
+                text: text.into(),
+                hint,
+            },
             entry_id,
             timestamp: None,
             copy_text: None,
@@ -5802,7 +5808,9 @@ impl Transcript {
                 mime_type,
             } => self.render_generated_image(&row.id, owner, path, name, mime_type, cx),
             RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
-            RowKind::Divider { text } => divider_row(text.clone(), &theme),
+            RowKind::Divider { text, hint } => {
+                divider_row(&row.id, text.clone(), hint.clone(), &theme)
+            }
         };
 
         // Hover-revealed metadata strip: a RESERVED 32px lane under the
@@ -6883,8 +6891,15 @@ fn error_chip(message: SharedString, theme: &Theme) -> AnyElement {
 /// A host-written `system` entry: a hairline rule either side of muted
 /// centered text ("Context compacted · 22.8k → 2.3k tokens"). It marks a
 /// boundary in the conversation, so it belongs to neither speaker's column.
-fn divider_row(text: SharedString, theme: &Theme) -> AnyElement {
+fn divider_row(
+    row_id: &SharedString,
+    text: SharedString,
+    hint: Option<SharedString>,
+    theme: &Theme,
+) -> AnyElement {
     let rule = || div().flex_1().h(px(1.0)).bg(crate::theme::hairline(0.08));
+    let muted = theme.text_muted.opacity(0.7);
+    let bright = theme.text_muted;
     div()
         .py(px(4.0))
         .w_full()
@@ -6895,12 +6910,53 @@ fn divider_row(text: SharedString, theme: &Theme) -> AnyElement {
         .child(
             div()
                 .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
                 .text_size(crate::typography::ui_rems(11.5))
-                .text_color(theme.text_muted.opacity(0.7))
-                .child(text),
+                .text_color(muted)
+                .child(text)
+                .when_some(hint, |label, hint| {
+                    label.child(
+                        div()
+                            .id(SharedString::from(format!("{row_id}-hint")))
+                            .group("divider-hint")
+                            .flex_none()
+                            .child(
+                                crate::icons::icon(crate::icons::INFO_CIRCLE)
+                                    .size(px(13.0))
+                                    .text_color(muted)
+                                    .group_hover("divider-hint", move |s| s.text_color(bright)),
+                            )
+                            .tooltip(move |_, cx| {
+                                cx.new(|_| DividerHintTooltip(hint.clone())).into()
+                            }),
+                    )
+                }),
         )
         .child(rule())
         .into_any_element()
+}
+
+struct DividerHintTooltip(SharedString);
+
+impl gpui::Render for DividerHintTooltip {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx);
+        div()
+            .max_w(px(300.0))
+            .px(px(10.0))
+            .py(px(8.0))
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(theme.border_strong)
+            .bg(theme.surface_raised)
+            .shadow_md()
+            .text_size(crate::typography::ui_rems(12.0))
+            .line_height(px(17.0))
+            .text_color(theme.text)
+            .child(self.0.clone())
+    }
 }
 
 /// A passive one-line chip marking a question the agent asked — the
@@ -8916,13 +8972,34 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert!(matches!(
             &rows[0].kind,
-            RowKind::Divider { text } if text == "Context compacted · 22.8k → 2.3k tokens"
+            RowKind::Divider { text, hint: None } if text == "Context compacted · 22.8k → 2.3k tokens"
         ));
         // No hover strip: a boundary has no author to timestamp or copy.
         assert!(rows[0].timestamp.is_none());
         assert!(rows[0].copy_text.is_none());
         // The working trailer reads the last entry; a boundary never spins.
         assert!(!consulting_advisor(std::slice::from_ref(&entry)));
+    }
+
+    #[test]
+    fn a_system_entry_second_text_part_is_the_divider_hint() {
+        let mut entry = assistant(
+            "m1",
+            MessageStatus::Complete,
+            vec![
+                text_part("t0", "Model changed from Fable 5.1 to Opus 5."),
+                text_part("t1", "The full history is re-read on the next message."),
+            ],
+        );
+        entry.role = MessageRole::System;
+        let rows = rows_for_entry(&entry, false, &mut parse);
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(
+            &rows[0].kind,
+            RowKind::Divider { text, hint: Some(hint) }
+                if text == "Model changed from Fable 5.1 to Opus 5."
+                    && hint == "The full history is re-read on the next message."
+        ));
     }
 
     #[test]

@@ -397,6 +397,16 @@ struct FetchToolBlobParams {
     blob_ref: String,
 }
 
+/// A host-written transcript boundary riding on a config mutation: the
+/// divider label plus the hint shown behind its info glyph.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SystemNote {
+    text: String,
+    #[serde(default)]
+    hint: Option<String>,
+}
+
 /// The Mutate surface (feature-inventory §2 DataRpc), tagged by `op`.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase")]
@@ -475,9 +485,17 @@ enum MutateParams {
     SetChatArchived { chat_id: String, archived: bool },
     /// Full-config replace on the chat row (zeron `SetChatConfig`): the
     /// composer's mid-session model / reasoning / options changes, LWW-synced
-    /// so they survive restarts and reach every device.
+    /// so they survive restarts and reach every device. `note` marks the
+    /// change in the transcript as a host-written `system` entry (the
+    /// model-switch divider); only the chat's host device writes it — a
+    /// viewer's copy of the doc is not the writer's lineage.
     #[serde(rename_all = "camelCase")]
-    SetChatConfig { chat_id: String, config: ChatConfig },
+    SetChatConfig {
+        chat_id: String,
+        config: ChatConfig,
+        #[serde(default)]
+        note: Option<SystemNote>,
+    },
     /// Tombstone: removes the chats-map row; the session doc remains.
     #[serde(rename_all = "camelCase")]
     DeleteChat { chat_id: String },
@@ -885,11 +903,30 @@ impl EngineRpc {
                 .set_chat_archived(&chat_id, archived)
                 .map_err(failed)
                 .map(drop),
-            MutateParams::SetChatConfig { chat_id, config } => self
-                .workspace
-                .set_chat_config(&chat_id, &config)
-                .map_err(failed)
-                .map(drop),
+            MutateParams::SetChatConfig {
+                chat_id,
+                config,
+                note,
+            } => {
+                self.workspace
+                    .set_chat_config(&chat_id, &config)
+                    .map_err(failed)?;
+                if let Some(note) = note
+                    && self.doc_host.is_host(&chat_id)
+                {
+                    self.doc_host
+                        .open(&chat_id)
+                        .map_err(failed)?
+                        .write_system_note(
+                            &crate::new_id(),
+                            &note.text,
+                            note.hint.as_deref(),
+                            crate::now_ms(),
+                        )
+                        .map_err(|e| failed(e.into()))?;
+                }
+                Ok(())
+            }
             MutateParams::DeleteChat { chat_id } => {
                 self.workspace.delete_chat(&chat_id).map_err(failed)?;
                 self.doc_host.purge_chat(&chat_id);

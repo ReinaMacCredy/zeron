@@ -4536,6 +4536,13 @@ impl Composer {
             .update(cx, |pickers, cx| pickers.open_model_menu(window, cx));
     }
 
+    /// Capture-knob passthrough (`ZERON_OPEN_DIALOG=model-switch`).
+    pub fn debug_open_model_switch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pickers.update(cx, |pickers, cx| {
+            pickers.debug_open_model_switch(window, cx)
+        });
+    }
+
     pub fn is_sending(&self) -> bool {
         self.sending
     }
