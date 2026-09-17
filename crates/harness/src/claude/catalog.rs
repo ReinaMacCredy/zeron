@@ -84,8 +84,11 @@ fn toggle(id: &str, label: &str) -> ModelOption {
 }
 
 /// The 200K/1M context-window select carried by the long-context models. The
-/// 1M window is selected via a model-id suffix (`<model>[1m]`), exactly how the
-/// CLI itself does it.
+/// CLI's model table marks every one of them `native_1m`: first-party runs get
+/// the 1M window with or without the `<model>[1m]` suffix (live-verified on
+/// 2.1.274, `modelUsage.contextWindow` = 1000000 for a bare id), so 1M is the
+/// honest default and 200K is the opt-in, applied through
+/// `CLAUDE_CODE_DISABLE_1M_CONTEXT` — the CLI's only kill switch for it.
 pub(crate) fn context_window() -> ModelOption {
     ModelOption {
         id: "contextWindow".into(),
@@ -100,7 +103,7 @@ pub(crate) fn context_window() -> ModelOption {
                 label: "1M".into(),
             },
         ],
-        default_choice: "200k".into(),
+        default_choice: "1m".into(),
     }
 }
 

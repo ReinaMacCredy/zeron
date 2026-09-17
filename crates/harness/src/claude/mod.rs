@@ -170,19 +170,24 @@ impl ClaudeHarness {
         ]);
         // The 1M context window is selected via a model-id suffix
         // (`sonnet[1m]`), exactly how the CLI itself does it; fast mode and
-        // always-on thinking are settings overrides.
+        // always-on thinking are settings overrides. The suffix alone can't
+        // express 200K: the catalog's long-context models are `native_1m` in
+        // the CLI, so a bare id still runs at 1M and only the env kill switch
+        // brings it down (see `catalog::context_window`).
         if let Some(model) = &request.model {
-            let one_m = request
+            let context_window = request
                 .model_options
                 .get("contextWindow")
-                .and_then(Value::as_str)
-                == Some("1m");
+                .and_then(Value::as_str);
             cmd.arg("--model");
-            cmd.arg(if one_m {
+            cmd.arg(if context_window == Some("1m") {
                 format!("{model}[1m]")
             } else {
                 model.clone()
             });
+            if context_window == Some("200k") {
+                cmd.env("CLAUDE_CODE_DISABLE_1M_CONTEXT", "1");
+            }
         }
         if let Some(effort) = to_effort(request.reasoning, request.model.as_deref()) {
             cmd.args(["--effort", effort]);
@@ -900,6 +905,54 @@ fn updated_input_with_answers(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // The Windows `Command` wrapper has no `as_std` to read the built line back.
+    #[cfg(not(windows))]
+    #[test]
+    fn context_window_pick_reaches_the_cli() {
+        let harness = ClaudeHarness::new();
+        let exe = PathBuf::from("/bin/claude");
+        let build = |choice: Option<&str>| {
+            let mut request = RunRequest {
+                prompt: String::new(),
+                harness: None,
+                model: Some("claude-fable-5-1".into()),
+                reasoning: None,
+                model_options: serde_json::Map::new(),
+                cwd: String::new(),
+                sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+                auto_approve: false,
+                resume: None,
+                attachments: Vec::new(),
+                worktree: None,
+            };
+            if let Some(choice) = choice {
+                request
+                    .model_options
+                    .insert("contextWindow".into(), json!(choice));
+            }
+            let cmd = harness.build_command(&exe, &request);
+            let std = cmd.as_std();
+            let args: Vec<String> = std
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            let model = args
+                .iter()
+                .position(|a| a == "--model")
+                .map(|i| args[i + 1].clone());
+            let disabled_1m = std
+                .get_envs()
+                .any(|(k, v)| k == "CLAUDE_CODE_DISABLE_1M_CONTEXT" && v.is_some());
+            (model, disabled_1m)
+        };
+        assert_eq!(
+            build(Some("1m")),
+            (Some("claude-fable-5-1[1m]".into()), false)
+        );
+        assert_eq!(build(Some("200k")), (Some("claude-fable-5-1".into()), true));
+        assert_eq!(build(None), (Some("claude-fable-5-1".into()), false));
+    }
 
     #[test]
     fn parses_questions_tolerantly() {
