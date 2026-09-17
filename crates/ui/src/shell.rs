@@ -2002,6 +2002,7 @@ impl Shell {
         }
         // Capture knob: pop the requested dialog once chats have landed.
         if let Some(which) = self.debug_dialog.clone()
+            && matches!(which.as_str(), "rename" | "delete")
             && let Some(first) = state.read(cx).chats.first().map(|c| c.id.clone())
         {
             self.debug_dialog = None;
@@ -10424,6 +10425,15 @@ impl Render for Shell {
                     self.debug_dialog = None;
                     self.composer
                         .update(cx, |c, cx| c.debug_open_model_menu(window, cx));
+                }
+                // `=model-switch` picks a different model on the selected chat
+                // (the switch-model dialog).
+                if self.debug_dialog.as_deref() == Some("model-switch")
+                    && self.state.read(cx).selected_chat.is_some()
+                {
+                    self.debug_dialog = None;
+                    self.composer
+                        .update(cx, |c, cx| c.debug_open_model_switch(window, cx));
                 }
                 // MessageRail width gate: hide below 48rem of main-panel width.
                 let viewport = f32::from(window.viewport_size().width);

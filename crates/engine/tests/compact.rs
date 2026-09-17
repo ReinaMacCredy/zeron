@@ -234,6 +234,65 @@ async fn engine_with_one_turn_on(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn set_chat_config_with_a_note_appends_one_system_entry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (core, _harness, _requests) = engine_with_one_turn(tmp.path()).await;
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let config = serde_json::json!({
+        "harness": "mock",
+        "model": "mock-b",
+        "reasoning": null,
+        "modelOptions": {},
+        "sandbox": "workspace-write",
+    });
+
+    let before = entries(&core);
+    client
+        .call(
+            zeron_rpc::methods::MUTATE,
+            serde_json::json!({
+                "op": "setChatConfig",
+                "chatId": CHAT,
+                "config": config,
+                "note": { "text": "Model changed from Mock A to Mock B.", "hint": "Re-read next turn." },
+            }),
+        )
+        .await
+        .expect("setChatConfig with note");
+    let after = entries(&core);
+    assert_eq!(after.len(), before.len() + 1, "exactly one new entry");
+    let note = after.last().expect("note entry");
+    assert_eq!(note.role, MessageRole::System);
+    let texts: Vec<&str> = note
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            MessagePart::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        ["Model changed from Mock A to Mock B.", "Re-read next turn."]
+    );
+    assert_eq!(
+        core.workspace.chat_config(CHAT).and_then(|c| c.model),
+        Some("mock-b".into()),
+        "the config landed with the note"
+    );
+
+    // Without a note the mutation stays a pure row write.
+    client
+        .call(
+            zeron_rpc::methods::MUTATE,
+            serde_json::json!({ "op": "setChatConfig", "chatId": CHAT, "config": config }),
+        )
+        .await
+        .expect("setChatConfig without note");
+    assert_eq!(entries(&core).len(), after.len());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn compaction_appends_one_system_entry_and_resets_the_meter() {
     let tmp = tempfile::tempdir().unwrap();
     let (core, _harness, requests) = engine_with_one_turn(tmp.path()).await;
