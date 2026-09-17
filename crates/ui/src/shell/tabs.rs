@@ -220,16 +220,28 @@ impl Shell {
     }
 
     /// The open tabs in VISUAL order: `open_tabs` minus ids the doc no longer
-    /// backs with a live (non-archived) chat. The stored vec is pruned
-    /// separately by [`Shell::sync_open_tabs`]; this read-only view just skips
-    /// rows that haven't been reconciled yet.
+    /// backs with a live (non-archived) chat, and minus idle sessions — the
+    /// strip is an activity strip (user request): a tab shows while its
+    /// session is working, waiting on input, or finished-but-unseen, plus the
+    /// selected one. Idle tabs stay in the stored vec and resurface when the
+    /// session runs again. The stored vec is pruned separately by
+    /// [`Shell::sync_open_tabs`]; this read-only view just skips rows that
+    /// haven't been reconciled yet.
     pub(super) fn open_tab_ids(&self, cx: &App) -> Vec<String> {
         let Some(open) = self.settings.open_tabs.as_ref() else {
             return Vec::new();
         };
         let state = self.state.read(cx);
+        let now = Utc::now();
         open.iter()
-            .filter(|id| state.chats.iter().any(|c| &c.id == *id && !c.archived))
+            .filter(|id| {
+                state.chats.iter().any(|c| {
+                    &c.id == *id
+                        && !c.archived
+                        && (state.selected_chat.as_deref() == Some(c.id.as_str())
+                            || state.display_status_for(c, now) != ChatIndicator::Idle)
+                })
+            })
             .cloned()
             .collect()
     }
@@ -259,7 +271,12 @@ impl Shell {
         if self.settings.open_tabs.is_none() {
             // First run with tabs (or a pre-tabs settings file): every
             // session the sidebar is showing opens as a tab, so the strip
-            // doesn't start out as the single boot-selected session.
+            // doesn't start out as the single boot-selected session. The
+            // sidebar list is space-gated, so wait for the spaces frame too —
+            // chats alone seeded a single tab (the boot selection).
+            if !self.state.read(cx).spaces_synced {
+                return;
+            }
             self.settings.open_tabs = Some(self.sidebar_visible_order(cx));
             changed = true;
         }
@@ -355,13 +372,23 @@ impl Shell {
         }
     }
 
-    /// Commit a drag: the reordered visual list becomes the stored list
+    /// Commit a drag: the reordered visual list becomes the stored list, with
+    /// the hidden (idle) ids kept after it so they resurface later
     /// (device-local; unreconciled ids drop out, which the prune would do
     /// anyway).
     fn commit_tab_reorder(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
         let mut order = self.open_tab_ids(cx);
         if from < order.len() {
             reorder_tabs(&mut order, from, to);
+            let hidden: Vec<String> = self
+                .settings
+                .open_tabs
+                .iter()
+                .flatten()
+                .filter(|id| !order.contains(id))
+                .cloned()
+                .collect();
+            order.extend(hidden);
             self.settings.open_tabs = Some(order);
             self.schedule_save(cx);
         }
@@ -1040,6 +1067,20 @@ mod strip_regressions {
         .unwrap()
     }
 
+    /// A live Working run for `id` — the status that keeps a tab on the
+    /// strip regardless of selection (selecting a chat marks it seen, so a
+    /// finished-but-unseen fixture would go Idle on first select).
+    fn working(id: &str) -> zeron_proto::Session {
+        zeron_proto::Session {
+            last_completed_turn: None,
+            chat_id: id.into(),
+            device_id: "local".into(),
+            status: zeron_proto::SessionStatus::Working,
+            started_at: None,
+            updated_at: Utc::now(),
+        }
+    }
+
     fn setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
@@ -1088,6 +1129,8 @@ mod strip_regressions {
             shell.state.update(cx, |state, cx| {
                 state.chats = vec![chat("a"), chat("b")];
                 state.chats_synced = true;
+                state.spaces_synced = true;
+                state.apply_sessions(vec![working("a"), working("b")]);
                 state.select_chat(Some("a".into()), cx);
             });
             shell.on_state_changed(&shell.state.clone(), cx);
@@ -1127,6 +1170,47 @@ mod strip_regressions {
         });
         cx.update(|window, cx| window.draw(cx).clear());
         assert!(cx.debug_bounds("session-tab-a").is_none());
+    }
+
+    #[gpui::test]
+    fn idle_tabs_hide_until_selected_or_active_again(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                state.chats = vec![chat("busy"), chat("quiet")];
+                state.chats_synced = true;
+                state.spaces_synced = true;
+                state.apply_sessions(vec![working("busy")]);
+                state.select_chat(Some("busy".into()), cx);
+            });
+            shell.on_state_changed(&shell.state.clone(), cx);
+            // The selected tab always shows, whatever its status.
+            shell.open_chat("quiet".into(), cx);
+            shell.on_state_changed(&shell.state.clone(), cx);
+            assert_eq!(shell.open_tab_ids(cx), ["busy", "quiet"]);
+            // Deselected and idle: the tab hides but stays stored.
+            shell.open_chat("busy".into(), cx);
+            shell.on_state_changed(&shell.state.clone(), cx);
+            assert_eq!(shell.open_tab_ids(cx), ["busy"]);
+            assert_eq!(
+                shell.settings.open_tabs.as_deref(),
+                Some(&["busy".to_string(), "quiet".to_string()][..])
+            );
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("session-tab-busy").is_some());
+        assert!(cx.debug_bounds("session-tab-quiet").is_none());
+
+        shell.update(cx, |shell, cx| {
+            // The session runs again: the tab resurfaces in its stored slot.
+            shell.state.update(cx, |state, _| {
+                state.apply_sessions(vec![working("busy"), working("quiet")]);
+            });
+            shell.on_state_changed(&shell.state.clone(), cx);
+            assert_eq!(shell.open_tab_ids(cx), ["busy", "quiet"]);
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("session-tab-quiet").is_some());
     }
 }
 
