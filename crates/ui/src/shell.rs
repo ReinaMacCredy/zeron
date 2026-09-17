@@ -3773,6 +3773,7 @@ impl Shell {
         let current = settings::current(cx);
         self.settings.new_thread_composer_background = current.new_thread_composer_background;
         self.settings.new_thread_background_effect = current.new_thread_background_effect;
+        self.settings.chat_background = current.chat_background;
         self.settings.open_web_links_in_zeron = current.open_web_links_in_zeron;
         self.settings.ui_font_family = current.ui_font_family;
         self.settings.ui_font_size = current.ui_font_size;
@@ -11735,6 +11736,12 @@ mod exit_regressions {
                     shell.settings.sidebar_width = 280.0;
                     shell.schedule_save(cx);
                     settings::set_new_thread_background_effect(effect, cx);
+                    settings::update_chat_background(settings::SavePolicy::Immediate, cx, |chat| {
+                        chat.enabled = open_links_in_zeron;
+                        chat.opacity = 0.1 * (index + 1) as f32;
+                    });
+                    let chat_background = settings::current(cx).chat_background;
+                    assert_eq!(chat_background.enabled, open_links_in_zeron);
                     settings::update(settings::SavePolicy::Immediate, cx, |settings| {
                         settings.open_web_links_in_zeron = open_links_in_zeron;
                         settings.terminal_font_family = terminal_family.clone();
@@ -11749,6 +11756,7 @@ mod exit_regressions {
                         shell.schedule_save(cx);
                         let current = settings::current(cx);
                         assert_eq!(current.new_thread_background_effect, effect);
+                        assert_eq!(current.chat_background, chat_background);
                         assert_eq!(current.open_web_links_in_zeron, open_links_in_zeron);
                         assert_eq!(current.terminal_font_family, terminal_family);
                         assert_eq!(current.terminal_font_size, terminal_size);
@@ -11758,6 +11766,7 @@ mod exit_regressions {
                     settings::flush(cx);
                     let loaded = settings::UiSettings::load(dir.path());
                     assert_eq!(loaded.new_thread_background_effect, effect);
+                    assert_eq!(loaded.chat_background, chat_background);
                     assert_eq!(loaded.open_web_links_in_zeron, open_links_in_zeron);
                     assert_eq!(loaded.terminal_font_family, terminal_family);
                     assert_eq!(loaded.terminal_font_size, terminal_size);
