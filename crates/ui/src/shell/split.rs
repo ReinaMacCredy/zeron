@@ -1,19 +1,78 @@
-//! Split view: a SECOND session beside the selected one. The selected chat
-//! stays the primary pane (keyboard, right pane, tab-strip selection all
-//! keep following `selected_chat`); the secondary is a live transcript +
-//! composer over another chat, built the way a sidechat surface is. A tab
-//! or sidebar row dragged onto the conversation column reveals two drop
-//! zones; dropping on a side puts that session there. Selecting the
-//! secondary's chat (tab click, palette, jump key) swaps the two panes
-//! instead of showing one session twice. Device-local and session-transient.
+//! Split view: two sessions PAIRED side by side. The pair is a device-local
+//! fact (`Shell::split_pair`: left chat, right chat) that outlives what is
+//! on screen: while the selected chat is one of the pair, the other renders
+//! as the secondary pane (a live transcript + composer over that chat,
+//! built the way a sidechat surface is) on its side; selecting any other
+//! session shows that session full-width and the pair waits on the tab
+//! strip as one double chip. A tab or sidebar row dragged onto the
+//! conversation column reveals two drop zones; dropping on a side puts
+//! that session there. The selected chat stays the primary pane (keyboard,
+//! right pane, tab-strip selection all keep following `selected_chat`).
 
 use super::*;
 
-/// Which side of the conversation column the secondary pane occupies.
+/// Which side of the conversation column a pane occupies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SplitSide {
     Left,
     Right,
+}
+
+/// The two paired chats in visual order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct SplitPair {
+    pub(super) left: String,
+    pub(super) right: String,
+}
+
+impl SplitPair {
+    pub(super) fn contains(&self, chat: &str) -> bool {
+        self.left == chat || self.right == chat
+    }
+
+    fn member(&self, side: SplitSide) -> &str {
+        match side {
+            SplitSide::Left => &self.left,
+            SplitSide::Right => &self.right,
+        }
+    }
+
+    /// The other member and the side it sits on, for a member `chat`.
+    pub(super) fn partner(&self, chat: &str) -> Option<(&str, SplitSide)> {
+        if self.left == chat {
+            Some((&self.right, SplitSide::Right))
+        } else if self.right == chat {
+            Some((&self.left, SplitSide::Left))
+        } else {
+            None
+        }
+    }
+
+    fn with(&self, side: SplitSide, chat: String) -> Self {
+        match side {
+            SplitSide::Left => Self {
+                left: chat,
+                right: self.right.clone(),
+            },
+            SplitSide::Right => Self {
+                left: self.left.clone(),
+                right: chat,
+            },
+        }
+    }
+
+    fn of(anchor: String, chat: String, chat_side: SplitSide) -> Self {
+        match chat_side {
+            SplitSide::Left => Self {
+                left: chat,
+                right: anchor,
+            },
+            SplitSide::Right => Self {
+                left: anchor,
+                right: chat,
+            },
+        }
+    }
 }
 
 /// The secondary pane: its chat, side, and the transcript + composer bound
@@ -45,77 +104,77 @@ pub(super) struct SplitDropHot {
     pub(super) epoch: usize,
 }
 
-/// What a drop on `side` does, given the current selection and split. Pure.
+/// What a drop on `side` does: the pair afterwards and the chat to select
+/// (when the drop replaced or created the primary's slot). Pure.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) enum SplitDrop {
-    /// Open `chat` as the secondary on that side (replacing any secondary).
-    Open,
-    /// The chat is the primary and lands on the secondary's side: swap.
-    Swap,
-    /// Route through normal selection (the primary's side).
-    Select,
-    Nothing,
+pub(super) struct SplitDrop {
+    pub(super) pair: Option<SplitPair>,
+    pub(super) select: Option<String>,
 }
 
 pub(super) fn split_drop(
     chat: &str,
     side: SplitSide,
     selected: Option<&str>,
-    split: Option<(&str, SplitSide)>,
+    pair: Option<&SplitPair>,
 ) -> SplitDrop {
-    match split {
-        None => match selected {
-            // Nothing to sit beside: the drop just opens the session.
-            None => SplitDrop::Select,
-            Some(sel) if sel == chat => SplitDrop::Nothing,
-            Some(_) => SplitDrop::Open,
+    let keep = SplitDrop {
+        pair: pair.cloned(),
+        select: None,
+    };
+    let Some(selected) = selected else {
+        // Nothing to sit beside: the drop just opens the session.
+        return SplitDrop {
+            pair: pair.cloned(),
+            select: Some(chat.to_string()),
+        };
+    };
+    match pair {
+        Some(pair) if pair.contains(selected) => {
+            let occupant = pair.member(side);
+            if occupant == chat {
+                keep
+            } else if pair.contains(chat) {
+                // A member dropped on the other's side: the pair flips.
+                SplitDrop {
+                    pair: Some(SplitPair {
+                        left: pair.right.clone(),
+                        right: pair.left.clone(),
+                    }),
+                    select: None,
+                }
+            } else {
+                // Replace that side's member; a replaced primary hands the
+                // selection to the newcomer.
+                SplitDrop {
+                    pair: Some(pair.with(side, chat.to_string())),
+                    select: (occupant == selected).then(|| chat.to_string()),
+                }
+            }
+        }
+        // The selected session is shown full: it pairs with the drop (any
+        // older pair gives way — one pair at a time).
+        _ if selected == chat => keep,
+        _ => SplitDrop {
+            pair: Some(SplitPair::of(selected.to_string(), chat.to_string(), side)),
+            select: None,
         },
-        Some((split_chat, split_side)) if side == split_side => {
-            if split_chat == chat {
-                SplitDrop::Nothing
-            } else if selected == Some(chat) {
-                SplitDrop::Swap
-            } else {
-                SplitDrop::Open
-            }
-        }
-        Some(_) => {
-            if selected == Some(chat) {
-                SplitDrop::Nothing
-            } else {
-                SplitDrop::Select
-            }
-        }
-    }
-}
-
-/// The split after a selection change. `previous` is the chat the primary
-/// pane was showing; selecting the secondary's own chat swaps the panes
-/// (the secondary takes `previous`) or closes the split when there was no
-/// previous chat. Landing on the canvas (`None`) closes it too: the caller
-/// promotes the secondary instead of leaving it beside the hero. Pure.
-pub(super) fn split_after_selection(
-    split_chat: &str,
-    selected: Option<&str>,
-    previous: Option<&str>,
-) -> Option<String> {
-    match selected {
-        None => None,
-        Some(sel) if sel != split_chat => Some(split_chat.to_string()),
-        Some(_) => previous
-            .filter(|prev| !prev.is_empty() && *prev != split_chat)
-            .map(str::to_string),
     }
 }
 
 impl Shell {
+    /// The chat shown in the secondary pane right now.
     pub(super) fn split_chat_id(&self) -> Option<&str> {
         self.split.as_ref().map(|s| s.chat_id.as_str())
     }
 
+    pub(super) fn split_pair_contains(&self, chat: &str) -> bool {
+        self.split_pair.as_ref().is_some_and(|p| p.contains(chat))
+    }
+
     /// Build the secondary pane over `chat_id` on `side`, replacing any
     /// current secondary.
-    pub(super) fn open_split(&mut self, chat_id: String, side: SplitSide, cx: &mut Context<Self>) {
+    fn open_split(&mut self, chat_id: String, side: SplitSide, cx: &mut Context<Self>) {
         if self.split_chat_id() == Some(chat_id.as_str()) {
             if let Some(split) = self.split.as_mut() {
                 split.side = side;
@@ -166,10 +225,10 @@ impl Shell {
         cx.notify();
     }
 
-    /// Drop the secondary pane. The doc watch is shared with sidechat and
-    /// subagent tabs (single-flight per doc id), so it is only released when
-    /// no other surface still shows that doc.
-    pub(super) fn close_split(&mut self, cx: &mut Context<Self>) {
+    /// Drop the secondary pane (the pair stays). The doc watch is shared
+    /// with sidechat and subagent tabs (single-flight per doc id), so it is
+    /// only released when no other surface still shows that doc.
+    fn close_split(&mut self, cx: &mut Context<Self>) {
         let Some(split) = self.split.take() else {
             return;
         };
@@ -188,54 +247,47 @@ impl Shell {
         cx.notify();
     }
 
-    /// Selection changed (every path lands in `on_state_changed`): keep the
-    /// invariant that one session shows once. `previous` is the chat the
-    /// primary was showing before the change.
+    /// Forget the pair: the pane closes and the double chip splits back
+    /// into ordinary tabs.
+    pub(super) fn dissolve_split_pair(&mut self, cx: &mut Context<Self>) {
+        self.split_pair = None;
+        self.close_split(cx);
+    }
+
+    /// Selection changed (every path lands in `on_state_changed`): a
+    /// selected pair member shows its partner beside it; anything else shows
+    /// full width.
     pub(super) fn reconcile_split_with_selection(
         &mut self,
         selected: Option<&str>,
-        previous: Option<&str>,
         cx: &mut Context<Self>,
     ) {
-        let Some(split_chat) = self.split_chat_id().map(str::to_string) else {
-            return;
-        };
-        match split_after_selection(&split_chat, selected, previous) {
-            Some(next) if next == split_chat => {}
-            Some(next) => {
-                let side = self
-                    .split
-                    .as_ref()
-                    .map(|s| s.side)
-                    .unwrap_or(SplitSide::Right);
-                self.open_split(next, side, cx);
-            }
-            None => {
-                self.close_split(cx);
-                // The primary went away (last tab closed, chat deleted): the
-                // secondary takes over as the selected session.
-                if selected.is_none() {
-                    self.select_existing_chat(split_chat, cx);
-                }
-            }
+        let partner = selected.and_then(|selected| {
+            self.split_pair
+                .as_ref()
+                .and_then(|pair| pair.partner(selected))
+                .map(|(chat, side)| (chat.to_string(), side))
+        });
+        match partner {
+            Some((chat, side)) => self.open_split(chat, side, cx),
+            None => self.close_split(cx),
         }
     }
 
-    /// The secondary's chat vanished (archived, deleted): the split goes.
+    /// A pair member vanished (archived, deleted): the pair goes.
     pub(super) fn prune_split(&mut self, cx: &mut Context<Self>) {
-        let Some(split_chat) = self.split_chat_id() else {
+        let Some(pair) = self.split_pair.clone() else {
             return;
         };
         let live = {
             let state = self.state.read(cx);
-            state.chats_synced
-                && state
-                    .chats
+            !state.chats_synced
+                || [&pair.left, &pair.right]
                     .iter()
-                    .any(|c| c.id == split_chat && !c.archived)
+                    .all(|id| state.chats.iter().any(|c| c.id == **id && !c.archived))
         };
         if !live {
-            self.close_split(cx);
+            self.dissolve_split_pair(cx);
         }
     }
 
@@ -251,42 +303,45 @@ impl Shell {
             return;
         }
         let selected = self.state.read(cx).selected_chat.clone();
-        let split = self.split.as_ref().map(|s| (s.chat_id.clone(), s.side));
         let verdict = split_drop(
             &chat_id,
             side,
             selected.as_deref(),
-            split.as_ref().map(|(id, side)| (id.as_str(), *side)),
+            self.split_pair.as_ref(),
         );
-        tracing::info!(chat = %chat_id, ?side, ?selected, ?split, ?verdict, "split: drop verdict");
-        match verdict {
-            SplitDrop::Open => self.open_split(chat_id, side, cx),
-            SplitDrop::Swap => {
-                // Selecting the secondary's chat swaps through the selection
-                // invariant; the secondary then sits where the drop landed.
-                let Some((split_chat, _)) = split else {
-                    return;
-                };
-                if let Some(s) = self.split.as_mut() {
-                    s.side = side;
-                }
-                self.open_chat(split_chat, cx);
-            }
-            SplitDrop::Select => self.open_chat(chat_id, cx),
-            SplitDrop::Nothing => {}
+        tracing::info!(chat = %chat_id, ?side, ?selected, pair = ?self.split_pair, ?verdict, "split: drop verdict");
+        let SplitDrop { pair, select } = verdict;
+        self.split_pair = pair;
+        match select {
+            Some(chat) => self.open_chat(chat, cx),
+            None => self.reconcile_split_with_selection(selected.as_deref(), cx),
         }
     }
 
     /// Pointer moved over a zone while dragging: restart the grow/shrink
     /// animation only on a change of side.
-    fn set_split_drop_hot(&mut self, side: SplitSide, cx: &mut Context<Self>) {
+    fn set_split_drop_hot(&mut self, side: Option<SplitSide>, cx: &mut Context<Self>) {
         let state = self.split_drop_hot.get_or_insert_with(Default::default);
-        if state.hot != Some(side) {
+        if state.hot != side {
             state.prev = state.hot;
-            state.hot = Some(side);
+            state.hot = side;
             state.epoch += 1;
             cx.notify();
         }
+    }
+
+    /// GPUI fires `on_drag_move` on EVERY listener, hovered or not, so the
+    /// side comes from the pointer against the layer's bounds (outside the
+    /// layer: no zone is hot).
+    fn split_zone_at(bounds: gpui::Bounds<Pixels>, position: Point<Pixels>) -> Option<SplitSide> {
+        if !bounds.contains(&position) {
+            return None;
+        }
+        Some(if position.x < bounds.center().x {
+            SplitSide::Left
+        } else {
+            SplitSide::Right
+        })
     }
 
     /// The secondary pane: a header (brand, title, close) under the
@@ -367,7 +422,7 @@ impl Shell {
                     .hover(|s| s.bg(crate::theme::wash(0.14)))
                     .on_click(cx.listener(|this, _, _, cx| {
                         cx.stop_propagation();
-                        this.close_split(cx);
+                        this.dissolve_split_pair(cx);
                     }))
                     .child(
                         icon(icons::CLOSE)
@@ -411,11 +466,9 @@ impl Shell {
         }
         let theme = Theme::of(cx).clone();
         let selected = self.state.read(cx).selected_chat.clone();
-        let split_open = self.split.is_some();
         let state = self.state.clone();
         let inert = std::rc::Rc::new(move |chat_id: &str, cx: &App| {
-            state.read(cx).is_draft(chat_id)
-                || (!split_open && selected.as_deref() == Some(chat_id))
+            state.read(cx).is_draft(chat_id) || selected.as_deref() == Some(chat_id)
         });
         let (hot, prev, epoch) = self
             .split_drop_hot
@@ -481,12 +534,6 @@ impl Shell {
                 // stays clear so the drag ghost reads over the transcript.
                 .when(side == SplitSide::Left, |el| el.justify_start())
                 .when(side == SplitSide::Right, |el| el.justify_end())
-                .on_drag_move::<tabs::TabDragPayload>(cx.listener(move |this, _, _, cx| {
-                    this.set_split_drop_hot(side, cx);
-                }))
-                .on_drag_move::<SessionRowDrag>(cx.listener(move |this, _, _, cx| {
-                    this.set_split_drop_hot(side, cx);
-                }))
                 .on_drop::<tabs::TabDragPayload>(cx.listener(
                     move |this, payload: &tabs::TabDragPayload, _, cx| {
                         tracing::info!(chat = %payload.chat_id, ?side, "split: tab dropped");
@@ -516,6 +563,18 @@ impl Shell {
                 .flex_row()
                 .opacity(0.0)
                 .bg(theme.scrim().opacity(0.35))
+                .on_drag_move::<tabs::TabDragPayload>(cx.listener(
+                    |this, event: &gpui::DragMoveEvent<tabs::TabDragPayload>, _, cx| {
+                        let side = Self::split_zone_at(event.bounds, event.event.position);
+                        this.set_split_drop_hot(side, cx);
+                    },
+                ))
+                .on_drag_move::<SessionRowDrag>(cx.listener(
+                    |this, event: &gpui::DragMoveEvent<SessionRowDrag>, _, cx| {
+                        let side = Self::split_zone_at(event.bounds, event.event.position);
+                        this.set_split_drop_hot(side, cx);
+                    },
+                ))
                 .drag_over::<tabs::TabDragPayload>(move |style, payload, _, cx| {
                     style.opacity(if inert_tab(&payload.chat_id, cx) {
                         0.3
@@ -734,19 +793,41 @@ mod drag_regressions {
 mod tests {
     use super::*;
 
+    fn pair(left: &str, right: &str) -> SplitPair {
+        SplitPair {
+            left: left.into(),
+            right: right.into(),
+        }
+    }
+
+    fn drop(pair: Option<SplitPair>, select: Option<&str>) -> SplitDrop {
+        SplitDrop {
+            pair,
+            select: select.map(str::to_string),
+        }
+    }
+
     #[test]
-    fn drop_beside_a_selected_chat_opens_the_split() {
+    fn drop_beside_a_selected_chat_pairs_them() {
         assert_eq!(
             split_drop("b", SplitSide::Right, Some("a"), None),
-            SplitDrop::Open
+            drop(Some(pair("a", "b")), None)
+        );
+        assert_eq!(
+            split_drop("b", SplitSide::Left, Some("a"), None),
+            drop(Some(pair("b", "a")), None)
         );
     }
 
     #[test]
-    fn dropping_the_selected_chat_with_no_split_does_nothing() {
+    fn dropping_the_selected_chat_changes_nothing() {
         assert_eq!(
             split_drop("a", SplitSide::Left, Some("a"), None),
-            SplitDrop::Nothing
+            drop(None, None)
+        );
+        assert_eq!(
+            split_drop("a", SplitSide::Left, Some("a"), Some(&pair("a", "b"))),
+            drop(Some(pair("a", "b")), None)
         );
     }
 
@@ -754,100 +835,51 @@ mod tests {
     fn drop_on_the_canvas_selects() {
         assert_eq!(
             split_drop("a", SplitSide::Left, None, None),
-            SplitDrop::Select
+            drop(None, Some("a"))
         );
     }
 
     #[test]
-    fn drop_on_the_secondary_side_replaces_it() {
+    fn drop_on_the_partner_side_replaces_it() {
         assert_eq!(
-            split_drop(
-                "c",
-                SplitSide::Right,
-                Some("a"),
-                Some(("b", SplitSide::Right))
-            ),
-            SplitDrop::Open
-        );
-        assert_eq!(
-            split_drop(
-                "b",
-                SplitSide::Right,
-                Some("a"),
-                Some(("b", SplitSide::Right))
-            ),
-            SplitDrop::Nothing
+            split_drop("c", SplitSide::Right, Some("a"), Some(&pair("a", "b"))),
+            drop(Some(pair("a", "c")), None)
         );
     }
 
     #[test]
-    fn dropping_the_primary_on_the_secondary_side_swaps() {
+    fn drop_on_the_primary_side_replaces_and_selects() {
         assert_eq!(
-            split_drop(
-                "a",
-                SplitSide::Right,
-                Some("a"),
-                Some(("b", SplitSide::Right))
-            ),
-            SplitDrop::Swap
+            split_drop("c", SplitSide::Left, Some("a"), Some(&pair("a", "b"))),
+            drop(Some(pair("c", "b")), Some("c"))
         );
     }
 
     #[test]
-    fn drop_on_the_primary_side_selects() {
+    fn dropping_a_member_on_the_other_side_flips_the_pair() {
         assert_eq!(
-            split_drop(
-                "c",
-                SplitSide::Left,
-                Some("a"),
-                Some(("b", SplitSide::Right))
-            ),
-            SplitDrop::Select
+            split_drop("a", SplitSide::Right, Some("a"), Some(&pair("a", "b"))),
+            drop(Some(pair("b", "a")), None)
         );
         assert_eq!(
-            split_drop(
-                "b",
-                SplitSide::Left,
-                Some("a"),
-                Some(("b", SplitSide::Right))
-            ),
-            SplitDrop::Select
-        );
-        assert_eq!(
-            split_drop(
-                "a",
-                SplitSide::Left,
-                Some("a"),
-                Some(("b", SplitSide::Right))
-            ),
-            SplitDrop::Nothing
+            split_drop("b", SplitSide::Left, Some("a"), Some(&pair("a", "b"))),
+            drop(Some(pair("b", "a")), None)
         );
     }
 
     #[test]
-    fn selecting_the_secondary_swaps_the_panes() {
+    fn a_full_width_session_pairs_afresh() {
         assert_eq!(
-            split_after_selection("b", Some("b"), Some("a")),
-            Some("a".to_string())
+            split_drop("d", SplitSide::Right, Some("c"), Some(&pair("a", "b"))),
+            drop(Some(pair("c", "d")), None)
         );
     }
 
     #[test]
-    fn selecting_the_secondary_off_the_canvas_closes_the_split() {
-        assert_eq!(split_after_selection("b", Some("b"), None), None);
-        assert_eq!(split_after_selection("b", Some("b"), Some("")), None);
-    }
-
-    #[test]
-    fn selecting_another_chat_keeps_the_split() {
-        assert_eq!(
-            split_after_selection("b", Some("c"), Some("a")),
-            Some("b".to_string())
-        );
-    }
-
-    #[test]
-    fn landing_on_the_canvas_closes_the_split() {
-        assert_eq!(split_after_selection("b", None, Some("a")), None);
+    fn partner_lookup_follows_the_pair_order() {
+        let p = pair("a", "b");
+        assert_eq!(p.partner("a"), Some(("b", SplitSide::Right)));
+        assert_eq!(p.partner("b"), Some(("a", SplitSide::Left)));
+        assert_eq!(p.partner("c"), None);
     }
 }

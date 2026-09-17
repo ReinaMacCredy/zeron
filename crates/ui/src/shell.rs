@@ -1551,6 +1551,9 @@ pub struct Shell {
     switcher: Option<switcher::Switcher>,
     /// The split view's secondary pane beside the selected session.
     split: Option<split::SplitPane>,
+    /// The two paired sessions (left, right); the pane above shows the
+    /// partner of the selected one, the tab strip shows one double chip.
+    split_pair: Option<split::SplitPair>,
     /// Chat outlet vs settings pages.
     route: Route,
     /// Route history behind the titlebar back/forward buttons (§ nav history).
@@ -1968,6 +1971,7 @@ impl Shell {
             stale_thumbs: Vec::new(),
             switcher: None,
             split: None,
+            split_pair: None,
             route,
             nav,
             devices_page: None,
@@ -2410,10 +2414,9 @@ impl Shell {
             if !selected.is_empty() {
                 self.touch_session_mru(&selected);
             }
-            let previous = std::mem::replace(&mut self.active_chat, selected.clone());
+            self.active_chat = selected.clone();
             self.reconcile_split_with_selection(
                 Some(selected.as_str()).filter(|s| !s.is_empty()),
-                Some(previous.as_str()),
                 cx,
             );
             // Route history: a chat switch is a navigation. The very first

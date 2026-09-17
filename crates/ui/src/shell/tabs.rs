@@ -150,6 +150,9 @@ fn split_tab_chip(
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> gpui::Stateful<gpui::Div> {
+    // The chip is "selected" while either member is on screen; another
+    // session selected shows full width and the pair waits here.
+    let active = halves.iter().any(|(id, ..)| selected == Some(id.as_str()));
     let mut chip = div()
         .id("session-tab-split")
         .w(px(SESSION_TAB_WIDTH * 2.0 + TAB_GAP))
@@ -160,8 +163,11 @@ fn split_tab_chip(
         .items_center()
         .rounded(px(8.0))
         .text_size(px(12.0))
-        .bg(crate::theme::glass_selected_bg())
-        .shadow(crate::theme::glass_selected_shadows())
+        .when(active, |el| {
+            el.bg(crate::theme::glass_selected_bg())
+                .shadow(crate::theme::glass_selected_shadows())
+        })
+        .when(!active, |el| el.hover(|s| s.bg(theme.glass_hover())))
         .block_mouse_except_scroll()
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default());
     for (n, (id, title, harness, status)) in halves.into_iter().enumerate() {
@@ -196,8 +202,10 @@ fn split_tab_chip(
                 .rounded(px(8.0))
                 .text_color(if is_primary {
                     theme.text
-                } else {
+                } else if active {
                     theme.text.opacity(0.7)
+                } else {
+                    theme.text_muted.opacity(0.6)
                 })
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -413,7 +421,6 @@ impl Shell {
     /// (the last selected project, restored from composer defaults) stands.
     pub(super) fn open_new_session(&mut self, cx: &mut Context<Self>) {
         self.snapshot_current_chat(cx);
-        self.close_split(cx);
         self.command_palette = None;
         self.route = Route::Chat;
         self.focus_composer(cx);
@@ -459,7 +466,7 @@ impl Shell {
         };
         let state = self.state.read(cx);
         let now = Utc::now();
-        let split = self.split_chat_id();
+        let pair = self.split_pair.clone();
         open.iter()
             .filter(|id| {
                 // A draft is always a place the user is working in (d18); a
@@ -470,7 +477,7 @@ impl Shell {
                         &c.id == *id
                             && !c.archived
                             && (state.selected_chat.as_deref() == Some(c.id.as_str())
-                                || split == Some(c.id.as_str())
+                                || pair.as_ref().is_some_and(|p| p.contains(&c.id))
                                 || state.display_status_for(c, now) != ChatIndicator::Idle)
                     })
             })
@@ -529,18 +536,22 @@ impl Shell {
                 .cloned()
                 .collect()
         };
-        let split = self.split_chat_id().map(str::to_string);
+        let pair: Vec<String> = self
+            .split_pair
+            .iter()
+            .flat_map(|p| [p.left.clone(), p.right.clone()])
+            .collect();
         let tabs = self.settings.open_tabs.get_or_insert_with(Vec::new);
         let before = tabs.len();
         tabs.retain(|id| {
             live.contains(id)
                 || selected.as_deref() == Some(id.as_str())
-                || split.as_deref() == Some(id.as_str())
+                || pair.contains(id)
                 || pending.contains(id)
         });
         changed |= tabs.len() != before;
-        // The split's secondary is a tab too: it is on screen.
-        for pinned in selected.iter().chain(split.iter()) {
+        // The split pair is always on the strip (its double chip).
+        for pinned in selected.iter().chain(pair.iter()) {
             if !tabs.contains(pinned) {
                 tabs.push(pinned.clone());
                 changed = true;
@@ -574,24 +585,22 @@ impl Shell {
         if let Some(tabs) = self.settings.open_tabs.as_mut() {
             tabs.retain(|id| id != &chat_id);
         }
-        let split = self.split_chat_id().map(str::to_string);
-        if split.as_deref() == Some(chat_id.as_str()) {
-            self.close_split(cx);
+        // Closing a pair member dissolves the pair; its partner survives at
+        // full width when the closed one was selected.
+        let partner = self
+            .split_pair
+            .as_ref()
+            .and_then(|pair| pair.partner(&chat_id))
+            .map(|(chat, _)| chat.to_string());
+        if self.split_pair_contains(&chat_id) {
+            self.dissolve_split_pair(cx);
         }
         if focused.as_deref() == Some(chat_id.as_str()) {
             if is_draft {
                 // Leaving the draft on the canvas would re-open its tab.
                 self.state.update(cx, |s, _| s.active_draft = None);
             }
-            // Closing the primary of a split: the secondary survives at full
-            // width (not a neighbor, which would swap the closed one back in).
-            let next = match split {
-                Some(split) => {
-                    self.close_split(cx);
-                    Some(split)
-                }
-                None => next_after_close(&order, &chat_id),
-            };
+            let next = partner.or_else(|| next_after_close(&order, &chat_id));
             self.navigate_to(next, true, cx);
         }
         self.schedule_save(cx);
@@ -637,10 +646,11 @@ impl Shell {
             self.frozen_draft_rows.remove(&id);
         }
         if self
-            .split_chat_id()
-            .is_some_and(|split| !kept.contains(&split.to_string()))
+            .split_pair
+            .as_ref()
+            .is_some_and(|pair| !kept.contains(&pair.left) || !kept.contains(&pair.right))
         {
-            self.close_split(cx);
+            self.dissolve_split_pair(cx);
         }
         let selected = self.state.read(cx).focused_id();
         if let Some(selected) = selected
@@ -714,25 +724,16 @@ impl Shell {
         // A split's two sessions share ONE double chip (Atlas): the secondary
         // moves next to the selected one, on the side it is shown on, and
         // the pair spends exactly two slots so the drop-index math holds.
-        let group: Option<(String, String)> = self.split.as_ref().and_then(|split| {
-            let primary = self.state.read(cx).selected_chat.clone()?;
-            let primary_ix = order.iter().position(|id| *id == primary)?;
-            order.iter().position(|id| *id == split.chat_id)?;
-            order.retain(|id| *id != split.chat_id);
-            let primary_ix = order
+        let group: Option<(String, String)> = self.split_pair.as_ref().and_then(|pair| {
+            let left_ix = order.iter().position(|id| *id == pair.left)?;
+            order.iter().position(|id| *id == pair.right)?;
+            order.retain(|id| *id != pair.right);
+            let left_ix = order
                 .iter()
-                .position(|id| *id == primary)
-                .unwrap_or(primary_ix);
-            Some(match split.side {
-                super::split::SplitSide::Left => {
-                    order.insert(primary_ix, split.chat_id.clone());
-                    (split.chat_id.clone(), primary)
-                }
-                super::split::SplitSide::Right => {
-                    order.insert(primary_ix + 1, split.chat_id.clone());
-                    (primary, split.chat_id.clone())
-                }
-            })
+                .position(|id| *id == pair.left)
+                .unwrap_or(left_ix);
+            order.insert(left_ix + 1, pair.right.clone());
+            Some((pair.left.clone(), pair.right.clone()))
         });
         let tabs: Vec<(
             String,
