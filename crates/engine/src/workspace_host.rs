@@ -942,6 +942,58 @@ impl WorkspaceHost {
         Ok(chat)
     }
 
+    /// A fork's chat row: the source's space, cwd, checkout and run
+    /// configuration under a new id, titled after the source. Never a
+    /// sidechat, whatever the source was; never the source's harness session
+    /// (the sessions engine stamps the branched one).
+    pub fn create_fork_chat(
+        &self,
+        source_chat_id: &str,
+        new_chat_id: &str,
+    ) -> Result<Chat, EngineError> {
+        if let Some(existing) = self.read(|doc| doc.chat(new_chat_id))? {
+            return Ok(existing);
+        }
+        let source = self
+            .read(|doc| doc.chat(source_chat_id))?
+            .ok_or_else(|| EngineError::Other(format!("no such chat: {source_chat_id}")))?;
+        let seed = source
+            .title
+            .as_deref()
+            .map(str::trim)
+            .map(|title| {
+                title
+                    .strip_prefix("Fork:")
+                    .or_else(|| title.strip_prefix("Sidechat:"))
+                    .map(str::trim)
+                    .unwrap_or(title)
+            })
+            .filter(|title| !title.is_empty())
+            .unwrap_or("chat");
+        let chat = Chat {
+            id: new_chat_id.to_string(),
+            device_id: source.device_id.clone(),
+            title: Some(format!("Fork: {seed}")),
+            archived: false,
+            cwd: source.cwd.clone(),
+            branch: source.branch.clone(),
+            checkout_id: source.checkout_id.clone(),
+            source_context: None,
+            config: source.config.clone(),
+            last_message_preview: None,
+            last_message_at: None,
+            created_at: Utc::now(),
+            harness_session_id: None,
+            harness_session_cwd: None,
+            room_gen: Some(2),
+            space_id: source.space_id.clone(),
+            last_seen_at: None,
+            sidechat_source_chat_id: None,
+        };
+        self.mutate(|doc| doc.upsert_chat(&chat))?;
+        Ok(chat)
+    }
+
     // ── spaces (Mutate surface + owner stamps) ──────────────────────────────
 
     /// Create a space (any device). Idempotent by id; a live duplicate of the

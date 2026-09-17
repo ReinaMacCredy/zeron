@@ -4020,7 +4020,7 @@ fn sidechat_pill_label(title: Option<&str>) -> String {
 
 /// The catalog's names live on the engine's harness descriptors, which the
 /// composer never holds; this is the same list, for one sentence of copy.
-fn harness_display_name(harness: HarnessId) -> &'static str {
+pub(crate) fn harness_display_name(harness: HarnessId) -> &'static str {
     match harness {
         HarnessId::ClaudeCode => "Claude Code",
         HarnessId::Codex => "Codex",
@@ -5722,6 +5722,11 @@ impl Composer {
                                 .compaction_cache
                                 .insert(harness, kind.to_string().into());
                         }
+                        if let Some(branching) = value.get("branching").and_then(|v| v.as_bool()) {
+                            composer.state.update(cx, |state, _| {
+                                state.harness_branching.insert(harness, branching);
+                            });
+                        }
                     }
                     Err(err) => {
                         tracing::debug!(%err, "harness compaction probe failed");
@@ -6962,6 +6967,7 @@ impl Composer {
                         resume: None,
                         attachments: attachment_paths,
                         worktree: run_worktree,
+                        branch: None,
                     },
                     message_id: message_id.clone(),
                 };

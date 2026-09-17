@@ -182,6 +182,7 @@ async fn exercise_projectless(command_first: bool) {
                         auto_approve: true,
                         attachments: Vec::new(),
                         worktree: None,
+                        branch: None,
                         resume: None,
                     },
                     message_id: message_id.into(),

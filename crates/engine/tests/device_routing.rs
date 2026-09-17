@@ -733,6 +733,7 @@ async fn target_device_id_routes_over_the_relay() {
             auto_approve: true,
             attachments: Vec::new(),
             worktree: None,
+            branch: None,
             resume: None,
         },
         message_id: "m-a-1".into(),

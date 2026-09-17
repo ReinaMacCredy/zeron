@@ -191,6 +191,7 @@ fn run_payload(prompt: &str, message_id: &str, cwd: &str) -> SessionCommandPaylo
             attachments: Vec::new(),
             resume: None,
             worktree: None,
+            branch: None,
         },
         message_id: message_id.into(),
     }

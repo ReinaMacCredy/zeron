@@ -2842,9 +2842,49 @@ enum BlobFetch {
     Ready(Arc<ToolDetail>),
 }
 
+/// Which way a hover-strip branch action cuts the conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchKind {
+    /// After an assistant reply: a new chat carrying history through it.
+    Fork,
+    /// Before a user prompt: this chat loses it and everything after.
+    Rewind,
+}
+
+/// Why a fork/rewind action is unavailable on a row right now, if it is. An
+/// unprobed harness (`branching: None`) is not a reason: the engine refuses
+/// with its own message when it must.
+pub fn branch_blocked(
+    kind: BranchKind,
+    harness: Option<zeron_proto::HarnessId>,
+    branching: Option<bool>,
+    turn_active: bool,
+) -> Option<String> {
+    match (harness, branching) {
+        (Some(h), Some(false)) => Some(format!(
+            "{} does not support fork or rewind",
+            crate::composer::harness_display_name(h)
+        )),
+        _ if kind == BranchKind::Rewind && turn_active => {
+            Some("Stop the running turn before rewinding".into())
+        }
+        _ => None,
+    }
+}
+
 /// Shell-facing events (the transcript itself hosts no surfaces).
 #[derive(Debug, Clone)]
 pub enum TranscriptEvent {
+    /// A hover-strip fork/rewind click. `blocked` carries the reason the
+    /// action is unavailable right now (the shell shows it instead of the
+    /// confirmation); `excerpt` is the entry's prose for that confirmation.
+    Branch {
+        chat_id: String,
+        entry_id: String,
+        kind: BranchKind,
+        excerpt: String,
+        blocked: Option<String>,
+    },
     /// A spawn chip's "Open subagent" affordance: open the subagent's
     /// transcript as a right-pane tab. `chat_id` is the doc the chip lives
     /// in (the frozen blob is keyed `{chat_id}/{doc_id}`); `frozen` means
@@ -5849,12 +5889,13 @@ impl Transcript {
                         .text_color(theme.text_muted),
                     )
             });
+            let branch = self.branch_action(&row, is_user_row, &theme, cx);
             let metadata = div()
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap(px(Theme::SPACE_SM));
-            let metadata = metadata.child(timestamp).children(copy);
+            let metadata = metadata.child(timestamp).children(copy).children(branch);
             div()
                 .h(px(Theme::SPACE_SM + Theme::SPACE_MD * 2.0))
                 .pt(px(Theme::SPACE_SM))
@@ -5922,6 +5963,93 @@ impl Transcript {
                     .children(trailer),
             )
             .into_any_element()
+    }
+
+    /// The hover strip's fork (assistant rows) or rewind (user rows) action.
+    /// Only a chat's own transcript offers it: subagent docs are not chats.
+    /// A blocked action still renders, dimmed, and its click explains why.
+    fn branch_action(
+        &self,
+        row: &Row,
+        is_user_row: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Stateful<gpui::Div>> {
+        if matches!(row.kind, RowKind::User { pending: true, .. }) {
+            return None;
+        }
+        let state = self.state.read(cx);
+        let chat_id = self
+            .doc_override
+            .clone()
+            .filter(|id| state.chats.iter().any(|c| &c.id == id))
+            .or_else(|| self.chat_id.clone().filter(|_| self.doc_override.is_none()))?;
+        let chat = state.chats.iter().find(|c| c.id == chat_id)?;
+        let kind = if is_user_row {
+            BranchKind::Rewind
+        } else {
+            BranchKind::Fork
+        };
+        let harness = chat.config.as_ref().map(|c| c.harness);
+        let blocked = branch_blocked(
+            kind,
+            harness,
+            harness.and_then(|h| state.harness_branching.get(&h).copied()),
+            state.session_for(&chat_id).is_some_and(|s| {
+                matches!(
+                    s.status,
+                    zeron_proto::SessionStatus::Working | zeron_proto::SessionStatus::AwaitingInput
+                )
+            }),
+        );
+        let entry_id = row.entry_id.to_string();
+        let excerpt = row
+            .copy_text
+            .as_ref()
+            .map(|t| t.to_string())
+            .unwrap_or_default();
+        let (glyph, label) = match kind {
+            BranchKind::Fork => (crate::icons::GIT_BRANCH, "fork"),
+            BranchKind::Rewind => (crate::icons::RESTART, "rewind"),
+        };
+        let fade_key = format!("{label}-message-hover-{entry_id}");
+        let dimmed = blocked.is_some();
+        Some(
+            div()
+                .id(SharedString::from(format!("{label}-message-{entry_id}")))
+                .size(px(Theme::SPACE_MD * 2.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(Theme::CONTROL_RADIUS))
+                .cursor_pointer()
+                .bg(motion::hover_blend(
+                    &fade_key,
+                    gpui::transparent_black(),
+                    crate::theme::ink(0.08),
+                ))
+                .on_hover(motion::hover_listener(fade_key))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    cx.emit(TranscriptEvent::Branch {
+                        chat_id: chat_id.clone(),
+                        entry_id: entry_id.clone(),
+                        kind,
+                        excerpt: excerpt.clone(),
+                        blocked: blocked.clone(),
+                    });
+                    let _ = this;
+                }))
+                .child(
+                    crate::icons::icon(glyph)
+                        .size(px(14.0))
+                        .text_color(if dimmed {
+                            theme.text_muted.opacity(0.4)
+                        } else {
+                            theme.text_muted
+                        }),
+                ),
+        )
     }
 
     fn copy_message(&mut self, entry_id: SharedString, text: SharedString, cx: &mut Context<Self>) {
@@ -9034,6 +9162,57 @@ mod tests {
                 this.refresh_protected_attachments(cx);
             });
         });
+    }
+
+    #[test]
+    fn branch_actions_block_on_capability_and_live_turns_only() {
+        use zeron_proto::HarnessId;
+        assert_eq!(
+            branch_blocked(
+                BranchKind::Fork,
+                Some(HarnessId::Cursor),
+                Some(false),
+                false
+            )
+            .as_deref(),
+            Some("Cursor does not support fork or rewind")
+        );
+        assert_eq!(
+            branch_blocked(
+                BranchKind::Rewind,
+                Some(HarnessId::Cursor),
+                Some(false),
+                true
+            )
+            .as_deref(),
+            Some("Cursor does not support fork or rewind")
+        );
+        assert_eq!(
+            branch_blocked(
+                BranchKind::Rewind,
+                Some(HarnessId::ClaudeCode),
+                Some(true),
+                true
+            )
+            .as_deref(),
+            Some("Stop the running turn before rewinding")
+        );
+        // A fork never waits for the turn: it copies settled entries only.
+        assert_eq!(
+            branch_blocked(
+                BranchKind::Fork,
+                Some(HarnessId::ClaudeCode),
+                Some(true),
+                true
+            ),
+            None
+        );
+        // Unprobed capability leaves the action live; the engine decides.
+        assert_eq!(
+            branch_blocked(BranchKind::Rewind, Some(HarnessId::Codex), None, false),
+            None
+        );
+        assert_eq!(branch_blocked(BranchKind::Fork, None, None, false), None);
     }
 
     #[test]

@@ -213,6 +213,7 @@ fn request(cwd: &Path, prompt: &str, resume: Option<&str>) -> RunRequest {
         auto_approve: false,
         attachments: Vec::new(),
         worktree: None,
+        branch: None,
         resume: resume.map(str::to_owned),
     }
 }

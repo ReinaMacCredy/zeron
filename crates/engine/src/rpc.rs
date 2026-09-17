@@ -108,6 +108,21 @@ struct CreateSidechatParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ForkChatParams {
+    source_chat_id: String,
+    entry_id: String,
+    chat_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RewindChatParams {
+    chat_id: String,
+    entry_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SetHarnessEnabledParams {
     harness: HarnessId,
     enabled: bool,
@@ -939,6 +954,8 @@ fn forwardable(method: &str) -> bool {
             | methods::LIST_COMMANDS
             | methods::HARNESS_COMPACTION
             | methods::COMPACT_CHAT
+            | methods::FORK_CHAT
+            | methods::REWIND_CHAT
             | methods::QUEUE_COMMAND
             | methods::WATCH_DOC_MESSAGES
             // The queue lives on the chat doc, and only its host may send from
@@ -1265,7 +1282,10 @@ impl RpcService for EngineRpc {
                     zeron_proto::Compaction::SlashText(_) => "slash",
                     zeron_proto::Compaction::None => "none",
                 };
-                RpcReply::value(&serde_json::json!({ "compaction": kind }))
+                RpcReply::value(&serde_json::json!({
+                    "compaction": kind,
+                    "branching": harness.branching(),
+                }))
             }
             methods::COMPACT_CHAT => {
                 let p: CompactChatParams = parse_params(params)?;
@@ -1273,6 +1293,22 @@ impl RpcService for EngineRpc {
                     .sessions
                     .compact(&p.chat_id, p.focus)
                     .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&outcome)
+            }
+            methods::FORK_CHAT => {
+                let p: ForkChatParams = parse_params(params)?;
+                let chat = self
+                    .sessions
+                    .fork_chat(&p.source_chat_id, &p.entry_id, &p.chat_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&chat)
+            }
+            methods::REWIND_CHAT => {
+                let p: RewindChatParams = parse_params(params)?;
+                let outcome = self
+                    .sessions
+                    .rewind_chat(&p.chat_id, &p.entry_id)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&outcome)
             }

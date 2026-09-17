@@ -123,6 +123,31 @@ pub struct RunRequest {
     /// host ignores it and runs in `cwd` (the repo's main checkout).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<WorktreeSpec>,
+    /// Cut the resumed harness session before this run (see
+    /// [`SessionBranch`]). Engine-injected from the chat's pending branch;
+    /// callers send `None`. Additive + serde-defaulted for wire compat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<SessionBranch>,
+}
+
+/// Where a resumed harness session is cut when the run starts: history
+/// through `keep` (the harness's own handle for the last reply kept) survives,
+/// `drop` (its handle for the first discarded prompt, when known) onward is
+/// discarded. Applied on a forked copy of the session, never in place, so the
+/// original stays resumable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionBranch {
+    pub keep: Option<String>,
+    pub drop: Option<String>,
+}
+
+/// Which side of a turn an [`AgentEvent::Anchor`] names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AnchorRole {
+    User,
+    Assistant,
 }
 
 /// Isolated-worktree directive riding [`RunRequest`]. The worktree is created
@@ -461,6 +486,25 @@ pub enum AgentEvent {
     /// the streaming assistant segment above it — the subagent transcript
     /// then reads like any steered chat. Never emitted untagged (the parent
     /// chat's user messages come from doc commands, not the wire).
+    /// The harness's own handle for the current prompt (`User`) or reply
+    /// (`Assistant`): a Claude message uuid, a Codex turn id, an OpenCode
+    /// message id. Drivers leave `entry_id` empty; the engine stamps the doc
+    /// entry it belongs to before journaling. Never persisted to docs.
+    #[serde(rename_all = "camelCase")]
+    Anchor {
+        role: AnchorRole,
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entry_id: Option<String>,
+    },
+    /// Engine-written journal record: the chat's next run branches its
+    /// resumed harness session at this point (see [`SessionBranch`]). The
+    /// run's `SessionStarted` retires it. Never persisted to docs.
+    #[serde(rename_all = "camelCase")]
+    BranchPending {
+        keep: Option<String>,
+        drop: Option<String>,
+    },
     #[serde(rename_all = "camelCase")]
     UserMessage {
         text: String,

@@ -30,8 +30,8 @@ use zeron_doc::{
 };
 use zeron_harness::{CancellationToken, Harness, HarnessError, RunControls, SteerMessage};
 use zeron_proto::{
-    AgentEvent, Compaction, DoneStatus, HarnessId, RunRequest, Session, SessionStatus,
-    UserInputAnswer, UserInputQuestion,
+    AgentEvent, AnchorRole, Chat, Compaction, DoneStatus, HarnessId, RunRequest, Session,
+    SessionBranch, SessionStatus, UserInputAnswer, UserInputQuestion,
 };
 
 use crate::doc_host::{ChatDocHandle, DocHost};
@@ -167,6 +167,11 @@ struct Inner {
     /// (zeron kept the same pair on `chats.harness_session_id`). An empty
     /// session id is the "do not resume" tombstone after a rejected resume.
     harness_sessions: Mutex<HashMap<String, HarnessSessionRef>>,
+    /// Chats whose next run must branch the resumed harness session (fork
+    /// and rewind). The durable copy is a `BranchPending` journal record
+    /// newer than the chat's last `SessionStarted`; the run that applies it
+    /// retires both through its own `SessionStarted`.
+    pending_branches: Mutex<HashMap<String, SessionBranch>>,
     /// Chats with a compaction in flight — one per chat, and the reservation
     /// is taken before the run slot so two RPCs can never both pass the check.
     compacting: Mutex<std::collections::HashSet<String>>,
@@ -214,6 +219,7 @@ impl SessionsEngine {
                 sessions_tx,
                 last_requests: Mutex::new(HashMap::new()),
                 harness_sessions: Mutex::new(HashMap::new()),
+                pending_branches: Mutex::new(HashMap::new()),
                 compacting: Mutex::new(std::collections::HashSet::new()),
                 compaction_timed_out: Mutex::new(std::collections::HashSet::new()),
                 titles: OnceLock::new(),
@@ -483,6 +489,7 @@ impl SessionsEngine {
             request.resume = self.inner.resume_for(chat_id, &request.cwd);
             resume_injected = request.resume.is_some();
         }
+        self.inner.inject_branch(chat_id, &mut request);
         lock(&self.inner.last_requests).insert(chat_id.to_string(), request.clone());
 
         let run_id = new_id();
@@ -729,6 +736,7 @@ impl SessionsEngine {
         // The same engine-owned resume the normal dispatch path injects: a
         // compaction that started a fresh session would compact nothing.
         request.resume = self.inner.resume_for(chat_id, &request.cwd);
+        self.inner.inject_branch(chat_id, &mut request);
 
         // Retire a parked warm child so the compaction owns the run slot; a
         // turn actually in flight was refused above.
@@ -852,6 +860,166 @@ impl SessionsEngine {
     /// The run configuration a compaction inherits: the chat's last dispatched
     /// request, else its durable row (the engine may have restarted since the
     /// last turn). Prompt and resume are the caller's to fill in.
+    /// Fork `source_chat_id` after the assistant entry `entry_id` into the
+    /// client-minted `new_chat_id`: a new row, a doc holding the source's
+    /// entries through that reply, the source's harness session remembered
+    /// on the fork, and a pending branch cutting it after the reply. The
+    /// source is not written.
+    pub fn fork_chat(
+        &self,
+        source_chat_id: &str,
+        entry_id: &str,
+        new_chat_id: &str,
+    ) -> Result<Chat, EngineError> {
+        let (host, ws) = self.branch_context()?;
+        let harness = self.branching_harness(&host, source_chat_id)?;
+        let entries = self.doc_handle(source_chat_id)?.doc().read_entries()?;
+        let ix = entries
+            .iter()
+            .position(|e| e.id == entry_id && e.role == MessageRole::Assistant)
+            .ok_or_else(|| EngineError::Other("That reply is no longer in the chat.".into()))?;
+        if entries[ix].status == Some(MessageStatus::Streaming) {
+            return Err(EngineError::Other("Wait for the reply to finish.".into()));
+        }
+        let end = entries[ix + 1..]
+            .iter()
+            .position(|e| e.role == MessageRole::User)
+            .map(|rel| ix + 1 + rel)
+            .unwrap_or(entries.len());
+        let session = self.inner.stored_harness_session(source_chat_id);
+        let anchors = self.inner.anchors(source_chat_id);
+        let branch = match &session {
+            None => None,
+            Some(_) => Some(SessionBranch {
+                keep: Some(anchors.get(entry_id).cloned().ok_or_else(|| {
+                    EngineError::Other(format!(
+                        "No checkpoint for this reply: it was recorded before {} checkpoints were tracked.",
+                        harness.display_name()
+                    ))
+                })?),
+                drop: entries.get(end).and_then(|e| anchors.get(&e.id).cloned()),
+            }),
+        };
+        let chat = ws.create_fork_chat(source_chat_id, new_chat_id)?;
+        let handle = self.doc_handle(new_chat_id)?;
+        if handle.doc().read_entries()?.is_empty() {
+            for entry in &entries[..end] {
+                handle.doc().push_message(entry)?;
+            }
+        }
+        if let Some(text) = entries[..end].iter().rev().find_map(|e| {
+            let text = entry_text(e);
+            (!text.is_empty()).then_some(text)
+        }) {
+            self.inner.note_message(new_chat_id, &text);
+        }
+        if let (Some((session, cwd)), Some(branch)) = (session, branch) {
+            self.inner
+                .remember_harness_session(new_chat_id, &session, &cwd);
+            self.inner.set_pending_branch(new_chat_id, branch);
+        }
+        Ok(chat)
+    }
+
+    /// Rewind `chat_id` to before the user entry `entry_id`: the doc loses
+    /// that entry and everything after it, the context meter clears, and the
+    /// next run branches the harness session after the previous reply. The
+    /// removed prompt comes back for the composer.
+    pub fn rewind_chat(&self, chat_id: &str, entry_id: &str) -> Result<RewindOutcome, EngineError> {
+        let (host, _ws) = self.branch_context()?;
+        let harness = self.branching_harness(&host, chat_id)?;
+        if self.turn_in_flight(chat_id) || lock(&self.inner.runs).contains_key(chat_id) {
+            return Err(EngineError::Other(
+                "Stop the running turn before rewinding.".into(),
+            ));
+        }
+        let handle = self.doc_handle(chat_id)?;
+        let entries = handle.doc().read_entries()?;
+        let ix = entries
+            .iter()
+            .position(|e| e.id == entry_id && e.role == MessageRole::User)
+            .ok_or_else(|| EngineError::Other("That prompt is no longer in the chat.".into()))?;
+        let previous_reply = entries[..ix]
+            .iter()
+            .rev()
+            .find(|e| e.role == MessageRole::Assistant);
+        let anchors = self.inner.anchors(chat_id);
+        let keep = match previous_reply {
+            None => None,
+            Some(reply) => Some(anchors.get(&reply.id).cloned().ok_or_else(|| {
+                EngineError::Other(format!(
+                    "No checkpoint before this prompt: it was recorded before {} checkpoints were tracked.",
+                    harness.display_name()
+                ))
+            })?),
+        };
+        let prompt = entry_text(&entries[ix]);
+        let removed = handle.doc().truncate_from(entry_id)?;
+        let _ = handle.doc().clear_context_usage();
+        if let Some(text) = entries[..ix].iter().rev().find_map(|e| {
+            let text = entry_text(e);
+            (!text.is_empty()).then_some(text)
+        }) {
+            self.inner.note_message(chat_id, &text);
+        }
+        match keep {
+            Some(keep) => self.inner.set_pending_branch(
+                chat_id,
+                SessionBranch {
+                    keep: Some(keep),
+                    drop: anchors.get(entry_id).cloned(),
+                },
+            ),
+            None => {
+                let cwd = self
+                    .inner
+                    .stored_harness_session(chat_id)
+                    .map(|(_, cwd)| cwd)
+                    .unwrap_or_else(|| self.chat_cwd(chat_id));
+                self.inner.tombstone_harness_session(chat_id, &cwd)
+            }
+        }
+        Ok(RewindOutcome { prompt, removed })
+    }
+
+    fn branch_context(
+        &self,
+    ) -> Result<(DocHost, crate::workspace_host::WorkspaceHost), EngineError> {
+        let host = self
+            .inner
+            .doc_host()
+            .ok_or_else(|| EngineError::Other("doc host not wired into sessions engine".into()))?;
+        let ws = self
+            .inner
+            .workspace()
+            .ok_or_else(|| EngineError::Other("workspace not wired into sessions engine".into()))?;
+        Ok((host, ws))
+    }
+
+    fn chat_cwd(&self, chat_id: &str) -> String {
+        self.inner
+            .workspace()
+            .and_then(|ws| ws.chat(chat_id).ok().flatten())
+            .and_then(|chat| chat.cwd)
+            .map(|cwd| expand_home(&cwd))
+            .unwrap_or_else(|| expand_home("~"))
+    }
+
+    fn branching_harness(
+        &self,
+        host: &DocHost,
+        chat_id: &str,
+    ) -> Result<Arc<dyn Harness>, EngineError> {
+        let harness = self.inner.registry.resolve(host.harness_for(chat_id))?;
+        if !harness.branching() {
+            return Err(EngineError::Other(format!(
+                "{} cannot fork or rewind a session.",
+                harness.display_name()
+            )));
+        }
+        Ok(harness)
+    }
+
     fn compaction_request(&self, chat_id: &str) -> Result<(HarnessId, RunRequest), EngineError> {
         let host = self
             .inner
@@ -884,6 +1052,7 @@ impl SessionsEngine {
                     resume: None,
                     attachments: Vec::new(),
                     worktree: None,
+                    branch: None,
                 }
             }
         };
@@ -891,6 +1060,7 @@ impl SessionsEngine {
         request.attachments.clear();
         // The checkout the chat runs in already exists; cwd points at it.
         request.worktree = None;
+        request.branch = None;
         Ok((harness_id, request))
     }
 
@@ -1020,6 +1190,7 @@ impl SessionsEngine {
                             attachments: Vec::new(),
                             resume: None,
                             worktree: None,
+                            branch: None,
                         })
                     });
                 let Some(mut request) = request else {
@@ -1071,6 +1242,29 @@ impl SessionsEngine {
     fn set_status(&self, chat_id: &str, status: SessionStatus, fresh_start: bool) {
         self.inner.set_status(chat_id, status, fresh_start);
     }
+}
+
+/// What a rewind hands back: the removed prompt, for the composer.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RewindOutcome {
+    pub prompt: String,
+    pub removed: usize,
+}
+
+/// An entry's prose, text parts only.
+fn entry_text(entry: &SessionMessageEntry) -> String {
+    entry
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            MessagePart::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+        .trim()
+        .to_string()
 }
 
 /// Ported verbatim from astra `sidechatProviderInput.ts:3-4`.
@@ -1413,6 +1607,7 @@ impl Inner {
         if session_id.is_empty() {
             return;
         }
+        lock(&self.pending_branches).remove(chat_id);
         lock(&self.harness_sessions).insert(
             chat_id.to_string(),
             HarnessSessionRef {
@@ -1456,6 +1651,96 @@ impl Inner {
         // Cache the journal hit (memory + row) so later dispatches skip the scan.
         self.remember_harness_session(chat_id, &session_id, &session_cwd);
         cwd_ok(&session_cwd).then_some(session_id)
+    }
+
+    /// The chat's stored harness session and the cwd it was created under,
+    /// ungated: a branch resumes the session where it lives, whatever the
+    /// row's cwd says today. `None` for a tombstone or a chat that never ran.
+    fn stored_harness_session(&self, chat_id: &str) -> Option<(String, String)> {
+        if let Some(known) = lock(&self.harness_sessions).get(chat_id).cloned() {
+            return (!known.session_id.is_empty()).then_some((known.session_id, known.cwd));
+        }
+        if let Some(ws) = self.workspace()
+            && let Some((session_id, cwd)) = ws.chat_harness_session(chat_id)
+        {
+            return (!session_id.is_empty()).then_some((session_id, cwd.unwrap_or_default()));
+        }
+        self.journal_harness_session(chat_id)
+    }
+
+    /// Copy the chat's pending branch onto a request that resumes; a request
+    /// starting fresh has nothing to cut.
+    fn inject_branch(&self, chat_id: &str, request: &mut RunRequest) {
+        if request.branch.is_none() && request.resume.is_some() {
+            request.branch = self.pending_branch(chat_id);
+        }
+    }
+
+    /// The branch the chat's next run must apply: the live map, else the
+    /// journal (a `BranchPending` newer than the last `SessionStarted`).
+    fn pending_branch(&self, chat_id: &str) -> Option<SessionBranch> {
+        if let Some(branch) = lock(&self.pending_branches).get(chat_id).cloned() {
+            return Some(branch);
+        }
+        let events = self.journal.replay(chat_id, 0).ok()?;
+        let mut pending = None;
+        for (_, event) in events {
+            match event {
+                AgentEvent::BranchPending { keep, drop } => {
+                    pending = Some(SessionBranch { keep, drop })
+                }
+                AgentEvent::SessionStarted { .. } => pending = None,
+                _ => {}
+            }
+        }
+        if let Some(branch) = &pending {
+            lock(&self.pending_branches).insert(chat_id.to_string(), branch.clone());
+        }
+        pending
+    }
+
+    fn set_pending_branch(&self, chat_id: &str, branch: SessionBranch) {
+        lock(&self.pending_branches).insert(chat_id.to_string(), branch.clone());
+        self.publish(
+            chat_id,
+            &AgentEvent::BranchPending {
+                keep: branch.keep,
+                drop: branch.drop,
+            },
+        );
+    }
+
+    /// Explicit "do not resume": the next run starts a fresh harness session.
+    fn tombstone_harness_session(&self, chat_id: &str, cwd: &str) {
+        lock(&self.pending_branches).remove(chat_id);
+        lock(&self.harness_sessions).insert(
+            chat_id.to_string(),
+            HarnessSessionRef {
+                session_id: String::new(),
+                cwd: cwd.to_string(),
+            },
+        );
+        if let Some(ws) = self.workspace() {
+            ws.set_chat_harness_session(chat_id, "", cwd);
+        }
+    }
+
+    /// Every doc entry's harness anchor from the journal, latest per entry.
+    fn anchors(&self, chat_id: &str) -> HashMap<String, String> {
+        let mut anchors = HashMap::new();
+        if let Ok(events) = self.journal.replay(chat_id, 0) {
+            for (_, event) in events {
+                if let AgentEvent::Anchor {
+                    id,
+                    entry_id: Some(entry_id),
+                    ..
+                } = event
+                {
+                    anchors.insert(entry_id, id);
+                }
+            }
+        }
+        anchors
     }
 
     /// The last harness session id named anywhere in the chat's journal, with
@@ -1985,6 +2270,9 @@ async fn drive_run(
     }
     let mut prepared_events = std::collections::VecDeque::new();
     let mut entry_id = new_id();
+    // The user entry the harness is currently answering: the dispatch's
+    // prompt, then each confirmed steer in turn. Anchors file under it.
+    let mut current_user_id = resume_state.user_message_id.clone();
     let mut segment_started = now_ms();
     let mut writer: Option<SegmentWriter<'_>> = None;
     let mut dirty = false;
@@ -2529,6 +2817,21 @@ async fn drive_run(
         if matches!(&event, AgentEvent::ReasoningDelta { text } if text.is_empty()) {
             continue;
         }
+        let event = match event {
+            AgentEvent::Anchor {
+                role,
+                id,
+                entry_id: None,
+            } => AgentEvent::Anchor {
+                role,
+                id,
+                entry_id: Some(match role {
+                    AnchorRole::User => current_user_id.clone(),
+                    AnchorRole::Assistant => entry_id.clone(),
+                }),
+            },
+            event => event,
+        };
 
         // Stale tool echoes: a ToolCall/ToolResult naming an id folded in a
         // PRIOR segment (the fold reset at a steer or park since) belongs to
@@ -2651,8 +2954,9 @@ async fn drive_run(
             if let Some(h) = lock(&inner.runs)
                 .get(&chat_id)
                 .filter(|h| h.run_id == run_id)
+                && let Some(steer) = lock(&h.routed_steers).pop_front()
             {
-                lock(&h.routed_steers).pop_front();
+                current_user_id = steer.message_id;
             }
             continue;
         }
@@ -2955,6 +3259,7 @@ mod tests {
             resume: None,
             attachments: Vec::new(),
             worktree: None,
+            branch: None,
         }
     }
 

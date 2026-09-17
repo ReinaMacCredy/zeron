@@ -189,6 +189,7 @@ fn run_payload(message_id: &str, cwd: &str) -> SessionCommandPayload {
             attachments: Vec::new(),
             resume: None,
             worktree: None,
+            branch: None,
         },
         message_id: message_id.into(),
     }

@@ -667,6 +667,10 @@ pub struct AppState {
     /// reads it to decide whether to offer its reopen pill; the shell owns
     /// the writes (tab opened / closed).
     pub open_sidechat_tabs: HashSet<String>,
+    /// Whether each probed harness can fork or rewind a session (the
+    /// `branching` half of the composer's `HarnessCompaction` probe).
+    /// Unprobed harnesses are treated as able; the engine has the last word.
+    pub harness_branching: HashMap<HarnessId, bool>,
     /// The selected chat's opening `WatchDocMessages` reset has landed. An
     /// empty transcript is otherwise indistinguishable from the pre-replay
     /// gap after selection, where optimistic echoes may already be visible.
@@ -762,6 +766,7 @@ impl AppState {
             context_usage: None,
             compacting_chat: None,
             open_sidechat_tabs: HashSet::new(),
+            harness_branching: HashMap::new(),
             transcript_replayed: false,
             transcript_revision: 0,
             echoes: HashMap::new(),

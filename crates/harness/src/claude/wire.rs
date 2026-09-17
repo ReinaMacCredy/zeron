@@ -99,6 +99,11 @@ pub(crate) struct MessageFrame {
     pub parent_tool_use_id: Option<String>,
     #[serde(default)]
     pub message: MessageBody,
+    /// The CLI's own id for this message in its transcript — the handle
+    /// `--resume-session-at` cuts at. User frames carry it only under
+    /// `--replay-user-messages`.
+    #[serde(default)]
+    pub uuid: Option<String>,
     /// Terse assistant-level error code (`rate_limit`, `billing_error`, …).
     #[serde(default)]
     pub error: Option<String>,

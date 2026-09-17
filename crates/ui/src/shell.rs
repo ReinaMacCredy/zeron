@@ -56,7 +56,7 @@ use crate::state::{
 };
 use crate::terminal::panel::{TerminalPanel, ToggleTerminal, clamp_terminal_height};
 use crate::theme::Theme;
-use crate::transcript::{self, Transcript, TranscriptEvent};
+use crate::transcript::{self, BranchKind, Transcript, TranscriptEvent};
 use crate::workspace_links::resolve_workspace_file_link;
 
 mod command_palette;
@@ -1281,6 +1281,18 @@ struct SidechatTab {
 /// Sidebar render identity lets transcript/caret frames reuse its GPUI scene.
 /// State and event handlers stay on Shell. Explicit Shell notifications still
 /// invalidate the sidebar, including selection, menus, theme and navigation.
+/// A pending fork/rewind confirmation.
+#[derive(Clone)]
+struct BranchModal {
+    chat_id: String,
+    entry_id: String,
+    kind: BranchKind,
+    excerpt: SharedString,
+    /// The RPC is out; the option row reads as in progress and clicks are
+    /// ignored until it lands.
+    busy: bool,
+}
+
 struct SidebarPane {
     shell: gpui::WeakEntity<Shell>,
     _observation: Subscription,
@@ -1434,6 +1446,8 @@ pub struct Shell {
     rename_dialog: Option<RenameChatDialog>,
     /// Chat id awaiting delete confirmation.
     delete_confirm: Option<String>,
+    /// The fork/rewind confirmation, centered like the delete dialog.
+    branch_modal: Option<BranchModal>,
     /// Space-row context menu (dropdown rows): (space id, window position).
     space_menu: popover::Popup<(String, Point<Pixels>)>,
     rename_space_dialog: Option<RenameSpaceDialog>,
@@ -1812,6 +1826,7 @@ impl Shell {
             chat_menu: popover::Popup::default(),
             rename_dialog: None,
             delete_confirm: None,
+            branch_modal: None,
             space_menu: popover::Popup::default(),
             rename_space_dialog: None,
             delete_space_confirm: None,
@@ -3070,7 +3085,115 @@ impl Shell {
                     cx,
                 );
             }
+            TranscriptEvent::Branch {
+                chat_id,
+                entry_id,
+                kind,
+                excerpt,
+                blocked,
+            } => {
+                if let Some(reason) = blocked {
+                    self.note_composer_failure(reason.clone(), cx);
+                    return;
+                }
+                self.branch_modal = Some(BranchModal {
+                    chat_id: chat_id.clone(),
+                    entry_id: entry_id.clone(),
+                    kind: *kind,
+                    excerpt: transcript::single_line(excerpt).into(),
+                    busy: false,
+                });
+                cx.notify();
+            }
         }
+    }
+
+    fn note_composer_failure(&mut self, message: String, cx: &mut Context<Self>) {
+        self.composer.update(cx, |composer, cx| {
+            composer.failure = Some(message.into());
+            cx.notify();
+        });
+    }
+
+    /// Fire the confirmed fork or rewind at the chat's host. A fork opens the
+    /// new chat; a rewind hands the removed prompt back to the composer.
+    fn confirm_branch(&mut self, cx: &mut Context<Self>) {
+        let Some(modal) = self.branch_modal.as_mut().filter(|m| !m.busy) else {
+            return;
+        };
+        modal.busy = true;
+        let modal = modal.clone();
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.branch_modal = None;
+            self.note_composer_failure("Engine not connected".into(), cx);
+            return;
+        };
+        let target = {
+            let state = self.state.read(cx);
+            state
+                .chats
+                .iter()
+                .find(|c| c.id == modal.chat_id)
+                .map(|c| c.device_id.clone())
+                .filter(|id| state.local_device_id.as_deref() != Some(id.as_str()))
+        };
+        let new_chat_id = uuid::Uuid::new_v4().to_string();
+        let (method, mut params) = match modal.kind {
+            BranchKind::Fork => (
+                methods::FORK_CHAT,
+                serde_json::json!({
+                    "sourceChatId": modal.chat_id,
+                    "entryId": modal.entry_id,
+                    "chatId": new_chat_id,
+                }),
+            ),
+            BranchKind::Rewind => (
+                methods::REWIND_CHAT,
+                serde_json::json!({ "chatId": modal.chat_id, "entryId": modal.entry_id }),
+            ),
+        };
+        if let (Some(target), Some(object)) = (target, params.as_object_mut()) {
+            object.insert("targetDeviceId".into(), target.into());
+        }
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = engine.client().call(method, params).await;
+            this.update(cx, |shell, cx| {
+                shell.branch_modal = None;
+                match (result, modal.kind) {
+                    (Ok(_), BranchKind::Fork) => shell.open_chat(new_chat_id, cx),
+                    (Ok(value), BranchKind::Rewind) => {
+                        let prompt = value
+                            .get("prompt")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        // A sidechat rewound from its tab gets the prompt
+                        // back in the TAB's composer, not the main one.
+                        let composer = shell
+                            .sidechat_tabs
+                            .values()
+                            .find(|tab| tab.chat_id == modal.chat_id)
+                            .map(|tab| tab.composer.clone())
+                            .unwrap_or_else(|| shell.composer.clone());
+                        let is_main = composer == shell.composer;
+                        composer.update(cx, |composer, cx| {
+                            composer
+                                .input
+                                .update(cx, |input, cx| input.set_text(prompt, cx));
+                            cx.notify();
+                        });
+                        if is_main {
+                            shell.focus_composer(cx);
+                        }
+                    }
+                    (Err(err), _) => shell.note_composer_failure(err.to_string(), cx),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// A spawn chip's "Open subagent": focus the existing tab for that doc,
@@ -4277,6 +4400,7 @@ impl Shell {
     /// stranding it over a session the user never picked.
     pub(super) fn overlay_owns_keyboard(&self, cx: &App) -> bool {
         self.command_palette.is_some()
+            || self.branch_modal.is_some()
             || self.add_space.is_some()
             || self.composer.read(cx).pickers().read(cx).is_open()
     }
@@ -7503,11 +7627,114 @@ impl Shell {
             overlays.push(popover::modal("delete-chat-dialog", viewport, card));
         }
 
+        if let Some(modal) = self.branch_modal.clone() {
+            overlays.push(self.render_branch_modal(modal, viewport, &theme, cx));
+        }
+
         if let Some(sync) = self.render_sync_overlay(viewport, cx) {
             overlays.push(sync);
         }
 
         overlays
+    }
+
+    /// Fork: "new chat through this reply". Rewind: "this chat loses the
+    /// prompt and everything after; the prompt returns to the composer".
+    /// One option row each in v1 (conversation only, same workspace).
+    fn render_branch_modal(
+        &mut self,
+        modal: BranchModal,
+        viewport: gpui::Size<Pixels>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let excerpt = if modal.excerpt.is_empty() {
+            String::new()
+        } else {
+            let mut text: String = modal.excerpt.chars().take(72).collect();
+            if modal.excerpt.chars().count() > 72 {
+                text.push('\u{2026}');
+            }
+            format!("\u{201C}{text}\u{201D}")
+        };
+        let (title, context, option, detail, glyph, danger) = match modal.kind {
+            BranchKind::Fork => (
+                "Fork chat from here",
+                format!("After {excerpt}"),
+                "Fork in this workspace",
+                "New chat with the conversation through this reply. This chat stays as is.",
+                icons::GIT_BRANCH,
+                false,
+            ),
+            BranchKind::Rewind => (
+                "Rewind to here",
+                format!("Before {excerpt}"),
+                "Restore conversation",
+                "Removes this prompt and everything after it and puts the prompt back in the composer. Files on disk stay as they are.",
+                icons::RESTART,
+                true,
+            ),
+        };
+        let option_row = popover::menu_row(theme, false, "branch-modal-option")
+            .id("branch-modal-option")
+            .px(px(12.0))
+            .py(px(10.0))
+            .when(modal.busy, |el| el.opacity(0.6))
+            .on_click(cx.listener(|this, _, _, cx| this.confirm_branch(cx)))
+            .child(icon(glyph).size(px(18.0)).text_color(if danger {
+                theme.danger
+            } else {
+                theme.text_muted
+            }))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .text_size(crate::typography::ui_rems(14.0))
+                            .text_color(if danger { theme.danger } else { theme.text })
+                            .child(SharedString::from(if modal.busy {
+                                format!("{option}\u{2026}")
+                            } else {
+                                option.to_string()
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(detail)),
+                    ),
+            );
+        let card = popover::dialog_card(theme)
+            .w(px(520.0))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                if this.branch_modal.as_ref().is_some_and(|m| !m.busy) {
+                    this.branch_modal = None;
+                    cx.notify();
+                }
+            }))
+            .child(popover::dialog_title(theme, title))
+            .child(
+                div()
+                    .mt(px(6.0))
+                    .child(popover::dialog_body(theme, context)),
+            )
+            .child(div().mt(px(14.0)).child(option_row))
+            .child(
+                div().mt(px(12.0)).flex().flex_row().justify_end().child(
+                    popover::btn_ghost(theme, "Cancel", "branch-modal-cancel")
+                        .id("branch-modal-cancel")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.branch_modal = None;
+                            cx.notify();
+                        })),
+                ),
+            )
+            .into_any_element();
+        popover::modal("branch-modal", viewport, card)
     }
 
     fn resize_handle<T>(

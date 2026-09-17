@@ -162,6 +162,7 @@ async fn transcript_survives_open_racing_create_chat() {
                         auto_approve: true,
                         attachments: Vec::new(),
                         worktree: None,
+                        branch: None,
                         resume: None,
                     },
                     message_id: "msg-race-1".into(),

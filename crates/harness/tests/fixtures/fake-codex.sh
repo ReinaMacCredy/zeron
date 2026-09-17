@@ -67,6 +67,11 @@ if has "$line" '"method":"thread/resume"'; then
   else
     emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-resumed\"}}}"
   fi
+elif has "$line" '"method":"thread/fork"'; then
+  # A branch: the source thread id plus the last turn to keep, nothing else.
+  has "$line" '"threadId":"resume-ok"' || exit 1
+  has "$line" '"lastTurnId":"t-keep"' || exit 1
+  emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-forked\",\"forkedFromId\":\"resume-ok\"}}}"
 elif has "$line" '"method":"thread/start"'; then
   emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-1\"}}}"
 else

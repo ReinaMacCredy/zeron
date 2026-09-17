@@ -51,6 +51,12 @@ pub mod methods {
     /// replying with the created `Chat` row. The first prompt is the caller's
     /// to send afterwards, as an ordinary `QueueCommand` Run on `chatId`.
     pub const CREATE_SIDECHAT: &str = "CreateSidechat";
+    /// Fork `sourceChatId` after the assistant entry `entryId` into the
+    /// client-minted `chatId`, replying with the created `Chat` row.
+    pub const FORK_CHAT: &str = "ForkChat";
+    /// Rewind `chatId` to before the user entry `entryId`, replying with
+    /// `{prompt, removed}`.
+    pub const REWIND_CHAT: &str = "RewindChat";
     pub const QUEUE_COMMAND: &str = "QueueCommand";
     /// Peer-to-peer delivery fallback: the SENDER's engine forwards a queued
     /// command entry (client-minted id and all) straight over the device-room

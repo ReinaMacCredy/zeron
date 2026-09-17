@@ -121,6 +121,13 @@ pub trait Harness: Send + Sync {
         ))
     }
 
+    /// Whether the driver can start a run on a copy of a resumed session cut
+    /// at a [`zeron_proto::SessionBranch`] (fork and rewind). Drivers that
+    /// return true emit [`AgentEvent::Anchor`] for prompts and replies.
+    fn branching(&self) -> bool {
+        false
+    }
+
     /// Run one (persistent) session; the stream ends with `AgentEvent::Done`.
     async fn run(
         &self,

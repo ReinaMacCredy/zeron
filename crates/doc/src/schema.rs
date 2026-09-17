@@ -347,6 +347,25 @@ impl SessionDoc {
         Ok(())
     }
 
+    /// Delete every entry from the one with `entry_id` to the end, in raw
+    /// list order (continuations included). Returns how many were removed;
+    /// `Ok(0)` when no entry has that id.
+    pub fn truncate_from(&self, entry_id: &str) -> Result<usize, DocError> {
+        let messages = self.doc.get_list("messages");
+        let raw: Vec<serde_json::Value> =
+            serde_json::from_value(messages.get_deep_value().to_json_value())?;
+        let Some(ix) = raw
+            .iter()
+            .position(|v| v.get("id").and_then(serde_json::Value::as_str) == Some(entry_id))
+        else {
+            return Ok(0);
+        };
+        let len = raw.len() - ix;
+        messages.delete(ix, len)?;
+        self.doc.commit();
+        Ok(len)
+    }
+
     pub fn chat_id(&self) -> Option<String> {
         match self.doc.get_map("meta").get("chatId") {
             Some(loro::ValueOrContainer::Value(LoroValue::String(s))) => Some(s.to_string()),

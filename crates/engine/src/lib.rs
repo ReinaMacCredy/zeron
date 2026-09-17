@@ -52,7 +52,7 @@ pub use registry::{HarnessDescriptor, HarnessRegistry, default_registry};
 pub use repos::{CheckoutIdentity, Repos, worktree_branch_from_title};
 pub use rpc::EngineRpc;
 pub use run_journal::{JournalError, RunJournal};
-pub use sessions::{JournaledEvent, SessionsEngine, SteerOutcome};
+pub use sessions::{JournaledEvent, RewindOutcome, SessionsEngine, SteerOutcome};
 pub use source_control::{
     BranchHeadContext, ChangeRequestError, ChangeRequestProvider, ChangeRequestResolution,
     ChangeRequestResolver, CheckoutChangeRequestLookup, CheckoutSourceContext, GitHubCli,

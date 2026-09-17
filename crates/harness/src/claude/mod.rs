@@ -167,7 +167,13 @@ impl ClaudeHarness {
             // Undocumented flag; validated live against 2.1.228.
             "--permission-prompt-tool",
             "stdio",
+            // Echo each prompt back with its transcript uuid — the anchor a
+            // later rewind or fork cuts at.
+            "--replay-user-messages",
         ]);
+        // File checkpoints are only recorded for sessions that ran with this
+        // set; a chat that never had it can never restore code later.
+        cmd.env("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", "true");
         // The 1M context window is selected via a model-id suffix
         // (`sonnet[1m]`), exactly how the CLI itself does it; fast mode and
         // always-on thinking are settings overrides. The suffix alone can't
@@ -203,6 +209,20 @@ impl ClaudeHarness {
         }
         if let Some(resume) = &request.resume {
             cmd.arg(format!("--resume={resume}"));
+            // A branch runs on a COPY of the resumed session cut at the kept
+            // reply; `--resume-drops-turn` names the discarded prompt so the
+            // CLI accepts a cut that spans its own bookkeeping frames. Both
+            // are print-mode flags absent from `--help` (SDK `resumeSessionAt`
+            // / `resumeDropsTurn`, 2.1.223+).
+            if let Some(branch) = &request.branch {
+                cmd.arg("--fork-session");
+                if let Some(keep) = &branch.keep {
+                    cmd.arg(format!("--resume-session-at={keep}"));
+                }
+                if let Some(drop) = &branch.drop {
+                    cmd.arg(format!("--resume-drops-turn={drop}"));
+                }
+            }
         }
         let mut settings = serde_json::Map::new();
         if option_is_on(&request.model_options, "fastMode") {
@@ -376,6 +396,10 @@ impl Harness for ClaudeHarness {
     }
     /// The CLI compacts itself: `/compact` as prompt text, answered with a
     /// `system`/`compact_boundary` frame.
+    fn branching(&self) -> bool {
+        true
+    }
+
     fn compaction(&self) -> Compaction {
         Compaction::SlashText("/compact".into())
     }
@@ -925,6 +949,7 @@ mod tests {
                 resume: None,
                 attachments: Vec::new(),
                 worktree: None,
+                branch: None,
             };
             if let Some(choice) = choice {
                 request
@@ -952,6 +977,77 @@ mod tests {
         );
         assert_eq!(build(Some("200k")), (Some("claude-fable-5-1".into()), true));
         assert_eq!(build(None), (Some("claude-fable-5-1".into()), false));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_branch_forks_the_resumed_session_at_the_kept_reply() {
+        let harness = ClaudeHarness::new();
+        let exe = PathBuf::from("/usr/bin/true");
+        let mut request = RunRequest {
+            prompt: "again".into(),
+            harness: None,
+            model: None,
+            reasoning: None,
+            model_options: serde_json::Map::new(),
+            cwd: String::new(),
+            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+            auto_approve: false,
+            resume: Some("sess-a".into()),
+            attachments: Vec::new(),
+            worktree: None,
+            branch: Some(zeron_proto::SessionBranch {
+                keep: Some("uuid-reply-1".into()),
+                drop: Some("uuid-prompt-2".into()),
+            }),
+        };
+        let args = |cmd: &Command| -> Vec<String> {
+            cmd.as_std()
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        let cmd = harness.build_command(&exe, &request);
+        let argv = args(&cmd);
+        for flag in [
+            "--resume=sess-a",
+            "--fork-session",
+            "--resume-session-at=uuid-reply-1",
+            "--resume-drops-turn=uuid-prompt-2",
+            "--replay-user-messages",
+        ] {
+            assert!(
+                argv.iter().any(|a| a == flag),
+                "{flag} missing from {argv:?}"
+            );
+        }
+        let env: Vec<(String, Option<String>)> = cmd
+            .as_std()
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        assert!(
+            env.contains(&(
+                "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING".to_string(),
+                Some("true".to_string())
+            )),
+            "{env:?}"
+        );
+
+        // No branch: a plain resume, never a fork.
+        request.branch = None;
+        let argv = args(&harness.build_command(&exe, &request));
+        assert!(argv.iter().any(|a| a == "--resume=sess-a"));
+        assert!(
+            !argv
+                .iter()
+                .any(|a| a.starts_with("--fork") || a.starts_with("--resume-"))
+        );
     }
 
     #[test]

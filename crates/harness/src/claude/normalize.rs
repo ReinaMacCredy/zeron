@@ -2,7 +2,7 @@
 //! decoding, error-code mapping).
 
 use serde_json::Value;
-use zeron_proto::{AgentEvent, DoneStatus, HarnessId, TodoItem, ToolCall};
+use zeron_proto::{AgentEvent, AnchorRole, DoneStatus, HarnessId, TodoItem, ToolCall};
 
 use super::wire::{ContentBlock, Frame};
 
@@ -320,9 +320,7 @@ impl Normalizer {
                         return Vec::new();
                     }
                     let status = match f.status.as_deref().unwrap_or("") {
-                        "completed" | "complete" | "succeeded" | "success" => {
-                            DoneStatus::Completed
-                        }
+                        "completed" | "complete" | "succeeded" | "success" => DoneStatus::Completed,
                         "failed" | "errored" | "error" => DoneStatus::Errored,
                         "killed" | "cancelled" | "canceled" | "stopped" | "interrupted" => {
                             DoneStatus::Interrupted
@@ -475,57 +473,71 @@ impl Normalizer {
                         self.agent_spawn_tools.insert(b.id.clone());
                     }
                 }
-                let mut out: Vec<AgentEvent> = f
-                    .message
-                    .blocks()
-                    .filter(|b: &ContentBlock| b.kind == "tool_use")
-                    .flat_map(|b| {
-                        let call = AgentEvent::ToolCall {
-                            id: b.id.clone(),
-                            call: decode_tool_use(&b.name, &b.input),
-                        };
-                        // A spawn's `prompt` is the subagent's opening user
-                        // message — the wire never echoes it on the child
-                        // feed (child user frames carry tool results and
-                        // steers only), so seed it here and the subagent
-                        // transcript starts the way every chat does.
-                        let opening = matches!(b.name.as_str(), "Agent" | "Task")
-                            .then(|| b.input.get("prompt"))
-                            .flatten()
-                            .and_then(Value::as_str)
-                            .filter(|p| !p.trim().is_empty())
-                            .map(|prompt| tag(
-                                &b.id,
-                                AgentEvent::UserMessage {
-                                    text: prompt.to_owned(),
-                                },
-                            ));
-                        // A SendMessage steer never echoes on the child feed
-                        // (live-verified) — surface it from the parent's own
-                        // call, re-keyed onto the spawn it addresses.
-                        let steer = (b.name == "SendMessage")
-                            .then(|| {
-                                let to = ["to", "recipient"]
-                                    .iter()
-                                    .find_map(|k| b.input.get(*k))
-                                    .and_then(Value::as_str)?;
-                                let spawn = self.agent_tasks.get(to)?;
-                                let text = ["message", "content"]
-                                    .iter()
-                                    .find_map(|k| b.input.get(*k))
-                                    .and_then(Value::as_str)
-                                    .filter(|m| !m.trim().is_empty())?;
-                                Some(tag(
-                                    spawn,
-                                    AgentEvent::UserMessage {
-                                        text: text.to_owned(),
-                                    },
-                                ))
-                            })
-                            .flatten();
-                        std::iter::once(call).chain(opening).chain(steer)
-                    })
-                    .collect();
+                // Every main-channel assistant message is a cut point; the
+                // engine keeps the latest one per reply entry.
+                let anchor =
+                    f.uuid
+                        .as_deref()
+                        .filter(|u| !u.is_empty())
+                        .map(|uuid| AgentEvent::Anchor {
+                            role: AnchorRole::Assistant,
+                            id: uuid.to_owned(),
+                            entry_id: None,
+                        });
+                let mut out: Vec<AgentEvent> = anchor.into_iter().collect();
+                out.extend(
+                    f.message
+                        .blocks()
+                        .filter(|b: &ContentBlock| b.kind == "tool_use")
+                        .flat_map(|b| {
+                            let call = AgentEvent::ToolCall {
+                                id: b.id.clone(),
+                                call: decode_tool_use(&b.name, &b.input),
+                            };
+                            // A spawn's `prompt` is the subagent's opening user
+                            // message — the wire never echoes it on the child
+                            // feed (child user frames carry tool results and
+                            // steers only), so seed it here and the subagent
+                            // transcript starts the way every chat does.
+                            let opening = matches!(b.name.as_str(), "Agent" | "Task")
+                                .then(|| b.input.get("prompt"))
+                                .flatten()
+                                .and_then(Value::as_str)
+                                .filter(|p| !p.trim().is_empty())
+                                .map(|prompt| {
+                                    tag(
+                                        &b.id,
+                                        AgentEvent::UserMessage {
+                                            text: prompt.to_owned(),
+                                        },
+                                    )
+                                });
+                            // A SendMessage steer never echoes on the child feed
+                            // (live-verified) — surface it from the parent's own
+                            // call, re-keyed onto the spawn it addresses.
+                            let steer = (b.name == "SendMessage")
+                                .then(|| {
+                                    let to = ["to", "recipient"]
+                                        .iter()
+                                        .find_map(|k| b.input.get(*k))
+                                        .and_then(Value::as_str)?;
+                                    let spawn = self.agent_tasks.get(to)?;
+                                    let text = ["message", "content"]
+                                        .iter()
+                                        .find_map(|k| b.input.get(*k))
+                                        .and_then(Value::as_str)
+                                        .filter(|m| !m.trim().is_empty())?;
+                                    Some(tag(
+                                        spawn,
+                                        AgentEvent::UserMessage {
+                                            text: text.to_owned(),
+                                        },
+                                    ))
+                                })
+                                .flatten();
+                            std::iter::once(call).chain(opening).chain(steer)
+                        }),
+                );
                 for b in f.message.blocks() {
                     out.extend(self.advisor_events(None, &b));
                 }
@@ -604,15 +616,43 @@ impl Normalizer {
                     );
                     return out;
                 }
-                f.message
-                    .blocks()
-                    .filter(|b: &ContentBlock| b.kind == "tool_result")
-                    .map(|b| AgentEvent::ToolResult {
-                        id: b.tool_use_id.clone(),
-                        is_error: b.is_error.unwrap_or(false),
-                        output: None,
-                        diff: None,
+                // A replayed prompt (`--replay-user-messages`) names the
+                // checkpoint before it; tool-result frames carry no text and
+                // no anchor of their own.
+                let anchor = f
+                    .uuid
+                    .as_deref()
+                    .filter(|u| !u.is_empty())
+                    .filter(|_| {
+                        // The driver sends prompts as a plain string, and
+                        // the echo keeps that shape; steers and SDK callers
+                        // use text blocks.
+                        let plain = f.message.content.as_str().map(str::trim);
+                        plain.is_some_and(|t| !t.is_empty() && !is_synthetic_user_text(t))
+                            || f.message.blocks().any(|b: ContentBlock| {
+                                b.kind == "text"
+                                    && !b.text.trim().is_empty()
+                                    && !is_synthetic_user_text(&b.text)
+                            })
                     })
+                    .map(|uuid| AgentEvent::Anchor {
+                        role: AnchorRole::User,
+                        id: uuid.to_owned(),
+                        entry_id: None,
+                    });
+                anchor
+                    .into_iter()
+                    .chain(
+                        f.message
+                            .blocks()
+                            .filter(|b: &ContentBlock| b.kind == "tool_result")
+                            .map(|b| AgentEvent::ToolResult {
+                                id: b.tool_use_id.clone(),
+                                is_error: b.is_error.unwrap_or(false),
+                                output: None,
+                                diff: None,
+                            }),
+                    )
                     .collect()
             }
 
@@ -801,6 +841,62 @@ mod tests {
     /// Sanitized live frames from claude 2.1.273 running `/compact` under
     /// `--print --input-format stream-json --output-format stream-json
     /// --verbose --resume <id>`, in wire order.
+    #[test]
+    fn replayed_prompts_and_assistant_frames_carry_anchors() {
+        let user = normalize_one(
+            r#"{"type":"user","uuid":"u-1","message":{"role":"user","content":[{"type":"text","text":"fix the bug"}]}}"#,
+        );
+        assert_eq!(
+            user,
+            vec![AgentEvent::Anchor {
+                role: AnchorRole::User,
+                id: "u-1".into(),
+                entry_id: None,
+            }]
+        );
+        // The driver's own prompt shape: a plain string, echoed back as is.
+        let plain = normalize_one(
+            r#"{"type":"user","uuid":"u-3","message":{"role":"user","content":"fix the bug"}}"#,
+        );
+        assert_eq!(
+            plain,
+            vec![AgentEvent::Anchor {
+                role: AnchorRole::User,
+                id: "u-3".into(),
+                entry_id: None,
+            }]
+        );
+        // Tool-result frames name no checkpoint, uuid or not.
+        let results = normalize_one(
+            r#"{"type":"user","uuid":"u-2","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}"#,
+        );
+        assert!(
+            !results
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Anchor { .. })),
+            "{results:?}"
+        );
+        let assistant = normalize_one(
+            r#"{"type":"assistant","uuid":"a-1","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}"#,
+        );
+        assert_eq!(
+            assistant.first(),
+            Some(&AgentEvent::Anchor {
+                role: AnchorRole::Assistant,
+                id: "a-1".into(),
+                entry_id: None,
+            })
+        );
+        // Subagent traffic is never a cut point of the parent session.
+        let child = normalize_one(
+            r#"{"type":"assistant","uuid":"a-2","parent_tool_use_id":"toolu_sub","message":{"role":"assistant","content":[{"type":"text","text":"child"}]}}"#,
+        );
+        assert!(
+            !child.iter().any(|e| matches!(e, AgentEvent::Anchor { .. })),
+            "{child:?}"
+        );
+    }
+
     #[test]
     fn compact_boundary_is_the_only_event_a_compaction_run_produces() {
         let mut normalizer = Normalizer::new();
@@ -1104,8 +1200,7 @@ mod tests {
         ] {
             let ev = normalize_one(frame);
             assert!(
-                !ev.iter()
-                    .any(|e| matches!(e, AgentEvent::Subagent { .. })),
+                !ev.iter().any(|e| matches!(e, AgentEvent::Subagent { .. })),
                 "{frame}: {ev:?}"
             );
         }
@@ -1281,10 +1376,12 @@ mod tests {
             r#"{"type":"system","subtype":"task_notification","tool_use_id":"toolu_agent","status":"running"}"#,
         )
         .is_empty());
-        assert!(normalize_one(
-            r#"{"type":"system","subtype":"task_notification","status":"completed"}"#,
-        )
-        .is_empty());
+        assert!(
+            normalize_one(
+                r#"{"type":"system","subtype":"task_notification","status":"completed"}"#,
+            )
+            .is_empty()
+        );
     }
 
     #[test]

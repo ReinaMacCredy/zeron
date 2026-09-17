@@ -313,6 +313,7 @@ mod tests {
             auto_approve: false,
             attachments: Vec::new(),
             worktree: None,
+            branch: None,
             resume: None,
         }
     }

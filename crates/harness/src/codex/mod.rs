@@ -53,8 +53,9 @@ use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc;
 
 use zeron_proto::{
-    AgentEvent, Compaction, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice,
-    ReasoningLevel, RunRequest, SlashCommand, SteeringMode, UserInputAnswer, UserInputQuestion,
+    AgentEvent, AnchorRole, Compaction, DoneStatus, HarnessId, Model, ModelOption,
+    ModelOptionChoice, ReasoningLevel, RunRequest, SlashCommand, SteeringMode, UserInputAnswer,
+    UserInputQuestion,
 };
 
 use crate::jsonrpc::{Incoming, RpcClient};
@@ -547,6 +548,10 @@ impl Harness for CodexHarness {
     }
     /// `thread/compact/start` on the app-server wire, resolved by
     /// `thread/compacted` — no prompt text reaches the model.
+    fn branching(&self) -> bool {
+        true
+    }
+
     fn compaction(&self) -> Compaction {
         Compaction::Native
     }
@@ -958,7 +963,19 @@ async fn run_session(session: Session) {
                 }
             }
         }
-        let thread = if let Some(resume) = &request.resume {
+        let thread = if let (Some(resume), Some(branch)) = (&request.resume, &request.branch)
+            && let Some(keep) = &branch.keep
+        {
+            // A branch copies the rollout through the kept turn onto a new
+            // thread. No fallback: resuming the source instead would append
+            // this run to the history the caller asked to leave behind.
+            client
+                .request(
+                    "thread/fork",
+                    json!({ "threadId": resume, "lastTurnId": keep }),
+                )
+                .await?
+        } else if let Some(resume) = &request.resume {
             let mut p = start_params.clone();
             p.insert("threadId".into(), Value::String(resume.clone()));
             match client.request("thread/resume", Value::Object(p)).await {
@@ -1060,7 +1077,24 @@ async fn run_session(session: Session) {
 
     let mut router = TurnRouter::default();
     match start_turn(&client, turn_params(&request.prompt)).await {
-        Ok(id) => router.adopt_started(id),
+        Ok(id) => {
+            // The turn id is the unit `thread/fork` cuts at.
+            if !id.is_empty()
+                && !send(
+                    &event_tx,
+                    AgentEvent::Anchor {
+                        role: AnchorRole::Assistant,
+                        id: id.clone(),
+                        entry_id: None,
+                    },
+                )
+                .await
+            {
+                shutdown_child(&mut child, kill_grace).await;
+                return;
+            }
+            router.adopt_started(id)
+        }
         Err(e) => {
             let _ = event_tx
                 .send(Ok(AgentEvent::Done {
@@ -1779,10 +1813,10 @@ async fn steer_as_new_turn(
 ) -> bool {
     match start_turn(client, params).await {
         Ok(id) => {
-            router.adopt_started(id);
+            router.adopt_started(id.clone());
             *done_current = false;
             let (prev, next) = rotate(assistant_message_id);
-            send(
+            if !send(
                 event_tx,
                 AgentEvent::Steered {
                     assistant_message_id: Some(prev),
@@ -1790,6 +1824,20 @@ async fn steer_as_new_turn(
                 },
             )
             .await
+            {
+                return false;
+            }
+            // After the boundary, so the engine files it under the new reply.
+            id.is_empty()
+                || send(
+                    event_tx,
+                    AgentEvent::Anchor {
+                        role: AnchorRole::Assistant,
+                        id,
+                        entry_id: None,
+                    },
+                )
+                .await
         }
         Err(e) => {
             let _ = send(

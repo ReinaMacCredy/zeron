@@ -47,6 +47,7 @@ fn request(prompt: &str) -> RunRequest {
         auto_approve: true,
         attachments: Vec::new(),
         worktree: None,
+        branch: None,
         resume: None,
     }
 }
@@ -589,6 +590,34 @@ async fn resume_reuses_the_existing_thread() {
             AgentEvent::SessionStarted { session_id, .. } if session_id == "th-resumed"
         )),
         "resumed thread expected: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_branch_forks_the_thread_and_anchors_the_turn() {
+    let (controls, _steer, _token) = controls("Yes");
+    let mut req = request("scenario:resumed");
+    req.resume = Some("resume-ok".into());
+    req.branch = Some(zeron_proto::SessionBranch {
+        keep: Some("t-keep".into()),
+        drop: None,
+    });
+    let events = run_to_end(&harness(), req, controls).await;
+
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            AgentEvent::SessionStarted { session_id, .. } if session_id == "th-forked"
+        )),
+        "forked thread expected: {events:?}"
+    );
+    assert!(
+        events.contains(&AgentEvent::Anchor {
+            role: zeron_proto::AnchorRole::Assistant,
+            id: "t-1".into(),
+            entry_id: None,
+        }),
+        "turn anchor expected: {events:?}"
     );
 }
 
