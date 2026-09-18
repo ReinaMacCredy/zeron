@@ -2753,6 +2753,12 @@ impl DocHost {
                 permission_mode: zeron_proto::PermissionMode::Ask,
             });
             if let Some(harness) = harness {
+                // A model id belongs to one harness; carrying it across would
+                // hand Codex a Claude id. Reasoning is Zeron's own ladder and
+                // survives the switch.
+                if harness != config.harness {
+                    config.model = None;
+                }
                 config.harness = harness;
             }
             if let Some(model) = model {

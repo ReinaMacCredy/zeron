@@ -77,7 +77,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "create_thread",
-            "description": "Open a new peer thread in this project and give it `prompt` as its first message. It runs this chat's harness, model and reasoning level unless `harness`, `model` or `reasoning` pick others; an unknown harness or reasoning level is an error. Counts against this turn's send budget.",
+            "description": "Open a new peer thread in this project and give it `prompt` as its first message. It runs this chat's harness, model and reasoning level unless `harness`, `model` or `reasoning` pick others; picking a different harness without a `model` uses that harness's default model, and an unknown harness or reasoning level is an error. Counts against this turn's send budget.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

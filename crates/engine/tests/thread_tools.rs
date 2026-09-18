@@ -301,7 +301,41 @@ async fn create_thread_picks_the_peers_run_settings_and_copies_the_creators_othe
         .create_thread("picky", "task", None, None, None, None)
         .await
         .unwrap();
-    assert_eq!(config_of(&copied), Some(creators));
+    assert_eq!(config_of(&copied), Some(creators.clone()));
+
+    // Switching harness drops the inherited model (it names a model of the
+    // old harness) but keeps the reasoning level, Zeron's own ladder.
+    let switched = rig
+        .core
+        .doc_host
+        .create_thread("picky", "task", None, Some(HarnessId::Codex), None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        config_of(&switched),
+        Some(zeron_proto::ChatConfig {
+            harness: HarnessId::Codex,
+            model: None,
+            ..creators.clone()
+        })
+    );
+    let switched_with_model = rig
+        .core
+        .doc_host
+        .create_thread(
+            "picky",
+            "task",
+            None,
+            Some(HarnessId::Codex),
+            Some("gpt-5.6-luna"),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        config_of(&switched_with_model).and_then(|c| c.model),
+        Some("gpt-5.6-luna".into())
+    );
 
     // A creator without a config row of its own: the pick still lands, on
     // the engine's default harness.
