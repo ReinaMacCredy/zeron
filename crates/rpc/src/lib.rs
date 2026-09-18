@@ -54,8 +54,9 @@ pub mod methods {
     // Thread tools (peer chats, d25). IPC-only; the caller identity comes from
     // the engine-spawned `zeron mcp --chat` process, never from the agent.
     /// Open a peer chat in `fromChatId`'s project, stamped `createdByChatId`,
-    /// and hand it `prompt` as its first turn.
-    /// `{fromChatId, prompt, title?, harness?}` → `{chatId}`.
+    /// and hand it `prompt` as its first turn. Omitted run settings copy the
+    /// creator's. `{fromChatId, prompt, title?, harness?, model?, reasoning?}`
+    /// → `{chatId}`.
     pub const CREATE_THREAD: &str = "CreateThread";
     /// Deliver `text` from one thread to another: a turn opens on an idle
     /// target, a working target finishes its own turn first. Self-send and

@@ -197,7 +197,14 @@ async fn create_thread_opens_a_peer_whose_first_turn_is_a_message_from_its_creat
     let peer = rig
         .core
         .doc_host
-        .create_thread("lead", "write the login tests", Some("Login tests"), None)
+        .create_thread(
+            "lead",
+            "write the login tests",
+            Some("Login tests"),
+            None,
+            None,
+            None,
+        )
         .await
         .expect("create thread");
     // Drained before the call returned: the creator's very next wait_threads
@@ -239,6 +246,75 @@ async fn create_thread_opens_a_peer_whose_first_turn_is_a_message_from_its_creat
     );
     assert!(prompts[0].ends_with("write the login tests"));
     assert_eq!(queue_len(&rig.core, &peer), 0);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn create_thread_picks_the_peers_run_settings_and_copies_the_creators_otherwise() {
+    let rig = rig(Duration::from_millis(1));
+    let creators = zeron_proto::ChatConfig {
+        harness: HarnessId::Mock,
+        model: Some("rec-1".into()),
+        reasoning: Some(ReasoningLevel::High),
+        model_options: Default::default(),
+        sandbox: SandboxLevel::ReadOnly,
+        permission_mode: zeron_proto::PermissionMode::Auto,
+    };
+    rig.core
+        .workspace
+        .create_chat(
+            "picky",
+            Some("space-tt"),
+            None,
+            Some(creators.clone()),
+            None,
+        )
+        .unwrap();
+    let config_of = |chat_id: &str| rig.core.workspace.chat(chat_id).unwrap().unwrap().config;
+
+    let chosen = rig
+        .core
+        .doc_host
+        .create_thread(
+            "picky",
+            "task",
+            None,
+            Some(HarnessId::Mock),
+            Some(" rec-2 "),
+            Some(ReasoningLevel::Low),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        config_of(&chosen),
+        Some(zeron_proto::ChatConfig {
+            model: Some("rec-2".into()),
+            reasoning: Some(ReasoningLevel::Low),
+            ..creators.clone()
+        }),
+        "the picks land on the row; sandbox and permissions stay the creator's"
+    );
+
+    let copied = rig
+        .core
+        .doc_host
+        .create_thread("picky", "task", None, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(config_of(&copied), Some(creators));
+
+    // A creator without a config row of its own: the pick still lands, on
+    // the engine's default harness.
+    let from_bare = rig
+        .core
+        .doc_host
+        .create_thread("lead", "task", None, None, Some("rec-3"), None)
+        .await
+        .unwrap();
+    let config = config_of(&from_bare).expect("a config row");
+    assert_eq!(config.harness, HarnessId::Mock);
+    assert_eq!(config.model.as_deref(), Some("rec-3"));
+    assert_eq!(config.reasoning, None);
     rig.core.shutdown().await;
 }
 
@@ -286,7 +362,7 @@ async fn a_message_to_a_working_peer_waits_and_take_moves_it_into_the_transcript
     let peer = rig
         .core
         .doc_host
-        .create_thread("lead", "first task", None, None)
+        .create_thread("lead", "first task", None, None, None, None)
         .await
         .unwrap();
     wait_for(
@@ -439,14 +515,14 @@ async fn the_creation_budget_refuses_the_ninth_open_thread() {
     for n in 0..8 {
         rig.core
             .doc_host
-            .create_thread("lead", &format!("task {n}"), None, None)
+            .create_thread("lead", &format!("task {n}"), None, None, None, None)
             .await
             .unwrap_or_else(|e| panic!("thread {n}: {e}"));
     }
     let err = rig
         .core
         .doc_host
-        .create_thread("lead", "one too many", None, None)
+        .create_thread("lead", "one too many", None, None, None, None)
         .await
         .expect_err("ninth");
     assert!(err.to_string().contains("8 open threads"), "{err}");

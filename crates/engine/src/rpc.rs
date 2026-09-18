@@ -115,6 +115,10 @@ struct CreateThreadParams {
     title: Option<String>,
     #[serde(default)]
     harness: Option<HarnessId>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    reasoning: Option<zeron_proto::ReasoningLevel>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1496,7 +1500,14 @@ impl RpcService for EngineRpc {
                 let p: CreateThreadParams = parse_params(params)?;
                 let chat_id = self
                     .doc_host
-                    .create_thread(&p.from_chat_id, &p.prompt, p.title.as_deref(), p.harness)
+                    .create_thread(
+                        &p.from_chat_id,
+                        &p.prompt,
+                        p.title.as_deref(),
+                        p.harness,
+                        p.model.as_deref(),
+                        p.reasoning,
+                    )
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "chatId": chat_id }))
@@ -2618,6 +2629,30 @@ impl RpcService for EngineRpc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn create_thread_params_refuse_an_unknown_harness_or_reasoning_level() {
+        let base = serde_json::json!({ "fromChatId": "a", "prompt": "go" });
+        let mut bad_reasoning = base.clone();
+        bad_reasoning["reasoning"] = "very-high".into();
+        assert!(matches!(
+            parse_params::<CreateThreadParams>(bad_reasoning),
+            Err(RpcError::BadParams(_))
+        ));
+        let mut bad_harness = base.clone();
+        bad_harness["harness"] = "gemini".into();
+        assert!(matches!(
+            parse_params::<CreateThreadParams>(bad_harness),
+            Err(RpcError::BadParams(_))
+        ));
+        let p: CreateThreadParams = parse_params(serde_json::json!({
+            "fromChatId": "a", "prompt": "go", "harness": "codex", "model": "gpt-5", "reasoning": "xhigh"
+        }))
+        .unwrap();
+        assert_eq!(p.harness, Some(HarnessId::Codex));
+        assert_eq!(p.model.as_deref(), Some("gpt-5"));
+        assert_eq!(p.reasoning, Some(zeron_proto::ReasoningLevel::XHigh));
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn local_opening_tail_arrives_before_full_mirror_and_keeps_all_history() {

@@ -2711,14 +2711,17 @@ impl DocHost {
     }
 
     /// Thread tools: open a peer chat in the creator's project (its cwd and
-    /// run configuration, another enabled harness if asked) stamped
-    /// `createdByChatId`, and hand it `prompt` as a message from the creator.
+    /// run configuration, with any of harness/model/reasoning overridden if
+    /// asked) stamped `createdByChatId`, and hand it `prompt` as a message
+    /// from the creator.
     pub async fn create_thread(
         &self,
         from_chat_id: &str,
         prompt: &str,
         title: Option<&str>,
         harness: Option<zeron_proto::HarnessId>,
+        model: Option<&str>,
+        reasoning: Option<zeron_proto::ReasoningLevel>,
     ) -> Result<String, EngineError> {
         let workspace = self
             .workspace()
@@ -2739,19 +2742,24 @@ impl DocHost {
             )));
         }
         let mut config = from.config.clone();
-        if let Some(harness) = harness {
-            match &mut config {
-                Some(config) => config.harness = harness,
-                None => {
-                    config = Some(zeron_proto::ChatConfig {
-                        harness,
-                        model: None,
-                        reasoning: None,
-                        model_options: Default::default(),
-                        sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
-                        permission_mode: zeron_proto::PermissionMode::Ask,
-                    })
-                }
+        let model = model.map(str::trim).filter(|model| !model.is_empty());
+        if harness.is_some() || model.is_some() || reasoning.is_some() {
+            let config = config.get_or_insert_with(|| zeron_proto::ChatConfig {
+                harness: self.inner.config.default_harness,
+                model: None,
+                reasoning: None,
+                model_options: Default::default(),
+                sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+                permission_mode: zeron_proto::PermissionMode::Ask,
+            });
+            if let Some(harness) = harness {
+                config.harness = harness;
+            }
+            if let Some(model) = model {
+                config.model = Some(model.to_string());
+            }
+            if let Some(reasoning) = reasoning {
+                config.reasoning = Some(reasoning);
             }
         }
         let chat_id = new_id();

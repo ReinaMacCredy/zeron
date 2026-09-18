@@ -39,6 +39,19 @@ pub struct ThreadTools {
     sends: AtomicUsize,
 }
 
+/// `ReasoningLevel`'s serde names, spelled out so the schema can list them.
+const REASONING_LEVELS: [&str; 9] = [
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+    "ultra",
+    "ultracode",
+    "ultrathink",
+];
+
 /// The tool catalog as `tools/list` reports it.
 pub fn tool_list() -> Value {
     let thread_id = json!({ "type": "string" });
@@ -64,13 +77,15 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "create_thread",
-            "description": "Open a new peer thread in this project and give it `prompt` as its first message. It runs this chat's harness and settings unless `harness` names another enabled one. Counts against this turn's send budget.",
+            "description": "Open a new peer thread in this project and give it `prompt` as its first message. It runs this chat's harness, model and reasoning level unless `harness`, `model` or `reasoning` pick others; an unknown harness or reasoning level is an error. Counts against this turn's send budget.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "prompt": { "type": "string" },
                     "title": { "type": "string" },
-                    "harness": { "type": "string", "description": "Harness id such as claude-code or codex; default: this chat's." }
+                    "harness": { "type": "string", "description": "Harness id such as claude-code or codex; default: this chat's." },
+                    "model": { "type": "string", "description": "Model id as the chosen harness names it; default: this chat's." },
+                    "reasoning": { "type": "string", "enum": REASONING_LEVELS, "description": "Reasoning level; default: this chat's." }
                 },
                 "required": ["prompt"],
                 "additionalProperties": false
@@ -223,6 +238,9 @@ impl ThreadTools {
                     "id": chat.id,
                     "title": chat.title,
                     "status": status_of(&sessions, &chat.id, now),
+                    "harness": chat.config.as_ref().map(|c| c.harness),
+                    "model": chat.config.as_ref().and_then(|c| c.model.as_deref()),
+                    "reasoning": chat.config.as_ref().and_then(|c| c.reasoning),
                     "createdByChatId": chat.created_by_chat_id,
                     "updatedAt": stamp(chat.last_message_at.unwrap_or(chat.created_at)),
                     "isThisChat": chat.id == self.chat_id,
@@ -273,6 +291,8 @@ impl ThreadTools {
                     "prompt": prompt,
                     "title": args["title"].as_str(),
                     "harness": args["harness"].as_str(),
+                    "model": args["model"].as_str(),
+                    "reasoning": args["reasoning"].as_str(),
                 }),
             )
             .await?;
@@ -674,10 +694,14 @@ mod tests {
     }
 
     fn fixture() -> Fake {
+        let mut b = chat("b", Some("s1"), false, Some("a"));
+        b["config"] = json!({
+            "harness": "codex", "model": "gpt-5", "reasoning": "high", "sandbox": "workspace-write"
+        });
         Fake {
             chats: vec![
                 chat("a", Some("s1"), false, None),
-                chat("b", Some("s1"), false, Some("a")),
+                b,
                 chat("c", Some("s2"), false, None),
                 chat("d", Some("s1"), true, None),
                 chat("e", Some("s1"), false, None),
@@ -759,6 +783,21 @@ mod tests {
             ]
         );
         assert_eq!(out["threads"][1]["createdByChatId"], "a");
+        assert_eq!(out["threads"][1]["harness"], "codex");
+        assert_eq!(out["threads"][1]["model"], "gpt-5");
+        assert_eq!(out["threads"][1]["reasoning"], "high");
+        assert!(
+            out["threads"][0]["harness"].is_null(),
+            "no config, no settings"
+        );
+    }
+
+    #[test]
+    fn the_schemas_reasoning_levels_are_real_ones() {
+        for level in REASONING_LEVELS {
+            serde_json::from_value::<zeron_proto::ReasoningLevel>(json!(level))
+                .unwrap_or_else(|e| panic!("{level}: {e}"));
+        }
     }
 
     #[tokio::test]
@@ -817,7 +856,9 @@ mod tests {
         let rig = rig(fixture());
         let created = rig
             .tools
-            .create_thread(&json!({ "prompt": "write the tests", "harness": "codex" }))
+            .create_thread(&json!({
+                "prompt": "write the tests", "harness": "codex", "model": "gpt-5", "reasoning": "xhigh"
+            }))
             .await
             .unwrap();
         assert_eq!(created["threadId"], "new-1");
@@ -832,6 +873,8 @@ mod tests {
         assert_eq!(calls[0].0, methods::CREATE_THREAD);
         assert_eq!(calls[0].1["fromChatId"], "a");
         assert_eq!(calls[0].1["harness"], "codex");
+        assert_eq!(calls[0].1["model"], "gpt-5");
+        assert_eq!(calls[0].1["reasoning"], "xhigh");
         assert_eq!(calls[1].0, methods::SEND_THREAD_MESSAGE);
         assert_eq!(
             calls[1].1,
