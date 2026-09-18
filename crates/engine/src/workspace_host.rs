@@ -1173,6 +1173,16 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.set_chat_config(chat_id, config))?)
     }
 
+    /// [`Self::set_chat_config`] for a switch replacing one nobody sent to:
+    /// the harness being left never ran, so it leaves no mark.
+    pub fn set_chat_config_after_unsent_switch(
+        &self,
+        chat_id: &str,
+        config: &ChatConfig,
+    ) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.set_chat_config_after_unsent_switch(chat_id, config))?)
+    }
+
     /// Tombstone: removes the chats (and session-status) row; the per-chat session
     /// doc remains untouched.
     pub fn delete_chat(&self, chat_id: &str) -> Result<bool, EngineError> {

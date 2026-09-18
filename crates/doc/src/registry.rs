@@ -1093,6 +1093,25 @@ impl RegistryDoc {
         chat_id: &str,
         config: &ChatConfig,
     ) -> Result<bool, DocError> {
+        self.write_chat_config(chat_id, config, true)
+    }
+
+    /// The config write of a switch that replaces one nobody sent to: the
+    /// harness being left never ran, so it leaves no mark in the history.
+    pub fn set_chat_config_after_unsent_switch(
+        &mut self,
+        chat_id: &str,
+        config: &ChatConfig,
+    ) -> Result<bool, DocError> {
+        self.write_chat_config(chat_id, config, false)
+    }
+
+    fn write_chat_config(
+        &mut self,
+        chat_id: &str,
+        config: &ChatConfig,
+        left_ran: bool,
+    ) -> Result<bool, DocError> {
         if !self.row_exists(KIND_CHATS, chat_id) {
             return Ok(false);
         }
@@ -1101,7 +1120,8 @@ impl RegistryDoc {
         // A provider switch leaves a mark: the harness the chat is leaving
         // joins its history once, so the sidebar can stack every mark. A row
         // this build cannot decode still takes the config write, as before.
-        if let Some(current) = self.chat(chat_id)?
+        if left_ran
+            && let Some(current) = self.chat(chat_id)?
             && let Some(left) = current.config.map(|c| c.harness)
             && left != config.harness
             && !current.previous_harnesses.contains(&left)

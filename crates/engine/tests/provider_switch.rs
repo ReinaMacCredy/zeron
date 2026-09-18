@@ -361,6 +361,92 @@ async fn the_new_harness_starts_fresh_with_the_conversation_as_text_then_resumes
     );
 }
 
+async fn switch(rig: &Rig, harness: &str, from: &str, to: &str) {
+    rig.client
+        .call(
+        zeron_rpc::methods::MUTATE,
+        serde_json::json!({
+            "op": "setChatConfig",
+            "chatId": CHAT,
+            "config": {
+                "harness": harness, "model": null, "reasoning": null,
+                "modelOptions": {}, "sandbox": "workspace-write",
+            },
+            "note": {
+                "text": format!("Provider changed from {from} to {to}."),
+                "hint": format!("{from} session closed. Handed to {to}; {from}'s files were not carried."),
+            },
+        }),
+        )
+        .await
+        .expect("switch");
+}
+
+fn previous_harnesses(rig: &Rig) -> Vec<HarnessId> {
+    rig.core
+        .workspace
+        .chat(CHAT)
+        .unwrap()
+        .unwrap()
+        .previous_harnesses
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_switch_before_any_message_replaces_the_first_divider() {
+    let tmp = tempfile::tempdir().unwrap();
+    let rig = rig(tmp.path()).await;
+    rig.turn(CHAT, "first", "m1").await;
+    switch(&rig, "pi", "Old", "New").await;
+    switch(&rig, "codex", "New", "Codex").await;
+    let doc = entries(&rig.core, CHAT);
+    // user, reply, one divider
+    assert_eq!(doc.len(), 3);
+    let divider = doc.last().unwrap();
+    assert_eq!(divider.role, MessageRole::System);
+    assert_eq!(
+        entry_text(divider),
+        "Provider changed from Old to Codex.Old session closed. Handed to Codex; Old's files were not carried."
+    );
+    assert!(matches!(
+        &divider.parts[2],
+        MessagePart::Handoff {
+            harness: HarnessId::Codex,
+            ..
+        }
+    ));
+    // The harness in between never ran, so it leaves no mark.
+    assert_eq!(previous_harnesses(&rig), vec![HarnessId::Mock]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn switching_back_before_any_message_leaves_no_divider() {
+    let tmp = tempfile::tempdir().unwrap();
+    let rig = rig(tmp.path()).await;
+    rig.turn(CHAT, "first", "m1").await;
+    switch(&rig, "pi", "Old", "New").await;
+    switch(&rig, "mock", "New", "Old").await;
+    let doc = entries(&rig.core, CHAT);
+    assert_eq!(doc.len(), 2);
+    assert_eq!(previous_harnesses(&rig), vec![HarnessId::Mock]);
+
+    // The session was still closed: the next turn hands over once, on the
+    // user entry, to the harness the chat never visibly left.
+    rig.turn(CHAT, "second", "m2").await;
+    assert!(rig.new.runs.lock().unwrap().is_empty());
+    let seen = rig.old.runs.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[1].resume, None);
+    assert_eq!(seen[1].prompt.matches("<provider_switch>").count(), 1);
+    let doc = entries(&rig.core, CHAT);
+    assert!(doc[2].parts.iter().any(|part| matches!(
+        part,
+        MessagePart::Handoff {
+            harness: HarnessId::Mock,
+            ..
+        }
+    )));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_switch_on_an_empty_chat_hands_nothing_over() {
     let tmp = tempfile::tempdir().unwrap();

@@ -410,6 +410,20 @@ fn a_provider_switch_records_the_harness_left_once_and_survives_a_full_upsert() 
         doc.chat("chat-1").unwrap().unwrap().previous_harnesses,
         vec![HarnessId::Mock, HarnessId::Codex]
     );
+
+    // A switch replacing one nobody sent to: Codex is left again, but
+    // through the unsent path Pi never joins the history.
+    config.harness = HarnessId::Pi;
+    doc.set_chat_config("chat-1", &config).unwrap();
+    config.harness = HarnessId::Grok;
+    doc.set_chat_config_after_unsent_switch("chat-1", &config)
+        .unwrap();
+    let row = doc.chat("chat-1").unwrap().unwrap();
+    assert_eq!(row.config.unwrap().harness, HarnessId::Grok);
+    assert_eq!(
+        row.previous_harnesses,
+        vec![HarnessId::Mock, HarnessId::Codex]
+    );
 }
 
 #[test]

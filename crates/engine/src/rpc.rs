@@ -978,29 +978,55 @@ impl EngineRpc {
                         .await
                         .map_err(failed)?;
                 }
-                self.workspace
-                    .set_chat_config(&chat_id, &config)
+                let handle = (note.is_some() && self.doc_host.is_host(&chat_id))
+                    .then(|| self.doc_host.open(&chat_id))
+                    .transpose()
                     .map_err(failed)?;
-                if let Some(note) = note
-                    && self.doc_host.is_host(&chat_id)
-                {
-                    // The packet is built now, at the switch, so the divider
-                    // shows it at once; the first run sends this same text.
-                    let packet = switching
-                        .then(|| self.sessions.provider_switch_packet(&chat_id))
-                        .flatten();
-                    self.doc_host
-                        .open(&chat_id)
-                        .map_err(failed)?
-                        .write_system_note_with(
-                            &crate::new_id(),
-                            &note.text,
-                            note.hint.as_deref(),
-                            packet.as_deref().map(|p| (config.harness, p)),
-                            crate::now_ms(),
-                        )
-                        .map_err(|e| failed(e.into()))?;
+                // A switch on top of a switch nobody has sent to yet replaces
+                // that divider instead of stacking a second one: the chat
+                // still left the harness the first note named, and the one
+                // in between never ran, so it leaves no mark either.
+                let replaced = handle
+                    .as_ref()
+                    .filter(|_| switching)
+                    .and_then(|handle| unanswered_switch_note(handle));
+                if replaced.is_some() {
+                    self.workspace
+                        .set_chat_config_after_unsent_switch(&chat_id, &config)
+                } else {
+                    self.workspace.set_chat_config(&chat_id, &config)
                 }
+                .map_err(failed)?;
+                let (Some(handle), Some(mut note)) = (handle, note) else {
+                    return Ok(());
+                };
+                if let Some(previous) = replaced {
+                    handle
+                        .doc()
+                        .truncate_from(&previous.id)
+                        .map_err(|e| failed(e.into()))?;
+                    match fold_switch_note(&previous, &note) {
+                        Some(folded) => note = folded,
+                        // Back where it started: the transcript shows no
+                        // switch, and the closed session hands over on the
+                        // next turn like any re-sent first turn.
+                        None => return Ok(()),
+                    }
+                }
+                // The packet is built now, at the switch, so the divider
+                // shows it at once; the first run sends this same text.
+                let packet = switching
+                    .then(|| self.sessions.provider_switch_packet(&chat_id))
+                    .flatten();
+                handle
+                    .write_system_note_with(
+                        &crate::new_id(),
+                        &note.text,
+                        note.hint.as_deref(),
+                        packet.as_deref().map(|p| (config.harness, p)),
+                        crate::now_ms(),
+                    )
+                    .map_err(|e| failed(e.into()))?;
                 Ok(())
             }
             MutateParams::DeleteChat { chat_id } => {
@@ -1051,6 +1077,63 @@ fn forward_deadline(method: &str) -> std::time::Duration {
         methods::COMPACT_CHAT => Duration::from_secs(660),
         _ => Duration::from_secs(30),
     }
+}
+
+/// A provider-switch divider nothing followed: the chat's newest entry is
+/// the note the picker wrote for the switch. Its id and the harness its
+/// label says the chat left, for the next switch to fold into.
+struct SwitchNote {
+    id: String,
+    from: String,
+}
+
+/// The harness names on the picker's "Provider changed from X to Y." label.
+fn switch_label_names(label: &str) -> Option<(&str, &str)> {
+    label
+        .strip_prefix("Provider changed from ")?
+        .strip_suffix('.')?
+        .split_once(" to ")
+}
+
+fn unanswered_switch_note(handle: &crate::doc_host::ChatDocHandle) -> Option<SwitchNote> {
+    let entries = handle.doc().read_entries().ok()?;
+    let last = entries.last()?;
+    if last.role != zeron_doc::MessageRole::System {
+        return None;
+    }
+    let label = last.parts.iter().find_map(|part| match part {
+        MessagePart::Text { text, .. } => Some(text),
+        _ => None,
+    })?;
+    let (from, _) = switch_label_names(label)?;
+    Some(SwitchNote {
+        id: last.id.clone(),
+        from: from.to_string(),
+    })
+}
+
+/// The note of a switch folded onto an unanswered one: the chat still left
+/// the harness the first label named and now reaches the one the new label
+/// names, so the harness in between is written out of the label and the
+/// hint. `None` when that is where the chat already was. A label in any
+/// other shape is kept as the new note wrote it.
+fn fold_switch_note(previous: &SwitchNote, next: &SystemNote) -> Option<SystemNote> {
+    let Some((between, to)) = switch_label_names(&next.text) else {
+        return Some(SystemNote {
+            text: next.text.clone(),
+            hint: next.hint.clone(),
+        });
+    };
+    if previous.from == to {
+        return None;
+    }
+    Some(SystemNote {
+        text: format!("Provider changed from {} to {to}.", previous.from),
+        hint: next
+            .hint
+            .as_ref()
+            .map(|hint| hint.replace(between, &previous.from)),
+    })
 }
 
 /// ControlRpc methods that honor `targetDeviceId` (feature-inventory §2.1). Extend this
@@ -2652,6 +2735,52 @@ impl RpcService for EngineRpc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folded_switch_note_keeps_the_harness_the_chat_left() {
+        let previous = SwitchNote {
+            id: "n1".into(),
+            from: "Mock".into(),
+        };
+        let folded = fold_switch_note(
+            &previous,
+            &SystemNote {
+                text: "Provider changed from Codex to Grok.".into(),
+                hint: Some(
+                    "Codex session closed. Handed to Grok; Codex's files were not carried.".into(),
+                ),
+            },
+        )
+        .unwrap();
+        assert_eq!(folded.text, "Provider changed from Mock to Grok.");
+        assert_eq!(
+            folded.hint.as_deref(),
+            Some("Mock session closed. Handed to Grok; Mock's files were not carried.")
+        );
+
+        // Back where it started: no divider at all.
+        assert!(
+            fold_switch_note(
+                &previous,
+                &SystemNote {
+                    text: "Provider changed from Codex to Mock.".into(),
+                    hint: None,
+                },
+            )
+            .is_none()
+        );
+
+        // Any other label is kept as written.
+        let other = fold_switch_note(
+            &previous,
+            &SystemNote {
+                text: "Something else.".into(),
+                hint: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(other.text, "Something else.");
+    }
 
     #[test]
     fn create_thread_params_refuse_an_unknown_harness_or_reasoning_level() {
