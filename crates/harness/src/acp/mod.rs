@@ -2731,6 +2731,7 @@ async fn run_session(session: Session) {
         request_input,
         mut steering,
         interrupt,
+        ..
     } = controls;
     let request_input = std::sync::Arc::new(request_input);
 

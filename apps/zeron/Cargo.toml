@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 zeron-engine.workspace = true
 zeron-rpc.workspace = true
+zeron-mcp.workspace = true
 zeron-ui.workspace = true
 zeron-update.workspace = true
 tokio.workspace = true

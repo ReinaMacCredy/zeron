@@ -182,6 +182,7 @@ impl RunSetup {
             }),
             steering: steer_rx,
             interrupt: interrupt_token.clone(),
+            tool_server: None,
         };
         Self {
             handle: RunHandle {
@@ -213,6 +214,11 @@ struct Inner {
     device_id: String,
     journal: Arc<RunJournal>,
     registry: Arc<HarnessRegistry>,
+    /// The IPC port this engine actually bound, once it has; `zeron mcp`
+    /// subprocesses dial it. A headed engine that lost the port race leaves
+    /// this unset and its runs get no thread tools, not a server that cannot
+    /// connect.
+    tool_server_port: Mutex<Option<u16>>,
     /// Set-once (first wins), cleared on runtime retirement: sessions and
     /// doc-host reference each other through Arcs, so this back-edge must be
     /// severable for a replaced engine graph to drop.
@@ -265,6 +271,26 @@ pub struct SessionsEngine {
     inner: Arc<Inner>,
 }
 
+impl Inner {
+    /// The thread-tools server for one chat's run: this binary as
+    /// `zeron mcp --chat <id> --port <port>`. `None` until an IPC port is
+    /// recorded, so a run never gets a server it cannot dial.
+    fn tool_server_for(&self, chat_id: &str) -> Option<zeron_harness::ToolServer> {
+        let port = (*lock(&self.tool_server_port))?;
+        let command = std::env::current_exe().ok()?.to_string_lossy().into_owned();
+        Some(zeron_harness::ToolServer {
+            command,
+            args: vec![
+                "mcp".into(),
+                "--chat".into(),
+                chat_id.into(),
+                "--port".into(),
+                port.to_string(),
+            ],
+        })
+    }
+}
+
 impl SessionsEngine {
     pub fn new(
         device_id: String,
@@ -277,6 +303,7 @@ impl SessionsEngine {
                 device_id,
                 journal,
                 registry,
+                tool_server_port: Mutex::new(None),
                 doc_host: Mutex::new(None),
                 runs: Mutex::new(HashMap::new()),
                 hubs: Mutex::new(HashMap::new()),
@@ -293,6 +320,12 @@ impl SessionsEngine {
                 turn_listener: OnceLock::new(),
             }),
         }
+    }
+
+    /// Record the IPC port this engine serves, so every later turn hands its
+    /// agent the thread tools (`zeron mcp --chat <id> --port <port>`).
+    pub fn set_tool_server_port(&self, port: u16) {
+        *lock(&self.inner.tool_server_port) = Some(port);
     }
 
     /// Wire the doc host (called once at engine assembly; the two services are mutually
@@ -573,7 +606,7 @@ impl SessionsEngine {
 
         let RunSetup {
             handle: run,
-            controls,
+            mut controls,
             engine_rx,
             cancel_rx,
         } = RunSetup::new(
@@ -583,6 +616,7 @@ impl SessionsEngine {
                 steerable: harness.supports_steering(),
             },
         );
+        controls.tool_server = self.inner.tool_server_for(chat_id);
         let run_id = run.run_id.clone();
         lock(&self.inner.runs).insert(chat_id.to_string(), run);
         self.set_status(chat_id, SessionStatus::Working, true);

@@ -474,6 +474,10 @@ impl ClaudeHarness {
                 "--setting-sources",
                 "",
             ]);
+        } else if let Some(server) = &controls.tool_server {
+            // Additive on purpose: `--strict-mcp-config` here would drop the
+            // user's own MCP servers.
+            cmd.args(["--mcp-config", &server.mcp_config_json("zeron")]);
         }
         let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -680,6 +684,7 @@ async fn run_session(session: Session) {
         request_input,
         mut steering,
         interrupt,
+        ..
     } = controls;
     let request_input = Arc::new(request_input);
 

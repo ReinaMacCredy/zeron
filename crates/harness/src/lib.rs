@@ -44,6 +44,26 @@ pub struct SteerMessage {
     pub message_id: Option<String>,
 }
 
+/// The MCP stdio server the engine serves to a run's agent (the thread
+/// tools): the harness injects it into the agent's own tool list. The chat
+/// identity rides in `args`, stamped by the engine, never chosen by the agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolServer {
+    pub command: String,
+    pub args: Vec<String>,
+}
+
+impl ToolServer {
+    /// The `{"mcpServers": {name: {command, args}}}` document Claude's
+    /// `--mcp-config` takes inline.
+    pub fn mcp_config_json(&self, name: &str) -> String {
+        serde_json::json!({
+            "mcpServers": { name: { "command": self.command, "args": self.args } }
+        })
+        .to_string()
+    }
+}
+
 /// Host-side controls handed to a run: input-request bridge + steering mailbox.
 pub struct RunControls {
     /// The run sends questions and awaits answers (blocks the agent, mirrors zeron).
@@ -56,6 +76,9 @@ pub struct RunControls {
     /// interrupt, then escalates to SIGTERM/SIGKILL on the child after a grace
     /// period. The run's stream ends with `Done { status: Interrupted }`.
     pub interrupt: CancellationToken,
+    /// Thread tools for this run, `None` for runs that get no tools (titles,
+    /// compaction) or when the engine bound no IPC port for them to dial.
+    pub tool_server: Option<ToolServer>,
 }
 
 #[async_trait]

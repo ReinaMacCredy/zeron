@@ -41,6 +41,17 @@ enum Command {
     /// Live sync introspection from the running engine: per-room connection
     /// state, last pushed-frame/ack ages, rejoin/probe/resync counters.
     Sync,
+    /// Serve one chat's thread tools over MCP stdio. The engine spawns this
+    /// next to each agent process; not meant to be run by hand.
+    #[command(hide = true)]
+    Mcp {
+        /// The chat whose agent is on the other end of stdio.
+        #[arg(long)]
+        chat: String,
+        /// The IPC port of the engine that spawned this server.
+        #[arg(long)]
+        port: Option<u16>,
+    },
     #[cfg(target_os = "linux")]
     /// Trigger an Appshot in the running headed instance (desktop shortcut fallback).
     Appshot,
@@ -153,9 +164,18 @@ fn main() -> anyhow::Result<()> {
     {
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
-        let registry = tracing_subscriber::registry()
-            .with(filter)
-            .with(tracing_subscriber::fmt::layer());
+        // `zeron mcp` owns stdout as its wire; a log line there would corrupt
+        // a JSON-RPC frame.
+        let logs_to_stderr = matches!(cli.command, Some(Command::Mcp { .. }));
+        let registry = tracing_subscriber::registry().with(filter).with(
+            tracing_subscriber::fmt::layer().with_writer(move || -> Box<dyn std::io::Write> {
+                if logs_to_stderr {
+                    Box::new(std::io::stderr())
+                } else {
+                    Box::new(std::io::stdout())
+                }
+            }),
+        );
         match log_file {
             Some(file) => registry
                 .with(
@@ -203,6 +223,11 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Sync) => {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(sync_cli(engine_config_from_env().ipc_port))
+        }
+        Some(Command::Mcp { chat, port }) => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            let port = port.unwrap_or_else(|| engine_config_from_env().ipc_port);
+            runtime.block_on(mcp_cli(chat, port))
         }
         #[cfg(target_os = "linux")]
         Some(Command::Appshot) => {
@@ -311,6 +336,22 @@ fn harness_from_env() -> zeron_engine::HarnessId {
 /// `zeron sync`: dial the running engine's IPC and print per-room sync state.
 /// The introspection surface every 2026-08 incident was missing — "is this
 /// device's workspace room actually receiving?" as a one-liner.
+/// stdout is the MCP wire, so nothing else may print there: tracing already
+/// goes to stderr, and every failure below is returned, not printed.
+async fn mcp_cli(chat: String, ipc_port: u16) -> anyhow::Result<()> {
+    let client = zeron_rpc::connect_ws(&format!("ws://127.0.0.1:{ipc_port}"))
+        .await
+        .map_err(|e| anyhow::anyhow!("no engine listening on 127.0.0.1:{ipc_port} ({e})"))?;
+    let tools = zeron_mcp::ThreadTools::new(client, chat);
+    zeron_mcp::serve(
+        tokio::io::BufReader::new(tokio::io::stdin()),
+        tokio::io::stdout(),
+        &tools,
+    )
+    .await?;
+    Ok(())
+}
+
 async fn sync_cli(ipc_port: u16) -> anyhow::Result<()> {
     let client = zeron_rpc::connect_ws(&format!("ws://127.0.0.1:{ipc_port}"))
         .await

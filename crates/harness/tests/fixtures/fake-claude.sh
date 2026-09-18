@@ -35,6 +35,25 @@ case "$first" in
   ;;
 
 
+*scenario:mcp*)
+  # A normal run with thread tools: the zeron server rides an ADDITIVE
+  # --mcp-config; strict would drop the user's own servers.
+  mcp_json=""
+  strict=false
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --mcp-config) shift; mcp_json="$1" ;;
+      --strict-mcp-config) strict=true ;;
+    esac
+    shift
+  done
+  case "$mcp_json" in *'"zeron"'*'"mcp"'*'"--chat"'*'"chat-42"'*) ;; *) exit 1 ;; esac
+  [ "$strict" = false ] || exit 1
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":["Bash","mcp__zeron__list_threads"],"cwd":"/tmp","session_id":"sess-mcp"}'
+  emit '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"tools on"}}}'
+  emit '{"type":"result","subtype":"success","result":"tools on","usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-mcp"}'
+  ;;
+
 *scenario:happy*)
   emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":["Bash","Read"],"cwd":"/tmp","session_id":"sess-1"}'
   # Re-emitted init mid-run (background-task wakeup): must be deduped.
