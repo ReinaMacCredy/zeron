@@ -1259,6 +1259,20 @@ pub fn rows_for_entry(
         // below stays a valid cache/diff key.
         // Lifted before the mention projection, so a comment body's own
         // Markdown never lands in the bubble.
+        if raw.trim() == RESUME_PROMPT {
+            return vec![Row {
+                id: entry.id.clone().into(),
+                version: fnv1a(RESUME_PROMPT.as_bytes()) << 1 | pending as u64,
+                turn_start: true,
+                kind: RowKind::Divider {
+                    text: "Resumed".into(),
+                    hint: Some(RESUME_PROMPT.into()),
+                },
+                entry_id,
+                timestamp: None,
+                copy_text: None,
+            }];
+        }
         let (body, badges) = crate::badges::split(&parsed.text);
         let (text, mentions) = match crate::composer::sent_mention_display(&body) {
             Some((display, spans)) => (display, spans),
@@ -2029,6 +2043,13 @@ pub fn consulting_advisor(entries: &[SessionMessageEntry]) -> bool {
             })
     })
 }
+
+/// What the resume button sends. A user entry carrying exactly this text
+/// renders as a "Resumed" divider instead of a bubble; the text itself is
+/// the divider's hover hint.
+pub const RESUME_PROMPT: &str = "Continue exactly where you left off. Your previous reply was \
+interrupted before it finished. Do not restart, do not repeat what was already said, and do \
+not ask whether to continue: pick up the remaining work at the point it stopped and finish it.";
 
 /// True when the chat's last turn stopped short and the chat sits idle (the
 /// composer's send circle becomes the resume triangle): the reply was interrupted (its entry is `Aborted`), or the interrupt landed
@@ -13371,6 +13392,27 @@ mod tests {
         assert!(!resume_offer(&aborted, Indicator::Working));
         assert!(!resume_offer(&unanswered, Indicator::Working));
         assert!(!resume_offer(&unanswered, Indicator::AwaitingInput));
+    }
+
+    #[test]
+    fn the_resume_prompt_renders_as_a_divider_not_a_bubble() {
+        let mut entry = assistant(
+            "u1",
+            MessageStatus::Complete,
+            vec![text_part("t0", RESUME_PROMPT)],
+        );
+        entry.role = MessageRole::User;
+        entry.status = None;
+        let rows = rows_for_entry(&entry, true, &mut parse);
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(
+            &rows[0].kind,
+            RowKind::Divider { text, hint: Some(hint) }
+                if text == "Resumed" && hint == RESUME_PROMPT
+        ));
+        assert!(rows[0].timestamp.is_none());
+        // The trailing resume prompt still offers a resume once idle again.
+        assert!(resume_offer(&[entry], crate::state::Indicator::None));
     }
 
     #[test]

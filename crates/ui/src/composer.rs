@@ -604,9 +604,6 @@ fn should_publish_optimistic_echo(queue: bool) -> bool {
     !queue
 }
 
-/// What the user typed by hand to pick a stopped turn back up.
-const RESUME_PROMPT: &str = "resume";
-
 fn begin_interrupt(pending: &mut HashSet<String>, chat_id: &str) -> bool {
     pending.insert(chat_id.to_string())
 }
@@ -6570,7 +6567,7 @@ impl Composer {
         if self.send_blocked(cx) {
             return;
         }
-        self.send_prompt(RESUME_PROMPT.to_string(), cx);
+        self.send_prompt(crate::transcript::RESUME_PROMPT.to_string(), cx);
     }
 
     /// Cmd/Ctrl+Enter remains an ordinary submit while the composer carries
