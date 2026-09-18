@@ -58,7 +58,7 @@ pub fn tool_list() -> Value {
     json!([
         {
             "name": "list_threads",
-            "description": "List the chats (threads) in this chat's project with their live status. Threads are peers, not workers: every one is a real sidebar chat the human can open, and none can stop another.",
+            "description": "List the chats (threads) in this chat's project with their live status and the role and first 120 characters of their newest transcript entry (`lastRole` assistant: its last turn finished; user or none: it is waiting on someone). Threads are peers, not workers: every one is a real sidebar chat the human can open, and none can stop another.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         },
         {
@@ -125,11 +125,15 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "set_thread_archived",
-            "description": "Archive or unarchive a thread in this project. Archiving never cascades to other threads.",
+            "description": "Archive or unarchive one thread (`threadId`) or several (`threadIds`) in this project. Archiving never cascades to other threads.",
             "inputSchema": {
                 "type": "object",
-                "properties": { "threadId": thread_id, "archived": { "type": "boolean" } },
-                "required": ["threadId", "archived"],
+                "properties": {
+                    "threadId": thread_id,
+                    "threadIds": { "type": "array", "items": { "type": "string" } },
+                    "archived": { "type": "boolean" }
+                },
+                "required": ["archived"],
                 "additionalProperties": false
             }
         }
@@ -230,24 +234,33 @@ impl ThreadTools {
         let (_, peers) = self.peers().await?;
         let sessions: Vec<Session> = self.snapshot(methods::WATCH_SESSIONS, json!({})).await?;
         let now = Utc::now();
-        let threads: Vec<Value> = peers
-            .iter()
-            .filter(|chat| !chat.archived)
-            .map(|chat| {
-                json!({
-                    "id": chat.id,
-                    "title": chat.title,
-                    "status": status_of(&sessions, &chat.id, now),
-                    "harness": chat.config.as_ref().map(|c| c.harness),
-                    "model": chat.config.as_ref().and_then(|c| c.model.as_deref()),
-                    "reasoning": chat.config.as_ref().and_then(|c| c.reasoning),
-                    "createdByChatId": chat.created_by_chat_id,
-                    "updatedAt": stamp(chat.last_message_at.unwrap_or(chat.created_at)),
-                    "isThisChat": chat.id == self.chat_id,
-                })
-            })
-            .collect();
+        let mut threads = Vec::new();
+        for chat in peers.iter().filter(|chat| !chat.archived) {
+            let entries = self.entries_of(&chat.id).await?;
+            let last = entries.last().map(render_entry);
+            threads.push(json!({
+                "id": chat.id,
+                "title": chat.title,
+                "status": status_of(&sessions, &chat.id, now),
+                "harness": chat.config.as_ref().map(|c| c.harness),
+                "model": chat.config.as_ref().and_then(|c| c.model.as_deref()),
+                "reasoning": chat.config.as_ref().and_then(|c| c.reasoning),
+                "createdByChatId": chat.created_by_chat_id,
+                "updatedAt": stamp(chat.last_message_at.unwrap_or(chat.created_at)),
+                "isThisChat": chat.id == self.chat_id,
+                "entryCount": entries.len(),
+                "lastRole": last.as_ref().map(|e| e["role"].clone()),
+                "lastText": last.as_ref().and_then(|e| e["text"].as_str()).map(preview),
+            }));
+        }
         Ok(json!({ "threads": threads }))
+    }
+
+    async fn entries_of(&self, thread_id: &str) -> Result<Vec<Value>, String> {
+        let snapshot: Value = self
+            .snapshot(methods::WATCH_DOC_MESSAGES, json!({ "chatId": thread_id }))
+            .await?;
+        Ok(snapshot["reset"].as_array().cloned().unwrap_or_default())
     }
 
     pub async fn read_thread(&self, args: &Value) -> Result<Value, String> {
@@ -258,10 +271,7 @@ impl ThreadTools {
             .map(|n| n as usize)
             .unwrap_or(DEFAULT_TAIL)
             .clamp(1, MAX_TAIL);
-        let snapshot: Value = self
-            .snapshot(methods::WATCH_DOC_MESSAGES, json!({ "chatId": thread_id }))
-            .await?;
-        let entries = snapshot["reset"].as_array().cloned().unwrap_or_default();
+        let entries = self.entries_of(thread_id).await?;
         let end = match args["before"].as_str() {
             Some(before) => entries
                 .iter()
@@ -335,15 +345,25 @@ impl ThreadTools {
     }
 
     pub async fn set_thread_archived(&self, args: &Value) -> Result<Value, String> {
-        let thread_id = Self::thread_id(args)?;
         let archived = args["archived"].as_bool().ok_or("archived is required")?;
-        self.peer(thread_id).await?;
-        self.call_engine(
-            methods::MUTATE,
-            json!({ "op": "setChatArchived", "chatId": thread_id, "archived": archived }),
-        )
-        .await?;
-        Ok(json!({ "threadId": thread_id, "archived": archived }))
+        let ids: Vec<&str> = match args["threadIds"].as_array() {
+            Some(ids) => ids.iter().filter_map(Value::as_str).collect(),
+            None => vec![Self::thread_id(args)?],
+        };
+        if ids.is_empty() {
+            return Err("threadId or threadIds is required".into());
+        }
+        for id in &ids {
+            self.peer(id).await?;
+        }
+        for id in &ids {
+            self.call_engine(
+                methods::MUTATE,
+                json!({ "op": "setChatArchived", "chatId": id, "archived": archived }),
+            )
+            .await?;
+        }
+        Ok(json!({ "threadIds": ids, "archived": archived }))
     }
 
     /// The inter-thread rows waiting on this chat, moved into its transcript.
@@ -459,28 +479,34 @@ fn stamp(at: DateTime<Utc>) -> String {
 /// every other part named. Tool inputs stay render-only in the doc, so they
 /// never reach a peer through here either.
 fn render_entry(entry: &Value) -> Value {
-    let text = entry["parts"]
-        .as_array()
-        .map(|parts| {
-            parts
-                .iter()
-                .filter_map(|part| match part["kind"].as_str().unwrap_or("") {
-                    "text" => part["text"].as_str().map(str::to_string),
-                    "reasoning" => None,
-                    "image" => Some(format!(
-                        "[image {}]",
-                        part["name"].as_str().unwrap_or("attachment")
-                    )),
-                    "tool" => Some(format!("[tool {}]", tool_label(part))),
-                    kind => Some(match part["name"].as_str() {
-                        Some(name) => format!("[{kind} {name}]"),
-                        None => format!("[{kind}]"),
-                    }),
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
+    let mut lines: Vec<(String, usize)> = Vec::new();
+    for part in entry["parts"].as_array().into_iter().flatten() {
+        let line = match part["kind"].as_str().unwrap_or("") {
+            "text" => match part["text"].as_str() {
+                Some(text) => text.to_string(),
+                None => continue,
+            },
+            "reasoning" => continue,
+            "image" => format!("[image {}]", part["name"].as_str().unwrap_or("attachment")),
+            "tool" => format!("[tool {}]", tool_label(part)),
+            kind => match part["name"].as_str() {
+                Some(name) => format!("[{kind} {name}]"),
+                None => format!("[{kind}]"),
+            },
+        };
+        match lines.last_mut() {
+            Some((last, count)) if line.starts_with('[') && *last == line => *count += 1,
+            _ => lines.push((line, 1)),
+        }
+    }
+    let text = lines
+        .into_iter()
+        .map(|(line, count)| match count {
+            1 => line,
+            n => format!("{} ×{n}]", &line[..line.len() - 1]),
         })
-        .unwrap_or_default();
+        .collect::<Vec<_>>()
+        .join("\n");
     json!({
         "id": entry["id"],
         "role": entry["role"],
@@ -491,12 +517,26 @@ fn render_entry(entry: &Value) -> Value {
     })
 }
 
+fn preview(text: &str) -> String {
+    const PREVIEW_CHARS: usize = 120;
+    let mut out: String = text.chars().take(PREVIEW_CHARS).collect();
+    if text.chars().nth(PREVIEW_CHARS).is_some() {
+        out.push('…');
+    }
+    out
+}
+
 /// A tool part's one-word identity for the transcript tail: the decoded
 /// call's kind plus its headline field (`exec ls -la`, `mcp zeron/read_thread`,
 /// `readFile src/x.rs`), or the raw name older rows carry.
 fn tool_label(part: &Value) -> String {
     let call = &part["call"];
     let kind = call["kind"].as_str();
+    if kind == Some("unknown")
+        && let Some(name) = call["name"].as_str()
+    {
+        return name.to_string();
+    }
     let detail = match kind {
         Some("mcp") => match (call["server"].as_str(), call["tool"].as_str()) {
             (Some(server), Some(tool)) => Some(format!("{server}/{tool}")),
@@ -790,6 +830,57 @@ mod tests {
             out["threads"][0]["harness"].is_null(),
             "no config, no settings"
         );
+        // The newest entry's role and a short preview ride along so a
+        // "which threads are done" pass needs no read_thread per row.
+        assert_eq!(out["threads"][1]["entryCount"], 5);
+        assert_eq!(out["threads"][1]["lastRole"], "user");
+        assert_eq!(
+            out["threads"][1]["lastText"],
+            "line 5\n[tool Bash]\n[tool mcp zeron/read_thread]"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_threads_previews_are_bounded_and_empty_threads_have_none() {
+        let mut fake = fixture();
+        fake.entries = vec![entry(
+            "m1",
+            "assistant",
+            vec![json!({ "kind": "text", "id": "t", "text": "x".repeat(300) })],
+        )];
+        let out = rig(fake).tools.list_threads().await.unwrap();
+        let text = out["threads"][0]["lastText"].as_str().unwrap();
+        assert_eq!(text.chars().count(), 121);
+        assert!(text.ends_with('…'));
+
+        let mut fake = fixture();
+        fake.entries = vec![];
+        let out = rig(fake).tools.list_threads().await.unwrap();
+        assert_eq!(out["threads"][0]["entryCount"], 0);
+        assert!(out["threads"][0]["lastRole"].is_null());
+        assert!(out["threads"][0]["lastText"].is_null());
+    }
+
+    #[tokio::test]
+    async fn read_thread_collapses_repeated_tool_lines_and_names_unknown_calls() {
+        let mut fake = fixture();
+        let read = json!({ "kind": "tool", "id": "m", "call": { "kind": "mcp", "server": "zeron", "tool": "read_thread" } });
+        let mut parts = vec![
+            json!({ "kind": "tool", "id": "s", "name": "ToolSearch", "call": { "kind": "unknown", "name": "ToolSearch" } }),
+        ];
+        parts.extend(std::iter::repeat_n(read, 21));
+        parts.push(json!({ "kind": "text", "id": "t", "text": "done" }));
+        parts.push(json!({ "kind": "text", "id": "t2", "text": "done" }));
+        fake.entries = vec![entry("m1", "assistant", parts)];
+        let page = rig(fake)
+            .tools
+            .read_thread(&json!({ "threadId": "b" }))
+            .await
+            .unwrap();
+        assert_eq!(
+            page["entries"][0]["text"],
+            "[tool ToolSearch]\n[tool mcp zeron/read_thread ×21]\ndone\ndone"
+        );
     }
 
     #[test]
@@ -945,6 +1036,33 @@ mod tests {
                 .await
                 .unwrap_err(),
             "no thread c in this project"
+        );
+
+        let out = rig
+            .tools
+            .set_thread_archived(&json!({ "threadIds": ["b", "e"], "archived": true }))
+            .await
+            .unwrap();
+        assert_eq!(out["threadIds"], json!(["b", "e"]));
+        let calls = rig.calls.calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 4);
+        assert_eq!(calls[2].1["chatId"], "b");
+        assert_eq!(calls[3].1["chatId"], "e");
+        // One out-of-scope id fails the whole batch before any mutation.
+        assert_eq!(
+            rig.tools
+                .set_thread_archived(&json!({ "threadIds": ["b", "c"], "archived": true }))
+                .await
+                .unwrap_err(),
+            "no thread c in this project"
+        );
+        assert_eq!(rig.calls.calls.lock().unwrap().len(), 4);
+        assert_eq!(
+            rig.tools
+                .set_thread_archived(&json!({ "threadIds": [], "archived": true }))
+                .await
+                .unwrap_err(),
+            "threadId or threadIds is required"
         );
     }
 
