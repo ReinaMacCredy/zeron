@@ -38,8 +38,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, Context, Entity, FocusHandle, Focusable as _, ListAlignment, ListState,
-    SharedString, Subscription, Task, Window, div, font, list, prelude::*, px,
+    AnyElement, App, Context, Entity, FocusHandle, Focusable as _, ListAlignment, ListOffset,
+    ListState, SharedString, Subscription, Task, Window, div, font, list, prelude::*, px,
 };
 use unicode_width::UnicodeWidthChar as _;
 
@@ -824,6 +824,16 @@ pub fn line_anchor(line: &DiffLine) -> Option<(CommentSide, u32)> {
 // ---------------------------------------------------------------------------
 // Resolution + states (pure)
 // ---------------------------------------------------------------------------
+
+/// An absolute `path` as the diff lists it: relative to the checkout root
+/// (`git -C <root> diff` paths). `None` when the file lies outside it.
+pub fn diff_relative_path(diff: &CheckoutDiff, path: &str) -> Option<String> {
+    let relative = std::path::Path::new(path)
+        .strip_prefix(&diff.cwd)
+        .ok()?
+        .to_str()?;
+    (!relative.is_empty()).then(|| relative.to_owned())
+}
 
 /// The diff shown for a chat: `checkout_id` match first, then device+cwd,
 /// then cwd alone (§1.11).
@@ -1693,6 +1703,14 @@ pub struct Changes {
     /// Pinned commit for a [`DiffScope::Commit`] pane (sha + subject drive
     /// the fetch and the surface-tab title).
     commit: Option<GitHistoryCommit>,
+    /// A transcript file-chip click waiting for the working-tree diff: the
+    /// absolute path to look up (answered by [`ChangesEvent::FileLocated`]).
+    locate: Option<String>,
+    /// A located file's diff-relative path, scrolled to once the parse lands.
+    reveal: Option<String>,
+    /// The watch has spoken at least once (a frame or an error), so a missing
+    /// diff means "no checkout diff", not "not loaded yet".
+    watch_answered: bool,
     _observe: Subscription,
 }
 
@@ -1700,6 +1718,9 @@ pub struct Changes {
 pub enum ChangesEvent {
     /// A History row was clicked — open this commit as its own diff tab.
     OpenCommit(GitHistoryCommit),
+    /// Answer to [`Changes::locate_file`]: whether the working-tree diff
+    /// carries the file. When it does, the pane has scrolled to it.
+    FileLocated { path: String, changed: bool },
 }
 
 impl gpui::EventEmitter<ChangesEvent> for Changes {}
@@ -1769,6 +1790,9 @@ impl Changes {
             history_view_button: None,
             history_events: None,
             commit: None,
+            locate: None,
+            reveal: None,
+            watch_answered: false,
             _observe: observe,
         }
     }
@@ -1796,6 +1820,78 @@ impl Changes {
 
     pub fn is_history(&self) -> bool {
         self.scope == DiffScope::History
+    }
+
+    pub fn is_working_tree(&self) -> bool {
+        self.scope == DiffScope::WorkingTree
+    }
+
+    /// Does `path` (absolute) have uncommitted changes? The answer arrives as
+    /// [`ChangesEvent::FileLocated`] once the watch has spoken — immediately
+    /// on a pane that already holds the diff.
+    pub fn locate_file(&mut self, path: String, cx: &mut Context<Self>) {
+        self.locate = Some(path);
+        self.resolve_locate(cx);
+    }
+
+    fn resolve_locate(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.locate.clone() else {
+            return;
+        };
+        if self.scope != DiffScope::WorkingTree || !self.watch_answered {
+            return;
+        }
+        let diff = self.resolved(cx);
+        let relative = diff
+            .as_ref()
+            .and_then(|diff| diff_relative_path(diff, &path));
+        let changed = match (&diff, &relative) {
+            (Some(diff), Some(relative)) if !diff.files.is_empty() => {
+                diff.files.iter().any(|file| file.path == *relative)
+            }
+            // Summaries can be absent for a non-empty patch; then the parsed
+            // file list decides once the in-flight parse lands.
+            (Some(diff), Some(relative)) if !diff.patch.trim().is_empty() => {
+                let key = self.parse_key(diff);
+                match self.parsed.as_ref().filter(|parsed| parsed.key == key) {
+                    Some(parsed) => parsed.files.iter().any(|file| file.path == *relative),
+                    None => return,
+                }
+            }
+            _ => false,
+        };
+        self.locate = None;
+        if changed {
+            self.reveal = relative;
+            self.apply_reveal(cx);
+        }
+        cx.emit(ChangesEvent::FileLocated { path, changed });
+    }
+
+    /// Scroll the located file's header to the top (expanding it if folded).
+    /// Waits for the parse when none has landed yet.
+    fn apply_reveal(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.reveal.clone() else {
+            return;
+        };
+        let Some(parsed) = &self.parsed else {
+            return;
+        };
+        let Some(ix) = parsed.files.iter().position(|file| file.path == path) else {
+            self.reveal = None;
+            return;
+        };
+        self.reveal = None;
+        if self.folds.get(&path).is_some_and(|fold| fold.collapsed) {
+            self.toggle_fold(ix, cx);
+        }
+        if let Some(range) = self.row_ranges.get(ix) {
+            self.list.scroll_to(ListOffset {
+                item_ix: range.start,
+                offset_in_item: px(0.),
+            });
+        }
+        cx.notify();
     }
 
     /// The surface-tab title (contextual, user request): the pinned commit's
@@ -1839,6 +1935,7 @@ impl Changes {
         if self.started {
             self.diffs.clear();
             self.error = None;
+            self.watch_answered = false;
         }
         self.started = true;
         self.watch_target = target.clone();
@@ -1875,6 +1972,8 @@ impl Changes {
                                     changes.sync(cx);
                                     cx.notify();
                                 }
+                                changes.watch_answered = true;
+                                changes.resolve_locate(cx);
                             });
                             if alive.is_err() {
                                 return;
@@ -1896,6 +1995,8 @@ impl Changes {
                             .update(cx, |changes, cx| {
                                 changes.error =
                                     Some(format!("Diff watch unavailable: {err}").into());
+                                changes.watch_answered = true;
+                                changes.resolve_locate(cx);
                                 cx.notify();
                             })
                             .is_err()
@@ -2330,6 +2431,8 @@ impl Changes {
                     horizontal,
                     files: Arc::new(files),
                 });
+                changes.resolve_locate(cx);
+                changes.apply_reveal(cx);
                 cx.notify();
             })
             .ok();
@@ -5937,6 +6040,18 @@ rename to new_name.rs
             room_gen: None,
             sidechat_source_chat_id: None,
         }
+    }
+
+    #[test]
+    fn diff_relative_path_strips_the_checkout_root_only() {
+        let d = diff("co-1", "dev-a", "/repo/one", "x");
+        assert_eq!(
+            diff_relative_path(&d, "/repo/one/crates/ui/src/transcript.rs").as_deref(),
+            Some("crates/ui/src/transcript.rs")
+        );
+        assert_eq!(diff_relative_path(&d, "/repo/one"), None);
+        assert_eq!(diff_relative_path(&d, "/repo/two/src/lib.rs"), None);
+        assert_eq!(diff_relative_path(&d, "/repo/oneself/src/lib.rs"), None);
     }
 
     #[test]
