@@ -621,6 +621,7 @@ mod drag_regressions {
             last_seen_at: None,
             room_gen: None,
             sidechat_source_chat_id: None,
+            created_by_chat_id: None,
         }
     }
 
@@ -671,6 +672,7 @@ mod drag_regressions {
                     "Second".into(),
                     "1m".into(),
                     "proj".into(),
+                    None,
                     None,
                     None,
                     None,

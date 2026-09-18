@@ -167,6 +167,11 @@ pub struct Chat {
     /// chat's own id never appears here on a third chat.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidechat_source_chat_id: Option<String>,
+    /// The chat whose agent opened this one through the thread tools. Sidebar
+    /// grouping only: the creator holds no authority over this chat, and the
+    /// link never expires. `None` for a chat a person opened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by_chat_id: Option<String>,
 }
 
 impl Chat {

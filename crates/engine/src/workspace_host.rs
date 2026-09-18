@@ -840,8 +840,28 @@ impl WorkspaceHost {
         config: Option<ChatConfig>,
         cwd: Option<String>,
     ) -> Result<(), EngineError> {
+        self.create_chat_from(chat_id, space_id, device_id, config, cwd, None)
+    }
+
+    /// [`Self::create_chat`] stamped with the chat whose agent is opening it
+    /// (thread tools). The creator must exist; the stamp is sidebar grouping
+    /// only and grants it nothing.
+    pub fn create_chat_from(
+        &self,
+        chat_id: &str,
+        space_id: Option<&str>,
+        device_id: Option<&str>,
+        config: Option<ChatConfig>,
+        cwd: Option<String>,
+        created_by_chat_id: Option<&str>,
+    ) -> Result<(), EngineError> {
         if self.read(|doc| doc.chat(chat_id))?.is_some() {
             return Ok(()); // idempotent: optimistic client retries never duplicate
+        }
+        if let Some(creator) = created_by_chat_id
+            && self.read(|doc| doc.chat(creator))?.is_none()
+        {
+            return Err(EngineError::Other(format!("no such chat: {creator}")));
         }
         let space = match space_id {
             Some(space_id) => match self.read(|doc| doc.space(space_id))? {
@@ -887,6 +907,7 @@ impl WorkspaceHost {
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
                 sidechat_source_chat_id: None,
+                created_by_chat_id: created_by_chat_id.map(str::to_string),
             })
         })?;
         Ok(())
@@ -938,6 +959,7 @@ impl WorkspaceHost {
             space_id: source.space_id.clone(),
             last_seen_at: None,
             sidechat_source_chat_id: Some(source_chat_id.to_string()),
+            created_by_chat_id: None,
         };
         self.mutate(|doc| doc.upsert_chat(&chat))?;
         Ok(chat)
@@ -990,6 +1012,7 @@ impl WorkspaceHost {
             space_id: source.space_id.clone(),
             last_seen_at: None,
             sidechat_source_chat_id: None,
+            created_by_chat_id: None,
         };
         self.mutate(|doc| doc.upsert_chat(&chat))?;
         Ok(chat)

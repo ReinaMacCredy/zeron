@@ -465,6 +465,10 @@ enum MutateParams {
         /// Cwd override (isolated-worktree path); default = the space's folder.
         #[serde(default)]
         cwd: Option<String>,
+        /// The chat whose agent is opening this one (thread tools); sidebar
+        /// grouping only.
+        #[serde(default)]
+        created_by_chat_id: Option<String>,
     },
     /// Create a space (device + folder pair). Idempotent by id; a live
     /// duplicate `(deviceId, path)` no-ops. `gitDetected` is seeded from the
@@ -853,14 +857,16 @@ impl EngineRpc {
                 config,
                 branch,
                 cwd,
+                created_by_chat_id,
             } => {
                 self.workspace
-                    .create_chat(
+                    .create_chat_from(
                         &chat_id,
                         space_id.as_deref(),
                         device_id.as_deref(),
                         config,
                         cwd,
+                        created_by_chat_id.as_deref(),
                     )
                     .map_err(failed)?;
                 if let Some(branch) = branch.as_deref().filter(|b| !b.is_empty()) {

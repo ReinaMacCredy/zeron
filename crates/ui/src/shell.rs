@@ -6333,6 +6333,9 @@ impl Shell {
         branch: Option<SharedString>,
         change_request: Option<zeron_proto::ChangeRequestSummary>,
         harness: Option<zeron_proto::HarnessId>,
+        // Title of the chat whose agent opened this one (thread tools); the
+        // row wears it as a small badge after its own title.
+        created_by: Option<SharedString>,
         status: zeron_proto::ChatIndicator,
         selected: bool,
         archived: bool,
@@ -6708,7 +6711,33 @@ impl Shell {
                             .text_size(crate::typography::ui_rems(13.0))
                             .line_height(px(17.0))
                             .child(popover::search_highlight(title, search_query, theme)),
-                    )),
+                    ))
+                    // Same cloth as the jump chip and the PR badge, in the
+                    // accent tone; the creator's title is cut short so the
+                    // badge never crowds this row's own title off the line.
+                    .when_some(created_by, |el, creator| {
+                        let tone = theme.accent;
+                        let mut label: String = creator.chars().take(14).collect();
+                        if creator.chars().count() > 14 {
+                            label.push('…');
+                        }
+                        el.child(
+                            div()
+                                .h(px(16.0))
+                                .flex_none()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .px(px(4.0))
+                                .rounded(px(4.0))
+                                .bg(tone.opacity(0.08))
+                                .text_size(crate::typography::ui_rems(10.0))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(tone.opacity(0.85))
+                                .font_family(theme.font_mono.clone())
+                                .child(SharedString::from(format!("by {label}"))),
+                        )
+                    }),
             )
             // Line 3 is structural, not reserved whitespace: compact states
             // omit it completely when both Branch and Pull request are hidden.
@@ -13754,6 +13783,7 @@ mod right_tab_mouse_regressions {
                     last_seen_at: None,
                     room_gen: None,
                     sidechat_source_chat_id: None,
+                    created_by_chat_id: None,
                 };
                 let mut side = source.clone();
                 side.id = "side".into();

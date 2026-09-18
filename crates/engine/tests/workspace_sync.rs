@@ -548,6 +548,41 @@ async fn non_host_engine_leaves_remote_chats_commands_alone() {
 }
 
 #[tokio::test]
+async fn an_agent_created_chat_carries_its_creator_and_needs_a_real_one() {
+    let dir_a = tempfile::tempdir().unwrap();
+    let a = assemble(dir_a.path(), "dev-a");
+    a.workspace
+        .create_space("space-tt", "dev-a", "/tmp/tt", None, false)
+        .expect("create space");
+    a.workspace
+        .create_chat("creator", Some("space-tt"), None, None, None)
+        .expect("create creator");
+
+    a.workspace
+        .create_chat_from("peer", Some("space-tt"), None, None, None, Some("creator"))
+        .expect("create peer");
+    let peer = a.workspace.chat("peer").unwrap().unwrap();
+    assert_eq!(peer.created_by_chat_id.as_deref(), Some("creator"));
+    assert_eq!(peer.space_id.as_deref(), Some("space-tt"));
+    assert_eq!(peer.sidechat_source_chat_id, None);
+
+    let err = a
+        .workspace
+        .create_chat_from("orphan", Some("space-tt"), None, None, None, Some("nope"))
+        .expect_err("unknown creator is refused");
+    assert!(err.to_string().contains("no such chat: nope"), "{err}");
+    assert!(a.workspace.chat("orphan").unwrap().is_none());
+
+    // Archiving the creator is a one-row LWW set; the peer is untouched.
+    a.workspace
+        .set_chat_archived("creator", true)
+        .expect("archive creator");
+    let peer = a.workspace.chat("peer").unwrap().unwrap();
+    assert!(!peer.archived);
+    a.shutdown().await;
+}
+
+#[tokio::test]
 async fn chat_config_selects_the_run_harness() {
     let dir_a = tempfile::tempdir().unwrap();
     let a = assemble(dir_a.path(), "dev-a"); // default harness = Mock ("Hello")
@@ -717,6 +752,7 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
                 space_id: Some("space-legacy".into()),
                 last_seen_at: Some(now),
                 sidechat_source_chat_id: None,
+                created_by_chat_id: None,
             })
             .unwrap();
         legacy
