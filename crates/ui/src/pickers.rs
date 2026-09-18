@@ -1977,6 +1977,13 @@ impl Pickers {
             state.apply_chat_config(&chat_id, config.clone());
             cx.notify();
         });
+        // The row is the truth now. A chat keeps the draft id it was sent
+        // from, so the canvas picks that seeded it never get dropped by the
+        // selection observer; left in place they would outrank the row in
+        // `effective_harness` and send the next run to the old harness.
+        self.config.harness = None;
+        self.config.model = None;
+        self.config.reasoning = None;
         let Some(engine) = self.engine(cx) else {
             return;
         };
@@ -6388,6 +6395,31 @@ mod tests {
                     pickers.viewed_harness, None,
                     "the dialog's close drops the browsed tab"
                 );
+            })
+            .unwrap();
+    }
+
+    /// A chat sent from the canvas keeps its draft id, so the canvas picks
+    /// survive into the existing chat. After a provider switch they must not
+    /// outrank the row: the chip and the next run follow the new harness.
+    #[gpui::test]
+    fn a_confirmed_switch_drops_the_canvas_picks_that_seeded_the_chat(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let handle = existing_claude_chat(cx);
+        handle
+            .update(cx, |pickers, _, cx| {
+                pickers.config.harness = Some(HarnessId::ClaudeCode);
+                pickers.config.model = Some("fable".into());
+                pickers.open.open(PickerKind::HarnessModel);
+                pickers.pick_harness(HarnessId::Codex, cx);
+                pickers.activate_model_index(0, cx);
+                pickers.confirm_model_switch(cx);
+                assert_eq!(pickers.config.harness, None);
+                assert_eq!(pickers.config.model, None);
+                assert_eq!(pickers.effective_harness(cx), Some(HarnessId::Codex));
+                assert_eq!(pickers.effective_model_id(cx), Some("gpt"));
+                assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::Codex));
             })
             .unwrap();
     }
