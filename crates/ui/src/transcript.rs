@@ -1237,6 +1237,25 @@ pub fn user_resize_spec(height_delta: f32) -> motion::MotionSpec {
 #[cfg(test)]
 thread_local! { static FORBID_ROW_PREPARATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 
+/// The entry's provider-switch packet as its own row, without a hover strip.
+fn handoff_row(entry: &SessionMessageEntry) -> Option<Row> {
+    entry.parts.iter().find_map(|p| match p {
+        MessagePart::Handoff { harness, text, .. } => Some(Row {
+            id: format!("{}#handoff", entry.id).into(),
+            version: fnv1a(text.as_bytes()),
+            turn_start: false,
+            kind: RowKind::Handoff {
+                harness: *harness,
+                text: text.clone().into(),
+            },
+            entry_id: entry.id.clone().into(),
+            timestamp: None,
+            copy_text: None,
+        }),
+        _ => None,
+    })
+}
+
 /// Build the block rows of one (already continuation-joined) entry.
 ///
 /// `parse` maps `(part_key, text)` to a block tree — the entity supplies
@@ -1292,12 +1311,6 @@ pub fn rows_for_entry(
             None => (body, Vec::new()),
         };
         let copy_text = (!text.trim().is_empty()).then(|| SharedString::from(text.clone()));
-        // The provider-switch packet, when this prompt was the first turn a
-        // new harness saw: its own row under the bubble.
-        let handoff = entry.parts.iter().find_map(|p| match p {
-            MessagePart::Handoff { harness, text, .. } => Some((*harness, text.as_str())),
-            _ => None,
-        });
         let mut rows = vec![Row {
             id: entry.id.clone().into(),
             version: (raw.len() as u64) << 1 | pending as u64,
@@ -1316,23 +1329,13 @@ pub fn rows_for_entry(
             timestamp: Some(entry.created_at),
             copy_text,
         }];
-        if let Some((harness, packet)) = handoff {
-            // The strip moves under the packet: it is the entry's last row.
+        // A re-sent first turn after a switch carries the packet itself; the
+        // strip moves under the packet, the entry's last row.
+        if let Some(mut packet) = handoff_row(entry) {
             let bubble = &mut rows[0];
-            let timestamp = bubble.timestamp.take();
-            let copy_text = bubble.copy_text.take();
-            rows.push(Row {
-                id: format!("{}#handoff", entry.id).into(),
-                version: fnv1a(packet.as_bytes()),
-                turn_start: false,
-                kind: RowKind::Handoff {
-                    harness,
-                    text: packet.to_string().into(),
-                },
-                entry_id,
-                timestamp,
-                copy_text,
-            });
+            packet.timestamp = bubble.timestamp.take();
+            packet.copy_text = bubble.copy_text.take();
+            rows.push(packet);
         }
         return rows;
     }
@@ -1348,7 +1351,7 @@ pub fn rows_for_entry(
         let hint = texts
             .next()
             .map(|hint| SharedString::from(hint.to_string()));
-        return vec![Row {
+        let mut rows = vec![Row {
             id: entry.id.clone().into(),
             version: fnv1a(text.as_bytes()),
             turn_start: true,
@@ -1360,6 +1363,10 @@ pub fn rows_for_entry(
             timestamp: None,
             copy_text: None,
         }];
+        // The provider-switch divider carries the packet the next harness
+        // will receive, shown from the moment of the switch.
+        rows.extend(handoff_row(entry));
+        return rows;
     }
 
     // Assistant: split parts into block rows, folding consecutive
@@ -10446,6 +10453,38 @@ mod tests {
         assert_eq!(rows[1].copy_text.as_deref(), Some("third"));
         assert_eq!(handoff_size_label(612), "612 chars");
         assert_eq!(handoff_size_label(12_345), "12.3k chars");
+    }
+
+    #[test]
+    fn a_provider_switch_divider_shows_its_packet_from_the_switch_on() {
+        let mut entry = assistant(
+            "s1",
+            MessageStatus::Complete,
+            vec![
+                text_part("t0", "Provider changed from Claude Code to Codex."),
+                text_part("t1", "The conversation so far is handed to Codex as text."),
+                MessagePart::Handoff {
+                    id: "s1-handoff".into(),
+                    harness: zeron_proto::HarnessId::Codex,
+                    text: "<provider_switch>\nmoved\n</provider_switch>".into(),
+                },
+            ],
+        );
+        entry.role = MessageRole::System;
+        let rows = rows_for_entry(&entry, false, &mut parse);
+        assert_eq!(rows.len(), 2);
+        assert!(matches!(
+            &rows[0].kind,
+            RowKind::Divider { hint: Some(_), .. }
+        ));
+        assert!(matches!(
+            &rows[1].kind,
+            RowKind::Handoff {
+                harness: zeron_proto::HarnessId::Codex,
+                ..
+            }
+        ));
+        assert!(rows[1].timestamp.is_none() && rows[1].copy_text.is_none());
     }
 
     #[test]

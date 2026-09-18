@@ -1082,6 +1082,23 @@ impl SessionsEngine {
         Ok(())
     }
 
+    /// The conversation so far as the packet the next harness receives —
+    /// `None` when there is nothing to hand over. Written onto the switch's
+    /// divider entry; [`Inner::harness_prompt`] sends that recorded text as
+    /// long as no message followed the divider.
+    pub fn provider_switch_packet(&self, chat_id: &str) -> Option<String> {
+        let entries = self
+            .inner
+            .doc_host()?
+            .open(chat_id)
+            .ok()?
+            .doc()
+            .read_entries()
+            .ok()?;
+        let history = bounded_source_copy(&entries, SIDECHAT_CONTEXT_BUDGET_CHARS);
+        (!history.is_empty()).then(|| provider_switch_context(&history))
+    }
+
     fn branch_context(
         &self,
     ) -> Result<(DocHost, crate::workspace_host::WorkspaceHost), EngineError> {
@@ -1504,14 +1521,33 @@ impl Inner {
             .into_iter()
             .filter(|entry| entry.id != user_entry_id)
             .collect();
-        let history = bounded_source_copy(&history, SIDECHAT_CONTEXT_BUDGET_CHARS);
-        if history.is_empty() {
-            return None;
-        }
-        let context = provider_switch_context(&history);
+        // The switch's divider already recorded the packet; send exactly
+        // that while it is still the newest thing said. Anything after it
+        // (a first turn that died and was re-sent) needs a fresh copy, which
+        // then lands on the user entry instead.
+        let recorded = history
+            .last()
+            .filter(|entry| entry.role == MessageRole::System)
+            .and_then(|entry| {
+                entry.parts.iter().find_map(|part| match part {
+                    MessagePart::Handoff { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+            });
+        let (context, handoff) = match recorded {
+            Some(context) => (context, None),
+            None => {
+                let history = bounded_source_copy(&history, SIDECHAT_CONTEXT_BUDGET_CHARS);
+                if history.is_empty() {
+                    return None;
+                }
+                let context = provider_switch_context(&history);
+                (context.clone(), Some(context))
+            }
+        };
         Some(HarnessPrompt {
             prompt: format!("{context}\n\n<latest_user_message>\n{typed}\n</latest_user_message>"),
-            handoff: Some(context),
+            handoff,
         })
     }
 

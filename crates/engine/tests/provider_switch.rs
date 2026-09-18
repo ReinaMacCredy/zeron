@@ -310,6 +310,16 @@ async fn the_new_harness_starts_fresh_with_the_conversation_as_text_then_resumes
         entry_text(&divider),
         "Provider changed from Old to New.The conversation so far is handed to New as text."
     );
+    // The packet is on the divider from the moment of the switch.
+    let packet = match &divider.parts[2] {
+        MessagePart::Handoff {
+            harness: HarnessId::Pi,
+            text,
+            ..
+        } => text.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert!(packet.ends_with("Assistant: Old answer 2\n</previous_conversation>"));
 
     rig.turn(CHAT, "third", "m3").await;
     let seen = rig.new.runs.lock().unwrap().clone();
@@ -325,35 +335,19 @@ async fn the_new_harness_starts_fresh_with_the_conversation_as_text_then_resumes
         2,
         "the old harness is not run again"
     );
-    // The doc keeps the typed text; the handover rides the same entry as its
-    // own part, verbatim, so the transcript can show what crossed.
+    // The first turn sends the recorded packet verbatim; the doc keeps the
+    // typed text and does not record a second copy on the user entry.
+    assert!(seen[0].prompt.starts_with(packet.as_str()));
     let doc = entries(&rig.core, CHAT);
     let prompt = &doc[doc.len() - 2];
     assert_eq!(entry_text(prompt), "third");
-    assert_eq!(prompt.parts.len(), 2);
-    assert!(
-        matches!(
-            &prompt.parts[1],
-            MessagePart::Handoff { id, harness: HarnessId::Pi, text }
-                if id == "m3-handoff" && seen[0].prompt.starts_with(text.as_str())
-                    && text.ends_with("</previous_conversation>")
-        ),
-        "{:?}",
-        prompt.parts[1]
-    );
+    assert_eq!(prompt.parts.len(), 1);
     assert_eq!(rig.session(CHAT).as_deref(), Some("New-sess"));
 
     rig.turn(CHAT, "fourth", "m4").await;
     let seen = rig.new.runs.lock().unwrap().clone();
     assert_eq!(seen[1].prompt, "fourth");
     assert_eq!(seen[1].resume.as_deref(), Some("New-sess"));
-    let doc = entries(&rig.core, CHAT);
-    assert_eq!(
-        doc[doc.len() - 2].parts.len(),
-        1,
-        "only the first turn after the switch carries a packet"
-    );
-
     // Switching back hands the conversation over again, and the recorded
     // packet is not conversation: it never nests inside the next one.
     rig.switch_to("mock", true).await;

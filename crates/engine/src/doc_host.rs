@@ -708,6 +708,20 @@ impl ChatDocHandle {
         hint: Option<&str>,
         created_at: i64,
     ) -> Result<(), DocError> {
+        self.write_system_note_with(message_id, text, hint, None, created_at)
+    }
+
+    /// [`Self::write_system_note`] carrying the provider-switch packet: the
+    /// conversation as text that the next harness will receive on its first
+    /// turn, shown under the divider from the moment of the switch.
+    pub fn write_system_note_with(
+        &self,
+        message_id: &str,
+        text: &str,
+        hint: Option<&str>,
+        handoff: Option<(zeron_proto::HarnessId, &str)>,
+        created_at: i64,
+    ) -> Result<(), DocError> {
         let mut parts = vec![MessagePart::Text {
             id: "t0".into(),
             text: text.to_string(),
@@ -716,6 +730,13 @@ impl ChatDocHandle {
             parts.push(MessagePart::Text {
                 id: "t1".into(),
                 text: hint.to_string(),
+            });
+        }
+        if let Some((harness, packet)) = handoff {
+            parts.push(MessagePart::Handoff {
+                id: format!("{message_id}-handoff"),
+                harness,
+                text: packet.to_string(),
             });
         }
         self.doc.push_message(&SessionMessageEntry {

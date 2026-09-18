@@ -971,7 +971,8 @@ impl EngineRpc {
                 config,
                 note,
             } => {
-                if self.doc_host.harness_for(&chat_id) != config.harness {
+                let switching = self.doc_host.harness_for(&chat_id) != config.harness;
+                if switching {
                     self.sessions
                         .switch_harness(&chat_id)
                         .await
@@ -983,13 +984,19 @@ impl EngineRpc {
                 if let Some(note) = note
                     && self.doc_host.is_host(&chat_id)
                 {
+                    // The packet is built now, at the switch, so the divider
+                    // shows it at once; the first run sends this same text.
+                    let packet = switching
+                        .then(|| self.sessions.provider_switch_packet(&chat_id))
+                        .flatten();
                     self.doc_host
                         .open(&chat_id)
                         .map_err(failed)?
-                        .write_system_note(
+                        .write_system_note_with(
                             &crate::new_id(),
                             &note.text,
                             note.hint.as_deref(),
+                            packet.as_deref().map(|p| (config.harness, p)),
                             crate::now_ms(),
                         )
                         .map_err(|e| failed(e.into()))?;
