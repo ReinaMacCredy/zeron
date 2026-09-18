@@ -805,11 +805,15 @@ async fn run_session(session: Session) {
                 .await;
         } else if !interrupted && !any_done {
             let status = child.try_wait().ok().flatten();
+            let error = norm
+                .pending_error
+                .take()
+                .unwrap_or_else(|| crate::crash_message("claude", status, &stderr_tail));
             let _ = event_tx
                 .send(Ok(AgentEvent::Done {
                     status: DoneStatus::Errored,
                     result: None,
-                    error: Some(crate::crash_message("claude", status, &stderr_tail)),
+                    error: Some(error),
                     session_id: norm.session_id.clone(),
                 }))
                 .await;

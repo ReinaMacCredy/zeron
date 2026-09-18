@@ -494,6 +494,50 @@ async fn error_codes_map_to_readable_messages() {
 }
 
 #[tokio::test]
+async fn a_safeguards_block_is_named_once_with_the_api_text() {
+    let (controls, _steer, _token) = controls("A");
+    let events = run_to_end(&harness(), request("scenario:safeguards"), controls).await;
+
+    assert!(
+        !events.iter().any(|e| matches!(e, AgentEvent::Error { .. })),
+        "the terse code must not double the real reason: {events:?}"
+    );
+    match events.last() {
+        Some(AgentEvent::Done {
+            status: DoneStatus::Errored,
+            result: None,
+            error: Some(error),
+            session_id,
+        }) => {
+            assert_eq!(session_id.as_deref(), Some("sess-sg"));
+            assert!(
+                error.starts_with("Blocked by Claude's safeguards (category: cyber)."),
+                "{error}"
+            );
+            assert!(error.ends_with("Request ID: req_test"), "{error}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn an_assistant_error_without_a_result_frame_still_surfaces() {
+    let (controls, _steer, _token) = controls("A");
+    let events = run_to_end(&harness(), request("scenario:eof"), controls).await;
+
+    assert_eq!(
+        events.last(),
+        Some(&AgentEvent::Done {
+            status: DoneStatus::Errored,
+            result: None,
+            error: Some("Billing error — check your Claude plan or payment method.".into()),
+            session_id: Some("sess-eof".into()),
+        }),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
 async fn missing_binary_is_not_installed() {
     let harness = ClaudeHarness::new().with_executable("/nonexistent/claude-nowhere");
     let (controls, _steer, _token) = controls("A");

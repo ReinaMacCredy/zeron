@@ -26,6 +26,31 @@ fn assistant_error_text(code: &str) -> String {
     }
 }
 
+/// The CLI renders a failed API call as a `success` result whose `result`
+/// text starts with `API Error:` — the only place the real reason (and any
+/// request id) ever appears; the assistant frame carries just the code.
+const API_ERROR_PREFIX: &str = "API Error:";
+
+/// Wording for an `API Error:` result. A safeguards block gets a leading
+/// line that names it and says what to do: the terse code alone left the
+/// user retrying "resume" against the same flagged session four times
+/// (2026-09-19), and the classifier fires on the model's streamed output,
+/// so resuming the same session reproduces the block.
+fn api_error_text(raw: &str) -> String {
+    if !raw.contains("safeguards flagged") {
+        return raw.to_owned();
+    }
+    let category = raw
+        .split_once("Details: `[")
+        .and_then(|(_, rest)| rest.split_once("]`"))
+        .map(|(category, _)| format!(" (category: {category})"))
+        .unwrap_or_default();
+    format!(
+        "Blocked by Claude's safeguards{category}. Resuming this thread replays the same \
+         session and gets blocked again — start a new thread or switch model, then rephrase.\n\n{raw}"
+    )
+}
+
 /// Which claude.ai usage window a `rate_limit_event` refers to.
 fn rate_window_label(kind: &str) -> &'static str {
     match kind {
@@ -222,6 +247,12 @@ pub(crate) struct Normalizer {
     assistant_message_id: String,
     /// Last session id seen (init or result) — used for synthetic Dones.
     pub session_id: Option<String>,
+    /// The main channel's assistant-level error, held until the `result`
+    /// frame: when that carries the CLI's `API Error:` text it supersedes the
+    /// code mapping, otherwise the mapping surfaces then. Every observed
+    /// assistant error was followed by a result frame (journals 2026-09-19);
+    /// the run loop drains a survivor into its synthetic Done.
+    pub pending_error: Option<String>,
 }
 
 impl Normalizer {
@@ -234,6 +265,7 @@ impl Normalizer {
             pending_advisor: std::collections::HashMap::new(),
             assistant_message_id: new_message_id(),
             session_id: None,
+            pending_error: None,
         }
     }
 
@@ -564,11 +596,10 @@ impl Normalizer {
                 }
                 // A failed turn (usage limit, billing, auth, overloaded, …)
                 // carries a terse `error` code here — often with empty content
-                // and no `result` error — so surface it visibly.
+                // and no `result` error — so it must surface; held for the
+                // result frame, which may carry the fuller `API Error:` text.
                 if let Some(code) = &f.error {
-                    out.push(AgentEvent::Error {
-                        message: assistant_error_text(code),
-                    });
+                    self.pending_error = Some(assistant_error_text(code));
                 }
                 // The enclosing assistant frame closes the streamed message
                 // item; rotate so post-boundary deltas get a fresh id.
@@ -699,7 +730,25 @@ impl Normalizer {
                     input_tokens: f.usage.input_tokens,
                     output_tokens: f.usage.output_tokens,
                 };
-                let done = if f.subtype == "success" {
+                let api_error = f
+                    .result
+                    .as_deref()
+                    .filter(|_| f.subtype == "success")
+                    .filter(|text| text.starts_with(API_ERROR_PREFIX))
+                    .map(api_error_text);
+                let pending_error = self.pending_error.take().filter(|_| api_error.is_none());
+                let done = if let Some(text) = api_error {
+                    AgentEvent::Done {
+                        status: if interrupted {
+                            DoneStatus::Interrupted
+                        } else {
+                            DoneStatus::Errored
+                        },
+                        result: None,
+                        error: Some(text),
+                        session_id: f.session_id,
+                    }
+                } else if f.subtype == "success" {
                     AgentEvent::Done {
                         status: if interrupted {
                             DoneStatus::Interrupted
@@ -761,6 +810,9 @@ impl Normalizer {
                     }
                 };
                 let mut out = self.settle_pending_advisors();
+                if let Some(message) = pending_error {
+                    out.push(AgentEvent::Error { message });
+                }
                 if let Some(window) = window {
                     out.push(AgentEvent::ContextUsage {
                         tokens: None,
@@ -1455,6 +1507,98 @@ mod tests {
             ),
             "wake turn settles with its own Done"
         );
+    }
+
+    /// Journal 127cbfdf 2026-09-19: the assistant frame carried only
+    /// `error: invalid_request`; the CLI's `success` result carried the
+    /// safeguards text, which the transcript never showed.
+    const SAFEGUARDS_RESULT: &str = r#"{"type":"result","subtype":"success","session_id":"s1","result":"API Error: Opus 5's safeguards flagged this message (https://www.anthropic.com/legal/aup). Claude Code can't respond to this message with Opus 5.\n\nDetails: `[cyber]`\n\nRequest ID: req_011CfBJhaYNDSEtaquHCPSbE"}"#;
+
+    fn assistant_error_then(result: &str) -> Vec<AgentEvent> {
+        let mut normalizer = Normalizer::new();
+        let assistant = crate::claude::wire::parse_frame(
+            r#"{"type":"assistant","uuid":"u1","message":{"content":[]},"error":"invalid_request"}"#,
+        )
+        .unwrap();
+        let mut events = normalizer.normalize(assistant, false);
+        events
+            .extend(normalizer.normalize(crate::claude::wire::parse_frame(result).unwrap(), false));
+        events
+    }
+
+    #[test]
+    fn an_api_error_result_names_a_safeguards_block_once() {
+        let events = assistant_error_then(SAFEGUARDS_RESULT);
+        let errors: Vec<&AgentEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Error { .. }))
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "the code mapping is superseded: {errors:?}"
+        );
+        match events.last() {
+            Some(AgentEvent::Done {
+                status,
+                result,
+                error: Some(error),
+                session_id,
+            }) => {
+                assert_eq!(*status, DoneStatus::Errored);
+                assert_eq!(*result, None);
+                assert_eq!(session_id.as_deref(), Some("s1"));
+                assert!(
+                    error.starts_with("Blocked by Claude's safeguards (category: cyber)."),
+                    "{error}"
+                );
+                assert!(
+                    error.contains("start a new thread or switch model"),
+                    "{error}"
+                );
+                assert!(
+                    error.contains("Request ID: req_011CfBJhaYNDSEtaquHCPSbE"),
+                    "{error}"
+                );
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_held_assistant_error_surfaces_at_a_plain_result() {
+        let events = assistant_error_then(
+            r#"{"type":"result","subtype":"success","session_id":"s1","result":""}"#,
+        );
+        let n = events.len();
+        assert!(
+            matches!(
+                &events[n - 3],
+                AgentEvent::Error { message } if message == "The request was rejected as invalid."
+            ),
+            "{events:?}"
+        );
+        assert!(matches!(&events[n - 2], AgentEvent::Usage { .. }));
+        assert!(matches!(
+            &events[n - 1],
+            AgentEvent::Done {
+                status: DoneStatus::Completed,
+                error: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_non_safeguards_api_error_passes_through_verbatim() {
+        let events = assistant_error_then(
+            r#"{"type":"result","subtype":"success","result":"API Error: 500 {\"type\":\"error\"}"}"#,
+        );
+        match events.last() {
+            Some(AgentEvent::Done { error, .. }) => {
+                assert_eq!(error.as_deref(), Some(r#"API Error: 500 {"type":"error"}"#));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     #[test]

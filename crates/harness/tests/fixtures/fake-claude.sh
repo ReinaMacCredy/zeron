@@ -162,6 +162,20 @@ case "$first" in
   emit '{"type":"result","subtype":"error_max_turns","errors":[],"usage":{"input_tokens":1,"output_tokens":2},"session_id":"sess-err"}'
   ;;
 
+*scenario:safeguards*)
+  # Journal 127cbfdf 2026-09-19: a classifier block arrives as a terse
+  # assistant code, then a SUCCESS result whose text is the real reason.
+  emit '{"type":"system","subtype":"init","model":"claude-opus-5","tools":[],"cwd":"/tmp","session_id":"sess-sg"}'
+  emit '{"type":"assistant","parent_tool_use_id":null,"message":{"content":[]},"error":"invalid_request"}'
+  emit '{"type":"result","subtype":"success","result":"API Error: Opus 5'"'"'s safeguards flagged this message (https://www.anthropic.com/legal/aup).\n\nDetails: `[cyber]`\n\nRequest ID: req_test","usage":{"input_tokens":24,"output_tokens":9554},"session_id":"sess-sg"}'
+  ;;
+
+*scenario:eof*)
+  # An assistant-level error with no result frame: the CLI just exits 0.
+  emit '{"type":"system","subtype":"init","model":"claude-opus-5","tools":[],"cwd":"/tmp","session_id":"sess-eof"}'
+  emit '{"type":"assistant","parent_tool_use_id":null,"message":{"content":[]},"error":"billing_error"}'
+  ;;
+
 *)
   emit '{"type":"result","subtype":"error_during_execution","errors":["unknown scenario"],"usage":{"input_tokens":0,"output_tokens":0},"session_id":"sess-x"}'
   ;;
