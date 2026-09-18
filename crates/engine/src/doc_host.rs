@@ -2626,11 +2626,13 @@ impl DocHost {
     }
 
     /// Thread tools (d25): a peer's message lands on the target's queue tagged
-    /// with its origin and held for turn end, so an idle target starts a turn
-    /// with it and a working one finishes its own turn first. Refused for a
-    /// self-send and across projects; both rows must exist. The queue is
-    /// drained before returning, so an idle target is already Working when
-    /// the sender's next `wait_threads` looks at it.
+    /// with its origin and goes out the way the composer's Send now does: an
+    /// idle target starts a turn with it, a working one whose agent takes
+    /// mid-turn input receives it at its next step, and only an agent that
+    /// cannot keeps the row held for turn end. Refused for a self-send and
+    /// across projects; both rows must exist. Delivered before returning, so
+    /// an idle target is already Working when the sender's next
+    /// `wait_threads` looks at it.
     pub async fn queue_thread_message(
         &self,
         chat_id: &str,
@@ -2670,7 +2672,10 @@ impl DocHost {
         handle.publish_queue();
         self.unarchive_on_send(chat_id);
         self.nudge_remote_host(chat_id);
-        self.drain_queue(&handle).await;
+        match self.steer_queued_now(chat_id, &id).await {
+            Ok(true) => {}
+            Ok(false) | Err(_) => self.drain_queue(&handle).await,
+        }
         Ok(id)
     }
 

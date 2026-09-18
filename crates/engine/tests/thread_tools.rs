@@ -19,9 +19,12 @@ use zeron_proto::{
     SessionStatus, SteeringMode,
 };
 
-/// Answers every prompt after `step_delay`, recording what it was asked.
+/// Answers every prompt after `step_delay`, recording what it was asked and,
+/// when steerable, what reached its mid-turn mailbox.
 struct RecordingHarness {
     prompts: Arc<Mutex<Vec<String>>>,
+    steers: Arc<Mutex<Vec<String>>>,
+    steerable: bool,
     step_delay: Duration,
 }
 
@@ -34,10 +37,14 @@ impl Harness for RecordingHarness {
         "Recording"
     }
     fn supports_steering(&self) -> bool {
-        false
+        self.steerable
     }
     fn steering_mode(&self) -> SteeringMode {
-        SteeringMode::TurnBoundary
+        if self.steerable {
+            SteeringMode::StepBoundary
+        } else {
+            SteeringMode::TurnBoundary
+        }
     }
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         &[]
@@ -48,10 +55,25 @@ impl Harness for RecordingHarness {
     async fn run(
         &self,
         request: RunRequest,
-        _controls: RunControls,
+        mut controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         self.prompts.lock().unwrap().push(request.prompt.clone());
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(8);
+        let steers = self.steers.clone();
+        let confirm = tx.clone();
+        tokio::spawn(async move {
+            while let Some(message) = controls.steering.recv().await {
+                steers.lock().unwrap().push(message.prompt);
+                // A real harness confirms the fold; without it the engine
+                // treats the steer as lost and re-runs it at turn end.
+                let _ = confirm
+                    .send(Ok(AgentEvent::Steered {
+                        assistant_message_id: Some("a-rec".into()),
+                        next_assistant_message_id: Some("a-rec-2".into()),
+                    }))
+                    .await;
+            }
+        });
         let delay = self.step_delay;
         tokio::spawn(async move {
             let script = vec![
@@ -90,16 +112,24 @@ impl Harness for RecordingHarness {
 struct Rig {
     core: EngineCore,
     prompts: Arc<Mutex<Vec<String>>>,
+    steers: Arc<Mutex<Vec<String>>>,
     _dir: tempfile::TempDir,
 }
 
 fn rig(step_delay: Duration) -> Rig {
+    rig_with(step_delay, false)
+}
+
+fn rig_with(step_delay: Duration, steerable: bool) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("device-id"), "dev-a").unwrap();
     let prompts = Arc::new(Mutex::new(Vec::new()));
+    let steers = Arc::new(Mutex::new(Vec::new()));
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(RecordingHarness {
         prompts: prompts.clone(),
+        steers: steers.clone(),
+        steerable,
         step_delay,
     }));
     let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
@@ -113,6 +143,7 @@ fn rig(step_delay: Duration) -> Rig {
     Rig {
         core,
         prompts,
+        steers,
         _dir: dir,
     }
 }
@@ -390,8 +421,62 @@ async fn self_and_cross_project_sends_are_refused() {
 }
 
 #[tokio::test]
+async fn a_message_to_a_working_peer_steers_its_turn_when_the_agent_takes_mid_turn_input() {
+    let rig = rig_with(Duration::from_millis(300), true);
+    let peer = rig
+        .core
+        .doc_host
+        .create_thread("lead", "first task", None, None, None, None)
+        .await
+        .unwrap();
+    wait_for(
+        || rig.core.sessions.turn_in_flight(&peer),
+        "the peer's turn to start",
+    )
+    .await;
+
+    let queued = rig
+        .core
+        .doc_host
+        .queue_thread_message(&peer, "lead", "also cover the refresh race")
+        .await
+        .unwrap();
+    assert!(
+        rig.core.sessions.turn_in_flight(&peer),
+        "the turn was not interrupted"
+    );
+    assert_eq!(queue_len(&rig.core, &peer), 0, "nothing left held");
+    let now = entries(&rig.core, &peer);
+    assert_eq!(
+        now.len(),
+        2,
+        "the tagged entry is in the transcript at once"
+    );
+    assert_eq!(now[1].id, queued);
+    assert_eq!(now[1].from_chat_id.as_deref(), Some("lead"));
+    wait_for(
+        || rig.steers.lock().unwrap().len() == 1,
+        "the framed message to reach the live turn",
+    )
+    .await;
+    let steer = rig.steers.lock().unwrap()[0].clone();
+    assert!(steer.starts_with("[Message from thread"), "{steer}");
+    assert!(steer.ends_with("also cover the refresh race"), "{steer}");
+
+    wait_for(|| idle(&rig.core, &peer), "the peer's turn to end").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        rig.prompts.lock().unwrap().len(),
+        1,
+        "a steered message never runs again at turn end"
+    );
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
 async fn a_message_to_a_working_peer_waits_and_take_moves_it_into_the_transcript() {
-    // A slow harness keeps the peer Working long enough to observe the hold.
+    // A slow harness that takes no mid-turn input keeps the peer Working
+    // long enough to observe the hold.
     let rig = rig(Duration::from_millis(300));
     let peer = rig
         .core

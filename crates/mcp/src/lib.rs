@@ -102,7 +102,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "send_message_to_thread",
-            "description": "Send a message to another thread in this project. An idle thread starts a turn with it; a working thread receives it when its turn ends (or sooner, if it is waiting with wait_threads). Never to this chat itself. Counts against this turn's send budget.",
+            "description": "Send a message to another thread in this project. An idle thread starts a turn with it; a working thread receives it inside its current turn at the next step (a wait_threads call there returns with it), or at turn end if its agent takes no mid-turn input. Never to this chat itself. Counts against this turn's send budget.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "threadId": thread_id, "text": { "type": "string" } },
@@ -112,7 +112,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "wait_threads",
-            "description": "Wait with mode any (default: any listed thread stops working, or an inbox message arrives), all (all listed threads stop working), or message (an inbox message arrives, even if peers are already idle). Use message after sending when you need a reply; it receives pending inbox messages too and does not correlate replies to a particular send. all requires threadIds; any with no ids waits for a message. Idle, awaiting_input and errored all mean not working, not task success. Timeout defaults to 600s, max 1800s.",
+            "description": "Wait with mode any (default: any listed thread stops working, or an inbox message arrives), all (all listed threads stop working), or message (an inbox message arrives, even if peers are already idle). Use message after sending when you need a reply; it receives pending inbox messages too and does not correlate replies to a particular send. all requires threadIds; any with no ids waits for a message. Idle, awaiting_input and errored all mean not working, not task success. A message returned here also reaches you as a user message at your next step, so act on it once. Timeout defaults to 600s, max 1800s.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -506,6 +506,19 @@ impl ThreadTools {
             .subscribe(methods::WATCH_QUEUE, json!({ "chatId": self.chat_id }))
             .await
             .map_err(|e| format!("WatchQueue: {e}"))?;
+        // A message steered into this chat's live turn is in the transcript
+        // already, never in the queue; the turn only folds it in once this
+        // call returns, so the transcript is what wakes the wait.
+        let mut transcript = self
+            .client
+            .subscribe(
+                methods::WATCH_DOC_MESSAGES,
+                json!({ "chatId": self.chat_id }),
+            )
+            .await
+            .map_err(|e| format!("WatchDocMessages: {e}"))?;
+        let mut seen: Option<std::collections::HashSet<String>> = None;
+        let mut transcript_open = true;
         let statuses = |sessions: &[Session]| -> Value {
             let now = Utc::now();
             ids.iter()
@@ -554,6 +567,19 @@ impl ThreadTools {
                     }
                     None => return Err("WatchQueue ended".into()),
                 },
+                item = transcript.recv(), if transcript_open && mode != "all" => match item {
+                    Some(frame) => {
+                        let arrived = new_peer_entries(&frame, &mut seen);
+                        if !arrived.is_empty() {
+                            return Ok(json!({
+                                "reason": "message",
+                                "messages": arrived,
+                                "statuses": latest.as_deref().map(statuses).unwrap_or(json!({})),
+                            }));
+                        }
+                    }
+                    None => transcript_open = false,
+                },
                 _ = tokio::time::sleep_until(deadline) => {
                     return Ok(json!({
                         "reason": "timeout",
@@ -564,6 +590,46 @@ impl ThreadTools {
             }
         }
     }
+}
+
+/// The peer-tagged user entries a `WatchDocMessages` frame carries that were
+/// not in the transcript when the wait began. The opening reset seeds `seen`
+/// and reports nothing.
+fn new_peer_entries(
+    frame: &Value,
+    seen: &mut Option<std::collections::HashSet<String>>,
+) -> Vec<Value> {
+    let entries: Vec<&Value> = match frame.get("reset") {
+        Some(reset) => reset.as_array().into_iter().flatten().collect(),
+        None => frame["upsert"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|u| &u["entry"])
+            .collect(),
+    };
+    let Some(seen) = seen else {
+        *seen = Some(
+            entries
+                .iter()
+                .filter_map(|e| e["id"].as_str().map(str::to_string))
+                .collect(),
+        );
+        return Vec::new();
+    };
+    entries
+        .into_iter()
+        .filter(|e| e["role"] == "user" && e["fromChatId"].is_string())
+        .filter(|e| {
+            e["id"]
+                .as_str()
+                .is_some_and(|id| seen.insert(id.to_string()))
+        })
+        .map(|e| {
+            let rendered = render_entry(e);
+            json!({ "id": rendered["id"], "fromChatId": rendered["fromChatId"], "text": rendered["text"] })
+        })
+        .collect()
 }
 
 fn status_of(sessions: &[Session], chat_id: &str, now: DateTime<Utc>) -> &'static str {
@@ -773,6 +839,7 @@ mod tests {
         session_snapshots: Vec<Vec<Value>>,
         queue_snapshots: Vec<Vec<Value>>,
         entries: Vec<Value>,
+        doc_frames: Vec<Value>,
         reads: Mutex<Vec<String>>,
         calls: Mutex<Vec<(String, Value)>>,
     }
@@ -834,8 +901,10 @@ mod tests {
                 }
                 methods::WATCH_DOC_MESSAGES => {
                     self.reads.lock().unwrap().push("FULL_TRANSCRIPT".into());
-                    Ok(RpcReply::Stream(
-                        futures::stream::iter(vec![json!({ "reset": self.entries })]).boxed(),
+                    Ok(timed(
+                        std::iter::once(json!({ "reset": self.entries }))
+                            .chain(self.doc_frames.iter().cloned())
+                            .collect(),
                     ))
                 }
                 methods::CREATE_THREAD
@@ -907,6 +976,7 @@ mod tests {
                     )
                 })
                 .collect(),
+            doc_frames: vec![],
             reads: Mutex::new(Vec::new()),
             calls: Mutex::new(Vec::new()),
         }
@@ -1418,6 +1488,46 @@ mod tests {
                 methods::TAKE_THREAD_MESSAGES.to_string(),
                 json!({ "chatId": "a" })
             )]
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_threads_returns_a_message_steered_into_this_chats_transcript() {
+        let mut fake = fixture();
+        fake.session_snapshots = vec![vec![session("b", "working", 0)]];
+        // One peer entry already in the transcript must not count as new.
+        let mut earlier = entry(
+            "m0",
+            "user",
+            vec![json!({ "kind": "text", "id": "t", "text": "old" })],
+        );
+        earlier["fromChatId"] = json!("b");
+        fake.entries.insert(0, earlier);
+        let mut steered = entry(
+            "m9",
+            "user",
+            vec![json!({ "kind": "text", "id": "t", "text": "pong from codex" })],
+        );
+        steered["fromChatId"] = json!("b");
+        fake.doc_frames = vec![
+            json!({ "append": [{ "entry": "m5", "part": "t", "text": "…", "len": 7 }], "count": 6 }),
+            json!({ "upsert": [{ "after": "m5", "entry": steered }], "count": 7 }),
+        ];
+        let rig = rig(fake);
+        let out = rig
+            .tools
+            .wait_threads(&json!({ "threadIds": ["b"], "timeoutSeconds": 30 }))
+            .await
+            .unwrap();
+        assert_eq!(out["reason"], "message");
+        assert_eq!(
+            out["messages"],
+            json!([{ "id": "m9", "fromChatId": "b", "text": "pong from codex" }])
+        );
+        assert_eq!(out["statuses"]["b"], "working");
+        assert!(
+            rig.calls.calls.lock().unwrap().is_empty(),
+            "nothing to take"
         );
     }
 
