@@ -493,7 +493,7 @@ impl SessionsEngine {
                     // dying run re-dispatches) keep the typed text.
                     prompt: self
                         .inner
-                        .sidechat_harness_prompt(chat_id, &request.prompt)
+                        .harness_prompt(chat_id, &request.prompt, &user_id)
                         .unwrap_or_else(|| request.prompt.clone()),
                     message_id: Some(user_id.clone()),
                 };
@@ -647,7 +647,7 @@ impl SessionsEngine {
             // to happen on this path too.
             prompt: self
                 .inner
-                .sidechat_harness_prompt(chat_id, prompt)
+                .harness_prompt(chat_id, prompt, &user_id)
                 .unwrap_or_else(|| prompt.to_string()),
             message_id: Some(user_id.clone()),
         };
@@ -915,16 +915,22 @@ impl SessionsEngine {
             .unwrap_or(entries.len());
         let session = self.inner.stored_harness_session(source_chat_id);
         let anchors = self.inner.anchors(source_chat_id);
+        if anchors.dead.contains(entry_id) {
+            return Err(EngineError::Other(
+                "That reply came from a previous provider: fork from a reply after the switch."
+                    .into(),
+            ));
+        }
         let branch = match &session {
             None => None,
             Some(_) => Some(SessionBranch {
-                keep: Some(anchors.get(entry_id).cloned().ok_or_else(|| {
+                keep: Some(anchors.live.get(entry_id).cloned().ok_or_else(|| {
                     EngineError::Other(format!(
                         "No checkpoint for this reply: it was recorded before {} checkpoints were tracked.",
                         harness.display_name()
                     ))
                 })?),
-                drop: entries.get(end).and_then(|e| anchors.get(&e.id).cloned()),
+                drop: entries.get(end).and_then(|e| anchors.live.get(&e.id).cloned()),
             }),
         };
         let chat = ws.create_fork_chat(source_chat_id, new_chat_id)?;
@@ -977,9 +983,13 @@ impl SessionsEngine {
             .rev()
             .find(|e| e.role == MessageRole::Assistant);
         let anchors = self.inner.anchors(chat_id);
+        // A reply from before a provider switch cannot be branched at; the
+        // rewind lands before the switch instead and the next run starts
+        // fresh, carrying what is left as text.
+        let previous_reply = previous_reply.filter(|reply| !anchors.dead.contains(&reply.id));
         let keep = match previous_reply {
             None => None,
-            Some(reply) => Some(anchors.get(&reply.id).cloned().ok_or_else(|| {
+            Some(reply) => Some(anchors.live.get(&reply.id).cloned().ok_or_else(|| {
                 EngineError::Other(format!(
                     "No checkpoint before this prompt: it was recorded before {} checkpoints were tracked.",
                     harness.display_name()
@@ -1008,7 +1018,7 @@ impl SessionsEngine {
                 chat_id,
                 SessionBranch {
                     keep: Some(keep),
-                    drop: anchors.get(entry_id).cloned(),
+                    drop: anchors.live.get(entry_id).cloned(),
                 },
             ),
             None => {
@@ -1021,6 +1031,21 @@ impl SessionsEngine {
             }
         }
         Ok(RewindOutcome { prompt, removed })
+    }
+
+    /// The chat is moving to another harness: retire whatever child is
+    /// parked or running (its Done would re-remember the old session id)
+    /// and tombstone the session, so the next run starts fresh and hands
+    /// the conversation over as text. The row config is the caller's write.
+    pub async fn switch_harness(&self, chat_id: &str) -> Result<(), EngineError> {
+        self.interrupt(chat_id).await?;
+        let cwd = self
+            .inner
+            .stored_harness_session(chat_id)
+            .map(|(_, cwd)| cwd)
+            .unwrap_or_else(|| self.chat_cwd(chat_id));
+        self.inner.tombstone_harness_session(chat_id, &cwd);
+        Ok(())
     }
 
     fn branch_context(
@@ -1381,6 +1406,22 @@ fn last_chars(text: &str, max: usize) -> String {
     text.chars().skip(count - max).collect()
 }
 
+/// The chat's harness anchors: `live` ones a branch can cut at, `dead` ones
+/// recorded for a session that was tombstoned since (a provider switch).
+#[derive(Default)]
+struct Anchors {
+    live: HashMap<String, String>,
+    dead: std::collections::HashSet<String>,
+}
+
+/// What a harness receives on the first turn after a provider switch: the
+/// conversation so far as text, then the typed message.
+fn provider_switch_prompt(typed: &str, history: &str) -> String {
+    format!(
+        "<provider_switch>\nThis chat was moved to you from another agent. Its conversation so far is below as plain text; that agent's tool results and file state were not carried over. Continue from where it left off.\n</provider_switch>\n\n<previous_conversation>\n{history}\n</previous_conversation>\n\n<latest_user_message>\n{typed}\n</latest_user_message>"
+    )
+}
+
 #[derive(Default)]
 struct SidechatContext {
     completed_assistant: Option<usize>,
@@ -1389,6 +1430,34 @@ struct SidechatContext {
 }
 
 impl Inner {
+    /// What crosses into the harness in place of the typed text: a sidechat's
+    /// wrap, else — on a chat whose session was tombstoned under a
+    /// conversation — that conversation as text (the harness that produced it
+    /// is gone, and the new one has never seen it). `None` leaves the typed
+    /// text as is. `user_entry_id` is the entry this prompt writes; it is not
+    /// part of the history.
+    fn harness_prompt(&self, chat_id: &str, typed: &str, user_entry_id: &str) -> Option<String> {
+        if let Some(prompt) = self.sidechat_harness_prompt(chat_id, typed) {
+            return Some(prompt);
+        }
+        if !self.session_tombstoned(chat_id) {
+            return None;
+        }
+        let entries = self
+            .doc_host()?
+            .open(chat_id)
+            .ok()?
+            .doc()
+            .read_entries()
+            .ok()?;
+        let history: Vec<SessionMessageEntry> = entries
+            .into_iter()
+            .filter(|entry| entry.id != user_entry_id)
+            .collect();
+        let history = bounded_source_copy(&history, SIDECHAT_CONTEXT_BUDGET_CHARS);
+        (!history.is_empty()).then(|| provider_switch_prompt(typed, &history))
+    }
+
     /// What a sidechat's harness receives in place of the typed text: the
     /// boundary instruction, the source transcript on the first turn, and the
     /// typed message. `None` for an ordinary chat, which is every chat whose
@@ -1790,20 +1859,40 @@ impl Inner {
         if let Some(ws) = self.workspace() {
             ws.set_chat_harness_session(chat_id, "", cwd);
         }
+        self.publish(chat_id, &AgentEvent::SessionTombstoned {});
+    }
+
+    /// Whether the chat's stored session is the explicit tombstone: the next
+    /// run starts fresh even though the doc may hold a conversation.
+    fn session_tombstoned(&self, chat_id: &str) -> bool {
+        if let Some(known) = lock(&self.harness_sessions).get(chat_id) {
+            return known.session_id.is_empty();
+        }
+        self.workspace()
+            .and_then(|ws| ws.chat_harness_session(chat_id))
+            .is_some_and(|(session_id, _)| session_id.is_empty())
     }
 
     /// Every doc entry's harness anchor from the journal, latest per entry.
-    fn anchors(&self, chat_id: &str) -> HashMap<String, String> {
-        let mut anchors = HashMap::new();
+    fn anchors(&self, chat_id: &str) -> Anchors {
+        let mut anchors = Anchors::default();
         if let Ok(events) = self.journal.replay(chat_id, 0) {
             for (_, event) in events {
-                if let AgentEvent::Anchor {
-                    id,
-                    entry_id: Some(entry_id),
-                    ..
-                } = event
-                {
-                    anchors.insert(entry_id, id);
+                match event {
+                    AgentEvent::Anchor {
+                        id,
+                        entry_id: Some(entry_id),
+                        ..
+                    } => {
+                        anchors.dead.remove(&entry_id);
+                        anchors.live.insert(entry_id, id);
+                    }
+                    AgentEvent::SessionTombstoned {} => {
+                        anchors
+                            .dead
+                            .extend(anchors.live.drain().map(|(entry_id, _)| entry_id));
+                    }
+                    _ => {}
                 }
             }
         }
@@ -2306,10 +2395,11 @@ async fn drive_run(
     });
     // After the retry snapshot and the titler's capture, both of which want the
     // typed text: only what crosses into the harness carries the sidechat wrap.
-    let request = match inner.sidechat_harness_prompt(&chat_id, &request.prompt) {
-        Some(prompt) => RunRequest { prompt, ..request },
-        None => request,
-    };
+    let request =
+        match inner.harness_prompt(&chat_id, &request.prompt, &resume_state.user_message_id) {
+            Some(prompt) => RunRequest { prompt, ..request },
+            None => request,
+        };
     let mut stream = match harness.run(request, controls).await {
         Ok(stream) => stream,
         Err(err) => {

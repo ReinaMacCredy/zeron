@@ -587,6 +587,12 @@ pub enum AgentEvent {
         keep: Option<String>,
         drop: Option<String>,
     },
+    /// Engine-written journal record: the chat's harness session was
+    /// tombstoned (a provider switch, a rewind to the first prompt). Anchors
+    /// recorded before it belong to a session no later run can branch. Never
+    /// persisted to docs.
+    #[serde(rename_all = "camelCase")]
+    SessionTombstoned {},
     #[serde(rename_all = "camelCase")]
     UserMessage {
         text: String,

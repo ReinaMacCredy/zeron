@@ -484,6 +484,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
         | AgentEvent::AvailableCommands { .. }
         | AgentEvent::Anchor { .. }
         | AgentEvent::BranchPending { .. }
+        | AgentEvent::SessionTombstoned {}
         | AgentEvent::UserMessage { .. } => {}
     }
 }

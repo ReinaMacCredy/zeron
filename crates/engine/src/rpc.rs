@@ -843,7 +843,7 @@ impl EngineRpc {
         }
     }
 
-    fn mutate(&self, params: MutateParams) -> Result<(), RpcError> {
+    async fn mutate(&self, params: MutateParams) -> Result<(), RpcError> {
         let failed = |e: crate::EngineError| RpcError::Failed(e.to_string());
         match params {
             MutateParams::CreateChat {
@@ -942,6 +942,12 @@ impl EngineRpc {
                 config,
                 note,
             } => {
+                if self.doc_host.harness_for(&chat_id) != config.harness {
+                    self.sessions
+                        .switch_harness(&chat_id)
+                        .await
+                        .map_err(failed)?;
+                }
                 self.workspace
                     .set_chat_config(&chat_id, &config)
                     .map_err(failed)?;
@@ -1842,7 +1848,7 @@ impl RpcService for EngineRpc {
             }
             methods::MUTATE => {
                 let p: MutateParams = parse_params(params)?;
-                self.mutate(p)?;
+                self.mutate(p).await?;
                 RpcReply::value(&serde_json::json!({ "ok": true }))
             }
             methods::WATCH_CHECKOUT_DIFFS => {
