@@ -2134,6 +2134,16 @@ impl SubagentSink {
     }
 }
 
+/// What a parked turn settles to: Working while any subagent sink is still
+/// live (a background agent is still running for this chat), else Idle.
+fn parked_status(subagents: &std::collections::HashMap<String, SubagentSink>) -> SessionStatus {
+    if subagents.is_empty() {
+        SessionStatus::Idle
+    } else {
+        SessionStatus::Working
+    }
+}
+
 /// The parent-chip refresh a tagged event implies, for the in-place (parked)
 /// path — LIFECYCLE ONLY, mirroring the fold (live tails were rejected:
 /// per-delta chip rewrites grew the parent doc for the whole run).
@@ -2598,7 +2608,7 @@ async fn drive_run(
                     idle_since = Some(tokio::time::Instant::now());
                     self_continued_turn = false;
                     inner.set_status_with_completion(
-                        &chat_id, SessionStatus::Idle, false, completed_turn,
+                        &chat_id, parked_status(&subagents), false, completed_turn,
                     );
                     continue;
                 }
@@ -2652,8 +2662,14 @@ async fn drive_run(
             // turn ends can beat registration) is chip-only: minting a doc
             // just to freeze it empty helps no one, and stamping the ref
             // would link the chip to that never-created doc (an empty tab
-            // on click).
-            let done_only = !sink_known && matches!(sub_event.as_ref(), AgentEvent::Done { .. });
+            // on click). A bare usage report is the same: the fold ignores
+            // it, so a sink minted for it would be a phantom that also held
+            // the session Working (below) with no Done ever coming.
+            let done_only = !sink_known
+                && matches!(
+                    sub_event.as_ref(),
+                    AgentEvent::Done { .. } | AgentEvent::ContextUsage { .. }
+                );
             if chip_streaming {
                 if !sink_known && !done_only {
                     for p in folded.iter_mut() {
@@ -2768,6 +2784,15 @@ async fn drive_run(
                             },
                         );
                     }
+                }
+            }
+            // A parked session with a live subagent is still working: the
+            // sidebar dot follows the sinks, not the parent turn. Held until
+            // the last tagged Done (or the idle reaper).
+            if idle_since.is_some() {
+                let want = parked_status(&subagents);
+                if lock(&inner.statuses).get(&chat_id).map(|s| s.status) != Some(want) {
+                    inner.set_status(&chat_id, want, false);
                 }
             }
             continue;
@@ -3161,7 +3186,7 @@ async fn drive_run(
                 self_continued_turn = false;
                 inner.set_status_with_completion(
                     &chat_id,
-                    SessionStatus::Idle,
+                    parked_status(&subagents),
                     false,
                     completed_turn,
                 );

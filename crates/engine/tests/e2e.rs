@@ -2380,48 +2380,131 @@ async fn context_usage_settles_after_done_without_reopening_the_turn() {
     );
 }
 
+/// A steerable harness whose stream the test feeds by hand: the mailbox stays
+/// alive and every event lands exactly when the test sends it.
+struct ControlledHarness(
+    std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<AgentEvent>>>,
+);
+#[async_trait]
+impl Harness for ControlledHarness {
+    fn id(&self) -> HarnessId {
+        HarnessId::Mock
+    }
+    fn display_name(&self) -> &str {
+        "Controlled"
+    }
+    fn supports_steering(&self) -> bool {
+        true
+    }
+    fn steering_mode(&self) -> SteeringMode {
+        SteeringMode::StepBoundary
+    }
+    fn reasoning_levels(&self) -> &[ReasoningLevel] {
+        &[ReasoningLevel::Medium]
+    }
+    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+        Ok(vec![])
+    }
+    async fn run(
+        &self,
+        _: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let rx = self.0.lock().unwrap().take().unwrap();
+        // Keep the mailbox alive but let the test control confirmation.
+        Ok(
+            futures::stream::unfold((rx, controls), |(mut rx, controls)| async move {
+                rx.recv().await.map(|event| (Ok(event), (rx, controls)))
+            })
+            .boxed(),
+        )
+    }
+}
+
+/// A background subagent still streaming after its parent turn completed keeps
+/// the session Working (the sidebar dot), in either order: spawn-then-park, or
+/// park-then-spawn. The last tagged Done settles it to Idle.
+#[tokio::test]
+async fn live_subagent_holds_a_parked_session_working() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(ControlledHarness(std::sync::Mutex::new(Some(rx)))),
+    );
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-subagent-hold",
+        SessionCommandPayload::Run {
+            request: run_request("spawn"),
+            message_id: "user-spawn".into(),
+        },
+    );
+    let status = || core.sessions.session_status(CHAT).map(|s| s.status);
+    let sub = |id: &str, event: AgentEvent| AgentEvent::Subagent {
+        parent_tool_use_id: id.into(),
+        event: Box::new(event),
+    };
+    let text = |t: &str| AgentEvent::TextDelta { text: t.into() };
+
+    // Spawn-then-park: the subagent streams before the parent's Done.
+    tx.send(text("spawning")).unwrap();
+    tx.send(sub("agent-1", text("scanning"))).unwrap();
+    wait_for(|| status() == Some(SessionStatus::Working), "opening run").await;
+    tx.send(done(DoneStatus::Completed)).unwrap();
+    wait_for(
+        || {
+            core.sessions
+                .session_status(CHAT)
+                .is_some_and(|s| s.last_completed_turn.is_some())
+        },
+        "parent turn completes",
+    )
+    .await;
+    assert_eq!(
+        status(),
+        Some(SessionStatus::Working),
+        "a parked turn with a live subagent stays Working"
+    );
+    tx.send(sub("agent-1", done(DoneStatus::Completed)))
+        .unwrap();
+    wait_for(
+        || status() == Some(SessionStatus::Idle),
+        "last subagent settles the session",
+    )
+    .await;
+
+    // Park-then-spawn: the eager-done norm, the subagent speaks after the park.
+    tx.send(sub("agent-2", text("still going"))).unwrap();
+    wait_for(
+        || status() == Some(SessionStatus::Working),
+        "background subagent reopens Working",
+    )
+    .await;
+    // Usage-only tagged traffic is not a subagent: it never holds the session.
+    tx.send(sub(
+        "agent-3",
+        AgentEvent::ContextUsage {
+            tokens: Some(1),
+            window: Some(2),
+        },
+    ))
+    .unwrap();
+    tx.send(sub("agent-2", done(DoneStatus::Completed)))
+        .unwrap();
+    wait_for(
+        || status() == Some(SessionStatus::Idle),
+        "subagent done settles the parked session",
+    )
+    .await;
+    core.shutdown().await;
+}
+
 /// Reproduce a steer accepted just before the old turn's Done. The harness
 /// confirms the new boundary later; only its eventual completion may notify.
 #[tokio::test]
 async fn pending_steer_handoff_does_not_publish_a_completion() {
-    struct ControlledHarness(
-        std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<AgentEvent>>>,
-    );
-    #[async_trait]
-    impl Harness for ControlledHarness {
-        fn id(&self) -> HarnessId {
-            HarnessId::Mock
-        }
-        fn display_name(&self) -> &str {
-            "Controlled"
-        }
-        fn supports_steering(&self) -> bool {
-            true
-        }
-        fn steering_mode(&self) -> SteeringMode {
-            SteeringMode::StepBoundary
-        }
-        fn reasoning_levels(&self) -> &[ReasoningLevel] {
-            &[ReasoningLevel::Medium]
-        }
-        async fn models(&self) -> Result<Vec<Model>, HarnessError> {
-            Ok(vec![])
-        }
-        async fn run(
-            &self,
-            _: RunRequest,
-            controls: RunControls,
-        ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-            let rx = self.0.lock().unwrap().take().unwrap();
-            // Keep the mailbox alive but let the test control confirmation.
-            Ok(
-                futures::stream::unfold((rx, controls), |(mut rx, controls)| async move {
-                    rx.recv().await.map(|event| (Ok(event), (rx, controls)))
-                })
-                .boxed(),
-            )
-        }
-    }
     for routed_dispatch in [false, true] {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let dir = tempfile::tempdir().unwrap();
