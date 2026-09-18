@@ -6062,40 +6062,85 @@ impl Transcript {
                 let text = text.clone();
                 let mentions = mentions.clone();
                 let pending = *pending;
-                // An inter-thread message reads as a peer's voice: left
-                // aligned under a "from <thread>" line, accent-washed with a
-                // left rule, never the user's own right-aligned bubble.
-                let from_thread: Option<SharedString> = from_chat_id.as_ref().map(|from| {
-                    let state = self.state.read(cx);
-                    state
-                        .chats
-                        .iter()
-                        .find(|chat| chat.id.as_str() == from.as_ref())
-                        .and_then(|chat| chat.title.clone())
-                        .map(|title| SharedString::from(single_line(&title)))
-                        .unwrap_or_else(|| from.clone())
-                });
+                // An inter-thread message (thread tools) is a peer speaking:
+                // a "→ from <thread>" rule carrying the sender's harness mark
+                // and clock time, then plain prose. Never the user's own
+                // right-aligned bubble, and no accent: the rule is the same
+                // hairline the system dividers use (owner pick C3, 2026-09-18).
+                let peer: Option<(SharedString, Option<zeron_proto::HarnessId>)> =
+                    from_chat_id.as_ref().map(|from| {
+                        let state = self.state.read(cx);
+                        let chat = state
+                            .chats
+                            .iter()
+                            .find(|chat| chat.id.as_str() == from.as_ref());
+                        let title = chat
+                            .and_then(|chat| chat.title.clone())
+                            .map(|title| SharedString::from(single_line(&title)))
+                            .unwrap_or_else(|| from.clone());
+                        let harness = chat.and_then(|chat| chat.config.as_ref().map(|c| c.harness));
+                        (title, harness)
+                    });
                 let mut column = div().w_full().flex().flex_col();
-                if let Some(from_thread) = &from_thread {
+                if let Some((title, harness)) = &peer {
+                    let clock: Option<SharedString> = row
+                        .timestamp
+                        .and_then(chrono::DateTime::from_timestamp_millis)
+                        .map(|utc| {
+                            utc.with_timezone(&chrono::Local)
+                                .format("%-I:%M %p")
+                                .to_string()
+                                .into()
+                        });
                     column = column.child(
                         div()
                             .w_full()
                             .flex()
                             .flex_row()
                             .items_center()
-                            .gap(px(4.0))
-                            .pb(px(4.0))
+                            .gap(px(6.0))
+                            .pb(px(8.0))
                             .text_size(crate::typography::ui_rems(11.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.accent)
+                            .text_color(theme.text_muted)
                             .child(
-                                crate::icons::icon(crate::icons::CHAT_ROUND_LINE)
-                                    .size(px(12.0))
-                                    .flex_none()
-                                    .text_color(theme.accent),
+                                div()
+                                    .text_color(theme.text_faint)
+                                    .child(SharedString::from("→")),
                             )
                             .child(SharedString::from("from"))
-                            .child(from_thread.clone()),
+                            .when_some(
+                                harness.map(crate::pickers::harness_brand_icon),
+                                |el, (path, tint)| {
+                                    el.child(
+                                        crate::icons::icon(path)
+                                            .size(px(12.0))
+                                            .flex_none()
+                                            .text_color(tint.unwrap_or(theme.text_muted)),
+                                    )
+                                },
+                            )
+                            .child(
+                                div()
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(theme.text.opacity(0.8))
+                                    .child(title.clone()),
+                            )
+                            .when_some(clock, |el, clock| {
+                                el.child(
+                                    div()
+                                        .font_family(theme.font_mono.clone())
+                                        .text_size(crate::typography::ui_rems(10.0))
+                                        .text_color(theme.text_faint)
+                                        .child(clock),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .h(px(1.0))
+                                    .ml(px(4.0))
+                                    .bg(theme.border.opacity(0.6)),
+                            ),
                     );
                 }
                 // Attachment thumbnails ride ABOVE the bubble, right-aligned
@@ -6136,26 +6181,23 @@ impl Transcript {
                     // item can't shrink, `justify_end` pushes the overflow off the
                     // left edge, and long prompts render as one clipped line
                     // instead of wrapping inside the 80% column cap.
-                    let peer = from_thread.is_some();
+                    let peer_voice = peer.is_some();
                     column = column.child(
                         div()
                             .w_full()
                             .flex()
-                            .when(peer, |el| el.justify_start())
-                            .when(!peer, |el| el.justify_end())
+                            .when(!peer_voice, |el| el.justify_end())
                             .child(
                                 div()
                                     .min_w_0()
-                                    .max_w(px(self.content_width * 0.8))
-                                    .bg(crate::theme::user_bubble_bg())
-                                    .when(peer, |el| {
-                                        el.bg(theme.accent.opacity(0.10))
-                                            .border_l_2()
-                                            .border_color(theme.accent)
+                                    .when(peer_voice, |el| el.w_full())
+                                    .when(!peer_voice, |el| {
+                                        el.max_w(px(self.content_width * 0.8))
+                                            .bg(crate::theme::user_bubble_bg())
+                                            .rounded(px(Theme::BUBBLE_RADIUS))
+                                            .px(px(16.0))
+                                            .py(px(10.0))
                                     })
-                                    .rounded(px(Theme::BUBBLE_RADIUS))
-                                    .px(px(16.0))
-                                    .py(px(10.0))
                                     .text_size(crate::typography::ui_rems(14.0))
                                     .line_height(crate::typography::ui_rems(USER_LINE_HEIGHT))
                                     .text_color(theme.text)
