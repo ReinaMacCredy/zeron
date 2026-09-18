@@ -1996,9 +1996,14 @@ struct ChipAffordance {
     label: SharedString,
 }
 
-/// Lines of a provider-switch packet shown before "Show all": enough to see
-/// the instruction and the first exchange, not a 48k-char wall.
-const HANDOFF_COLLAPSED_LINES: usize = 10;
+/// User and assistant turns inside a provider-switch packet, counted the way
+/// `bounded_source_copy` wrote them: one `User: ` / `Assistant: ` line each.
+fn handoff_message_count(packet: &str) -> usize {
+    packet
+        .lines()
+        .filter(|line| line.starts_with("User: ") || line.starts_with("Assistant: "))
+        .count()
+}
 
 /// "612 chars" up to four digits, "12.3k chars" past that.
 fn handoff_size_label(chars: usize) -> String {
@@ -6901,10 +6906,9 @@ impl Transcript {
         Some(Arc::new(crate::changes::DiffHighlights { old, new }))
     }
 
-    /// The provider-switch packet under a user bubble: a dashed card whose
-    /// header names the receiving harness and whose body is the packet
-    /// verbatim in mono, clipped to [`HANDOFF_COLLAPSED_LINES`] until the
-    /// footer expands it. The pin rides `folds` like a tool group's.
+    /// The provider-switch packet: one muted line under the divider naming
+    /// how much crossed and to whom, with "view" opening the verbatim text in
+    /// a popover. The open state rides `folds` like a tool group's.
     fn render_handoff(
         &mut self,
         row_id: &SharedString,
@@ -6914,95 +6918,107 @@ impl Transcript {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let open = self.folds.get(row_id).and_then(|fold| fold.open) == Some(true);
-        let lines: Vec<&str> = text.lines().collect();
-        let total = lines.len();
-        let shown = if open {
-            total
-        } else {
-            total.min(HANDOFF_COLLAPSED_LINES)
-        };
-        let muted = theme.text_muted;
-        let faint = theme.text_faint;
-        let header = div()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .text_size(crate::typography::ui_rems(12.0))
-            .text_color(muted)
-            .child(
-                crate::icons::icon(crate::icons::DOCUMENT)
-                    .size(px(13.0))
-                    .text_color(muted),
-            )
-            .child(SharedString::from(format!(
-                "Context handed to {}",
-                crate::composer::harness_display_name(harness)
-            )))
-            .child(
-                div()
-                    .ml_auto()
-                    .font_family(theme.font_mono.clone())
-                    .text_size(px(10.0))
-                    .text_color(faint)
-                    .child(SharedString::from(format!(
-                        "first turn · {}",
-                        handoff_size_label(text.chars().count())
-                    ))),
-            );
-        let body = div()
-            .w_full()
-            .min_w_0()
-            .pt(px(4.0))
-            .font_family(theme.font_mono.clone())
-            .text_size(px(11.0))
-            .line_height(px(16.0))
-            .text_color(faint)
-            .children(lines.iter().take(shown).map(|line| {
-                div()
-                    .w_full()
-                    .min_h(px(16.0))
-                    .child(SharedString::from(line.to_string()))
-            }));
-        let footer = (total > HANDOFF_COLLAPSED_LINES).then(|| {
-            let toggle_id = row_id.clone();
-            div()
-                .id(SharedString::from(format!("{row_id}-toggle")))
-                .h(px(BLOB_AFFORDANCE_HEIGHT))
-                .flex()
-                .items_center()
-                .text_size(px(TOOL_TEXT_SIZE))
-                .text_color(faint)
-                .cursor_pointer()
-                .hover(|s| s.text_color(muted))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let fold = this.folds.entry(toggle_id.clone()).or_default();
-                    fold.open = Some(!open);
+        let muted = theme.text_muted.opacity(0.7);
+        let bright = theme.text_muted;
+        let messages = handoff_message_count(&text);
+        let summary = format!(
+            "{} · {} handed to {} as text",
+            match messages {
+                1 => "1 message".to_string(),
+                n => format!("{n} messages"),
+            },
+            handoff_size_label(text.chars().count()),
+            crate::composer::harness_display_name(harness)
+        );
+        let toggle_id = row_id.clone();
+        let close_id = row_id.clone();
+        let popover = open.then(|| {
+            let content = crate::popover::popover_card(theme)
+                .w(px(560.0))
+                .on_mouse_down_out(cx.listener(move |this, _, _, cx| {
+                    if let Some(fold) = this.folds.get_mut(&close_id) {
+                        fold.open = None;
+                    }
                     cx.notify();
                 }))
-                .child(SharedString::from(if open {
-                    "Collapse".to_string()
-                } else {
-                    format!("Show all {total} lines")
-                }))
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .px(px(6.0))
+                        .pt(px(4.0))
+                        .text_size(crate::typography::ui_rems(13.0))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(format!(
+                            "Context handed to {}",
+                            crate::composer::harness_display_name(harness)
+                        )))
+                        .child(
+                            div()
+                                .ml_auto()
+                                .font_family(theme.font_mono.clone())
+                                .text_size(px(11.0))
+                                .text_color(theme.text_faint)
+                                .child(SharedString::from(format!(
+                                    "first turn · {}",
+                                    handoff_size_label(text.chars().count())
+                                ))),
+                        ),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("{row_id}-packet")))
+                        .max_h(px(260.0))
+                        .overflow_y_scroll()
+                        .px(px(6.0))
+                        .pb(px(4.0))
+                        .font_family(theme.font_mono.clone())
+                        .text_size(px(12.5))
+                        .line_height(px(18.0))
+                        .text_color(theme.text_faint)
+                        .children(text.lines().map(|line| {
+                            div()
+                                .w_full()
+                                .min_h(px(18.0))
+                                .child(SharedString::from(line.to_string()))
+                        })),
+                )
+                .into_any_element();
+            crate::popover::anchored_menu_below(format!("{row_id}-popover"), content, None)
         });
         div()
             .w_full()
-            .pt(px(6.0))
+            .flex()
+            .justify_center()
+            .pb(px(2.0))
             .child(
                 div()
-                    .w_full()
+                    .relative()
                     .flex()
-                    .flex_col()
-                    .rounded(px(12.0))
-                    .border_1()
-                    .border_dashed()
-                    .border_color(crate::theme::hairline(0.14))
-                    .bg(crate::theme::ink(0.02))
-                    .px(px(12.0))
-                    .py(px(10.0))
-                    .child(header)
-                    .child(body)
-                    .children(footer),
+                    .items_center()
+                    .gap(px(6.0))
+                    .text_size(crate::typography::ui_rems(11.5))
+                    .text_color(muted)
+                    .child(SharedString::from(summary))
+                    .child(div().text_color(theme.text_faint).child("·"))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("{row_id}-view")))
+                            .cursor_pointer()
+                            .text_color(muted)
+                            .hover(move |s| s.text_color(bright))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let fold = this.folds.entry(toggle_id.clone()).or_default();
+                                fold.open = Some(fold.open != Some(true));
+                                cx.notify();
+                            }))
+                            .child("view"),
+                    )
+                    .children(popover),
             )
             .into_any_element()
     }
@@ -10453,6 +10469,12 @@ mod tests {
         assert_eq!(rows[1].copy_text.as_deref(), Some("third"));
         assert_eq!(handoff_size_label(612), "612 chars");
         assert_eq!(handoff_size_label(12_345), "12.3k chars");
+        assert_eq!(
+            handoff_message_count(
+                "<previous_conversation>\nUser: a\n\nAssistant: b\nUser: not a turn\n\nUser: c\n</previous_conversation>"
+            ),
+            4
+        );
     }
 
     #[test]

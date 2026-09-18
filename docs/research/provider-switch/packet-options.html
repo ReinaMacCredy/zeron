@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Provider switch · packet card options</title>
+<style>
+  :root {
+    --bg: #1c1c1e; --main: #202022;
+    --border: rgba(255,255,255,0.06); --border-2: rgba(255,255,255,0.10);
+    --text: rgba(255,255,255,0.92); --text-80: rgba(255,255,255,0.74);
+    --muted: rgba(255,255,255,0.46); --muted-50: rgba(255,255,255,0.23);
+    --ink-04: rgba(255,255,255,0.04); --ink-08: rgba(255,255,255,0.08);
+    --accent: #7aa2f7;
+    --claude: #d29a6b; --codex: #9ece6a; --warning: #e0af68;
+    --font-ui: "Geist", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    --font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  html, body { margin: 0; background: #111; color: var(--text); font-family: var(--font-ui); -webkit-font-smoothing: antialiased; }
+  .toolbar { width: 980px; margin: 24px auto 0; display: flex; gap: 12px; align-items: center; font-size: 12px; color: var(--muted); }
+  .toolbar b { color: var(--text-80); font-weight: 500; }
+  .toolbar .seg { display: inline-flex; border: 1px solid var(--border-2); border-radius: 8px; overflow: hidden; }
+  .toolbar .seg button { background: transparent; border: 0; color: var(--muted); padding: 5px 10px; font: inherit; cursor: pointer; }
+  .toolbar .seg button.on { background: var(--ink-08); color: var(--text); }
+  .stage { width: 980px; margin: 14px auto 60px; background: var(--main); border: 1px solid var(--border); border-radius: 14px; padding: 8px 48px 40px; }
+  .col { max-width: 760px; margin: 0 auto; }
+
+  .divider { display: flex; align-items: center; gap: 10px; margin: 26px 0 10px; font-size: 11.5px; color: var(--muted); }
+  .divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: rgba(255,255,255,0.08); }
+  .divider .lbl { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .divider .i { width: 13px; height: 13px; border-radius: 50%; border: 1px solid currentColor; font-size: 9px; display: inline-flex; align-items: center; justify-content: center; color: var(--muted-50); }
+  .bubble { margin: 10px 0 10px auto; width: max-content; max-width: 80%; background: var(--ink-08); padding: 9px 14px; border-radius: 16px; font-size: 14px; line-height: 20px; }
+  .md { font-size: 14px; line-height: 21px; color: var(--text); margin: 8px 0 0; }
+
+  .opt { margin-top: 44px; }
+  .opt .tag { display: flex; align-items: baseline; gap: 10px; font-size: 11px; color: var(--muted-50); font-family: var(--font-mono); text-transform: uppercase; letter-spacing: .08em; border-bottom: 1px dashed var(--border-2); padding-bottom: 6px; }
+  .opt .tag b { color: var(--warning); font-weight: 500; }
+  .opt .tag span { text-transform: none; letter-spacing: 0; font-family: var(--font-ui); color: var(--muted); }
+
+  .hdot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+  .hdot.claude { background: var(--claude); } .hdot.codex { background: var(--codex); }
+  .mark { display: inline-flex; width: 14px; height: 14px; align-items: center; justify-content: center; font-size: 11px; line-height: 1; }
+  .mark.claude { color: var(--claude); } .mark.codex { color: var(--text-80); }
+
+  /* ── A · receipt ─────────────────────────────────────────────── */
+  .a { border: 1px solid var(--border-2); border-radius: 12px; background: var(--ink-04); overflow: hidden; font-size: 12px; }
+  .a .hd { display: flex; align-items: center; gap: 8px; padding: 9px 12px; color: var(--text-80); }
+  .a .hd .arrow { color: var(--muted-50); }
+  .a .hd .n { margin-left: auto; font-family: var(--font-mono); font-size: 10px; color: var(--muted-50); }
+  .a .stats { display: flex; gap: 0; border-top: 1px solid var(--border); }
+  .a .stat { flex: 1; padding: 8px 12px; border-right: 1px solid var(--border); }
+  .a .stat:last-child { border-right: 0; }
+  .a .stat .v { font-size: 15px; color: var(--text); font-variant-numeric: tabular-nums; }
+  .a .stat .v.no { color: var(--muted); font-size: 12px; }
+  .a .stat .k { font-size: 10px; color: var(--muted-50); margin-top: 1px; }
+  .a .ft { display: flex; gap: 14px; padding: 7px 12px; border-top: 1px solid var(--border); color: var(--muted); }
+  .a .ft a { color: var(--muted); text-decoration: none; cursor: pointer; }
+  .a .ft a:hover { color: var(--text); }
+  .a .raw { display: none; border-top: 1px solid var(--border); padding: 10px 12px; font: 11px/16px var(--font-mono); color: var(--muted); white-space: pre-wrap; max-height: 220px; overflow: auto; }
+  .a.open .raw { display: block; }
+
+  /* ── B · thread ──────────────────────────────────────────────── */
+  .b { padding: 4px 0 2px 2px; font-size: 12px; }
+  .b .hd { display: flex; align-items: center; gap: 8px; color: var(--muted); margin-bottom: 8px; }
+  .b .hd .n { margin-left: auto; font-family: var(--font-mono); font-size: 10px; color: var(--muted-50); }
+  .b .rail { position: relative; padding-left: 22px; }
+  .b .rail::before { content: ""; position: absolute; left: 6px; top: 6px; bottom: 6px; width: 1px; background: linear-gradient(var(--border-2), rgba(255,255,255,0.02)); }
+  .b .m { position: relative; display: flex; gap: 10px; padding: 3px 0; color: var(--muted); line-height: 17px; }
+  .b .m::before { content: ""; position: absolute; left: -19px; top: 9px; width: 7px; height: 7px; border-radius: 50%; background: var(--main); border: 1px solid var(--muted-50); }
+  .b .m.user::before { background: var(--muted-50); }
+  .b .m .who { flex: none; width: 58px; font-family: var(--font-mono); font-size: 10px; color: var(--muted-50); padding-top: 2px; }
+  .b .m .t { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .b .m.dim { opacity: .6; }
+  .b .end { position: relative; display: flex; align-items: center; gap: 8px; margin-top: 6px; padding: 4px 0; color: var(--text-80); }
+  .b .end::before { content: ""; position: absolute; left: -19px; top: 9px; width: 7px; height: 7px; border-radius: 50%; background: var(--codex); }
+  .b .end .n { margin-left: auto; font-family: var(--font-mono); font-size: 10px; color: var(--muted-50); }
+  .b .more { padding: 3px 0 0 22px; }
+  .b .more a { color: var(--muted-50); font-size: 11px; cursor: pointer; }
+  .b .more a:hover { color: var(--muted); }
+  .b .raw { display: none; margin: 8px 0 0 22px; border-left: 2px solid var(--border-2); padding: 6px 10px; font: 11px/16px var(--font-mono); color: var(--muted); white-space: pre-wrap; max-height: 200px; overflow: auto; }
+  .b.open .raw { display: block; }
+
+  /* ── C · one line ────────────────────────────────────────────── */
+  .c { display: flex; align-items: center; gap: 8px; justify-content: center; font-size: 11.5px; color: var(--muted); margin-top: -2px; position: relative; }
+  .c .sep { color: var(--muted-50); }
+  .c a { color: var(--muted); text-decoration: underline dotted; text-underline-offset: 3px; cursor: pointer; }
+  .c a:hover { color: var(--text); }
+  .c .pop { display: none; position: absolute; top: 22px; left: 50%; transform: translateX(-50%); width: 560px; background: #2a2a2d; border: 1px solid var(--border-2); border-radius: 12px; box-shadow: 0 12px 32px rgba(0,0,0,.5); padding: 10px 12px; text-align: left; z-index: 4; }
+  .c.open .pop { display: block; }
+  .c .pop .t { display: flex; gap: 8px; align-items: center; color: var(--text-80); font-size: 12px; margin-bottom: 6px; }
+  .c .pop .t .n { margin-left: auto; font-family: var(--font-mono); font-size: 10px; color: var(--muted-50); }
+  .c .pop pre { margin: 0; font: 11px/16px var(--font-mono); color: var(--muted); white-space: pre-wrap; max-height: 220px; overflow: auto; }
+
+  /* ── D · manifest ────────────────────────────────────────────── */
+  .d { border: 1px solid var(--border-2); border-radius: 12px; background: rgba(0,0,0,0.18); overflow: hidden; font-size: 12px; }
+  .d .hd { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--ink-04); border-bottom: 1px solid var(--border); color: var(--text-80); }
+  .d .hd .chips { display: flex; gap: 6px; margin-left: auto; }
+  .d .hd .chip { font: 10px/16px var(--font-mono); padding: 0 7px; border-radius: 999px; background: var(--ink-08); color: var(--muted); }
+  .d .hd .chip.off { color: var(--muted-50); text-decoration: line-through; text-decoration-color: rgba(255,255,255,0.25); }
+  .d .body { position: relative; font: 11px/16px var(--font-mono); color: var(--muted); max-height: 176px; overflow: hidden; }
+  .d.open .body { max-height: none; }
+  .d .ln { display: flex; }
+  .d .ln .g { flex: none; width: 34px; text-align: right; padding-right: 10px; color: rgba(255,255,255,0.14); user-select: none; }
+  .d .ln .code { flex: 1; white-space: pre-wrap; padding-right: 12px; }
+  .d .ln .code .xtag { color: rgba(255,255,255,0.30); }
+  .d .ln .code .u { color: var(--accent); }
+  .d .ln .code .as { color: var(--claude); }
+  .d .ln .code .sys { color: var(--muted); font-style: italic; }
+  .d .ln:first-child { padding-top: 8px; } .d .ln:last-child { padding-bottom: 8px; }
+  .d .fade { position: absolute; left: 0; right: 0; bottom: 0; height: 56px; background: linear-gradient(rgba(32,32,34,0), #1f1f21); pointer-events: none; }
+  .d.open .fade { display: none; }
+  .d .ft { display: flex; align-items: center; gap: 10px; padding: 6px 12px; border-top: 1px solid var(--border); color: var(--muted-50); font-size: 11px; }
+  .d .ft a { color: var(--muted); cursor: pointer; }
+  .d .ft a:hover { color: var(--text); }
+  .d .ft .n { margin-left: auto; font-family: var(--font-mono); font-size: 10px; }
+
+  /* ── E · envelope ────────────────────────────────────────────── */
+  .e { position: relative; margin: 8px 0 0 0; width: 380px; }
+  .e .env { position: relative; border: 1px solid var(--border-2); border-radius: 10px; background: linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02)); padding: 10px 12px 10px 12px; font-size: 12px; overflow: hidden; }
+  .e .env::before { content: ""; position: absolute; inset: 0; background: repeating-linear-gradient(-45deg, transparent 0 8px, rgba(255,255,255,0.025) 8px 9px); pointer-events: none; }
+  .e .env .flap { position: absolute; left: 0; right: 0; top: 0; height: 26px; border-bottom: 1px solid var(--border-2); background: rgba(255,255,255,0.03); }
+  .e .env .flap::after { content: ""; position: absolute; left: 50%; top: 0; width: 22px; height: 22px; transform: translate(-50%, -11px) rotate(45deg); border: 1px solid var(--border-2); border-top: 0; border-left: 0; background: var(--main); }
+  .e .env .row { position: relative; display: flex; align-items: center; gap: 8px; margin-top: 22px; }
+  .e .env .row .from, .e .env .row .to { display: inline-flex; align-items: center; gap: 5px; }
+  .e .env .row .arrow { color: var(--muted-50); }
+  .e .env .row .stamp { margin-left: auto; font: 9px/1 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; border: 1px solid rgba(158,206,106,0.5); color: var(--codex); padding: 3px 5px; border-radius: 3px; transform: rotate(-6deg); }
+  .e .env .sub { position: relative; margin-top: 8px; color: var(--muted); font-size: 11px; display: flex; gap: 10px; }
+  .e .env .sub .x { text-decoration: line-through; text-decoration-color: rgba(255,255,255,0.3); color: var(--muted-50); }
+  .e .env .open-btn { position: relative; margin-top: 8px; font-size: 11px; color: var(--muted-50); cursor: pointer; }
+  .e .env .open-btn:hover { color: var(--text-80); }
+  .e .raw { display: none; margin-top: 8px; width: 760px; border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; font: 11px/16px var(--font-mono); color: var(--muted); white-space: pre-wrap; max-height: 220px; overflow: auto; background: rgba(0,0,0,0.18); }
+  .e.open .raw { display: block; }
+
+  /* ── F · index card ──────────────────────────────────────────── */
+  .f { display: flex; gap: 14px; align-items: flex-start; }
+  .f .card { flex: none; width: 300px; border-radius: 6px; background: #26262a; box-shadow: 0 1px 0 rgba(255,255,255,0.06) inset, 0 6px 18px rgba(0,0,0,0.35); padding: 10px 14px 12px; font-size: 12px; position: relative; }
+  .f .card::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 2px; background: linear-gradient(90deg, var(--claude), var(--codex)); border-radius: 6px 6px 0 0; }
+  .f .card .t { font-size: 13px; color: var(--text); margin-bottom: 6px; display: flex; align-items: center; gap: 6px; }
+  .f .card .kv { display: grid; grid-template-columns: 74px 1fr; row-gap: 3px; column-gap: 8px; color: var(--muted); font-size: 11px; }
+  .f .card .kv .k { color: var(--muted-50); font-family: var(--font-mono); font-size: 10px; padding-top: 1px; }
+  .f .card .kv .v { color: var(--text-80); }
+  .f .card .kv .v.no { color: var(--muted-50); }
+  .f .card .lines { margin-top: 8px; border-top: 1px dashed var(--border-2); padding-top: 6px; display: flex; gap: 12px; font-size: 11px; }
+  .f .card .lines a { color: var(--muted); cursor: pointer; }
+  .f .card .lines a:hover { color: var(--text); }
+  .f .side { flex: 1; min-width: 0; font-size: 12px; color: var(--muted); line-height: 17px; padding-top: 4px; }
+  .f .side .q { border-left: 2px solid var(--border-2); padding-left: 10px; margin-bottom: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .f .side .q b { font-weight: 500; color: var(--muted-50); font-family: var(--font-mono); font-size: 10px; margin-right: 6px; }
+  .f .raw { display: none; margin-top: 10px; border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; font: 11px/16px var(--font-mono); color: var(--muted); white-space: pre-wrap; max-height: 220px; overflow: auto; background: rgba(0,0,0,0.18); }
+  .f.open .raw { display: block; }
+
+  /* ── G · inside the bubble ───────────────────────────────────── */
+  .g .bubble { margin: 10px 0 0 auto; padding: 0; overflow: hidden; max-width: 78%; }
+  .g .bubble .msg { padding: 9px 14px; }
+  .g .bubble .attach { border-top: 1px solid rgba(255,255,255,0.08); background: rgba(0,0,0,0.18); padding: 7px 12px; font-size: 11.5px; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+  .g .bubble .attach .pill { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px; border-radius: 999px; background: var(--ink-08); color: var(--text-80); font-size: 11px; }
+  .g .bubble .attach a { margin-left: auto; color: var(--muted-50); cursor: pointer; }
+  .g .bubble .attach a:hover { color: var(--text); }
+  .g .raw { display: none; margin: 8px 0 0 auto; width: 78%; border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; font: 11px/16px var(--font-mono); color: var(--muted); white-space: pre-wrap; max-height: 220px; overflow: auto; background: rgba(0,0,0,0.18); }
+  .g.open .raw { display: block; }
+
+  /* ── H · fused divider ───────────────────────────────────────── */
+  .h { display: flex; align-items: center; gap: 12px; margin: 26px 0 10px; }
+  .h::before, .h::after { content: ""; flex: 1; height: 1px; background: rgba(255,255,255,0.08); }
+  .h .pill { display: inline-flex; align-items: stretch; border: 1px solid var(--border-2); border-radius: 999px; overflow: hidden; font-size: 11.5px; background: var(--ink-04); }
+  .h .pill .seg { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; color: var(--muted); }
+  .h .pill .seg + .seg { border-left: 1px solid var(--border-2); }
+  .h .pill .seg.cargo { color: var(--text-80); }
+  .h .pill .seg.cargo .box { display: inline-flex; width: 10px; height: 10px; border: 1px solid currentColor; border-radius: 2px; }
+  .h .pill .seg.cargo a { color: var(--muted-50); cursor: pointer; text-decoration: none; margin-left: 2px; }
+  .h .pill .seg.cargo a:hover { color: var(--text); }
+  .h + .raw { display: none; border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; font: 11px/16px var(--font-mono); color: var(--muted); white-space: pre-wrap; max-height: 220px; overflow: auto; background: rgba(0,0,0,0.18); margin-bottom: 8px; }
+  .h.open + .raw { display: block; }
+
+  .hint { width: 980px; margin: -40px auto 40px; font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="toolbar">
+  <b>Packet card · 8 options</b>
+  <span>Cùng một dữ liệu: 4 messages, 1 559 chars, Claude Code → Codex. Bấm "Show / View" trong từng option để mở raw.</span>
+  <span class="seg" style="margin-left:auto"><button class="on" onclick="setAll(false)">collapsed</button><button onclick="setAll(true)">expanded</button></span>
+</div>
+
+<div class="stage"><div class="col">
+
+  <div class="md">Synced to every device through the session room. <i>Mock harness reporting in.</i></div>
+
+  <!-- ─────────────── A ─────────────── -->
+  <div class="opt">
+    <div class="tag"><b>A</b> receipt <span>· tóm tắt số liệu trước, raw là phụ. Nhấn mạnh cái KHÔNG được mang theo.</span></div>
+    <div class="divider"><span class="lbl">Provider changed from <span class="hdot claude"></span>Claude Code to <span class="hdot codex"></span>Codex. <span class="i">i</span></span></div>
+    <div class="a" id="a">
+      <div class="hd"><span class="mark claude">✳</span><span class="arrow">→</span><span class="mark codex">⌘</span><span>Context handed to Codex</span><span class="n">at switch · sent on first turn</span></div>
+      <div class="stats">
+        <div class="stat"><div class="v">4</div><div class="k">messages as text</div></div>
+        <div class="stat"><div class="v">1.5k</div><div class="k">chars · of 48k budget</div></div>
+        <div class="stat"><div class="v no">not carried</div><div class="k">2 tool results · file state</div></div>
+        <div class="stat"><div class="v no">none</div><div class="k">Claude session resumed</div></div>
+      </div>
+      <div class="ft"><a onclick="toggle('a')">View packet</a><a>Copy</a></div>
+      <pre class="raw" id="a-raw"></pre>
+    </div>
+  </div>
+
+  <!-- ─────────────── B ─────────────── -->
+  <div class="opt">
+    <div class="tag"><b>B</b> thread <span>· packet là một timeline nhỏ của các message đã bàn giao, kết ở Codex. Không khung, không XML.</span></div>
+    <div class="divider"><span class="lbl">Provider changed from <span class="hdot claude"></span>Claude Code to <span class="hdot codex"></span>Codex. <span class="i">i</span></span></div>
+    <div class="b" id="b">
+      <div class="hd"><span>Handed to Codex as text</span><span class="n">4 messages · 1.5k chars</span></div>
+      <div class="rail">
+        <div class="m user"><span class="who">you</span><span class="t">Fix the login retry loop in auth.rs, it retries forever on 401</span></div>
+        <div class="m dim"><span class="who">claude</span><span class="t">The loop in auth.rs:88 never checks the status class. I will bound it to 3 attempts…</span></div>
+        <div class="m user"><span class="who">you</span><span class="t">Also add a test for the 401 case</span></div>
+        <div class="m dim"><span class="who">claude</span><span class="t">Added retry_stops_on_401 in auth_tests.rs. 12 tests pass.</span></div>
+        <div class="end"><span class="mark codex">⌘</span><span>Codex picks up here</span><span class="n">tool results · file state not carried</span></div>
+      </div>
+      <div class="more"><a onclick="toggle('b')">Show the exact text sent</a></div>
+      <pre class="raw" id="b-raw"></pre>
+    </div>
+  </div>
+
+  <!-- ─────────────── C ─────────────── -->
+  <div class="opt">
+    <div class="tag"><b>C</b> one line <span>· gần như không chiếm chỗ. Một dòng dưới divider, raw nằm trong popover.</span></div>
+    <div class="divider"><span class="lbl">Provider changed from <span class="hdot claude"></span>Claude Code to <span class="hdot codex"></span>Codex. <span class="i">i</span></span></div>
+    <div class="c" id="c">
+      <span>4 messages · 1.5k chars handed to Codex as text</span><span class="sep">·</span><a onclick="toggle('c')">view</a>
+      <div class="pop"><div class="t"><span class="mark codex">⌘</span>Context handed to Codex<span class="n">first turn · 1 559 chars</span></div><pre id="c-raw"></pre></div>
+    </div>
+    <div class="bubble" style="margin-top:22px">Now make the retry delay exponential</div>
+  </div>
+
+  <!-- ─────────────── D ─────────────── -->
+  <div class="opt">
+    <div class="tag"><b>D</b> manifest <span>· vẫn là raw như hiện tại nhưng có gutter, tô màu tag/role, fade thay vì cắt cụt, chip "carried / not carried".</span></div>
+    <div class="divider"><span class="lbl">Provider changed from <span class="hdot claude"></span>Claude Code to <span class="hdot codex"></span>Codex. <span class="i">i</span></span></div>
+    <div class="d" id="d">
+      <div class="hd"><span class="mark codex">⌘</span><span>Context handed to Codex</span>
+        <span class="chips"><span class="chip">4 messages</span><span class="chip">1.5k chars</span><span class="chip off">tool results</span><span class="chip off">file state</span></span></div>
+      <div class="body" id="d-body"><div class="fade"></div></div>
+      <div class="ft"><a onclick="toggle('d')" id="d-more">Show all 45 lines</a><span class="n">verbatim · sent on first turn</span></div>
+    </div>
+  </div>
+
+  <!-- ─────────────── E ─────────────── -->
+  <div class="opt">
+    <div class="tag"><b>E</b> envelope <span>· gói bàn giao là một vật: phong bì nhỏ, from → to, con dấu "as text". Vui hơn, nhỏ hơn, không chiếm hết bề ngang.</span></div>
+    <div class="divider"><span class="lbl">Provider changed from <span class="hdot claude"></span>Claude Code to <span class="hdot codex"></span>Codex. <span class="i">i</span></span></div>
+    <div class="e" id="e">
+      <div class="env">
+        <div class="flap"></div>
+        <div class="row">
+          <span class="from"><span class="mark claude">✳</span>Claude Code</span>
+          <span class="arrow">→</span>
+          <span class="to"><span class="mark codex">⌘</span>Codex</span>
+          <span class="stamp">as text</span>
+        </div>
+        <div class="sub"><span>4 messages</span><span>1.5k chars</span><span class="x">tool results</span><span class="x">file state</span></div>
+        <div class="open-btn" onclick="toggle('e')">Open envelope</div>
+      </div>
+      <pre class="raw" id="e-raw"></pre>
+    </div>
+  </div>
+
+  <!-- ─────────────── F ─────────────── -->
+  <div class="opt">
+    <div class="tag"><b>F</b> index card <span>· thẻ tài liệu bên trái (what / from / to / carried), bên phải là trích 2 dòng đầu-cuối của cuộc trò chuyện. Hai cột, không mono.</span></div>
+    <div class="divider"><span class="lbl">Provider changed from <span class="hdot claude"></span>Claude Code to <span class="hdot codex"></span>Codex. <span class="i">i</span></span></div>
+    <div class="f" id="f">
+      <div class="card">
+        <div class="t"><span class="mark codex">⌘</span>Context handed to Codex</div>
+        <div class="kv">
+          <span class="k">from</span><span class="v">Claude Code · session closed</span>
+          <span class="k">form</span><span class="v">plain text, 4 messages, 1.5k chars</span>
+          <span class="k">carried</span><span class="v">every user and assistant message</span>
+          <span class="k">not carried</span><span class="v no">2 tool results · file state</span>
+          <span class="k">sent</span><span class="v">with the first message to Codex</span>
+        </div>
+        <div class="lines"><a onclick="toggle('f')">View text</a><a>Copy</a></div>
+      </div>
+      <div class="side">
+        <div class="q"><b>first</b>Fix the login retry loop in auth.rs, it retries forever on 401</div>
+        <div class="q"><b>…</b>2 more messages</div>
+        <div class="q"><b>last</b>Added retry_stops_on_401 in auth_tests.rs. 12 tests pass.</div>
+      </div>
+    </div>
+    <pre class="raw" id="f-raw" style="display:none"></pre>
+  </div>
+
+  <!-- ─────────────── G ─────────────── -->
+  <div class="opt">
+    <div class="tag"><b>G</b> attachment on the bubble <span>· không có card riêng. Divider giữ nguyên; tin nhắn đầu gửi cho Codex mang packet như một file đính kèm dưới bubble.</span></div>
+    <div class="divider"><span class="lbl">Provider changed from <span class="hdot claude"></span>Claude Code to <span class="hdot codex"></span>Codex. <span class="i">i</span></span></div>
+    <div class="g" id="g">
+      <div class="bubble">
+        <div class="msg">Now make the retry delay exponential</div>
+        <div class="attach"><span class="pill"><span class="mark codex" style="width:auto">⌘</span>context · 4 msgs · 1.5k</span><span>handed with this message</span><a onclick="toggle('g')">view</a></div>
+      </div>
+      <pre class="raw" id="g-raw"></pre>
+    </div>
+  </div>
+
+  <!-- ─────────────── H ─────────────── -->
+  <div class="opt">
+    <div class="tag"><b>H</b> fused divider <span>· divider và packet là một pill duy nhất: [Claude → Codex] [4 msgs · 1.5k as text · view]. Một dòng, không có block nào bên dưới.</span></div>
+    <div class="h" id="h">
+      <div class="pill">
+        <span class="seg"><span class="hdot claude"></span>Claude Code<span style="color:var(--muted-50)">→</span><span class="hdot codex"></span>Codex</span>
+        <span class="seg cargo"><span class="box"></span>4 msgs · 1.5k as text<a onclick="toggle('h')">view</a></span>
+      </div>
+    </div>
+    <pre class="raw" id="h-raw"></pre>
+    <div class="bubble">Now make the retry delay exponential</div>
+  </div>
+
+</div></div>
+<div class="hint">Mọi option đều giữ: hiện ngay lúc switch, text raw có thể xem được, số liệu là thật (đếm từ packet). A–D khác nhau ở thứ đưa lên trước: số liệu (A), nội dung (B), gần như ẩn (C), raw có cấu trúc (D). E–H đổi hình dạng: vật thể (E), thẻ hai cột (F), đính kèm bubble (G), gộp vào divider (H).</div>
+
+<script>
+const PACKET = `<provider_switch>
+This chat was moved to you from another agent. Its conversation so far is below as plain text; that agent's tool results and file state were not carried over. Continue from where it left off.
+</provider_switch>
+
+<previous_conversation>
+User: Fix the login retry loop in auth.rs, it retries forever on 401
+
+Assistant: The loop in auth.rs:88 never checks the status class. I will bound it to 3 attempts with a 250ms base delay and stop on any 4xx.
+
+\`\`\`rust
+for attempt in 0..3 {
+    match client.login(&creds).await {
+        Ok(session) => return Ok(session),
+        Err(e) if e.status().is_client_error() => return Err(e),
+        Err(_) => sleep(Duration::from_millis(250)).await,
+    }
+}
+\`\`\`
+
+User: Also add a test for the 401 case
+
+Assistant: Added retry_stops_on_401 in auth_tests.rs. 12 tests pass.
+</previous_conversation>`;
+for (const id of ['a-raw','b-raw','c-raw','e-raw','f-raw','g-raw','h-raw']) document.getElementById(id).textContent = PACKET;
+const body = document.getElementById('d-body');
+PACKET.split('\n').forEach((line, i) => {
+  const ln = document.createElement('div'); ln.className = 'ln';
+  const g = document.createElement('span'); g.className = 'g'; g.textContent = i + 1;
+  const c = document.createElement('span'); c.className = "code";
+  const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;');
+  if (/^<\/?(provider_switch|previous_conversation)>$/.test(line)) c.innerHTML = `<span class="xtag">${esc(line)}</span>`;
+  else if (line.startsWith('User: ')) c.innerHTML = `<span class="u">User:</span>${esc(line.slice(5))}`;
+  else if (line.startsWith('Assistant: ')) c.innerHTML = `<span class="as">Assistant:</span>${esc(line.slice(10))}`;
+  else if (i === 1) c.innerHTML = `<span class="sys">${esc(line)}</span>`;
+  else c.textContent = line || ' ';
+  ln.append(g, c); body.insertBefore(ln, body.querySelector('.fade'));
+});
+function toggle(id) { const el = document.getElementById(id); el.classList.toggle('open');
+  if (id === 'f') document.getElementById('f-raw').style.display = el.classList.contains('open') ? 'block' : 'none';
+  if (id === 'd') document.getElementById('d-more').textContent = el.classList.contains('open') ? 'Collapse' : 'Show all 45 lines'; }
+function setAll(open) { for (const id of ['a','b','c','d','e','f','g','h']) { const el = document.getElementById(id); el.classList.toggle('open', open); }
+  document.getElementById('f-raw').style.display = open ? 'block' : 'none';
+  document.getElementById('d-more').textContent = open ? 'Collapse' : 'Show all 45 lines';
+  document.querySelectorAll('.toolbar .seg button').forEach((b, i) => b.classList.toggle('on', (i === 1) === open)); }
+</script>
+</body>
+</html>
