@@ -102,17 +102,39 @@ impl Shell {
                 Some((surface, title, icon_path))
             })
             .collect();
+        let source = self.sidechat_source_chat(cx);
+        let mut sidechats: Vec<_> = self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .filter(|chat| {
+                !chat.archived
+                    && source.as_deref().is_some_and(|source| {
+                        chat.sidechat_source_chat_id.as_deref() == Some(source)
+                    })
+            })
+            .cloned()
+            .collect();
+        sidechats.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
         let subagents = self.transcript.read(cx).subagent_summaries();
         let sources = self.transcript.read(cx).user_attachments();
         let muted = theme.text_muted;
 
         let mut card = popover::popover_card(theme)
+            .id("pinned-summary-scroll")
+            .max_h(px(480.0))
+            .overflow_y_scroll()
             .w(px(CARD_WIDTH))
             .flex()
             .flex_col()
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_summary_menu(cx)));
 
-        if outputs.is_empty() && subagents.is_empty() && sources.is_empty() {
+        if outputs.is_empty() && subagents.is_empty() && sources.is_empty() && source.is_none() {
             return card
                 .child(
                     div()
@@ -162,11 +184,45 @@ impl Shell {
             card = card.when(hidden > 0, |card| card.child(more(theme, hidden)));
         }
 
+        let has_sidechats = source.is_some();
+        if has_sidechats {
+            card = card
+                .when(has_outputs, |card| card.child(popover::menu_separator()))
+                .child(popover::menu_heading(theme, "Sidechats"));
+            for (ix, chat) in sidechats.into_iter().enumerate() {
+                let title = format!(
+                    "{}. {}",
+                    ix + 1,
+                    chat.title.as_deref().unwrap_or("Sidechat")
+                );
+                card = card.child(
+                    row(theme, "pinned-summary-sidechat", ix, icons::CHAT_ROUND_LINE)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.add_sidechat_surface(&chat, cx);
+                            this.close_summary_menu(cx);
+                        }))
+                        .child(label(title.into())),
+                );
+            }
+            card = card.child(
+                row(theme, "pinned-summary-new-sidechat", 0, icons::PLUS)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(source) = source.clone() {
+                            this.create_sidechat(source, None, cx);
+                        }
+                        this.close_summary_menu(cx);
+                    }))
+                    .child(label("New sidechat".into())),
+            );
+        }
+
         let has_subagents = !subagents.is_empty();
         if has_subagents {
             let hidden = subagents.len().saturating_sub(SECTION_CAP);
             card = card
-                .when(has_outputs, |card| card.child(popover::menu_separator()))
+                .when(has_outputs || has_sidechats, |card| {
+                    card.child(popover::menu_separator())
+                })
                 .child(popover::menu_heading(theme, "Subagents"));
             for (ix, agent) in subagents.into_iter().take(SECTION_CAP).enumerate() {
                 let (state, tone) = match agent.status {
@@ -204,7 +260,7 @@ impl Shell {
         if !sources.is_empty() {
             let hidden = sources.len().saturating_sub(SECTION_CAP);
             card = card
-                .when(has_outputs || has_subagents, |card| {
+                .when(has_outputs || has_sidechats || has_subagents, |card| {
                     card.child(popover::menu_separator())
                 })
                 .child(popover::menu_heading(theme, "Sources"));

@@ -3491,9 +3491,9 @@ impl Shell {
             .then(|| chat.id.clone())
     }
 
-    /// The one way a sidechat tab opens — picker row, footer pill and
-    /// `/sidechat` all land here. Existing tab → focus it; existing sidechat
-    /// row → open a tab on it; neither → mint an id, `CreateSidechat`, open.
+    /// The footer pill and `/sidechat` reopen the newest side conversation,
+    /// creating one only when none exists. Explicit New sidechat actions
+    /// call `create_sidechat` directly.
     /// `prompt` starts the sidechat's first turn once its tab exists.
     fn open_sidechat(
         &mut self,
@@ -3503,21 +3503,6 @@ impl Shell {
     ) {
         if !self.right_pane_open(cx) {
             self.toggle_right_pane(cx);
-        }
-        let existing = self
-            .sidechat_tabs
-            .iter()
-            .find(|(_, tab)| {
-                self.state.read(cx).chats.iter().any(|chat| {
-                    chat.id == tab.chat_id
-                        && chat.sidechat_source_chat_id.as_deref() == Some(source_chat_id.as_str())
-                })
-            })
-            .map(|(&id, _)| id);
-        if let Some(id) = existing {
-            self.set_right_active(RightSurface::Sidechat(id), cx);
-            self.send_into_sidechat(id, prompt, cx);
-            return;
         }
         if let Some(chat) = self
             .state
@@ -3529,6 +3514,15 @@ impl Shell {
             self.send_into_sidechat(id, prompt, cx);
             return;
         }
+        self.create_sidechat(source_chat_id, prompt, cx);
+    }
+
+    fn create_sidechat(
+        &mut self,
+        source_chat_id: String,
+        prompt: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         if self
             .sidechat_create
             .as_ref()
@@ -3593,6 +3587,17 @@ impl Shell {
     /// sidechat is an ordinary chat, so the doc id IS the chat id) and a
     /// composer bound to it.
     fn add_sidechat_surface(&mut self, chat: &zeron_proto::Chat, cx: &mut Context<Self>) -> u64 {
+        if !self.right_pane_open(cx) {
+            self.toggle_right_pane(cx);
+        }
+        if let Some(id) = self
+            .sidechat_tabs
+            .iter()
+            .find_map(|(&id, tab)| (tab.chat_id == chat.id).then_some(id))
+        {
+            self.set_right_active(RightSurface::Sidechat(id), cx);
+            return id;
+        }
         self.sidechat_seq += 1;
         let id = self.sidechat_seq;
         let chat_id = chat.id.clone();
@@ -9339,12 +9344,16 @@ impl Shell {
                     )
                     .when(self.sidechat_source_chat(cx).is_some(), |el| {
                         el.child(
-                            row("surface-card-sidechat", icons::CHAT_ROUND_LINE, "Sidechat")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if let Some(source) = this.sidechat_source_chat(cx) {
-                                        this.open_sidechat(source, None, cx);
-                                    }
-                                })),
+                            row(
+                                "surface-card-sidechat",
+                                icons::CHAT_ROUND_LINE,
+                                "New sidechat",
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(source) = this.sidechat_source_chat(cx) {
+                                    this.create_sidechat(source, None, cx);
+                                }
+                            })),
                         )
                     })
                     // Git surfaces only where there IS git — the pane itself
@@ -9887,7 +9896,7 @@ impl Shell {
                                     .id("right-plus-sidechat-row")
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         if let Some(source) = this.sidechat_source_chat(cx) {
-                                            this.open_sidechat(source, None, cx);
+                                            this.create_sidechat(source, None, cx);
                                         }
                                         this.close_right_plus(cx);
                                     }))
@@ -9896,7 +9905,7 @@ impl Shell {
                                             .size(px(13.0))
                                             .text_color(theme.text_muted),
                                     )
-                                    .child(SharedString::from("Sidechat")),
+                                    .child(SharedString::from("New sidechat")),
                             )
                         })
                         .when(self.space_git_detected(cx), |menu| {
@@ -13810,6 +13819,51 @@ mod pinned_summary_regressions {
         let shell = host.read_with(cx, |host, _| host.shell.clone());
         cx.update(|window, cx| window.draw(cx).clear());
         (shell, cx)
+    }
+
+    #[gpui::test]
+    fn summary_opens_each_sidechat_and_reuses_only_the_matching_tab(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                let source: zeron_proto::Chat = serde_json::from_value(serde_json::json!({
+                    "id": "parent", "deviceId": "dev", "title": "Parent",
+                    "archived": false, "createdAt": "2026-09-18T00:00:00Z"
+                }))
+                .unwrap();
+                state.chats.push(source.clone());
+                for id in ["side-a", "side-b"] {
+                    let mut chat = source.clone();
+                    chat.id = id.into();
+                    chat.sidechat_source_chat_id = Some("parent".into());
+                    state.chats.push(chat);
+                }
+                state.selected_chat = Some("parent".into());
+            });
+        });
+        for (row, expected, count) in [
+            ("pinned-summary-sidechat-0", "side-a", 1),
+            ("pinned-summary-sidechat-1", "side-b", 2),
+            ("pinned-summary-sidechat-0", "side-a", 2),
+        ] {
+            shell.update(cx, |shell, cx| {
+                shell.summary_menu.open(());
+                cx.notify();
+            });
+            cx.update(|window, cx| window.draw(cx).clear());
+            assert!(cx.debug_bounds("pinned-summary-new-sidechat-0").is_some());
+            let bounds = cx.debug_bounds(row).unwrap();
+            cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+            shell.read_with(cx, |shell, cx| {
+                assert!(shell.right_pane_open(cx));
+                assert_eq!(shell.sidechat_tabs.len(), count);
+                let RightSurface::Sidechat(id) = shell.resolved_right_active(cx) else {
+                    panic!("sidechat must be active");
+                };
+                assert_eq!(shell.sidechat_tabs[&id].chat_id, expected);
+                assert!(!shell.summary_menu.is_open());
+            });
+        }
     }
 
     #[gpui::test]
