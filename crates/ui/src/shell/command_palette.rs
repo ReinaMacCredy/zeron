@@ -1,14 +1,16 @@
 //! Global action and conversation search, using the sidebar's conversation rows.
 use super::*;
+use crate::appearance::AppearanceMode;
 
 const HISTORY_RESULT_LIMIT: usize = 30;
-const RESULTS_SCROLL_GUTTER: f32 = popover::CARD_INSET;
+const RESULTS_FADE_BAND: f32 = 18.0;
 
 pub(super) struct CommandPalette {
     search: Entity<ComposerInput>,
     focus: FocusHandle,
     previous_focus: Option<FocusHandle>,
     active: usize,
+    enter_press: EnterPress,
     // Claim focus during mount so the shell does not restore the composer
     // while this input is still absent from the dispatch tree.
     focus_pending: bool,
@@ -16,11 +18,30 @@ pub(super) struct CommandPalette {
     _search_events: Subscription,
 }
 
+// X11 suppresses synthetic repeat releases but sends repeated keydowns with
+// is_held=false. Keep our own latch until the physical key is released.
+#[derive(Default)]
+struct EnterPress {
+    down: bool,
+}
+
+impl EnterPress {
+    fn press(&mut self, is_held: bool) -> bool {
+        let was_down = std::mem::replace(&mut self.down, true);
+        !was_down && !is_held
+    }
+
+    fn release(&mut self) {
+        self.down = false;
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum Entry {
     NewChat,
     NewProject,
     Settings,
+    Theme(AppearanceMode),
     Chat(String),
 }
 
@@ -30,6 +51,14 @@ impl Entry {
             Self::NewChat => Some(("New chat", icons::PEN_NEW_SQUARE)),
             Self::NewProject => Some(("New project", icons::FOLDER)),
             Self::Settings => Some(("Open settings", icons::SETTINGS_MINIMALISTIC)),
+            Self::Theme(mode) => Some((
+                match mode {
+                    AppearanceMode::System => "Switch to system theme",
+                    AppearanceMode::Light => "Switch to light theme",
+                    AppearanceMode::Dark => "Switch to dark theme",
+                },
+                mode.icon(),
+            )),
             Self::Chat(_) => None,
         }
     }
@@ -40,14 +69,29 @@ fn matches_query(query: &str, text: &str) -> bool {
     query.split_whitespace().all(|word| text.contains(word))
 }
 
-fn actions_for(query: &str) -> Vec<Entry> {
-    [Entry::NewChat, Entry::NewProject, Entry::Settings]
-        .into_iter()
-        .filter(|entry| matches_query(query, entry.action().unwrap().0))
-        .collect()
+fn actions_for(query: &str, is_dark: bool) -> Vec<Entry> {
+    [
+        Entry::NewChat,
+        Entry::NewProject,
+        Entry::Settings,
+        Entry::Theme(if is_dark {
+            AppearanceMode::Light
+        } else {
+            AppearanceMode::Dark
+        }),
+    ]
+    .into_iter()
+    .filter(|entry| matches_query(query, entry.action().unwrap().0))
+    .collect()
 }
 
 impl Shell {
+    pub(super) fn reset_command_palette_key_state(&mut self) {
+        if let Some(palette) = self.command_palette.as_mut() {
+            palette.enter_press.release();
+        }
+    }
+
     pub(super) fn toggle_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.command_palette.is_some() {
             self.close_command_palette(window, cx);
@@ -55,7 +99,7 @@ impl Shell {
         }
         self.add_space = None;
         let search = cx.new(|cx| {
-            ComposerInput::with_context("Type a command or search chats…", "PaletteSearch", cx)
+            ComposerInput::with_context("Search commands and chats…", "PaletteSearch", cx)
         });
         let events = cx.subscribe(&search, |this, _, event, cx| {
             if matches!(event, ComposerInputEvent::Edited) {
@@ -72,6 +116,7 @@ impl Shell {
             focus: cx.focus_handle(),
             previous_focus,
             active: 0,
+            enter_press: EnterPress::default(),
             focus_pending: true,
             scroll: gpui::ScrollHandle::new(),
             _search_events: events,
@@ -93,7 +138,7 @@ impl Shell {
             return Vec::new();
         };
         let query = palette.search.read(cx).text().trim().to_lowercase();
-        let mut entries = actions_for(&query);
+        let mut entries = actions_for(&query, Theme::of(cx).appearance.is_dark());
         let state = self.state.read(cx);
         // Global history deliberately ignores the sidebar's project filter and
         // collapsed groups. Archived conversations remain searchable too.
@@ -138,11 +183,18 @@ impl Shell {
     }
 
     fn activate_command(&mut self, entry: Entry, window: &mut Window, cx: &mut Context<Self>) {
+        if let Entry::Theme(mode) = entry {
+            // Keep the palette open so this ordinary action updates to its next state.
+            crate::appearance::set_mode(mode, cx);
+            cx.notify();
+            return;
+        }
         self.close_command_palette(window, cx);
         match entry {
             Entry::NewChat => self.open_new_session(cx),
             Entry::NewProject => self.open_add_space(cx),
             Entry::Settings => self.open_settings(SettingsSection::Devices, cx),
+            Entry::Theme(_) => unreachable!(),
             Entry::Chat(id) => self.open_chat(id, cx),
         }
     }
@@ -168,19 +220,15 @@ impl Shell {
         let action_count = entries.iter().take_while(|e| e.action().is_some()).count();
         let mut rows = Vec::new();
         for (ix, entry) in entries.iter().enumerate() {
-            let mut row = div().id(("command-result", ix)).flex_none();
-            if ix == 0 && action_count > 0 {
-                row = row.child(div().px(px(10.0)).child(section_label("Actions", &theme)));
-            }
+            // End spacing belongs to the content, so it scrolls out of the
+            // fade instead of leaving a permanent gutter beside the chrome.
+            let mut row = div()
+                .id(("command-result", ix))
+                .flex_none()
+                .when(ix == 0, |row| row.pt(px(8.0)))
+                .when(ix + 1 == entries.len(), |row| row.pb(px(8.0)));
             if ix == action_count && action_count > 0 {
-                row = row.child(
-                    div()
-                        .mt(px(8.0))
-                        .mb(px(8.0))
-                        .h(px(1.0))
-                        .w_full()
-                        .bg(theme.border),
-                );
+                row = row.child(spaces::sidebar_separator(&theme).w_full().my(px(8.0)));
             }
             let content = if let Some((label, glyph)) = entry.action() {
                 let shortcut = match entry {
@@ -205,25 +253,26 @@ impl Shell {
                 popover::menu_row(&theme, ix == active, format!("command-action-{ix}"))
                     .id(("command-action", ix))
                     .rounded(px(popover::PALETTE_ITEM_RADIUS))
-                    .h(px(32.0))
+                    .role(gpui::Role::Button)
+                    .aria_label(label)
+                    .min_h(px(30.0))
+                    .py(px(4.0))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.activate_command(entry.clone(), window, cx)
                     }))
-                    .child(icon(glyph).size(px(17.0)).text_color(theme.text_muted))
-                    .child(popover::search_highlight(
+                    .child(
+                        icon(glyph)
+                            .size(px(16.0))
+                            .flex_none()
+                            .text_color(theme.text_muted),
+                    )
+                    .child(div().flex_1().min_w_0().child(popover::search_highlight(
                         label.into(),
                         Some(&query),
                         &theme,
-                    ))
-                    .child(div().flex_1())
+                    )))
                     .when_some(shortcut, |row, shortcut| {
-                        row.child(
-                            popover::key_cap(&theme)
-                                .flex_none()
-                                .text_size(crate::typography::ui_rems(11.0))
-                                .text_color(theme.text_muted)
-                                .child(SharedString::from(shortcut)),
-                        )
+                        row.child(popover::kbd_hint(&theme, &shortcut))
                     })
                     .into_any_element()
             } else if let Entry::Chat(id) = entry {
@@ -276,13 +325,13 @@ impl Shell {
             } else {
                 unreachable!()
             };
-            rows.push(row.child(div().px(px(popover::CARD_INSET)).child(content)));
+            rows.push(row.child(div().px(px(8.0)).child(content)));
         }
-        let height = (f32::from(viewport.height) - 180.0).clamp(100.0, 440.0);
+        let height = (f32::from(viewport.height) - 180.0).clamp(100.0, 360.0);
         let body = div()
             .id("command-results")
             .min_h_0()
-            .max_h(px(height - RESULTS_SCROLL_GUTTER * 2.0))
+            .max_h(px(height))
             .overflow_y_scroll()
             .track_scroll(&scroll)
             .flex()
@@ -292,18 +341,31 @@ impl Shell {
             .when(entries.is_empty(), |el| {
                 el.child(
                     div()
-                        .p(px(24.0))
-                        .text_color(theme.text_muted)
-                        .child("No actions or chats found"),
+                        .w_full()
+                        .py(px(24.0))
+                        .px(px(16.0))
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap(px(6.0))
+                        .text_size(crate::typography::ui_rems(13.0))
+                        .child("No results")
+                        .child(
+                            div()
+                                .text_color(theme.text_muted)
+                                .child("Try a command, chat title, project, or device."),
+                        ),
                 )
             });
+        let body = crate::edge_fade::edge_faded(RESULTS_FADE_BAND, true, true, body)
+            .fade_overflow_y(&scroll);
         let card = div()
             .id("command-palette")
             .track_focus(&focus)
-            .w(px(600.0_f32.min(f32::from(viewport.width) - 32.0)))
+            .w(px(560.0_f32.min(f32::from(viewport.width) - 32.0)))
             .flex()
             .flex_col()
-            .rounded(px(14.0))
+            .rounded(px(16.0))
             .border_1()
             .border_color(theme.border)
             .when(!theme.is_frost(), |el| el.shadow_lg())
@@ -327,6 +389,14 @@ impl Shell {
                             }
                         }
                         "enter" => {
+                            let activate = this
+                                .command_palette
+                                .as_mut()
+                                .is_some_and(|palette| palette.enter_press.press(event.is_held));
+                            if !activate {
+                                cx.stop_propagation();
+                                return;
+                            }
                             let entries = this.command_entries(cx);
                             if let Some(entry) = this
                                 .command_palette
@@ -343,61 +413,59 @@ impl Shell {
                     cx.stop_propagation();
                 }),
             )
+            .on_key_up(cx.listener(|this, event: &gpui::KeyUpEvent, _, cx| {
+                if event.keystroke.key == "enter" {
+                    if let Some(palette) = this.command_palette.as_mut() {
+                        palette.enter_press.release();
+                    }
+                    cx.stop_propagation();
+                }
+            }))
             .on_mouse_down_out(
                 cx.listener(|this, _, window, cx| this.close_command_palette(window, cx)),
             )
             .child(
                 div()
-                    .h(px(58.0))
+                    .min_h(px(44.0))
                     .flex_none()
-                    .px(px(18.0))
+                    .px(px(16.0))
+                    .py(px(8.0))
                     .flex()
                     .items_center()
-                    .gap(px(12.0))
+                    .gap(px(10.0))
                     .border_b_1()
-                    .border_color(theme.border)
+                    .border_color(crate::theme::hairline(0.06))
                     .child(popover::palette_search_icon(&theme))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(crate::typography::ui_rems(15.0))
+                            .text_size(crate::typography::ui_rems(14.0))
                             .child(search),
                     )
-                    .child(popover::key_hint_text(
+                    .child(popover::kbd_hint(
                         &theme,
-                        if cfg!(target_os = "macos") {
-                            "⌘K"
-                        } else {
-                            "Ctrl K"
-                        },
-                        "",
+                        &crate::settings::badge_combo("mod-k"),
                     )),
             )
-            // Keep these gutters outside the scroll viewport: content padding
-            // scrolls away, and keyboard reveal otherwise pins rows to an edge.
-            .child(div().min_h_0().py(px(RESULTS_SCROLL_GUTTER)).child(body))
+            .child(body)
             .child(
                 div()
                     .flex_none()
-                    .px(px(18.0))
-                    .py(px(12.0))
+                    .px(px(16.0))
+                    .py(px(7.0))
                     .border_t_1()
-                    .border_color(theme.border)
+                    .border_color(crate::theme::hairline(0.06))
                     .flex()
+                    .flex_wrap()
                     .items_center()
-                    .gap(px(18.0))
-                    .child(popover::key_hint_pair(
-                        &theme,
-                        icons::ARROW_UP,
-                        icons::ARROW_DOWN,
-                        "Navigate",
-                    ))
-                    .child(popover::key_hint_text(&theme, "↵", "Open"))
-                    .child(popover::key_hint_text(&theme, "esc", "Close")),
+                    .gap(px(12.0))
+                    .child(command_key_hint(&theme, "↑ ↓", "Navigate"))
+                    .child(command_key_hint(&theme, "↵", "Select"))
+                    .child(command_key_hint(&theme, "Esc", "Close")),
             );
         // Match the composer's 16px backdrop blur, including its opaque fallback.
-        let card = crate::frost::frosted(14.0, crate::frost::MENU_BLUR, card);
+        let card = crate::frost::frosted(16.0, crate::frost::MENU_BLUR, card);
         Some(
             gpui::deferred(
                 gpui::anchored()
@@ -407,6 +475,9 @@ impl Shell {
                             .occlude()
                             .w(viewport.width)
                             .h(viewport.height)
+                            // Match glass modals: quiet the background while
+                            // preserving its color through the frosted palette.
+                            .bg(popover::scrim_alpha(0.35))
                             .flex()
                             .items_center()
                             .justify_center()
@@ -419,28 +490,89 @@ impl Shell {
     }
 }
 
-fn section_label(label: &'static str, theme: &Theme) -> gpui::Div {
+fn command_key_hint(theme: &Theme, keys: &str, label: &'static str) -> gpui::Div {
     div()
-        .px(px(8.0))
-        .py(px(8.0))
-        .text_size(crate::typography::ui_rems(11.0))
-        .text_color(theme.text_muted)
-        .child(label)
+        .flex()
+        .items_center()
+        .gap(px(5.0))
+        .child(popover::kbd_hint(theme, keys))
+        .child(
+            div()
+                .text_size(crate::typography::ui_rems(10.0))
+                .text_color(theme.text_muted)
+                .child(label),
+        )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::appearance::AppearanceMode;
+
+    #[test]
+    fn x11_unflagged_enter_repeats_activate_once_until_release() {
+        let mut enter = EnterPress::default();
+        // The pinned X11 backend drops synthetic repeat releases and emits
+        // every repeated KeyDownEvent with is_held=false.
+        assert!(enter.press(false));
+        for _ in 0..35 {
+            assert!(!enter.press(false));
+        }
+        enter.release();
+        assert!(enter.press(false));
+    }
+
+    #[test]
+    fn flagged_enter_repeats_do_not_activate() {
+        let mut enter = EnterPress::default();
+        assert!(!enter.press(true));
+        assert!(!enter.press(false));
+        enter.release();
+        assert!(enter.press(false));
+        assert!(!enter.press(true));
+    }
 
     #[test]
     fn action_search_hides_empty_section_and_preserves_order() {
         assert_eq!(
-            actions_for(""),
-            vec![Entry::NewChat, Entry::NewProject, Entry::Settings]
+            actions_for("", true),
+            vec![
+                Entry::NewChat,
+                Entry::NewProject,
+                Entry::Settings,
+                Entry::Theme(AppearanceMode::Light)
+            ]
         );
-        assert_eq!(actions_for("new"), vec![Entry::NewChat, Entry::NewProject]);
-        assert_eq!(actions_for("settings"), vec![Entry::Settings]);
-        assert!(actions_for("deployment").is_empty());
+        assert_eq!(
+            actions_for("new", true),
+            vec![Entry::NewChat, Entry::NewProject]
+        );
+        assert_eq!(actions_for("settings", true), vec![Entry::Settings]);
+        assert_eq!(
+            actions_for("theme", true),
+            vec![Entry::Theme(AppearanceMode::Light)]
+        );
+        assert!(actions_for("deployment", true).is_empty());
+    }
+
+    #[test]
+    fn theme_action_targets_the_opposite_resolved_appearance() {
+        assert_eq!(
+            actions_for("theme", true),
+            vec![Entry::Theme(AppearanceMode::Light)]
+        );
+        assert_eq!(
+            actions_for("theme", false),
+            vec![Entry::Theme(AppearanceMode::Dark)]
+        );
+        assert_eq!(
+            actions_for("light", true),
+            vec![Entry::Theme(AppearanceMode::Light)]
+        );
+        assert_eq!(
+            actions_for("dark", false),
+            vec![Entry::Theme(AppearanceMode::Dark)]
+        );
     }
 
     #[test]

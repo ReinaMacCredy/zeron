@@ -30,6 +30,7 @@ use zeron_proto::{Chat, ChatConfig, Device, Session, Space};
 use zeron_sync::{DocsStore, RegistryClient, RegistryTuning};
 
 use crate::doc_host::EdgeConfig;
+use crate::http_error::describe_http_error;
 use crate::{EngineError, now_ms};
 
 /// Legacy Loro workspace snapshot row — now only read once, as the migration
@@ -90,7 +91,7 @@ pub(crate) async fn token_changed(changes: &mut Option<tokio::sync::watch::Recei
 
 async fn token_revoked(token: &Option<Arc<dyn zeron_rpc::TokenSource>>) -> bool {
     match token {
-        Some(token) => token.token().await.is_none(),
+        Some(token) => matches!(token.token().await, Err(zeron_rpc::TokenError::SignedOut)),
         // Fixed test/dev URLs have no revocable credential source.
         None => false,
     }
@@ -1443,8 +1444,8 @@ async fn relay_probe_task(weak: Weak<WorkspaceHostInner>) {
         if stale.is_empty() {
             continue;
         }
-        let Some(bearer) = edge.bearer().await else {
-            continue; // signed out
+        let Ok(bearer) = edge.bearer().await else {
+            continue; // no usable token yet
         };
         let mut refreshed = false;
         for device_id in stale {
@@ -1512,7 +1513,9 @@ async fn workspace_task(weak: Weak<WorkspaceHostInner>, mut changed_rx: watch::R
             _ = tokio::time::sleep_until(sleep_until), if save_deadline.is_some() => {
                 save_deadline = None;
                 let Some(inner) = weak.upgrade() else { break };
-                inner.save_snapshot();
+                if let Err(error) = tokio::task::spawn_blocking(move || inner.save_snapshot()).await {
+                    tracing::warn!(%error, "registry snapshot worker failed");
+                }
             }
             _ = presence.tick() => {
                 let Some(inner) = weak.upgrade() else { break };
@@ -1622,7 +1625,7 @@ impl zeron_sync::RegistryTransport for WsDerivedRegistryTransport {
             let resp = req
                 .send()
                 .await
-                .map_err(|e| zeron_sync::SyncError::WebSocket(e.to_string()))?;
+                .map_err(|e| zeron_sync::SyncError::WebSocket(describe_http_error(e)))?;
             if !resp.status().is_success() {
                 return Err(zeron_sync::SyncError::Protocol(format!(
                     "registry pull http {}",
@@ -1631,7 +1634,7 @@ impl zeron_sync::RegistryTransport for WsDerivedRegistryTransport {
             }
             resp.text()
                 .await
-                .map_err(|e| zeron_sync::SyncError::WebSocket(e.to_string()))
+                .map_err(|e| zeron_sync::SyncError::WebSocket(describe_http_error(e)))
         })
     }
 
@@ -1653,7 +1656,7 @@ impl zeron_sync::RegistryTransport for WsDerivedRegistryTransport {
             let resp = req
                 .send()
                 .await
-                .map_err(|e| zeron_sync::SyncError::WebSocket(e.to_string()))?;
+                .map_err(|e| zeron_sync::SyncError::WebSocket(describe_http_error(e)))?;
             if !resp.status().is_success() {
                 return Err(zeron_sync::SyncError::Protocol(format!(
                     "registry push http {}",
@@ -1662,7 +1665,7 @@ impl zeron_sync::RegistryTransport for WsDerivedRegistryTransport {
             }
             resp.text()
                 .await
-                .map_err(|e| zeron_sync::SyncError::WebSocket(e.to_string()))
+                .map_err(|e| zeron_sync::SyncError::WebSocket(describe_http_error(e)))
         })
     }
 }
@@ -1670,6 +1673,28 @@ impl zeron_sync::RegistryTransport for WsDerivedRegistryTransport {
 #[cfg(test)]
 mod tests {
     use super::{device_name_on_boot, linked_worktree_root};
+
+    #[tokio::test]
+    async fn registry_http_sync_retains_dns_cause() {
+        use super::*;
+        use crate::http_error::test_support::FailingDns;
+        use zeron_sync::RegistryTransport;
+
+        let dns = Arc::new(FailingDns::default());
+        let transport = WsDerivedRegistryTransport {
+            url: Arc::new(zeron_sync::StaticUrl(
+                "wss://edge.invalid/registry/org/ws?token=token-secret".into(),
+            )),
+            client: dns.client(),
+        };
+        let pull = transport.fetch(0).await.unwrap_err();
+        let push = transport.push("{}".into()).await.unwrap_err();
+        for error in [pull, push] {
+            let message = error.to_string();
+            assert!(message.contains("injected DNS lookup failure"), "{message}");
+            assert!(!message.contains("token-secret"), "{message}");
+        }
+    }
 
     #[tokio::test]
     async fn presence_publish_keeps_unchanged_lists_quiet_and_late_subscribers_current() {

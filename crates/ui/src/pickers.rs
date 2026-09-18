@@ -661,6 +661,9 @@ pub struct Pickers {
     boot_focus_pending: bool,
     /// `ZERON_OPEN_DIALOG=model-switch` arrived before the catalog had rows.
     boot_switch_pending: bool,
+    /// Reclaim focus while mounting: shell recovery can replace an immediate
+    /// focus request while the menu is still absent from the dispatch tree.
+    focus_on_mount: bool,
     load_task: Option<Task<()>>,
     /// Own slot: the refs load runs concurrently with the eager
     /// harness/model loads — sharing `load_task` would abort one mid-flight.
@@ -845,6 +848,7 @@ impl Pickers {
             focus: cx.focus_handle(),
             boot_focus_pending: boot_open.is_some(),
             boot_switch_pending: false,
+            focus_on_mount: false,
             load_task: None,
             refs_task: None,
             switching: None,
@@ -1121,6 +1125,7 @@ impl Pickers {
 
     /// Outside clicks and navigation keep focus at the clicked destination.
     fn dismiss(&mut self, cx: &mut Context<Self>) {
+        self.focus_on_mount = false;
         self.cancel_setting_hover();
         self.pending_model_switch = None;
         self.setting_menu = None;
@@ -1194,6 +1199,7 @@ impl Pickers {
             return;
         }
         self.open.open(kind);
+        self.focus_on_mount = true;
         // The plain-div menus (branch / project / device) share one scroll
         // handle; a fresh open starts at the top. The model list resets its
         // own virtualized handle below. Sync the rail baselines so the jump
@@ -4350,6 +4356,8 @@ impl Pickers {
             let id = group.id.clone();
             let outside_id = id.clone();
             let move_id = id.clone();
+            let exit_id = id.clone();
+            let exit_entity = cx.entity().downgrade();
             let entity = cx.entity().downgrade();
             let mut row = popover::menu_row(
                 &theme,
@@ -4397,7 +4405,45 @@ impl Pickers {
                             }
                         });
                     },
-                    |_, _, _, _| {},
+                    move |trigger, _, window, _| {
+                        if !open {
+                            return;
+                        }
+                        window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, _, cx| {
+                            if phase != gpui::DispatchPhase::Bubble {
+                                return;
+                            }
+                            let _ = exit_entity.update(cx, |this, cx| {
+                                if this.setting_menu.as_ref() != Some(&exit_id) {
+                                    return;
+                                }
+                                let pointer = event.position;
+                                if trigger.contains(&pointer) {
+                                    this.setting_intent_origin = Some(pointer);
+                                    return;
+                                }
+                                let Some(bounds) = this.setting_bounds else {
+                                    return;
+                                };
+                                if bounds.contains(&pointer) {
+                                    return;
+                                }
+                                if this.setting_intent_origin.is_some_and(|origin| {
+                                    submenu_corridor(origin, pointer, bounds, this.setting_on_left)
+                                }) {
+                                    return;
+                                }
+                                this.cancel_setting_hover();
+                                this.setting_menu = None;
+                                this.setting_bounds = None;
+                                this.setting_intent_origin = None;
+                                // Do not leave a keyboard-style selection on the
+                                // trigger after pointer navigation dismisses it.
+                                this.active = 0;
+                                cx.notify();
+                            });
+                        });
+                    },
                 )
                 .absolute()
                 .inset_0(),
@@ -4803,6 +4849,7 @@ pub(crate) fn harness_brand_icon(harness: HarnessId) -> (&'static str, Option<gp
         HarnessId::Pi => (crate::icons::PI_MARK, None),
         // The pixel-"o" from opencode's wordmark (their favicon), monochrome.
         HarnessId::Opencode => (crate::icons::OPENCODE_MARK, None),
+        HarnessId::Antigravity => (crate::icons::ANTIGRAVITY_MARK, None),
     }
 }
 
@@ -4942,13 +4989,24 @@ impl Render for Pickers {
             }
         }
 
+        let focus_on_mount = std::mem::take(&mut self.focus_on_mount) && self.is_open();
+        if focus_on_mount {
+            // The frame exists even when loading/error/empty content omits
+            // the input. Claim it during mount, after any pre-frame shell
+            // recovery has handled the old dispatch tree.
+            window.focus(&self.focus, cx);
+        }
         if self.is_open() {
             let search = self.search.focus_handle(cx);
             let frame = self.focus.clone();
             window.defer(cx, move |window, cx| {
-                // Loading, empty, and error states can omit the search box.
-                // Keep Escape/arrow keys on the mounted menu in those states.
-                if search.is_focused(window) && !frame.contains(&search, window) {
+                let has_search = frame.contains(&search, window);
+                if focus_on_mount && frame.is_focused(window) && has_search {
+                    // Transfer to the filter only once it is actually mounted.
+                    window.focus(&search, cx);
+                } else if search.is_focused(window) && !has_search {
+                    // Loading, empty, and error states can omit the search box.
+                    // Keep Escape/arrow keys on the mounted menu in those states.
                     window.focus(&frame, cx);
                 }
             });
@@ -5260,6 +5318,152 @@ mod tests {
         assert!(switch_warning(Some(HarnessId::Codex), "GPT-5.6 Luna").contains("compact"));
         assert!(switch_warning(Some(HarnessId::Mock), "Mock B").contains("Mock B"));
         assert!(switch_hint(None).contains("re-read"));
+    }
+
+    struct ModelShortcutHost {
+        focus_sub: Option<gpui::Subscription>,
+        root: FocusHandle,
+        editor: FocusHandle,
+        neutral: FocusHandle,
+        pickers: Entity<Pickers>,
+    }
+
+    impl Render for ModelShortcutHost {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            if self.focus_sub.is_none() {
+                self.focus_sub = Some(cx.on_focus_lost(window, |this: &mut Self, window, cx| {
+                    let root = this.root.clone();
+                    let editor = this.editor.clone();
+                    let neutral = this.neutral.clone();
+                    window.on_next_frame(move |window, cx| {
+                        crate::shell::restore_mounted_focus(&root, &editor, &neutral, window, cx);
+                    });
+                    cx.notify();
+                }));
+            }
+            let root = self.root.clone();
+            let editor = self.editor.clone();
+            let neutral = self.neutral.clone();
+            window.defer(cx, move |window, cx| {
+                crate::shell::restore_mounted_focus(&root, &editor, &neutral, window, cx);
+            });
+            div()
+                .size_full()
+                .track_focus(&self.root)
+                .on_action(
+                    cx.listener(|this, _: &crate::shell::OpenModelPicker, window, cx| {
+                        this.pickers
+                            .update(cx, |pickers, cx| pickers.open_model_menu(window, cx));
+                        cx.notify();
+                    }),
+                )
+                .child(div().track_focus(&self.editor))
+                .child(div().track_focus(&self.neutral))
+                .child(self.pickers.clone())
+        }
+    }
+
+    #[gpui::test]
+    fn model_shortcut_focuses_mounted_picker_and_routes_navigation(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            crate::composer::init(cx, Default::default());
+            cx.bind_keys([gpui::KeyBinding::new(
+                "cmd-/",
+                crate::shell::OpenModelPicker,
+                None,
+            )]);
+        });
+        let handle = cx.add_window(|_, cx| ModelShortcutHost {
+            focus_sub: None,
+            root: cx.focus_handle(),
+            editor: cx.focus_handle(),
+            neutral: cx.focus_handle(),
+            pickers: cx.new(|cx| {
+                let state = cx.new(|_| AppState::new());
+                let mut pickers = Pickers::new(state, cx);
+                pickers.config.harness = Some(HarnessId::ClaudeCode);
+                pickers.config.model = Some("first".into());
+                pickers.harnesses =
+                    Loadable::Ready(vec![descriptor(HarnessId::ClaudeCode, "Claude Code")]);
+                pickers.models.insert(
+                    HarnessId::ClaudeCode,
+                    Loadable::Ready(vec![
+                        bare_model("first", "First"),
+                        bare_model("second", "Second"),
+                    ]),
+                );
+                pickers
+            }),
+        });
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        handle
+            .update(cx, |host, window, cx| window.focus(&host.editor, cx))
+            .unwrap();
+        cx.simulate_keystrokes(handle.into(), "cmd-/");
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        handle
+            .update(cx, |host, window, cx| {
+                host.pickers.read_with(cx, |pickers, cx| {
+                    assert!(pickers.is_open());
+                    assert!(
+                        pickers.focus.contains_focused(window, cx),
+                        "shortcut must transfer focus into the mounted picker"
+                    );
+                });
+            })
+            .unwrap();
+        cx.simulate_keystrokes(handle.into(), "down");
+        handle
+            .read_with(cx, |host, cx| assert_eq!(host.pickers.read(cx).active, 1))
+            .unwrap();
+        cx.simulate_keystrokes(handle.into(), "up");
+        handle
+            .read_with(cx, |host, cx| assert_eq!(host.pickers.read(cx).active, 0))
+            .unwrap();
+        cx.simulate_keystrokes(handle.into(), "escape");
+        handle
+            .read_with(cx, |host, cx| assert!(!host.pickers.read(cx).is_open()))
+            .unwrap();
+
+        // Catalog loading/error/empty cards omit the input but still need
+        // immediate keyboard focus on their mounted frame for Escape.
+        for catalog in [
+            Loadable::Loading,
+            Loadable::Error("offline".into()),
+            Loadable::Ready(vec![]),
+        ] {
+            cx.executor().advance_clock(Duration::from_secs(1));
+            cx.run_until_parked();
+            handle
+                .update(cx, |host, window, cx| {
+                    host.pickers.update(cx, |pickers, cx| {
+                        pickers.config.harness = None;
+                        pickers.defaults.harness = None;
+                        pickers.harnesses = catalog;
+                        cx.notify();
+                    });
+                    window.focus(&host.editor, cx);
+                })
+                .unwrap();
+            cx.simulate_keystrokes(handle.into(), "cmd-/");
+            cx.run_until_parked();
+            cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+                .unwrap();
+            handle
+                .update(cx, |host, window, cx| {
+                    assert!(host.pickers.read(cx).focus.contains_focused(window, cx));
+                })
+                .unwrap();
+            cx.simulate_keystrokes(handle.into(), "escape");
+            handle
+                .read_with(cx, |host, cx| assert!(!host.pickers.read(cx).is_open()))
+                .unwrap();
+        }
     }
 
     #[gpui::test]
@@ -5795,17 +5999,29 @@ mod tests {
             } else {
                 (parent.right() + submenu.left()) / 2.0
             };
-            // Move out of the row diagonally, pause over the gap, overshoot
-            // below the submenu, and come back to its first choice.
+            // Leaving the safe corridor closes the child and clears its
+            // trigger selection, while preserving the parent picker.
+            for outside in [
+                gpui::point(gap_x, submenu.bottom() + px(20.0)),
+                gpui::point(parent.center().x, parent.top() + px(60.0)),
+                gpui::point(px(8.0), px(8.0)),
+            ] {
+                cx.update_window(handle.into(), |_, window, cx| {
+                    hover(window, cx, outside);
+                    assert!(pickers.read(cx).setting_menu.is_none());
+                    assert_eq!(pickers.read(cx).active, 0);
+                    assert!(pickers.read(cx).is_open());
+                    hover(window, cx, trigger);
+                    assert_eq!(pickers.read(cx).setting_menu, Some(ModelSetting::Reasoning));
+                })
+                .unwrap();
+            }
+            // Moving through the gap into the child remains safe.
             let target = gpui::point(
                 submenu.left() + px(30.0),
                 submenu.bottom() - px(popover::CARD_INSET + 30.0 + popover::MENU_GAP + 15.0),
             );
-            for position in [
-                gpui::point(gap_x, trigger.y + px(16.0)),
-                gpui::point(gap_x, submenu.bottom() + px(20.0)),
-                target,
-            ] {
+            for position in [gpui::point(gap_x, trigger.y + px(16.0)), target] {
                 cx.update_window(handle.into(), |_, window, cx| {
                     window.dispatch_event(
                         gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {

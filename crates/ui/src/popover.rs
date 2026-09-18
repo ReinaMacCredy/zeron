@@ -718,14 +718,12 @@ pub fn modal(
     viewport: gpui::Size<Pixels>,
     card: AnyElement,
 ) -> AnyElement {
-    modal_with(id, viewport, card, 16.0, 0.6)
+    modal_with(id, viewport, card, 16.0, 0.35)
 }
 
-/// [`modal`] for glass-tinted cards (the add-space palette): a LIGHTER scrim,
-/// so the frosted card reads like the popovers — the standard 0.6 dim buried
-/// the backdrop hue under the blur and the palette came out a flat grey slab
-/// next to the hue-inheriting menus (user report). `corner_radius` must match
-/// the card's rounding.
+/// [`modal`] with custom rounding for glass palettes. Both use a light
+/// scrim so the blurred backdrop retains its hue instead of becoming gray.
+/// `corner_radius` must match the card's rounding.
 pub fn modal_glass(
     id: impl Into<ElementId>,
     viewport: gpui::Size<Pixels>,
@@ -895,21 +893,17 @@ pub fn palette_card(theme: &Theme, width: Pixels, corner_radius: f32) -> gpui::D
         .text_color(theme.text)
 }
 
-/// A compact search glyph in a stable header slot. The slight optical offset
-/// balances the magnifier's upper-left lens against its lower-right handle.
+/// A compact search glyph with the same 16px slot as palette action icons.
 pub fn palette_search_icon(theme: &Theme) -> gpui::Div {
     div()
-        .size(px(20.0))
+        .size(px(16.0))
         .flex_none()
         .flex()
         .items_center()
         .justify_center()
         .child(
-            crate::icons::icon(crate::icons::MAGNIFER)
+            crate::icons::icon(crate::icons::PALETTE_SEARCH)
                 .size(px(16.0))
-                .relative()
-                .left(px(0.5))
-                .top(px(0.5))
                 .text_color(theme.text_muted),
         )
 }
@@ -1057,8 +1051,8 @@ pub fn menu_section() -> gpui::Div {
 // Dialog primitives (zeron dialog.tsx / sidebar dialogs.tsx)
 // ---------------------------------------------------------------------------
 
-/// The centered dialog card (`dialog-pop`): `w-[360px] rounded-2xl border
-/// border-white/[0.1] bg-popover/95 p-5 shadow-2xl` — popover tone ≈ #101010.
+/// Centered dialog with the shared popover surface. A filled drop shadow
+/// would show through the translucent card, so only opaque cards use it.
 pub fn dialog_card(theme: &Theme) -> gpui::Div {
     div()
         .w(px(360.0))
@@ -1067,7 +1061,7 @@ pub fn dialog_card(theme: &Theme) -> gpui::Div {
         .bg(surface_bg(theme))
         .border_1()
         .border_color(hairline(0.10))
-        .shadow_lg()
+        .when(!theme.is_frost(), |el| el.shadow_lg())
         .flex()
         .flex_col()
         .text_color(theme.text)

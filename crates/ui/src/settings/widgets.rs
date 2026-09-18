@@ -240,6 +240,7 @@ pub const OPTION_CARD_RADIUS: f32 = 6.0;
 /// state.
 pub fn option_card(
     theme: &Theme,
+    icon_path: &'static str,
     label: impl Into<SharedString>,
     selected: bool,
     preview: AnyElement,
@@ -264,6 +265,9 @@ pub fn option_card(
         )
         .child(
             div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
                 .text_size(crate::typography::ui_rems(13.0))
                 .font_weight(if selected {
                     gpui::FontWeight::MEDIUM
@@ -275,6 +279,7 @@ pub fn option_card(
                 } else {
                     theme.text_muted
                 })
+                .child(crate::icons::icon(icon_path).size(px(16.0)).flex_none())
                 .child(label.into()),
         )
 }

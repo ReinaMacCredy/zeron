@@ -174,7 +174,21 @@ pub async fn fetch_latest(edge_url: &str) -> anyhow::Result<Manifest> {
 }
 
 fn http_client() -> anyhow::Result<reqwest::Client> {
+    http_client_with_timeouts(
+        std::time::Duration::from_secs(15),
+        std::time::Duration::from_secs(30),
+    )
+}
+
+fn http_client_with_timeouts(
+    connect: std::time::Duration,
+    read: std::time::Duration,
+) -> anyhow::Result<reqwest::Client> {
     reqwest::Client::builder()
+        .connect_timeout(connect)
+        // Inactivity timeout, not a total download cap: slow progressing
+        // updates remain viable on constrained links.
+        .read_timeout(read)
         .user_agent(concat!("zeron/", env!("CARGO_PKG_VERSION")))
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
             if attempt.previous().len() >= 10 {
@@ -832,6 +846,97 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stalled_update_headers_and_body_time_out_but_progressing_body_survives() {
+        use std::time::Duration;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for stall_body in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                socket.read(&mut request).await.unwrap();
+                if stall_body {
+                    socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nx")
+                        .await
+                        .unwrap();
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            });
+            let client =
+                http_client_with_timeouts(Duration::from_millis(200), Duration::from_millis(100))
+                    .unwrap();
+            let request = async {
+                client
+                    .get(format!("http://{address}"))
+                    .send()
+                    .await?
+                    .bytes()
+                    .await
+            };
+            let error = tokio::time::timeout(Duration::from_secs(1), request)
+                .await
+                .expect("bounded read")
+                .unwrap_err();
+            assert!(error.is_timeout());
+            server.abort();
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n")
+                .await
+                .unwrap();
+            for _ in 0..10 {
+                socket.write_all(b"x").await.unwrap();
+                tokio::time::sleep(Duration::from_millis(40)).await;
+            }
+        });
+        let client =
+            http_client_with_timeouts(Duration::from_secs(1), Duration::from_millis(200)).unwrap();
+        assert_eq!(
+            client
+                .get(format!("http://{address}"))
+                .send()
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap()
+                .len(),
+            10
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stalled_update_tls_handshake_has_a_connect_deadline() {
+        use std::time::Duration;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        });
+        let client =
+            http_client_with_timeouts(Duration::from_millis(100), Duration::from_secs(30)).unwrap();
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            client.get(format!("https://{address}")).send(),
+        )
+        .await
+        .expect("bounded TLS handshake")
+        .unwrap_err();
+        assert!(error.is_timeout());
+        server.abort();
+    }
 
     #[test]
     fn update_feed_override_requires_an_https_base_url() {

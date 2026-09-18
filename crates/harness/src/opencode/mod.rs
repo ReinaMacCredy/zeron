@@ -39,7 +39,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -215,7 +215,7 @@ pub struct OpencodeHarness {
     interrupt_grace: Duration,
     kill_grace: Duration,
     startup_timeout: Duration,
-    models_cache: tokio::sync::OnceCell<Vec<Model>>,
+    models_cache: tokio::sync::Mutex<Option<(Instant, Vec<Model>)>>,
     commands_cache: tokio::sync::OnceCell<Vec<SlashCommand>>,
     /// Coalesce concurrent picker/title probes: several cold opencode boots
     /// at once are slower than one.
@@ -230,7 +230,7 @@ impl Default for OpencodeHarness {
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_secs(3),
             startup_timeout: startup_timeout(),
-            models_cache: tokio::sync::OnceCell::new(),
+            models_cache: tokio::sync::Mutex::new(None),
             commands_cache: tokio::sync::OnceCell::new(),
             probe_lock: tokio::sync::Mutex::new(()),
         }
@@ -277,14 +277,10 @@ impl OpencodeHarness {
         Server::spawn(&exe, cwd, self.startup_timeout).await
     }
 
-    /// One short-lived server answers both discovery calls; each cache keeps
-    /// what it got. Also primes the OTHER cache so the picker's models fetch
-    /// and the composer's commands fetch share one boot.
+    /// One short-lived server answers both discovery calls. Also primes the
+    /// commands cache so concurrent picker/composer fetches share one boot.
     async fn probe_models(&self) -> Result<Vec<Model>, HarnessError> {
         let _guard = self.probe_lock.lock().await;
-        if let Some(models) = self.models_cache.get() {
-            return Ok(models.clone());
-        }
         let mut server = self.server(None).await?;
         let result = async {
             let providers = server.provider_catalog(None).await?;
@@ -356,15 +352,22 @@ impl Harness for OpencodeHarness {
     }
 
     /// Live discovery off `GET /provider` (what the desktop app populates its
-    /// picker from), cached on success. Failures surface — the picker retries.
+    /// picker from). Only overlapping calls share a result, so provider/auth
+    /// changes are visible on the next request. Failures remain retryable.
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         if self.base_url.is_none() {
             self.resolve_executable()?;
         }
-        self.models_cache
-            .get_or_try_init(|| self.probe_models())
-            .await
-            .cloned()
+        let requested_at = Instant::now();
+        let mut latest = self.models_cache.lock().await;
+        if let Some((completed_at, models)) = &*latest
+            && *completed_at >= requested_at
+        {
+            return Ok(models.clone());
+        }
+        let models = self.probe_models().await?;
+        *latest = Some((Instant::now(), models.clone()));
+        Ok(models)
     }
 
     async fn commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {

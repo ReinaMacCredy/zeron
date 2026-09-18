@@ -1,8 +1,10 @@
 //! Settings → Appearance: system behavior, independent light/dark variants,
 //! and the optional interactive accent overlay.
 
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
@@ -174,7 +176,23 @@ fn nearest_mono_ix(size: f32) -> usize {
         .unwrap_or_default()
 }
 
+#[derive(Clone)]
+struct TranscriptWidthDrag;
+
+impl Render for TranscriptWidthDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
+
 pub struct AppearancePage {
+    width_focus: FocusHandle,
+    width_hovered: bool,
+    width_pressed: bool,
+    width_keyboard_active: bool,
+    width_bounds: Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    pending_width: Option<f32>,
+    width_frame_pending: bool,
     scroll: crate::settings::widgets::PageScroll,
     selected_font: UiFontFamily,
     selected_terminal_font: UiFontFamily,
@@ -225,6 +243,222 @@ pub struct AppearancePage {
 }
 
 impl AppearancePage {
+    fn queue_width(&mut self, width: f32, window: &mut Window, cx: &mut Context<Self>) {
+        let width = crate::settings::normalize_transcript_width(width);
+        if self
+            .pending_width
+            .unwrap_or_else(|| crate::settings::transcript_width(cx))
+            == width
+        {
+            return;
+        }
+        self.pending_width = Some(width);
+        // Coalesce pointer events into one layout/settings update per frame.
+        if !self.width_frame_pending {
+            self.width_frame_pending = true;
+            let page = cx.weak_entity();
+            window.on_next_frame(move |_, cx| {
+                let _ = page.update(cx, |this, cx| {
+                    this.width_frame_pending = false;
+                    this.apply_pending_width(cx);
+                });
+            });
+        }
+        cx.notify();
+    }
+
+    fn apply_pending_width(&mut self, cx: &mut Context<Self>) {
+        if let Some(width) = self.pending_width.take() {
+            crate::settings::set_transcript_width(width, cx);
+            cx.notify();
+        }
+    }
+
+    fn drag_width(&mut self, x: gpui::Pixels, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(bounds) = self.width_bounds.get() else {
+            return;
+        };
+        let fraction =
+            (f32::from(x - bounds.left()) - 7.0) / (f32::from(bounds.size.width) - 14.0).max(1.0);
+        self.queue_width(
+            crate::settings::TRANSCRIPT_WIDTH_MIN
+                + fraction.clamp(0.0, 1.0)
+                    * (crate::settings::TRANSCRIPT_WIDTH_MAX
+                        - crate::settings::TRANSCRIPT_WIDTH_MIN),
+            window,
+            cx,
+        );
+    }
+
+    fn render_transcript_width(
+        &self,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use crate::settings::{
+            TRANSCRIPT_WIDTH_DEFAULT, TRANSCRIPT_WIDTH_MAX, TRANSCRIPT_WIDTH_MIN,
+            TRANSCRIPT_WIDTH_STEP,
+        };
+        let width = self
+            .pending_width
+            .unwrap_or_else(|| crate::settings::transcript_width(cx));
+        let fraction =
+            (width - TRANSCRIPT_WIDTH_MIN) / (TRANSCRIPT_WIDTH_MAX - TRANSCRIPT_WIDTH_MIN);
+        let bounds = self.width_bounds.clone();
+        let show_details = self.width_hovered
+            || self.width_pressed
+            || (self.width_keyboard_active && self.width_focus.is_focused(window));
+        let slider = div()
+            .id("transcript-width-slider")
+            .track_focus(&self.width_focus)
+            .relative()
+            .w(px(240.0))
+            .h(px(28.0))
+            .cursor_pointer()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                    window.focus(&this.width_focus, cx);
+                    this.width_pressed = true;
+                    this.width_keyboard_active = false;
+                    cx.notify();
+                    cx.stop_propagation();
+                    this.drag_width(event.position.x, window, cx);
+                }),
+            )
+            .on_drag(TranscriptWidthDrag, |drag, _, _, cx| {
+                cx.stop_propagation();
+                cx.new(|_| drag.clone())
+            })
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                let width = this
+                    .pending_width
+                    .unwrap_or_else(|| crate::settings::transcript_width(cx));
+                let next = match event.keystroke.key.as_str() {
+                    "left" | "down" => width - TRANSCRIPT_WIDTH_STEP,
+                    "right" | "up" => width + TRANSCRIPT_WIDTH_STEP,
+                    "home" => TRANSCRIPT_WIDTH_MIN,
+                    "end" => TRANSCRIPT_WIDTH_MAX,
+                    _ => return,
+                };
+                this.width_keyboard_active = true;
+                cx.notify();
+                cx.stop_propagation();
+                window.prevent_default();
+                this.queue_width(next, window, cx);
+            }))
+            .child(
+                gpui::canvas(move |rect, _, _| bounds.set(Some(rect)), |_, _, _, _| {})
+                    .absolute()
+                    .size_full(),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(px(7.0))
+                    .right(px(7.0))
+                    .top(px(12.0))
+                    .h(px(4.0))
+                    .rounded_full()
+                    .bg(theme.border)
+                    .child(
+                        div()
+                            .h_full()
+                            .w(gpui::relative(fraction))
+                            .rounded_full()
+                            .bg(theme.accent),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left(gpui::relative(fraction))
+                            .ml(px(-7.0))
+                            .top(px(-5.0))
+                            .size(px(14.0))
+                            .rounded_full()
+                            .bg(theme.accent),
+                    ),
+            );
+        div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(20.0))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(200.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(widgets::field_label(theme, "Conversation width"))
+                    .child(
+                        div()
+                            .text_size(typography::ui_rems(12.0))
+                            .line_height(px(18.0))
+                            .text_color(theme.text_muted)
+                            .child("Maximum width of messages. Adapts to smaller windows."),
+                    ),
+            )
+            .child(
+                div()
+                    .id("transcript-width-control")
+                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                        this.width_hovered = *hovered;
+                        if *hovered {
+                            this.width_keyboard_active = false;
+                        }
+                        cx.notify();
+                    }))
+                    // Details occupy the surrounding whitespace, so the
+                    // slider keeps the same row rhythm as the font controls.
+                    .my(px(-12.0))
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .when(!show_details, |el| el.invisible())
+                            .flex()
+                            .justify_between()
+                            .text_size(typography::ui_rems(12.0))
+                            .line_height(px(16.0))
+                            .child(format!("{width:.0} px"))
+                            .child(
+                                div()
+                                    .id("reset-transcript-width")
+                                    .cursor_pointer()
+                                    .text_color(theme.text_muted)
+                                    .hover(|style| style.text_color(theme.text))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.pending_width = None;
+                                        crate::settings::set_transcript_width(
+                                            TRANSCRIPT_WIDTH_DEFAULT,
+                                            cx,
+                                        );
+                                        cx.notify();
+                                    }))
+                                    .child("Reset"),
+                            ),
+                    )
+                    .child(slider)
+                    .child(
+                        div()
+                            .when(!show_details, |el| el.invisible())
+                            .flex()
+                            .justify_between()
+                            .text_size(typography::ui_rems(11.0))
+                            .line_height(px(14.0))
+                            .text_color(theme.text_muted)
+                            .child("560 px")
+                            .child("1,200 px"),
+                    ),
+            )
+            .into_any_element()
+    }
+
     pub fn new(cx: &mut Context<Self>) -> Self {
         // `PaletteSearch` binds text-editing keys only — arrows/Enter/Escape
         // stay unbound and bubble from the input to the menu card's own key
@@ -237,6 +471,13 @@ impl AppearancePage {
             }
         });
         Self {
+            width_focus: cx.focus_handle(),
+            width_hovered: false,
+            width_pressed: false,
+            width_keyboard_active: false,
+            width_bounds: Rc::default(),
+            pending_width: None,
+            width_frame_pending: false,
             scroll: crate::settings::widgets::PageScroll::default(),
             selected_font: typography::effective(cx),
             selected_terminal_font: typography::terminal_effective(cx),
@@ -3142,6 +3383,7 @@ impl Render for AppearancePage {
             .map(|mode| {
                 widgets::option_card(
                     &theme,
+                    mode.icon(),
                     mode.label(),
                     mode == current_mode,
                     preview(mode, &current_themes, current_accent, current_surface),
@@ -3159,15 +3401,15 @@ impl Render for AppearancePage {
             .into_iter()
             .enumerate()
         {
-            let label = if appearance_kind.is_light() {
-                "Light theme"
+            let (label, mode) = if appearance_kind.is_light() {
+                ("Light theme", AppearanceMode::Light)
             } else {
-                "Dark theme"
+                ("Dark theme", AppearanceMode::Dark)
             };
             let selector = self.render_theme_selector(appearance_kind, &current_themes, &theme, cx);
             theme_rows.push(
                 widgets::card_row(&theme, index == 0)
-                    .child(widgets::row_tile(&theme, icons::TUNING))
+                    .child(widgets::row_tile(&theme, mode.icon()))
                     .child(
                         div()
                             .flex_1()
@@ -3496,6 +3738,7 @@ impl Render for AppearancePage {
                     ),
             );
         }
+        font_section = font_section.child(self.render_transcript_width(&theme, window, cx));
         for kind in FontKind::ALL {
             let (requested, effective) = (kind.requested(cx), kind.effective(cx));
             if requested != effective {
@@ -3517,6 +3760,31 @@ impl Render for AppearancePage {
         let scrollbar = popover::rail(self, "appearance-page-scrollbar", &theme, cx);
         div()
             .id("appearance-page-host")
+            .on_drag_move(cx.listener(
+                |this, event: &gpui::DragMoveEvent<TranscriptWidthDrag>, window, cx| {
+                    this.drag_width(event.event.position.x, window, cx);
+                },
+            ))
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _: &gpui::MouseUpEvent, _, cx| {
+                    if this.width_pressed {
+                        this.width_pressed = false;
+                        cx.notify();
+                    }
+                    this.apply_pending_width(cx);
+                }),
+            )
+            .on_mouse_up_out(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _: &gpui::MouseUpEvent, _, cx| {
+                    if this.width_pressed {
+                        this.width_pressed = false;
+                        cx.notify();
+                    }
+                    this.apply_pending_width(cx);
+                }),
+            )
             .relative()
             .size_full()
             .on_hover(cx.listener(Self::on_scroll_hovered))
@@ -3789,6 +4057,45 @@ mod tests {
         }
         assert!(FontKind::Terminal.size_labels().contains(&"13 px".into()));
         assert!(FontKind::Code.size_labels().contains(&"12.5 px".into()));
+    }
+
+    #[gpui::test]
+    fn conversation_width_drag_coalesces_and_persists_the_last_value(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(Default::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| AppearancePage::new(cx));
+        window
+            .update(cx, |page, window, cx| {
+                page.width_bounds.set(Some(gpui::Bounds::new(
+                    gpui::point(px(100.0), px(0.0)),
+                    gpui::size(px(240.0), px(28.0)),
+                )));
+                page.drag_width(px(0.0), window, cx);
+                assert_eq!(page.pending_width, Some(560.0));
+                page.drag_width(px(1000.0), window, cx);
+                assert_eq!(page.pending_width, Some(1200.0));
+                page.drag_width(px(220.0), window, cx);
+                assert_eq!(page.pending_width, Some(880.0));
+                assert_eq!(
+                    crate::settings::transcript_width(cx),
+                    736.0,
+                    "pointer events must coalesce before publishing"
+                );
+                page.apply_pending_width(cx);
+                assert_eq!(crate::settings::transcript_width(cx), 880.0);
+                crate::settings::flush(cx);
+                assert_eq!(
+                    crate::settings::UiSettings::load(dir.path()).transcript_width,
+                    880.0
+                );
+            })
+            .unwrap();
     }
 
     #[gpui::test]

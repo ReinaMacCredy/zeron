@@ -59,14 +59,14 @@ impl NpmPin {
     }
 }
 
-const OK_MARKER: &str = ".zeron-install-ok";
+pub(crate) const OK_MARKER: &str = ".zeron-install-ok";
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Managed adapter storage. `$ZERON_ADAPTERS_DIR` wins, followed by
 /// `$ZERON_DATA_DIR/adapters`. Windows defaults to
 /// `%LOCALAPPDATA%/Zeron/adapters` (or `%USERPROFILE%/AppData/Local/...`);
 /// Unix keeps `~/.zeron/adapters`.
-fn adapters_root() -> Option<PathBuf> {
+pub(crate) fn adapters_root() -> Option<PathBuf> {
     adapters_root_with(
         &|key| std::env::var_os(key),
         crate::executable::Platform::current(),
@@ -299,7 +299,7 @@ fn describe_npm_exit(status: Option<std::process::ExitStatus>) -> String {
 
 /// One installer at a time per process; installs are rare and npm handles
 /// its own intra-install parallelism.
-fn install_lock() -> &'static tokio::sync::Mutex<()> {
+pub(crate) fn install_lock() -> &'static tokio::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
@@ -375,26 +375,43 @@ pub(crate) async fn ensure_installed(
 /// A zeron-owned shim script materialized INSIDE a managed install dir, for
 /// SDK packages with no bin entry (`@cursor/sdk`): the shim resolves the SDK
 /// from the sibling `node_modules`. Returns the shim path when the install is
-/// complete AND the shim contents match this build (a comet upgrade that
-/// changes the shim rewrites it in place).
+/// complete. Each build's shim source has its own immutable filename.
 pub(crate) fn installed_shim(pin: &NpmPin, shim_name: &str, contents: &str) -> Option<PathBuf> {
     let dir = install_dir(pin)?;
     if !dir.join(OK_MARKER).exists() {
         return None;
     }
-    let shim = dir.join(shim_name);
-    match std::fs::read_to_string(&shim) {
-        Ok(existing) if existing == contents => Some(shim),
-        _ => {
-            std::fs::write(&shim, contents).ok()?;
-            Some(shim)
+    materialize_shim(&dir, shim_name, contents).ok()
+}
+
+/// Different running Zeron builds must never replace each other's shim.
+/// Publish complete, content-addressed files; a reader never sees a partial write.
+fn materialize_shim(dir: &Path, name: &str, contents: &str) -> std::io::Result<PathBuf> {
+    use sha2::{Digest, Sha256};
+    let digest = format!("{:x}", Sha256::digest(contents.as_bytes()));
+    let name = Path::new(name);
+    let stem = name.file_stem().unwrap_or_default().to_string_lossy();
+    let extension = name.extension().unwrap_or_default().to_string_lossy();
+    let shim = dir.join(format!("{stem}-{digest}.{extension}"));
+    if std::fs::read(&shim).ok().as_deref() == Some(contents.as_bytes()) {
+        return Ok(shim);
+    }
+    let temporary = dir.join(format!(".shim-{}", uuid::Uuid::new_v4()));
+    std::fs::write(&temporary, contents)?;
+    if let Err(error) = std::fs::rename(&temporary, &shim) {
+        let _ = std::fs::remove_file(&temporary);
+        // Windows cannot rename over an existing destination. Another writer
+        // publishing these same immutable bytes is a successful race.
+        if std::fs::read(&shim).ok().as_deref() != Some(contents.as_bytes()) {
+            return Err(error);
         }
     }
+    Ok(shim)
 }
 
 /// Like [`ensure_installed`], for a package consumed as a LIBRARY by a
 /// zeron-owned shim rather than through a bin entry. Installs the pin once,
-/// writes `contents` as `<install-dir>/<shim_name>`, and returns the shim
+/// writes `contents` to a content-addressed sibling of `shim_name`, and returns the shim
 /// path (spawn it via [`launch_for_entry`]).
 pub(crate) async fn ensure_installed_shim(
     pin: NpmPin,
@@ -433,7 +450,7 @@ pub(crate) async fn ensure_installed_shim(
         let _ = std::fs::remove_dir_all(&tmp_dir);
         return Err(e);
     }
-    std::fs::write(tmp_dir.join(shim_name), contents)?;
+    materialize_shim(&tmp_dir, shim_name, contents)?;
     std::fs::write(tmp_dir.join(OK_MARKER), pin.version)?;
     if let Some(parent) = final_dir.parent() {
         std::fs::create_dir_all(parent)?;
@@ -814,5 +831,33 @@ mod tests {
             assert!(message.contains("Windows batch wrapper"));
             assert!(message.contains("native .exe"));
         }
+    }
+}
+
+#[cfg(test)]
+mod shim_stress_tests {
+    use super::*;
+    #[test]
+    fn concurrent_builds_publish_immutable_complete_shims() {
+        let dir = tempfile::tempdir().unwrap();
+        let sources: Vec<String> = (0..8)
+            .map(|build| format!("// build {build}\n{}", "x".repeat(256 * 1024)))
+            .collect();
+        std::thread::scope(|scope| {
+            for source in &sources {
+                let dir = dir.path();
+                scope.spawn(move || {
+                    for _ in 0..100 {
+                        let shim = materialize_shim(dir, "shim.mjs", source).unwrap();
+                        assert_eq!(std::fs::read_to_string(shim).unwrap(), *source);
+                        // Older applications can still rewrite their legacy filename.
+                        std::fs::write(dir.join("shim.mjs"), "old build").unwrap();
+                    }
+                });
+            }
+        });
+        println!(
+            "stress: 800 publications across 8 concurrent build versions, zero corrupt or replaced shims"
+        );
     }
 }

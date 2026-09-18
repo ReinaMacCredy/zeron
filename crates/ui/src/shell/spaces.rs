@@ -225,6 +225,11 @@ fn grouped_visible_order(
         .collect()
 }
 
+/// Shared quiet rule for sidebar groups and palette sections.
+pub(super) fn sidebar_separator(theme: &Theme) -> gpui::Div {
+    div().h(px(1.0)).bg(theme.border.opacity(0.6))
+}
+
 fn sidebar_disclosure_header(theme: &Theme, label: SharedString, chevron: AnyElement) -> gpui::Div {
     div()
         .flex()
@@ -234,15 +239,16 @@ fn sidebar_disclosure_header(theme: &Theme, label: SharedString, chevron: AnyEle
         .h(px(SIDEBAR_DISCLOSURE_HEADER_HEIGHT))
         .px(px(Theme::SPACE_SM))
         .cursor_pointer()
-        .child(
+        .child(super::sidebar_faded_label(
+            "sidebar-disclosure-label".into(),
+            false,
             div()
-                .flex_none()
                 .text_size(crate::typography::ui_rems(12.0))
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(theme.text_muted.opacity(0.5))
                 .child(label),
-        )
-        .child(div().h(px(1.0)).flex_1().bg(theme.border.opacity(0.6)))
+        ))
+        .child(sidebar_separator(theme).flex_1())
         .child(chevron)
 }
 
@@ -907,7 +913,7 @@ impl Shell {
                     .text_color(theme.text_muted),
             )
             // flex_1 pushes the caret to the trigger's right edge and gives
-            // long space names a bound to truncate against; the "@ device"
+            // long space names a bound to fade against; the "@ device"
             // tag hugs the name inside it rather than sitting by the caret.
             .child(
                 div()
@@ -917,16 +923,21 @@ impl Shell {
                     .flex_row()
                     .items_center()
                     .gap(px(6.0))
-                    .child(div().min_w_0().truncate().child(label))
+                    .child(super::sidebar_faded_label(
+                        "spaces-filter-label".into(),
+                        false,
+                        label,
+                    ))
                     .when_some(device_tag, |el, (tag, offline)| {
-                        el.child(
+                        el.child(super::sidebar_faded_label(
+                            "spaces-filter-device".into(),
+                            false,
                             div()
-                                .flex_none()
                                 .text_size(crate::typography::ui_rems(10.0))
                                 .font_weight(gpui::FontWeight::NORMAL)
                                 .text_color(theme.text_muted.opacity(0.45))
                                 .child(tag),
-                        )
+                        ))
                         // Disconnected glyph, not the word (user request).
                         .when(offline, |el| {
                             el.child(
@@ -1861,11 +1872,10 @@ impl Shell {
                                     }),
                             )
                         })
-                        .child(
+                        .child(super::sidebar_faded_label(
+                            format!("archived-title-{id}").into(),
+                            true,
                             div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
                                 .text_size(crate::typography::ui_rems(13.0))
                                 .text_color(if hovered || is_selected {
                                     theme.text
@@ -1873,7 +1883,7 @@ impl Shell {
                                     theme.text.opacity(0.55)
                                 })
                                 .child(title),
-                        )
+                        ))
                         .child(right),
                 );
             }

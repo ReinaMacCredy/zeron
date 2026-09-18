@@ -4049,6 +4049,7 @@ pub(crate) fn harness_display_name(harness: HarnessId) -> &'static str {
         HarnessId::Hermes => "Hermes",
         HarnessId::Pi => "Pi",
         HarnessId::Opencode => "OpenCode",
+        HarnessId::Antigravity => "Antigravity",
         HarnessId::Mock => "Mock",
     }
 }
@@ -6513,7 +6514,12 @@ impl Composer {
             self.staged_comments(cx).len(),
         );
         match self.button_mode(cx) {
-            SendButtonMode::Stop => self.interrupt_selected(cx),
+            // Enter never stops a run: Stop mode implies an empty composer,
+            // so a stray extra Enter right after sending landed an interrupt
+            // on the just-dispatched prompt and the agent ate it silently
+            // (issue #406). Stop stays on the button — and on Esc when
+            // escape_stops_active_agent is enabled.
+            SendButtonMode::Stop => {}
             _ if no_content => {}
             _ if self.send_blocked(cx) => {}
             SendButtonMode::Send => self.send(text, false, false, false, cx),
@@ -9041,6 +9047,41 @@ mod tests {
                 "Pending edits must still block submission"
             );
         });
+    }
+
+    /// Issue #406: Enter submits — it must never stop a run. Stop mode only
+    /// exists on a live run with an EMPTY composer, so a habitual
+    /// double-Enter after sending interrupted the just-dispatched prompt
+    /// and the agent ate it silently. Keyboard stop is the Esc setting's
+    /// job; Enter on an empty composer is a no-op.
+    #[gpui::test]
+    fn enter_on_empty_composer_during_a_live_run_never_interrupts(cx: &mut gpui::TestAppContext) {
+        // RpcClient::new spawns its reader on tokio — give the test a reactor.
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        // The client's write end: any RPC Enter dispatches lands here.
+        let (out, mut server_in) = tokio::sync::mpsc::channel::<String>(16);
+        let (_server_out, inbound) = tokio::sync::mpsc::channel::<String>(16);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(
+                zeron_rpc::RpcClient::new(out, inbound),
+            ));
+            state.selected_chat = Some("c".into());
+            // A send in flight reads as Working — the double-Enter window.
+            state.begin_pending_send("c", "m1", chrono::Utc::now());
+        });
+        let composer = cx.new(|cx| Composer::new(state, cx));
+        composer.update(cx, |composer, cx| {
+            assert_eq!(composer.button_mode(cx), SendButtonMode::Stop);
+            composer.on_submit(cx);
+            // interrupt_chat marks the chat before its RPC even flies.
+            assert!(!composer.interrupting.contains("c"));
+        });
+        // If Enter had dispatched an interrupt, the spawned call would have
+        // written its frame into the channel by the time the executor parks.
+        cx.run_until_parked();
+        assert!(server_in.try_recv().is_err());
     }
 
     /// The press intent is judged by eye everywhere except here: that a

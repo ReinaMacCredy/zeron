@@ -25,9 +25,12 @@ futures.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+deser-hjson.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+sha2.workspace = true
+zip.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
@@ -36,4 +39,5 @@ libc.workspace = true
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Security", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_SystemInformation", "Win32_System_Threading"] }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true

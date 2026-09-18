@@ -946,6 +946,35 @@ async fn models_discover_from_the_provider_catalog() {
 }
 
 #[tokio::test]
+async fn models_refresh_large_provider_catalogs_and_recover_after_disconnect() {
+    let fake = FakeOpencode::start().await;
+    let harness = harness(&fake);
+    let models: serde_json::Map<String, Value> = (0..512)
+        .map(|i| (format!("model-{i}"), json!({"name": "x".repeat(2048)})))
+        .collect();
+    let catalog = json!({
+        "all": [{"id": "provider", "models": models}],
+        "connected": ["provider"],
+    });
+    fake.set_providers(catalog.clone());
+    assert_eq!(harness.models().await.unwrap().len(), 512);
+
+    fake.set_providers(json!({"all": [], "connected": []}));
+    assert!(
+        harness.models().await.is_err(),
+        "must not return the old account's catalog"
+    );
+
+    fake.set_providers(json!({
+        "all": [{"id": "new-account", "models": {"fresh": {"name": "Fresh"}}}],
+        "connected": ["new-account"],
+    }));
+    let refreshed = harness.models().await.unwrap();
+    assert_eq!(refreshed.len(), 1);
+    assert_eq!(refreshed[0].id, "new-account/fresh");
+}
+
+#[tokio::test]
 async fn repeated_session_create_failure_stops_after_one_retry() {
     let fake = FakeOpencode::start().await;
     *fake.fail_session_creates.lock().unwrap() = 10;

@@ -438,6 +438,54 @@ impl SessionDoc {
             .or_else(|| (0..messages.len()).rev().find(|&index| complete(index)))
     }
 
+    /// Read a bounded suffix directly from the containers, without expanding
+    /// the full messages tree. For first paint only: the full watch must follow.
+    /// Limits count parts rather than joined messages (one turn can have tens
+    /// of thousands of parts). Never truncate a part's text or persisted data.
+    pub fn read_opening_tail(
+        &self,
+        max_parts: usize,
+    ) -> Result<Vec<SessionMessageEntry>, DocError> {
+        use loro::{Container, ValueOrContainer};
+        let messages = self.doc.get_list("messages");
+        let mut remaining = max_parts;
+        let mut entries = Vec::new();
+        for index in (0..messages.len()).rev() {
+            if remaining == 0 {
+                break;
+            }
+            let Some(ValueOrContainer::Container(Container::Map(map))) = messages.get(index) else {
+                continue;
+            };
+            let mut value = map.get_value().to_json_value();
+            let mut tail = Vec::new();
+            if let Some(ValueOrContainer::Container(Container::List(parts))) = map.get("parts") {
+                let count = remaining.min(parts.len());
+                for part_index in parts.len().saturating_sub(count)..parts.len() {
+                    if let Some(part) = parts.get(part_index) {
+                        tail.push(part.get_deep_value().to_json_value());
+                    }
+                }
+                remaining -= count.max(1).min(remaining);
+            } else {
+                remaining -= 1;
+            }
+            value["parts"] = serde_json::Value::Array(tail);
+            if let Ok(entry) = entry_from_json(value) {
+                entries.push(entry);
+            }
+        }
+        entries.reverse();
+        // Preserve the joined id even when the first included segment's root
+        // is outside the window, so its text rows survive the full reset.
+        if let Some(first) = entries.first_mut()
+            && let Some(root) = first.continuation_of.take()
+        {
+            first.id = root;
+        }
+        Ok(join_continuation_entries(entries))
+    }
+
     /// Read the commands ledger.
     ///
     /// Same skip-not-fail policy as `read_entries`: any device can append
@@ -1307,6 +1355,45 @@ mod tests {
     use super::*;
     use crate::parts::fold_event_into_parts;
     use zeron_proto::{AgentEvent, ToolCall};
+
+    #[test]
+    fn opening_tail_bounds_parts_and_preserves_continuation_ids() {
+        let doc = SessionDoc::init("whale").unwrap();
+        for segment in 0..4 {
+            doc.push_message(&SessionMessageEntry {
+                id: format!("segment-{segment}"),
+                role: MessageRole::Assistant,
+                parts: (0..100)
+                    .map(|part| MessagePart::Text {
+                        id: format!("part-{}", segment * 100 + part),
+                        text: "body".into(),
+                    })
+                    .collect(),
+                created_at: segment,
+                device_id: "device".into(),
+                status: Some(MessageStatus::Complete),
+                continuation_of: (segment > 0).then(|| "segment-0".into()),
+            })
+            .unwrap();
+        }
+        let before = doc.export_snapshot().unwrap();
+        let tail = doc.read_opening_tail(128).unwrap();
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].id, "segment-0");
+        assert_eq!(tail[0].parts.len(), 128);
+        assert_eq!(tail[0].parts[0].id(), "part-272");
+        assert_eq!(tail[0].parts.last().unwrap().id(), "part-399");
+        assert_eq!(
+            doc.read_opening_tail(1000).unwrap(),
+            join_continuation_entries(doc.read_entries().unwrap())
+        );
+        assert!(doc.read_opening_tail(0).unwrap().is_empty());
+        assert_eq!(
+            before,
+            doc.export_snapshot().unwrap(),
+            "preview never mutates storage"
+        );
+    }
 
     #[test]
     fn generated_image_persists_updates_and_salvages() {

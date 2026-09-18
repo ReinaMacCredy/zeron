@@ -24,10 +24,12 @@ use gpui::{
     px,
 };
 
+use std::time::Duration;
 use zeron_engine::registry::TitleSettings;
 use zeron_engine::registry::{HarnessDescriptor, descriptor_enabled};
-use zeron_proto::HarnessId;
+
 use zeron_proto::Model;
+use zeron_proto::{AgentLoginPoll, AgentLoginStart, AgentLoginStatus, HarnessId};
 use zeron_rpc::methods;
 
 use crate::pickers::visible_harnesses;
@@ -48,6 +50,7 @@ pub fn blurb(harness: HarnessId) -> &'static str {
         HarnessId::Hermes => "Nous Research's Hermes Agent (hermes CLI).",
         HarnessId::Pi => "The pi coding agent (pi CLI).",
         HarnessId::Opencode => "SST's opencode agent (opencode CLI).",
+        HarnessId::Antigravity => "Google's Antigravity agent (Antigravity ACP server).",
         HarnessId::Mock => "Scripted test harness.",
     }
 }
@@ -63,6 +66,7 @@ pub fn cli_name(harness: HarnessId) -> &'static str {
         HarnessId::Hermes => "hermes",
         HarnessId::Pi => "pi",
         HarnessId::Opencode => "opencode",
+        HarnessId::Antigravity => "agy",
         HarnessId::Mock => "mock",
     }
 }
@@ -89,6 +93,57 @@ pub struct HarnessesPage {
     error: Option<String>,
     load_task: Option<Task<()>>,
     toggle_task: Option<Task<()>>,
+    /// a sign-in that switches its harness on once it succeeds.
+    sign_in: Option<SignIn>,
+    sign_in_failure: Option<SignInFailure>,
+    sign_in_task: Option<Task<()>>,
+}
+
+struct SignIn {
+    harness: HarnessId,
+    /// known once the engine accepted the start.
+    login_id: Option<String>,
+    message: Option<String>,
+    phase: SignInPhase,
+}
+
+#[derive(Clone, Copy)]
+enum SignInPhase {
+    Starting,
+    Installing,
+    Authenticating,
+    Enabling,
+}
+
+struct SignInFailure {
+    harness: HarnessId,
+    message: String,
+    phase: SignInPhase,
+}
+
+impl SignInPhase {
+    fn pending_label(self) -> &'static str {
+        match self {
+            Self::Starting => "Preparing Antigravity…",
+            Self::Installing => "Installing Antigravity…",
+            Self::Authenticating => "Finish signing in in your browser.",
+            Self::Enabling => "Enabling Antigravity…",
+        }
+    }
+
+    fn failure_label(self) -> &'static str {
+        match self {
+            Self::Starting => "Setup failed",
+            Self::Installing => "Installation failed",
+            Self::Authenticating => "Sign-in failed",
+            Self::Enabling => "Enable failed",
+        }
+    }
+}
+
+/// harnesses whose toggle runs the agent's own sign-in before switching on.
+fn signs_in_on_enable(harness: HarnessId) -> bool {
+    harness == HarnessId::Antigravity
 }
 
 impl HarnessesPage {
@@ -108,6 +163,9 @@ impl HarnessesPage {
             error: None,
             load_task: None,
             toggle_task: None,
+            sign_in: None,
+            sign_in_failure: None,
+            sign_in_task: None,
         };
         page.load(cx);
         page
@@ -129,6 +187,7 @@ impl HarnessesPage {
             cx.notify();
             return;
         }
+        self.cancel_sign_in(cx);
         self.title_task = None;
         self.title_settings = Loadable::Idle;
         self.title_models = Loadable::Idle;
@@ -136,6 +195,7 @@ impl HarnessesPage {
         self.title_saving = false;
         self.target_device = target;
         self.error = None;
+        self.sign_in_failure = None;
         self.harnesses = Loadable::Idle;
         self.load(cx);
         cx.notify();
@@ -397,6 +457,201 @@ impl HarnessesPage {
     /// fresh catalog, so the rows repaint from the authoritative state in one
     /// round trip; refusals (engine guards) land in the error strip.
     fn toggle(&mut self, harness: HarnessId, enabled: bool, cx: &mut Context<Self>) {
+        if enabled && signs_in_on_enable(harness) {
+            self.start_sign_in(harness, cx);
+        } else {
+            self.set_enabled(harness, enabled, cx);
+        }
+    }
+
+    /// sign in first, then switch on: StartAgentLogin, then PollAgentLogin
+    /// until the engine reports the outcome, opening the sign-in page the
+    /// first time a poll names it.
+    fn start_sign_in(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
+        if self.target_device.is_some() {
+            // the sign-in redirect lands on a loopback port of the device
+            // running the agent, which a browser here can't reach
+            self.error = Some("Turn this agent on from its own device to sign in.".into());
+            cx.notify();
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        self.error = None;
+        self.sign_in_failure = None;
+        self.sign_in = Some(SignIn {
+            harness,
+            login_id: None,
+            message: None,
+            phase: SignInPhase::Starting,
+        });
+        let start_params = serde_json::json!({ "harness": harness });
+        self.sign_in_task = Some(cx.spawn(async move |this, cx| {
+            let started = engine
+                .client()
+                .call(methods::START_AGENT_LOGIN, start_params)
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|value| {
+                    serde_json::from_value::<AgentLoginStart>(value).map_err(|e| e.to_string())
+                });
+            let login_id = match started {
+                Ok(start) => start.login_id,
+                Err(error) => {
+                    this.update(cx, |page, cx| {
+                        page.fail_sign_in(harness, format!("Sign-in failed to start: {error}"));
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+            };
+            this.update(cx, |page, _| {
+                if let Some(sign_in) = &mut page.sign_in {
+                    sign_in.login_id = Some(login_id.clone());
+                    sign_in.phase = SignInPhase::Installing;
+                }
+            })
+            .ok();
+            let poll_params = serde_json::json!({ "loginId": login_id });
+            let mut opened = false;
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(1000))
+                    .await;
+                let poll = engine
+                    .client()
+                    .call(methods::POLL_AGENT_LOGIN, poll_params.clone())
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|value| {
+                        serde_json::from_value::<AgentLoginPoll>(value).map_err(|e| e.to_string())
+                    });
+                let finished = this.update(cx, |page, cx| {
+                    let finished = match poll {
+                        Ok(poll) => match poll.status {
+                            AgentLoginStatus::Pending => {
+                                if !opened && let Some(url) = &poll.url {
+                                    opened = true;
+                                    cx.open_url(url);
+                                }
+                                if let Some(sign_in) = &mut page.sign_in {
+                                    if poll.url.is_some() {
+                                        sign_in.phase = SignInPhase::Authenticating;
+                                    }
+                                    sign_in.message = poll.message;
+                                }
+                                false
+                            }
+                            AgentLoginStatus::Done => {
+                                page.sign_in_failure = None;
+                                if let Some(sign_in) = &mut page.sign_in {
+                                    sign_in.phase = SignInPhase::Enabling;
+                                    sign_in.message = None;
+                                }
+                                page.finish_sign_in(harness, cx);
+                                true
+                            }
+                            AgentLoginStatus::Error => {
+                                page.fail_sign_in(
+                                    harness,
+                                    poll.message.unwrap_or_else(|| "Unknown error".into()),
+                                );
+                                true
+                            }
+                        },
+                        Err(error) => {
+                            page.fail_sign_in(harness, error);
+                            true
+                        }
+                    };
+                    cx.notify();
+                    finished
+                });
+                if finished.unwrap_or(true) {
+                    break;
+                }
+            }
+        }));
+        cx.notify();
+    }
+
+    fn fail_sign_in(&mut self, harness: HarnessId, message: String) {
+        let phase = self
+            .sign_in
+            .take()
+            .filter(|sign_in| sign_in.harness == harness)
+            .map(|sign_in| sign_in.phase)
+            .unwrap_or(SignInPhase::Starting);
+        self.sign_in_failure = Some(SignInFailure {
+            harness,
+            message,
+            phase,
+        });
+    }
+
+    fn finish_sign_in(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.fail_sign_in(harness, "Engine unavailable".into());
+            return;
+        };
+        let params = self.with_target(serde_json::json!({
+            "harness": harness,
+            "enabled": true,
+        }));
+        self.toggle_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::SET_HARNESS_ENABLED, params)
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|value| {
+                    serde_json::from_value::<Vec<HarnessDescriptor>>(value)
+                        .map_err(|error| error.to_string())
+                });
+            this.update(cx, |page, cx| {
+                match result {
+                    Ok(list) => {
+                        page.harnesses = Loadable::Ready(list);
+                        page.sign_in = None;
+                        page.sign_in_failure = None;
+                        crate::pickers::bump_harness_catalog(cx);
+                    }
+                    Err(error) => page.fail_sign_in(harness, error),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn cancel_sign_in(&mut self, cx: &mut Context<Self>) {
+        let Some(sign_in) = self.sign_in.take() else {
+            return;
+        };
+        self.sign_in_task = None;
+        if let (Some(login_id), Some(engine)) =
+            (sign_in.login_id, self.state.read(cx).engine().cloned())
+        {
+            cx.spawn(async move |_, _| {
+                if let Err(err) = engine
+                    .client()
+                    .call(
+                        methods::CANCEL_AGENT_LOGIN,
+                        serde_json::json!({ "loginId": login_id }),
+                    )
+                    .await
+                {
+                    tracing::debug!(error = %err, "CancelAgentLogin failed (best-effort)");
+                }
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    fn set_enabled(&mut self, harness: HarnessId, enabled: bool, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
@@ -606,16 +861,64 @@ impl HarnessesPage {
                 // (its hint says to turn it off) and the composer handles the
                 // resulting empty set (mirrors the engine guard).
                 let last_enabled = enabled && enabled_count == 1 && installed;
+                let signing_in = self
+                    .sign_in
+                    .as_ref()
+                    .filter(|sign_in| sign_in.harness == harness);
+                let sign_in_failure = self
+                    .sign_in_failure
+                    .as_ref()
+                    .filter(|failure| failure.harness == harness);
+                let sign_in_cancellable = signing_in
+                    .is_some_and(|sign_in| !matches!(sign_in.phase, SignInPhase::Enabling));
                 // Turning OFF never needs the CLI (a default-on agent the
                 // user doesn't want must not be stuck on because it isn't
                 // installed); turning ON still does.
-                let interactive = !last_enabled && (enabled || installed);
+                let interactive = signing_in.is_none()
+                    && sign_in_failure.is_none()
+                    && !last_enabled
+                    && (enabled || installed);
                 let (icon_path, tint) = crate::pickers::harness_brand_icon(harness);
                 let mut meta: Vec<gpui::AnyElement> = vec![
                     div()
                         .child(SharedString::from(blurb(harness)))
                         .into_any_element(),
                 ];
+                if let Some(sign_in) = signing_in {
+                    meta.push(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(crate::loaders::mini_mono_spinner(
+                                format!("harness-setup-spinner-{harness:?}"),
+                                1.5,
+                                theme.text_muted,
+                                cx.entity_id(),
+                                cx,
+                            ))
+                            .child(SharedString::from(
+                                sign_in
+                                    .message
+                                    .clone()
+                                    .unwrap_or_else(|| sign_in.phase.pending_label().into()),
+                            ))
+                            .into_any_element(),
+                    );
+                }
+                if let Some(failure) = sign_in_failure {
+                    meta.push(
+                        div()
+                            .text_color(theme.danger_muted.opacity(0.9))
+                            .child(SharedString::from(format!(
+                                "{} — {}",
+                                failure.phase.failure_label(),
+                                failure.message
+                            )))
+                            .into_any_element(),
+                    );
+                }
                 if !installed {
                     meta.push(
                         div()
@@ -651,6 +954,7 @@ impl HarnessesPage {
                 widgets::card_row(&theme, ix == 0)
                     .id(("harness-row", ix))
                     .when(!installed, |el| el.opacity(0.55))
+                    .when(signing_in.is_some(), |el| el.opacity(0.65))
                     .child(tile)
                     .child(
                         div()
@@ -661,9 +965,32 @@ impl HarnessesPage {
                             .child(widgets::row_title(&theme, descriptor.name.clone()))
                             .child(widgets::meta_line(&theme, meta)),
                     )
+                    .when(sign_in_cancellable, |el| {
+                        el.child(
+                            widgets::ghost_action(&theme)
+                                .id(("harness-cancel-sign-in", ix))
+                                .hover(|s| widgets::ghost_hover(&theme, s))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.cancel_sign_in(cx);
+                                }))
+                                .child(SharedString::from("Cancel")),
+                        )
+                    })
+                    .when(sign_in_failure.is_some(), |el| {
+                        el.child(
+                            widgets::ghost_action(&theme)
+                                .id(("harness-retry-sign-in", ix))
+                                .hover(|s| widgets::ghost_hover(&theme, s))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.start_sign_in(harness, cx);
+                                }))
+                                .child(SharedString::from("Retry")),
+                        )
+                    })
                     .child(
                         widgets::toggle_switch(&theme, enabled)
                             .id(("harness-toggle", ix))
+                            .when(!interactive, |el| el.opacity(0.35))
                             .when(interactive, |el| {
                                 el.cursor_pointer()
                                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -776,5 +1103,40 @@ impl Render for HarnessesPage {
                     ),
             )
             .children(scrollbar)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SignInPhase;
+
+    #[test]
+    fn antigravity_setup_copy_matches_each_phase() {
+        assert_eq!(
+            SignInPhase::Starting.pending_label(),
+            "Preparing Antigravity…"
+        );
+        assert_eq!(SignInPhase::Starting.failure_label(), "Setup failed");
+        assert_eq!(
+            SignInPhase::Installing.pending_label(),
+            "Installing Antigravity…"
+        );
+        assert_eq!(
+            SignInPhase::Installing.failure_label(),
+            "Installation failed"
+        );
+        assert_eq!(
+            SignInPhase::Authenticating.pending_label(),
+            "Finish signing in in your browser."
+        );
+        assert_eq!(
+            SignInPhase::Authenticating.failure_label(),
+            "Sign-in failed"
+        );
+        assert_eq!(
+            SignInPhase::Enabling.pending_label(),
+            "Enabling Antigravity…"
+        );
+        assert_eq!(SignInPhase::Enabling.failure_label(), "Enable failed");
     }
 }
