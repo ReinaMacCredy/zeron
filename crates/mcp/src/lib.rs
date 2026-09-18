@@ -58,8 +58,12 @@ pub fn tool_list() -> Value {
     json!([
         {
             "name": "list_threads",
-            "description": "List the chats (threads) in this chat's project with their live status and the role and first 120 characters of their newest transcript entry (`lastRole` assistant: its last turn finished; user or none: it is waiting on someone). Threads are peers, not workers: every one is a real sidebar chat the human can open, and none can stop another.",
-            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+            "description": "List the chats (threads) in this chat's project with their live status and the role and first 120 characters of their newest transcript entry (`lastRole` assistant: its last turn finished; user or none: it is waiting on someone). Archived threads are left out unless `includeArchived` is true. Threads are peers, not workers: every one is a real sidebar chat the human can open, and none can stop another.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "includeArchived": { "type": "boolean" } },
+                "additionalProperties": false
+            }
         },
         {
             "name": "read_thread",
@@ -77,7 +81,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "create_thread",
-            "description": "Open a new peer thread in this project and give it `prompt` as its first message. It runs this chat's harness, model and reasoning level unless `harness`, `model` or `reasoning` pick others; picking a different harness without a `model` uses that harness's default model, and an unknown harness or reasoning level is an error. Counts against this turn's send budget.",
+            "description": "Open a new peer thread in this project and give it `prompt` as its first message. It runs this chat's harness, model and reasoning level unless `harness`, `model` or `reasoning` pick others; picking a different harness without a `model` uses that harness's default model, and an unknown harness or reasoning level is an error. Returns the new thread's row as list_threads reports it. Counts against this turn's send budget.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -125,7 +129,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "set_thread_archived",
-            "description": "Archive or unarchive one thread (`threadId`) or several (`threadIds`) in this project. Archiving never cascades to other threads.",
+            "description": "Archive or unarchive one thread (`threadId`) or several (`threadIds`) in this project. A working thread (this chat included, while its turn runs) cannot be archived; archiving never cascades to other threads.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -151,7 +155,7 @@ impl ThreadTools {
 
     pub async fn call(&self, name: &str, args: &Value) -> Result<Value, String> {
         match name {
-            "list_threads" => self.list_threads().await,
+            "list_threads" => self.list_threads(args).await,
             "read_thread" => self.read_thread(args).await,
             "create_thread" => self.create_thread(args).await,
             "send_message_to_thread" => self.send_message_to_thread(args).await,
@@ -230,30 +234,45 @@ impl ThreadTools {
         Ok(())
     }
 
-    pub async fn list_threads(&self) -> Result<Value, String> {
+    pub async fn list_threads(&self, args: &Value) -> Result<Value, String> {
+        let include_archived = args["includeArchived"].as_bool().unwrap_or(false);
         let (_, peers) = self.peers().await?;
         let sessions: Vec<Session> = self.snapshot(methods::WATCH_SESSIONS, json!({})).await?;
         let now = Utc::now();
         let mut threads = Vec::new();
-        for chat in peers.iter().filter(|chat| !chat.archived) {
-            let entries = self.entries_of(&chat.id).await?;
-            let last = entries.last().map(render_entry);
-            threads.push(json!({
-                "id": chat.id,
-                "title": chat.title,
-                "status": status_of(&sessions, &chat.id, now),
-                "harness": chat.config.as_ref().map(|c| c.harness),
-                "model": chat.config.as_ref().and_then(|c| c.model.as_deref()),
-                "reasoning": chat.config.as_ref().and_then(|c| c.reasoning),
-                "createdByChatId": chat.created_by_chat_id,
-                "updatedAt": stamp(chat.last_message_at.unwrap_or(chat.created_at)),
-                "isThisChat": chat.id == self.chat_id,
-                "entryCount": entries.len(),
-                "lastRole": last.as_ref().map(|e| e["role"].clone()),
-                "lastText": last.as_ref().and_then(|e| e["text"].as_str()).map(preview),
-            }));
+        for chat in peers
+            .iter()
+            .filter(|chat| include_archived || !chat.archived)
+        {
+            threads.push(self.row_of(chat, &sessions, now).await?);
         }
         Ok(json!({ "threads": threads }))
+    }
+
+    /// One thread as list_threads and create_thread report it.
+    async fn row_of(
+        &self,
+        chat: &Chat,
+        sessions: &[Session],
+        now: DateTime<Utc>,
+    ) -> Result<Value, String> {
+        let entries = self.entries_of(&chat.id).await?;
+        let last = entries.last().map(render_entry);
+        Ok(json!({
+            "id": chat.id,
+            "title": chat.title,
+            "status": status_of(sessions, &chat.id, now),
+            "archived": chat.archived,
+            "harness": chat.config.as_ref().map(|c| c.harness),
+            "model": chat.config.as_ref().and_then(|c| c.model.as_deref()),
+            "reasoning": chat.config.as_ref().and_then(|c| c.reasoning),
+            "createdByChatId": chat.created_by_chat_id,
+            "updatedAt": stamp(chat.last_message_at.unwrap_or(chat.created_at)),
+            "isThisChat": chat.id == self.chat_id,
+            "entryCount": entries.len(),
+            "lastRole": last.as_ref().map(|e| e["role"].clone()),
+            "lastText": last.as_ref().and_then(|e| e["text"].as_str()).map(preview),
+        }))
     }
 
     async fn entries_of(&self, thread_id: &str) -> Result<Vec<Value>, String> {
@@ -306,7 +325,14 @@ impl ThreadTools {
                 }),
             )
             .await?;
-        Ok(json!({ "threadId": created["chatId"] }))
+        let thread_id = created["chatId"]
+            .as_str()
+            .ok_or("engine returned no chatId")?;
+        let chat = self.peer(thread_id).await?;
+        let sessions: Vec<Session> = self.snapshot(methods::WATCH_SESSIONS, json!({})).await?;
+        let mut row = self.row_of(&chat, &sessions, Utc::now()).await?;
+        row["threadId"] = json!(thread_id);
+        Ok(row)
     }
 
     pub async fn send_message_to_thread(&self, args: &Value) -> Result<Value, String> {
@@ -355,6 +381,18 @@ impl ThreadTools {
         }
         for id in &ids {
             self.peer(id).await?;
+        }
+        if archived {
+            let sessions: Vec<Session> = self.snapshot(methods::WATCH_SESSIONS, json!({})).await?;
+            let now = Utc::now();
+            if let Some(id) = ids
+                .iter()
+                .find(|id| status_of(&sessions, id, now) == "working")
+            {
+                return Err(format!(
+                    "thread {id} is working; archiving would hide a running turn, wait for it to end"
+                ));
+            }
         }
         for id in &ids {
             self.call_engine(
@@ -507,14 +545,22 @@ fn render_entry(entry: &Value) -> Value {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    json!({
+    let mut out = json!({
         "id": entry["id"],
         "role": entry["role"],
-        "fromChatId": entry["fromChatId"],
-        "createdAt": entry["createdAt"],
-        "status": entry["status"],
+        "createdAt": entry["createdAt"]
+            .as_i64()
+            .and_then(DateTime::from_timestamp_millis)
+            .map(stamp),
         "text": text,
-    })
+    });
+    if entry["fromChatId"].is_string() {
+        out["fromChatId"] = entry["fromChatId"].clone();
+    }
+    if entry["status"].is_string() && entry["status"] != "complete" {
+        out["status"] = entry["status"].clone();
+    }
+    out
 }
 
 fn preview(text: &str) -> String {
@@ -745,10 +791,12 @@ mod tests {
                 chat("c", Some("s2"), false, None),
                 chat("d", Some("s1"), true, None),
                 chat("e", Some("s1"), false, None),
+                chat("new-1", Some("s1"), false, Some("a")),
             ],
             session_snapshots: vec![vec![
                 session("b", "working", 0),
                 session("e", "working", 120),
+                session("new-1", "working", 0),
             ]],
             queue_snapshots: vec![vec![]],
             entries: (1..=5)
@@ -799,7 +847,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_threads_scopes_to_the_callers_space_and_checks_staleness() {
-        let out = rig(fixture()).tools.list_threads().await.unwrap();
+        let out = rig(fixture()).tools.list_threads(&json!({})).await.unwrap();
         let rows: Vec<(String, String, bool)> = out["threads"]
             .as_array()
             .unwrap()
@@ -820,8 +868,10 @@ mod tests {
                 ("a".into(), "idle".into(), true),
                 ("b".into(), "working".into(), false),
                 ("e".into(), "idle".into(), false),
+                ("new-1".into(), "working".into(), false),
             ]
         );
+        assert_eq!(out["threads"][1]["archived"], false);
         assert_eq!(out["threads"][1]["createdByChatId"], "a");
         assert_eq!(out["threads"][1]["harness"], "codex");
         assert_eq!(out["threads"][1]["model"], "gpt-5");
@@ -848,17 +898,47 @@ mod tests {
             "assistant",
             vec![json!({ "kind": "text", "id": "t", "text": "x".repeat(300) })],
         )];
-        let out = rig(fake).tools.list_threads().await.unwrap();
+        let out = rig(fake).tools.list_threads(&json!({})).await.unwrap();
         let text = out["threads"][0]["lastText"].as_str().unwrap();
         assert_eq!(text.chars().count(), 121);
         assert!(text.ends_with('…'));
 
         let mut fake = fixture();
         fake.entries = vec![];
-        let out = rig(fake).tools.list_threads().await.unwrap();
+        let out = rig(fake).tools.list_threads(&json!({})).await.unwrap();
         assert_eq!(out["threads"][0]["entryCount"], 0);
         assert!(out["threads"][0]["lastRole"].is_null());
         assert!(out["threads"][0]["lastText"].is_null());
+    }
+
+    #[tokio::test]
+    async fn list_threads_can_include_archived_rows_so_they_can_be_unarchived() {
+        let out = rig(fixture())
+            .tools
+            .list_threads(&json!({ "includeArchived": true }))
+            .await
+            .unwrap();
+        let archived: Vec<(&str, bool)> = out["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                (
+                    row["id"].as_str().unwrap(),
+                    row["archived"].as_bool().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            archived,
+            [
+                ("a", false),
+                ("b", false),
+                ("d", true),
+                ("e", false),
+                ("new-1", false)
+            ]
+        );
     }
 
     #[tokio::test]
@@ -913,6 +993,30 @@ mod tests {
             ]
         );
         assert_eq!(page["before"], "m4");
+        // Defaults stay off the wire: no null fromChatId, no "complete"
+        // status, and the stamp reads as a date rather than epoch ms.
+        assert_eq!(
+            page["entries"][0],
+            json!({
+                "id": "m4", "role": "assistant", "createdAt": "1970-01-01T00:00:00Z",
+                "text": "line 4\n[tool Bash]\n[tool mcp zeron/read_thread]"
+            })
+        );
+
+        let mut fake = fixture();
+        fake.entries = vec![{
+            let mut e = entry("m1", "user", vec![]);
+            e["fromChatId"] = json!("b");
+            e["status"] = json!("streaming");
+            e
+        }];
+        let tagged = self::tests::rig(fake)
+            .tools
+            .read_thread(&json!({ "threadId": "b" }))
+            .await
+            .unwrap();
+        assert_eq!(tagged["entries"][0]["fromChatId"], "b");
+        assert_eq!(tagged["entries"][0]["status"], "streaming");
 
         let older = rig
             .tools
@@ -953,6 +1057,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(created["threadId"], "new-1");
+        assert_eq!(created["id"], "new-1");
+        assert_eq!(created["title"], "Thread new-1");
+        assert_eq!(created["status"], "working");
+        assert_eq!(created["createdByChatId"], "a");
         let sent = rig
             .tools
             .send_message_to_thread(&json!({ "threadId": "b", "text": "cover the refresh race" }))
@@ -1040,14 +1148,28 @@ mod tests {
 
         let out = rig
             .tools
-            .set_thread_archived(&json!({ "threadIds": ["b", "e"], "archived": true }))
+            .set_thread_archived(&json!({ "threadIds": ["a", "e"], "archived": true }))
             .await
             .unwrap();
-        assert_eq!(out["threadIds"], json!(["b", "e"]));
+        assert_eq!(out["threadIds"], json!(["a", "e"]));
         let calls = rig.calls.calls.lock().unwrap().clone();
         assert_eq!(calls.len(), 4);
-        assert_eq!(calls[2].1["chatId"], "b");
+        assert_eq!(calls[2].1["chatId"], "a");
         assert_eq!(calls[3].1["chatId"], "e");
+        // b's turn is running: archiving it would hide live work, so the
+        // whole batch is refused. Unarchiving never needs the check.
+        let err = rig
+            .tools
+            .set_thread_archived(&json!({ "threadIds": ["e", "b"], "archived": true }))
+            .await
+            .unwrap_err();
+        assert!(err.starts_with("thread b is working"), "{err}");
+        assert_eq!(rig.calls.calls.lock().unwrap().len(), 4);
+        rig.tools
+            .set_thread_archived(&json!({ "threadId": "b", "archived": false }))
+            .await
+            .unwrap();
+        assert_eq!(rig.calls.calls.lock().unwrap().len(), 5);
         // One out-of-scope id fails the whole batch before any mutation.
         assert_eq!(
             rig.tools
@@ -1056,7 +1178,7 @@ mod tests {
                 .unwrap_err(),
             "no thread c in this project"
         );
-        assert_eq!(rig.calls.calls.lock().unwrap().len(), 4);
+        assert_eq!(rig.calls.calls.lock().unwrap().len(), 5);
         assert_eq!(
             rig.tools
                 .set_thread_archived(&json!({ "threadIds": [], "archived": true }))
