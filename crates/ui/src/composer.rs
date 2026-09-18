@@ -4883,6 +4883,7 @@ impl Composer {
         }
         self.state.update(cx, |state, _| {
             state.purge_review_comments(chat_id);
+            state.purge_quotes(chat_id);
         });
     }
 
@@ -4894,29 +4895,98 @@ impl Composer {
             .to_vec()
     }
 
-    fn render_comments_chip(&self, theme: &Theme, cx: &App) -> Option<gpui::Div> {
-        let count = self.staged_comments(cx).len();
-        if count == 0 {
+    /// Staged in `AppState` because the transcript's "Add to chat" writes them.
+    fn staged_quotes(&self, cx: &App) -> Vec<crate::quotes::Quote> {
+        self.state.read(cx).quotes(&self.current_key).to_vec()
+    }
+
+    fn staged_chip_count(&self, cx: &App) -> usize {
+        self.staged_comments(cx).len() + self.staged_quotes(cx).len()
+    }
+
+    fn render_staged_chips(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let comments = self.staged_comments(cx).len();
+        let quotes = self.staged_quotes(cx);
+        if comments == 0 && quotes.is_empty() {
             return None;
         }
-        Some(
-            div()
-                .flex()
-                .flex_row()
-                .px(px(STRIP_PAD_X))
-                .pt(px(STRIP_PAD_TOP))
-                .child(crate::badges::render(
-                    "composer-comments",
-                    &crate::badges::MessageBadge {
-                        icon: crate::icons::CHAT_ROUND_LINE,
-                        label: crate::comments::chip_label(count).into(),
-                        // The staged set is already on screen in the changes
-                        // pane, so a hover card would only repeat it.
-                        details: Vec::new(),
-                    },
-                    theme,
-                )),
-        )
+        let mut row = div()
+            .flex()
+            .flex_row()
+            .gap(px(STRIP_GAP))
+            .px(px(STRIP_PAD_X))
+            .pt(px(STRIP_PAD_TOP));
+        if comments > 0 {
+            row = row.child(crate::badges::render(
+                "composer-comments",
+                &crate::badges::MessageBadge {
+                    icon: crate::icons::CHAT_ROUND_LINE,
+                    label: crate::comments::chip_label(comments).into(),
+                    // The staged set is already on screen in the changes
+                    // pane, so a hover card would only repeat it.
+                    details: Vec::new(),
+                },
+                theme,
+            ));
+        }
+        if !quotes.is_empty() {
+            let details = quotes
+                .iter()
+                .map(|quote| crate::badges::BadgeDetail {
+                    location: "Selected text".into(),
+                    tag: None,
+                    body: quote.text.clone().into(),
+                })
+                .collect();
+            let group: SharedString = "composer-quotes".into();
+            let key = self.current_key.clone();
+            row = row.child(
+                div()
+                    .group(group.clone())
+                    .flex_none()
+                    .relative()
+                    .child(crate::badges::render(
+                        "composer-quotes",
+                        &crate::badges::MessageBadge {
+                            icon: crate::icons::WRAP_TEXT,
+                            label: crate::quotes::chip_label(quotes.len()).into(),
+                            details,
+                        },
+                        theme,
+                    ))
+                    .child(
+                        div()
+                            .id("composer-quotes-remove")
+                            .absolute()
+                            .top(px(-6.0))
+                            .right(px(-6.0))
+                            .size(px(18.0))
+                            .rounded_full()
+                            .bg(theme.bg)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .shadow_sm()
+                            .opacity(0.0)
+                            .group_hover(group, |s| s.opacity(1.0))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.state.update(cx, |state, cx| {
+                                    state.purge_quotes(&key);
+                                    cx.notify();
+                                });
+                                cx.notify();
+                            }))
+                            .child(
+                                crate::icons::icon(crate::icons::CLOSE_CIRCLE)
+                                    .size(px(14.0))
+                                    .text_color(theme.text_muted),
+                            ),
+                    ),
+            );
+        }
+        Some(row)
     }
 
     /// The staged-thumbnail strip (attachment-ui.tsx AttachmentStrip):
@@ -6488,7 +6558,7 @@ impl Composer {
         let has_text = composer_has_content(
             self.input.read(cx).text(),
             self.staged().len() + self.staged_appshots().len(),
-            self.staged_comments(cx).len(),
+            self.staged_chip_count(cx),
         );
         send_button_mode(self.run_live(cx), has_text, self.turn_stopped(cx))
     }
@@ -6529,7 +6599,7 @@ impl Composer {
         let no_content = !composer_has_content(
             &text,
             self.staged().len() + self.staged_appshots().len(),
-            self.staged_comments(cx).len(),
+            self.staged_chip_count(cx),
         );
         match self.button_mode(cx) {
             // Enter never stops a run: Stop mode implies an empty composer,
@@ -6581,7 +6651,7 @@ impl Composer {
         let has_content = composer_has_content(
             &text,
             self.staged().len() + self.staged_appshots().len(),
-            self.staged_comments(cx).len(),
+            self.staged_chip_count(cx),
         );
         // On a draft, the modifier chord starts the session in the
         // background and leaves a fresh draft here (t3code "Start in the
@@ -6763,7 +6833,15 @@ impl Composer {
             }
             taken
         });
+        let quotes = self.state.update(cx, |state, cx| {
+            let taken = state.take_quotes(&key);
+            if !taken.is_empty() {
+                cx.notify();
+            }
+            taken
+        });
         let typed = text.clone();
+        let text = crate::quotes::with_quotes(&text, &quotes);
         let text = crate::comments::with_comments(&text, &comments);
         self.preview = None;
         let message_id = uuid::Uuid::new_v4().to_string();
@@ -7324,6 +7402,9 @@ impl Composer {
                         };
                         for comment in &comments {
                             s.add_review_comment(&restore_key, comment.clone());
+                        }
+                        for quote in &quotes {
+                            s.add_quote(&restore_key, quote.clone());
                         }
                         cx.notify();
                         restore_key
@@ -8176,7 +8257,7 @@ impl Render for Composer {
             && !composer_has_content(
                 self.input.read(cx).text(),
                 self.staged().len() + self.staged_appshots().len(),
-                self.staged_comments(cx).len(),
+                self.staged_chip_count(cx),
             );
         let container = container.when_some(
             self.render_queue_panel(show_queue_latest_shortcut, window, cx),
@@ -8237,7 +8318,7 @@ impl Render for Composer {
             self.last_available_width.unwrap_or(COMPOSER_MAX_WIDTH) - 2.0 * Theme::SPACE_LG - 2.0;
         let appshot_count = self.staged_appshots().len();
         let strip_h = attachment_strip_height(staged_count, strip_width_hint);
-        let comment_strip_h = comment_strip_height(self.staged_comments(cx).len());
+        let comment_strip_h = comment_strip_height(self.staged_chip_count(cx));
         let base_height = if self.dock_frame.is_some() {
             dock_height(dock_amount)
         } else if expanded {
@@ -8407,7 +8488,7 @@ impl Render for Composer {
         // the input inside the pill in both modes.
         let strip = self.render_attachment_strip(&theme, cx);
         let appshot_strip = self.render_appshot_strip(&theme, window, cx);
-        let comments_chip = self.render_comments_chip(&theme, cx);
+        let comments_chip = self.render_staged_chips(&theme, cx);
 
         // A translucent cool silver/slate edge sits more naturally on frost
         // than the general-purpose white/black separator color.
