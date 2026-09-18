@@ -6088,7 +6088,13 @@ impl Transcript {
                             .text_size(crate::typography::ui_rems(11.0))
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.accent)
-                            .child(SharedString::from("↳ from"))
+                            .child(
+                                crate::icons::icon(crate::icons::CHAT_ROUND_LINE)
+                                    .size(px(12.0))
+                                    .flex_none()
+                                    .text_color(theme.accent),
+                            )
+                            .child(SharedString::from("from"))
                             .child(from_thread.clone()),
                     );
                 }
