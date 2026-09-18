@@ -3053,6 +3053,8 @@ pub enum TranscriptEvent {
     /// tab when it has uncommitted changes, else the Files editor. `path` is
     /// as the tool call named it (absolute or cwd-relative).
     OpenFile { chat_id: String, path: String },
+    /// A peer message's "From <thread>" header: open that thread.
+    OpenChat { chat_id: String },
 }
 
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
@@ -6103,28 +6105,47 @@ impl Transcript {
                             .text_size(crate::typography::ui_rems(11.0))
                             .text_color(theme.text_muted)
                             .child(
-                                div()
-                                    .text_color(theme.text_faint)
-                                    .child(SharedString::from("→")),
+                                crate::icons::icon(crate::icons::CHAT_ROUND_LINE)
+                                    .size(px(12.0))
+                                    .flex_none()
+                                    .text_color(theme.text_faint),
                             )
-                            .child(SharedString::from("from"))
-                            .when_some(
-                                harness.map(crate::pickers::harness_brand_icon),
-                                |el, (path, tint)| {
-                                    el.child(
-                                        crate::icons::icon(path)
-                                            .size(px(12.0))
-                                            .flex_none()
-                                            .text_color(tint.unwrap_or(theme.text_muted)),
-                                    )
-                                },
-                            )
-                            .child(
+                            .child(SharedString::from("From"))
+                            .child({
+                                // The name is the way over: clicking it opens
+                                // the sending thread.
+                                let open_id = from_chat_id.clone().map(|id| id.to_string());
                                 div()
+                                    .id(SharedString::from(format!("{}-from-thread", row.id)))
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .cursor_pointer()
                                     .font_weight(gpui::FontWeight::MEDIUM)
                                     .text_color(theme.text.opacity(0.8))
-                                    .child(title.clone()),
-                            )
+                                    .hover(|s| s.text_color(theme.text))
+                                    .when_some(
+                                        harness.map(crate::pickers::harness_brand_icon),
+                                        |el, (path, tint)| {
+                                            el.child(
+                                                crate::icons::icon(path)
+                                                    .size(px(12.0))
+                                                    .flex_none()
+                                                    .text_color(tint.unwrap_or(theme.text_muted)),
+                                            )
+                                        },
+                                    )
+                                    .child(title.clone())
+                                    .when_some(open_id, |el, open_id| {
+                                        el.on_click(cx.listener(move |_, _, _, cx| {
+                                            cx.stop_propagation();
+                                            cx.emit(TranscriptEvent::OpenChat {
+                                                chat_id: open_id.clone(),
+                                            });
+                                        }))
+                                    })
+                            })
                             .when_some(clock, |el, clock| {
                                 el.child(
                                     div()

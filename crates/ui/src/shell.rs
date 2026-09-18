@@ -3349,6 +3349,7 @@ impl Shell {
                 cx.notify();
             }
             TranscriptEvent::OpenFile { chat_id, path } => self.open_tool_file(chat_id, path, cx),
+            TranscriptEvent::OpenChat { chat_id } => self.open_chat(chat_id.clone(), cx),
         }
     }
 
