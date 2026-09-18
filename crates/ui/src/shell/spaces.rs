@@ -154,12 +154,13 @@ fn promote_local_device_group<T>(
 /// organization draws one flat list.
 /// Linked chats (a sidechat under its source, an agent-created chat under
 /// its creator) sit under their owner, in the order they already had. A link
-/// whose owner is missing from the list — or is itself linked — renders flat
-/// rather than hidden; it is otherwise unreachable from the sidebar. A
-/// sidechat leaves its source where it was; an agent-created chat lifts its
-/// creator's whole group to the earliest position any member holds (d26), so
-/// an active created chat never sinks under a quiet creator. `true` marks a
-/// row that renders nested.
+/// whose owner is missing from the list renders flat rather than hidden; it
+/// is otherwise unreachable from the sidebar. Depth is two at most: a
+/// sidechat of an agent-created chat follows that chat; any deeper link
+/// renders flat. A sidechat leaves its source where it was; an agent-created
+/// chat lifts its creator's whole group to the earliest position any member
+/// holds (d26), so an active created chat never sinks under a quiet creator.
+/// `true` marks a row that renders nested.
 fn nest_linked_chats<T>(rows: Vec<T>, chat: impl Fn(&T) -> &zeron_proto::Chat) -> Vec<(T, bool)> {
     let ids: Vec<&str> = rows.iter().map(|row| chat(row).id.as_str()).collect();
     let position = |id: &str| ids.iter().position(|other| *other == id);
@@ -179,7 +180,12 @@ fn nest_linked_chats<T>(rows: Vec<T>, chat: impl Fn(&T) -> &zeron_proto::Chat) -
         .collect();
     let links: Vec<Option<(usize, bool)>> = raw
         .iter()
-        .map(|link| link.filter(|(owner, _)| raw[*owner].is_none()))
+        .map(|link| {
+            link.filter(|(owner, lifts)| match raw[*owner] {
+                None => true,
+                Some((_, owner_lifts)) => owner_lifts && !lifts,
+            })
+        })
         .collect();
     let mut owners: Vec<(usize, usize)> = (0..links.len())
         .filter(|index| links[*index].is_none())
@@ -205,6 +211,13 @@ fn nest_linked_chats<T>(rows: Vec<T>, chat: impl Fn(&T) -> &zeron_proto::Chat) -
                 && let Some(row) = slots[child].take()
             {
                 nested.push((row, true));
+                for grandchild in 0..slots.len() {
+                    if matches!(links[grandchild], Some((at, false)) if at == child)
+                        && let Some(row) = slots[grandchild].take()
+                    {
+                        nested.push((row, true));
+                    }
+                }
             }
         }
     }
@@ -3463,6 +3476,28 @@ mod tests {
             .map(|(chat, _)| chat.id)
             .collect();
         assert_eq!(order, ["x", "p", "s1"]);
+
+        // /sidechat inside a created chat still nests under that chat (the
+        // w10 behavior), and a link any deeper renders flat.
+        let rows = vec![
+            sidechat_of("s", "c"),
+            created_by("c", "p"),
+            chat("p"),
+            created_by("deep", "c"),
+        ];
+        let order: Vec<(String, bool)> = nest_linked_chats(rows, |chat| chat)
+            .into_iter()
+            .map(|(chat, nested)| (chat.id, nested))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                ("p".to_string(), false),
+                ("c".to_string(), true),
+                ("s".to_string(), true),
+                ("deep".to_string(), false),
+            ]
+        );
     }
 
     #[gpui::test]
