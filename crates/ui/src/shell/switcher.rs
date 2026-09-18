@@ -1,9 +1,11 @@
-//! Ctrl+Tab session switcher: a held-modifier overlay over the strip's tabs in
-//! most-recently-used order (macOS Cmd+Tab: the first press lands on the
-//! previous session, release commits, Escape cancels). Each card carries the
-//! last frame this device saw of that session — a capture of our own window
-//! cropped to the conversation column, taken as the selection LEAVES it — or,
-//! before the session has been viewed, its title and last message.
+//! Ctrl+Tab session switcher: a held-modifier overlay over the sidebar's
+//! sessions (narrowed by the Settings → Shortcuts recency window, plus the
+//! strip's tabs) in most-recently-used order (macOS Cmd+Tab: the first press
+//! lands on the previous session, release commits, Escape cancels). Each card
+//! carries the last frame this device saw of that session — a capture of our
+//! own window cropped to the conversation column, taken as the selection
+//! LEAVES it — or, before the session has been viewed, its title and last
+//! message.
 
 use super::*;
 use std::sync::Arc;
@@ -24,11 +26,12 @@ pub(super) struct CapturedFrame {
     pub bgra: Vec<u8>,
 }
 
-/// The open switcher: tabs in MRU order (the current session first) and the
-/// highlighted index.
+/// The open switcher: sessions in MRU order (the current session first) and
+/// the highlighted index.
 pub(super) struct Switcher {
     pub order: Vec<String>,
     pub hi: usize,
+    pub scroll: gpui::ScrollHandle,
 }
 
 /// Capture this app's key window. Own-process windows need no Screen
@@ -88,8 +91,38 @@ pub(super) fn capture_window() -> Option<CapturedFrame> {
     None
 }
 
-/// The switcher's card order: the strip's visible tabs, most recently used
-/// first; tabs never selected this launch follow in strip order. Pure.
+/// Whether a sidebar session is recent enough for the switcher: its last
+/// activity (the sidebar's own recency stamp) is at or after `cutoff`, or
+/// there is no cutoff. Pure.
+pub(super) fn within_window(
+    chat: &zeron_proto::Chat,
+    cutoff: Option<chrono::DateTime<Utc>>,
+) -> bool {
+    cutoff.is_none_or(|cutoff| chat.last_message_at.unwrap_or(chat.created_at) >= cutoff)
+}
+
+/// The switcher's candidates: the sidebar's rows in their drawn order,
+/// narrowed to the recency window, then the strip's tabs that the window (or
+/// the sidebar filter) left out — the selected session, a split pair, and
+/// drafts are always reachable. Pure.
+pub(super) fn switcher_candidates(
+    sidebar: impl IntoIterator<Item = (String, bool)>,
+    strip: &[String],
+) -> Vec<String> {
+    let mut ids: Vec<String> = sidebar
+        .into_iter()
+        .filter_map(|(id, recent)| recent.then_some(id))
+        .collect();
+    for id in strip {
+        if !ids.contains(id) {
+            ids.push(id.clone());
+        }
+    }
+    ids
+}
+
+/// The switcher's card order: the candidates most recently used first; those
+/// never selected this launch follow in candidate order. Pure.
 pub(super) fn switcher_order(mru: &[String], visible: &[String]) -> Vec<String> {
     let mut order: Vec<String> = mru
         .iter()
@@ -241,13 +274,31 @@ impl Shell {
         }
         if let Some(sw) = self.switcher.as_mut() {
             sw.hi = step_index(sw.hi, sw.order.len(), forward);
+            sw.scroll.scroll_to_item(sw.hi);
             cx.notify();
             return;
         }
         if self.overlay_owns_keyboard(cx) {
             return;
         }
-        let order = switcher_order(&self.session_mru, &self.open_tab_ids(cx));
+        let cutoff = self.settings.switcher_window.cutoff(Utc::now());
+        let sidebar = self.sidebar_visible_order(cx);
+        let recent: Vec<(String, bool)> = {
+            let state = self.state.read(cx);
+            sidebar
+                .into_iter()
+                .map(|id| {
+                    let recent = state
+                        .chats
+                        .iter()
+                        .find(|c| c.id == id)
+                        .is_some_and(|c| within_window(c, cutoff));
+                    (id, recent)
+                })
+                .collect()
+        };
+        let candidates = switcher_candidates(recent, &self.open_tab_ids(cx));
+        let order = switcher_order(&self.session_mru, &candidates);
         match order.len() {
             0 => return,
             // One tab and nothing selected (the canvas): just go there.
@@ -260,7 +311,9 @@ impl Shell {
         }
         self.snapshot_current_chat(cx);
         let hi = step_index(0, order.len(), forward);
-        self.switcher = Some(Switcher { order, hi });
+        let scroll = gpui::ScrollHandle::new();
+        scroll.scroll_to_item(hi);
+        self.switcher = Some(Switcher { order, hi, scroll });
         cx.notify();
     }
 
@@ -299,6 +352,7 @@ impl Shell {
         let theme = Theme::of(cx).for_popup();
         let now = Utc::now();
         let hi = sw.hi;
+        let scroll = sw.scroll.clone();
         let cards: Vec<AnyElement> = sw
             .order
             .iter()
@@ -456,9 +510,13 @@ impl Shell {
             .collect();
 
         let max_width = f32::from(viewport.width) - 48.0;
+        let max_height = f32::from(viewport.height) - 48.0;
         let panel = div()
             .id("session-switcher")
             .max_w(px(max_width))
+            .max_h(px(max_height))
+            .overflow_y_scroll()
+            .track_scroll(&scroll)
             .p(px(10.0))
             .flex()
             .flex_row()
@@ -495,6 +553,44 @@ mod tests {
         assert_eq!(switcher_order(&mru, &visible), ids(&["c", "a", "b", "d"]));
         assert_eq!(switcher_order(&[], &visible), visible);
         assert!(switcher_order(&mru, &[]).is_empty());
+    }
+
+    #[test]
+    fn candidates_are_recent_sidebar_rows_then_leftover_strip_tabs() {
+        let sidebar = vec![
+            ("a".to_string(), true),
+            ("old".to_string(), false),
+            ("b".to_string(), true),
+        ];
+        let strip = ids(&["b", "old", "draft"]);
+        assert_eq!(
+            switcher_candidates(sidebar, &strip),
+            ids(&["a", "b", "old", "draft"])
+        );
+    }
+
+    #[test]
+    fn window_uses_last_message_then_creation() {
+        let now = Utc::now();
+        let chat = |created_h: i64, last_h: Option<i64>| -> zeron_proto::Chat {
+            let mut value = serde_json::json!({
+                "id": "c", "deviceId": "local", "archived": false,
+                "createdAt": now - chrono::Duration::hours(created_h),
+            });
+            if let Some(h) = last_h {
+                value["lastMessageAt"] = serde_json::json!(now - chrono::Duration::hours(h));
+            }
+            serde_json::from_value(value).unwrap()
+        };
+        let cutoff = crate::settings::SwitcherWindow::Hours8.cutoff(now);
+        assert!(within_window(&chat(30, Some(2)), cutoff));
+        assert!(!within_window(&chat(30, Some(9)), cutoff));
+        assert!(within_window(&chat(2, None), cutoff));
+        assert!(!within_window(&chat(9, None), cutoff));
+        assert!(within_window(
+            &chat(300, Some(200)),
+            crate::settings::SwitcherWindow::All.cutoff(now)
+        ));
     }
 
     #[test]

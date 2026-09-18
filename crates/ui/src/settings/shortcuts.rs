@@ -15,8 +15,8 @@ use crate::popover::{self, ScrollRailHost};
 mod appshots_page;
 use crate::settings::widgets;
 use crate::settings::{
-    ComposerSendBehavior, FollowUpBehavior, KeymapConfig, ShortcutId, combo_from_keystroke,
-    display_combo,
+    ComposerSendBehavior, FollowUpBehavior, KeymapConfig, ShortcutId, SwitcherWindow,
+    combo_from_keystroke, display_combo,
 };
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -52,6 +52,8 @@ pub enum ShortcutsEvent {
     ComposerSendBehaviorChanged(ComposerSendBehavior),
     /// Busy-turn submits queue or steer by default — persist it locally.
     FollowUpBehaviorChanged(FollowUpBehavior),
+    /// The switcher's recency window changed — persist it locally.
+    SwitcherWindowChanged(SwitcherWindow),
     AppshotsChanged {
         enabled: bool,
         sound_enabled: bool,
@@ -68,6 +70,7 @@ pub struct ShortcutsPage {
     escape_stops_active_agent: bool,
     composer_send_behavior: ComposerSendBehavior,
     follow_up_behavior: FollowUpBehavior,
+    switcher_window: SwitcherWindow,
     recording: Option<ShortcutId>,
     recording_blur: Option<gpui::Subscription>,
     recording_interceptor: Option<gpui::Subscription>,
@@ -95,6 +98,7 @@ impl ShortcutsPage {
         escape_stops_active_agent: bool,
         composer_send_behavior: ComposerSendBehavior,
         follow_up_behavior: FollowUpBehavior,
+        switcher_window: SwitcherWindow,
         appshots_enabled: bool,
         appshot_sound_enabled: bool,
         appshot_destination: AppshotDestination,
@@ -110,6 +114,7 @@ impl ShortcutsPage {
             escape_stops_active_agent,
             composer_send_behavior,
             follow_up_behavior,
+            switcher_window,
             recording: None,
             recording_blur: None,
             recording_interceptor: None,
@@ -196,6 +201,14 @@ impl ShortcutsPage {
         if self.follow_up_behavior != behavior {
             self.follow_up_behavior = behavior;
             cx.emit(ShortcutsEvent::FollowUpBehaviorChanged(behavior));
+            cx.notify();
+        }
+    }
+
+    fn set_switcher_window(&mut self, window: SwitcherWindow, cx: &mut Context<Self>) {
+        if self.switcher_window != window {
+            self.switcher_window = window;
+            cx.emit(ShortcutsEvent::SwitcherWindowChanged(window));
             cx.notify();
         }
     }
@@ -563,10 +576,12 @@ impl Render for ShortcutsPage {
         let escape_stops_active_agent = self.escape_stops_active_agent;
         let send_behavior = self.composer_send_behavior;
         let follow_up_behavior = self.follow_up_behavior;
+        let switcher_window = self.switcher_window;
         let customized = self.keymap != KeymapConfig::default()
             || escape_stops_active_agent
             || send_behavior != ComposerSendBehavior::default()
-            || follow_up_behavior != FollowUpBehavior::default();
+            || follow_up_behavior != FollowUpBehavior::default()
+            || switcher_window != SwitcherWindow::default();
         let modifier_label = modifier_send_label(cfg!(target_os = "macos"));
 
         let escape_behavior_row = widgets::section_card(&theme).child(
@@ -777,6 +792,72 @@ impl Render for ShortcutsPage {
                             ),
                     ),
             );
+        let switcher_row = widgets::section_card(&theme).child(
+            widgets::card_row(&theme, true)
+                .min_h(px(84.0))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(widgets::row_title(&theme, "Session switcher shows"))
+                        .child(
+                            div()
+                                .mt(px(4.0))
+                                .max_w(px(430.0))
+                                .text_size(px(11.5))
+                                .line_height(px(17.0))
+                                .text_color(theme.text_muted.opacity(0.65))
+                                .child(SharedString::from(
+                                    "Ctrl+Tab offers every session in the sidebar, or only those active within this window. The open session and running tabs are always included.",
+                                )),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("switcher-window")
+                        .flex_none()
+                        .flex()
+                        .flex_row()
+                        .rounded(px(9.0))
+                        .p(px(2.0))
+                        .bg(crate::theme::ink(0.04))
+                        .children(SwitcherWindow::ALL.into_iter().enumerate().map(
+                            |(ix, window)| {
+                                let selected = switcher_window == window;
+                                div()
+                                    .id(("switcher-window-option", ix))
+                                    .min_w(px(44.0))
+                                    .px(px(10.0))
+                                    .py(px(6.0))
+                                    .rounded(px(7.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_size(px(12.0))
+                                    .text_color(if selected {
+                                        theme.text
+                                    } else {
+                                        theme.text_muted
+                                    })
+                                    .when(selected, |el| {
+                                        el.bg(theme.bg)
+                                            .border_1()
+                                            .border_color(theme.border.opacity(0.8))
+                                    })
+                                    .when(!selected, |el| {
+                                        el.cursor_pointer()
+                                            .hover(|s| s.text_color(theme.text))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.set_switcher_window(window, cx)
+                                            }))
+                                    })
+                                    .child(SharedString::from(window.label()))
+                            },
+                        )),
+                ),
+        );
         // One card per group, each under its small section label — the flat
         // 16-row table read as one undifferentiated wall. `ix` (the id's
         // position in ALL) keys the interactive elements, so ids stay unique
@@ -888,6 +969,10 @@ impl Render for ShortcutsPage {
                                                             FollowUpBehavior::Queue,
                                                             cx,
                                                         );
+                                                        this.set_switcher_window(
+                                                            SwitcherWindow::All,
+                                                            cx,
+                                                        );
                                                     }),
                                                 )
                                             })
@@ -900,6 +985,7 @@ impl Render for ShortcutsPage {
                                     }),
                             )
                             .child(send_behavior_row.mt(px(32.0)))
+                            .child(switcher_row.mt(px(12.0)))
                             .child(
                                 div()
                                     .mt(px(28.0))
@@ -945,6 +1031,7 @@ mod tests {
                 false,
                 ComposerSendBehavior::default(),
                 FollowUpBehavior::default(),
+                SwitcherWindow::default(),
                 false,
                 false,
                 AppshotDestination::Automatic,
@@ -1039,6 +1126,7 @@ mod tests {
                 false,
                 ComposerSendBehavior::default(),
                 FollowUpBehavior::default(),
+                SwitcherWindow::default(),
                 false,
                 true,
                 AppshotDestination::Automatic,

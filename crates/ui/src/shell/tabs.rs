@@ -1771,6 +1771,75 @@ mod strip_regressions {
             assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("c"));
         });
     }
+
+    #[gpui::test]
+    fn switcher_offers_the_sidebar_within_the_recency_window(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            // Project-less, already-seen rows: the sidebar lists them without
+            // a space row and the strip has no reason to show them.
+            let loose = |id: &str, hours_ago: i64| {
+                let mut chat = chat(id);
+                chat.space_id = None;
+                chat.last_message_at = Some(Utc::now() - chrono::Duration::hours(hours_ago));
+                chat.last_seen_at = chat.last_message_at;
+                chat
+            };
+            shell.state.update(cx, |state, cx| {
+                state.chats = vec![loose("a", 0), loose("stale", 9), loose("fresh", 1)];
+                state.chats_synced = true;
+                state.spaces_synced = true;
+                // Only "a" runs: the other two are idle sidebar rows with no
+                // tab on the strip.
+                state.apply_sessions(vec![working("a")]);
+                state.select_chat(Some("a".into()), cx);
+            });
+            shell.on_state_changed(&shell.state.clone(), cx);
+            assert_eq!(shell.open_tab_ids(cx), ["a"]);
+
+            // Default window: every sidebar row is a card.
+            shell.switcher_step(true, cx);
+            let mut order = shell.switcher.as_ref().unwrap().order.clone();
+            order.sort();
+            assert_eq!(order, ["a", "fresh", "stale"]);
+            shell.switcher_close(cx);
+
+            // An 8h window drops the 9h-old row; the selected session stays.
+            shell.settings.switcher_window = settings::SwitcherWindow::Hours8;
+            shell.switcher_step(true, cx);
+            let mut order = shell.switcher.as_ref().unwrap().order.clone();
+            order.sort();
+            assert_eq!(order, ["a", "fresh"]);
+            shell.switcher_close(cx);
+
+            // The selected session is offered even when it is older than the
+            // window, because it is on the strip.
+            shell.state.update(cx, |state, _| {
+                state.chats[0].last_message_at = Some(Utc::now() - chrono::Duration::hours(20));
+            });
+            shell.on_state_changed(&shell.state.clone(), cx);
+            shell.switcher_step(true, cx);
+            let mut order = shell.switcher.as_ref().unwrap().order.clone();
+            order.sort();
+            assert_eq!(order, ["a", "fresh"]);
+
+            // Committing onto a sidebar-only row selects it and puts it on
+            // the strip, exactly like clicking its sidebar row.
+            let sw = shell.switcher.as_ref().unwrap();
+            assert_eq!(sw.order[sw.hi], "fresh");
+            shell.on_modifiers_changed(
+                &gpui::ModifiersChangedEvent {
+                    modifiers: gpui::Modifiers::default(),
+                    capslock: gpui::Capslock::default(),
+                },
+                cx,
+            );
+            assert!(shell.switcher.is_none());
+            assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("fresh"));
+            shell.on_state_changed(&shell.state.clone(), cx);
+            assert!(shell.open_tab_ids(cx).contains(&"fresh".to_string()));
+        });
+    }
 }
 
 #[cfg(test)]

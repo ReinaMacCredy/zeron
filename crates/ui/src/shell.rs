@@ -4621,6 +4621,7 @@ impl Shell {
                     let escape_stops_active_agent = self.settings.escape_stops_active_agent;
                     let composer_send_behavior = self.settings.composer_send_behavior;
                     let follow_up_behavior = self.settings.follow_up_behavior;
+                    let switcher_window = self.settings.switcher_window;
                     let appshots_enabled = self.settings.appshots_enabled;
                     let appshot_sound_enabled = self.settings.appshot_sound_enabled;
                     let appshot_destination = self.settings.appshot_destination;
@@ -4631,6 +4632,7 @@ impl Shell {
                             escape_stops_active_agent,
                             composer_send_behavior,
                             follow_up_behavior,
+                            switcher_window,
                             appshots_enabled,
                             appshot_sound_enabled,
                             appshot_destination,
@@ -4653,6 +4655,9 @@ impl Shell {
                                 }
                                 ShortcutsEvent::FollowUpBehaviorChanged(behavior) => {
                                     this.settings.follow_up_behavior = *behavior;
+                                }
+                                ShortcutsEvent::SwitcherWindowChanged(window) => {
+                                    this.settings.switcher_window = *window;
                                 }
                                 ShortcutsEvent::AppshotsChanged {
                                     enabled,

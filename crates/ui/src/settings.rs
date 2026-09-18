@@ -574,6 +574,59 @@ pub enum FollowUpBehavior {
     Steer,
 }
 
+/// How far back the Ctrl+Tab switcher reaches into the sidebar: every session
+/// the sidebar shows, or only those active within the window. The selected
+/// session and the strip's live tabs are always offered.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SwitcherWindow {
+    #[default]
+    All,
+    Hours8,
+    Hours12,
+    Hours24,
+    Days3,
+    Days7,
+}
+
+impl SwitcherWindow {
+    pub const ALL: [SwitcherWindow; 6] = [
+        SwitcherWindow::All,
+        SwitcherWindow::Hours8,
+        SwitcherWindow::Hours12,
+        SwitcherWindow::Hours24,
+        SwitcherWindow::Days3,
+        SwitcherWindow::Days7,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SwitcherWindow::All => "All",
+            SwitcherWindow::Hours8 => "8h",
+            SwitcherWindow::Hours12 => "12h",
+            SwitcherWindow::Hours24 => "24h",
+            SwitcherWindow::Days3 => "3d",
+            SwitcherWindow::Days7 => "7d",
+        }
+    }
+
+    /// The oldest activity timestamp still offered, or `None` for no limit.
+    pub fn cutoff(
+        self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        let hours = match self {
+            SwitcherWindow::All => return None,
+            SwitcherWindow::Hours8 => 8,
+            SwitcherWindow::Hours12 => 12,
+            SwitcherWindow::Hours24 => 24,
+            SwitcherWindow::Days3 => 72,
+            SwitcherWindow::Days7 => 168,
+        };
+        Some(now - chrono::Duration::hours(hours))
+    }
+}
+
 /// Persist the latest revision. Safe to call at shutdown.
 pub fn flush(cx: &mut App) {
     if !cx.has_global::<SettingsStore>() {
@@ -705,6 +758,8 @@ pub struct UiSettings {
     pub composer_send_behavior: ComposerSendBehavior,
     /// Queue or steer a message submitted while the agent is busy.
     pub follow_up_behavior: FollowUpBehavior,
+    /// Recency limit on the sessions the Ctrl+Tab switcher offers.
+    pub switcher_window: SwitcherWindow,
     pub sidebar_width: f32,
     pub sidebar_collapsed: bool,
     /// Legacy: the grouped-by-project toggle predates spaces (which group by
@@ -868,6 +923,7 @@ impl Default for UiSettings {
             escape_stops_active_agent: false,
             composer_send_behavior: ComposerSendBehavior::default(),
             follow_up_behavior: FollowUpBehavior::default(),
+            switcher_window: SwitcherWindow::default(),
             appshots_enabled: false,
             appshot_sound_enabled: true,
             appshot_destination: crate::appshots::AppshotDestination::Automatic,
@@ -2040,6 +2096,7 @@ mod tests {
             escape_stops_active_agent: true,
             composer_send_behavior: ComposerSendBehavior::ModEnter,
             follow_up_behavior: FollowUpBehavior::Steer,
+            switcher_window: SwitcherWindow::Hours12,
             appshots_enabled: false,
             appshot_sound_enabled: true,
             // The destination is only persisted where Appshots exist (macOS and
