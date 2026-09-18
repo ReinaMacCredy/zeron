@@ -1029,8 +1029,9 @@ impl Shell {
                             )
                         })
                         // A draft wears the amber pen where a session wears
-                        // its harness brand (d18).
-                        .when(is_draft, |el| {
+                        // its harness brand (d18); a session with unsent
+                        // composer text wears both, like its sidebar row.
+                        .when(is_draft || crate::draft_store::has_content(&id, cx), |el| {
                             el.child(
                                 icon(icons::PEN)
                                     .size(px(13.0))
