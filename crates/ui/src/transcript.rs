@@ -3008,6 +3008,10 @@ pub enum TranscriptEvent {
         title: String,
         frozen: bool,
     },
+    /// A tool chip's file badge: open the file in the right pane — the Diff
+    /// tab when it has uncommitted changes, else the Files editor. `path` is
+    /// as the tool call named it (absolute or cwd-relative).
+    OpenFile { chat_id: String, path: String },
 }
 
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
@@ -6931,6 +6935,19 @@ impl Transcript {
                 }
                 let detail = details[ix].clone();
                 let invocation = invocations[ix].clone();
+                let file_link = tool_file_path(&tool.call).map(|path| {
+                    let chat_id = self.chat_id.clone().unwrap_or_default();
+                    let path = path.to_owned();
+                    FileBadgeLink {
+                        id: SharedString::from(format!("{row_id}#f{ix}")),
+                        on_click: Box::new(cx.listener(move |_, _, _, cx| {
+                            cx.emit(TranscriptEvent::OpenFile {
+                                chat_id: chat_id.clone(),
+                                path: path.clone(),
+                            });
+                        })),
+                    }
+                });
                 if detail.is_none() && invocation.is_none() {
                     return reveal_tool_row(
                         tool_chip(
@@ -6941,6 +6958,7 @@ impl Transcript {
                             content_reveal,
                             connector_reveal,
                             continuation_reveal,
+                            file_link,
                             theme,
                             cx.entity_id(),
                             cx,
@@ -6998,7 +7016,14 @@ impl Transcript {
                                 entry.toggled_at = Some(Instant::now());
                                 cx.notify();
                             }))
-                            .child(chip_header(tool, open, theme, cx.entity_id(), cx)),
+                            .child(chip_header(
+                                tool,
+                                open,
+                                file_link,
+                                theme,
+                                cx.entity_id(),
+                                cx,
+                            )),
                     );
                 // The body stays mounted while the close tween shrinks over it.
                 // Invocation first (what was asked), then output/diff (what
@@ -7614,6 +7639,24 @@ enum ChipTrail {
     OpenArrow,
 }
 
+/// The file a chip's badge names, for the tools that address one.
+fn tool_file_path(call: &ToolCall) -> Option<&str> {
+    match call {
+        ToolCall::ReadFile { path }
+        | ToolCall::WriteFile { path, .. }
+        | ToolCall::EditFile { path, .. }
+        | ToolCall::ApplyPatch { path: Some(path) } => Some(path.as_str()),
+        _ => None,
+    }
+}
+
+/// The file badge's click, keyed per chip so its stateful id stays unique
+/// across rows (a plain chip has no keyed parent of its own).
+struct FileBadgeLink {
+    id: SharedString,
+    on_click: Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static>,
+}
+
 /// The chip's content row: icon tile + label + detail line (+ trailing tile
 /// when the chip expands or links out). Shared between the plain chip, the
 /// header of an expandable chip card, and the spawn link chip.
@@ -7626,6 +7669,7 @@ enum ChipTrail {
 fn chip_header_row(
     tool: &ToolItem,
     trail: Option<ChipTrail>,
+    file_link: Option<FileBadgeLink>,
     theme: &Theme,
     view: gpui::EntityId,
     cx: &mut gpui::App,
@@ -7636,13 +7680,7 @@ fn chip_header_row(
         tool_chip_content(&tool.call)
     };
     let activity = !is_agent_tool(tool);
-    let file_path = match &tool.call {
-        ToolCall::ReadFile { path }
-        | ToolCall::WriteFile { path, .. }
-        | ToolCall::EditFile { path, .. }
-        | ToolCall::ApplyPatch { path: Some(path) } => Some(path.as_str()),
-        _ => None,
-    };
+    let file_path = tool_file_path(&tool.call);
     let running = tool.subagent_ref.is_some()
         && matches!(tool.subagent_status, Some(SubagentStatus::Running));
     let failed = tool.is_error
@@ -7777,17 +7815,30 @@ fn chip_header_row(
                                 .truncate()
                                 .child(SharedString::from(file_badge_name(path).to_owned())),
                         )
-                        .map(|badge| {
-                            if hover_text {
-                                badge
-                                    .id("tool-file-badge")
-                                    .group_hover("tool-header", |style| {
+                        .map(|badge| match file_link {
+                            // The badge is its own click (open the file);
+                            // stopping propagation keeps the header's
+                            // accordion toggle out of it.
+                            Some(link) => badge
+                                .id(link.id)
+                                .debug_selector(|| "tool-file-badge".into())
+                                .cursor_pointer()
+                                .hover(|style| style.bg(theme.ink(0.12)))
+                                .when(hover_text, |badge| {
+                                    badge.group_hover("tool-header", |style| {
                                         style.text_color(theme.text)
                                     })
-                                    .into_any_element()
-                            } else {
-                                badge.into_any_element()
-                            }
+                                })
+                                .on_click(move |event, window, cx| {
+                                    cx.stop_propagation();
+                                    (link.on_click)(event, window, cx);
+                                })
+                                .into_any_element(),
+                            None if hover_text => badge
+                                .id("tool-file-badge")
+                                .group_hover("tool-header", |style| style.text_color(theme.text))
+                                .into_any_element(),
+                            None => badge.into_any_element(),
                         });
                     crate::frost::frosted(5.0, 16.0, badge).into_any_element()
                 } else {
@@ -7891,11 +7942,19 @@ fn chip_header_row(
 fn chip_header(
     tool: &ToolItem,
     open: bool,
+    file_link: Option<FileBadgeLink>,
     theme: &Theme,
     view: gpui::EntityId,
     cx: &mut gpui::App,
 ) -> gpui::Div {
-    chip_header_row(tool, Some(ChipTrail::Chevron { open }), theme, view, cx)
+    chip_header_row(
+        tool,
+        Some(ChipTrail::Chevron { open }),
+        file_link,
+        theme,
+        view,
+        cx,
+    )
 }
 
 /// Max chars a subagent tab title keeps. The strip chip is fixed-width and
@@ -8087,6 +8146,7 @@ fn tool_chip(
     content_reveal: f32,
     connector_reveal: f32,
     continuation_reveal: f32,
+    file_link: Option<FileBadgeLink>,
     theme: &Theme,
     view: gpui::EntityId,
     cx: &mut gpui::App,
@@ -8134,7 +8194,7 @@ fn tool_chip(
                         .top(px(4.0 * (1.0 - content_reveal)))
                         .opacity(content_reveal)
                 })
-                .child(chip_header_row(tool, None, theme, view, cx)),
+                .child(chip_header_row(tool, None, file_link, theme, view, cx)),
         )
         .into_any_element()
 }
@@ -8190,6 +8250,7 @@ fn subagent_chip(
                 .child(chip_header_row(
                     tool,
                     Some(ChipTrail::OpenArrow),
+                    None,
                     theme,
                     view,
                     cx,
@@ -10048,6 +10109,105 @@ mod tests {
         cx.simulate_keystrokes("escape");
         transcript.read_with(cx, |this, _| assert!(this.attachment_preview.is_none()));
         cx.update(|window, _| assert!(return_focus.is_focused(window)));
+    }
+
+    #[gpui::test]
+    fn file_badge_click_opens_the_file_without_toggling_the_header(cx: &mut gpui::TestAppContext) {
+        use std::cell::Cell;
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let state = cx.new(|_| AppState::new());
+        let transcript = cx.new(|cx| Transcript::new(state, cx));
+        let header_clicks = Rc::new(Cell::new(0u32));
+        let opened: Rc<Cell<Option<String>>> = Rc::new(Cell::new(None));
+        let _events = cx.update(|cx| {
+            let opened = opened.clone();
+            cx.subscribe(&transcript, move |_, event: &TranscriptEvent, _| {
+                if let TranscriptEvent::OpenFile { path, .. } = event {
+                    opened.set(Some(path.clone()));
+                }
+            })
+        });
+        struct HeaderFixture {
+            transcript: Entity<Transcript>,
+            header_clicks: Rc<Cell<u32>>,
+        }
+        impl Render for HeaderFixture {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let theme = Theme::of(cx).clone();
+                let tool = ToolItem {
+                    part_id: "fixture".into(),
+                    call: ToolCall::ReadFile {
+                        path: "/repo/crates/ui/src/transcript.rs".into(),
+                    },
+                    is_error: false,
+                    resolved: true,
+                    detail: None,
+                    invocation: None,
+                    output_ref: None,
+                    output_bytes: None,
+                    diff_ref: None,
+                    subagent_ref: None,
+                    subagent_status: None,
+                    subagent_tail: None,
+                    is_thought: false,
+                };
+                let transcript = self.transcript.clone();
+                let link = FileBadgeLink {
+                    id: "row#f0".into(),
+                    on_click: Box::new(move |_, _, cx| {
+                        transcript.update(cx, |_, cx| {
+                            cx.emit(TranscriptEvent::OpenFile {
+                                chat_id: "chat".into(),
+                                path: "/repo/crates/ui/src/transcript.rs".into(),
+                            })
+                        })
+                    }),
+                };
+                let header_clicks = self.header_clicks.clone();
+                div()
+                    .id("header")
+                    .w(px(400.0))
+                    .on_click(move |_, _, _| header_clicks.set(header_clicks.get() + 1))
+                    .child(chip_header(
+                        &tool,
+                        false,
+                        Some(link),
+                        &theme,
+                        self.transcript.entity_id(),
+                        cx,
+                    ))
+            }
+        }
+        let (_fixture, cx) = cx.add_window_view(|_, _| HeaderFixture {
+            transcript: transcript.clone(),
+            header_clicks: header_clicks.clone(),
+        });
+        cx.run_until_parked();
+        let badge = cx.debug_bounds("tool-file-badge").expect("badge painted");
+        cx.simulate_click(badge.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            opened.take().as_deref(),
+            Some("/repo/crates/ui/src/transcript.rs")
+        );
+        assert_eq!(
+            header_clicks.get(),
+            0,
+            "badge click must not toggle the header"
+        );
+        // The label, outside the badge, still reaches the header.
+        cx.simulate_click(
+            gpui::point(badge.origin.x - px(20.0), badge.center().y),
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        assert_eq!(opened.take(), None);
+        assert_eq!(header_clicks.get(), 1);
     }
 
     #[gpui::test]

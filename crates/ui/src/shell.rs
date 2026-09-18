@@ -1526,6 +1526,10 @@ pub struct Shell {
     /// Event hookups for [`Self::diffs`] (History rows opening commit tabs).
     diff_subs: std::collections::HashMap<u64, Subscription>,
     diff_seq: u64,
+    /// A file-badge probe: a working-tree [`Changes`] held OFF the tab strip
+    /// until it answers whether the clicked file has changes, so a clean
+    /// file never flashes a Diff tab before its editor opens.
+    diff_probe: Option<(Entity<Changes>, Subscription)>,
     /// Subagent transcript surfaces by id — each tab a read-only
     /// [`Transcript`] pinned to its subagent doc.
     subagent_tabs: std::collections::HashMap<u64, SubagentTab>,
@@ -1982,6 +1986,7 @@ impl Shell {
             pending_exit: None,
             diff_subs: std::collections::HashMap::new(),
             diff_seq: 0,
+            diff_probe: None,
             subagent_tabs: std::collections::HashMap::new(),
             subagent_seq: 0,
             sidechat_tabs: std::collections::HashMap::new(),
@@ -3263,9 +3268,12 @@ impl Shell {
     fn register_diff_surface(&mut self, changes: Entity<Changes>, cx: &mut Context<Self>) {
         self.diff_seq += 1;
         let id = self.diff_seq;
-        let sub = cx.subscribe(&changes, |this: &mut Self, _, event, cx| match event {
+        let sub = cx.subscribe(&changes, move |this: &mut Self, _, event, cx| match event {
             ChangesEvent::OpenCommit(commit) => {
                 this.add_commit_diff_surface(commit.clone(), cx);
+            }
+            ChangesEvent::FileLocated { path, changed } => {
+                this.on_tool_file_located(Some(id), path.clone(), *changed, cx);
             }
         });
         self.diffs.insert(id, changes);
@@ -3339,7 +3347,112 @@ impl Shell {
                 });
                 cx.notify();
             }
+            TranscriptEvent::OpenFile { chat_id, path } => self.open_tool_file(chat_id, path, cx),
         }
+    }
+
+    /// A tool chip's file badge: the Diff tab when the file has uncommitted
+    /// changes, else the Files editor. The working-tree diff lives in the
+    /// [`Changes`] watch, so the question goes to this panel's working-tree
+    /// Diff tab when one is open, else to an unregistered probe; either
+    /// answers through [`ChangesEvent::FileLocated`].
+    fn open_tool_file(&mut self, chat_id: &str, path: &str, cx: &mut Context<Self>) {
+        let Some(root) = self.chat_cwd(chat_id, cx) else {
+            return;
+        };
+        let Some(link) = resolve_workspace_file_link(path, &root) else {
+            return;
+        };
+        let absolute = PathBuf::from(root)
+            .join(link.path)
+            .to_string_lossy()
+            .into_owned();
+        let key = self.panel_key(cx);
+        let open_tab = self
+            .right_tabs
+            .get(&key)
+            .into_iter()
+            .flatten()
+            .find_map(|surface| match surface {
+                RightSurface::Diff(id) => self
+                    .diffs
+                    .get(id)
+                    .filter(|changes| changes.read(cx).is_working_tree())
+                    .cloned(),
+                _ => None,
+            });
+        let changes = open_tab.unwrap_or_else(|| {
+            let changes = cx.new(|cx| Changes::new(self.state.clone(), cx));
+            let sub = cx.subscribe(&changes, |this: &mut Self, _, event, cx| {
+                if let ChangesEvent::FileLocated { path, changed } = event {
+                    this.on_tool_file_located(None, path.clone(), *changed, cx);
+                }
+            });
+            changes.update(cx, |changes, cx| changes.ensure_content(cx));
+            self.diff_probe = Some((changes.clone(), sub));
+            changes
+        });
+        changes.update(cx, |changes, cx| changes.locate_file(absolute, cx));
+    }
+
+    /// `tab` is the working-tree Diff tab that answered, `None` for the probe
+    /// (which joins the tab strip only when the file turned out changed).
+    fn on_tool_file_located(
+        &mut self,
+        tab: Option<u64>,
+        path: String,
+        changed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let probe = match tab {
+            Some(_) => None,
+            None => self.diff_probe.take().map(|(changes, _)| changes),
+        };
+        if !self.right_pane_open(cx) {
+            self.toggle_right_pane(cx);
+        }
+        if changed {
+            match (tab, probe) {
+                (Some(id), _) => self.set_right_active(RightSurface::Diff(id), cx),
+                (None, Some(changes)) => self.register_diff_surface(changes, cx),
+                (None, None) => {}
+            }
+            return;
+        }
+        let Some(relative) = self
+            .chat_cwd(&self.active_chat.clone(), cx)
+            .and_then(|root| resolve_workspace_file_link(&path, &root))
+        else {
+            return;
+        };
+        // The editor needs the window and this arrives on an entity event;
+        // the click's window is the active one.
+        let Some(window) = cx.active_window() else {
+            return;
+        };
+        let shell = cx.weak_entity();
+        cx.defer(move |cx| {
+            window
+                .update(cx, |_, window, cx| {
+                    shell
+                        .update(cx, |shell, cx| {
+                            shell.add_file_surface(relative.path, window, cx)
+                        })
+                        .ok();
+                })
+                .ok();
+        });
+    }
+
+    /// The checkout root of `chat_id`'s row, falling back to the active chat
+    /// (subagent transcripts carry their doc id, not a chat's).
+    fn chat_cwd(&self, chat_id: &str, cx: &App) -> Option<String> {
+        let chats = &self.state.read(cx).chats;
+        chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .or_else(|| chats.iter().find(|chat| chat.id == self.active_chat))
+            .and_then(|chat| chat.cwd.clone())
     }
 
     fn note_composer_failure(&mut self, message: String, cx: &mut Context<Self>) {
