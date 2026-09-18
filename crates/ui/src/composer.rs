@@ -502,6 +502,8 @@ pub enum SendButtonMode {
     Queue,
     /// Live run, nothing typed: red stop square.
     Stop,
+    /// Stopped turn, nothing typed: play triangle that resumes it.
+    Resume,
 }
 
 /// What the composer holds that a send could carry. A staged image or diff
@@ -575,8 +577,9 @@ pub fn appshot_strip_height(count: usize) -> f32 {
     }
 }
 
-pub fn send_button_mode(run_live: bool, has_text: bool) -> SendButtonMode {
+pub fn send_button_mode(run_live: bool, has_text: bool, stopped: bool) -> SendButtonMode {
     match (run_live, has_text) {
+        (false, false) if stopped => SendButtonMode::Resume,
         (false, _) => SendButtonMode::Send,
         (true, true) => SendButtonMode::Queue,
         (true, false) => SendButtonMode::Stop,
@@ -6487,7 +6490,22 @@ impl Composer {
             self.staged().len() + self.staged_appshots().len(),
             self.staged_comments(cx).len(),
         );
-        send_button_mode(self.run_live(cx), has_text)
+        send_button_mode(self.run_live(cx), has_text, self.turn_stopped(cx))
+    }
+
+    /// The bound chat's last turn stopped short and nothing is running:
+    /// the send circle turns into the resume triangle.
+    fn turn_stopped(&self, cx: &App) -> bool {
+        let Some(chat_id) = self.bound_chat_id(cx) else {
+            return false;
+        };
+        let state = self.state.read(cx);
+        let entries = if self.chat_override.is_some() {
+            state.sub_transcript(&chat_id)
+        } else {
+            &state.transcript
+        };
+        crate::transcript::resume_offer(entries, state.indicator_for(&chat_id, chrono::Utc::now()))
     }
 
     fn on_submit(&mut self, cx: &mut Context<Self>) {
@@ -6519,7 +6537,7 @@ impl Composer {
             // on the just-dispatched prompt and the agent ate it silently
             // (issue #406). Stop stays on the button — and on Esc when
             // escape_stops_active_agent is enabled.
-            SendButtonMode::Stop => {}
+            SendButtonMode::Stop | SendButtonMode::Resume => {}
             _ if no_content => {}
             _ if self.send_blocked(cx) => {}
             SendButtonMode::Send => self.send(text, false, false, false, cx),
@@ -6541,6 +6559,15 @@ impl Composer {
     pub(crate) fn send_prompt(&mut self, prompt: String, cx: &mut Context<Self>) {
         let queue = matches!(self.button_mode(cx), SendButtonMode::Queue);
         self.send(prompt, queue, false, false, cx);
+    }
+
+    /// The play button on a stopped turn: send the same prompt the user
+    /// would type, under the guards a typed submit runs.
+    fn resume(&mut self, cx: &mut Context<Self>) {
+        if self.send_blocked(cx) {
+            return;
+        }
+        self.send_prompt(crate::transcript::RESUME_PROMPT.to_string(), cx);
     }
 
     /// Cmd/Ctrl+Enter remains an ordinary submit while the composer carries
@@ -7756,6 +7783,25 @@ impl Composer {
                 .hover(|s| s.opacity(0.85))
                 .on_click(cx.listener(|this, _, _, cx| this.interrupt_selected(cx)))
                 .child(div().size(px(11.0)).rounded(px(3.0)).bg(theme.bg))
+                .into_any_element(),
+            SendButtonMode::Resume => div()
+                .id("composer-resume")
+                .size(px(28.0))
+                .flex_none()
+                .rounded_full()
+                .bg(theme.text)
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|s| s.opacity(0.85))
+                .on_click(cx.listener(|this, _, _, cx| this.resume(cx)))
+                .child(
+                    crate::icons::icon(crate::icons::PLAY)
+                        .size(px(12.0))
+                        .ml(px(1.0))
+                        .text_color(theme.bg),
+                )
                 .into_any_element(),
             SendButtonMode::Send | SendButtonMode::Queue => {
                 // Share the submission guard with Enter, including pending
@@ -10650,23 +10696,27 @@ mod tests {
         let live = true;
         let comment_only = composer_has_content("", 0, 2);
         assert_eq!(
-            send_button_mode(live, comment_only),
+            send_button_mode(live, comment_only, false),
             SendButtonMode::Queue,
             "comment-only submit must queue without interrupting the run"
         );
         // Nothing staged at all is still the stop square.
         assert_eq!(
-            send_button_mode(live, composer_has_content("", 0, 0)),
+            send_button_mode(live, composer_has_content("", 0, 0), false),
             SendButtonMode::Stop
         );
     }
 
     #[test]
     fn send_button_morph() {
-        assert_eq!(send_button_mode(false, false), SendButtonMode::Send);
-        assert_eq!(send_button_mode(false, true), SendButtonMode::Send);
-        assert_eq!(send_button_mode(true, true), SendButtonMode::Queue);
-        assert_eq!(send_button_mode(true, false), SendButtonMode::Stop);
+        assert_eq!(send_button_mode(false, false, false), SendButtonMode::Send);
+        assert_eq!(send_button_mode(false, true, false), SendButtonMode::Send);
+        assert_eq!(send_button_mode(true, true, false), SendButtonMode::Queue);
+        assert_eq!(send_button_mode(true, false, false), SendButtonMode::Stop);
+        // A stopped turn owns the empty circle; typing or a live run wins.
+        assert_eq!(send_button_mode(false, false, true), SendButtonMode::Resume);
+        assert_eq!(send_button_mode(false, true, true), SendButtonMode::Send);
+        assert_eq!(send_button_mode(true, false, true), SendButtonMode::Stop);
     }
 
     #[test]
