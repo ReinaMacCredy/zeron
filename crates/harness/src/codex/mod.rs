@@ -938,6 +938,9 @@ async fn run_session(session: Session) {
                 Value::String(server.command.clone()),
             );
             overrides.insert("mcp_servers.zeron.args".into(), json!(server.args));
+            // wait_threads blocks up to 30 min; Codex's own per-call ceiling
+            // would cut it short (`tool_timeout_sec` in the 0.154.0 schema).
+            overrides.insert("mcp_servers.zeron.tool_timeout_sec".into(), json!(1800));
         }
         p.insert("cwd".into(), Value::String(request.cwd.clone()));
         p.insert("approvalPolicy".into(), approval_policy.into());
