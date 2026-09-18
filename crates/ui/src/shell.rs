@@ -3330,25 +3330,6 @@ impl Shell {
                 });
                 cx.notify();
             }
-            TranscriptEvent::Resume { chat_id } => self.resume_chat(chat_id, cx),
-        }
-    }
-
-    /// Route the stopped-turn Resume click to the composer bound to that
-    /// chat: the main composer, a split pane's, or a sidechat tab's.
-    fn resume_chat(&mut self, chat_id: &str, cx: &mut Context<Self>) {
-        let main_bound = self.composer.read(cx).bound_chat_id(cx).as_deref() == Some(chat_id);
-        let composer = main_bound
-            .then(|| self.composer.clone())
-            .or_else(|| self.split_composer_for(chat_id))
-            .or_else(|| {
-                self.sidechat_tabs
-                    .values()
-                    .find(|tab| tab.chat_id == chat_id)
-                    .map(|tab| tab.composer.clone())
-            });
-        if let Some(composer) = composer {
-            composer.update(cx, |composer, cx| composer.resume(cx));
         }
     }
 

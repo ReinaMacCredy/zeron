@@ -2030,8 +2030,8 @@ pub fn consulting_advisor(entries: &[SessionMessageEntry]) -> bool {
     })
 }
 
-/// True when the chat's last turn stopped short and the chat sits idle: the
-/// reply was interrupted (its entry is `Aborted`), or the interrupt landed
+/// True when the chat's last turn stopped short and the chat sits idle (the
+/// composer's send circle becomes the resume triangle): the reply was interrupted (its entry is `Aborted`), or the interrupt landed
 /// before anything streamed — the engine writes no empty aborted stub then,
 /// so the user's prompt is the trailing entry with no reply behind it.
 pub fn resume_offer(entries: &[SessionMessageEntry], indicator: crate::state::Indicator) -> bool {
@@ -3024,9 +3024,6 @@ pub enum TranscriptEvent {
         title: String,
         frozen: bool,
     },
-    /// The stopped-turn trailer's Resume click: the chat's own composer
-    /// sends the resume prompt as if typed.
-    Resume { chat_id: String },
 }
 
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
@@ -5977,58 +5974,6 @@ impl Transcript {
         )
     }
 
-    /// The stopped-turn affordance, in the working trailer's slot once the
-    /// run has settled: one click sends the resume prompt through the chat's
-    /// own composer instead of the user typing it.
-    fn render_resume_trailer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let chat_id = self.live_chat_id(cx)?;
-        {
-            let state = self.state.read(cx);
-            let entries = match &self.doc_override {
-                Some(doc_id) => state.sub_transcript(doc_id),
-                None => &state.transcript,
-            };
-            if !resume_offer(entries, state.indicator_for(&chat_id, chrono::Utc::now())) {
-                return None;
-            }
-        }
-        let theme = Theme::of(cx).clone();
-        Some(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(Theme::SPACE_SM))
-                .pt(px(Theme::SPACE_LG))
-                .text_size(crate::typography::ui_rems(12.0))
-                .child(
-                    div()
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from("Stopped")),
-                )
-                .child(
-                    div()
-                        .id("resume-turn")
-                        .px(px(10.0))
-                        .py(px(3.0))
-                        .rounded(px(9.0))
-                        .border_1()
-                        .border_color(crate::theme::hairline(0.12))
-                        .bg(crate::theme::ink(0.04))
-                        .text_color(theme.text)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(crate::theme::ink(0.08)))
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.emit(TranscriptEvent::Resume {
-                                chat_id: chat_id.clone(),
-                            })
-                        }))
-                        .child(SharedString::from("Resume")),
-                )
-                .into_any_element(),
-        )
-    }
-
     fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(row) = self.rows.get(ix).cloned() else {
             return gpui::Empty.into_any_element();
@@ -6071,10 +6016,7 @@ impl Transcript {
         // Live-run loader rides under the LAST row's content (above its
         // clearance pad), so it sits right beneath the working reply.
         let trailer = (ix + 1 == self.rows.len())
-            .then(|| {
-                self.render_working_trailer(cx)
-                    .or_else(|| self.render_resume_trailer(cx))
-            })
+            .then(|| self.render_working_trailer(cx))
             .flatten();
 
         let inner: AnyElement = match &row.kind {

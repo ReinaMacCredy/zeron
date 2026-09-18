@@ -172,13 +172,6 @@ impl Shell {
         self.split_pair.as_ref().is_some_and(|p| p.contains(chat))
     }
 
-    pub(super) fn split_composer_for(&self, chat: &str) -> Option<Entity<Composer>> {
-        self.split
-            .as_ref()
-            .filter(|s| s.chat_id == chat)
-            .map(|s| s.composer.clone())
-    }
-
     /// Build the secondary pane over `chat_id` on `side`, replacing any
     /// current secondary.
     fn open_split(&mut self, chat_id: String, side: SplitSide, cx: &mut Context<Self>) {
