@@ -28,6 +28,7 @@ use gpui_tokio::Tokio;
 use serde::de::DeserializeOwned;
 
 use crate::comments::ReviewComment;
+use crate::quotes::Quote;
 use zeron_doc::{SessionMessageEntry, TranscriptDesync, TranscriptFrame};
 use zeron_engine::{Engine, EngineConfig, EngineRuntime, InstanceLock, rpc::AuthRpc};
 use zeron_proto::{
@@ -756,6 +757,8 @@ pub struct AppState {
     /// revision that has not reached disk yet. A chat remains blocked until
     /// every surface waiting on a workspace write has finished or cancelled.
     review_comment_flushes: HashMap<String, HashSet<u64>>,
+    /// Written by the transcript's "Add to chat", read by the composer.
+    quotes: HashMap<String, Vec<Quote>>,
     /// This engine's device id (best-effort `LocalDevice` probe; `None` until
     /// the engine serves it — views degrade gracefully).
     pub local_device_id: Option<String>,
@@ -840,6 +843,7 @@ impl AppState {
             transfers: HashMap::new(),
             review_comments: HashMap::new(),
             review_comment_flushes: HashMap::new(),
+            quotes: HashMap::new(),
             local_device_id: None,
             update: None,
             data_dir: None,
@@ -932,6 +936,31 @@ impl AppState {
     pub fn purge_review_comments(&mut self, key: &str) {
         self.review_comment_flushes.remove(key);
         self.review_comments.remove(key);
+    }
+
+    pub fn quotes(&self, key: &str) -> &[Quote] {
+        self.quotes.get(key).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    pub fn add_quote(&mut self, key: &str, quote: Quote) {
+        self.quotes.entry(key.to_string()).or_default().push(quote);
+    }
+
+    pub fn remove_quote(&mut self, key: &str, id: &str) {
+        if let Some(list) = self.quotes.get_mut(key) {
+            list.retain(|q| q.id != id);
+            if list.is_empty() {
+                self.quotes.remove(key);
+            }
+        }
+    }
+
+    pub fn take_quotes(&mut self, key: &str) -> Vec<Quote> {
+        self.quotes.remove(key).unwrap_or_default()
+    }
+
+    pub fn purge_quotes(&mut self, key: &str) {
+        self.quotes.remove(key);
     }
 
     pub fn begin_review_comment_flush(&mut self, key: &str, source: u64) {

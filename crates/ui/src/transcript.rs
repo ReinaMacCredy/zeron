@@ -127,6 +127,9 @@ const TOOL_CONNECTOR_REVEAL: motion::MotionSpec =
 const TOOL_FIRST_ROW_DELAY_MS: u64 = 90;
 const TOOL_ROW_STAGGER_MS: u64 = 65;
 
+const ADD_TO_CHAT_WIDTH: f32 = 112.0;
+const ADD_TO_CHAT_HEIGHT: f32 = 28.0;
+
 /// Signed list scroll step for a pointer near a viewport edge.
 ///
 /// GPUI list offsets increase toward the document bottom. The quadratic ramp
@@ -2937,6 +2940,10 @@ pub struct Transcript {
     /// One-shot timer rescheduled only while the pointer remains in an edge
     /// zone. Dropping it on mouse-up stops all selection scroll work.
     selection_scroll_task: Option<Task<()>>,
+    /// A settled markdown selection and the "Add to chat" pill's bounds
+    /// (window coordinates, fixed at mouse-up) until the next mouse-down
+    /// outside the pill or a scroll.
+    add_to_chat: Option<(String, Bounds<Pixels>)>,
     /// MessageRail width gate (set by the shell from the container width).
     rail_enabled: bool,
     /// Height of the shell's composer/status/terminal stack overlaying the
@@ -3205,6 +3212,7 @@ impl Transcript {
             scroll_anim: None,
             selection_drag_position: None,
             selection_scroll_task: None,
+            add_to_chat: None,
             rail_enabled,
             bottom_clearance: 0.0,
             rail_hover: None,
@@ -3428,6 +3436,7 @@ impl Transcript {
         // Cancel synchronously, before a queued animation frame can undo the
         // wheel/touch input. Neither operation reads the borrowed ListState.
         self.user_collapse_scroll = None;
+        self.add_to_chat = None;
         self.cancel_user_hold();
         let released_own_turn = self.own_turn.as_ref().is_some_and(|anchor| anchor.held);
         self.release_own_turn_hold();
@@ -3538,6 +3547,12 @@ impl Transcript {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some((_, pill)) = &self.add_to_chat
+            && !pill.contains(&event.position)
+        {
+            self.add_to_chat = None;
+            cx.notify();
+        }
         // Text listeners claim the drag before it bubbles here. Stop following
         // immediately: a stream commit can otherwise virtualize the anchor
         // before the first mouse move. Keep the user bubble's long-press timer.
@@ -3554,17 +3569,21 @@ impl Transcript {
 
     fn on_selection_mouse_up(
         &mut self,
-        _event: &MouseUpEvent,
+        event: &MouseUpEvent,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let was_selecting = self.selection_drag_position.is_some();
         self.stop_selection_scroll();
-        if let Some(_text) = crate::markdown::selection::end_active_drag() {
+        if let Some(text) = crate::markdown::selection::end_active_drag() {
             // X11 middle-click paste parity, including the case where the
             // anchor row has virtualized away and cannot receive mouse-up.
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-            cx.write_to_primary(ClipboardItem::new_string(_text));
+            cx.write_to_primary(ClipboardItem::new_string(text.clone()));
+            if self.chat_id.is_some() && !text.trim().is_empty() {
+                self.add_to_chat = Some((text, self.add_to_chat_pill(event.position)));
+                cx.notify();
+            }
         }
         if was_selecting {
             self.last_scroll_distance = self.distance_from_bottom();
@@ -3577,6 +3596,80 @@ impl Transcript {
     fn stop_selection_scroll(&mut self) {
         self.selection_drag_position = None;
         self.selection_scroll_task = None;
+    }
+
+    fn add_selection_to_chat(&mut self, cx: &mut Context<Self>) {
+        let Some((text, _)) = self.add_to_chat.take() else {
+            return;
+        };
+        let Some(chat_id) = self.chat_id.clone() else {
+            return;
+        };
+        if let Some(key) = crate::markdown::selection::anchor_key() {
+            crate::markdown::selection::clear_if_owner(&key);
+        }
+        self.state.update(cx, |state, cx| {
+            state.add_quote(&chat_id, crate::quotes::Quote::new(text));
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    /// Where the "Add to chat" pill sits (window coordinates): just under the
+    /// drag's end, kept inside the viewport.
+    fn add_to_chat_pill(&self, at: Point<Pixels>) -> Bounds<Pixels> {
+        let viewport = self.list.viewport_bounds();
+        let width = f32::from(viewport.size.width);
+        let x = (f32::from(at.x - viewport.origin.x) - ADD_TO_CHAT_WIDTH / 2.0)
+            .clamp(8.0, (width - ADD_TO_CHAT_WIDTH - 8.0).max(8.0));
+        let y = (f32::from(at.y - viewport.origin.y) + 12.0).clamp(
+            8.0,
+            (f32::from(viewport.size.height) - ADD_TO_CHAT_HEIGHT - 8.0).max(8.0),
+        );
+        Bounds::new(
+            point(viewport.origin.x + px(x), viewport.origin.y + px(y)),
+            size(px(ADD_TO_CHAT_WIDTH), px(ADD_TO_CHAT_HEIGHT)),
+        )
+    }
+
+    /// The "Add to chat" pill floating under the end of a settled selection.
+    fn render_add_to_chat(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (_, pill) = self.add_to_chat.as_ref()?;
+        let viewport = self.list.viewport_bounds();
+        let theme = Theme::of(cx).for_popup();
+        Some(
+            div()
+                .id("transcript-add-to-chat")
+                .debug_selector(|| "transcript-add-to-chat".into())
+                .absolute()
+                .left(pill.origin.x - viewport.origin.x)
+                .top(pill.origin.y - viewport.origin.y)
+                .h(px(ADD_TO_CHAT_HEIGHT))
+                .w(px(ADD_TO_CHAT_WIDTH))
+                .rounded_full()
+                .border_1()
+                .border_color(theme.border)
+                .bg(crate::popover::surface_bg(&theme))
+                .shadow_md()
+                .cursor_pointer()
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap(px(6.0))
+                .text_size(crate::typography::ui_rems(12.0))
+                .text_color(theme.text)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.add_selection_to_chat(cx);
+                }))
+                .child(
+                    crate::icons::icon(crate::icons::PLUS)
+                        .size(px(12.0))
+                        .text_color(theme.text_muted),
+                )
+                .child("Add to chat")
+                .into_any_element(),
+        )
     }
 
     fn schedule_selection_scroll(&mut self, cx: &mut Context<Self>) {
@@ -8691,7 +8784,8 @@ impl Render for Transcript {
             // (document paint order = selection order; see markdown/render.rs).
             .child(crate::markdown::render::selection_frame_reset())
             .child(content)
-            .child(rail);
+            .child(rail)
+            .children(self.render_add_to_chat(cx));
         // Full-size viewer for a clicked user-bubble thumbnail
         // (AttachmentPreviewDialog: bare lightbox, click closes).
         if let Some(preview) = self.attachment_preview.clone() {
@@ -10283,6 +10377,48 @@ mod tests {
         cx.simulate_keystrokes("escape");
         transcript.read_with(cx, |this, _| assert!(this.attachment_preview.is_none()));
         cx.update(|window, _| assert!(return_focus.is_focused(window)));
+    }
+
+    #[gpui::test]
+    fn add_to_chat_click_stages_the_selection_as_a_quote(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let state = cx.new(|_| AppState::new());
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        transcript.update(cx, |transcript, _| {
+            transcript.chat_id = Some("chat".into());
+            transcript.add_to_chat = Some((
+                "picked words".into(),
+                Bounds::new(point(px(80.0), px(60.0)), size(px(112.0), px(28.0))),
+            ));
+        });
+        struct Fixture(Entity<Transcript>);
+        impl Render for Fixture {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size(px(400.0)).child(self.0.clone())
+            }
+        }
+        let (_fixture, cx) = cx.add_window_view(|_, _| Fixture(transcript.clone()));
+        cx.run_until_parked();
+        let pill = cx
+            .debug_bounds("transcript-add-to-chat")
+            .expect("pill painted");
+        cx.simulate_click(pill.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        let quotes: Vec<String> = state.read_with(cx, |state, _| {
+            state
+                .quotes("chat")
+                .iter()
+                .map(|q| q.text.clone())
+                .collect()
+        });
+        assert_eq!(quotes, vec!["picked words".to_string()]);
+        assert!(transcript.read_with(cx, |transcript, _| transcript.add_to_chat.is_none()));
+        assert!(cx.debug_bounds("transcript-add-to-chat").is_none());
     }
 
     #[gpui::test]
