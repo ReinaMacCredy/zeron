@@ -65,7 +65,16 @@ if has "$line" '"method":"session/load"'; then
     fi
   fi
 elif has "$line" '"method":"session/new"'; then
-  has "$line" '"mcpServers":[]' || exit 1
+  # Thread tools ride the mcpServers list (stdio shape); every other
+  # session opens with an empty list.
+  ZERON_TOOLS=0
+  if has "$line" '"name":"zeron"'; then
+    has "$line" '"command":"/opt/zeron/zeron"' || exit 1
+    has "$line" '"args":["mcp","--chat","chat-42","--port","27654"]' || exit 1
+    ZERON_TOOLS=1
+  else
+    has "$line" '"mcpServers":[]' || exit 1
+  fi
   # Advertise config options: model (current differs from the tests' request,
   # forcing a set) and thought_level (current high). The model config option
   # feeds discovery first; the first-class `models` state (SessionModelState)
@@ -113,6 +122,15 @@ case "$promptline" in
   if has "$CONFIG_SETS" '"configId":"model"' && has "$CONFIG_SETS" '"value":"grok-4.5"' \
     && has "$CONFIG_SETS" '"configId":"effort"' && has "$CONFIG_SETS" '"value":"medium"'; then
     update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"configured"}}'
+    emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
+  else
+    emit "{\"id\":$pid,\"result\":{\"stopReason\":\"refusal\"}}"
+  fi
+  ;;
+
+*scenario:mcp*)
+  if [ "$ZERON_TOOLS" = 1 ]; then
+    update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"tools on"}}'
     emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
   else
     emit "{\"id\":$pid,\"result\":{\"stopReason\":\"refusal\"}}"

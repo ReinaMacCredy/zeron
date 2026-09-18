@@ -22,6 +22,7 @@ async fn turn(
     let controls = RunControls {
         steering,
         interrupt: token.clone(),
+        tool_server: None,
         request_input: Box::new(|_| {
             let (tx, rx) = oneshot::channel();
             let _ = tx.send(vec![]);
@@ -137,6 +138,7 @@ async fn parked(harness: &CursorHarness, count: usize) {
     let controls = RunControls {
         steering,
         interrupt: CancellationToken::new(),
+        tool_server: None,
         request_input: Box::new(|_| {
             let (tx, rx) = oneshot::channel();
             let _ = tx.send(vec![]);
@@ -223,6 +225,7 @@ async fn burst(harness: &CursorHarness, count: usize, cancel: bool) {
     let controls = RunControls {
         steering,
         interrupt: token.clone(),
+        tool_server: None,
         request_input: Box::new(|_| {
             let (tx, rx) = oneshot::channel();
             let _ = tx.send(vec![]);

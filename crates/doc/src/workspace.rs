@@ -698,6 +698,8 @@ pub(crate) struct RawChat {
     room_gen: Option<u32>,
     #[serde(default)]
     sidechat_source_chat_id: Option<String>,
+    #[serde(default)]
+    created_by_chat_id: Option<String>,
 }
 
 /// Decode a chat row's `config` leniently: unknown enum values (a newer
@@ -739,6 +741,7 @@ impl From<RawChat> for Chat {
             last_seen_at: raw.last_seen_at.map(dt),
             room_gen: raw.room_gen,
             sidechat_source_chat_id: raw.sidechat_source_chat_id,
+            created_by_chat_id: raw.created_by_chat_id,
         }
     }
 }
@@ -818,6 +821,7 @@ mod tests {
             last_seen_at: None,
             room_gen: None,
             sidechat_source_chat_id: None,
+            created_by_chat_id: None,
         }
     }
 
@@ -947,6 +951,23 @@ mod tests {
         assert_eq!(chats.len(), 1);
         assert_eq!(chats[0].title, None);
         assert_eq!(chats[0].last_message_preview.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn created_by_chat_id_decodes_when_present_and_defaults_when_absent() {
+        let base = serde_json::json!({
+            "id": "chat-2", "deviceId": "dev-a", "createdAt": 2_000,
+        });
+        let plain: Chat = serde_json::from_value::<RawChat>(base.clone())
+            .unwrap()
+            .into();
+        assert_eq!(plain.created_by_chat_id, None);
+
+        let mut linked = base;
+        linked["createdByChatId"] = serde_json::json!("chat-1");
+        linked["fromANewerBuild"] = serde_json::json!(true);
+        let linked: Chat = serde_json::from_value::<RawChat>(linked).unwrap().into();
+        assert_eq!(linked.created_by_chat_id.as_deref(), Some("chat-1"));
     }
 
     #[test]

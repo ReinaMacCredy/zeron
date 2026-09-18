@@ -890,6 +890,10 @@ impl Engine {
             stop_tx,
         });
         let server = serve_ipc(config.ipc_port, service).await?;
+        runtime
+            .core()
+            .sessions
+            .set_tool_server_port(config.ipc_port);
 
         tokio::select! {
             result = shutdown_signal() => result?,

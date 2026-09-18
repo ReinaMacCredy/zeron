@@ -51,6 +51,21 @@ pub mod methods {
     /// replying with the created `Chat` row. The first prompt is the caller's
     /// to send afterwards, as an ordinary `QueueCommand` Run on `chatId`.
     pub const CREATE_SIDECHAT: &str = "CreateSidechat";
+    // Thread tools (peer chats, d25). IPC-only; the caller identity comes from
+    // the engine-spawned `zeron mcp --chat` process, never from the agent.
+    /// Open a peer chat in `fromChatId`'s project, stamped `createdByChatId`,
+    /// and hand it `prompt` as its first turn. Omitted run settings copy the
+    /// creator's. `{fromChatId, prompt, title?, harness?, model?, reasoning?}`
+    /// → `{chatId}`.
+    pub const CREATE_THREAD: &str = "CreateThread";
+    /// Deliver `text` from one thread to another: a turn opens on an idle
+    /// target, a working target finishes its own turn first. Self-send and
+    /// cross-project sends are refused. `{chatId, fromChatId, text}` → `{id}`.
+    pub const SEND_THREAD_MESSAGE: &str = "SendThreadMessage";
+    /// Move the inter-thread messages waiting on `chatId`'s queue into its
+    /// transcript, for an agent that asked for them mid-turn.
+    /// `{chatId}` → `{messages: [{id, fromChatId, text}]}`.
+    pub const TAKE_THREAD_MESSAGES: &str = "TakeThreadMessages";
     /// Fork `sourceChatId` after the assistant entry `entryId` into the
     /// client-minted `chatId`, replying with the created `Chat` row.
     pub const FORK_CHAT: &str = "ForkChat";

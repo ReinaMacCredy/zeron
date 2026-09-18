@@ -396,6 +396,23 @@ const ATTACHMENT_PROMPT_HEADER: &str = "Attached images (local files — open th
 /// Older clients stored the already-expanded prompt in `text`; recognize the
 /// exact trailer implied by `attachments` so those rows are not expanded a
 /// second time after an upgrade.
+/// Open threads one chat may have created at once (implementer default,
+/// SPEC thread-tools).
+const MAX_CREATED_THREADS: usize = 8;
+
+/// What a harness receives for a message another thread sent: who sent it
+/// and how to answer, then the message itself.
+fn thread_message_prompt(from_chat_id: &str, from_title: Option<&str>, body: &str) -> String {
+    let name = match from_title.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(title) => format!("\"{title}\" ({from_chat_id})"),
+        None => from_chat_id.to_string(),
+    };
+    format!(
+        "[Message from thread {name}. It is a peer chat, not the user; answer it with \
+         send_message_to_thread (threadId {from_chat_id}) if it needs a reply.]\n\n{body}"
+    )
+}
+
 fn queued_message_prompt(text: &str, attachments: &[String]) -> String {
     if attachments.is_empty() {
         return text.to_string();
@@ -640,6 +657,19 @@ impl ChatDocHandle {
         text: &str,
         created_at: i64,
     ) -> Result<(), DocError> {
+        self.write_user_message_from(message_id, text, created_at, None)
+    }
+
+    /// [`Self::write_user_message`] with the sending thread stamped on the
+    /// entry (thread tools): the transcript shows who wrote it, the text
+    /// stays exactly what was sent.
+    pub fn write_user_message_from(
+        &self,
+        message_id: &str,
+        text: &str,
+        created_at: i64,
+        from_chat_id: Option<&str>,
+    ) -> Result<(), DocError> {
         if self.doc.read_entries()?.iter().any(|e| e.id == message_id) {
             return Ok(());
         }
@@ -654,6 +684,7 @@ impl ChatDocHandle {
             device_id: self.device_id.clone(),
             status: Some(MessageStatus::Complete),
             continuation_of: None,
+            from_chat_id: from_chat_id.map(str::to_string),
         })
     }
 
@@ -695,6 +726,7 @@ impl ChatDocHandle {
             device_id: self.device_id.clone(),
             status: Some(MessageStatus::Complete),
             continuation_of: None,
+            from_chat_id: None,
         })
     }
 
@@ -2580,6 +2612,7 @@ impl DocHost {
             text: text.to_string(),
             attachments,
             hold_for_turn_end,
+            from_chat_id: None,
             issued_by: self.inner.config.device_id.clone(),
             issued_at: now_ms(),
             edited_at: None,
@@ -2590,6 +2623,160 @@ impl DocHost {
         self.unarchive_on_send(chat_id);
         self.nudge_remote_host(chat_id);
         Ok(id)
+    }
+
+    /// Thread tools (d25): a peer's message lands on the target's queue tagged
+    /// with its origin and held for turn end, so an idle target starts a turn
+    /// with it and a working one finishes its own turn first. Refused for a
+    /// self-send and across projects; both rows must exist. The queue is
+    /// drained before returning, so an idle target is already Working when
+    /// the sender's next `wait_threads` looks at it.
+    pub async fn queue_thread_message(
+        &self,
+        chat_id: &str,
+        from_chat_id: &str,
+        text: &str,
+    ) -> Result<String, EngineError> {
+        if chat_id == from_chat_id {
+            return Err(EngineError::Other("a thread cannot message itself".into()));
+        }
+        let workspace = self
+            .workspace()
+            .ok_or_else(|| EngineError::Other("workspace not wired".into()))?;
+        let row = |id: &str| {
+            workspace
+                .chat(id)?
+                .ok_or_else(|| EngineError::Other(format!("no such chat: {id}")))
+        };
+        let (target, from) = (row(chat_id)?, row(from_chat_id)?);
+        if target.device_id != from.device_id || target.space_id != from.space_id {
+            return Err(EngineError::Other(
+                "threads can only message peers in the same project".into(),
+            ));
+        }
+        let handle = self.open(chat_id)?;
+        let id = new_id();
+        handle.doc.push_queued(&QueuedMessage {
+            id: id.clone(),
+            text: text.to_string(),
+            attachments: Vec::new(),
+            hold_for_turn_end: true,
+            issued_by: self.inner.config.device_id.clone(),
+            issued_at: now_ms(),
+            edited_at: None,
+            delivery_gate: None,
+            from_chat_id: Some(from_chat_id.to_string()),
+        })?;
+        handle.publish_queue();
+        self.unarchive_on_send(chat_id);
+        self.nudge_remote_host(chat_id);
+        self.drain_queue(&handle).await;
+        Ok(id)
+    }
+
+    /// Thread tools: the inter-thread rows waiting on `chat_id`, moved into
+    /// its transcript as read user entries. A waiting agent asked for them
+    /// mid-turn; a person's own queued rows stay where they are.
+    pub fn take_thread_messages(&self, chat_id: &str) -> Result<Vec<QueuedMessage>, EngineError> {
+        let handle = self.open(chat_id)?;
+        let waiting: Vec<QueuedMessage> = handle
+            .doc
+            .read_queue()?
+            .into_iter()
+            .filter(|row| row.from_chat_id.is_some() && row.delivery_gate.is_none())
+            .collect();
+        let mut taken = Vec::new();
+        for row in waiting {
+            let Some(item) = handle.doc.take_queued(&row.id)? else {
+                continue;
+            };
+            handle.write_user_message_from(
+                &item.id,
+                &item.text,
+                item.issued_at.min(now_ms()),
+                item.from_chat_id.as_deref(),
+            )?;
+            // The row's last-message marker moves as it does for a dispatched
+            // prompt, so the sidebar's unseen mark fires for a taken message.
+            if let Some(workspace) = self.workspace() {
+                workspace.note_message(chat_id, &item.text);
+            }
+            taken.push(item);
+        }
+        if !taken.is_empty() {
+            handle.publish_queue();
+            self.save_snapshot(&handle);
+        }
+        Ok(taken)
+    }
+
+    /// Thread tools: open a peer chat in the creator's project (its cwd and
+    /// run configuration, with any of harness/model/reasoning overridden if
+    /// asked) stamped `createdByChatId`, and hand it `prompt` as a message
+    /// from the creator.
+    pub async fn create_thread(
+        &self,
+        from_chat_id: &str,
+        prompt: &str,
+        title: Option<&str>,
+        harness: Option<zeron_proto::HarnessId>,
+        model: Option<&str>,
+        reasoning: Option<zeron_proto::ReasoningLevel>,
+    ) -> Result<String, EngineError> {
+        let workspace = self
+            .workspace()
+            .ok_or_else(|| EngineError::Other("workspace not wired".into()))?;
+        let from = workspace
+            .chat(from_chat_id)?
+            .ok_or_else(|| EngineError::Other(format!("no such chat: {from_chat_id}")))?;
+        let live = workspace
+            .read_chats()?
+            .iter()
+            .filter(|chat| {
+                !chat.archived && chat.created_by_chat_id.as_deref() == Some(from_chat_id)
+            })
+            .count();
+        if live >= MAX_CREATED_THREADS {
+            return Err(EngineError::Other(format!(
+                "this thread already has {live} open threads it created; archive one first"
+            )));
+        }
+        let mut config = from.config.clone();
+        let model = model.map(str::trim).filter(|model| !model.is_empty());
+        if harness.is_some() || model.is_some() || reasoning.is_some() {
+            let config = config.get_or_insert_with(|| zeron_proto::ChatConfig {
+                harness: self.inner.config.default_harness,
+                model: None,
+                reasoning: None,
+                model_options: Default::default(),
+                sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+                permission_mode: zeron_proto::PermissionMode::Ask,
+            });
+            if let Some(harness) = harness {
+                config.harness = harness;
+            }
+            if let Some(model) = model {
+                config.model = Some(model.to_string());
+            }
+            if let Some(reasoning) = reasoning {
+                config.reasoning = Some(reasoning);
+            }
+        }
+        let chat_id = new_id();
+        workspace.create_chat_from(
+            &chat_id,
+            from.space_id.as_deref(),
+            Some(&from.device_id),
+            config,
+            from.cwd.clone(),
+            Some(from_chat_id),
+        )?;
+        if let Some(title) = title.map(str::trim).filter(|title| !title.is_empty()) {
+            workspace.rename_chat(&chat_id, title)?;
+        }
+        self.queue_thread_message(&chat_id, from_chat_id, prompt)
+            .await?;
+        Ok(chat_id)
     }
 
     /// Retype a queued message. Empty text deletes the row — emptying the box
@@ -3231,7 +3418,23 @@ impl DocHost {
         // therefore wait without disturbing the active turn's runway, then
         // anchor the prompt only once this exact row reaches the transcript.
         let message_id = item.id.clone();
-        let prompt = queued_message_prompt(&item.text, &item.attachments);
+        let mut prompt = queued_message_prompt(&item.text, &item.attachments);
+        if let Some(from) = &item.from_chat_id {
+            // The entry keeps the raw text with its provenance; only what the
+            // harness sees carries the framing. Written first so the
+            // dispatch's own idempotent write finds it.
+            handle.write_user_message_from(
+                &message_id,
+                &item.text,
+                item.issued_at.min(now_ms()),
+                Some(from),
+            )?;
+            let title = self
+                .workspace()
+                .and_then(|ws| ws.chat(from).ok().flatten())
+                .and_then(|chat| chat.title);
+            prompt = thread_message_prompt(from, title.as_deref(), &prompt);
+        }
         if send == QueueSend::Steer {
             match sessions
                 .steer(chat_id, &prompt, Some(message_id.clone()))
@@ -4497,6 +4700,7 @@ impl DocHost {
             text: prompt.to_string(),
             attachments: Vec::new(),
             hold_for_turn_end: false,
+            from_chat_id: None,
             issued_by: self.inner.config.device_id.clone(),
             issued_at: now_ms(),
             edited_at: None,
@@ -4757,6 +4961,7 @@ mod transfer_progress_tests {
                     device_id: "remote".into(),
                     status: None,
                     continuation_of: None,
+                    from_chat_id: None,
                 })
                 .unwrap();
         }

@@ -69,6 +69,7 @@ fn controls() -> (RunControls, mpsc::Sender<SteerMessage>, CancellationToken) {
         }),
         steering: steer_rx,
         interrupt: token.clone(),
+        tool_server: None,
     };
     (controls, steer_tx, token)
 }
@@ -95,6 +96,39 @@ fn dones(events: &[AgentEvent]) -> Vec<(DoneStatus, Option<String>)> {
             _ => None,
         })
         .collect()
+}
+
+#[tokio::test]
+async fn thread_tools_ride_the_session_new_mcp_servers_list() {
+    let (mut with_tools, _steer, _token) = controls();
+    with_tools.tool_server = Some(zeron_harness::ToolServer {
+        command: "/opt/zeron/zeron".into(),
+        args: vec![
+            "mcp".into(),
+            "--chat".into(),
+            "chat-42".into(),
+            "--port".into(),
+            "27654".into(),
+        ],
+    });
+    // The fixture answers "tools on" only when session/new named the zeron
+    // server with its command and args; otherwise it refuses the prompt.
+    let events = run_to_end(&harness(), request("scenario:mcp"), with_tools).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TextDelta { text } if text == "tools on")),
+        "{events:?}"
+    );
+
+    let (without_tools, _steer, _token) = controls();
+    let events = run_to_end(&harness(), request("scenario:mcp"), without_tools).await;
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TextDelta { text } if text == "tools on")),
+        "{events:?}"
+    );
 }
 
 #[tokio::test]

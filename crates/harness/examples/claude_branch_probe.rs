@@ -27,6 +27,7 @@ async fn run(harness: &ClaudeHarness, request: RunRequest) -> Outcome {
                 request_input: Box::new(|_| panic!("probe must not ask for input")),
                 steering,
                 interrupt: CancellationToken::new(),
+                tool_server: None,
             },
         )
         .await
@@ -39,16 +40,15 @@ async fn run(harness: &ClaudeHarness, request: RunRequest) -> Outcome {
         error: None,
     };
     loop {
-        let ev = match tokio::time::timeout(std::time::Duration::from_secs(120), stream.next())
-            .await
-        {
-            Ok(Some(ev)) => ev,
-            Ok(None) => break,
-            Err(_) => {
-                eprintln!("--- timed out");
-                std::process::exit(2);
-            }
-        };
+        let ev =
+            match tokio::time::timeout(std::time::Duration::from_secs(120), stream.next()).await {
+                Ok(Some(ev)) => ev,
+                Ok(None) => break,
+                Err(_) => {
+                    eprintln!("--- timed out");
+                    std::process::exit(2);
+                }
+            };
         match ev {
             Ok(AgentEvent::SessionStarted { session_id, .. }) => out.session_id = Some(session_id),
             Ok(AgentEvent::Anchor { role, id, .. }) => match role {
@@ -106,7 +106,11 @@ async fn main() {
     .await;
     println!(
         "turn 1: session={:?} prompt_anchor={:?} reply_anchor={:?} err={:?}\n  {}",
-        one.session_id, one.prompt_anchor, one.reply_anchor, one.error, one.text.trim()
+        one.session_id,
+        one.prompt_anchor,
+        one.reply_anchor,
+        one.error,
+        one.text.trim()
     );
     let session = one.session_id.clone().expect("turn 1 session id");
     let keep = one.reply_anchor.clone().expect("turn 1 reply anchor");
@@ -116,7 +120,11 @@ async fn main() {
     let two = run(&harness, second).await;
     println!(
         "turn 2: session={:?} prompt_anchor={:?} reply_anchor={:?} err={:?}\n  {}",
-        two.session_id, two.prompt_anchor, two.reply_anchor, two.error, two.text.trim()
+        two.session_id,
+        two.prompt_anchor,
+        two.reply_anchor,
+        two.error,
+        two.text.trim()
     );
     let drop = two.prompt_anchor.clone();
 
@@ -132,7 +140,9 @@ async fn main() {
     let three = run(&harness, third).await;
     println!(
         "branch: session={:?} err={:?}\n  {}",
-        three.session_id, three.error, three.text.trim()
+        three.session_id,
+        three.error,
+        three.text.trim()
     );
 
     let mut original = request(
@@ -143,7 +153,9 @@ async fn main() {
     let four = run(&harness, original).await;
     println!(
         "original after branch: session={:?} err={:?}\n  {}",
-        four.session_id, four.error, four.text.trim()
+        four.session_id,
+        four.error,
+        four.text.trim()
     );
 
     let reply = three.text.to_uppercase();

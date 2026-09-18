@@ -75,6 +75,7 @@ fn controls(
         }),
         steering: steer_rx,
         interrupt: token.clone(),
+        tool_server: None,
     };
     (controls, steer_tx, token)
 }
@@ -91,6 +92,49 @@ async fn run_to_end(
     )
     .await
     .expect("run finished in time")
+}
+
+#[tokio::test]
+async fn thread_tools_ride_an_additive_mcp_config_on_a_normal_run() {
+    let (mut with_tools, _steer, _token) = controls("A");
+    with_tools.tool_server = Some(zeron_harness::ToolServer {
+        command: "/opt/zeron/zeron".into(),
+        args: vec![
+            "mcp".into(),
+            "--chat".into(),
+            "chat-42".into(),
+            "--port".into(),
+            "27654".into(),
+        ],
+    });
+    // The fixture exits 1 (no result frame) unless --mcp-config names the
+    // zeron server with the chat and no --strict-mcp-config is present.
+    let events = run_to_end(&harness(), request("scenario:mcp"), with_tools).await;
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            }
+        )),
+        "{events:?}"
+    );
+
+    // Without a server the normal run carries no --mcp-config at all: the
+    // fixture's mcp scenario then fails, which is the falsifier here.
+    let (without_tools, _steer, _token) = controls("A");
+    let events = run_to_end(&harness(), request("scenario:mcp"), without_tools).await;
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            }
+        )),
+        "{events:?}"
+    );
 }
 
 #[tokio::test]
@@ -306,6 +350,7 @@ async fn ask_user_question_round_trips_through_the_control_channel() {
         }),
         steering: steer_rx,
         interrupt: token.clone(),
+        tool_server: None,
     };
     let events = run_to_end(&harness(), request("scenario:askuser"), controls).await;
 

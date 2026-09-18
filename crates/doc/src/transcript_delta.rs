@@ -169,6 +169,7 @@ fn try_text_append(prev: &SessionMessageEntry, next: &SessionMessageEntry) -> Op
         || prev.device_id != next.device_id
         || prev.status != next.status
         || prev.continuation_of != next.continuation_of
+        || prev.from_chat_id != next.from_chat_id
         || prev.parts.len() != next.parts.len()
     {
         return None;
@@ -360,6 +361,7 @@ mod tests {
             device_id: "dev".into(),
             status: None,
             continuation_of: None,
+            from_chat_id: None,
         }
     }
 
@@ -543,6 +545,7 @@ mod context_update_tests {
             device_id: "host".into(),
             status: Some(crate::MessageStatus::Streaming),
             continuation_of: None,
+            from_chat_id: None,
         };
         let baseline = TranscriptBaseline::capture(&[entry.clone()]);
         assert!(baseline.covers(&entry));

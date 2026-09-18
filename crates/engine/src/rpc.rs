@@ -108,6 +108,29 @@ struct CreateSidechatParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct CreateThreadParams {
+    from_chat_id: String,
+    prompt: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    harness: Option<HarnessId>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    reasoning: Option<zeron_proto::ReasoningLevel>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SendThreadMessageParams {
+    chat_id: String,
+    from_chat_id: String,
+    text: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ForkChatParams {
     source_chat_id: String,
     entry_id: String,
@@ -465,6 +488,10 @@ enum MutateParams {
         /// Cwd override (isolated-worktree path); default = the space's folder.
         #[serde(default)]
         cwd: Option<String>,
+        /// The chat whose agent is opening this one (thread tools); sidebar
+        /// grouping only.
+        #[serde(default)]
+        created_by_chat_id: Option<String>,
     },
     /// Create a space (device + folder pair). Idempotent by id; a live
     /// duplicate `(deviceId, path)` no-ops. `gitDetected` is seeded from the
@@ -853,14 +880,16 @@ impl EngineRpc {
                 config,
                 branch,
                 cwd,
+                created_by_chat_id,
             } => {
                 self.workspace
-                    .create_chat(
+                    .create_chat_from(
                         &chat_id,
                         space_id.as_deref(),
                         device_id.as_deref(),
                         config,
                         cwd,
+                        created_by_chat_id.as_deref(),
                     )
                     .map_err(failed)?;
                 if let Some(branch) = branch.as_deref().filter(|b| !b.is_empty()) {
@@ -1466,6 +1495,48 @@ impl RpcService for EngineRpc {
                     .create_sidechat(&p.source_chat_id, &p.chat_id)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&chat)
+            }
+            methods::CREATE_THREAD => {
+                let p: CreateThreadParams = parse_params(params)?;
+                let chat_id = self
+                    .doc_host
+                    .create_thread(
+                        &p.from_chat_id,
+                        &p.prompt,
+                        p.title.as_deref(),
+                        p.harness,
+                        p.model.as_deref(),
+                        p.reasoning,
+                    )
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "chatId": chat_id }))
+            }
+            methods::SEND_THREAD_MESSAGE => {
+                let p: SendThreadMessageParams = parse_params(params)?;
+                let id = self
+                    .doc_host
+                    .queue_thread_message(&p.chat_id, &p.from_chat_id, &p.text)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "id": id }))
+            }
+            methods::TAKE_THREAD_MESSAGES => {
+                let p: ChatParams = parse_params(params)?;
+                let messages: Vec<serde_json::Value> = self
+                    .doc_host
+                    .take_thread_messages(&p.chat_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?
+                    .into_iter()
+                    .map(|row| {
+                        serde_json::json!({
+                            "id": row.id,
+                            "fromChatId": row.from_chat_id,
+                            "text": row.text,
+                        })
+                    })
+                    .collect();
+                RpcReply::value(&serde_json::json!({ "messages": messages }))
             }
             methods::QUEUE_COMMAND => {
                 let p: QueueCommandParams = parse_params(params)?;
@@ -2559,6 +2630,30 @@ impl RpcService for EngineRpc {
 mod tests {
     use super::*;
 
+    #[test]
+    fn create_thread_params_refuse_an_unknown_harness_or_reasoning_level() {
+        let base = serde_json::json!({ "fromChatId": "a", "prompt": "go" });
+        let mut bad_reasoning = base.clone();
+        bad_reasoning["reasoning"] = "very-high".into();
+        assert!(matches!(
+            parse_params::<CreateThreadParams>(bad_reasoning),
+            Err(RpcError::BadParams(_))
+        ));
+        let mut bad_harness = base.clone();
+        bad_harness["harness"] = "gemini".into();
+        assert!(matches!(
+            parse_params::<CreateThreadParams>(bad_harness),
+            Err(RpcError::BadParams(_))
+        ));
+        let p: CreateThreadParams = parse_params(serde_json::json!({
+            "fromChatId": "a", "prompt": "go", "harness": "codex", "model": "gpt-5", "reasoning": "xhigh"
+        }))
+        .unwrap();
+        assert_eq!(p.harness, Some(HarnessId::Codex));
+        assert_eq!(p.model.as_deref(), Some("gpt-5"));
+        assert_eq!(p.reasoning, Some(zeron_proto::ReasoningLevel::XHigh));
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn local_opening_tail_arrives_before_full_mirror_and_keeps_all_history() {
         use crate::doc_host::{DocHost, DocHostConfig};
@@ -2589,6 +2684,7 @@ mod tests {
                 device_id: "host".into(),
                 status: None,
                 continuation_of: None,
+                from_chat_id: None,
             })
             .unwrap();
         // Hold publication blocked: the opening must not await the full mirror.
@@ -2799,6 +2895,7 @@ mod context_usage_tests {
                     device_id: "writer".into(),
                     status: Some(zeron_doc::MessageStatus::Streaming),
                     continuation_of: None,
+                    from_chat_id: None,
                 })
                 .unwrap()
         };
@@ -2919,6 +3016,7 @@ mod context_usage_tests {
             device_id: "host".into(),
             status: Some(zeron_doc::MessageStatus::Streaming),
             continuation_of: None,
+            from_chat_id: None,
         };
         handle.doc().push_message(&entry("local-before")).unwrap();
         source.update_context_usage(Some(10), Some(100)).unwrap();

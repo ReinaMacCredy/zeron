@@ -276,6 +276,7 @@ fn chat(id: &str, device_id: &str) -> Chat {
         last_seen_at: None,
         room_gen: None,
         sidechat_source_chat_id: None,
+        created_by_chat_id: None,
     }
 }
 
@@ -387,6 +388,25 @@ fn a_sidechat_row_round_trips_its_source() {
     assert_eq!(chats[0].sidechat_source_chat_id, None);
     assert_eq!(chats[1].sidechat_source_chat_id.as_deref(), Some("chat-1"));
     assert_eq!(chats[1], sidechat);
+}
+
+#[test]
+fn an_agent_created_row_round_trips_its_creator_across_devices() {
+    let mut a = RegistryDoc::new("dev-a");
+    let mut b = RegistryDoc::new("dev-b");
+    let mut created = chat("chat-2", "dev-a");
+    created.created_by_chat_id = Some("chat-1".into());
+    a.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+    a.upsert_chat(&created).unwrap();
+    assert_eq!(a.read_chats().unwrap()[1], created);
+
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    let on_b = b.read_chats().unwrap();
+    assert_eq!(on_b.len(), 2);
+    assert_eq!(on_b[1].created_by_chat_id.as_deref(), Some("chat-1"));
+    assert_eq!(on_b[0].created_by_chat_id, None);
 }
 
 #[test]

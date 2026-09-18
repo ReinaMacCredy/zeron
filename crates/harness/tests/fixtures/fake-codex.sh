@@ -148,6 +148,22 @@ case "$turnline" in
   emit '{"method":"turn/completed","params":{"turn":{"id":"publication-turn","status":"completed"}}}'
   ;;
 
+*scenario:mcp*)
+  # A normal run with thread tools: the zeron server rides config-layer
+  # overrides on thread/start, and the user's own servers stay enabled.
+  for want in '"mcp_servers.zeron.command":"/opt/zeron/zeron"' '"mcp_servers.zeron.args":["mcp","--chat","chat-42","--port","27654"]' '"mcp_servers.zeron.tool_timeout_sec":1800'; do
+    has "$thread_line" "$want" || { fail_turn "$tid" "thread tools missing: $want"; exit 0; }
+  done
+  if has "$thread_line" '"mcp_servers.test.enabled":false'; then
+    fail_turn "$tid" "user servers were disabled"; exit 0
+  fi
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-mcp\"}}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-mcp"}}}'
+  emit '{"method":"item/agentMessage/delta","params":{"itemId":"m1","delta":"tools on"}}'
+  emit '{"method":"item/completed","params":{"item":{"id":"m1","type":"agentMessage","text":"tools on"}}}'
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-mcp"}}}'
+  ;;
+
 *scenario:happy*)
   # Verify the turn/start + thread/start params the harness must send.
   for want in '"method":"turn/start"' '"effort":"ultra"' '"model":"gpt-5.6-sol"' \

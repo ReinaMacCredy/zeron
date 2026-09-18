@@ -906,6 +906,10 @@ impl RegistryDoc {
                 "sidechatSourceChatId",
                 opt_str(chat.sidechat_source_chat_id.as_deref()),
             ),
+            (
+                "createdByChatId",
+                opt_str(chat.created_by_chat_id.as_deref()),
+            ),
         ]);
         self.write(KIND_CHATS, &chat.id.clone(), OpKind::Upsert, set);
         Ok(())
@@ -1289,6 +1293,10 @@ impl RegistryDoc {
                     (
                         "sidechatSourceChatId",
                         opt_str(chat.sidechat_source_chat_id.as_deref()),
+                    ),
+                    (
+                        "createdByChatId",
+                        opt_str(chat.created_by_chat_id.as_deref()),
                     ),
                 ]),
             );

@@ -74,6 +74,7 @@ fn controls(
         }),
         steering: steer_rx,
         interrupt: token.clone(),
+        tool_server: None,
     };
     (controls, steer_tx, token)
 }
@@ -417,6 +418,7 @@ async fn approvals_round_trip_as_input_requests() {
         }),
         steering: steer_rx,
         interrupt: token.clone(),
+        tool_server: None,
     };
     let mut req = request("scenario:approve");
     req.auto_approve = false;
@@ -1299,6 +1301,77 @@ async fn live_commands_discovery() {
     let h = CodexHarness::new();
     let commands = h.commands().await.expect("live discovery");
     eprintln!("{} commands, first: {:?}", commands.len(), commands.first());
+}
+
+async fn collect_until_done(
+    stream: futures::stream::BoxStream<'static, Result<AgentEvent, HarnessError>>,
+) -> Vec<AgentEvent> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut stream = stream;
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            let event = event.unwrap();
+            let done = matches!(event, AgentEvent::Done { .. });
+            events.push(event);
+            if done {
+                break;
+            }
+        }
+        events
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn thread_tools_ride_codex_config_overrides_on_a_normal_run() {
+    let (mut with_tools, _steer, token) = controls("Yes");
+    with_tools.tool_server = Some(zeron_harness::ToolServer {
+        command: "/opt/zeron/zeron".into(),
+        args: vec![
+            "mcp".into(),
+            "--chat".into(),
+            "chat-42".into(),
+            "--port".into(),
+            "27654".into(),
+        ],
+    });
+    // The fixture fails the turn unless thread/start carries the zeron
+    // server overrides and leaves the user's own server enabled.
+    let stream = harness()
+        .run(request("scenario:mcp"), with_tools)
+        .await
+        .unwrap();
+    let events = collect_until_done(stream).await;
+    token.cancel();
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            }
+        )),
+        "{events:?}"
+    );
+
+    let (without_tools, _steer, token) = controls("Yes");
+    let stream = harness()
+        .run(request("scenario:mcp"), without_tools)
+        .await
+        .unwrap();
+    let events = collect_until_done(stream).await;
+    token.cancel();
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            }
+        )),
+        "{events:?}"
+    );
 }
 
 #[tokio::test]

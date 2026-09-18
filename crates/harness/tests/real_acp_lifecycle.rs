@@ -16,6 +16,7 @@ async fn live_run(cancel: bool) {
     let controls = RunControls {
         steering,
         interrupt: interrupt.clone(),
+        tool_server: None,
         request_input: Box::new(|_| {
             let (tx, rx) = oneshot::channel();
             let _ = tx.send(Vec::new());

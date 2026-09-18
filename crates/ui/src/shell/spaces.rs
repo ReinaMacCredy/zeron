@@ -152,38 +152,72 @@ fn promote_local_device_group<T>(
 /// regrouped exactly as `render_active_rows` groups it (project or device
 /// sections in first-seen order, local device promoted), or unchanged when the
 /// organization draws one flat list.
-/// Sidechats sit under their source, in the order they already had. A
-/// sidechat whose source is missing from the list renders flat rather than
-/// hidden — it is otherwise unreachable from the sidebar. `true` marks a row
-/// that renders nested.
-fn nest_sidechats<T>(rows: Vec<T>, chat: impl Fn(&T) -> &zeron_proto::Chat) -> Vec<(T, bool)> {
-    let ids: std::collections::HashSet<String> =
-        rows.iter().map(|row| chat(row).id.clone()).collect();
-    let owners: Vec<String> = rows.iter().map(|row| chat(row).id.clone()).collect();
-    let sources: Vec<Option<String>> = rows
+/// Linked chats (a sidechat under its source, an agent-created chat under
+/// its creator) sit under their owner, in the order they already had. A link
+/// whose owner is missing from the list renders flat rather than hidden; it
+/// is otherwise unreachable from the sidebar. Depth is two at most: a
+/// sidechat of an agent-created chat follows that chat; any deeper link
+/// renders flat. A sidechat leaves its source where it was; an agent-created
+/// chat lifts its creator's whole group to the earliest position any member
+/// holds (d26), so an active created chat never sinks under a quiet creator.
+/// `true` marks a row that renders nested.
+fn nest_linked_chats<T>(rows: Vec<T>, chat: impl Fn(&T) -> &zeron_proto::Chat) -> Vec<(T, bool)> {
+    let ids: Vec<&str> = rows.iter().map(|row| chat(row).id.as_str()).collect();
+    let position = |id: &str| ids.iter().position(|other| *other == id);
+    // (owner index, lifts the owner's group)
+    let raw: Vec<Option<(usize, bool)>> = rows
         .iter()
         .map(|row| {
-            chat(row)
-                .sidechat_source_chat_id
-                .clone()
-                .filter(|source| ids.contains(source))
+            let chat = chat(row);
+            if let Some(at) = chat.sidechat_source_chat_id.as_deref().and_then(position) {
+                Some((at, false))
+            } else if let Some(at) = chat.created_by_chat_id.as_deref().and_then(position) {
+                Some((at, true))
+            } else {
+                None
+            }
         })
         .collect();
+    let links: Vec<Option<(usize, bool)>> = raw
+        .iter()
+        .map(|link| {
+            link.filter(|(owner, lifts)| match raw[*owner] {
+                None => true,
+                Some((_, owner_lifts)) => owner_lifts && !lifts,
+            })
+        })
+        .collect();
+    let mut owners: Vec<(usize, usize)> = (0..links.len())
+        .filter(|index| links[*index].is_none())
+        .map(|owner| {
+            let anchor = links
+                .iter()
+                .enumerate()
+                .filter(|(_, link)| matches!(link, Some((at, true)) if *at == owner))
+                .map(|(index, _)| index)
+                .fold(owner, usize::min);
+            (anchor, owner)
+        })
+        .collect();
+    owners.sort_unstable();
     let mut slots: Vec<Option<T>> = rows.into_iter().map(Some).collect();
     let mut nested = Vec::with_capacity(slots.len());
-    for index in 0..slots.len() {
-        if sources[index].is_some() {
-            continue;
+    for (_, owner) in owners {
+        if let Some(row) = slots[owner].take() {
+            nested.push((row, false));
         }
-        let Some(row) = slots[index].take() else {
-            continue;
-        };
-        nested.push((row, false));
         for child in 0..slots.len() {
-            if sources[child].as_deref() == Some(owners[index].as_str())
+            if matches!(links[child], Some((at, _)) if at == owner)
                 && let Some(row) = slots[child].take()
             {
                 nested.push((row, true));
+                for grandchild in 0..slots.len() {
+                    if matches!(links[grandchild], Some((at, false)) if at == child)
+                        && let Some(row) = slots[grandchild].take()
+                    {
+                        nested.push((row, true));
+                    }
+                }
             }
         }
     }
@@ -220,7 +254,7 @@ fn grouped_visible_order(
     }
     groups
         .into_iter()
-        .flat_map(|(_, rows)| nest_sidechats(rows, |chat| chat))
+        .flat_map(|(_, rows)| nest_linked_chats(rows, |chat| chat))
         .map(|(chat, _)| chat.id)
         .collect()
 }
@@ -1534,7 +1568,7 @@ impl Shell {
         let mut slot = 0usize;
         let mut rendered = Vec::new();
         for (group, rows) in groups {
-            let rows = nest_sidechats(rows, |row| &row.chat);
+            let rows = nest_linked_chats(rows, |row| &row.chat);
             let mut rendered_rows = Vec::with_capacity(rows.len());
             for (row, nested) in rows {
                 let ActiveChatRow {
@@ -1564,6 +1598,17 @@ impl Shell {
                     None
                 };
                 slot += 1;
+                let created_by: Option<SharedString> = chat
+                    .created_by_chat_id
+                    .as_deref()
+                    .and_then(|creator| {
+                        let state = self.state.read(cx);
+                        let creator = state.chats.iter().find(|row| row.id == creator)?;
+                        Some(transcript::single_line(
+                            creator.title.as_deref().unwrap_or("New session"),
+                        ))
+                    })
+                    .map(SharedString::from);
                 let element = self.render_chat_row(
                     chat.id.clone(),
                     transcript::single_line(
@@ -1575,6 +1620,7 @@ impl Shell {
                     branch.map(SharedString::from),
                     change_request,
                     harness,
+                    created_by,
                     status,
                     is_selected,
                     false,
@@ -3254,7 +3300,7 @@ mod tests {
     use chrono::{TimeZone as _, Utc};
 
     use super::{
-        compare_sidebar_chats, grouped_visible_order, nest_sidechats, promote_local_device_group,
+        compare_sidebar_chats, grouped_visible_order, nest_linked_chats, promote_local_device_group,
     };
     use crate::settings::{SidebarOrganization, SidebarSort};
 
@@ -3282,6 +3328,7 @@ mod tests {
             last_seen_at: None,
             room_gen: None,
             sidechat_source_chat_id: None,
+            created_by_chat_id: None,
         }
     }
 
@@ -3353,7 +3400,7 @@ mod tests {
             sidechat_of("orphan", "gone"),
         ];
 
-        let nested = nest_sidechats(rows, |chat| chat);
+        let nested = nest_linked_chats(rows, |chat| chat);
         let order: Vec<(&str, bool)> = nested
             .iter()
             .map(|(chat, nested)| (chat.id.as_str(), *nested))
@@ -3376,6 +3423,80 @@ mod tests {
         assert_eq!(
             grouped_visible_order(chats, SidebarOrganization::InOneList, false, None),
             ["src", "s1", "other"]
+        );
+    }
+
+    #[test]
+    fn agent_created_chats_lift_their_creator_and_orphans_stay_flat() {
+        let created_by = |id: &str, creator: &str| {
+            let mut chat = chat(id);
+            chat.created_by_chat_id = Some(creator.into());
+            chat
+        };
+        // Attention order: an active created chat outranks everything, its
+        // quiet creator sits third.
+        let rows = vec![
+            created_by("c1", "p"),
+            chat("x"),
+            chat("p"),
+            created_by("c2", "p"),
+            created_by("orphan", "gone"),
+            chat("y"),
+        ];
+
+        let nested = nest_linked_chats(rows, |chat| chat);
+        let order: Vec<(&str, bool)> = nested
+            .iter()
+            .map(|(chat, nested)| (chat.id.as_str(), *nested))
+            .collect();
+        // The creator's group takes c1's slot; the created rows follow it in
+        // their own order; the orphan keeps its place, unindented.
+        assert_eq!(
+            order,
+            [
+                ("p", false),
+                ("c1", true),
+                ("c2", true),
+                ("x", false),
+                ("orphan", false),
+                ("y", false),
+            ]
+        );
+
+        // A sidechat never lifts its source: the source stays where the sort
+        // put it and the sidechat follows.
+        let sidechat_of = |id: &str, source: &str| {
+            let mut chat = chat(id);
+            chat.sidechat_source_chat_id = Some(source.into());
+            chat
+        };
+        let rows = vec![sidechat_of("s1", "p"), chat("x"), chat("p")];
+        let order: Vec<String> = nest_linked_chats(rows, |chat| chat)
+            .into_iter()
+            .map(|(chat, _)| chat.id)
+            .collect();
+        assert_eq!(order, ["x", "p", "s1"]);
+
+        // /sidechat inside a created chat still nests under that chat (the
+        // w10 behavior), and a link any deeper renders flat.
+        let rows = vec![
+            sidechat_of("s", "c"),
+            created_by("c", "p"),
+            chat("p"),
+            created_by("deep", "c"),
+        ];
+        let order: Vec<(String, bool)> = nest_linked_chats(rows, |chat| chat)
+            .into_iter()
+            .map(|(chat, nested)| (chat.id, nested))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                ("p".to_string(), false),
+                ("c".to_string(), true),
+                ("s".to_string(), true),
+                ("deep".to_string(), false),
+            ]
         );
     }
 

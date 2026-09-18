@@ -53,6 +53,10 @@ pub struct SessionMessageEntry {
     pub status: Option<MessageStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation_of: Option<String>,
+    /// The thread whose agent wrote this user entry (thread tools); `None`
+    /// for a person's own prompt. Rendered as provenance, never as text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_chat_id: Option<String>,
 }
 
 /// The doc-resident flat part map (`DocMessagePart` in TS). Distinct from the app-layer
@@ -802,6 +806,9 @@ fn write_entry_scalar_fields(map: &LoroMap, entry: &SessionMessageEntry) -> Resu
     if let Some(continuation_of) = &entry.continuation_of {
         map.insert("continuationOf", continuation_of.as_str())?;
     }
+    if let Some(from_chat_id) = &entry.from_chat_id {
+        map.insert("fromChatId", from_chat_id.as_str())?;
+    }
     Ok(())
 }
 
@@ -897,6 +904,8 @@ fn entry_from_json(v: serde_json::Value) -> Result<SessionMessageEntry, DocError
         status: Option<MessageStatus>,
         #[serde(default)]
         continuation_of: Option<String>,
+        #[serde(default)]
+        from_chat_id: Option<String>,
     }
     match serde_json::from_value::<RawEntry>(v.clone()) {
         Ok(raw) => Ok(SessionMessageEntry {
@@ -907,6 +916,7 @@ fn entry_from_json(v: serde_json::Value) -> Result<SessionMessageEntry, DocError
             device_id: raw.device_id,
             status: raw.status,
             continuation_of: raw.continuation_of,
+            from_chat_id: raw.from_chat_id,
         }),
         // 2026-08-10 incident rule: a missing field must cost AT MOST what
         // the field carried — never the entry, never the transcript. Rooms
@@ -971,6 +981,7 @@ fn salvage_entry(
             .get("status")
             .and_then(|s| serde_json::from_value(s.clone()).ok()),
         continuation_of: str_field("continuationOf"),
+        from_chat_id: str_field("fromChatId"),
     })
 }
 
@@ -1110,6 +1121,7 @@ impl<'a> SegmentWriter<'a> {
                 device_id: device_id.into(),
                 status: Some(MessageStatus::Streaming),
                 continuation_of: None,
+                from_chat_id: None,
             },
         )?;
         map.insert_container("parts", LoroList::new())?;
@@ -1373,6 +1385,7 @@ mod tests {
                 device_id: "device".into(),
                 status: Some(MessageStatus::Complete),
                 continuation_of: (segment > 0).then(|| "segment-0".into()),
+                from_chat_id: None,
             })
             .unwrap();
         }
@@ -1449,6 +1462,7 @@ mod tests {
             device_id: "dev-a".into(),
             status: Some(MessageStatus::Complete),
             continuation_of: None,
+            from_chat_id: None,
         }
     }
 
@@ -1617,6 +1631,7 @@ mod tests {
             // The orphan case: the run died and recovery stamped the entry.
             status: Some(MessageStatus::Aborted),
             continuation_of: None,
+            from_chat_id: None,
         })
         .unwrap();
         assert!(!doc.resolve_input("nope").unwrap());
@@ -1880,6 +1895,7 @@ mod tests {
             device_id: "dev-a".into(),
             status: Some(MessageStatus::Complete),
             continuation_of: None,
+            from_chat_id: None,
         })
         .unwrap();
         let entries = doc.read_entries().unwrap();

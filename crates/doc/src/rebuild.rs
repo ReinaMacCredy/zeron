@@ -189,6 +189,7 @@ mod tests {
             device_id: "dev-a".into(),
             status: Some(MessageStatus::Complete),
             continuation_of: None,
+            from_chat_id: None,
         }
     }
 

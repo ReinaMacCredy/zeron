@@ -365,6 +365,7 @@ mod tests {
             last_seen_at: None,
             room_gen: None,
             sidechat_source_chat_id: None,
+            created_by_chat_id: None,
         }
     }
 

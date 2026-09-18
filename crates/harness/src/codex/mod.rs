@@ -870,6 +870,8 @@ async fn run_session(session: Session) {
         request_input,
         mut steering,
         interrupt,
+        tool_server,
+        ..
     } = controls;
     let request_input = Arc::new(request_input);
 
@@ -922,6 +924,23 @@ async fn run_session(session: Session) {
                     "features.memories": false
                 }),
             );
+        } else if let Some(server) = &tool_server {
+            // The thread tools as a config-layer MCP server: dotted keys
+            // merge over the user's own `mcp_servers` table instead of
+            // replacing it. Title-only runs never get it.
+            let overrides = p
+                .entry("config")
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .expect("config overrides are an object");
+            overrides.insert(
+                "mcp_servers.zeron.command".into(),
+                Value::String(server.command.clone()),
+            );
+            overrides.insert("mcp_servers.zeron.args".into(), json!(server.args));
+            // wait_threads blocks up to 30 min; Codex's own per-call ceiling
+            // would cut it short (`tool_timeout_sec` in the 0.154.0 schema).
+            overrides.insert("mcp_servers.zeron.tool_timeout_sec".into(), json!(1800));
         }
         p.insert("cwd".into(), Value::String(request.cwd.clone()));
         p.insert("approvalPolicy".into(), approval_policy.into());
@@ -1596,6 +1615,7 @@ async fn compact_session(session: CompactSession) {
         request_input,
         steering: _steering,
         interrupt,
+        ..
     } = controls;
     let request_input = Arc::new(request_input);
 

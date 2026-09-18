@@ -983,6 +983,9 @@ pub enum RowKind {
         badges: Arc<Vec<crate::badges::MessageBadge>>,
         /// Optimistic echo not yet confirmed by a doc frame.
         pending: bool,
+        /// The thread whose agent sent this entry (thread tools); drawn as
+        /// provenance above a left-aligned bubble instead of the user's own.
+        from_chat_id: Option<SharedString>,
     },
     /// One top-level markdown block of a completed message.
     Markdown {
@@ -1289,6 +1292,7 @@ pub fn rows_for_entry(
                 attachments: Arc::new(parsed.attachments),
                 badges: Arc::new(badges),
                 pending,
+                from_chat_id: entry.from_chat_id.clone().map(SharedString::from),
             },
             entry_id,
             // User rows always carry the strip (chat-view.tsx: whenever
@@ -3049,6 +3053,8 @@ pub enum TranscriptEvent {
     /// tab when it has uncommitted changes, else the Files editor. `path` is
     /// as the tool call named it (absolute or cwd-relative).
     OpenFile { chat_id: String, path: String },
+    /// A peer message's "From <thread>" header: open that thread.
+    OpenChat { chat_id: String },
 }
 
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
@@ -6051,16 +6057,116 @@ impl Transcript {
                 attachments,
                 badges,
                 pending,
+                from_chat_id,
             } => {
                 let attachments = attachments.clone();
                 let badges = badges.clone();
                 let text = text.clone();
                 let mentions = mentions.clone();
                 let pending = *pending;
+                // An inter-thread message (thread tools) is a peer speaking:
+                // a "→ from <thread>" rule carrying the sender's harness mark
+                // and clock time, then plain prose. Never the user's own
+                // right-aligned bubble, and no accent: the rule is the same
+                // hairline the system dividers use (owner pick C3, 2026-09-18).
+                let peer: Option<(SharedString, Option<zeron_proto::HarnessId>)> =
+                    from_chat_id.as_ref().map(|from| {
+                        let state = self.state.read(cx);
+                        let chat = state
+                            .chats
+                            .iter()
+                            .find(|chat| chat.id.as_str() == from.as_ref());
+                        let title = chat
+                            .and_then(|chat| chat.title.clone())
+                            .map(|title| SharedString::from(single_line(&title)))
+                            .unwrap_or_else(|| from.clone());
+                        let harness = chat.and_then(|chat| chat.config.as_ref().map(|c| c.harness));
+                        (title, harness)
+                    });
+                let mut column = div().w_full().flex().flex_col();
+                if let Some((title, harness)) = &peer {
+                    let clock: Option<SharedString> = row
+                        .timestamp
+                        .and_then(chrono::DateTime::from_timestamp_millis)
+                        .map(|utc| {
+                            utc.with_timezone(&chrono::Local)
+                                .format("%-I:%M %p")
+                                .to_string()
+                                .into()
+                        });
+                    column = column.child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.0))
+                            .pb(px(8.0))
+                            .text_size(crate::typography::ui_rems(11.0))
+                            .text_color(theme.text_muted)
+                            .child(
+                                crate::icons::icon(crate::icons::CHAT_ROUND_LINE)
+                                    .size(px(12.0))
+                                    .flex_none()
+                                    .text_color(theme.text_faint),
+                            )
+                            .child(SharedString::from("From"))
+                            .child({
+                                // The name is the way over: clicking it opens
+                                // the sending thread.
+                                let open_id = from_chat_id.clone().map(|id| id.to_string());
+                                div()
+                                    .id(SharedString::from(format!("{}-from-thread", row.id)))
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .cursor_pointer()
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(theme.text.opacity(0.8))
+                                    .hover(|s| s.text_color(theme.text))
+                                    .when_some(
+                                        harness.map(crate::pickers::harness_brand_icon),
+                                        |el, (path, tint)| {
+                                            el.child(
+                                                crate::icons::icon(path)
+                                                    .size(px(12.0))
+                                                    .flex_none()
+                                                    .text_color(tint.unwrap_or(theme.text_muted)),
+                                            )
+                                        },
+                                    )
+                                    .child(title.clone())
+                                    .when_some(open_id, |el, open_id| {
+                                        el.on_click(cx.listener(move |_, _, _, cx| {
+                                            cx.stop_propagation();
+                                            cx.emit(TranscriptEvent::OpenChat {
+                                                chat_id: open_id.clone(),
+                                            });
+                                        }))
+                                    })
+                            })
+                            .when_some(clock, |el, clock| {
+                                el.child(
+                                    div()
+                                        .font_family(theme.font_mono.clone())
+                                        .text_size(crate::typography::ui_rems(10.0))
+                                        .text_color(theme.text_faint)
+                                        .child(clock),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .h(px(1.0))
+                                    .ml(px(4.0))
+                                    .bg(theme.border.opacity(0.6)),
+                            ),
+                    );
+                }
                 // Attachment thumbnails ride ABOVE the bubble, right-aligned
                 // (chat-view.tsx RowView: UserAttachmentStrip then the text
                 // HStack); image-only sends show no bubble at all.
-                let mut column = div().w_full().flex().flex_col();
                 if !attachments.is_empty() {
                     column = column.child(self.render_user_attachments(
                         &row.id,
@@ -6096,23 +6202,31 @@ impl Transcript {
                     // item can't shrink, `justify_end` pushes the overflow off the
                     // left edge, and long prompts render as one clipped line
                     // instead of wrapping inside the 80% column cap.
+                    let peer_voice = peer.is_some();
                     column = column.child(
-                        div().w_full().flex().justify_end().child(
-                            div()
-                                .min_w_0()
-                                .max_w(px(self.content_width * 0.8))
-                                .bg(crate::theme::user_bubble_bg())
-                                .rounded(px(Theme::BUBBLE_RADIUS))
-                                .px(px(16.0))
-                                .py(px(10.0))
-                                .text_size(crate::typography::ui_rems(14.0))
-                                .line_height(crate::typography::ui_rems(USER_LINE_HEIGHT))
-                                .text_color(theme.text)
-                                .when(pending, |el| el.opacity(0.65))
-                                .child(self.render_user_body(
-                                    &row.id, ix, text, mentions, &theme, window, cx,
-                                )),
-                        ),
+                        div()
+                            .w_full()
+                            .flex()
+                            .when(!peer_voice, |el| el.justify_end())
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .when(peer_voice, |el| el.w_full())
+                                    .when(!peer_voice, |el| {
+                                        el.max_w(px(self.content_width * 0.8))
+                                            .bg(crate::theme::user_bubble_bg())
+                                            .rounded(px(Theme::BUBBLE_RADIUS))
+                                            .px(px(16.0))
+                                            .py(px(10.0))
+                                    })
+                                    .text_size(crate::typography::ui_rems(14.0))
+                                    .line_height(crate::typography::ui_rems(USER_LINE_HEIGHT))
+                                    .text_color(theme.text)
+                                    .when(pending, |el| el.opacity(0.65))
+                                    .child(self.render_user_body(
+                                        &row.id, ix, text, mentions, &theme, window, cx,
+                                    )),
+                            ),
                     );
                 }
                 column.into_any_element()
@@ -9996,6 +10110,7 @@ mod tests {
             device_id: "dev".into(),
             status: Some(status),
             continuation_of: None,
+            from_chat_id: None,
         }
     }
 
@@ -13301,6 +13416,7 @@ mod tests {
             device_id: "dev".into(),
             status: None,
             continuation_of: None,
+            from_chat_id: None,
         };
         let rows = rows_for_entry(&user, true, &mut parse);
         assert_eq!(rows.len(), 1);

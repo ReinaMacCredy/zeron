@@ -352,6 +352,7 @@ impl EngineHandle {
                 None
             }
         };
+        let ipc_bound = ipc_task.is_some();
         let runtime = Arc::new(tokio::sync::Mutex::new(None));
         let runtime_for_boot = runtime.clone();
         let service_for_boot = assembled_service.clone();
@@ -390,6 +391,12 @@ impl EngineHandle {
             match Engine::assemble_runtime_with_lock(&engine_config, auth, profile, lock).await {
                 Ok(engine_runtime) => {
                     let service: Arc<dyn RpcService> = engine_runtime.core().rpc_service();
+                    if ipc_bound {
+                        engine_runtime
+                            .core()
+                            .sessions
+                            .set_tool_server_port(engine_config.ipc_port);
+                    }
                     *runtime_for_boot.lock().await = Some(engine_runtime);
                     if service_for_boot.set(service).is_err() {
                         state_tx.send_replace(DeferredEngineState::Failed(
@@ -3501,6 +3508,7 @@ mod tests {
             last_seen_at: None,
             room_gen: None,
             sidechat_source_chat_id: None,
+            created_by_chat_id: None,
         }
     }
 
@@ -3562,6 +3570,7 @@ mod tests {
             device_id: "dev".into(),
             status: None,
             continuation_of: None,
+            from_chat_id: None,
         }
     }
 
@@ -4425,6 +4434,7 @@ mod tests {
             device_id: "local".into(),
             status: None,
             continuation_of: None,
+            from_chat_id: None,
         };
         state.push_echo("c1", echo.clone());
         // Duplicate pushes dedupe.
