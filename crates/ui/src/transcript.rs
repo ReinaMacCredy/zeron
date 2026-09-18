@@ -1027,6 +1027,13 @@ pub enum RowKind {
         text: SharedString,
         hint: Option<SharedString>,
     },
+    /// The conversation as text, as the engine handed it to `harness` on the
+    /// first turn after a provider switch (`MessagePart::Handoff`): a dashed
+    /// packet under the user bubble showing exactly what crossed.
+    Handoff {
+        harness: zeron_proto::HarnessId,
+        text: SharedString,
+    },
 }
 
 fn generated_image_devices(owner: &str, fallback: &[String]) -> Vec<String> {
@@ -1285,7 +1292,13 @@ pub fn rows_for_entry(
             None => (body, Vec::new()),
         };
         let copy_text = (!text.trim().is_empty()).then(|| SharedString::from(text.clone()));
-        return vec![Row {
+        // The provider-switch packet, when this prompt was the first turn a
+        // new harness saw: its own row under the bubble.
+        let handoff = entry.parts.iter().find_map(|p| match p {
+            MessagePart::Handoff { harness, text, .. } => Some((*harness, text.as_str())),
+            _ => None,
+        });
+        let mut rows = vec![Row {
             id: entry.id.clone().into(),
             version: (raw.len() as u64) << 1 | pending as u64,
             turn_start: true,
@@ -1297,12 +1310,31 @@ pub fn rows_for_entry(
                 pending,
                 from_chat_id: entry.from_chat_id.clone().map(SharedString::from),
             },
-            entry_id,
+            entry_id: entry_id.clone(),
             // User rows always carry the strip (chat-view.tsx: whenever
             // `createdAt` exists — the optimistic echo included).
             timestamp: Some(entry.created_at),
             copy_text,
         }];
+        if let Some((harness, packet)) = handoff {
+            // The strip moves under the packet: it is the entry's last row.
+            let bubble = &mut rows[0];
+            let timestamp = bubble.timestamp.take();
+            let copy_text = bubble.copy_text.take();
+            rows.push(Row {
+                id: format!("{}#handoff", entry.id).into(),
+                version: fnv1a(packet.as_bytes()),
+                turn_start: false,
+                kind: RowKind::Handoff {
+                    harness,
+                    text: packet.to_string().into(),
+                },
+                entry_id,
+                timestamp,
+                copy_text,
+            });
+        }
+        return rows;
     }
 
     if entry.role == MessageRole::System {
@@ -1557,8 +1589,10 @@ pub fn rows_for_entry(
                         });
                     }
                     // Tools and thoughts are grouped by the outer arms;
-                    // nothing reaches here.
-                    MessagePart::Tool { .. } | MessagePart::Reasoning { .. } => {}
+                    // nothing reaches here. A handoff lives on user entries.
+                    MessagePart::Tool { .. }
+                    | MessagePart::Reasoning { .. }
+                    | MessagePart::Handoff { .. } => {}
                 }
             }
         }
@@ -1953,6 +1987,19 @@ pub const BLOB_AFFORDANCE_HEIGHT: f32 = 24.0;
 struct ChipAffordance {
     blob_ref: SharedString,
     label: SharedString,
+}
+
+/// Lines of a provider-switch packet shown before "Show all": enough to see
+/// the instruction and the first exchange, not a 48k-char wall.
+const HANDOFF_COLLAPSED_LINES: usize = 10;
+
+/// "612 chars" up to four digits, "12.3k chars" past that.
+fn handoff_size_label(chars: usize) -> String {
+    if chars < 10_000 {
+        format!("{chars} chars")
+    } else {
+        format!("{:.1}k chars", chars as f64 / 1000.0)
+    }
 }
 
 /// Line cap for a FETCHED full output (a defensive ceiling, not a doc cap —
@@ -6475,6 +6522,9 @@ impl Transcript {
             RowKind::Divider { text, hint } => {
                 divider_row(&row.id, text.clone(), hint.clone(), &theme)
             }
+            RowKind::Handoff { harness, text } => {
+                self.render_handoff(&row.id, *harness, text.clone(), &theme, cx)
+            }
         };
 
         // Hover-revealed metadata strip: a RESERVED 32px lane under the
@@ -6482,7 +6532,7 @@ impl Transcript {
         // flip visibility/content, so none of them shifts the virtualizer.
         // User entries align end (under the bubble), assistant entries start.
         // Both read timestamp first, then the copy action.
-        let is_user_row = matches!(row.kind, RowKind::User { .. });
+        let is_user_row = matches!(row.kind, RowKind::User { .. } | RowKind::Handoff { .. });
         let hovered = self
             .hovered_entry
             .as_ref()
@@ -6842,6 +6892,112 @@ impl Transcript {
             None => None,
         };
         Some(Arc::new(crate::changes::DiffHighlights { old, new }))
+    }
+
+    /// The provider-switch packet under a user bubble: a dashed card whose
+    /// header names the receiving harness and whose body is the packet
+    /// verbatim in mono, clipped to [`HANDOFF_COLLAPSED_LINES`] until the
+    /// footer expands it. The pin rides `folds` like a tool group's.
+    fn render_handoff(
+        &mut self,
+        row_id: &SharedString,
+        harness: zeron_proto::HarnessId,
+        text: SharedString,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let open = self.folds.get(row_id).and_then(|fold| fold.open) == Some(true);
+        let lines: Vec<&str> = text.lines().collect();
+        let total = lines.len();
+        let shown = if open {
+            total
+        } else {
+            total.min(HANDOFF_COLLAPSED_LINES)
+        };
+        let muted = theme.text_muted;
+        let faint = theme.text_faint;
+        let header = div()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .text_size(crate::typography::ui_rems(12.0))
+            .text_color(muted)
+            .child(
+                crate::icons::icon(crate::icons::DOCUMENT)
+                    .size(px(13.0))
+                    .text_color(muted),
+            )
+            .child(SharedString::from(format!(
+                "Context handed to {}",
+                crate::composer::harness_display_name(harness)
+            )))
+            .child(
+                div()
+                    .ml_auto()
+                    .font_family(theme.font_mono.clone())
+                    .text_size(px(10.0))
+                    .text_color(faint)
+                    .child(SharedString::from(format!(
+                        "first turn · {}",
+                        handoff_size_label(text.chars().count())
+                    ))),
+            );
+        let body = div()
+            .w_full()
+            .min_w_0()
+            .pt(px(4.0))
+            .font_family(theme.font_mono.clone())
+            .text_size(px(11.0))
+            .line_height(px(16.0))
+            .text_color(faint)
+            .children(lines.iter().take(shown).map(|line| {
+                div()
+                    .w_full()
+                    .min_h(px(16.0))
+                    .child(SharedString::from(line.to_string()))
+            }));
+        let footer = (total > HANDOFF_COLLAPSED_LINES).then(|| {
+            let toggle_id = row_id.clone();
+            div()
+                .id(SharedString::from(format!("{row_id}-toggle")))
+                .h(px(BLOB_AFFORDANCE_HEIGHT))
+                .flex()
+                .items_center()
+                .text_size(px(TOOL_TEXT_SIZE))
+                .text_color(faint)
+                .cursor_pointer()
+                .hover(|s| s.text_color(muted))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let fold = this.folds.entry(toggle_id.clone()).or_default();
+                    fold.open = Some(!open);
+                    cx.notify();
+                }))
+                .child(SharedString::from(if open {
+                    "Collapse".to_string()
+                } else {
+                    format!("Show all {total} lines")
+                }))
+        });
+        div()
+            .w_full()
+            .pt(px(6.0))
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .rounded(px(12.0))
+                    .border_1()
+                    .border_dashed()
+                    .border_color(crate::theme::hairline(0.14))
+                    .bg(crate::theme::ink(0.02))
+                    .px(px(12.0))
+                    .py(px(10.0))
+                    .child(header)
+                    .child(body)
+                    .children(footer),
+            )
+            .into_any_element()
     }
 
     fn render_tool_group(
@@ -10258,6 +10414,38 @@ mod tests {
         assert!(rows[0].copy_text.is_none());
         // The working trailer reads the last entry; a boundary never spins.
         assert!(!consulting_advisor(std::slice::from_ref(&entry)));
+    }
+
+    #[test]
+    fn a_user_entry_with_a_handoff_part_gets_the_packet_row_and_the_strip_moves_under_it() {
+        let mut entry = assistant(
+            "m3",
+            MessageStatus::Complete,
+            vec![
+                text_part("t0", "third"),
+                MessagePart::Handoff {
+                    id: "m3-handoff".into(),
+                    harness: zeron_proto::HarnessId::Codex,
+                    text: "<provider_switch>\nmoved\n</provider_switch>".into(),
+                },
+            ],
+        );
+        entry.role = MessageRole::User;
+        entry.created_at = 1_700_000_000_000;
+        let rows = rows_for_entry(&entry, false, &mut parse);
+        assert_eq!(rows.len(), 2);
+        assert!(matches!(&rows[0].kind, RowKind::User { text, .. } if text == "third"));
+        assert!(rows[0].timestamp.is_none() && rows[0].copy_text.is_none());
+        assert!(matches!(
+            &rows[1].kind,
+            RowKind::Handoff { harness: zeron_proto::HarnessId::Codex, text }
+                if text == "<provider_switch>\nmoved\n</provider_switch>"
+        ));
+        assert!(!rows[1].turn_start);
+        assert_eq!(rows[1].timestamp, Some(1_700_000_000_000));
+        assert_eq!(rows[1].copy_text.as_deref(), Some("third"));
+        assert_eq!(handoff_size_label(612), "612 chars");
+        assert_eq!(handoff_size_label(12_345), "12.3k chars");
     }
 
     #[test]

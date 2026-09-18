@@ -527,7 +527,7 @@ impl SessionsEngine {
                     prompt: self
                         .inner
                         .harness_prompt(chat_id, &request.prompt, &user_id)
-                        .unwrap_or_else(|| request.prompt.clone()),
+                        .map_or_else(|| request.prompt.clone(), |wrapped| wrapped.prompt),
                     message_id: Some(user_id.clone()),
                 };
                 if steer_tx.try_send(message).is_ok() {
@@ -682,7 +682,7 @@ impl SessionsEngine {
             prompt: self
                 .inner
                 .harness_prompt(chat_id, prompt, &user_id)
-                .unwrap_or_else(|| prompt.to_string()),
+                .map_or_else(|| prompt.to_string(), |wrapped| wrapped.prompt),
             message_id: Some(user_id.clone()),
         };
         {
@@ -1448,12 +1448,20 @@ struct Anchors {
     dead: std::collections::HashSet<String>,
 }
 
-/// What a harness receives on the first turn after a provider switch: the
-/// conversation so far as text, then the typed message.
-fn provider_switch_prompt(typed: &str, history: &str) -> String {
+/// What a harness receives ahead of the typed message on the first turn after
+/// a provider switch: the conversation so far as text. Recorded on the user
+/// entry verbatim, so the transcript shows exactly what crossed.
+fn provider_switch_context(history: &str) -> String {
     format!(
-        "<provider_switch>\nThis chat was moved to you from another agent. Its conversation so far is below as plain text; that agent's tool results and file state were not carried over. Continue from where it left off.\n</provider_switch>\n\n<previous_conversation>\n{history}\n</previous_conversation>\n\n<latest_user_message>\n{typed}\n</latest_user_message>"
+        "<provider_switch>\nThis chat was moved to you from another agent. Its conversation so far is below as plain text; that agent's tool results and file state were not carried over. Continue from where it left off.\n</provider_switch>\n\n<previous_conversation>\n{history}\n</previous_conversation>"
     )
+}
+
+/// What crosses into the harness in place of the typed text, and the
+/// provider-switch packet inside it when this is that first turn.
+struct HarnessPrompt {
+    prompt: String,
+    handoff: Option<String>,
 }
 
 #[derive(Default)]
@@ -1470,9 +1478,17 @@ impl Inner {
     /// is gone, and the new one has never seen it). `None` leaves the typed
     /// text as is. `user_entry_id` is the entry this prompt writes; it is not
     /// part of the history.
-    fn harness_prompt(&self, chat_id: &str, typed: &str, user_entry_id: &str) -> Option<String> {
+    fn harness_prompt(
+        &self,
+        chat_id: &str,
+        typed: &str,
+        user_entry_id: &str,
+    ) -> Option<HarnessPrompt> {
         if let Some(prompt) = self.sidechat_harness_prompt(chat_id, typed) {
-            return Some(prompt);
+            return Some(HarnessPrompt {
+                prompt,
+                handoff: None,
+            });
         }
         if !self.session_tombstoned(chat_id) {
             return None;
@@ -1489,7 +1505,14 @@ impl Inner {
             .filter(|entry| entry.id != user_entry_id)
             .collect();
         let history = bounded_source_copy(&history, SIDECHAT_CONTEXT_BUDGET_CHARS);
-        (!history.is_empty()).then(|| provider_switch_prompt(typed, &history))
+        if history.is_empty() {
+            return None;
+        }
+        let context = provider_switch_context(&history);
+        Some(HarnessPrompt {
+            prompt: format!("{context}\n\n<latest_user_message>\n{typed}\n</latest_user_message>"),
+            handoff: Some(context),
+        })
     }
 
     /// What a sidechat's harness receives in place of the typed text: the
@@ -2430,11 +2453,28 @@ async fn drive_run(
     });
     // After the retry snapshot and the titler's capture, both of which want the
     // typed text: only what crosses into the harness carries the sidechat wrap.
-    let request =
-        match inner.harness_prompt(&chat_id, &request.prompt, &resume_state.user_message_id) {
-            Some(prompt) => RunRequest { prompt, ..request },
-            None => request,
-        };
+    let request = match inner.harness_prompt(
+        &chat_id,
+        &request.prompt,
+        &resume_state.user_message_id,
+    ) {
+        Some(HarnessPrompt { prompt, handoff }) => {
+            if let Some(text) = handoff {
+                // Idempotent by part id: the startup-crash retry runs this
+                // again against the same entry.
+                let part = MessagePart::Handoff {
+                    id: format!("{}-handoff", resume_state.user_message_id),
+                    harness: harness_id,
+                    text,
+                };
+                if let Err(err) = doc.append_part(&resume_state.user_message_id, &part) {
+                    tracing::warn!(chat = %chat_id, error = %err, "provider-switch packet not recorded");
+                }
+            }
+            RunRequest { prompt, ..request }
+        }
+        None => request,
+    };
     let mut stream = match harness.run(request, controls).await {
         Ok(stream) => stream,
         Err(err) => {

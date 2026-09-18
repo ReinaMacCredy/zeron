@@ -325,15 +325,46 @@ async fn the_new_harness_starts_fresh_with_the_conversation_as_text_then_resumes
         2,
         "the old harness is not run again"
     );
-    // The doc keeps the typed text, not the handover.
+    // The doc keeps the typed text; the handover rides the same entry as its
+    // own part, verbatim, so the transcript can show what crossed.
     let doc = entries(&rig.core, CHAT);
-    assert_eq!(entry_text(&doc[doc.len() - 2]), "third");
+    let prompt = &doc[doc.len() - 2];
+    assert_eq!(entry_text(prompt), "third");
+    assert_eq!(prompt.parts.len(), 2);
+    assert!(
+        matches!(
+            &prompt.parts[1],
+            MessagePart::Handoff { id, harness: HarnessId::Pi, text }
+                if id == "m3-handoff" && seen[0].prompt.starts_with(text.as_str())
+                    && text.ends_with("</previous_conversation>")
+        ),
+        "{:?}",
+        prompt.parts[1]
+    );
     assert_eq!(rig.session(CHAT).as_deref(), Some("New-sess"));
 
     rig.turn(CHAT, "fourth", "m4").await;
     let seen = rig.new.runs.lock().unwrap().clone();
     assert_eq!(seen[1].prompt, "fourth");
     assert_eq!(seen[1].resume.as_deref(), Some("New-sess"));
+    let doc = entries(&rig.core, CHAT);
+    assert_eq!(
+        doc[doc.len() - 2].parts.len(),
+        1,
+        "only the first turn after the switch carries a packet"
+    );
+
+    // Switching back hands the conversation over again, and the recorded
+    // packet is not conversation: it never nests inside the next one.
+    rig.switch_to("mock", true).await;
+    rig.turn(CHAT, "fifth", "m5").await;
+    let seen = rig.old.runs.lock().unwrap().clone();
+    let last = &seen.last().unwrap().prompt;
+    assert_eq!(last.matches("<provider_switch>").count(), 1, "{last}");
+    assert!(
+        last.contains("Assistant: New answer 1\n\nUser: fourth\n\nAssistant: New answer 2\n</previous_conversation>"),
+        "{last}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

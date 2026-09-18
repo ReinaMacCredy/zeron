@@ -5,7 +5,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use zeron_proto::{AgentEvent, SUBAGENT_INPUT_KEEP, ToolCall, ToolDiff, UserInputQuestion};
+use zeron_proto::{
+    AgentEvent, HarnessId, SUBAGENT_INPUT_KEEP, ToolCall, ToolDiff, UserInputQuestion,
+};
 
 use crate::constants::MSG_INLINE_MAX;
 
@@ -143,6 +145,16 @@ pub enum MessagePart {
         id: String,
         text: String,
     },
+    /// The conversation as text, as handed to `harness` on its first turn
+    /// under an already-running chat (a provider switch). Sits on that turn's
+    /// user entry. Its own kind, not a `Text` part: the next switch's copy
+    /// collects `Text` only, so a packet never nests inside a later packet,
+    /// and older readers degrade it to an empty part like `Reasoning`.
+    Handoff {
+        id: String,
+        harness: HarnessId,
+        text: String,
+    },
     #[serde(rename_all = "camelCase")]
     Tool {
         id: String,
@@ -212,6 +224,7 @@ impl MessagePart {
             MessagePart::Text { id, .. }
             | MessagePart::Image { id, .. }
             | MessagePart::Reasoning { id, .. }
+            | MessagePart::Handoff { id, .. }
             | MessagePart::Tool { id, .. }
             | MessagePart::Input { id, .. }
             | MessagePart::Error { id, .. } => id,
@@ -220,7 +233,9 @@ impl MessagePart {
 
     pub fn byte_len(&self) -> usize {
         match self {
-            MessagePart::Text { text, .. } | MessagePart::Reasoning { text, .. } => text.len(),
+            MessagePart::Text { text, .. }
+            | MessagePart::Reasoning { text, .. }
+            | MessagePart::Handoff { text, .. } => text.len(),
             MessagePart::Tool {
                 call,
                 output,

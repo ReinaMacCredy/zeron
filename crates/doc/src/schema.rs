@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::commands::{SessionCommandEntry, SessionCommandStatus};
 use crate::constants::{SESSION_SCHEMA_VERSION, TAIL_MESSAGE_COUNT};
 use crate::parts::{MessagePart, MessageStatus, SubagentStatus};
+use zeron_proto::HarnessId;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DocError {
@@ -80,6 +81,12 @@ struct DocPartJson {
     /// transcripts; on this field they degrade to an invisible empty part.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reasoning: Option<String>,
+    /// Packet body + receiving harness for `kind: "handoff"` (additive; off
+    /// `text` for the same reason as `reasoning`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    handoff: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    harness: Option<HarnessId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     call: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -146,6 +153,13 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             id: id.clone(),
             kind: "reasoning".into(),
             reasoning: Some(text.clone()),
+            ..Default::default()
+        },
+        MessagePart::Handoff { id, harness, text } => DocPartJson {
+            id: id.clone(),
+            kind: "handoff".into(),
+            handoff: Some(text.clone()),
+            harness: Some(*harness),
             ..Default::default()
         },
         MessagePart::Tool {
@@ -254,6 +268,17 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
         "reasoning" => MessagePart::Reasoning {
             id: p.id,
             text: p.reasoning.unwrap_or_default(),
+        },
+        "handoff" => match p.harness {
+            Some(harness) => MessagePart::Handoff {
+                id: p.id,
+                harness,
+                text: p.handoff.unwrap_or_default(),
+            },
+            None => MessagePart::Text {
+                id: p.id,
+                text: String::new(),
+            },
         },
         _ => MessagePart::Text {
             id: p.id,
@@ -694,6 +719,19 @@ impl SessionDoc {
         part_id: &str,
         message: &str,
     ) -> Result<bool, DocError> {
+        self.append_part(
+            message_id,
+            &MessagePart::Error {
+                id: part_id.to_string(),
+                message: message.to_string(),
+            },
+        )
+    }
+
+    /// Append `part` to an existing entry, idempotent per part id. Returns
+    /// `false` when no entry matches.
+    pub fn append_part(&self, message_id: &str, part: &MessagePart) -> Result<bool, DocError> {
+        let part_id = part.id();
         let messages = self.doc.get_list("messages");
         for i in 0..messages.len() {
             let Some(loro::ValueOrContainer::Container(loro::Container::Map(entry))) =
@@ -725,13 +763,7 @@ impl SessionDoc {
                     return Ok(true);
                 }
             }
-            push_part(
-                &parts,
-                &MessagePart::Error {
-                    id: part_id.to_string(),
-                    message: message.to_string(),
-                },
-            )?;
+            push_part(&parts, part)?;
             self.doc.commit();
             return Ok(true);
         }
@@ -907,6 +939,15 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
         // whole-value rewrites cost ~125x the oplog of a text append.
         let t = map.insert_container("reasoning", LoroText::new())?;
         t.insert(0, reasoning)?;
+    }
+    if let Some(handoff) = &doc_part.handoff {
+        map.insert("handoff", handoff.as_str())?;
+    }
+    if let Some(harness) = &doc_part.harness {
+        map.insert(
+            "harness",
+            loro_value_from_json(&serde_json::to_value(harness)?),
+        )?;
     }
     for (key, value) in [
         ("path", &doc_part.path),
