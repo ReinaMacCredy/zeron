@@ -983,6 +983,9 @@ pub enum RowKind {
         badges: Arc<Vec<crate::badges::MessageBadge>>,
         /// Optimistic echo not yet confirmed by a doc frame.
         pending: bool,
+        /// The thread whose agent sent this entry (thread tools); drawn as
+        /// provenance above a left-aligned bubble instead of the user's own.
+        from_chat_id: Option<SharedString>,
     },
     /// One top-level markdown block of a completed message.
     Markdown {
@@ -1289,6 +1292,7 @@ pub fn rows_for_entry(
                 attachments: Arc::new(parsed.attachments),
                 badges: Arc::new(badges),
                 pending,
+                from_chat_id: entry.from_chat_id.clone().map(SharedString::from),
             },
             entry_id,
             // User rows always carry the strip (chat-view.tsx: whenever
@@ -6051,16 +6055,46 @@ impl Transcript {
                 attachments,
                 badges,
                 pending,
+                from_chat_id,
             } => {
                 let attachments = attachments.clone();
                 let badges = badges.clone();
                 let text = text.clone();
                 let mentions = mentions.clone();
                 let pending = *pending;
+                // An inter-thread message reads as a peer's voice: left
+                // aligned under a "from <thread>" line, accent-washed with a
+                // left rule, never the user's own right-aligned bubble.
+                let from_thread: Option<SharedString> = from_chat_id.as_ref().map(|from| {
+                    let state = self.state.read(cx);
+                    state
+                        .chats
+                        .iter()
+                        .find(|chat| chat.id.as_str() == from.as_ref())
+                        .and_then(|chat| chat.title.clone())
+                        .map(|title| SharedString::from(single_line(&title)))
+                        .unwrap_or_else(|| from.clone())
+                });
+                let mut column = div().w_full().flex().flex_col();
+                if let Some(from_thread) = &from_thread {
+                    column = column.child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(4.0))
+                            .pb(px(4.0))
+                            .text_size(crate::typography::ui_rems(11.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.accent)
+                            .child(SharedString::from("↳ from"))
+                            .child(from_thread.clone()),
+                    );
+                }
                 // Attachment thumbnails ride ABOVE the bubble, right-aligned
                 // (chat-view.tsx RowView: UserAttachmentStrip then the text
                 // HStack); image-only sends show no bubble at all.
-                let mut column = div().w_full().flex().flex_col();
                 if !attachments.is_empty() {
                     column = column.child(self.render_user_attachments(
                         &row.id,
@@ -6096,23 +6130,34 @@ impl Transcript {
                     // item can't shrink, `justify_end` pushes the overflow off the
                     // left edge, and long prompts render as one clipped line
                     // instead of wrapping inside the 80% column cap.
+                    let peer = from_thread.is_some();
                     column = column.child(
-                        div().w_full().flex().justify_end().child(
-                            div()
-                                .min_w_0()
-                                .max_w(px(self.content_width * 0.8))
-                                .bg(crate::theme::user_bubble_bg())
-                                .rounded(px(Theme::BUBBLE_RADIUS))
-                                .px(px(16.0))
-                                .py(px(10.0))
-                                .text_size(crate::typography::ui_rems(14.0))
-                                .line_height(crate::typography::ui_rems(USER_LINE_HEIGHT))
-                                .text_color(theme.text)
-                                .when(pending, |el| el.opacity(0.65))
-                                .child(self.render_user_body(
-                                    &row.id, ix, text, mentions, &theme, window, cx,
-                                )),
-                        ),
+                        div()
+                            .w_full()
+                            .flex()
+                            .when(peer, |el| el.justify_start())
+                            .when(!peer, |el| el.justify_end())
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .max_w(px(self.content_width * 0.8))
+                                    .bg(crate::theme::user_bubble_bg())
+                                    .when(peer, |el| {
+                                        el.bg(theme.accent.opacity(0.10))
+                                            .border_l_2()
+                                            .border_color(theme.accent)
+                                    })
+                                    .rounded(px(Theme::BUBBLE_RADIUS))
+                                    .px(px(16.0))
+                                    .py(px(10.0))
+                                    .text_size(crate::typography::ui_rems(14.0))
+                                    .line_height(crate::typography::ui_rems(USER_LINE_HEIGHT))
+                                    .text_color(theme.text)
+                                    .when(pending, |el| el.opacity(0.65))
+                                    .child(self.render_user_body(
+                                        &row.id, ix, text, mentions, &theme, window, cx,
+                                    )),
+                            ),
                     );
                 }
                 column.into_any_element()
@@ -9996,6 +10041,7 @@ mod tests {
             device_id: "dev".into(),
             status: Some(status),
             continuation_of: None,
+            from_chat_id: None,
         }
     }
 
@@ -13301,6 +13347,7 @@ mod tests {
             device_id: "dev".into(),
             status: None,
             continuation_of: None,
+            from_chat_id: None,
         };
         let rows = rows_for_entry(&user, true, &mut parse);
         assert_eq!(rows.len(), 1);

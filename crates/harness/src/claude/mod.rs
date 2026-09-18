@@ -476,8 +476,11 @@ impl ClaudeHarness {
             ]);
         } else if let Some(server) = &controls.tool_server {
             // Additive on purpose: `--strict-mcp-config` here would drop the
-            // user's own MCP servers.
+            // user's own MCP servers. The CLI kills any MCP call after
+            // MCP_TOOL_TIMEOUT (default 5 min, cap 30 min; read from 2.1.274);
+            // wait_threads blocks up to 30 min, so raise it to the cap.
             cmd.args(["--mcp-config", &server.mcp_config_json("zeron")]);
+            cmd.env("MCP_TOOL_TIMEOUT", "1800000");
         }
         let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {

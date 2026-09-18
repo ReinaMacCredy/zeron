@@ -49,6 +49,10 @@ pub struct QueuedMessage {
     /// `ReviewRequired`; they never silently become sendable again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_gate: Option<QueueDeliveryGate>,
+    /// The thread whose agent sent this row (thread tools); `None` for a
+    /// row a person typed. Rides onto the transcript entry it becomes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_chat_id: Option<String>,
 }
 
 /// Why a queued row is not currently eligible for automatic or explicit
@@ -92,6 +96,7 @@ impl QueuedMessage {
             text: text.into(),
             attachments: Vec::new(),
             hold_for_turn_end: false,
+            from_chat_id: None,
             issued_by: issued_by.into(),
             issued_at: 0,
             edited_at: None,
@@ -353,6 +358,9 @@ fn write_queued_map(map: &loro::LoroMap, item: &QueuedMessage) -> Result<(), Doc
     if let Some(edited_at) = item.edited_at {
         map.insert("editedAt", edited_at)?;
     }
+    if let Some(from_chat_id) = &item.from_chat_id {
+        map.insert("fromChatId", from_chat_id.as_str())?;
+    }
     if let Some(gate) = &item.delivery_gate {
         map.insert(
             "deliveryGate",
@@ -389,6 +397,10 @@ fn queued_from_json(v: serde_json::Value) -> Option<QueuedMessage> {
             .to_string(),
         issued_at: v.get("issuedAt").and_then(|t| t.as_i64()).unwrap_or(0),
         edited_at: v.get("editedAt").and_then(|t| t.as_i64()),
+        from_chat_id: v
+            .get("fromChatId")
+            .and_then(|f| f.as_str())
+            .map(str::to_string),
         delivery_gate: match v.get("deliveryGate") {
             None | Some(serde_json::Value::Null) => None,
             Some(gate) => serde_json::from_value(gate.clone()).ok().or_else(|| {
@@ -419,6 +431,7 @@ mod tests {
             text: text.into(),
             attachments: Vec::new(),
             hold_for_turn_end: false,
+            from_chat_id: None,
             issued_by: "device-a".into(),
             issued_at: 1_000,
             edited_at: None,

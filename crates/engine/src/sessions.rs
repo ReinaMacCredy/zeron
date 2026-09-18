@@ -2223,6 +2223,7 @@ impl SubagentSink {
             device_id: device_id.to_owned(),
             status: Some(MessageStatus::Complete),
             continuation_of: None,
+            from_chat_id: None,
         };
         if let Err(err) = self.doc.push_message(&entry) {
             tracing::warn!(doc = %self.doc_id, error = %err, "subagent steer write failed");

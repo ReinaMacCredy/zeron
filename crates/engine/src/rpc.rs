@@ -108,6 +108,25 @@ struct CreateSidechatParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct CreateThreadParams {
+    from_chat_id: String,
+    prompt: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    harness: Option<HarnessId>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SendThreadMessageParams {
+    chat_id: String,
+    from_chat_id: String,
+    text: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ForkChatParams {
     source_chat_id: String,
     entry_id: String,
@@ -1473,6 +1492,41 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&chat)
             }
+            methods::CREATE_THREAD => {
+                let p: CreateThreadParams = parse_params(params)?;
+                let chat_id = self
+                    .doc_host
+                    .create_thread(&p.from_chat_id, &p.prompt, p.title.as_deref(), p.harness)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "chatId": chat_id }))
+            }
+            methods::SEND_THREAD_MESSAGE => {
+                let p: SendThreadMessageParams = parse_params(params)?;
+                let id = self
+                    .doc_host
+                    .queue_thread_message(&p.chat_id, &p.from_chat_id, &p.text)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "id": id }))
+            }
+            methods::TAKE_THREAD_MESSAGES => {
+                let p: ChatParams = parse_params(params)?;
+                let messages: Vec<serde_json::Value> = self
+                    .doc_host
+                    .take_thread_messages(&p.chat_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?
+                    .into_iter()
+                    .map(|row| {
+                        serde_json::json!({
+                            "id": row.id,
+                            "fromChatId": row.from_chat_id,
+                            "text": row.text,
+                        })
+                    })
+                    .collect();
+                RpcReply::value(&serde_json::json!({ "messages": messages }))
+            }
             methods::QUEUE_COMMAND => {
                 let p: QueueCommandParams = parse_params(params)?;
                 let command_id = self
@@ -2595,6 +2649,7 @@ mod tests {
                 device_id: "host".into(),
                 status: None,
                 continuation_of: None,
+                from_chat_id: None,
             })
             .unwrap();
         // Hold publication blocked: the opening must not await the full mirror.
@@ -2805,6 +2860,7 @@ mod context_usage_tests {
                     device_id: "writer".into(),
                     status: Some(zeron_doc::MessageStatus::Streaming),
                     continuation_of: None,
+                    from_chat_id: None,
                 })
                 .unwrap()
         };
@@ -2925,6 +2981,7 @@ mod context_usage_tests {
             device_id: "host".into(),
             status: Some(zeron_doc::MessageStatus::Streaming),
             continuation_of: None,
+            from_chat_id: None,
         };
         handle.doc().push_message(&entry("local-before")).unwrap();
         source.update_context_usage(Some(10), Some(100)).unwrap();

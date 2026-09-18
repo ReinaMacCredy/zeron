@@ -6890,6 +6890,7 @@ impl Composer {
             device_id: "local".into(),
             status: None,
             continuation_of: None,
+            from_chat_id: None,
         };
         // Background start (d23): the session is minted and run without
         // becoming the selection; the canvas moves on to a fresh draft that
@@ -7065,6 +7066,7 @@ impl Composer {
                             device_id: "local".into(),
                             status: None,
                             continuation_of: None,
+                            from_chat_id: None,
                         };
                         let echo_chat_id = chat_id.clone();
                         this.update(cx, |composer, cx| {
@@ -10856,6 +10858,7 @@ mod tests {
             device_id: "d".into(),
             status,
             continuation_of: None,
+            from_chat_id: None,
         };
         // Streaming entry with unresolved input → panel.
         let t = vec![entry(
@@ -10892,6 +10895,7 @@ mod tests {
                 device_id: "d".into(),
                 status: Some(MessageStatus::Complete),
                 continuation_of: None,
+                from_chat_id: None,
             },
         ];
         assert!(pending_input_request(&t).is_none());
@@ -10924,6 +10928,7 @@ mod tests {
             device_id: "d".into(),
             status: Some(MessageStatus::Complete),
             continuation_of: None,
+            from_chat_id: None,
         };
         let t = vec![
             entry(Some(MessageStatus::Streaming), vec![input_part.clone()]),

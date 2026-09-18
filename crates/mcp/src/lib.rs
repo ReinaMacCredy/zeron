@@ -3,10 +3,12 @@
 //! The engine spawns `zeron mcp --chat <id> --port <ipc>` next to each
 //! harness process; the harness lists it as an MCP server, so the agent
 //! calls these like any other tool. Newline-delimited JSON-RPC 2.0 on
-//! stdin/stdout (the MCP stdio transport). Every tool is a thin read over
+//! stdin/stdout (the MCP stdio transport). Every tool is a thin call over
 //! the engine's own RPC (d28); the caller's identity is the spawn argument,
-//! never a tool input.
+//! never a tool input. Threads are peers (d25): nothing here interrupts,
+//! cancels, or answers for another chat.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -23,6 +25,10 @@ const DEFAULT_TAIL: usize = 30;
 const MAX_TAIL: usize = 200;
 const DEFAULT_WAIT_SECS: u64 = 600;
 const MAX_WAIT_SECS: u64 = 1800;
+/// Outgoing messages (sends and creates) one server process — one turn —
+/// may issue. A ping-pong between two agents ends in a tool error instead of
+/// a silent token burn.
+pub const SEND_BUDGET: usize = 16;
 /// A Working row that stops heartbeating only turns stale by the clock, so a
 /// wait re-evaluates its snapshot on a timer, not just on pushes.
 const STALE_RECHECK: Duration = Duration::from_secs(5);
@@ -30,14 +36,16 @@ const STALE_RECHECK: Duration = Duration::from_secs(5);
 pub struct ThreadTools {
     client: RpcClient,
     chat_id: String,
+    sends: AtomicUsize,
 }
 
 /// The tool catalog as `tools/list` reports it.
 pub fn tool_list() -> Value {
+    let thread_id = json!({ "type": "string" });
     json!([
         {
             "name": "list_threads",
-            "description": "List the chats (threads) in this chat's project with their live status. Peers, not workers: every thread is a real sidebar chat the human can open.",
+            "description": "List the chats (threads) in this chat's project with their live status. Threads are peers, not workers: every one is a real sidebar chat the human can open, and none can stop another.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         },
         {
@@ -46,7 +54,7 @@ pub fn tool_list() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "threadId": { "type": "string" },
+                    "threadId": thread_id,
                     "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
                     "before": { "type": "string", "description": "An entry id from a previous page; returns entries older than it." }
                 },
@@ -55,15 +63,58 @@ pub fn tool_list() -> Value {
             }
         },
         {
-            "name": "wait_threads",
-            "description": "Block until any listed thread is no longer working (idle, awaiting_input, errored) or the timeout passes (default 600s, max 1800s). Returns every listed thread's status either way.",
+            "name": "create_thread",
+            "description": "Open a new peer thread in this project and give it `prompt` as its first message. It runs this chat's harness and settings unless `harness` names another enabled one. Counts against this turn's send budget.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "threadIds": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+                    "prompt": { "type": "string" },
+                    "title": { "type": "string" },
+                    "harness": { "type": "string", "description": "Harness id such as claude-code or codex; default: this chat's." }
+                },
+                "required": ["prompt"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "send_message_to_thread",
+            "description": "Send a message to another thread in this project. An idle thread starts a turn with it; a working thread receives it when its turn ends (or sooner, if it is waiting with wait_threads). Never to this chat itself. Counts against this turn's send budget.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "threadId": thread_id, "text": { "type": "string" } },
+                "required": ["threadId", "text"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "wait_threads",
+            "description": "Block until any listed thread is no longer working (idle, awaiting_input, errored), a message from another thread arrives for this chat, or the timeout passes (default 600s, max 1800s). Returns the listed threads' statuses either way.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "threadIds": { "type": "array", "items": { "type": "string" } },
                     "timeoutSeconds": { "type": "integer", "minimum": 0, "maximum": 1800 }
                 },
-                "required": ["threadIds"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "set_thread_title",
+            "description": "Rename a thread in this project (this chat included).",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "threadId": thread_id, "title": { "type": "string" } },
+                "required": ["threadId", "title"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "set_thread_archived",
+            "description": "Archive or unarchive a thread in this project. Archiving never cascades to other threads.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "threadId": thread_id, "archived": { "type": "boolean" } },
+                "required": ["threadId", "archived"],
                 "additionalProperties": false
             }
         }
@@ -75,6 +126,7 @@ impl ThreadTools {
         Self {
             client,
             chat_id: chat_id.into(),
+            sends: AtomicUsize::new(0),
         }
     }
 
@@ -82,7 +134,11 @@ impl ThreadTools {
         match name {
             "list_threads" => self.list_threads().await,
             "read_thread" => self.read_thread(args).await,
+            "create_thread" => self.create_thread(args).await,
+            "send_message_to_thread" => self.send_message_to_thread(args).await,
             "wait_threads" => self.wait_threads(args).await,
+            "set_thread_title" => self.set_thread_title(args).await,
+            "set_thread_archived" => self.set_thread_archived(args).await,
             other => Err(format!("unknown tool: {other}")),
         }
     }
@@ -105,21 +161,63 @@ impl ThreadTools {
         serde_json::from_value(item).map_err(|e| format!("{method}: {e}"))
     }
 
-    pub async fn list_threads(&self) -> Result<Value, String> {
+    async fn call_engine(&self, method: &str, params: Value) -> Result<Value, String> {
+        self.client
+            .call(method, params)
+            .await
+            .map_err(|e| format!("{method}: {e}"))
+    }
+
+    /// The caller's row plus every other chat it may see: same device, same
+    /// project (space), not archived.
+    async fn peers(&self) -> Result<(Chat, Vec<Chat>), String> {
         let chats: Vec<Chat> = self.snapshot(methods::WATCH_CHATS, json!({})).await?;
-        let sessions: Vec<Session> = self.snapshot(methods::WATCH_SESSIONS, json!({})).await?;
         let caller = chats
             .iter()
             .find(|chat| chat.id == self.chat_id)
+            .cloned()
             .ok_or_else(|| format!("this chat ({}) is not in the registry", self.chat_id))?;
+        let peers = chats
+            .into_iter()
+            .filter(|chat| chat.device_id == caller.device_id && chat.space_id == caller.space_id)
+            .collect();
+        Ok((caller, peers))
+    }
+
+    /// `thread_id` as one of the caller's peers, or a scope error.
+    async fn peer(&self, thread_id: &str) -> Result<Chat, String> {
+        let (_, peers) = self.peers().await?;
+        peers
+            .into_iter()
+            .find(|chat| chat.id == thread_id)
+            .ok_or_else(|| format!("no thread {thread_id} in this project"))
+    }
+
+    fn thread_id<'a>(args: &'a Value) -> Result<&'a str, String> {
+        args["threadId"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| "threadId is required".to_string())
+    }
+
+    fn spend_send(&self) -> Result<(), String> {
+        let used = self.sends.fetch_add(1, Ordering::SeqCst);
+        if used >= SEND_BUDGET {
+            self.sends.fetch_sub(1, Ordering::SeqCst);
+            return Err(format!(
+                "this turn's outgoing message budget ({SEND_BUDGET}) is spent; finish the turn and continue in the next one"
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn list_threads(&self) -> Result<Value, String> {
+        let (_, peers) = self.peers().await?;
+        let sessions: Vec<Session> = self.snapshot(methods::WATCH_SESSIONS, json!({})).await?;
         let now = Utc::now();
-        let threads: Vec<Value> = chats
+        let threads: Vec<Value> = peers
             .iter()
-            .filter(|chat| {
-                !chat.archived
-                    && chat.device_id == caller.device_id
-                    && chat.space_id == caller.space_id
-            })
+            .filter(|chat| !chat.archived)
             .map(|chat| {
                 json!({
                     "id": chat.id,
@@ -135,10 +233,8 @@ impl ThreadTools {
     }
 
     pub async fn read_thread(&self, args: &Value) -> Result<Value, String> {
-        let thread_id = args["threadId"]
-            .as_str()
-            .filter(|id| !id.is_empty())
-            .ok_or("threadId is required")?;
+        let thread_id = Self::thread_id(args)?;
+        self.peer(thread_id).await?;
         let limit = args["limit"]
             .as_u64()
             .map(|n| n as usize)
@@ -163,6 +259,84 @@ impl ThreadTools {
         }))
     }
 
+    pub async fn create_thread(&self, args: &Value) -> Result<Value, String> {
+        let prompt = args["prompt"]
+            .as_str()
+            .filter(|p| !p.trim().is_empty())
+            .ok_or("prompt is required")?;
+        self.spend_send()?;
+        let created = self
+            .call_engine(
+                methods::CREATE_THREAD,
+                json!({
+                    "fromChatId": self.chat_id,
+                    "prompt": prompt,
+                    "title": args["title"].as_str(),
+                    "harness": args["harness"].as_str(),
+                }),
+            )
+            .await?;
+        Ok(json!({ "threadId": created["chatId"] }))
+    }
+
+    pub async fn send_message_to_thread(&self, args: &Value) -> Result<Value, String> {
+        let thread_id = Self::thread_id(args)?;
+        let text = args["text"]
+            .as_str()
+            .filter(|t| !t.trim().is_empty())
+            .ok_or("text is required")?;
+        if thread_id == self.chat_id {
+            return Err("a thread cannot message itself".into());
+        }
+        self.peer(thread_id).await?;
+        self.spend_send()?;
+        let queued = self
+            .call_engine(
+                methods::SEND_THREAD_MESSAGE,
+                json!({ "chatId": thread_id, "fromChatId": self.chat_id, "text": text }),
+            )
+            .await?;
+        Ok(json!({ "threadId": thread_id, "messageId": queued["id"] }))
+    }
+
+    pub async fn set_thread_title(&self, args: &Value) -> Result<Value, String> {
+        let thread_id = Self::thread_id(args)?;
+        let title = args["title"]
+            .as_str()
+            .filter(|t| !t.trim().is_empty())
+            .ok_or("title is required")?;
+        self.peer(thread_id).await?;
+        self.call_engine(
+            methods::MUTATE,
+            json!({ "op": "renameChat", "chatId": thread_id, "title": title }),
+        )
+        .await?;
+        Ok(json!({ "threadId": thread_id, "title": title }))
+    }
+
+    pub async fn set_thread_archived(&self, args: &Value) -> Result<Value, String> {
+        let thread_id = Self::thread_id(args)?;
+        let archived = args["archived"].as_bool().ok_or("archived is required")?;
+        self.peer(thread_id).await?;
+        self.call_engine(
+            methods::MUTATE,
+            json!({ "op": "setChatArchived", "chatId": thread_id, "archived": archived }),
+        )
+        .await?;
+        Ok(json!({ "threadId": thread_id, "archived": archived }))
+    }
+
+    /// The inter-thread rows waiting on this chat, moved into its transcript.
+    async fn take_messages(&self) -> Result<Vec<Value>, String> {
+        let taken = self
+            .call_engine(
+                methods::TAKE_THREAD_MESSAGES,
+                json!({ "chatId": self.chat_id }),
+            )
+            .await?;
+        Ok(taken["messages"].as_array().cloned().unwrap_or_default())
+    }
+
     pub async fn wait_threads(&self, args: &Value) -> Result<Value, String> {
         let ids: Vec<String> = args["threadIds"]
             .as_array()
@@ -173,9 +347,6 @@ impl ThreadTools {
                     .collect()
             })
             .unwrap_or_default();
-        if ids.is_empty() {
-            return Err("threadIds is required".into());
-        }
         let timeout = Duration::from_secs(
             args["timeoutSeconds"]
                 .as_u64()
@@ -183,14 +354,16 @@ impl ThreadTools {
                 .min(MAX_WAIT_SECS),
         );
         let deadline = tokio::time::Instant::now() + timeout;
-        let mut items = self
+        let mut sessions = self
             .client
             .subscribe(methods::WATCH_SESSIONS, json!({}))
             .await
             .map_err(|e| format!("WatchSessions: {e}"))?;
-        let parse = |item: Value| -> Result<Vec<Session>, String> {
-            serde_json::from_value(item).map_err(|e| format!("WatchSessions: {e}"))
-        };
+        let mut queue = self
+            .client
+            .subscribe(methods::WATCH_QUEUE, json!({ "chatId": self.chat_id }))
+            .await
+            .map_err(|e| format!("WatchQueue: {e}"))?;
         let statuses = |sessions: &[Session]| -> Value {
             let now = Utc::now();
             ids.iter()
@@ -198,25 +371,49 @@ impl ThreadTools {
                 .collect::<serde_json::Map<_, _>>()
                 .into()
         };
-        let mut latest = match tokio::time::timeout_at(deadline, items.recv()).await {
-            Ok(Some(item)) => parse(item)?,
-            Ok(None) => return Err("WatchSessions ended".into()),
-            Err(_) => return Ok(json!({ "reason": "timeout", "statuses": statuses(&[]) })),
-        };
+        let mut latest: Option<Vec<Session>> = None;
         loop {
-            let current = statuses(&latest);
-            if current.as_object().is_some_and(|map| {
-                map.values().any(|status| status.as_str() != Some("working"))
-            }) {
-                return Ok(json!({ "reason": "status", "statuses": current }));
+            if let Some(sessions) = &latest {
+                let current = statuses(sessions);
+                if current
+                    .as_object()
+                    .is_some_and(|map| map.values().any(|s| s.as_str() != Some("working")))
+                {
+                    return Ok(json!({ "reason": "status", "statuses": current }));
+                }
             }
             tokio::select! {
-                item = items.recv() => match item {
-                    Some(item) => latest = parse(item)?,
+                item = sessions.recv() => match item {
+                    Some(item) => {
+                        latest = Some(
+                            serde_json::from_value(item).map_err(|e| format!("WatchSessions: {e}"))?,
+                        );
+                    }
                     None => return Err("WatchSessions ended".into()),
                 },
+                item = queue.recv() => match item {
+                    Some(item) => {
+                        let waiting = item["items"]
+                            .as_array()
+                            .is_some_and(|rows| rows.iter().any(|row| row["fromChatId"].is_string()));
+                        if waiting {
+                            let messages = self.take_messages().await?;
+                            if !messages.is_empty() {
+                                return Ok(json!({
+                                    "reason": "message",
+                                    "messages": messages,
+                                    "statuses": latest.as_deref().map(statuses).unwrap_or(json!({})),
+                                }));
+                            }
+                        }
+                    }
+                    None => return Err("WatchQueue ended".into()),
+                },
                 _ = tokio::time::sleep_until(deadline) => {
-                    return Ok(json!({ "reason": "timeout", "statuses": current }));
+                    return Ok(json!({
+                        "reason": "timeout",
+                        "statuses": latest.as_deref().map(statuses).unwrap_or(json!({})),
+                    }));
                 }
                 _ = tokio::time::sleep(STALE_RECHECK) => {}
             }
@@ -266,6 +463,7 @@ fn render_entry(entry: &Value) -> Value {
     json!({
         "id": entry["id"],
         "role": entry["role"],
+        "fromChatId": entry["fromChatId"],
         "createdAt": entry["createdAt"],
         "status": entry["status"],
         "text": text,
@@ -320,7 +518,10 @@ async fn respond(request: &Value, tools: &ThreadTools) -> Option<Value> {
                 .cloned()
                 .unwrap_or_else(|| json!({}));
             let (text, is_error) = match tools.call(name, &args).await {
-                Ok(value) => (serde_json::to_string_pretty(&value).unwrap_or_default(), false),
+                Ok(value) => (
+                    serde_json::to_string_pretty(&value).unwrap_or_default(),
+                    false,
+                ),
                 Err(message) => (message, true),
             };
             ok(
@@ -342,7 +543,7 @@ fn error(id: Value, code: i64, message: String) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
     use futures::StreamExt;
@@ -367,43 +568,85 @@ mod tests {
         json!({ "id": id, "role": role, "parts": parts, "createdAt": 1, "deviceId": "dev-a" })
     }
 
-    /// Canned watches: chats once, sessions as a timed sequence of snapshots,
-    /// doc messages once.
+    /// Canned watches (chats once, sessions and queue as timed snapshot
+    /// sequences, doc messages once) plus a log of every unary call.
     struct Fake {
         chats: Vec<Value>,
         session_snapshots: Vec<Vec<Value>>,
+        queue_snapshots: Vec<Vec<Value>>,
         entries: Vec<Value>,
+        calls: Mutex<Vec<(String, Value)>>,
+    }
+
+    fn timed(snapshots: Vec<Value>) -> RpcReply {
+        RpcReply::Stream(
+            futures::stream::unfold(snapshots.into_iter(), |mut it| async move {
+                let next = it.next()?;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                Some((next, it))
+            })
+            .chain(futures::stream::pending())
+            .boxed(),
+        )
     }
 
     #[async_trait]
     impl RpcService for Fake {
-        async fn handle(&self, method: &str, _params: Value) -> Result<RpcReply, RpcError> {
+        async fn handle(&self, method: &str, params: Value) -> Result<RpcReply, RpcError> {
             match method {
                 methods::WATCH_CHATS => Ok(RpcReply::Stream(
                     futures::stream::iter(vec![Value::Array(self.chats.clone())]).boxed(),
                 )),
-                methods::WATCH_SESSIONS => {
-                    let snapshots = self.session_snapshots.clone();
-                    Ok(RpcReply::Stream(
-                        futures::stream::unfold(snapshots.into_iter(), |mut it| async move {
-                            let next = it.next()?;
-                            tokio::time::sleep(Duration::from_millis(20)).await;
-                            Some((Value::Array(next), it))
-                        })
-                        .chain(futures::stream::pending())
-                        .boxed(),
-                    ))
-                }
+                methods::WATCH_SESSIONS => Ok(timed(
+                    self.session_snapshots
+                        .iter()
+                        .cloned()
+                        .map(Value::Array)
+                        .collect(),
+                )),
+                methods::WATCH_QUEUE => Ok(timed(
+                    self.queue_snapshots
+                        .iter()
+                        .cloned()
+                        .map(|items| json!({ "items": items }))
+                        .collect(),
+                )),
                 methods::WATCH_DOC_MESSAGES => Ok(RpcReply::Stream(
                     futures::stream::iter(vec![json!({ "reset": self.entries })]).boxed(),
                 )),
+                methods::CREATE_THREAD
+                | methods::SEND_THREAD_MESSAGE
+                | methods::TAKE_THREAD_MESSAGES
+                | methods::MUTATE => {
+                    self.calls
+                        .lock()
+                        .unwrap()
+                        .push((method.to_string(), params.clone()));
+                    Ok(RpcReply::Value(match method {
+                        methods::CREATE_THREAD => json!({ "chatId": "new-1" }),
+                        methods::SEND_THREAD_MESSAGE => json!({ "id": "q-1" }),
+                        methods::TAKE_THREAD_MESSAGES => json!({
+                            "messages": [{ "id": "q-9", "fromChatId": "b", "text": "done, 4 tests" }]
+                        }),
+                        _ => json!({}),
+                    }))
+                }
                 other => Err(RpcError::UnknownMethod(other.into())),
             }
         }
     }
 
-    fn tools(fake: Fake) -> ThreadTools {
-        ThreadTools::new(memory_client(Arc::new(fake)), "a")
+    struct Rig {
+        tools: ThreadTools,
+        calls: Arc<Fake>,
+    }
+
+    fn rig(fake: Fake) -> Rig {
+        let fake = Arc::new(fake);
+        Rig {
+            tools: ThreadTools::new(memory_client(fake.clone()), "a"),
+            calls: fake,
+        }
     }
 
     fn fixture() -> Fake {
@@ -415,7 +658,11 @@ mod tests {
                 chat("d", Some("s1"), true, None),
                 chat("e", Some("s1"), false, None),
             ],
-            session_snapshots: vec![vec![session("b", "working", 0), session("e", "working", 120)]],
+            session_snapshots: vec![vec![
+                session("b", "working", 0),
+                session("e", "working", 120),
+            ]],
+            queue_snapshots: vec![vec![]],
             entries: (1..=5)
                 .map(|n| {
                     entry(
@@ -429,11 +676,12 @@ mod tests {
                     )
                 })
                 .collect(),
+            calls: Mutex::new(Vec::new()),
         }
     }
 
     #[test]
-    fn tool_list_names_the_read_tools_only() {
+    fn tool_list_names_every_thread_tool() {
         let list = tool_list();
         let names: Vec<&str> = list
             .as_array()
@@ -441,12 +689,28 @@ mod tests {
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, ["list_threads", "read_thread", "wait_threads"]);
+        assert_eq!(
+            names,
+            [
+                "list_threads",
+                "read_thread",
+                "create_thread",
+                "send_message_to_thread",
+                "wait_threads",
+                "set_thread_title",
+                "set_thread_archived",
+            ]
+        );
+        assert!(
+            names
+                .iter()
+                .all(|n| !n.contains("cancel") && !n.contains("respond"))
+        );
     }
 
     #[tokio::test]
     async fn list_threads_scopes_to_the_callers_space_and_checks_staleness() {
-        let out = tools(fixture()).list_threads().await.unwrap();
+        let out = rig(fixture()).tools.list_threads().await.unwrap();
         let rows: Vec<(String, String, bool)> = out["threads"]
             .as_array()
             .unwrap()
@@ -473,9 +737,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_thread_returns_a_bounded_tail_with_a_cursor() {
-        let tools = tools(fixture());
-        let page = tools
+    async fn read_thread_returns_a_bounded_tail_with_a_cursor_inside_the_project() {
+        let rig = rig(fixture());
+        let page = rig
+            .tools
             .read_thread(&json!({ "threadId": "b", "limit": 2 }))
             .await
             .unwrap();
@@ -488,7 +753,8 @@ mod tests {
         assert_eq!(texts, ["line 4\n[tool Bash]", "line 5\n[tool Bash]"]);
         assert_eq!(page["before"], "m4");
 
-        let older = tools
+        let older = rig
+            .tools
             .read_thread(&json!({ "threadId": "b", "limit": 2, "before": "m4" }))
             .await
             .unwrap();
@@ -501,8 +767,111 @@ mod tests {
         assert_eq!(ids, ["m2", "m3"]);
         assert_eq!(older["before"], "m2");
 
-        let err = tools.read_thread(&json!({})).await.unwrap_err();
-        assert_eq!(err, "threadId is required");
+        assert_eq!(
+            rig.tools.read_thread(&json!({})).await.unwrap_err(),
+            "threadId is required"
+        );
+        // Another project's chat is out of scope even though it exists.
+        assert_eq!(
+            rig.tools
+                .read_thread(&json!({ "threadId": "c" }))
+                .await
+                .unwrap_err(),
+            "no thread c in this project"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_and_send_go_through_the_engine_with_the_callers_identity() {
+        let rig = rig(fixture());
+        let created = rig
+            .tools
+            .create_thread(&json!({ "prompt": "write the tests", "harness": "codex" }))
+            .await
+            .unwrap();
+        assert_eq!(created["threadId"], "new-1");
+        let sent = rig
+            .tools
+            .send_message_to_thread(&json!({ "threadId": "b", "text": "cover the refresh race" }))
+            .await
+            .unwrap();
+        assert_eq!(sent["messageId"], "q-1");
+
+        let calls = rig.calls.calls.lock().unwrap().clone();
+        assert_eq!(calls[0].0, methods::CREATE_THREAD);
+        assert_eq!(calls[0].1["fromChatId"], "a");
+        assert_eq!(calls[0].1["harness"], "codex");
+        assert_eq!(calls[1].0, methods::SEND_THREAD_MESSAGE);
+        assert_eq!(
+            calls[1].1,
+            json!({ "chatId": "b", "fromChatId": "a", "text": "cover the refresh race" })
+        );
+
+        assert_eq!(
+            rig.tools
+                .send_message_to_thread(&json!({ "threadId": "a", "text": "hi" }))
+                .await
+                .unwrap_err(),
+            "a thread cannot message itself"
+        );
+        assert_eq!(
+            rig.tools
+                .send_message_to_thread(&json!({ "threadId": "c", "text": "hi" }))
+                .await
+                .unwrap_err(),
+            "no thread c in this project"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_send_budget_ends_a_ping_pong() {
+        let rig = rig(fixture());
+        for _ in 0..SEND_BUDGET - 1 {
+            rig.tools
+                .send_message_to_thread(&json!({ "threadId": "b", "text": "again" }))
+                .await
+                .unwrap();
+        }
+        rig.tools
+            .create_thread(&json!({ "prompt": "last one" }))
+            .await
+            .unwrap();
+        let err = rig
+            .tools
+            .send_message_to_thread(&json!({ "threadId": "b", "text": "one too many" }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("budget"), "{err}");
+        assert_eq!(rig.calls.calls.lock().unwrap().len(), SEND_BUDGET);
+    }
+
+    #[tokio::test]
+    async fn title_and_archive_are_registry_mutations_in_scope() {
+        let rig = rig(fixture());
+        rig.tools
+            .set_thread_title(&json!({ "threadId": "b", "title": "Tests for login" }))
+            .await
+            .unwrap();
+        rig.tools
+            .set_thread_archived(&json!({ "threadId": "a", "archived": true }))
+            .await
+            .unwrap();
+        let calls = rig.calls.calls.lock().unwrap().clone();
+        assert_eq!(
+            calls[0].1,
+            json!({ "op": "renameChat", "chatId": "b", "title": "Tests for login" })
+        );
+        assert_eq!(
+            calls[1].1,
+            json!({ "op": "setChatArchived", "chatId": "a", "archived": true })
+        );
+        assert_eq!(
+            rig.tools
+                .set_thread_archived(&json!({ "threadId": "c", "archived": true }))
+                .await
+                .unwrap_err(),
+            "no thread c in this project"
+        );
     }
 
     #[tokio::test]
@@ -513,7 +882,8 @@ mod tests {
             vec![session("b", "working", 0)],
             vec![session("b", "idle", 0)],
         ];
-        let out = tools(fake)
+        let out = rig(fake)
+            .tools
             .wait_threads(&json!({ "threadIds": ["b"], "timeoutSeconds": 30 }))
             .await
             .unwrap();
@@ -525,7 +895,8 @@ mod tests {
     async fn wait_threads_treats_a_stale_working_row_as_finished() {
         let mut fake = fixture();
         fake.session_snapshots = vec![vec![session("b", "working", 300)]];
-        let out = tools(fake)
+        let out = rig(fake)
+            .tools
             .wait_threads(&json!({ "threadIds": ["b", "zz"] }))
             .await
             .unwrap();
@@ -534,27 +905,52 @@ mod tests {
         assert_eq!(out["statuses"]["zz"], "idle");
     }
 
+    #[tokio::test]
+    async fn wait_threads_returns_an_inbox_message_and_takes_it_into_the_transcript() {
+        let mut fake = fixture();
+        fake.session_snapshots = vec![vec![session("b", "working", 0)]];
+        fake.queue_snapshots = vec![
+            vec![json!({ "id": "q-8", "text": "typed by the human" })],
+            vec![
+                json!({ "id": "q-8", "text": "typed by the human" }),
+                json!({ "id": "q-9", "text": "done, 4 tests", "fromChatId": "b" }),
+            ],
+        ];
+        let rig = rig(fake);
+        let out = rig
+            .tools
+            .wait_threads(&json!({ "threadIds": ["b"], "timeoutSeconds": 30 }))
+            .await
+            .unwrap();
+        assert_eq!(out["reason"], "message");
+        assert_eq!(out["messages"][0]["fromChatId"], "b");
+        assert_eq!(out["statuses"]["b"], "working");
+        let calls = rig.calls.calls.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![(
+                methods::TAKE_THREAD_MESSAGES.to_string(),
+                json!({ "chatId": "a" })
+            )]
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn wait_threads_times_out_with_the_last_known_statuses() {
         let mut fake = fixture();
         fake.session_snapshots = vec![vec![session("b", "working", 0)]];
-        let out = tools(fake)
+        let out = rig(fake)
+            .tools
             .wait_threads(&json!({ "threadIds": ["b"], "timeoutSeconds": 3 }))
             .await
             .unwrap();
         assert_eq!(out["reason"], "timeout");
         assert_eq!(out["statuses"]["b"], "working");
-
-        let err = tools(fixture())
-            .wait_threads(&json!({ "threadIds": [] }))
-            .await
-            .unwrap_err();
-        assert_eq!(err, "threadIds is required");
     }
 
     #[tokio::test]
     async fn serve_answers_initialize_list_and_call_over_one_pipe() {
-        let tools = tools(fixture());
+        let tools = rig(fixture()).tools;
         let (client_side, server_side) = tokio::io::duplex(64 * 1024);
         let (server_read, server_write) = tokio::io::split(server_side);
         let server = tokio::spawn(async move {
@@ -562,49 +958,39 @@ mod tests {
         });
         let (client_read, mut client_write) = tokio::io::split(client_side);
         let mut replies = tokio::io::BufReader::new(client_read).lines();
-        let mut ask = |line: String| {
-            let mut line = line;
-            line.push('\n');
-            line
+        let requests = [
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-03-26" } }),
+            json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+            json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "read_thread", "arguments": { "threadId": "b", "limit": 1 } } }),
+            json!({ "jsonrpc": "2.0", "id": 4, "method": "nope" }),
+        ];
+        for request in requests {
+            client_write
+                .write_all(format!("{request}\n").as_bytes())
+                .await
+                .unwrap();
+        }
+        let mut received = Vec::new();
+        for _ in 0..4 {
+            let line = replies.next_line().await.unwrap().unwrap();
+            received.push(serde_json::from_str::<Value>(&line).unwrap());
+        }
+        let [init, list, call, unknown] = received.as_slice() else {
+            panic!("expected four replies");
         };
-        client_write
-            .write_all(
-                ask(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-03-26" } }).to_string())
-                    .as_bytes(),
-            )
-            .await
-            .unwrap();
-        client_write
-            .write_all(ask(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }).to_string()).as_bytes())
-            .await
-            .unwrap();
-        client_write
-            .write_all(ask(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }).to_string()).as_bytes())
-            .await
-            .unwrap();
-        client_write
-            .write_all(
-                ask(json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "read_thread", "arguments": { "threadId": "b", "limit": 1 } } }).to_string())
-                    .as_bytes(),
-            )
-            .await
-            .unwrap();
-        client_write
-            .write_all(ask(json!({ "jsonrpc": "2.0", "id": 4, "method": "nope" }).to_string()).as_bytes())
-            .await
-            .unwrap();
-
-        let init: Value = serde_json::from_str(&replies.next_line().await.unwrap().unwrap()).unwrap();
         assert_eq!(init["id"], 1);
         assert_eq!(init["result"]["protocolVersion"], "2025-03-26");
-        let list: Value = serde_json::from_str(&replies.next_line().await.unwrap().unwrap()).unwrap();
         assert_eq!(list["id"], 2);
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 3);
-        let call: Value = serde_json::from_str(&replies.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 7);
         assert_eq!(call["id"], 3);
         assert_eq!(call["result"]["isError"], false);
-        assert!(call["result"]["content"][0]["text"].as_str().unwrap().contains("line 5"));
-        let unknown: Value = serde_json::from_str(&replies.next_line().await.unwrap().unwrap()).unwrap();
+        assert!(
+            call["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("line 5")
+        );
         assert_eq!(unknown["error"]["code"], -32601);
 
         // Both halves must go for the duplex to close and the server to see EOF.
