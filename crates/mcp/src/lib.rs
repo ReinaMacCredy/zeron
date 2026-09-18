@@ -451,6 +451,7 @@ fn render_entry(entry: &Value) -> Value {
                         "[image {}]",
                         part["name"].as_str().unwrap_or("attachment")
                     )),
+                    "tool" => Some(format!("[tool {}]", tool_label(part))),
                     kind => Some(match part["name"].as_str() {
                         Some(name) => format!("[{kind} {name}]"),
                         None => format!("[{kind}]"),
@@ -468,6 +469,29 @@ fn render_entry(entry: &Value) -> Value {
         "status": entry["status"],
         "text": text,
     })
+}
+
+/// A tool part's one-word identity for the transcript tail: the decoded
+/// call's kind plus its headline field (`exec ls -la`, `mcp zeron/read_thread`,
+/// `readFile src/x.rs`), or the raw name older rows carry.
+fn tool_label(part: &Value) -> String {
+    let call = &part["call"];
+    let kind = call["kind"].as_str();
+    let detail = match kind {
+        Some("mcp") => match (call["server"].as_str(), call["tool"].as_str()) {
+            (Some(server), Some(tool)) => Some(format!("{server}/{tool}")),
+            (_, tool) => tool.map(str::to_string),
+        },
+        _ => ["command", "path", "pattern", "url", "name"]
+            .iter()
+            .find_map(|key| call[key].as_str().map(str::to_string)),
+    };
+    match (kind, detail, part["name"].as_str()) {
+        (Some(kind), Some(detail), _) => format!("{kind} {}", detail.lines().next().unwrap_or("")),
+        (Some(kind), None, _) => kind.to_string(),
+        (None, _, Some(name)) => name.to_string(),
+        (None, _, None) => "call".to_string(),
+    }
 }
 
 /// Serve MCP over one line-delimited JSON-RPC pair until the reader closes.
@@ -672,6 +696,7 @@ mod tests {
                             json!({ "kind": "text", "id": "t", "text": format!("line {n}") }),
                             json!({ "kind": "reasoning", "id": "r", "text": "hidden" }),
                             json!({ "kind": "tool", "id": "k", "name": "Bash" }),
+                            json!({ "kind": "tool", "id": "m", "call": { "kind": "mcp", "server": "zeron", "tool": "read_thread" } }),
                         ],
                     )
                 })
@@ -750,7 +775,13 @@ mod tests {
             .iter()
             .map(|e| e["text"].as_str().unwrap())
             .collect();
-        assert_eq!(texts, ["line 4\n[tool Bash]", "line 5\n[tool Bash]"]);
+        assert_eq!(
+            texts,
+            [
+                "line 4\n[tool Bash]\n[tool mcp zeron/read_thread]",
+                "line 5\n[tool Bash]\n[tool mcp zeron/read_thread]"
+            ]
+        );
         assert_eq!(page["before"], "m4");
 
         let older = rig

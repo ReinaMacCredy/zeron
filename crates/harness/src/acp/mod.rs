@@ -2731,6 +2731,7 @@ async fn run_session(session: Session) {
         request_input,
         mut steering,
         interrupt,
+        tool_server,
         ..
     } = controls;
     let request_input = std::sync::Arc::new(request_input);
@@ -2743,7 +2744,20 @@ async fn run_session(session: Session) {
         let steer_ext = steering_supported(&init);
         let init_commands = scan_available_commands(&init);
 
-        let session_params = json!({ "cwd": request.cwd, "mcpServers": [] });
+        // The thread tools ride ACP's own `mcpServers` list (stdio shape:
+        // name, command, args, env); discovery sessions never carry them.
+        let mcp_servers: Vec<Value> = tool_server
+            .iter()
+            .map(|server| {
+                json!({
+                    "name": "zeron",
+                    "command": server.command,
+                    "args": server.args,
+                    "env": [],
+                })
+            })
+            .collect();
+        let session_params = json!({ "cwd": request.cwd, "mcpServers": mcp_servers });
         let (session_id, mut session_response) = if let Some(resume) = &request.resume {
             let mut load = session_params.clone();
             load["sessionId"] = Value::String(resume.clone());

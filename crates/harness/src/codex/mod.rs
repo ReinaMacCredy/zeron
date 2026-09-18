@@ -870,6 +870,7 @@ async fn run_session(session: Session) {
         request_input,
         mut steering,
         interrupt,
+        tool_server,
         ..
     } = controls;
     let request_input = Arc::new(request_input);
@@ -923,6 +924,20 @@ async fn run_session(session: Session) {
                     "features.memories": false
                 }),
             );
+        } else if let Some(server) = &tool_server {
+            // The thread tools as a config-layer MCP server: dotted keys
+            // merge over the user's own `mcp_servers` table instead of
+            // replacing it. Title-only runs never get it.
+            let overrides = p
+                .entry("config")
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .expect("config overrides are an object");
+            overrides.insert(
+                "mcp_servers.zeron.command".into(),
+                Value::String(server.command.clone()),
+            );
+            overrides.insert("mcp_servers.zeron.args".into(), json!(server.args));
         }
         p.insert("cwd".into(), Value::String(request.cwd.clone()));
         p.insert("approvalPolicy".into(), approval_policy.into());

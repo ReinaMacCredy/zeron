@@ -483,6 +483,19 @@ impl Composer {
             }),
         );
 
+        // A row another thread sent (thread tools) says so, and that it waits
+        // for the turn to end (d26 C); the human's own rows carry no line.
+        let from_thread: Option<SharedString> = item.from_chat_id.as_ref().map(|from| {
+            let state = self.state.read(cx);
+            let title = state
+                .chats
+                .iter()
+                .find(|chat| &chat.id == from)
+                .and_then(|chat| chat.title.clone())
+                .unwrap_or_else(|| from.clone());
+            SharedString::from(format!("↳ from {} · held for turn end", one_line(&title)))
+        });
+
         let drag_chat = chat_id.to_string();
         let queue_marker = div()
             .id(SharedString::from(format!("{key}-drag")))
@@ -569,6 +582,16 @@ impl Composer {
                             .text_color(theme.text.opacity(0.9))
                             .child(title),
                     );
+                if let Some(from_thread) = from_thread {
+                    content = content.child(
+                        div()
+                            .truncate()
+                            .text_size(px(11.0))
+                            .line_height(px(13.0))
+                            .text_color(theme.accent)
+                            .child(from_thread),
+                    );
+                }
                 if !labels.is_empty() && !only_images {
                     content = content.child(
                         div()
