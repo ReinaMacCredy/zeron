@@ -3575,15 +3575,22 @@ impl Transcript {
     ) {
         let was_selecting = self.selection_drag_position.is_some();
         self.stop_selection_scroll();
-        if let Some(text) = crate::markdown::selection::end_active_drag() {
+        if let Some(_text) = crate::markdown::selection::end_active_drag() {
             // X11 middle-click paste parity, including the case where the
             // anchor row has virtualized away and cannot receive mouse-up.
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-            cx.write_to_primary(ClipboardItem::new_string(text.clone()));
-            if self.quote_chat_id(cx).is_some() && !text.trim().is_empty() {
-                self.add_to_chat = Some((text, self.add_to_chat_pill(event.position)));
-                cx.notify();
-            }
+            cx.write_to_primary(ClipboardItem::new_string(_text));
+        }
+        // The anchor element's own mouse-up usually ends the drag before this
+        // bubbles here, so read the settled selection rather than the return
+        // value above.
+        if was_selecting
+            && let Some(text) = crate::markdown::selection::selected_text()
+            && !text.trim().is_empty()
+            && self.quote_chat_id(cx).is_some()
+        {
+            self.add_to_chat = Some((text, self.add_to_chat_pill(event.position)));
+            cx.notify();
         }
         if was_selecting {
             self.last_scroll_distance = self.distance_from_bottom();
