@@ -1048,7 +1048,7 @@ fn forward_deadline(method: &str) -> std::time::Duration {
         methods::CREATE_WORKTREE => Duration::from_secs(120),
         // Outlives the engine's own compaction timeout, so a forwarded call
         // reports the harness's outcome rather than a transport timeout.
-        methods::COMPACT_CHAT => Duration::from_secs(180),
+        methods::COMPACT_CHAT => Duration::from_secs(660),
         _ => Duration::from_secs(30),
     }
 }

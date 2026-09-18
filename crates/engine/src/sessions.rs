@@ -2040,10 +2040,10 @@ impl Inner {
 
 // ── compaction ──────────────────────────────────────────────────────────────
 
-/// A routine compaction of a large context runs tens of seconds (37s measured
-/// live on claude 2.1.273); past this the chat is released and a retry is
-/// refused until its next completed turn.
-const COMPACT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+/// A routine compaction runs tens of seconds (37s measured live on claude
+/// 2.1.273), but a long 1M-window chat can take several minutes; past this
+/// the chat is released and a retry is refused until its next completed turn.
+const COMPACT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Releases the chat's one-compaction-at-a-time reservation on every exit path.
 struct CompactionReservation {
