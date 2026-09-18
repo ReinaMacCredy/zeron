@@ -1,7 +1,8 @@
 //! Composer pickers (feature-inventory §1.7): RepoPicker (recents + search +
 //! in-app folder browser + clone/create), BranchPicker (search + isolated-
-//! worktree toggle), HarnessModelPicker (harness rail + model list, harness
-//! locked once the chat exists), TraitsPicker (reasoning ladder + advertised
+//! worktree toggle), HarnessModelPicker (harness rail + model list; on an
+//! existing chat a foreign-harness pick is a provider switch behind the
+//! switch dialog), TraitsPicker (reasoning ladder + advertised
 //! model options; trigger shows the non-default summary "High · 1M · Fast").
 //!
 //! All selections accumulate into a [`DraftConfig`] the composer threads into
@@ -96,7 +97,7 @@ fn workspace_footer_row() -> gpui::Div {
         .gap(px(4.0))
 }
 
-use crate::composer::{ComposerInput, ComposerInputEvent};
+use crate::composer::{ComposerInput, ComposerInputEvent, harness_display_name};
 use crate::motion;
 use crate::popover::{self, Loadable, MenuKey};
 use crate::settings::composer::ComposerDefaults;
@@ -481,8 +482,7 @@ enum ModelRail {
 struct ModelRowsKey {
     query: String,
     rail: ModelRail,
-    effective: Option<HarnessId>,
-    locked: bool,
+    viewed: Option<HarnessId>,
     catalog_rev: u64,
 }
 
@@ -545,12 +545,15 @@ struct SettingGroup {
     choices: Vec<SettingChoice>,
 }
 
-/// A mid-chat model pick awaiting the switch-model dialog's answer.
+/// A mid-chat model pick awaiting the switch-model dialog's answer. With
+/// `harness` set the pick is a provider switch: the chat moves to that
+/// harness, which starts a fresh session and gets the conversation as text.
 #[derive(Clone, Debug, PartialEq)]
 struct PendingModelSwitch {
     model_id: String,
     from: String,
     to: String,
+    harness: Option<HarnessId>,
 }
 
 /// A model pick on an existing chat warns before it lands only when there
@@ -572,6 +575,26 @@ fn switch_warning(harness: Option<HarnessId>, to: &str) -> String {
             "Changing models mid-conversation may degrade performance. Switching to {to} means the full history gets re-read on your next message."
         ),
     }
+}
+
+/// The switch-provider dialog's body: the chat's session belongs to the
+/// harness that produced it, so the new one starts fresh with the
+/// conversation handed over as text.
+fn provider_switch_warning(from: HarnessId, to: HarnessId) -> String {
+    let from = harness_display_name(from);
+    let to = harness_display_name(to);
+    format!(
+        "{to} has never seen this chat. The {from} session is closed; on your next message the conversation so far is handed to {to} as plain text. Tool results, open files and {from}'s cache are not carried over."
+    )
+}
+
+/// The transcript divider's hover hint after a provider switch.
+fn provider_switch_hint(from: HarnessId, to: HarnessId) -> String {
+    let from = harness_display_name(from);
+    let to = harness_display_name(to);
+    format!(
+        "{from} session closed. The messages above were handed to {to} as text on the next turn; {from}'s tool results and file state were not carried."
+    )
 }
 
 /// The transcript divider's hover hint once the switch has happened.
@@ -677,6 +700,9 @@ pub struct Pickers {
     /// A model pick on a chat with history, parked behind the switch-model
     /// dialog until the user confirms or backs out.
     pending_model_switch: Option<PendingModelSwitch>,
+    /// The harness tab an existing chat's picker is browsing: only the model
+    /// list follows it; the chat's harness changes on a confirmed pick.
+    viewed_harness: Option<HarnessId>,
     _search_events: Subscription,
     _state_observe: Subscription,
     _catalog_observe: Subscription,
@@ -856,6 +882,7 @@ impl Pickers {
             switch_error: None,
             mutate_task: None,
             pending_model_switch: None,
+            viewed_harness: None,
             _search_events: search_events,
             _state_observe: state_observe,
             _catalog_observe: catalog_observe,
@@ -908,9 +935,10 @@ impl Pickers {
             .or_else(|| state.selected_space_row())
     }
 
-    /// Harness is locked once the chat exists (feature-inventory §1.7).
-    fn harness_locked(&self, cx: &App) -> bool {
-        self.chat_id(cx).is_some()
+    /// The harness whose models the picker lists: the browsed tab on an
+    /// existing chat, else the effective harness.
+    fn rail_harness(&self, cx: &App) -> Option<HarnessId> {
+        self.viewed_harness.or_else(|| self.effective_harness(cx))
     }
 
     fn engine(&self, cx: &App) -> Option<EngineHandle> {
@@ -1128,6 +1156,7 @@ impl Pickers {
         self.focus_on_mount = false;
         self.cancel_setting_hover();
         self.pending_model_switch = None;
+        self.viewed_harness = None;
         self.setting_menu = None;
         self.setting_bounds = None;
         self.menu_bar = popover::MenuScrollbarState::default();
@@ -1221,9 +1250,10 @@ impl Pickers {
         // Prime the model picker's rail BEFORE anchoring the highlight (the
         // visible rows depend on it): the favorites view when stars exist —
         // t3 ModelPickerContent's initial selection — else the effective
-        // harness. Locked chats stay on their own harness.
+        // harness. Existing chats open on their own harness's tab.
         if kind == PickerKind::HarnessModel {
-            self.model_rail = if !self.harness_locked(cx) && !self.defaults.favorites.is_empty() {
+            self.viewed_harness = None;
+            self.model_rail = if self.chat_id(cx).is_none() && !self.defaults.favorites.is_empty() {
                 ModelRail::Favorites
             } else {
                 ModelRail::Harness
@@ -1675,7 +1705,14 @@ impl Pickers {
     }
 
     fn pick_harness(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
-        if self.harness_locked(cx) {
+        if self.chat_id(cx).is_some() {
+            // An existing chat only browses the tab: its harness changes on a
+            // confirmed model pick (`pick_foreign_model`), never on a click here.
+            self.viewed_harness = Some(harness);
+            self.model_scroll_base().set_offset(gpui::Point::default());
+            self.ensure_models(harness, false, cx);
+            self.active = self.selected_model_index(cx);
+            cx.notify();
             return;
         }
         if self.config.harness != Some(harness) {
@@ -1701,16 +1738,8 @@ impl Pickers {
         // a model is the expected flow. Esc, click-out, or the chip close it.
         if self.chat_id(cx).is_some() {
             // A chat the harness has already read: the switch costs the next
-            // turn a full re-read, so it waits behind the dialog. Not yet
-            // replayed and pending echoes both count as history — a fresh
-            // chat must not warn, a just-sent one must not skip.
-            let state = self.state.read(cx);
-            let has_history = !state.transcript_replayed
-                || !state.pending_echoes().is_empty()
-                || state
-                    .transcript
-                    .iter()
-                    .any(|entry| entry.role != MessageRole::System);
+            // turn a full re-read, so it waits behind the dialog.
+            let has_history = self.chat_has_history(cx);
             let current = self
                 .selected_model(cx)
                 .map(|m| m.id.as_str())
@@ -1726,7 +1755,12 @@ impl Pickers {
                 };
                 let from = current.map(|id| label(id)).unwrap_or_default();
                 let to = label(&model_id);
-                self.pending_model_switch = Some(PendingModelSwitch { model_id, from, to });
+                self.pending_model_switch = Some(PendingModelSwitch {
+                    model_id,
+                    from,
+                    to,
+                    harness: None,
+                });
                 cx.notify();
                 return;
             }
@@ -1751,17 +1785,77 @@ impl Pickers {
         cx.notify();
     }
 
+    /// A model of another harness picked on an existing chat: a provider
+    /// switch. Free on a chat with no history; otherwise parked behind the
+    /// dialog, since the new harness starts from a text copy of the chat.
+    fn pick_foreign_model(&mut self, harness: HarnessId, model_id: String, cx: &mut Context<Self>) {
+        self.setting_menu = None;
+        if !self.chat_has_history(cx) {
+            self.update_chat_config(cx, None, move |config| {
+                config.harness = harness;
+                config.model = Some(model_id);
+            });
+            cx.notify();
+            return;
+        }
+        let from = self
+            .effective_harness(cx)
+            .map(harness_display_name)
+            .unwrap_or_default()
+            .to_string();
+        let to = self
+            .models
+            .get(&harness)
+            .and_then(|l| l.ready())
+            .and_then(|models| models.iter().find(|m| m.id == model_id))
+            .map(|m| m.label.clone())
+            .unwrap_or_else(|| model_id.clone());
+        self.pending_model_switch = Some(PendingModelSwitch {
+            model_id,
+            from,
+            to,
+            harness: Some(harness),
+        });
+        cx.notify();
+    }
+
+    /// Whether the chat has anything a harness would re-read: not yet
+    /// replayed and pending echoes both count — a fresh chat must not warn,
+    /// a just-sent one must not skip.
+    fn chat_has_history(&self, cx: &App) -> bool {
+        let state = self.state.read(cx);
+        !state.transcript_replayed
+            || !state.pending_echoes().is_empty()
+            || state
+                .transcript
+                .iter()
+                .any(|entry| entry.role != MessageRole::System)
+    }
+
     /// The dialog's "Yes": land the parked pick and mark it in the transcript.
     fn confirm_model_switch(&mut self, cx: &mut Context<Self>) {
         let Some(pending) = self.pending_model_switch.take() else {
             return;
         };
         let harness = self.effective_harness(cx);
-        let note = (
-            format!("Model changed from {} to {}.", pending.from, pending.to),
-            switch_hint(harness).to_string(),
-        );
+        let note = match (harness, pending.harness) {
+            (Some(from), Some(to)) => (
+                format!(
+                    "Provider changed from {} to {}.",
+                    harness_display_name(from),
+                    harness_display_name(to)
+                ),
+                provider_switch_hint(from, to),
+            ),
+            _ => (
+                format!("Model changed from {} to {}.", pending.from, pending.to),
+                switch_hint(harness).to_string(),
+            ),
+        };
         self.update_chat_config(cx, Some(note), move |config| {
+            if let Some(harness) = pending.harness {
+                config.harness = harness;
+            }
             config.model = Some(pending.model_id)
         });
         self.animate_close(cx);
@@ -1883,6 +1977,13 @@ impl Pickers {
             state.apply_chat_config(&chat_id, config.clone());
             cx.notify();
         });
+        // The row is the truth now. A chat keeps the draft id it was sent
+        // from, so the canvas picks that seeded it never get dropped by the
+        // selection observer; left in place they would outrank the row in
+        // `effective_harness` and send the next run to the old harness.
+        self.config.harness = None;
+        self.config.model = None;
+        self.config.reasoning = None;
         let Some(engine) = self.engine(cx) else {
             return;
         };
@@ -1945,16 +2046,14 @@ impl Pickers {
     /// A live search spans every ready harness (t3: the sidebar hides and
     /// the query ignores it); otherwise the rail selection decides —
     /// favorites across harnesses, or the effective harness's list with its
-    /// starred rows floated to the top (t3 `groupFavorites`). A locked chat
-    /// restricts every view to its own harness.
+    /// starred rows floated to the top (t3 `groupFavorites`).
     /// Cached [`Self::visible_model_rows`]: selection/highlight changes and
     /// re-renders share one flattened list until an input actually changes.
     fn model_rows(&self, cx: &App) -> std::sync::Arc<Vec<ModelRowData>> {
         let key = ModelRowsKey {
             query: self.search.read(cx).text().trim().to_string(),
             rail: self.model_rail,
-            effective: self.effective_harness(cx),
-            locked: self.harness_locked(cx),
+            viewed: self.rail_harness(cx),
             catalog_rev: self.catalog_rev,
         };
         if let Some((cached_key, rows)) = self.model_rows_cache.borrow().as_ref()
@@ -1968,11 +2067,8 @@ impl Pickers {
     }
 
     fn visible_model_rows(&self, cx: &App) -> Vec<ModelRowData> {
-        let effective = self.effective_harness(cx);
-        let mut descriptors = self.rail_descriptors(cx);
-        if self.harness_locked(cx) {
-            descriptors.retain(|d| Some(d.id) == effective);
-        }
+        let viewed = self.rail_harness(cx);
+        let descriptors = self.rail_descriptors(cx);
         // Favorite lookups are per-row; the Vec scan made the flatten
         // O(models × favorites).
         let favorites: std::collections::HashSet<(HarnessId, &str)> = self
@@ -1985,7 +2081,7 @@ impl Pickers {
         scoped_model_rows(
             &query,
             self.model_rail,
-            effective,
+            viewed,
             &descriptors,
             |harness| {
                 self.models
@@ -2029,15 +2125,16 @@ impl Pickers {
         }
     }
 
-    /// Pick the visible row at `ix` — a foreign-harness row (favorites /
-    /// search) switches the harness first, exactly like clicking its rail
-    /// icon and then the model.
+    /// Pick the visible row at `ix` — a foreign-harness row (another tab,
+    /// favorites, search) switches the harness first: the draft's harness
+    /// on a new chat, a provider switch on an existing one.
     fn activate_model_index(&mut self, ix: usize, cx: &mut Context<Self>) {
         let Some(row) = self.model_rows(cx).get(ix).cloned() else {
             return;
         };
         if self.effective_harness(cx) != Some(row.harness) {
-            if self.harness_locked(cx) {
+            if self.chat_id(cx).is_some() {
+                self.pick_foreign_model(row.harness, row.model.id, cx);
                 return;
             }
             self.pick_harness(row.harness, cx);
@@ -3655,8 +3752,8 @@ impl Pickers {
 
     /// The combined harness + model switcher (zeron harness-model-picker.tsx):
     /// a vertical harness rail of square brand-icon tabs on the left, the
-    /// viewed harness's models on the right. On an existing chat the other
-    /// tabs stay visible but disabled — the lock reads as a rule.
+    /// viewed harness's models on the right. On an existing chat browsing
+    /// another tab changes nothing until a model there is picked.
     /// The harness/model picker (t3code ModelPickerContent): an icons-only
     /// harness rail on the left (favorites star on top), a search box over
     /// the model list on the right. Rows are two lines — model name over the
@@ -3715,8 +3812,7 @@ impl Pickers {
             Loadable::Ready(_) => {}
         }
 
-        let locked = self.harness_locked(cx);
-        let effective = self.effective_harness(cx);
+        let viewed = self.rail_harness(cx);
         let model_scroll = self.model_scroll.clone();
         let query = self.search.read(cx).text().trim().to_string();
         let searching = !query.is_empty();
@@ -3811,8 +3907,7 @@ impl Pickers {
         );
         for (ix, descriptor) in descriptors.iter().enumerate() {
             let harness = descriptor.id;
-            let is_viewed = !favorites_view && effective == Some(harness);
-            let is_disabled = locked && effective != Some(harness);
+            let is_viewed = !favorites_view && viewed == Some(harness);
             let (icon_path, tint) = harness_brand_icon(harness);
             tabs =
                 tabs.child(
@@ -3825,11 +3920,8 @@ impl Pickers {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .when(is_disabled, |el| el.opacity(0.35))
-                        .when(!is_disabled, |el| el.cursor_pointer())
-                        .when(!is_disabled && !is_viewed, |el| {
-                            el.hover(|s| s.bg(crate::theme::ink(0.06)))
-                        })
+                        .cursor_pointer()
+                        .when(!is_viewed, |el| el.hover(|s| s.bg(crate::theme::ink(0.06))))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.setting_menu = None;
                             this.model_rail = ModelRail::Harness;
@@ -3878,7 +3970,7 @@ impl Pickers {
         //    renders, so a 7k-model catalog scrolls as smoothly as seven
         //    (field report: the un-virtualized stack was the picker's lag).
         //    Keyboard nav scrolls via the UniformListScrollHandle.
-        let effective_models = effective.and_then(|h| self.models.get(&h));
+        let effective_models = viewed.and_then(|h| self.models.get(&h));
         let model_list: Option<AnyElement> = if !rows.is_empty() {
             let entity = cx.entity();
             let row_data = rows.clone();
@@ -5221,7 +5313,30 @@ impl Pickers {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let body = switch_warning(self.effective_harness(cx), &pending.to);
+        let provider = pending
+            .harness
+            .and_then(|to| self.effective_harness(cx).map(|from| (from, to)));
+        let body = match provider {
+            Some((from, to)) => provider_switch_warning(from, to),
+            None => switch_warning(self.effective_harness(cx), &pending.to),
+        };
+        let (title, lead, yes_detail, no_title) = match provider {
+            Some(_) => (
+                "Switch provider?",
+                format!("{} starts from a text copy of this chat", pending.to),
+                format!(
+                    "Same chat, same tab. A divider marks where {} stopped.",
+                    pending.from
+                ),
+                format!("No, keep {}", pending.from),
+            ),
+            None => (
+                "Switch model?",
+                "Your next response will be slower and use more tokens".to_string(),
+                "Applies to this chat only. The change is marked in the transcript.".to_string(),
+                "No, go back".to_string(),
+            ),
+        };
         let option =
             |number: &'static str, title: String, detail: String, fade_key: &'static str| {
                 popover::menu_row(theme, false, fade_key)
@@ -5254,25 +5369,25 @@ impl Pickers {
         let yes = option(
             "1.",
             format!("Yes, switch to {}", pending.to),
-            "Applies to this chat only. The change is marked in the transcript.".into(),
+            yes_detail,
             "model-switch-yes",
         )
         .on_click(cx.listener(|this, _, _, cx| this.confirm_model_switch(cx)));
         let no = option(
             "2.",
-            "No, go back".into(),
+            no_title,
             format!("Keep {} for this chat.", pending.from),
             "model-switch-no",
         )
         .on_click(cx.listener(|this, _, _, cx| this.cancel_model_switch(cx)));
         let card = popover::dialog_card(theme)
-            .child(popover::dialog_title(theme, "Switch model?"))
+            .child(popover::dialog_title(theme, title))
             .child(
                 div()
                     .mt(px(6.0))
                     .text_size(crate::typography::ui_rems(12.5))
                     .text_color(theme.warning)
-                    .child("Your next response will be slower and use more tokens"),
+                    .child(lead),
             )
             .child(div().mt(px(8.0)).child(popover::dialog_body(theme, body)))
             .child(
@@ -6159,6 +6274,163 @@ mod tests {
             steering_mode: zeron_proto::SteeringMode::StepBoundary,
             supports_steering: false,
         }
+    }
+
+    /// A chat with history on Claude, both catalogs loaded, no engine: the
+    /// mutate is skipped but the optimistic row stamp shows what would be
+    /// written.
+    fn existing_claude_chat(cx: &mut gpui::TestAppContext) -> gpui::WindowHandle<Pickers> {
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            crate::composer::init(cx, Default::default());
+        });
+        cx.add_window(|_, cx| {
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.chats = vec![zeron_proto::Chat {
+                    id: "c1".into(),
+                    device_id: "dev".into(),
+                    title: Some("Auth work".into()),
+                    archived: false,
+                    cwd: None,
+                    branch: None,
+                    checkout_id: None,
+                    source_context: None,
+                    config: Some(ChatConfig {
+                        harness: HarnessId::ClaudeCode,
+                        model: Some("fable".into()),
+                        reasoning: None,
+                        model_options: Default::default(),
+                        sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+                        permission_mode: Default::default(),
+                    }),
+                    last_message_preview: None,
+                    last_message_at: None,
+                    created_at: chrono::Utc::now(),
+                    harness_session_id: Some("sess".into()),
+                    harness_session_cwd: None,
+                    space_id: None,
+                    last_seen_at: None,
+                    room_gen: None,
+                    sidechat_source_chat_id: None,
+                }];
+                state.selected_chat = Some("c1".into());
+                state.transcript_replayed = false;
+                state
+            });
+            let mut pickers = Pickers::new(state, cx);
+            pickers.harnesses = Loadable::Ready(vec![
+                descriptor(HarnessId::ClaudeCode, "Claude Code"),
+                descriptor(HarnessId::Codex, "Codex"),
+            ]);
+            pickers.models.insert(
+                HarnessId::ClaudeCode,
+                Loadable::Ready(vec![bare_model("fable", "Fable")]),
+            );
+            pickers.models.insert(
+                HarnessId::Codex,
+                Loadable::Ready(vec![bare_model("gpt", "GPT")]),
+            );
+            pickers
+        })
+    }
+
+    #[gpui::test]
+    fn a_foreign_harness_pick_on_an_existing_chat_switches_provider_behind_the_dialog(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let handle = existing_claude_chat(cx);
+        handle
+            .update(cx, |pickers, _, cx| {
+                pickers.open.open(PickerKind::HarnessModel);
+                assert_eq!(pickers.rail_harness(cx), Some(HarnessId::ClaudeCode));
+
+                // Browsing the Codex tab lists its models and changes nothing.
+                pickers.pick_harness(HarnessId::Codex, cx);
+                assert_eq!(pickers.rail_harness(cx), Some(HarnessId::Codex));
+                assert_eq!(pickers.effective_harness(cx), Some(HarnessId::ClaudeCode));
+                assert_eq!(pickers.config.harness, None);
+                let rows = pickers.model_rows(cx);
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].harness, HarnessId::Codex);
+
+                // Picking one parks a provider switch; the row is untouched.
+                pickers.activate_model_index(0, cx);
+                let pending = pickers.pending_model_switch.clone().expect("dialog");
+                assert_eq!(pending.harness, Some(HarnessId::Codex));
+                assert_eq!(pending.model_id, "gpt");
+                assert_eq!(pending.from, "Claude Code");
+                assert_eq!(pending.to, "GPT");
+                assert_eq!(
+                    pickers
+                        .chat_row(cx)
+                        .unwrap()
+                        .config
+                        .as_ref()
+                        .unwrap()
+                        .harness,
+                    HarnessId::ClaudeCode
+                );
+
+                pickers.cancel_model_switch(cx);
+                assert!(pickers.pending_model_switch.is_none());
+                assert_eq!(
+                    pickers
+                        .chat_row(cx)
+                        .unwrap()
+                        .config
+                        .as_ref()
+                        .unwrap()
+                        .harness,
+                    HarnessId::ClaudeCode
+                );
+
+                pickers.activate_model_index(0, cx);
+                pickers.confirm_model_switch(cx);
+                let config = pickers.chat_row(cx).unwrap().config.clone().unwrap();
+                assert_eq!(config.harness, HarnessId::Codex);
+                assert_eq!(config.model.as_deref(), Some("gpt"));
+                assert!(pickers.pending_model_switch.is_none());
+                assert_eq!(
+                    pickers.viewed_harness, None,
+                    "the dialog's close drops the browsed tab"
+                );
+            })
+            .unwrap();
+    }
+
+    /// A chat sent from the canvas keeps its draft id, so the canvas picks
+    /// survive into the existing chat. After a provider switch they must not
+    /// outrank the row: the chip and the next run follow the new harness.
+    #[gpui::test]
+    fn a_confirmed_switch_drops_the_canvas_picks_that_seeded_the_chat(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let handle = existing_claude_chat(cx);
+        handle
+            .update(cx, |pickers, _, cx| {
+                pickers.config.harness = Some(HarnessId::ClaudeCode);
+                pickers.config.model = Some("fable".into());
+                pickers.open.open(PickerKind::HarnessModel);
+                pickers.pick_harness(HarnessId::Codex, cx);
+                pickers.activate_model_index(0, cx);
+                pickers.confirm_model_switch(cx);
+                assert_eq!(pickers.config.harness, None);
+                assert_eq!(pickers.config.model, None);
+                assert_eq!(pickers.effective_harness(cx), Some(HarnessId::Codex));
+                assert_eq!(pickers.effective_model_id(cx), Some("gpt"));
+                assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::Codex));
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn provider_switch_copy_names_both_harnesses() {
+        let body = provider_switch_warning(HarnessId::ClaudeCode, HarnessId::Codex);
+        assert!(body.contains("Codex has never seen this chat"), "{body}");
+        assert!(body.contains("Claude Code session is closed"), "{body}");
+        let hint = provider_switch_hint(HarnessId::ClaudeCode, HarnessId::Codex);
+        assert!(hint.contains("handed to Codex as text"), "{hint}");
     }
 
     #[test]
