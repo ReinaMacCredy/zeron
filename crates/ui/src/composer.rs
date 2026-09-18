@@ -6602,6 +6602,16 @@ impl Composer {
         steer: bool,
         cx: &mut Context<Self>,
     ) {
+        if self
+            .bound_chat_row(cx)
+            .is_some_and(|chat| chat.sidechat_expired(chrono::Utc::now()))
+        {
+            self.failure =
+                Some("Sidechat expired after 24 hours. Create a new sidechat to continue.".into());
+            self.failure_key = self.bound_chat_id(cx);
+            cx.notify();
+            return;
+        }
         // `/compact` is zeron's own command: it becomes an RPC, never a turn,
         // so it never builds a `Run` and never writes a user entry.
         if let Some(focus) = compact_focus(&text) {
@@ -7806,6 +7816,29 @@ impl Render for Composer {
             window.focus(&focus, cx);
         }
         let theme = Theme::of(cx).clone();
+        if self
+            .bound_chat_row(cx)
+            .is_some_and(|chat| chat.sidechat_expired(chrono::Utc::now()))
+        {
+            let stop = self
+                .run_live(cx)
+                .then(|| self.render_send_button(SendButtonMode::Stop, cx));
+            return div()
+                .p(px(12.0))
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .text_size(crate::typography::ui_rems(12.0))
+                .text_color(theme.text_muted)
+                .child(
+                    div()
+                        .id("expired-sidechat")
+                        .debug_selector(|| "expired-sidechat".into())
+                        .flex_1()
+                        .child("Expired after 24 hours. Create a new sidechat to continue."),
+                )
+                .children(stop);
+        }
         let wizard_active = self.wizard.is_some();
         if self.mention.token.is_some()
             && (wizard_active || !self.input.focus_handle(cx).is_focused(window))
@@ -9523,6 +9556,35 @@ mod tests {
         );
         assert_eq!(sidechat_pill_label(None), "Sidechat");
         assert_eq!(sidechat_pill_label(Some("Sidechat:")), "Sidechat");
+    }
+
+    #[gpui::test]
+    fn expired_sidechat_keeps_the_draft_and_rejects_sending(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        handle
+            .update(cx, |composer, _, cx| {
+                composer.state.update(cx, |state, _| {
+                    let mut side = chat_row("side", Some("src"));
+                    side.created_at = chrono::Utc::now() - chrono::Duration::hours(24);
+                    state.chats = vec![side];
+                    state.selected_chat = Some("side".into());
+                });
+                composer
+                    .input
+                    .update(cx, |input, cx| input.set_text("keep my draft", cx));
+                composer.send_prompt("after expiry".into(), cx);
+                assert_eq!(composer.input.read(cx).text(), "keep my draft");
+                assert!(
+                    composer
+                        .failure
+                        .as_deref()
+                        .unwrap()
+                        .starts_with("Sidechat expired")
+                );
+                assert!(!composer.sending);
+                assert!(composer.state.read(cx).transcript.is_empty());
+            })
+            .unwrap();
     }
 
     #[gpui::test]

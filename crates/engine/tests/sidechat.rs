@@ -533,3 +533,36 @@ async fn cached_context_tracks_source_edits_and_removed_answers() {
             .contains("new source context")
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn expired_sidechat_rejects_dispatch_and_steering_without_removing_history() {
+    let tmp = tempfile::tempdir().unwrap();
+    let rig = rig(tmp.path(), true).await;
+    let mut side = rig.core.workspace.create_sidechat(SOURCE, SIDE).unwrap();
+    rig.turn(SIDE, "before expiry", "side-1").await;
+    let before = entries(&rig.core, SIDE);
+    side.created_at = chrono::Utc::now() - chrono::Duration::hours(24);
+    rig.core.workspace.import_chat_row(&side).unwrap();
+    let SessionCommandPayload::Run { request, .. } =
+        run_payload("after expiry", "side-2", &rig.cwd)
+    else {
+        unreachable!()
+    };
+    let err = rig
+        .core
+        .sessions
+        .dispatch(SIDE, HarnessId::Mock, request, Some("side-2".into()))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("Sidechat expired"), "{err}");
+    let err = rig
+        .core
+        .sessions
+        .steer(SIDE, "after expiry", Some("side-3".into()))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("Sidechat expired"), "{err}");
+    assert_eq!(entries(&rig.core, SIDE), before);
+    assert!(rig.harness.steer_prompts.lock().unwrap().is_empty());
+    assert_eq!(rig.harness.run_prompts.lock().unwrap().len(), 1);
+}

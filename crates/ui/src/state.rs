@@ -1749,13 +1749,17 @@ impl AppState {
         self.chats.iter().find(|c| c.id == id)
     }
 
-    /// The newest sidechat of `chat_id`, if the chat has any. Newest by
-    /// creation, not by activity: the pill and the picker row both reopen the
+    /// The newest unexpired sidechat of `chat_id`, if any. Newest by
+    /// creation, not by activity: the pill and slash command both reopen the
     /// most recently STARTED side conversation.
     pub fn latest_sidechat_of(&self, chat_id: &str) -> Option<&Chat> {
         self.chats
             .iter()
-            .filter(|c| c.sidechat_source_chat_id.as_deref() == Some(chat_id))
+            .filter(|c| {
+                c.sidechat_source_chat_id.as_deref() == Some(chat_id)
+                    && !c.archived
+                    && !c.sidechat_expired(Utc::now())
+            })
             .max_by_key(|c| c.created_at)
     }
 
@@ -3498,6 +3502,23 @@ mod tests {
             room_gen: None,
             sidechat_source_chat_id: None,
         }
+    }
+
+    #[test]
+    fn expired_sidechat_is_not_reopened_by_the_pill_or_slash_command() {
+        let mut state = AppState::new();
+        let mut expired = chat("expired", 0, None);
+        expired.sidechat_source_chat_id = Some("parent".into());
+        expired.created_at = Utc::now() - TimeDelta::hours(24);
+        state.chats.push(expired.clone());
+        assert!(state.latest_sidechat_of("parent").is_none());
+        let mut fresh = expired;
+        fresh.id = "fresh".into();
+        fresh.created_at = Utc::now();
+        state.chats.push(fresh);
+        assert_eq!(state.latest_sidechat_of("parent").unwrap().id, "fresh");
+        state.chats.last_mut().unwrap().archived = true;
+        assert!(state.latest_sidechat_of("parent").is_none());
     }
 
     fn space(id: &str, device_id: &str, path: &str, created_min: i64) -> Space {

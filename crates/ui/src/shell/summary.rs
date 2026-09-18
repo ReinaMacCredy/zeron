@@ -190,6 +190,7 @@ impl Shell {
                 .when(has_outputs, |card| card.child(popover::menu_separator()))
                 .child(popover::menu_heading(theme, "Sidechats"));
             for (ix, chat) in sidechats.into_iter().enumerate() {
+                let expired = chat.sidechat_expired(Utc::now());
                 let title = format!(
                     "{}. {}",
                     ix + 1,
@@ -201,7 +202,16 @@ impl Shell {
                             this.add_sidechat_surface(&chat, cx);
                             this.close_summary_menu(cx);
                         }))
-                        .child(label(title.into())),
+                        .child(label(title.into()))
+                        .when(expired, |row| {
+                            row.child(
+                                div()
+                                    .flex_none()
+                                    .text_size(crate::typography::ui_rems(11.0))
+                                    .text_color(muted)
+                                    .child("Expired"),
+                            )
+                        }),
                 );
             }
             card = card.child(

@@ -170,6 +170,11 @@ pub struct Chat {
 }
 
 impl Chat {
+    pub fn sidechat_expired(&self, now: DateTime<Utc>) -> bool {
+        self.sidechat_source_chat_id.is_some()
+            && now.signed_duration_since(self.created_at) >= chrono::Duration::hours(24)
+    }
+
     /// True when this chat syncs over the chat2 dumb relay.
     pub fn on_chat2(&self) -> bool {
         self.room_gen.unwrap_or(1) >= 2
@@ -966,6 +971,23 @@ pub struct ChatConnectivity {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn sidechat_expires_at_24_hours_from_creation_not_last_activity() {
+        let mut chat: Chat = serde_json::from_value(serde_json::json!({
+            "id": "side", "deviceId": "dev", "archived": false,
+            "createdAt": "2026-09-18T00:00:00Z", "sidechatSourceChatId": "parent"
+        }))
+        .unwrap();
+        let deadline = chat.created_at + chrono::Duration::hours(24);
+        assert!(!chat.sidechat_expired(chat.created_at - chrono::Duration::seconds(1)));
+        assert!(!chat.sidechat_expired(deadline - chrono::Duration::milliseconds(1)));
+        assert!(chat.sidechat_expired(deadline));
+        chat.last_message_at = Some(deadline + chrono::Duration::minutes(1));
+        assert!(chat.sidechat_expired(deadline + chrono::Duration::minutes(1)));
+        chat.sidechat_source_chat_id = None;
+        assert!(!chat.sidechat_expired(deadline + chrono::Duration::days(100)));
+    }
 
     #[test]
     fn checkout_change_request_status_round_trips_all_states_as_camel_case() {

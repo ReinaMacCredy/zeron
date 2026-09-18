@@ -1846,13 +1846,21 @@ impl Shell {
         // Working-indicator heartbeat: notify once a second while a session is
         // live so elapsed time and the flavour word stay fresh.
         let ticker = cx.spawn(async move |this, cx| {
-            let mut displayed_minute = Utc::now().timestamp().div_euclid(60);
+            let mut expiry_checked_at = Utc::now();
+            let mut displayed_minute = expiry_checked_at.timestamp().div_euclid(60);
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
-                let minute = Utc::now().timestamp().div_euclid(60);
+                let now = Utc::now();
+                let minute = now.timestamp().div_euclid(60);
                 let minute_changed = minute != displayed_minute;
                 displayed_minute = minute;
                 let alive = this.update(cx, |shell: &mut Shell, cx| {
+                    let expired = shell.state.read(cx).chats.iter().any(|chat| {
+                        !chat.sidechat_expired(expiry_checked_at) && chat.sidechat_expired(now)
+                    });
+                    if expired {
+                        shell.state.update(cx, |_, cx| cx.notify());
+                    }
                     let live = {
                         let s = shell.state.read(cx);
                         s.selected_chat
@@ -1868,10 +1876,11 @@ impl Shell {
                     };
                     // Relative sidebar times still advance when unchanged
                     // presence heartbeats no longer invalidate the whole UI.
-                    if live || minute_changed {
+                    if live || minute_changed || expired {
                         cx.notify();
                     }
                 });
+                expiry_checked_at = now;
                 if alive.is_err() {
                     break;
                 }
@@ -6241,22 +6250,30 @@ impl Shell {
         // FAILED (explicit, with the transcript's retry affordance); a send
         // whose delivery path is degraded is QUEUED, not Working — the
         // pending pill tells the truth instead of faking a spinner.
-        let (queued, undelivered) = {
+        let (queued, undelivered, expired) = {
             let now = Utc::now();
             let state = self.state.read(cx);
             (
                 state.send_queued(&id, now),
                 state.send_undelivered(&id, now),
+                state
+                    .chats
+                    .iter()
+                    .any(|chat| chat.id == id && chat.sidechat_expired(now)),
             )
         };
-        let status_color = if undelivered {
+        let status_color = if expired {
+            theme.text_muted
+        } else if undelivered {
             theme.danger
         } else if queued {
             theme.warning
         } else {
             spaces::status_dot_color(status, theme)
         };
-        let status_label: Option<&'static str> = if undelivered {
+        let status_label: Option<&'static str> = if expired {
+            Some("Expired")
+        } else if undelivered {
             Some("Failed")
         } else if queued {
             Some("Queued")
@@ -6272,7 +6289,8 @@ impl Shell {
         let shows_metadata = branch.is_some() || change_request.is_some();
         let unsent = crate::draft_store::has_content(&id, cx);
         let queued = queued && !undelivered;
-        let working = status == zeron_proto::ChatIndicator::Working && !queued && !undelivered;
+        let working =
+            status == zeron_proto::ChatIndicator::Working && !queued && !undelivered && !expired;
         let corner_body: AnyElement = if let Some(label) = jump_label {
             // The jump hint replaces the status/time corner while the modifier
             // is held, cut to the sidebar PR badge's exact cloth
@@ -6343,29 +6361,30 @@ impl Shell {
                     // Glyph slot: Working wears the preset's animated pixel
                     // glyph beside its label, Done wears the check, and the
                     // remaining statuses use a compact dot.
-                    let glyph: AnyElement = if status == zeron_proto::ChatIndicator::Completed {
-                        icon(icons::CHECK)
-                            .size(px(11.0))
-                            .flex_none()
-                            .text_color(status_color)
+                    let glyph: AnyElement =
+                        if status == zeron_proto::ChatIndicator::Completed && !expired {
+                            icon(icons::CHECK)
+                                .size(px(11.0))
+                                .flex_none()
+                                .text_color(status_color)
+                                .into_any_element()
+                        } else if working {
+                            loaders::mini_glyph_spinner(
+                                format!("{row_id}-working"),
+                                2.0,
+                                theme.glyph,
+                                self.sidebar_pane.entity_id(),
+                                cx,
+                            )
                             .into_any_element()
-                    } else if working {
-                        loaders::mini_glyph_spinner(
-                            format!("{row_id}-working"),
-                            2.0,
-                            theme.glyph,
-                            self.sidebar_pane.entity_id(),
-                            cx,
-                        )
-                        .into_any_element()
-                    } else {
-                        div()
-                            .size(px(6.0))
-                            .flex_none()
-                            .rounded_full()
-                            .bg(status_color)
-                            .into_any_element()
-                    };
+                        } else {
+                            div()
+                                .size(px(6.0))
+                                .flex_none()
+                                .rounded_full()
+                                .bg(status_color)
+                                .into_any_element()
+                        };
                     div()
                         .flex()
                         .flex_row()

@@ -413,6 +413,18 @@ impl SessionsEngine {
         Ok((replay, rx))
     }
 
+    fn ensure_sidechat_active(&self, chat_id: &str) -> Result<(), EngineError> {
+        if let Some(workspace) = self.inner.workspace()
+            && let Some(chat) = workspace.chat(chat_id)?
+            && chat.sidechat_expired(chrono::Utc::now())
+        {
+            return Err(EngineError::Other(
+                "Sidechat expired after 24 hours. Create a new sidechat to continue.".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Start (or route) a run for `chat_id`.
     ///
     /// - The user message entry is written to the doc immediately (id = `message_id`).
@@ -454,6 +466,7 @@ impl SessionsEngine {
         mut message_id: Option<String>,
         startup_retry: bool,
     ) -> Result<String, EngineError> {
+        self.ensure_sidechat_active(chat_id)?;
         // Project-less chats store cwd `~` (the creating device can't know the
         // host's home); expand it here, on the host, where the run spawns.
         request.cwd = expand_home(&request.cwd);
@@ -613,6 +626,7 @@ impl SessionsEngine {
         prompt: &str,
         message_id: Option<String>,
     ) -> Result<SteerOutcome, EngineError> {
+        self.ensure_sidechat_active(chat_id)?;
         let target = lock(&self.inner.runs)
             .get(chat_id)
             .filter(|h| h.steerable)
