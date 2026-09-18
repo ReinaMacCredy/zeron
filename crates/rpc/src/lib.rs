@@ -62,6 +62,8 @@ pub mod methods {
     /// target, a working target finishes its own turn first. Self-send and
     /// cross-project sends are refused. `{chatId, fromChatId, text}` → `{id}`.
     pub const SEND_THREAD_MESSAGE: &str = "SendThreadMessage";
+    /// Compact joined transcript count, last role and bounded prose preview. `{chatId}`.
+    pub const GET_THREAD_SUMMARY: &str = "GetThreadSummary";
     /// Move the inter-thread messages waiting on `chatId`'s queue into its
     /// transcript, for an agent that asked for them mid-turn.
     /// `{chatId}` → `{messages: [{id, fromChatId, text}]}`.

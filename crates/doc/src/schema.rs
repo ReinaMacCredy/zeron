@@ -423,6 +423,78 @@ impl SessionDoc {
             .collect())
     }
 
+    /// Joined entry count and prose preview without expanding historical parts.
+    pub fn thread_summary(&self) -> Result<serde_json::Value, DocError> {
+        use loro::{Container, ValueOrContainer};
+        let messages = self.doc.get_list("messages");
+        let mut roots = std::collections::HashMap::<String, usize>::new();
+        let mut groups: Vec<(SessionMessageEntry, Vec<LoroMap>)> = Vec::new();
+        for index in 0..messages.len() {
+            let Some(ValueOrContainer::Container(Container::Map(map))) = messages.get(index) else {
+                continue;
+            };
+            let mut value = map.get_value().to_json_value();
+            value["parts"] = serde_json::json!([]);
+            let Ok(entry) = entry_from_json(value) else {
+                continue;
+            };
+            if let Some(at) = entry.continuation_of.as_ref().and_then(|id| roots.get(id)) {
+                groups[*at].1.push(map);
+            } else {
+                if entry.continuation_of.is_none() {
+                    roots.insert(entry.id.clone(), groups.len());
+                }
+                groups.push((entry, vec![map]));
+            }
+        }
+        let Some((last, segments)) = groups.last() else {
+            return Ok(serde_json::json!({"entryCount": 0, "lastRole": null, "lastText": null}));
+        };
+        let mut preview = String::new();
+        let mut remaining = 121;
+        'segments: for segment in segments {
+            let Some(ValueOrContainer::Container(Container::List(parts))) = segment.get("parts")
+            else {
+                continue;
+            };
+            for index in 0..parts.len() {
+                let Some(ValueOrContainer::Container(Container::Map(part))) = parts.get(index)
+                else {
+                    continue;
+                };
+                if !matches!(part.get("kind"), Some(ValueOrContainer::Value(LoroValue::String(kind))) if kind.as_str() == "text")
+                {
+                    continue;
+                }
+                if !preview.is_empty() {
+                    preview.push('\n');
+                    remaining -= 1;
+                }
+                let text = match part.get("text") {
+                    Some(ValueOrContainer::Container(Container::Text(text))) => {
+                        text.slice(0, remaining.min(text.len_unicode()))?
+                    }
+                    Some(ValueOrContainer::Value(LoroValue::String(text))) => {
+                        text.chars().take(remaining).collect()
+                    }
+                    _ => String::new(),
+                };
+                remaining -= text.chars().count();
+                preview.push_str(&text);
+                if remaining == 0 {
+                    break 'segments;
+                }
+            }
+        }
+        if preview.chars().count() > 120 {
+            preview = preview.chars().take(120).collect();
+            preview.push('…');
+        }
+        Ok(
+            serde_json::json!({"entryCount": groups.len(), "lastRole": last.role, "lastText": preview}),
+        )
+    }
+
     /// Find a completed assistant without materializing message parts. A
     /// caller's previous match remains usable only while that slot still
     /// holds a completed assistant (rewinds and imports can replace it).
@@ -1367,6 +1439,56 @@ mod tests {
     use super::*;
     use crate::parts::fold_event_into_parts;
     use zeron_proto::{AgentEvent, ToolCall};
+
+    #[test]
+    fn thread_summary_counts_joined_entries_and_bounds_unicode_prose() {
+        let doc = SessionDoc::init("summary").unwrap();
+        assert_eq!(
+            doc.thread_summary().unwrap(),
+            serde_json::json!({"entryCount": 0, "lastRole": null, "lastText": null})
+        );
+        for (id, continuation, text) in [
+            ("root", None, "hello".to_string()),
+            ("next", Some("root"), "界".repeat(100_000)),
+        ] {
+            doc.push_message(&SessionMessageEntry {
+                id: id.into(),
+                role: MessageRole::Assistant,
+                parts: vec![MessagePart::Text {
+                    id: format!("text-{id}"),
+                    text,
+                }],
+                created_at: 0,
+                device_id: "device".into(),
+                status: None,
+                continuation_of: continuation.map(str::to_owned),
+                from_chat_id: None,
+            })
+            .unwrap();
+        }
+        let summary = doc.thread_summary().unwrap();
+        assert_eq!(
+            summary["entryCount"],
+            join_continuation_entries(doc.read_entries().unwrap()).len()
+        );
+        assert_eq!(summary["lastRole"], "assistant");
+        assert_eq!(summary["lastText"], format!("hello\n{}…", "界".repeat(114)));
+        doc.push_message(&SessionMessageEntry {
+            id: "orphan".into(),
+            role: MessageRole::User,
+            parts: vec![],
+            created_at: 0,
+            device_id: "device".into(),
+            status: None,
+            continuation_of: Some("missing".into()),
+            from_chat_id: None,
+        })
+        .unwrap();
+        assert_eq!(
+            doc.thread_summary().unwrap(),
+            serde_json::json!({"entryCount": 2, "lastRole": "user", "lastText": ""})
+        );
+    }
 
     #[test]
     fn opening_tail_bounds_parts_and_preserves_continuation_ids() {

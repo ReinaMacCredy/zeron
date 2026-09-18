@@ -58,10 +58,15 @@ pub fn tool_list() -> Value {
     json!([
         {
             "name": "list_threads",
-            "description": "List the chats (threads) in this chat's project with their live status and the role and first 120 characters of their newest transcript entry (`lastRole` assistant: its last turn finished; user or none: it is waiting on someone). Archived threads are left out unless `includeArchived` is true. Threads are peers, not workers: every one is a real sidebar chat the human can open, and none can stop another.",
+            "description": "List the chats (threads) in this chat's project with their live status and the role and first 120 prose characters of their newest transcript entry. `lastRole` identifies the author only; neither an assistant entry nor idle status proves the task is complete or safe to archive. Use status for runtime state and read_thread for context. Results are ordered by id, default 50 and max 200 per page; pass nextCursor as cursor for the next page. Archived threads are left out unless `includeArchived` is true. Threads are peers, not workers: every one is a real sidebar chat the human can open, and none can stop another.",
             "inputSchema": {
                 "type": "object",
-                "properties": { "includeArchived": { "type": "boolean" } },
+                "properties": {
+                    "includeArchived": { "type": "boolean" },
+                    "status": { "type": "string", "enum": ["idle", "working", "awaiting_input", "errored"] },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
+                    "cursor": { "type": "string", "description": "nextCursor from the previous page with the same filters." }
+                },
                 "additionalProperties": false
             }
         },
@@ -107,12 +112,13 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "wait_threads",
-            "description": "Block until any listed thread is no longer working (idle, awaiting_input, errored), a message from another thread arrives for this chat, or the timeout passes (default 600s, max 1800s). Returns the listed threads' statuses either way.",
+            "description": "Wait with mode any (default: any listed thread stops working, or an inbox message arrives), all (all listed threads stop working), or message (an inbox message arrives, even if peers are already idle). Use message after sending when you need a reply; it receives pending inbox messages too and does not correlate replies to a particular send. all requires threadIds; any with no ids waits for a message. Idle, awaiting_input and errored all mean not working, not task success. Timeout defaults to 600s, max 1800s.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "threadIds": { "type": "array", "items": { "type": "string" } },
-                    "timeoutSeconds": { "type": "integer", "minimum": 0, "maximum": 1800 }
+                    "timeoutSeconds": { "type": "integer", "minimum": 0, "maximum": 1800 },
+                    "mode": { "type": "string", "enum": ["any", "all", "message"] }
                 },
                 "additionalProperties": false
             }
@@ -236,17 +242,54 @@ impl ThreadTools {
 
     pub async fn list_threads(&self, args: &Value) -> Result<Value, String> {
         let include_archived = args["includeArchived"].as_bool().unwrap_or(false);
-        let (_, peers) = self.peers().await?;
+        let filter = match args.get("status") {
+            None => None,
+            Some(Value::String(status))
+                if matches!(
+                    status.as_str(),
+                    "idle" | "working" | "awaiting_input" | "errored"
+                ) =>
+            {
+                Some(status.as_str())
+            }
+            _ => return Err("status must be idle, working, awaiting_input or errored".into()),
+        };
+        let limit = match args.get("limit") {
+            None => 50,
+            Some(value) => value
+                .as_u64()
+                .filter(|n| (1..=200).contains(n))
+                .ok_or("limit must be between 1 and 200")? as usize,
+        };
+        let cursor = match args.get("cursor") {
+            None => None,
+            Some(Value::String(cursor)) => Some(cursor.as_str()),
+            _ => return Err("cursor must be a string".into()),
+        };
+        let (_, mut peers) = self.peers().await?;
+        peers.sort_by(|a, b| a.id.cmp(&b.id));
+        if let Some(cursor) = cursor
+            && !peers.iter().any(|chat| chat.id == cursor)
+        {
+            return Err("cursor thread is no longer in this project; restart listing".into());
+        }
         let sessions: Vec<Session> = self.snapshot(methods::WATCH_SESSIONS, json!({})).await?;
         let now = Utc::now();
-        let mut threads = Vec::new();
-        for chat in peers
+        let page: Vec<_> = peers
             .iter()
-            .filter(|chat| include_archived || !chat.archived)
-        {
+            .filter(|chat| {
+                (include_archived || !chat.archived)
+                    && cursor.is_none_or(|cursor| chat.id.as_str() > cursor)
+                    && filter.is_none_or(|status| status_of(&sessions, &chat.id, now) == status)
+            })
+            .take(limit + 1)
+            .collect();
+        let next_cursor = (page.len() > limit).then(|| page[limit - 1].id.clone());
+        let mut threads = Vec::new();
+        for chat in page.into_iter().take(limit) {
             threads.push(self.row_of(chat, &sessions, now).await?);
         }
-        Ok(json!({ "threads": threads }))
+        Ok(json!({ "threads": threads, "nextCursor": next_cursor }))
     }
 
     /// One thread as list_threads and create_thread report it.
@@ -256,8 +299,9 @@ impl ThreadTools {
         sessions: &[Session],
         now: DateTime<Utc>,
     ) -> Result<Value, String> {
-        let entries = self.entries_of(&chat.id).await?;
-        let last = entries.last().map(render_entry);
+        let summary = self
+            .call_engine(methods::GET_THREAD_SUMMARY, json!({"chatId": chat.id}))
+            .await?;
         Ok(json!({
             "id": chat.id,
             "title": chat.title,
@@ -269,9 +313,9 @@ impl ThreadTools {
             "createdByChatId": chat.created_by_chat_id,
             "updatedAt": stamp(chat.last_message_at.unwrap_or(chat.created_at)),
             "isThisChat": chat.id == self.chat_id,
-            "entryCount": entries.len(),
-            "lastRole": last.as_ref().map(|e| e["role"].clone()),
-            "lastText": last.as_ref().and_then(|e| e["text"].as_str()).map(preview),
+            "entryCount": summary["entryCount"],
+            "lastRole": summary["lastRole"],
+            "lastText": summary["lastText"],
         }))
     }
 
@@ -416,15 +460,35 @@ impl ThreadTools {
     }
 
     pub async fn wait_threads(&self, args: &Value) -> Result<Value, String> {
-        let ids: Vec<String> = args["threadIds"]
-            .as_array()
-            .map(|ids| {
-                ids.iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default();
+        let ids: Vec<String> = match args.get("threadIds") {
+            None => Vec::new(),
+            Some(Value::Array(ids)) => ids
+                .iter()
+                .map(|id| {
+                    id.as_str()
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_owned)
+                        .ok_or_else(|| "threadIds must contain nonempty strings".to_string())
+                })
+                .collect::<Result<_, _>>()?,
+            _ => return Err("threadIds must be an array".into()),
+        };
+        let mode = match args.get("mode") {
+            None => "any",
+            Some(Value::String(mode)) if matches!(mode.as_str(), "any" | "all" | "message") => {
+                mode.as_str()
+            }
+            _ => return Err("mode must be any, all or message".into()),
+        };
+        if mode == "all" && ids.is_empty() {
+            return Err("all mode requires threadIds".into());
+        }
+        let (_, peers) = self.peers().await?;
+        for id in &ids {
+            if !peers.iter().any(|chat| chat.id == *id) {
+                return Err(format!("no thread {id} in this project"));
+            }
+        }
         let timeout = Duration::from_secs(
             args["timeoutSeconds"]
                 .as_u64()
@@ -453,10 +517,13 @@ impl ThreadTools {
         loop {
             if let Some(sessions) = &latest {
                 let current = statuses(sessions);
-                if current
-                    .as_object()
-                    .is_some_and(|map| map.values().any(|s| s.as_str() != Some("working")))
-                {
+                let stopped = |s: &Value| s.as_str() != Some("working");
+                let ready = current.as_object().is_some_and(|map| match mode {
+                    "any" => map.values().any(stopped),
+                    "all" => map.values().all(stopped),
+                    _ => false,
+                });
+                if ready {
                     return Ok(json!({ "reason": "status", "statuses": current }));
                 }
             }
@@ -469,7 +536,7 @@ impl ThreadTools {
                     }
                     None => return Err("WatchSessions ended".into()),
                 },
-                item = queue.recv() => match item {
+                item = queue.recv(), if mode != "all" => match item {
                     Some(item) => {
                         let waiting = item["items"]
                             .as_array()
@@ -563,6 +630,7 @@ fn render_entry(entry: &Value) -> Value {
     out
 }
 
+#[cfg(test)]
 fn preview(text: &str) -> String {
     const PREVIEW_CHARS: usize = 120;
     let mut out: String = text.chars().take(PREVIEW_CHARS).collect();
@@ -705,6 +773,7 @@ mod tests {
         session_snapshots: Vec<Vec<Value>>,
         queue_snapshots: Vec<Vec<Value>>,
         entries: Vec<Value>,
+        reads: Mutex<Vec<String>>,
         calls: Mutex<Vec<(String, Value)>>,
     }
 
@@ -741,9 +810,34 @@ mod tests {
                         .map(|items| json!({ "items": items }))
                         .collect(),
                 )),
-                methods::WATCH_DOC_MESSAGES => Ok(RpcReply::Stream(
-                    futures::stream::iter(vec![json!({ "reset": self.entries })]).boxed(),
-                )),
+                methods::GET_THREAD_SUMMARY => {
+                    self.reads
+                        .lock()
+                        .unwrap()
+                        .push(params["chatId"].as_str().unwrap().to_string());
+                    let last = self.entries.last();
+                    let text = last.map(|entry| {
+                        entry["parts"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .filter(|part| part["kind"] == "text")
+                            .filter_map(|part| part["text"].as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    });
+                    Ok(RpcReply::Value(json!({
+                        "entryCount": self.entries.len(),
+                        "lastRole": last.map(|entry| &entry["role"]),
+                        "lastText": text.as_deref().map(preview),
+                    })))
+                }
+                methods::WATCH_DOC_MESSAGES => {
+                    self.reads.lock().unwrap().push("FULL_TRANSCRIPT".into());
+                    Ok(RpcReply::Stream(
+                        futures::stream::iter(vec![json!({ "reset": self.entries })]).boxed(),
+                    ))
+                }
                 methods::CREATE_THREAD
                 | methods::SEND_THREAD_MESSAGE
                 | methods::TAKE_THREAD_MESSAGES
@@ -813,6 +907,7 @@ mod tests {
                     )
                 })
                 .collect(),
+            reads: Mutex::new(Vec::new()),
             calls: Mutex::new(Vec::new()),
         }
     }
@@ -843,6 +938,87 @@ mod tests {
                 .iter()
                 .all(|n| !n.contains("cancel") && !n.contains("respond"))
         );
+    }
+
+    #[tokio::test]
+    async fn list_filters_and_pages_before_loading_summaries() {
+        let rig = rig(fixture());
+        let first = rig
+            .tools
+            .list_threads(&json!({"status": "working", "limit": 1}))
+            .await
+            .unwrap();
+        assert_eq!(first["threads"].as_array().unwrap().len(), 1);
+        assert_eq!(first["threads"][0]["id"], "b");
+        assert_eq!(first["nextCursor"], "b");
+        let second = rig
+            .tools
+            .list_threads(&json!({"status": "working", "limit": 1, "cursor": first["nextCursor"]}))
+            .await
+            .unwrap();
+        assert_eq!(second["threads"][0]["id"], "new-1");
+        assert!(second["nextCursor"].is_null());
+        assert_eq!(*rig.calls.reads.lock().unwrap(), vec!["b", "new-1"]);
+        assert!(
+            rig.tools
+                .list_threads(&json!({"status": "done"}))
+                .await
+                .is_err()
+        );
+        assert!(
+            rig.tools
+                .list_threads(&json!({"cursor": "missing"}))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn message_wait_does_not_return_for_an_idle_peer() {
+        let mut fake = fixture();
+        fake.session_snapshots = vec![vec![session("b", "idle", 0)]];
+        fake.queue_snapshots = vec![
+            vec![],
+            vec![json!({"id": "q-9", "fromChatId": "b", "text": "reply"})],
+        ];
+        let out = rig(fake)
+            .tools
+            .wait_threads(&json!({"threadIds": ["b"], "mode": "message", "timeoutSeconds": 1}))
+            .await
+            .unwrap();
+        assert_eq!(out["reason"], "message");
+    }
+
+    #[tokio::test]
+    async fn wait_rejects_invalid_modes_and_out_of_scope_targets() {
+        let rig = rig(fixture());
+        for args in [
+            json!({"mode": "bad"}),
+            json!({"mode": "all"}),
+            json!({"threadIds": ["c"]}),
+            json!({"threadIds": [1]}),
+            json!({"threadIds": "b"}),
+        ] {
+            assert!(rig.tools.wait_threads(&args).await.is_err(), "{args}");
+        }
+    }
+
+    #[tokio::test]
+    async fn all_wait_requires_every_peer_to_stop() {
+        let mut fake = fixture();
+        fake.queue_snapshots = vec![vec![
+            json!({"id": "q-9", "fromChatId": "b", "text": "reply"}),
+        ]];
+        fake.session_snapshots = vec![
+            vec![session("b", "idle", 0), session("e", "working", 0)],
+            vec![session("b", "idle", 0), session("e", "errored", 0)],
+        ];
+        let out = rig(fake)
+            .tools
+            .wait_threads(&json!({"threadIds": ["b", "e"], "mode": "all", "timeoutSeconds": 1}))
+            .await
+            .unwrap();
+        assert_eq!(out["statuses"]["e"], "errored");
     }
 
     #[tokio::test]
@@ -881,13 +1057,10 @@ mod tests {
             "no config, no settings"
         );
         // The newest entry's role and a short preview ride along so a
-        // "which threads are done" pass needs no read_thread per row.
+        // overview needs no read_thread per row; role does not prove completion.
         assert_eq!(out["threads"][1]["entryCount"], 5);
         assert_eq!(out["threads"][1]["lastRole"], "user");
-        assert_eq!(
-            out["threads"][1]["lastText"],
-            "line 5\n[tool Bash]\n[tool mcp zeron/read_thread]"
-        );
+        assert_eq!(out["threads"][1]["lastText"], "line 5");
     }
 
     #[tokio::test]
@@ -1211,12 +1384,11 @@ mod tests {
         fake.session_snapshots = vec![vec![session("b", "working", 300)]];
         let out = rig(fake)
             .tools
-            .wait_threads(&json!({ "threadIds": ["b", "zz"] }))
+            .wait_threads(&json!({ "threadIds": ["b"] }))
             .await
             .unwrap();
         assert_eq!(out["reason"], "status");
         assert_eq!(out["statuses"]["b"], "idle");
-        assert_eq!(out["statuses"]["zz"], "idle");
     }
 
     #[tokio::test]

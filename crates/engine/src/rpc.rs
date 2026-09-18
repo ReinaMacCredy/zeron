@@ -1521,6 +1521,22 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "id": id }))
             }
+            methods::GET_THREAD_SUMMARY => {
+                let p: ChatParams = parse_params(params)?;
+                let host = self.doc_host.clone();
+                let summary = tokio::task::spawn_blocking(move || {
+                    let handle = host
+                        .open(&p.chat_id)
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    handle
+                        .doc()
+                        .thread_summary()
+                        .map_err(|e| RpcError::Failed(e.to_string()))
+                })
+                .await
+                .map_err(|e| RpcError::Failed(e.to_string()))??;
+                RpcReply::value(&summary)
+            }
             methods::TAKE_THREAD_MESSAGES => {
                 let p: ChatParams = parse_params(params)?;
                 let messages: Vec<serde_json::Value> = self

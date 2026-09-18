@@ -571,3 +571,37 @@ async fn the_creation_budget_refuses_the_ninth_open_thread() {
     assert_eq!(created, 8);
     rig.core.shutdown().await;
 }
+
+#[tokio::test]
+async fn summary_rpc_reads_a_bounded_preview_without_a_transcript_watch() {
+    let rig = rig(Duration::from_millis(1));
+    let handle = rig.core.doc_host.open("lead").unwrap();
+    handle
+        .doc()
+        .push_message(&zeron_doc::SessionMessageEntry {
+            id: "long".into(),
+            role: MessageRole::User,
+            parts: vec![zeron_doc::MessagePart::Text {
+                id: "body".into(),
+                text: "界".repeat(100_000),
+            }],
+            created_at: 0,
+            device_id: "dev-a".into(),
+            status: None,
+            continuation_of: None,
+            from_chat_id: None,
+        })
+        .unwrap();
+    let client = zeron_rpc::memory_client(rig.core.rpc_service());
+    let summary = client
+        .call(
+            zeron_rpc::methods::GET_THREAD_SUMMARY,
+            serde_json::json!({"chatId": "lead"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(summary["entryCount"], 1);
+    assert_eq!(summary["lastRole"], "user");
+    assert_eq!(summary["lastText"], format!("{}…", "界".repeat(120)));
+    assert!(summary.to_string().len() < 500);
+}
