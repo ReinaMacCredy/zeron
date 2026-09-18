@@ -601,6 +601,9 @@ fn should_publish_optimistic_echo(queue: bool) -> bool {
     !queue
 }
 
+/// What the user typed by hand to pick a stopped turn back up.
+const RESUME_PROMPT: &str = "resume";
+
 fn begin_interrupt(pending: &mut HashSet<String>, chat_id: &str) -> bool {
     pending.insert(chat_id.to_string())
 }
@@ -6541,6 +6544,15 @@ impl Composer {
     pub(crate) fn send_prompt(&mut self, prompt: String, cx: &mut Context<Self>) {
         let queue = matches!(self.button_mode(cx), SendButtonMode::Queue);
         self.send(prompt, queue, false, false, cx);
+    }
+
+    /// The transcript's Resume click on a stopped turn: send the same prompt
+    /// the user would type, under the guards a typed submit runs.
+    pub(crate) fn resume(&mut self, cx: &mut Context<Self>) {
+        if self.send_blocked(cx) {
+            return;
+        }
+        self.send_prompt(RESUME_PROMPT.to_string(), cx);
     }
 
     /// Cmd/Ctrl+Enter remains an ordinary submit while the composer carries

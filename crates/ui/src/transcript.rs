@@ -2030,6 +2030,22 @@ pub fn consulting_advisor(entries: &[SessionMessageEntry]) -> bool {
     })
 }
 
+/// True when the chat's last turn stopped short and the chat sits idle: the
+/// reply was interrupted (its entry is `Aborted`), or the interrupt landed
+/// before anything streamed — the engine writes no empty aborted stub then,
+/// so the user's prompt is the trailing entry with no reply behind it.
+pub fn resume_offer(entries: &[SessionMessageEntry], indicator: crate::state::Indicator) -> bool {
+    if matches!(
+        indicator,
+        crate::state::Indicator::Working | crate::state::Indicator::AwaitingInput
+    ) {
+        return false;
+    }
+    entries.last().is_some_and(|last| {
+        last.role == MessageRole::User || last.status == Some(MessageStatus::Aborted)
+    })
+}
+
 /// The working trailer's "Sending…" bridge: true while an in-flight send is
 /// fresher than the session row's turn start — the row still carries the
 /// PREVIOUS turn (or none), so a timer would count the send round-trip and
@@ -3008,6 +3024,9 @@ pub enum TranscriptEvent {
         title: String,
         frozen: bool,
     },
+    /// The stopped-turn trailer's Resume click: the chat's own composer
+    /// sends the resume prompt as if typed.
+    Resume { chat_id: String },
 }
 
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
@@ -5800,15 +5819,37 @@ impl Transcript {
         }
     }
 
+    /// The chat whose Session row tells this transcript's liveness: the
+    /// selected chat for the main transcript, or an override doc that is
+    /// itself a chat (a sidechat tab, a split pane). A subagent doc has no
+    /// Session row — `indicator_for` would read the PARENT chat's state into
+    /// its tab — so it resolves to none. Frozen snapshots never resolve.
+    fn live_chat_id(&self, cx: &gpui::App) -> Option<String> {
+        match &self.doc_override {
+            Some(doc_id) => {
+                if !self.doc_live {
+                    return None;
+                }
+                let state = self.state.read(cx);
+                state
+                    .chats
+                    .iter()
+                    .any(|chat| chat.id == *doc_id)
+                    .then(|| doc_id.clone())
+            }
+            None => self.chat_id.clone(),
+        }
+    }
+
     fn render_working_trailer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let now = chrono::Utc::now();
-        let (sending, queued, elapsed_secs, seed) = if let Some(doc_id) = &self.doc_override {
-            // A subagent doc has no Session row — `indicator_for` would read
-            // the PARENT chat's live state into this tab. Liveness rides the
-            // doc itself instead: the sink's assistant entry streams until
-            // the subagent settles (run teardown finalizes abandoned sinks),
-            // and a trailing USER entry is a steer still awaiting its reply
-            // segment. Frozen snapshots never spin, whatever they claim.
+        let live_chat = self.live_chat_id(cx);
+        let subagent_doc = self.doc_override.as_ref().filter(|_| live_chat.is_none());
+        let (sending, queued, elapsed_secs, seed) = if let Some(doc_id) = subagent_doc {
+            // Liveness rides the subagent doc itself: the sink's assistant
+            // entry streams until the subagent settles (run teardown
+            // finalizes abandoned sinks), and a trailing USER entry is a
+            // steer still awaiting its reply segment.
             if !self.doc_live {
                 return None;
             }
@@ -5822,7 +5863,7 @@ impl Transcript {
             let elapsed = ((now.timestamp_millis() - last.created_at).max(0) / 1000) as i64;
             (false, false, elapsed, flavour_seed(doc_id))
         } else {
-            let chat_id = self.chat_id.clone()?;
+            let chat_id = live_chat?;
             // Failed-send state first: past the grace window the trailer IS
             // the retry affordance, whatever the indicator fell back to.
             if self.state.read(cx).send_undelivered(&chat_id, now) {
@@ -5936,6 +5977,58 @@ impl Transcript {
         )
     }
 
+    /// The stopped-turn affordance, in the working trailer's slot once the
+    /// run has settled: one click sends the resume prompt through the chat's
+    /// own composer instead of the user typing it.
+    fn render_resume_trailer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let chat_id = self.live_chat_id(cx)?;
+        {
+            let state = self.state.read(cx);
+            let entries = match &self.doc_override {
+                Some(doc_id) => state.sub_transcript(doc_id),
+                None => &state.transcript,
+            };
+            if !resume_offer(entries, state.indicator_for(&chat_id, chrono::Utc::now())) {
+                return None;
+            }
+        }
+        let theme = Theme::of(cx).clone();
+        Some(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(Theme::SPACE_SM))
+                .pt(px(Theme::SPACE_LG))
+                .text_size(crate::typography::ui_rems(12.0))
+                .child(
+                    div()
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from("Stopped")),
+                )
+                .child(
+                    div()
+                        .id("resume-turn")
+                        .px(px(10.0))
+                        .py(px(3.0))
+                        .rounded(px(9.0))
+                        .border_1()
+                        .border_color(crate::theme::hairline(0.12))
+                        .bg(crate::theme::ink(0.04))
+                        .text_color(theme.text)
+                        .cursor_pointer()
+                        .hover(|s| s.bg(crate::theme::ink(0.08)))
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.emit(TranscriptEvent::Resume {
+                                chat_id: chat_id.clone(),
+                            })
+                        }))
+                        .child(SharedString::from("Resume")),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(row) = self.rows.get(ix).cloned() else {
             return gpui::Empty.into_any_element();
@@ -5978,7 +6071,10 @@ impl Transcript {
         // Live-run loader rides under the LAST row's content (above its
         // clearance pad), so it sits right beneath the working reply.
         let trailer = (ix + 1 == self.rows.len())
-            .then(|| self.render_working_trailer(cx))
+            .then(|| {
+                self.render_working_trailer(cx)
+                    .or_else(|| self.render_resume_trailer(cx))
+            })
             .flatten();
 
         let inner: AnyElement = match &row.kind {
@@ -13297,6 +13393,42 @@ mod tests {
         // No send in flight: never a bridge, whatever the row says.
         assert!(!sending_bridge(None, Some(before)));
         assert!(!sending_bridge(None, None));
+    }
+
+    #[test]
+    fn resume_is_offered_only_for_a_stopped_turn_on_an_idle_chat() {
+        use crate::state::Indicator;
+        let user = |id: &str| {
+            let mut entry = assistant(id, MessageStatus::Complete, vec![text_part("t", "go")]);
+            entry.role = MessageRole::User;
+            entry.status = None;
+            entry
+        };
+        let aborted = vec![
+            user("u1"),
+            assistant("m1", MessageStatus::Aborted, vec![text_part("t", "half")]),
+        ];
+        // Interrupted before anything streamed: no aborted stub, the prompt
+        // is the trailing entry.
+        let unanswered = vec![user("u1")];
+        let complete = vec![
+            user("u1"),
+            assistant("m1", MessageStatus::Complete, vec![text_part("t", "done")]),
+        ];
+        let streaming = vec![
+            user("u1"),
+            assistant("m1", MessageStatus::Streaming, vec![text_part("t", "…")]),
+        ];
+        assert!(resume_offer(&aborted, Indicator::None));
+        assert!(resume_offer(&unanswered, Indicator::None));
+        assert!(resume_offer(&unanswered, Indicator::Errored));
+        assert!(!resume_offer(&complete, Indicator::None));
+        assert!(!resume_offer(&streaming, Indicator::None));
+        assert!(!resume_offer(&[], Indicator::None));
+        // A live run owns the trailer slot, whatever the tail says.
+        assert!(!resume_offer(&aborted, Indicator::Working));
+        assert!(!resume_offer(&unanswered, Indicator::Working));
+        assert!(!resume_offer(&unanswered, Indicator::AwaitingInput));
     }
 
     #[test]
