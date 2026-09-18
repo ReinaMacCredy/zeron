@@ -1586,8 +1586,8 @@ impl Shell {
                 let harness = self
                     .settings
                     .sidebar_show_harness
-                    .then(|| chat.config.as_ref().map(|c| c.harness))
-                    .flatten();
+                    .then(|| crate::pickers::chat_harness_marks(&chat))
+                    .unwrap_or_default();
                 let height = super::chat_row_height(branch.is_some(), change_request.is_some());
                 // Only rows a jump slot can reach wear a chip; row 10 onward
                 // keeps its time-ago.
@@ -3329,6 +3329,7 @@ mod tests {
             room_gen: None,
             sidechat_source_chat_id: None,
             created_by_chat_id: None,
+            previous_harnesses: Vec::new(),
         }
     }
 

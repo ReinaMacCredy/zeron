@@ -6339,7 +6339,9 @@ impl Shell {
         space_name: SharedString,
         branch: Option<SharedString>,
         change_request: Option<zeron_proto::ChangeRequestSummary>,
-        harness: Option<zeron_proto::HarnessId>,
+        // Every harness the chat ran on, current last
+        // (`pickers::chat_harness_marks`); empty hides the mark.
+        harnesses: Vec<zeron_proto::HarnessId>,
         // Title of the chat whose agent opened this one (thread tools); the
         // row wears it as a small badge after its own title.
         created_by: Option<SharedString>,
@@ -6641,7 +6643,10 @@ impl Shell {
                         split::SessionRowDrag {
                             chat_id: id.clone(),
                             title: title.clone(),
-                            brand: harness.map(crate::pickers::harness_brand_icon),
+                            brand: harnesses
+                                .last()
+                                .copied()
+                                .map(crate::pickers::harness_brand_icon),
                         },
                         |payload, _point, _, cx| {
                             let title = payload.title.clone();
@@ -6691,17 +6696,14 @@ impl Shell {
                     .flex_row()
                     .items_center()
                     .gap(px(SIDEBAR_ACTIVE_HARNESS_TITLE_GAP))
-                    .when_some(
-                        harness.map(crate::pickers::harness_brand_icon),
-                        |el, (path, tint)| {
-                            el.child(
-                                icon(path)
-                                    .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
-                                    .flex_none()
-                                    .text_color(tint.unwrap_or(subline).opacity(0.8)),
-                            )
-                        },
-                    )
+                    .when(!harnesses.is_empty(), |el| {
+                        el.child(crate::pickers::harness_mark_stack(
+                            &harnesses,
+                            SIDEBAR_ACTIVE_HARNESS_ICON_SIZE,
+                            subline,
+                            0.8,
+                        ))
+                    })
                     // Unsent text in this chat's composer (t3code's amber pen).
                     .when(unsent, |el| {
                         el.child(
@@ -13791,6 +13793,7 @@ mod right_tab_mouse_regressions {
                     room_gen: None,
                     sidechat_source_chat_id: None,
                     created_by_chat_id: None,
+                    previous_harnesses: Vec::new(),
                 };
                 let mut side = source.clone();
                 side.id = "side".into();

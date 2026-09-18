@@ -277,6 +277,7 @@ fn chat(id: &str, device_id: &str) -> Chat {
         room_gen: None,
         sidechat_source_chat_id: None,
         created_by_chat_id: None,
+        previous_harnesses: Vec::new(),
     }
 }
 
@@ -373,6 +374,42 @@ fn rows_round_trip_and_upsert_refreshes() {
     assert_eq!(chats.len(), 1);
     assert_eq!(chats[0].title, None);
     assert_eq!(chats[0].last_message_preview.as_deref(), Some("hello"));
+}
+
+#[test]
+fn a_provider_switch_records_the_harness_left_once_and_survives_a_full_upsert() {
+    let mut doc = RegistryDoc::new("dev-a");
+    doc.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+    let mut config = chat("chat-1", "dev-a").config.unwrap();
+    // Same harness, other model: no history.
+    config.model = Some("mock-2".into());
+    doc.set_chat_config("chat-1", &config).unwrap();
+    assert!(
+        doc.chat("chat-1")
+            .unwrap()
+            .unwrap()
+            .previous_harnesses
+            .is_empty()
+    );
+
+    config.harness = HarnessId::Codex;
+    doc.set_chat_config("chat-1", &config).unwrap();
+    config.harness = HarnessId::Mock;
+    doc.set_chat_config("chat-1", &config).unwrap();
+    config.harness = HarnessId::Codex;
+    doc.set_chat_config("chat-1", &config).unwrap();
+    let row = doc.chat("chat-1").unwrap().unwrap();
+    assert_eq!(
+        row.previous_harnesses,
+        vec![HarnessId::Mock, HarnessId::Codex]
+    );
+
+    // Read → modify → upsert paths keep the history.
+    doc.upsert_chat(&row).unwrap();
+    assert_eq!(
+        doc.chat("chat-1").unwrap().unwrap().previous_harnesses,
+        vec![HarnessId::Mock, HarnessId::Codex]
+    );
 }
 
 #[test]

@@ -28,7 +28,7 @@ use chrono::{DateTime, Utc};
 use loro::{ExportMode, LoroDoc, LoroMap, LoroValue, ToJson};
 use serde::{Deserialize, Serialize};
 
-use zeron_proto::{Chat, ChatConfig, Device, Session, SessionStatus, Space};
+use zeron_proto::{Chat, ChatConfig, Device, HarnessId, Session, SessionStatus, Space};
 
 use crate::schema::DocError;
 
@@ -276,6 +276,10 @@ impl WorkspaceDoc {
         )?;
         set_opt_str(&row, "spaceId", chat.space_id.as_deref())?;
         set_opt_ms(&row, "lastSeenAt", chat.last_seen_at)?;
+        row.insert(
+            "previousHarnesses",
+            LoroValue::from(serde_json::to_value(&chat.previous_harnesses)?),
+        )?;
         self.doc.commit();
         Ok(())
     }
@@ -700,6 +704,22 @@ pub(crate) struct RawChat {
     sidechat_source_chat_id: Option<String>,
     #[serde(default)]
     created_by_chat_id: Option<String>,
+    /// LENIENT like `config`: a harness id this build doesn't know is
+    /// dropped from the list, never the row.
+    #[serde(default, deserialize_with = "lenient_harness_list")]
+    previous_harnesses: Vec<HarnessId>,
+}
+
+fn lenient_harness_list<'de, D>(deserializer: D) -> Result<Vec<HarnessId>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let values = Option::<Vec<serde_json::Value>>::deserialize(deserializer)?;
+    Ok(values
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|value| serde_json::from_value::<HarnessId>(value).ok())
+        .collect())
 }
 
 /// Decode a chat row's `config` leniently: unknown enum values (a newer
@@ -742,6 +762,7 @@ impl From<RawChat> for Chat {
             room_gen: raw.room_gen,
             sidechat_source_chat_id: raw.sidechat_source_chat_id,
             created_by_chat_id: raw.created_by_chat_id,
+            previous_harnesses: raw.previous_harnesses,
         }
     }
 }
@@ -822,6 +843,7 @@ mod tests {
             room_gen: None,
             sidechat_source_chat_id: None,
             created_by_chat_id: None,
+            previous_harnesses: Vec::new(),
         }
     }
 

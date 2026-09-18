@@ -4924,6 +4924,50 @@ pub(crate) fn normalize_model_rows(harness: HarnessId, models: Vec<Model>) -> Ve
         .collect()
 }
 
+/// Every harness a chat has run on, oldest first, the current one last: the
+/// marks a sidebar row or tab stacks. Empty when the row has no config yet.
+pub(crate) fn chat_harness_marks(chat: &zeron_proto::Chat) -> Vec<HarnessId> {
+    let mut marks = chat.previous_harnesses.clone();
+    if let Some(current) = chat.config.as_ref().map(|c| c.harness) {
+        marks.retain(|h| *h != current);
+        marks.push(current);
+    }
+    marks
+}
+
+/// The marks of [`chat_harness_marks`] as one element: a single mark plain,
+/// several overlapping left to right so the current harness sits on top,
+/// the way a group avatar stacks its members.
+pub(crate) fn harness_mark_stack(
+    marks: &[HarnessId],
+    size: f32,
+    fallback: gpui::Hsla,
+    opacity: f32,
+) -> gpui::Div {
+    // Explicit width + absolute children: a negative margin shrank the
+    // container to one mark and the rest spilled under the title.
+    let step = size * 0.65;
+    let width = size + step * marks.len().saturating_sub(1) as f32;
+    div()
+        .flex_none()
+        .relative()
+        .w(px(width))
+        .h(px(size))
+        .children(marks.iter().enumerate().map(|(ix, harness)| {
+            let (path, tint) = harness_brand_icon(*harness);
+            div()
+                .absolute()
+                .top_0()
+                .left(px(step * ix as f32))
+                .size(px(size))
+                .child(
+                    crate::icons::icon(path)
+                        .size(px(size))
+                        .text_color(tint.unwrap_or(fallback).opacity(opacity)),
+                )
+        }))
+}
+
 pub(crate) fn harness_brand_icon(harness: HarnessId) -> (&'static str, Option<gpui::Hsla>) {
     match harness {
         HarnessId::ClaudeCode | HarnessId::Mock => (
@@ -6264,6 +6308,48 @@ mod tests {
         });
     }
 
+    #[test]
+    fn chat_marks_stack_history_before_the_current_harness_without_repeats() {
+        let mut chat = zeron_proto::Chat {
+            id: "c".into(),
+            device_id: "d".into(),
+            title: None,
+            archived: false,
+            cwd: None,
+            branch: None,
+            checkout_id: None,
+            source_context: None,
+            config: None,
+            last_message_preview: None,
+            last_message_at: None,
+            created_at: chrono::Utc::now(),
+            harness_session_id: None,
+            harness_session_cwd: None,
+            space_id: None,
+            last_seen_at: None,
+            room_gen: None,
+            sidechat_source_chat_id: None,
+            created_by_chat_id: None,
+            previous_harnesses: vec![HarnessId::ClaudeCode, HarnessId::Codex],
+        };
+        assert_eq!(
+            chat_harness_marks(&chat),
+            vec![HarnessId::ClaudeCode, HarnessId::Codex]
+        );
+        chat.config = Some(ChatConfig {
+            harness: HarnessId::ClaudeCode,
+            model: None,
+            reasoning: None,
+            model_options: Default::default(),
+            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+            permission_mode: zeron_proto::PermissionMode::Full,
+        });
+        assert_eq!(
+            chat_harness_marks(&chat),
+            vec![HarnessId::Codex, HarnessId::ClaudeCode]
+        );
+    }
+
     fn descriptor(id: HarnessId, name: &str) -> HarnessDescriptor {
         HarnessDescriptor {
             id,
@@ -6314,6 +6400,7 @@ mod tests {
                     room_gen: None,
                     sidechat_source_chat_id: None,
                     created_by_chat_id: None,
+                    previous_harnesses: Vec::new(),
                 }];
                 state.selected_chat = Some("c1".into());
                 state.transcript_replayed = false;

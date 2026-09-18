@@ -908,6 +908,7 @@ impl WorkspaceHost {
                 last_seen_at: None,
                 sidechat_source_chat_id: None,
                 created_by_chat_id: created_by_chat_id.map(str::to_string),
+                previous_harnesses: Vec::new(),
             })
         })?;
         Ok(())
@@ -960,6 +961,7 @@ impl WorkspaceHost {
             last_seen_at: None,
             sidechat_source_chat_id: Some(source_chat_id.to_string()),
             created_by_chat_id: None,
+            previous_harnesses: Vec::new(),
         };
         self.mutate(|doc| doc.upsert_chat(&chat))?;
         Ok(chat)
@@ -1013,6 +1015,7 @@ impl WorkspaceHost {
             last_seen_at: None,
             sidechat_source_chat_id: None,
             created_by_chat_id: None,
+            previous_harnesses: Vec::new(),
         };
         self.mutate(|doc| doc.upsert_chat(&chat))?;
         Ok(chat)

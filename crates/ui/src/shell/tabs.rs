@@ -143,7 +143,7 @@ fn split_tab_chip(
     halves: [(
         String,
         SharedString,
-        Option<zeron_proto::HarnessId>,
+        Vec<zeron_proto::HarnessId>,
         ChatIndicator,
     ); 2],
     selected: Option<&str>,
@@ -181,7 +181,7 @@ fn split_tab_chip(
             );
         }
         let is_primary = selected == Some(id.as_str());
-        let brand = harness.map(crate::pickers::harness_brand_icon);
+        let brand = harness.last().copied().map(crate::pickers::harness_brand_icon);
         let dot = spaces::status_dot_color(status, theme);
         let select_id = id.clone();
         let middle_id = id.clone();
@@ -243,13 +243,13 @@ fn split_tab_chip(
                         },
                     )
                 })
-                .when_some(brand, |el, (path, tint)| {
-                    el.child(
-                        icon(path)
-                            .size(px(14.0))
-                            .flex_none()
-                            .text_color(tint.unwrap_or(theme.text_muted).opacity(0.9)),
-                    )
+                .when(!harness.is_empty(), |el| {
+                    el.child(crate::pickers::harness_mark_stack(
+                        &harness,
+                        14.0,
+                        theme.text_muted,
+                        0.9,
+                    ))
                 })
                 .child(div().flex_1().min_w_0().truncate().child(title))
                 .when(status == ChatIndicator::Working, |el| {
@@ -760,7 +760,7 @@ impl Shell {
         let tabs: Vec<(
             String,
             SharedString,
-            Option<zeron_proto::HarnessId>,
+            Vec<zeron_proto::HarnessId>,
             ChatIndicator,
             bool,
         )> = {
@@ -787,7 +787,7 @@ impl Shell {
                         return Some((
                             id.clone(),
                             SharedString::from("New session"),
-                            None,
+                            Vec::new(),
                             ChatIndicator::Idle,
                             true,
                         ));
@@ -798,7 +798,7 @@ impl Shell {
                         SharedString::from(transcript::single_line(
                             &chat.title.clone().unwrap_or_else(|| "New session".into()),
                         )),
-                        chat.config.as_ref().map(|c| c.harness),
+                        crate::pickers::chat_harness_marks(chat),
                         if state.send_pending(&chat.id, now) {
                             ChatIndicator::Working
                         } else {
@@ -838,10 +838,10 @@ impl Shell {
 
         let tabs_by_id: std::collections::HashMap<
             String,
-            (SharedString, Option<zeron_proto::HarnessId>, ChatIndicator),
+            (SharedString, Vec<zeron_proto::HarnessId>, ChatIndicator),
         > = tabs
             .iter()
-            .map(|(id, title, harness, status, _)| (id.clone(), (title.clone(), *harness, *status)))
+            .map(|(id, title, harness, status, _)| (id.clone(), (title.clone(), harness.clone(), *status)))
             .collect();
         let tab_elements: Vec<AnyElement> =
             tabs.into_iter()
@@ -882,7 +882,7 @@ impl Shell {
                         (theme.text_muted.opacity(0.6), crate::theme::wash(0.0))
                     };
                     let glyph_alpha = if is_selected { 0.9 } else { 0.6 };
-                    let brand = harness.map(crate::pickers::harness_brand_icon);
+                    let brand = harness.last().copied().map(crate::pickers::harness_brand_icon);
                     let select_id = id.clone();
                     let close_id = id.clone();
                     let middle_id = id.clone();
@@ -1021,12 +1021,13 @@ impl Shell {
                                 },
                             )
                         })
-                        .when_some(brand, |el, (path, tint)| {
-                            el.child(
-                                icon(path).size(px(14.0)).flex_none().text_color(
-                                    tint.unwrap_or(theme.text_muted).opacity(glyph_alpha),
-                                ),
-                            )
+                        .when(!harness.is_empty(), |el| {
+                            el.child(crate::pickers::harness_mark_stack(
+                                &harness,
+                                14.0,
+                                theme.text_muted,
+                                glyph_alpha,
+                            ))
                         })
                         // A draft wears the amber pen where a session wears
                         // its harness brand (d18); a session with unsent

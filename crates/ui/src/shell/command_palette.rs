@@ -303,8 +303,8 @@ impl Shell {
                 let harness = self
                     .settings
                     .sidebar_show_harness
-                    .then(|| chat.config.as_ref().map(|c| c.harness))
-                    .flatten();
+                    .then(|| crate::pickers::chat_harness_marks(chat))
+                    .unwrap_or_default();
                 self.render_chat_row(
                     id.clone(),
                     transcript::single_line(chat.title.as_deref().unwrap_or("New session")).into(),

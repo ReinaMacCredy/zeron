@@ -622,6 +622,7 @@ mod drag_regressions {
             room_gen: None,
             sidechat_source_chat_id: None,
             created_by_chat_id: None,
+            previous_harnesses: Vec::new(),
         }
     }
 
@@ -674,7 +675,7 @@ mod drag_regressions {
                     "proj".into(),
                     None,
                     None,
-                    None,
+                    Vec::new(),
                     None,
                     zeron_proto::ChatIndicator::Idle,
                     false,

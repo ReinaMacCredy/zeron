@@ -910,6 +910,7 @@ impl RegistryDoc {
                 "createdByChatId",
                 opt_str(chat.created_by_chat_id.as_deref()),
             ),
+            ("previousHarnesses", json!(chat.previous_harnesses)),
         ]);
         self.write(KIND_CHATS, &chat.id.clone(), OpKind::Upsert, set);
         Ok(())
@@ -1096,12 +1097,20 @@ impl RegistryDoc {
             return Ok(false);
         }
         let value = serde_json::to_value(config)?;
-        self.write(
-            KIND_CHATS,
-            chat_id,
-            OpKind::Update,
-            fields([("config", value)]),
-        );
+        let mut set = fields([("config", value)]);
+        // A provider switch leaves a mark: the harness the chat is leaving
+        // joins its history once, so the sidebar can stack every mark. A row
+        // this build cannot decode still takes the config write, as before.
+        if let Some(current) = self.chat(chat_id)?
+            && let Some(left) = current.config.map(|c| c.harness)
+            && left != config.harness
+            && !current.previous_harnesses.contains(&left)
+        {
+            let mut previous = current.previous_harnesses;
+            previous.push(left);
+            set.insert("previousHarnesses".into(), json!(previous));
+        }
+        self.write(KIND_CHATS, chat_id, OpKind::Update, set);
         Ok(true)
     }
 
@@ -1298,6 +1307,7 @@ impl RegistryDoc {
                         "createdByChatId",
                         opt_str(chat.created_by_chat_id.as_deref()),
                     ),
+                    ("previousHarnesses", json!(chat.previous_harnesses)),
                 ]),
             );
         }

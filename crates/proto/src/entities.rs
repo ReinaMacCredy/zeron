@@ -172,6 +172,11 @@ pub struct Chat {
     /// link never expires. `None` for a chat a person opened.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_by_chat_id: Option<String>,
+    /// Every harness this chat ran on before the current one, oldest first,
+    /// each once (a provider switch appends the harness it left). The sidebar
+    /// row and tab stack their marks ahead of the current one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub previous_harnesses: Vec<HarnessId>,
 }
 
 impl Chat {
