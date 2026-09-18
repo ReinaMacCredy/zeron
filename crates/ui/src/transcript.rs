@@ -3580,7 +3580,7 @@ impl Transcript {
             // anchor row has virtualized away and cannot receive mouse-up.
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             cx.write_to_primary(ClipboardItem::new_string(text.clone()));
-            if self.chat_id.is_some() && !text.trim().is_empty() {
+            if self.quote_chat_id(cx).is_some() && !text.trim().is_empty() {
                 self.add_to_chat = Some((text, self.add_to_chat_pill(event.position)));
                 cx.notify();
             }
@@ -3602,7 +3602,7 @@ impl Transcript {
         let Some((text, _)) = self.add_to_chat.take() else {
             return;
         };
-        let Some(chat_id) = self.chat_id.clone() else {
+        let Some(chat_id) = self.quote_chat_id(cx) else {
             return;
         };
         if let Some(key) = crate::markdown::selection::anchor_key() {
@@ -3613,6 +3613,16 @@ impl Transcript {
             cx.notify();
         });
         cx.notify();
+    }
+
+    /// The chat a selection here can be added to. Only a chat's own
+    /// transcript has a composer: a subagent doc is not a chat.
+    fn quote_chat_id(&self, cx: &gpui::App) -> Option<String> {
+        let state = self.state.read(cx);
+        self.doc_override
+            .clone()
+            .filter(|id| state.chats.iter().any(|c| &c.id == id))
+            .or_else(|| self.chat_id.clone().filter(|_| self.doc_override.is_none()))
     }
 
     /// Where the "Add to chat" pill sits (window coordinates): just under the
