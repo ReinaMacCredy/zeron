@@ -582,6 +582,9 @@ pub enum FollowUpBehavior {
 pub enum SwitcherWindow {
     #[default]
     All,
+    Hours1,
+    Hours2,
+    Hours4,
     Hours8,
     Hours12,
     Hours24,
@@ -590,8 +593,11 @@ pub enum SwitcherWindow {
 }
 
 impl SwitcherWindow {
-    pub const ALL: [SwitcherWindow; 6] = [
+    pub const ALL: [SwitcherWindow; 9] = [
         SwitcherWindow::All,
+        SwitcherWindow::Hours1,
+        SwitcherWindow::Hours2,
+        SwitcherWindow::Hours4,
         SwitcherWindow::Hours8,
         SwitcherWindow::Hours12,
         SwitcherWindow::Hours24,
@@ -602,6 +608,9 @@ impl SwitcherWindow {
     pub fn label(self) -> &'static str {
         match self {
             SwitcherWindow::All => "All",
+            SwitcherWindow::Hours1 => "1h",
+            SwitcherWindow::Hours2 => "2h",
+            SwitcherWindow::Hours4 => "4h",
             SwitcherWindow::Hours8 => "8h",
             SwitcherWindow::Hours12 => "12h",
             SwitcherWindow::Hours24 => "24h",
@@ -617,6 +626,9 @@ impl SwitcherWindow {
     ) -> Option<chrono::DateTime<chrono::Utc>> {
         let hours = match self {
             SwitcherWindow::All => return None,
+            SwitcherWindow::Hours1 => 1,
+            SwitcherWindow::Hours2 => 2,
+            SwitcherWindow::Hours4 => 4,
             SwitcherWindow::Hours8 => 8,
             SwitcherWindow::Hours12 => 12,
             SwitcherWindow::Hours24 => 24,
