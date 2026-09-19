@@ -237,6 +237,16 @@ fn is_synthetic_user_text(text: &str) -> bool {
     text.starts_with("<system-reminder>") || text.starts_with("[Request interrupted")
 }
 
+/// The opening prompt an `Agent`/`Task` tool_use block hands its subagent;
+/// `None` for any other tool or an empty prompt.
+fn spawn_prompt(b: &ContentBlock) -> Option<&str> {
+    matches!(b.name.as_str(), "Agent" | "Task")
+        .then(|| b.input.get("prompt"))
+        .flatten()
+        .and_then(Value::as_str)
+        .filter(|p| !p.trim().is_empty())
+}
+
 /// Per-run normalization state.
 ///
 /// `saw_init` dedupes `system:init` — the CLI re-emits it every time the model
@@ -263,6 +273,12 @@ pub(crate) struct Normalizer {
     /// which then opened as an empty, never-created subagent doc (user
     /// report 2026-08-20).
     agent_spawn_tools: std::collections::HashSet<String>,
+    /// Spawn tool_use id → the opening prompt this normalizer already seeded
+    /// onto its feed. A FOREGROUND spawn (`run_in_background: false`) echoes
+    /// that prompt back as a tagged user text frame (live-verified 2.1.278;
+    /// a background spawn does not), which read as a steer and doubled the
+    /// subagent's opening entry (user report 2026-09-19). Consumed on match.
+    seeded_prompts: std::collections::HashMap<String, String>,
     /// The advisor call still awaiting its answer, per feed (`None` = the
     /// parent, `Some(spawn id)` = a subagent). The advisor is a SERVER tool:
     /// its call is a `server_tool_use` block and its answer an
@@ -292,6 +308,7 @@ impl Normalizer {
             last_model: None,
             agent_tasks: std::collections::HashMap::new(),
             agent_spawn_tools: std::collections::HashSet::new(),
+            seeded_prompts: std::collections::HashMap::new(),
             pending_advisor: std::collections::HashMap::new(),
             assistant_message_id: new_message_id(),
             session_id: None,
@@ -533,6 +550,9 @@ impl Normalizer {
                 for b in f.message.blocks() {
                     if b.kind == "tool_use" && matches!(b.name.as_str(), "Agent" | "Task") {
                         self.agent_spawn_tools.insert(b.id.clone());
+                        if let Some(prompt) = spawn_prompt(&b) {
+                            self.seeded_prompts.insert(b.id.clone(), prompt.to_owned());
+                        }
                     }
                 }
                 // Every main-channel assistant message is a cut point; the
@@ -557,23 +577,20 @@ impl Normalizer {
                                 call: decode_tool_use(&b.name, &b.input),
                             };
                             // A spawn's `prompt` is the subagent's opening user
-                            // message — the wire never echoes it on the child
-                            // feed (child user frames carry tool results and
-                            // steers only), so seed it here and the subagent
-                            // transcript starts the way every chat does.
-                            let opening = matches!(b.name.as_str(), "Agent" | "Task")
-                                .then(|| b.input.get("prompt"))
-                                .flatten()
-                                .and_then(Value::as_str)
-                                .filter(|p| !p.trim().is_empty())
-                                .map(|prompt| {
-                                    tag(
-                                        &b.id,
-                                        AgentEvent::UserMessage {
-                                            text: prompt.to_owned(),
-                                        },
-                                    )
-                                });
+                            // message — a background spawn never echoes it on
+                            // the child feed (child user frames carry tool
+                            // results and steers only), so seed it here and
+                            // the subagent transcript starts the way every
+                            // chat does. A foreground spawn's echo is dropped
+                            // against `seeded_prompts` in the user-frame arm.
+                            let opening = spawn_prompt(&b).map(|prompt| {
+                                tag(
+                                    &b.id,
+                                    AgentEvent::UserMessage {
+                                        text: prompt.to_owned(),
+                                    },
+                                )
+                            });
                             // A SendMessage steer never echoes on the child feed
                             // (live-verified) — surface it from the parent's own
                             // call, re-keyed onto the spawn it addresses.
@@ -667,16 +684,25 @@ impl Normalizer {
                     // tool results ride their own blocks, filtered above).
                     // Synthetic harness injections are not conversation, and
                     // must not read as a steer — see [`is_synthetic_user_text`].
-                    out.extend(
-                        f.message
-                            .blocks()
-                            .filter(|b: &ContentBlock| {
-                                b.kind == "text"
-                                    && !b.text.trim().is_empty()
-                                    && !is_synthetic_user_text(&b.text)
-                            })
-                            .map(|b| tag(parent, AgentEvent::UserMessage { text: b.text })),
-                    );
+                    // A foreground spawn's echo of the prompt already seeded
+                    // from its tool_use block is not a steer either.
+                    for b in f.message.blocks() {
+                        if b.kind != "text"
+                            || b.text.trim().is_empty()
+                            || is_synthetic_user_text(&b.text)
+                        {
+                            continue;
+                        }
+                        if self
+                            .seeded_prompts
+                            .get(parent)
+                            .is_some_and(|p| *p == b.text)
+                        {
+                            self.seeded_prompts.remove(parent);
+                            continue;
+                        }
+                        out.push(tag(parent, AgentEvent::UserMessage { text: b.text }));
+                    }
                     return out;
                 }
                 // A replayed prompt (`--replay-user-messages`) names the
@@ -1344,8 +1370,8 @@ mod tests {
 
     #[test]
     fn spawn_prompt_seeds_the_subagent_opening_user_message() {
-        // The wire never echoes a Task's prompt on the child feed, so the
-        // spawn itself seeds the subagent's opening user entry.
+        // A background spawn never echoes its prompt on the child feed, so
+        // the spawn itself seeds the subagent's opening user entry.
         let ev = normalize_one(
             r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_sub","name":"Task","input":{"description":"probe","prompt":"scan the fold path"}}]}}"#,
         );
@@ -1370,6 +1396,59 @@ mod tests {
                 "{frame}: {ev:?}"
             );
         }
+    }
+
+    /// Live 2.1.278: a FOREGROUND spawn echoes its prompt back as a tagged
+    /// user text frame after the seed. Read as a steer it doubled the opening
+    /// entry (user report 2026-09-19); the echo is dropped once, and a later
+    /// steer — even one repeating the prompt — still arrives.
+    #[test]
+    fn a_foreground_spawn_echo_of_the_seeded_prompt_is_not_a_steer() {
+        let mut norm = Normalizer::new();
+        let spawn = crate::claude::wire::parse_frame(
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_sub","name":"Agent","input":{"description":"probe","prompt":"scan the fold path","run_in_background":false}}]}}"#,
+        )
+        .expect("parses");
+        let opening = |ev: &[AgentEvent]| {
+            ev.iter()
+                .filter(|e| matches!(
+                    e,
+                    AgentEvent::Subagent { parent_tool_use_id, event }
+                        if parent_tool_use_id == "toolu_sub"
+                            && matches!(event.as_ref(), AgentEvent::UserMessage { text } if text == "scan the fold path")
+                ))
+                .count()
+        };
+        assert_eq!(opening(&norm.normalize(spawn, false)), 1);
+        let echo = r#"{"type":"user","parent_tool_use_id":"toolu_sub","message":{"content":[{"type":"text","text":"scan the fold path"}]}}"#;
+        let ev = norm.normalize(
+            crate::claude::wire::parse_frame(echo).expect("parses"),
+            false,
+        );
+        assert!(ev.is_empty(), "echo leaked as a steer: {ev:?}");
+        let ev = norm.normalize(
+            crate::claude::wire::parse_frame(echo).expect("parses"),
+            false,
+        );
+        assert_eq!(
+            opening(&ev),
+            1,
+            "a repeated steer must still arrive: {ev:?}"
+        );
+        // A different steer on the same feed is untouched by the seed.
+        let steer = r#"{"type":"user","parent_tool_use_id":"toolu_sub","message":{"content":[{"type":"text","text":"Keep going."}]}}"#;
+        let ev = norm.normalize(
+            crate::claude::wire::parse_frame(steer).expect("parses"),
+            false,
+        );
+        assert!(
+            ev.iter().any(|e| matches!(
+                e,
+                AgentEvent::Subagent { event, .. }
+                    if matches!(event.as_ref(), AgentEvent::UserMessage { text } if text == "Keep going.")
+            )),
+            "{ev:?}"
+        );
     }
 
     /// Killing a subagent puts `done{interrupted}` on the child feed and then
