@@ -564,6 +564,8 @@ pub enum WorkspaceReadOnlyReason {
     TooLarge,
     PermissionDenied,
     NotRegularFile,
+    /// An absolute path outside the checkout; the write verbs never accept it.
+    OutsideWorkspace,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

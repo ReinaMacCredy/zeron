@@ -501,6 +501,28 @@ impl Harness for MockHarness {
             })
             .into_iter()
             .flatten();
+        // Dev/testing knob: `ZERON_MOCK_READ_FILE=<path>` appends one Read
+        // chip on that path (absolute or checkout-relative), the data-side way
+        // to click a file badge into the Files pane without a real harness.
+        let read_file_events = std::env::var("ZERON_MOCK_READ_FILE")
+            .ok()
+            .filter(|path| !path.is_empty())
+            .map(|path| {
+                [
+                    AgentEvent::ToolCall {
+                        id: "mock-read-file".into(),
+                        call: zeron_proto::ToolCall::ReadFile { path },
+                    },
+                    AgentEvent::ToolResult {
+                        id: "mock-read-file".into(),
+                        is_error: false,
+                        output: None,
+                        diff: None,
+                    },
+                ]
+            })
+            .into_iter()
+            .flatten();
         let events: Vec<Result<AgentEvent, HarnessError>> = body
             .iter()
             .cycle()
@@ -509,6 +531,7 @@ impl Harness for MockHarness {
             .chain(thinking_events)
             .chain(code_tool_events)
             .chain(subagent_events)
+            .chain(read_file_events)
             .chain(code_event)
             .chain(table_event)
             .chain(mend_event)

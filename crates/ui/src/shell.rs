@@ -3357,12 +3357,17 @@ impl Shell {
     /// changes, else the Files editor. The working-tree diff lives in the
     /// [`Changes`] watch, so the question goes to this panel's working-tree
     /// Diff tab when one is open, else to an unregistered probe; either
-    /// answers through [`ChangesEvent::FileLocated`].
+    /// answers through [`ChangesEvent::FileLocated`]. An absolute path
+    /// outside the checkout has no diff to ask about: it opens read-only
+    /// in the Files editor as is.
     fn open_tool_file(&mut self, chat_id: &str, path: &str, cx: &mut Context<Self>) {
         let Some(root) = self.chat_cwd(chat_id, cx) else {
             return;
         };
         let Some(link) = resolve_workspace_file_link(path, &root) else {
+            if std::path::Path::new(path.trim()).has_root() {
+                self.defer_file_surface(path.trim().to_owned(), cx);
+            }
             return;
         };
         let absolute = PathBuf::from(root)
@@ -3427,19 +3432,25 @@ impl Shell {
         else {
             return;
         };
-        // The editor needs the window and this arrives on an entity event;
-        // the click's window is the active one.
+        self.defer_file_surface(relative.path, cx);
+    }
+
+    /// Open `path` in a Files editor tab from outside a window context. The
+    /// editor needs the window and this arrives on an entity event; the
+    /// click's window is the active one.
+    fn defer_file_surface(&mut self, path: String, cx: &mut Context<Self>) {
         let Some(window) = cx.active_window() else {
             return;
         };
+        if !self.right_pane_open(cx) {
+            self.toggle_right_pane(cx);
+        }
         let shell = cx.weak_entity();
         cx.defer(move |cx| {
             window
                 .update(cx, |_, window, cx| {
                     shell
-                        .update(cx, |shell, cx| {
-                            shell.add_file_surface(relative.path, window, cx)
-                        })
+                        .update(cx, |shell, cx| shell.add_file_surface(path, window, cx))
                         .ok();
                 })
                 .ok();
@@ -13413,6 +13424,78 @@ mod exit_regressions {
                 })
                 .unwrap();
         }
+    }
+
+    #[gpui::test]
+    fn tool_file_outside_the_checkout_opens_a_file_tab_on_its_absolute_path(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        let spilled = "/Users/me/.claude/projects/-repo/session/tool-results/ba13ozzko.txt";
+        window
+            .update(cx, |shell, window, cx| {
+                window.activate_window();
+                shell.active_chat = "owner".into();
+                shell.state.update(cx, |state, _| {
+                    state.selected_chat = Some("owner".into());
+                    state.chats = vec![
+                        serde_json::from_value(serde_json::json!({
+                            "id": "owner", "deviceId": "local", "spaceId": "a", "cwd": "/repo",
+                            "archived": false, "createdAt": Utc::now(),
+                        }))
+                        .unwrap(),
+                    ];
+                });
+                shell.open_tool_file("owner", spilled, cx);
+                assert!(shell.file_surface_paths.is_empty());
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, cx| {
+                assert_eq!(
+                    shell.file_surface_paths.values().collect::<Vec<_>>(),
+                    vec![spilled]
+                );
+                assert!(shell.right_pane_open(cx));
+                assert_eq!(
+                    shell.resolved_right_active(cx),
+                    RightSurface::File(shell.file_surface_seq)
+                );
+                // Inside the checkout the click still asks the diff probe,
+                // never the editor directly; a relative path is never a host path.
+                shell.open_tool_file("owner", "/repo/src/lib.rs", cx);
+                shell.open_tool_file("owner", "src/lib.rs", cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, _| {
+                assert_eq!(shell.file_surface_paths.len(), 1)
+            })
+            .unwrap();
     }
 
     #[gpui::test]

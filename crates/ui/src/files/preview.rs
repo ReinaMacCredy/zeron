@@ -2752,7 +2752,13 @@ impl FilesSurface {
         if file.text.is_none() {
             return centered_state(read_only_message(file.read_only_reason), theme.text_muted);
         }
-        let truncated = file.truncated;
+        let notice = if file.truncated {
+            Some("Large file preview is truncated and read-only.")
+        } else if file.read_only_reason == Some(WorkspaceReadOnlyReason::OutsideWorkspace) {
+            Some("Outside the workspace: read-only.")
+        } else {
+            None
+        };
         let word_wrap = self.preview.word_wrap();
         let code_scroll = if word_wrap {
             div()
@@ -2800,7 +2806,7 @@ impl FilesSurface {
             .min_h_0()
             .flex()
             .flex_col()
-            .when(truncated, |element| {
+            .when_some(notice, |element, notice| {
                 element.child(
                     div()
                         .h(px(28.0))
@@ -2813,7 +2819,7 @@ impl FilesSurface {
                         .items_center()
                         .text_size(px(10.0))
                         .text_color(theme.warning_muted)
-                        .child("Large file preview is truncated and read-only."),
+                        .child(notice),
                 )
             })
             .child(code_scroll)
@@ -3423,6 +3429,9 @@ fn read_only_message(reason: Option<WorkspaceReadOnlyReason>) -> SharedString {
         Some(WorkspaceReadOnlyReason::TooLarge) => "This file is too large to preview.",
         Some(WorkspaceReadOnlyReason::MixedLineEndings) => {
             "Files with mixed line endings are read-only."
+        }
+        Some(WorkspaceReadOnlyReason::OutsideWorkspace) => {
+            "Files outside the workspace are read-only."
         }
         Some(WorkspaceReadOnlyReason::NotRegularFile) | None => "This file cannot be previewed.",
     }

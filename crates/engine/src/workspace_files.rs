@@ -1,7 +1,8 @@
 //! Authorized filesystem access for the file tree and editor RPC surface.
 //!
 //! Every operation resolves a synced chat or space to a checkout owned by this
-//! device before accepting a workspace-relative path.
+//! device before accepting a workspace-relative path. The two read verbs also
+//! take an absolute path anywhere on the device (read-only; see [`HostFile`]).
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
@@ -194,6 +195,55 @@ fn bad_path(message: &str) -> WorkspaceFilesError {
     WorkspaceFilesError::BadParams(message.to_string())
 }
 
+/// An absolute path named by a tool call, read outside the checkout jail.
+/// Canonicalized up front so the component walk meets no symlink (`/tmp` and
+/// `/var` are symlinks on macOS). Only the read verbs accept one; a write
+/// still needs a workspace-relative path.
+struct HostFile {
+    root: PathBuf,
+    relative: WorkspaceRelativePath,
+}
+
+impl HostFile {
+    fn resolve(path: &str) -> Result<Option<Self>, WorkspaceFilesError> {
+        if !Path::new(path).has_root() {
+            return Ok(None);
+        }
+        if path.len() > MAX_RELATIVE_PATH_BYTES {
+            return Err(bad_path("path is too long"));
+        }
+        if path.contains('\0') {
+            return Err(bad_path("path contains an invalid character"));
+        }
+        let canonical = std::fs::canonicalize(path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                WorkspaceFilesError::NotFound("file not found".into())
+            } else {
+                WorkspaceFilesError::Io(error.to_string())
+            }
+        })?;
+        let mut root = PathBuf::new();
+        let mut parts = Vec::new();
+        for component in canonical.components() {
+            match component {
+                Component::Prefix(_) | Component::RootDir => root.push(component.as_os_str()),
+                Component::Normal(value) => {
+                    parts.push(
+                        value
+                            .to_str()
+                            .ok_or_else(|| bad_path("path must be UTF-8"))?,
+                    );
+                }
+                Component::CurDir | Component::ParentDir => {
+                    return Err(bad_path("path must not contain . or .."));
+                }
+            }
+        }
+        let relative = WorkspaceRelativePath::file(&parts.join("/"))?;
+        Ok(Some(Self { root, relative }))
+    }
+}
+
 fn plain_folder_identity(device_id: &str, root: &Path) -> String {
     let mut hasher = Sha256::new();
     hasher.update(device_id.as_bytes());
@@ -372,12 +422,22 @@ impl WorkspaceFiles {
         request: ReadWorkspaceFileRequest,
     ) -> Result<WorkspaceFileText, WorkspaceFilesError> {
         let workspace = self.resolve_target(&request.target).await?;
-        let relative = WorkspaceRelativePath::file(&request.path)?;
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_on_drop = CancelOnDrop::new(cancel.clone());
         let result = tokio::task::spawn_blocking(move || {
-            let mut file = read_file_blocking(&workspace.root, &relative, &cancel)?;
+            // A tool chip can point outside the checkout (a harness spills
+            // tool results under its own data dir); those open read-only.
+            let Some(host) = HostFile::resolve(&request.path)? else {
+                let relative = WorkspaceRelativePath::file(&request.path)?;
+                let mut file = read_file_blocking(&workspace.root, &relative, &cancel)?;
+                file.checkout_id = workspace.checkout_id;
+                return Ok(file);
+            };
+            let mut file = read_file_blocking(&host.root, &host.relative, &cancel)?;
             file.checkout_id = workspace.checkout_id;
+            file.path = request.path;
+            file.read_only_reason
+                .get_or_insert(WorkspaceReadOnlyReason::OutsideWorkspace);
             Ok(file)
         })
         .await
@@ -398,9 +458,12 @@ impl WorkspaceFiles {
                 "Workspace changed before image read".into(),
             ));
         }
-        let relative = WorkspaceRelativePath::file(&request.path)?;
-        tokio::task::spawn_blocking(move || {
-            read_image_blocking(&workspace.root, &relative, &request)
+        tokio::task::spawn_blocking(move || match HostFile::resolve(&request.path)? {
+            Some(host) => read_image_blocking(&host.root, &host.relative, &request),
+            None => {
+                let relative = WorkspaceRelativePath::file(&request.path)?;
+                read_image_blocking(&workspace.root, &relative, &request)
+            }
         })
         .await
         .map_err(|e| WorkspaceFilesError::Io(e.to_string()))?
@@ -2012,6 +2075,38 @@ mod tests {
                 "unsafe path accepted: {path:?}"
             );
         }
+    }
+
+    #[test]
+    fn host_file_reads_an_absolute_path_outside_any_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("real")).unwrap();
+        let file = dir.path().join("real").join("tool-result.txt");
+        std::fs::write(&file, b"spilled output\n").unwrap();
+
+        assert!(HostFile::resolve("tool-result.txt").unwrap().is_none());
+        assert!(matches!(
+            HostFile::resolve(dir.path().join("missing.txt").to_str().unwrap()),
+            Err(WorkspaceFilesError::NotFound(_))
+        ));
+
+        // A tempdir sits under a symlink on macOS (/var -> /private/var);
+        // add one more on top and the read must still land on the file.
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("link")).unwrap();
+        #[cfg(unix)]
+        let requested = dir.path().join("link").join("tool-result.txt");
+        #[cfg(not(unix))]
+        let requested = file.clone();
+        let host = HostFile::resolve(requested.to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        let text = read_file_blocking(&host.root, &host.relative, &no_cancel()).unwrap();
+        assert_eq!(text.text.as_deref(), Some("spilled output\n"));
+        assert_eq!(
+            host.root.join(host.relative.as_path()),
+            std::fs::canonicalize(&file).unwrap()
+        );
     }
 
     #[test]
