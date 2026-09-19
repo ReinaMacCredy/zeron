@@ -2720,6 +2720,18 @@ impl RpcService for EngineRpc {
             }
             methods::FETCH_TOOL_BLOB => {
                 let p: FetchToolBlobParams = parse_params(params)?;
+                // A diff this host produced is answered from its own run
+                // journal; the edge sidecar (parked) is the remote fallback.
+                if let Some((chat, part)) = p
+                    .blob_ref
+                    .strip_suffix(".diff")
+                    .and_then(|r| r.split_once('/'))
+                    && let Some(diff) = self.sessions.journaled_tool_diff(chat, part)
+                {
+                    let text = serde_json::to_string(&diff)
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    return RpcReply::value(&serde_json::json!({ "text": text }));
+                }
                 let text = self
                     .doc_host
                     .fetch_tool_blob(&p.blob_ref)
