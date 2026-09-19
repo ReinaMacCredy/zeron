@@ -412,9 +412,15 @@ impl SessionsEngine {
     }
 
     /// Any run currently working or blocked on input — the auto-updater's
-    /// "don't restart from under a session" gate.
+    /// "don't restart from under a session" gate. Background subagents count:
+    /// a restart would kill them with the child.
     pub fn any_active(&self) -> bool {
-        lock(&self.inner.statuses).values().any(is_active)
+        lock(&self.inner.statuses).values().any(|s| {
+            matches!(
+                s.status,
+                SessionStatus::Working | SessionStatus::AwaitingInput
+            )
+        })
     }
 
     /// The last request dispatched for a chat (steer→new-turn fallback).
@@ -1765,7 +1771,7 @@ impl Inner {
     }
 
     fn set_status(&self, chat_id: &str, status: SessionStatus, fresh_start: bool) {
-        self.set_status_with_completion(chat_id, status, fresh_start, None);
+        self.set_status_with_completion(chat_id, status, fresh_start, None, false);
     }
 
     fn has_pending_steers(&self, chat_id: &str, run_id: &str) -> bool {
@@ -1777,12 +1783,15 @@ impl Inner {
 
     /// Publish the completion marker atomically with the settled status. Keep
     /// it on subsequent Working/heartbeat rows for coalesced and remote watches.
+    /// `held_by_subagents`: the status is a parked turn's, Working only because
+    /// background subagents are still streaming (see [`parked_status`]).
     fn set_status_with_completion(
         &self,
         chat_id: &str,
         status: SessionStatus,
         fresh_start: bool,
         completed_turn: Option<String>,
+        held_by_subagents: bool,
     ) {
         let now = Utc::now();
         let session = {
@@ -1794,6 +1803,7 @@ impl Inner {
                     chat_id: chat_id.to_string(),
                     device_id: self.device_id.clone(),
                     status,
+                    held_by_subagents,
                     started_at: None,
                     updated_at: now,
                 });
@@ -1803,16 +1813,14 @@ impl Inner {
             // the old base showed the previous turn's 30min on send), and a
             // settled session drops its base entirely so no later reader can
             // resurrect a stale elapsed.
-            let was_active = matches!(
-                entry.status,
-                SessionStatus::Working | SessionStatus::AwaitingInput
-            );
+            let was_active = is_active(entry);
             if let Some(turn) = completed_turn {
                 entry.last_completed_turn = Some(turn);
                 // A completed turn is the retry gate a timed-out compaction waits on.
                 lock(&self.compaction_timed_out).remove(chat_id);
             }
             entry.status = status;
+            entry.held_by_subagents = held_by_subagents;
             entry.updated_at = now;
             match status {
                 SessionStatus::Working if fresh_start || !was_active => {
@@ -2199,12 +2207,13 @@ fn format_tokens(tokens: u64) -> String {
 
 /// A turn is in flight: streaming, or parked on a question it is still owed an
 /// answer to. Notably NOT a persistent session that has parked between turns —
-/// that holds a warm child with nothing outstanding.
+/// that holds a warm child with nothing outstanding — even while background
+/// subagents keep its dot Working.
 fn is_active(session: &Session) -> bool {
     matches!(
         session.status,
         SessionStatus::Working | SessionStatus::AwaitingInput
-    )
+    ) && !session.held_by_subagents
 }
 
 // ── subagent docs ───────────────────────────────────────────────────────────
@@ -2917,7 +2926,11 @@ async fn drive_run(
                     idle_since = Some(tokio::time::Instant::now());
                     self_continued_turn = false;
                     inner.set_status_with_completion(
-                        &chat_id, parked_status(&subagents), false, completed_turn,
+                        &chat_id,
+                        parked_status(&subagents),
+                        false,
+                        completed_turn,
+                        !subagents.is_empty(),
                     );
                     continue;
                 }
@@ -3101,7 +3114,13 @@ async fn drive_run(
             if idle_since.is_some() {
                 let want = parked_status(&subagents);
                 if lock(&inner.statuses).get(&chat_id).map(|s| s.status) != Some(want) {
-                    inner.set_status(&chat_id, want, false);
+                    inner.set_status_with_completion(
+                        &chat_id,
+                        want,
+                        false,
+                        None,
+                        !subagents.is_empty(),
+                    );
                 }
             }
             continue;
@@ -3498,6 +3517,7 @@ async fn drive_run(
                     parked_status(&subagents),
                     false,
                     completed_turn,
+                    !subagents.is_empty(),
                 );
                 continue;
             }
@@ -3543,7 +3563,7 @@ async fn drive_run(
         .map(|h| std::mem::take(&mut *lock(&h.routed_steers)).into())
         .unwrap_or_default();
     inner.remove_run(&chat_id, &run_id);
-    inner.set_status_with_completion(&chat_id, final_status, false, final_completed_turn);
+    inner.set_status_with_completion(&chat_id, final_status, false, final_completed_turn, false);
     if !interrupted && !orphans.is_empty() {
         // The dying run accepted these into its mailbox but never confirmed a
         // Steered boundary (idle-reaper race, a mid-turn error discarding

@@ -301,6 +301,11 @@ pub struct Session {
     pub chat_id: String,
     pub device_id: String,
     pub status: SessionStatus,
+    /// `Working` held only by background subagents: the turn itself has
+    /// parked, and the next prompt goes straight through (a send, not a
+    /// queue). The dot still reads Working.
+    #[serde(default)]
+    pub held_by_subagents: bool,
     pub started_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
 }

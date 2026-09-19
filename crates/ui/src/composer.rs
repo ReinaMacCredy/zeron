@@ -6524,11 +6524,9 @@ impl Composer {
         let Some(chat_id) = self.bound_chat_id(cx) else {
             return false;
         };
-        let s = self.state.read(cx);
-        matches!(
-            s.indicator_for(&chat_id, chrono::Utc::now()),
-            Indicator::Working | Indicator::AwaitingInput
-        )
+        self.state
+            .read(cx)
+            .turn_in_flight(&chat_id, chrono::Utc::now())
     }
 
     /// New chats need a runnable agent, but may target the device's home

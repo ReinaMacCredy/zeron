@@ -298,6 +298,7 @@ fn space(id: &str, device_id: &str, path: &str) -> Space {
 fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
     Session {
         last_completed_turn: None,
+        held_by_subagents: false,
         chat_id: chat_id.into(),
         device_id: device_id.into(),
         status,

@@ -479,6 +479,7 @@ impl WorkspaceDoc {
         row.insert("chatId", session.chat_id.as_str())?;
         row.insert("deviceId", session.device_id.as_str())?;
         row.insert("status", status_str(session.status))?;
+        row.insert("heldBySubagents", session.held_by_subagents)?;
         set_opt_str(
             &row,
             "lastCompletedTurn",
@@ -792,6 +793,8 @@ pub(crate) struct RawSession {
     device_id: String,
     status: SessionStatus,
     #[serde(default)]
+    held_by_subagents: bool,
+    #[serde(default)]
     started_at: Option<i64>,
     #[serde(default)]
     updated_at: i64,
@@ -804,6 +807,7 @@ impl From<RawSession> for Session {
             chat_id: raw.chat_id,
             device_id: raw.device_id,
             status: raw.status,
+            held_by_subagents: raw.held_by_subagents,
             started_at: raw.started_at.map(dt),
             updated_at: dt(raw.updated_at),
         }
@@ -910,6 +914,7 @@ mod tests {
     fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
         Session {
             last_completed_turn: None,
+            held_by_subagents: false,
             chat_id: chat_id.into(),
             device_id: device_id.into(),
             status,
@@ -983,13 +988,15 @@ mod tests {
         ws.upsert_session(&row).unwrap();
         assert_eq!(ws.read_sessions().unwrap(), vec![row.clone()]);
         row.status = SessionStatus::Working;
+        row.held_by_subagents = true;
         ws.upsert_session(&row).unwrap();
         assert_eq!(ws.read_sessions().unwrap(), vec![row]);
-        ws.row("sessions", "chat-1")
-            .unwrap()
-            .delete("lastCompletedTurn")
-            .unwrap();
-        assert_eq!(ws.read_sessions().unwrap()[0].last_completed_turn, None);
+        let legacy = ws.row("sessions", "chat-1").unwrap();
+        legacy.delete("lastCompletedTurn").unwrap();
+        legacy.delete("heldBySubagents").unwrap();
+        let read = &ws.read_sessions().unwrap()[0];
+        assert_eq!(read.last_completed_turn, None);
+        assert!(!read.held_by_subagents);
     }
 
     #[test]

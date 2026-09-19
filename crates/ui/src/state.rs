@@ -1798,6 +1798,21 @@ impl AppState {
         effective_indicator(self.session_for(chat_id), now)
     }
 
+    /// Whether a prompt typed now would join a turn already in flight (queue)
+    /// rather than start the next one (send). A Working dot held only by
+    /// background subagents is a parked turn: the warm mailbox takes the
+    /// prompt straight through, so it is a send.
+    pub fn turn_in_flight(&self, chat_id: &str, now: DateTime<Utc>) -> bool {
+        if self.send_pending(chat_id, now) {
+            return true;
+        }
+        let session = self.session_for(chat_id);
+        matches!(
+            effective_indicator(session, now),
+            Indicator::Working | Indicator::AwaitingInput
+        ) && !session.is_some_and(|s| s.held_by_subagents)
+    }
+
     pub fn selected_chat_row(&self) -> Option<&Chat> {
         let id = self.selected_chat.as_deref()?;
         self.chats.iter().find(|c| c.id == id)
@@ -3609,6 +3624,7 @@ mod tests {
     ) -> Session {
         Session {
             last_completed_turn: None,
+            held_by_subagents: false,
             chat_id: chat_id.into(),
             device_id: "dev".into(),
             status,
@@ -3888,6 +3904,7 @@ mod tests {
         let now = Utc::now();
         let mut row = Session {
             last_completed_turn: None,
+            held_by_subagents: false,
             chat_id: "chat".into(),
             device_id: "host".into(),
             status: SessionStatus::Working,
@@ -3919,6 +3936,7 @@ mod tests {
         let now = Utc::now();
         state.sessions = vec![Session {
             last_completed_turn: None,
+            held_by_subagents: false,
             chat_id: "chat".into(),
             device_id: "host".into(),
             status: SessionStatus::Working,
@@ -4144,6 +4162,23 @@ mod tests {
         // Future timestamps (clock skew) count as fresh.
         let skewed = session("c", SessionStatus::Working, -30, now);
         assert_eq!(effective_indicator(Some(&skewed), now), Indicator::Working);
+    }
+
+    #[test]
+    fn subagent_held_working_keeps_the_dot_but_frees_the_composer() {
+        let now = Utc::now();
+        let mut state = AppState::new();
+        let mut held = session("c", SessionStatus::Working, 0, now);
+        held.held_by_subagents = true;
+        state.sessions = vec![held];
+        assert_eq!(state.indicator_for("c", now), Indicator::Working);
+        assert!(!state.turn_in_flight("c", now));
+        // The send just made is a turn until the host writes it back.
+        state.begin_pending_send("c", "m1", now);
+        assert!(state.turn_in_flight("c", now));
+        state.pending_sends.clear();
+        state.sessions = vec![session("c", SessionStatus::Working, 0, now)];
+        assert!(state.turn_in_flight("c", now));
     }
 
     #[test]

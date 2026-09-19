@@ -2496,6 +2496,90 @@ async fn live_subagent_holds_a_parked_session_working() {
     core.shutdown().await;
 }
 
+/// A prompt sent while a parked turn is held Working by a background subagent
+/// is the next turn, not a queued one: the row says so, the drain releases it
+/// into the warm mailbox, and the routed turn takes the status over.
+#[tokio::test]
+async fn subagent_held_parked_session_takes_the_next_prompt_straight_through() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(ControlledHarness(std::sync::Mutex::new(Some(rx)))),
+    );
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-subagent-send",
+        SessionCommandPayload::Run {
+            request: run_request("spawn"),
+            message_id: "user-spawn".into(),
+        },
+    );
+    let session = || core.sessions.session_status(CHAT);
+    tx.send(AgentEvent::TextDelta {
+        text: "spawning".into(),
+    })
+    .unwrap();
+    tx.send(AgentEvent::Subagent {
+        parent_tool_use_id: "agent-1".into(),
+        event: Box::new(AgentEvent::TextDelta {
+            text: "scanning".into(),
+        }),
+    })
+    .unwrap();
+    wait_for(
+        || session().map(|s| s.status) == Some(SessionStatus::Working),
+        "opening run",
+    )
+    .await;
+    tx.send(done(DoneStatus::Completed)).unwrap();
+    wait_for(
+        || session().is_some_and(|s| s.last_completed_turn.is_some()),
+        "parent turn completes",
+    )
+    .await;
+    let held = session().unwrap();
+    assert_eq!(held.status, SessionStatus::Working);
+    assert!(held.held_by_subagents);
+    assert!(!core.sessions.turn_in_flight(CHAT));
+
+    // Two rows: the first is the next turn; the second waits for it like any
+    // queued message behind a live turn.
+    core.doc_host
+        .queue_message(CHAT, "follow-up", Vec::new())
+        .unwrap();
+    core.doc_host
+        .queue_message(CHAT, "after that", Vec::new())
+        .unwrap();
+    wait_for(
+        || {
+            entries_now(&core).iter().any(|e| {
+                e.role == MessageRole::User
+                    && e.parts
+                        .iter()
+                        .any(|p| matches!(p, MessagePart::Text { text, .. } if text == "follow-up"))
+            })
+        },
+        "queued prompt promoted into the parked session",
+    )
+    .await;
+    let routed = session().unwrap();
+    assert_eq!(routed.status, SessionStatus::Working);
+    assert!(!routed.held_by_subagents, "a routed turn is in flight");
+    assert!(core.sessions.turn_in_flight(CHAT));
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let queued: Vec<String> = handle
+        .doc()
+        .read_queue()
+        .unwrap()
+        .into_iter()
+        .map(|item| item.text)
+        .collect();
+    assert_eq!(queued, vec!["after that"], "one row per turn boundary");
+    core.shutdown().await;
+}
+
 /// Reproduce a steer accepted just before the old turn's Done. The harness
 /// confirms the new boundary later; only its eventual completion may notify.
 #[tokio::test]
