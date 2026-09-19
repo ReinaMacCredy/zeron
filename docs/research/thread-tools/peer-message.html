@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8" />
+<title>Zeron thread tools — tin liên thread trong transcript (3 phương án)</title>
+<style>
+  :root {
+    --bg: #1c1c1e; --main: #202022; --border: rgba(255,255,255,0.06);
+    --text: rgba(255,255,255,0.92); --text-80: rgba(255,255,255,0.74);
+    --muted: rgba(255,255,255,0.46); --faint: rgba(255,255,255,0.30);
+    --ink-08: rgba(255,255,255,0.08); --accent: #f078b6; --accent-wash: rgba(240,120,182,0.12);
+    --claude: #d97757; --codex: #ffffff;
+    --font-ui: "Geist", "Inter", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    --font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: #111; color: var(--text); font-family: var(--font-ui); -webkit-font-smoothing: antialiased; }
+  .legend { width: 1180px; margin: 24px auto 12px; color: #999; font: 12px/1.7 var(--font-ui); }
+  .legend b { color: #ddd; } .legend code { color: #ddd; font-family: var(--font-mono); font-size: 11px; }
+  .legend label { margin-right: 14px; cursor: pointer; white-space: nowrap; }
+  .grid { width: 1180px; margin: 0 auto 40px; display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .pane { background: var(--main); border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; overflow: hidden; }
+  .pane h3 { margin: 0; padding: 10px 14px; font-size: 12px; font-weight: 500; color: var(--muted); border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; }
+  .pane h3 .tag { font-family: var(--font-mono); font-size: 10px; color: var(--faint); }
+  .transcript { padding: 20px 26px 22px; display: flex; flex-direction: column; gap: 16px; }
+  .entry.user { display: flex; flex-direction: column; align-items: flex-end; }
+  .bubble { max-width: 80%; background: var(--ink-08); color: var(--text); padding: 10px 16px; border-radius: 16px; font-size: 14px; line-height: 20px; }
+  .assistant .md { font-size: 14px; line-height: 21px; color: var(--text); }
+  .stamp { font-size: 10px; color: var(--faint); font-family: var(--font-mono); }
+  .brand { width: 12px; height: 12px; border-radius: 3px; flex: none; display: inline-block; }
+  .brand.claude { background: var(--claude); } .brand.codex { background: var(--codex); }
+  .glyph { width: 12px; height: 12px; flex: none; }
+
+  /* hiện tại: callout accent + viền trái */
+  .now .from { display: flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 500; color: var(--accent); padding-bottom: 4px; }
+  .now .box { max-width: 80%; background: var(--accent-wash); border-left: 2px solid var(--accent); padding: 10px 16px; border-radius: 16px; font-size: 14px; line-height: 20px; }
+
+  /* A: người tham gia khác, prose không ô */
+  .a .head { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-80); font-weight: 500; }
+  .a .head .sep { color: var(--faint); } .a .head .meta { color: var(--muted); font-weight: 400; }
+  .a .body { font-size: 14px; line-height: 21px; color: var(--text); margin-top: 4px; }
+
+  /* B: bubble user cloth, canh trái, chip tên phía trên */
+  .b .chip { display: inline-flex; align-items: center; gap: 5px; height: 18px; padding: 0 6px 0 4px; border-radius: 9px; background: var(--ink-08); font-size: 11px; color: var(--text-80); margin-bottom: 4px; }
+  .b .bubble { border-top-left-radius: 6px; }
+
+  /* D: hàng tool chip, gập/mở như tool row */
+  .d .row { display: inline-flex; align-items: center; gap: 8px; height: 26px; padding: 0 10px; border-radius: 8px; background: rgba(255,255,255,0.04); border: 1px solid var(--border); font-size: 12px; color: var(--text-80); max-width: 100%; cursor: pointer; }
+  .d .row > span { white-space: nowrap; }
+  .d .row .name { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
+  .d .row .preview { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 420px; }
+  .d .row .chev { color: var(--faint); font-size: 10px; }
+  .d .open { margin: 6px 0 0 10px; padding-left: 10px; border-left: 1px solid rgba(255,255,255,0.12); font-size: 14px; line-height: 21px; color: var(--text); }
+
+  /* E: vẫn là user bubble bên phải, tag người gửi trong ô */
+  .e .bubble { position: relative; padding-top: 24px; }
+  .e .tag { position: absolute; top: 7px; left: 16px; display: inline-flex; align-items: center; gap: 5px; font-size: 10px; font-weight: 500; color: var(--muted); letter-spacing: .01em; }
+
+  /* H: quote block không màu */
+  .h .quote { max-width: 80%; padding: 2px 0 2px 12px; border-left: 2px solid rgba(255,255,255,0.18); }
+  .h .quote .who { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+  .h .quote .body { font-size: 14px; line-height: 21px; color: var(--text-80); }
+
+  /* C: divider như system entry */
+  .c .divider { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--muted); }
+  .c .divider::before, .c .divider::after { content: ""; flex: 1; height: 1px; background: rgba(255,255,255,0.10); }
+  .c .body { font-size: 14px; line-height: 21px; color: var(--text); }
+</style>
+</head>
+<body>
+<div class="legend">
+  <b>Tin từ thread khác trong transcript</b> — trên: bản đang chạy trong Dev TT (callout accent + viền trái), và ba phương án thay thế. Mỗi pane là cùng một đoạn: bạn gõ, assistant trả lời, rồi tin từ thread "Check Sidebar Thread" (Codex) tới, assistant tiếp tục. Số liệu bubble user lấy đúng từ <code>transcript.rs</code>: ink 0.08, radius 16, px 16 / py 10, 14px, tối đa 80% cột.
+  <br /><label><input type="checkbox" id="codex" checked /> Thread gửi chạy Codex (tắt = Claude)</label>
+  <label><input type="checkbox" id="long" /> Tin dài 3 dòng</label>
+</div>
+
+<div class="grid">
+  <div class="pane now">
+    <h3>Hiện tại <span class="tag">accent wash + border-left</span></h3>
+    <div class="transcript">
+      <div class="entry user"><div class="bubble">Gửi "hi" cho thread kia rồi chờ nó trả lời.</div></div>
+      <div class="entry assistant"><div class="md">Đã gửi. Đang chờ bằng <code style="font-family:var(--font-mono);font-size:12px;background:var(--ink-08);padding:1px 5px;border-radius:4px">wait_threads</code>.</div></div>
+      <div>
+        <div class="from"><svg class="glyph" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="6"/><path d="M5 8h6M8 5v6"/></svg>from Check Sidebar Thread</div>
+        <div class="box msg">hi from "Agent Thread Management API" — received your message through the thread tools. Round trip works both ways; nothing else needed from my side.</div>
+      </div>
+      <div class="entry assistant"><div class="md">Thread kia đã nhận và trả lời. Round trip hai chiều hoạt động.</div></div>
+    </div>
+  </div>
+
+  <div class="pane a">
+    <h3>A · Người tham gia khác lên tiếng <span class="tag">header + prose, không ô, không accent</span></h3>
+    <div class="transcript">
+      <div class="entry user"><div class="bubble">Gửi "hi" cho thread kia rồi chờ nó trả lời.</div></div>
+      <div class="entry assistant"><div class="md">Đã gửi. Đang chờ bằng <code style="font-family:var(--font-mono);font-size:12px;background:var(--ink-08);padding:1px 5px;border-radius:4px">wait_threads</code>.</div></div>
+      <div>
+        <div class="head"><span class="brand codex sender"></span>Check Sidebar Thread <span class="sep">·</span> <span class="meta">8:19 PM</span></div>
+        <div class="body msg">hi from "Agent Thread Management API" — received your message through the thread tools. Round trip works both ways; nothing else needed from my side.</div>
+      </div>
+      <div class="entry assistant"><div class="md">Thread kia đã nhận và trả lời. Round trip hai chiều hoạt động.</div></div>
+    </div>
+  </div>
+
+  <div class="pane b">
+    <h3>B · Bubble của người khác <span class="tag">cloth user hiện có, canh trái, chip tên</span></h3>
+    <div class="transcript">
+      <div class="entry user"><div class="bubble">Gửi "hi" cho thread kia rồi chờ nó trả lời.</div></div>
+      <div class="entry assistant"><div class="md">Đã gửi. Đang chờ bằng <code style="font-family:var(--font-mono);font-size:12px;background:var(--ink-08);padding:1px 5px;border-radius:4px">wait_threads</code>.</div></div>
+      <div style="display:flex;flex-direction:column;align-items:flex-start">
+        <span class="chip"><span class="brand codex sender"></span>Check Sidebar Thread</span>
+        <div class="bubble msg">hi from "Agent Thread Management API" — received your message through the thread tools. Round trip works both ways; nothing else needed from my side.</div>
+      </div>
+      <div class="entry assistant"><div class="md">Thread kia đã nhận và trả lời. Round trip hai chiều hoạt động.</div></div>
+    </div>
+  </div>
+
+  <div class="pane c">
+    <h3>C · Dòng chia như system entry <span class="tag">divider + prose</span></h3>
+    <div class="transcript">
+      <div class="entry user"><div class="bubble">Gửi "hi" cho thread kia rồi chờ nó trả lời.</div></div>
+      <div class="entry assistant"><div class="md">Đã gửi. Đang chờ bằng <code style="font-family:var(--font-mono);font-size:12px;background:var(--ink-08);padding:1px 5px;border-radius:4px">wait_threads</code>.</div></div>
+      <div>
+        <div class="divider"><span class="brand codex sender"></span>Check Sidebar Thread said</div>
+        <div class="body msg" style="margin-top:8px">hi from "Agent Thread Management API" — received your message through the thread tools. Round trip works both ways; nothing else needed from my side.</div>
+      </div>
+      <div class="entry assistant"><div class="md">Thread kia đã nhận và trả lời. Round trip hai chiều hoạt động.</div></div>
+    </div>
+  </div>
+
+  <div class="pane d">
+    <h3>D · Hàng tool, gập/mở <span class="tag">cloth tool row hiện có + expander</span></h3>
+    <div class="transcript">
+      <div class="entry user"><div class="bubble">Gửi "hi" cho thread kia rồi chờ nó trả lời.</div></div>
+      <div class="entry assistant"><div class="md">Đã gửi. Đang chờ bằng <code style="font-family:var(--font-mono);font-size:12px;background:var(--ink-08);padding:1px 5px;border-radius:4px">wait_threads</code>.</div></div>
+      <div>
+        <div class="row" onclick="this.nextElementSibling.hidden=!this.nextElementSibling.hidden"><span class="brand codex sender"></span><span class="name">message</span><span>Check Sidebar Thread</span><span class="preview msg">hi from "Agent Thread Management API" — received your message through the thread tools. Round trip works both ways; nothing else needed from my side.</span><span class="chev">▾</span></div>
+        <div class="open msg">hi from "Agent Thread Management API" — received your message through the thread tools. Round trip works both ways; nothing else needed from my side.</div>
+      </div>
+      <div class="entry assistant"><div class="md">Thread kia đã nhận và trả lời. Round trip hai chiều hoạt động.</div></div>
+    </div>
+  </div>
+
+  <div class="pane e">
+    <h3>E · Bubble của bạn, có tag người gửi <span class="tag">giữ nguyên vị trí phải, thêm tag trong ô</span></h3>
+    <div class="transcript">
+      <div class="entry user"><div class="bubble">Gửi "hi" cho thread kia rồi chờ nó trả lời.</div></div>
+      <div class="entry assistant"><div class="md">Đã gửi. Đang chờ bằng <code style="font-family:var(--font-mono);font-size:12px;background:var(--ink-08);padding:1px 5px;border-radius:4px">wait_threads</code>.</div></div>
+      <div class="entry user"><div class="bubble"><span class="tag"><span class="brand codex sender"></span>CHECK SIDEBAR THREAD</span><span class="msg">hi from "Agent Thread Management API" — received your message through the thread tools. Round trip works both ways; nothing else needed from my side.</span></div></div>
+      <div class="entry assistant"><div class="md">Thread kia đã nhận và trả lời. Round trip hai chiều hoạt động.</div></div>
+    </div>
+  </div>
+
+  <div class="pane h">
+    <h3>H · Quote block không màu <span class="tag">viền trái ink, chữ 80%, không wash</span></h3>
+    <div class="transcript">
+      <div class="entry user"><div class="bubble">Gửi "hi" cho thread kia rồi chờ nó trả lời.</div></div>
+      <div class="entry assistant"><div class="md">Đã gửi. Đang chờ bằng <code style="font-family:var(--font-mono);font-size:12px;background:var(--ink-08);padding:1px 5px;border-radius:4px">wait_threads</code>.</div></div>
+      <div class="quote">
+        <div class="who"><span class="brand codex sender"></span>Check Sidebar Thread · 8:19 PM</div>
+        <div class="body msg">hi from "Agent Thread Management API" — received your message through the thread tools. Round trip works both ways; nothing else needed from my side.</div>
+      </div>
+      <div class="entry assistant"><div class="md">Thread kia đã nhận và trả lời. Round trip hai chiều hoạt động.</div></div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const q = s => document.querySelector(s), qa = s => [...document.querySelectorAll(s)];
+  const SHORT = 'hi from "Agent Thread Management API" — received your message through the thread tools. Round trip works both ways; nothing else needed from my side.';
+  const LONG = 'Xong. Tôi đã thêm 4 test cho luồng login: refresh hết hạn, refresh song song, token bị thu hồi, và cookie thiếu SameSite. Một test fail: refresh song song tạo ra hai token khác nhau, có vẻ refreshSession chưa single-flight. Bạn muốn tôi sửa luôn ở đây hay để bên bạn?';
+  q('#codex').onchange = e => qa('.sender').forEach(el => { el.classList.toggle('codex', e.target.checked); el.classList.toggle('claude', !e.target.checked); });
+  q('#long').onchange = e => qa('.msg').forEach(el => el.textContent = e.target.checked ? LONG : SHORT);
+</script>
+</body>
+</html>

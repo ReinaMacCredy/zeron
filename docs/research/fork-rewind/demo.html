@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Zeron — fork / rewind (interactive mock)</title>
+<style>
+  :root {
+    --bg: #1c1c1e; --sidebar: #1a1a1c; --main: #202022; --pane: #1e1e20;
+    --border: rgba(255,255,255,0.06);
+    --text: rgba(255,255,255,0.92); --text-80: rgba(255,255,255,0.74);
+    --muted: rgba(255,255,255,0.46); --muted-50: rgba(255,255,255,0.23);
+    --wash-hover: rgba(255,255,255,0.05); --wash-selected: rgba(255,255,255,0.08);
+    --ink-08: rgba(255,255,255,0.08);
+    --accent: #7aa2f7; --accent-wash: rgba(122,162,247,0.12);
+    --working: #e0af68; --done: #9ece6a; --danger: #f7768e; --warning: #e0af68;
+    --sidebar-w: 236px;
+    --font-ui: "Geist", "Inter", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    --font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; background: #111; color: var(--text); font-family: var(--font-ui); -webkit-font-smoothing: antialiased; }
+
+  .toolbar { width: 1180px; margin: 24px auto 0; display: flex; gap: 8px; align-items: center; font-size: 12px; color: var(--muted); }
+  .toolbar .seg { display: flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .toolbar .seg button { background: transparent; border: 0; color: var(--muted); padding: 5px 10px; font: inherit; cursor: pointer; }
+  .toolbar .seg button.on { background: var(--wash-selected); color: var(--text); }
+  .toolbar .hint { margin-left: auto; color: var(--muted-50); }
+
+  .window { position: relative; width: 1180px; height: 720px; margin: 10px auto 40px; background: var(--bg); border-radius: 12px; overflow: hidden;
+    border: 1px solid rgba(255,255,255,0.08); display: grid; grid-template-rows: 44px 1fr; }
+  .titlebar { display: flex; align-items: center; height: 44px; border-bottom: 1px solid var(--border); }
+  .titlebar .left { width: var(--sidebar-w); display: flex; align-items: center; gap: 8px; padding-left: 78px; color: var(--muted); font-size: 12px; }
+  .tabs { flex: 1; display: flex; align-items: center; gap: 4px; padding-left: 12px; }
+  .tab { height: 28px; display: flex; align-items: center; gap: 6px; padding: 0 10px; border-radius: 7px; font-size: 12px; color: var(--muted); cursor: pointer; }
+  .tab.active { background: var(--wash-selected); color: var(--text); }
+  .tab .x { color: var(--muted-50); font-size: 11px; }
+
+  .body { display: flex; min-height: 0; }
+  .sidebar { width: var(--sidebar-w); background: var(--sidebar); display: flex; flex-direction: column; padding: 8px; gap: 2px; }
+  .group-header { padding: 8px 8px 2px; font-size: 10px; font-weight: 500; color: var(--muted); }
+  .row { display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; border-radius: 8px; color: var(--text-80); cursor: pointer; }
+  .row:hover { background: var(--wash-hover); color: var(--text); }
+  .row.selected { background: var(--wash-selected); color: var(--text); }
+  .row.nested { margin-left: 14px; border-left: 1px solid var(--border); border-radius: 0 8px 8px 0; }
+  .row .l1 { display: flex; justify-content: space-between; font-size: 10px; color: var(--muted-50); }
+  .row .l2 { font-size: 13px; line-height: 17px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .l3 { font-family: var(--font-mono); font-size: 10px; color: var(--muted); }
+  .row .l3 .fork-tag { color: var(--accent); }
+
+  .main { flex: 1; min-width: 0; background: var(--main); border-left: 1px solid var(--border); display: flex; flex-direction: column; }
+  .transcript { flex: 1; overflow-y: auto; padding: 28px 48px 12px; display: flex; flex-direction: column; align-items: center; }
+  .col { width: 100%; max-width: 640px; }
+  .origin { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); background: var(--ink-08); padding: 3px 8px; border-radius: 6px; margin-bottom: 14px; }
+  .origin b { color: var(--text-80); font-weight: 500; }
+  .origin.warn { color: var(--warning); }
+
+  .entry { padding: 6px 0; }
+  .entry.user { display: flex; flex-direction: column; align-items: flex-end; }
+  .bubble { max-width: 80%; background: rgba(255,255,255,0.08); color: var(--text); padding: 9px 14px; border-radius: 16px; font-size: 14px; line-height: 20px; }
+  .assistant .md { font-size: 14px; line-height: 21px; color: var(--text); }
+  .assistant .md code { font-family: var(--font-mono); font-size: 12px; background: var(--ink-08); padding: 1px 5px; border-radius: 4px; }
+  .tools { font-size: 12px; color: var(--muted); margin: 6px 0; display: flex; gap: 6px; }
+  .tools span { background: var(--ink-08); padding: 2px 7px; border-radius: 5px; }
+
+  /* hover-revealed metadata strip: reserved 32px lane, only visibility flips */
+  .strip { height: 32px; padding-top: 8px; display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted-50); opacity: 0; transition: opacity .12s; }
+  .entry.user .strip { justify-content: flex-end; }
+  .entry:hover .strip, .strip.pinned { opacity: 1; }
+  .ib { width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; border-radius: 6px; color: var(--muted); cursor: pointer; position: relative; }
+  .ib:hover { background: var(--ink-08); color: var(--text); }
+  .ib svg { width: 14px; height: 14px; }
+  .ib.disabled { color: var(--muted-50); cursor: not-allowed; }
+  .ib.disabled:hover { background: transparent; color: var(--muted-50); }
+  .ib[data-tip]:hover::after { content: attr(data-tip); position: absolute; bottom: 30px; right: 0; white-space: nowrap; background: #2a2a2d; border: 1px solid rgba(255,255,255,0.1); color: var(--text-80); font-size: 11px; padding: 5px 8px; border-radius: 6px; z-index: 5; }
+
+  .sysnote { align-self: center; font-size: 11px; color: var(--muted); padding: 4px 10px; margin: 6px 0; border: 1px dashed var(--border); border-radius: 6px; }
+
+  .composer-wrap { padding: 8px 48px 16px; display: flex; justify-content: center; }
+  .composer { width: 100%; max-width: 640px; border: 1px solid rgba(255,255,255,0.1); border-radius: 14px; background: rgba(255,255,255,0.03); padding: 10px 12px 8px; }
+  .composer textarea { width: 100%; background: transparent; border: 0; outline: 0; color: var(--text); font: 14px/20px var(--font-ui); resize: none; height: 44px; }
+  .composer .ctl { display: flex; align-items: center; gap: 10px; font-size: 11px; color: var(--muted); }
+  .meter { display: inline-flex; align-items: center; gap: 5px; }
+  .ring { width: 14px; height: 14px; border-radius: 50%; background: conic-gradient(var(--accent) var(--pct), rgba(255,255,255,0.12) 0); }
+  .composer .ctl .send { margin-left: auto; background: var(--accent); color: #101010; border: 0; border-radius: 8px; padding: 4px 10px; font: 500 12px var(--font-ui); }
+  .pill { display: inline-flex; align-items: center; gap: 6px; background: var(--ink-08); padding: 2px 8px; border-radius: 999px; cursor: pointer; }
+
+  /* right pane (sidechat tab) */
+  .pane { width: 380px; background: var(--pane); border-left: 1px solid var(--border); display: flex; flex-direction: column; }
+  .pane-head { height: 36px; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-bottom: 1px solid var(--border); font-size: 12px; color: var(--text-80); }
+  .pane-head .grow { flex: 1; }
+  .pane-head .btn { font-size: 11px; color: var(--muted); border: 1px solid var(--border); border-radius: 6px; padding: 3px 8px; cursor: pointer; }
+  .pane-head .btn:hover { background: var(--wash-hover); color: var(--text); }
+  .pane .transcript { padding: 16px 14px 8px; }
+  .pane .bubble { font-size: 13px; line-height: 18px; }
+  .pane .assistant .md { font-size: 13px; line-height: 19px; }
+  .pane .composer-wrap { padding: 6px 14px 12px; }
+
+  /* centered modal (glass palette style) */
+  .scrim { position: absolute; inset: 0; z-index: 20; display: flex; align-items: flex-start; justify-content: center; padding-top: 180px; background: rgba(0,0,0,0.28); }
+  .modal { width: 520px; background: rgba(36,36,39,0.92); backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); border: 1px solid rgba(255,255,255,0.10); border-radius: 16px; box-shadow: 0 24px 60px rgba(0,0,0,0.55); overflow: hidden; }
+  .modal h3 { margin: 0; padding: 18px 20px 12px; font-size: 18px; font-weight: 500; color: var(--text); }
+  .modal .ctx { padding: 0 20px 12px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--border); }
+  .modal .opts { padding: 8px; }
+  .opt { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 10px; cursor: pointer; }
+  .opt:hover, .opt.focus { background: var(--wash-selected); }
+  .opt svg { width: 18px; height: 18px; color: var(--muted); flex: none; }
+  .opt .t { font-size: 14px; color: var(--text); }
+  .opt .d { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .opt.danger .t { color: var(--danger); }
+  .opt.disabled { opacity: .45; cursor: not-allowed; }
+  .opt.disabled:hover { background: transparent; }
+  .modal .foot { display: flex; justify-content: space-between; padding: 8px 16px 10px; font-size: 11px; color: var(--muted-50); border-top: 1px solid var(--border); }
+  .modal .foot kbd { font-family: var(--font-mono); background: var(--ink-08); padding: 1px 5px; border-radius: 4px; color: var(--muted); }
+
+  .toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); background: #242427; border: 1px solid rgba(255,255,255,0.1); color: var(--text-80); font-size: 12px; padding: 8px 12px; border-radius: 8px; opacity: 0; transition: opacity .15s; pointer-events: none; }
+  .toast.on { opacity: 1; }
+</style>
+</head>
+<body>
+
+<div class="toolbar">
+  <span>Harness:</span>
+  <div class="seg" id="harness">
+    <button class="on" data-h="claude">Claude</button>
+    <button data-h="codex">Codex</button>
+    <button data-h="opencode">OpenCode</button>
+    <button data-h="cursor">Cursor</button>
+  </div>
+  <span class="pill" id="reset">Reset demo</span>
+  <span class="hint">Hover a row. User rows: copy + rewind. Assistant rows: copy + fork.</span>
+</div>
+
+<div class="window">
+  <div class="titlebar">
+    <div class="left">All spaces</div>
+    <div class="tabs" id="tabs"></div>
+  </div>
+  <div class="body">
+    <div class="sidebar" id="sidebar"></div>
+    <div class="main">
+      <div class="transcript" id="transcript"></div>
+      <div class="composer-wrap">
+        <div class="composer">
+          <textarea id="composer" placeholder="Message…"></textarea>
+          <div class="ctl">
+            <span class="meter"><span class="ring" id="ring" style="--pct:62%"></span><span id="pct">62%</span></span>
+            <span id="model">claude-fable-5-1</span>
+            <span class="pill" id="reopen" hidden>Sidechat: explain the retry loop</span>
+            <button class="send">Send</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="pane" id="pane" hidden>
+      <div class="pane-head">
+        <span>Sidechat</span><span style="color:var(--muted)">·</span><span id="pane-title" style="color:var(--muted)"></span>
+        <span class="grow"></span>
+        <span class="btn" id="fork-side" title="Fork this sidechat into a standalone chat">Fork to chat</span>
+        <span class="btn" id="close-pane">Close</span>
+      </div>
+      <div class="transcript" id="pane-transcript"></div>
+      <div class="composer-wrap"><div class="composer"><textarea placeholder="Ask about the current work…" style="height:32px"></textarea></div></div>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const ICON = {
+  copy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
+  fork: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="4" r="2"/><circle cx="18" cy="4" r="2"/><circle cx="12" cy="20" r="2"/><path d="M6 6v3a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V6M12 12v6"/></svg>',
+  rewind: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>',
+  worktree: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7h18M3 12h18M3 17h12"/><path d="M19 15l3 2-3 2"/></svg>',
+  code: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m8 8-4 4 4 4M16 8l4 4-4 4M14 4l-4 16"/></svg>',
+  check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6 9 17l-5-5"/></svg>',
+};
+
+const CAP = {
+  claude:   { fork: true,  rewind: true,  why: '' },
+  codex:    { fork: true,  rewind: true,  why: '' },
+  opencode: { fork: true,  rewind: true,  why: '' },
+  cursor:   { fork: false, rewind: false, why: 'Cursor has no session fork or rewind' },
+};
+
+// entries: user rows carry `anchor` (harness uuid / turn id). null = no anchor:
+// legacy row from before anchors shipped, or a steered message that joined a running turn.
+const seed = () => ({
+  chats: {
+    c1: { id: 'c1', title: 'Fix login retry loop', folder: 'zeron-fork', branch: 'feat/auth-retry', entries: [
+      { id: 'u1', role: 'user', text: 'Fix the login retry loop in auth.rs, it retries forever on 401', anchor: 'a0f1', legacy: true, t: '5:02 AM' },
+      { id: 'a1', role: 'assistant', legacy: true, md: 'The loop in <code>auth.rs:88</code> never checks the status class. I will bound it to 3 attempts and stop on 4xx.', tools: ['Read auth.rs', 'Edit auth.rs'], t: '5:03 AM' },
+      { id: 'u2', role: 'user', text: 'Also add a test for the 401 case', anchor: 'b7c2', t: '5:11 AM' },
+      { id: 'a2', role: 'assistant', anchor: 't2', md: 'Added <code>retry_stops_on_401</code> in <code>auth_tests.rs</code>. 12 tests pass.', tools: ['Write auth_tests.rs', 'Bash cargo test'], t: '5:12 AM' },
+      { id: 'u3', role: 'user', text: 'hmm actually use exponential backoff instead', anchor: 'c9d3', t: '5:20 AM' },
+      { id: 'a3', role: 'assistant', anchor: 't3', md: 'Switched to exponential backoff with jitter, base 200ms, cap 5s. Tests updated.', tools: ['Edit auth.rs', 'Edit auth_tests.rs', 'Bash cargo test'], t: '5:21 AM' },
+      { id: 'u4', role: 'user', text: 'wait, keep the 3-attempt cap too', anchor: null, steered: true, t: '5:21 AM' },
+      { id: 'a4', role: 'assistant', anchor: 't4', md: 'Kept the cap: backoff runs at most 3 times, then surfaces the error.', tools: ['Edit auth.rs'], t: '5:23 AM' },
+    ]},
+    s1: { id: 's1', title: 'Sidechat: explain the retry loop', folder: 'zeron-fork', branch: 'feat/auth-retry', sidechatOf: 'c1', entries: [
+      { id: 'su1', role: 'user', text: 'explain the retry loop change in plain words', anchor: 'e1', t: '5:14 AM' },
+      { id: 'sa1', role: 'assistant', anchor: 'e1', md: 'The old loop retried any error, so a bad password hammered the server. Now it stops on client errors and gives up after three tries.', t: '5:14 AM' },
+      { id: 'su2', role: 'user', text: 'is jitter worth it here?', anchor: 'e2', t: '5:16 AM' },
+      { id: 'sa2', role: 'assistant', anchor: 'e2', md: 'Yes for many clients waking together; for a single desktop app it is harmless but not important.', t: '5:16 AM' },
+    ]},
+  },
+  order: ['c1', 's1'],
+  tabs: ['c1'],
+  active: 'c1',
+  paneOpen: false,
+  ctx: { c1: 62, s1: 18 },
+  n: 0,
+});
+
+let S = seed();
+let harness = 'claude';
+
+const $ = (s) => document.querySelector(s);
+const toast = (m) => { const t = $('#toast'); t.textContent = m; t.classList.add('on'); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('on'), 2200); };
+
+function iconBtn(kind, opts = {}) {
+  const b = document.createElement('span');
+  b.className = 'ib' + (opts.disabled ? ' disabled' : '');
+  b.innerHTML = ICON[kind];
+  if (opts.tip) b.dataset.tip = opts.tip;
+  if (!opts.disabled && opts.onClick) b.onclick = (e) => { e.stopPropagation(); opts.onClick(e, b); };
+  return b;
+}
+
+function renderEntry(chat, e, ix, into) {
+  const el = document.createElement('div');
+  el.className = 'entry ' + e.role;
+  const strip = document.createElement('div');
+  strip.className = 'strip';
+  const ts = document.createElement('span'); ts.textContent = 'Sep 17, ' + e.t;
+  if (e.role === 'user') {
+    const b = document.createElement('div'); b.className = 'bubble'; b.textContent = e.text; el.appendChild(b);
+    strip.appendChild(ts);
+    strip.appendChild(iconBtn('copy', { onClick: (_, btn) => { btn.innerHTML = ICON.check; setTimeout(() => btn.innerHTML = ICON.copy, 1200); } }));
+    const cap = CAP[harness];
+    let why = '';
+    if (!cap.fork) why = cap.why;
+    else if (e.steered) why = 'Joined a running turn; no checkpoint here';
+    else if (e.anchor === null || e.legacy) why = 'Recorded before anchors were tracked';
+    if (!cap.rewind) why = cap.why;
+    const disabled = !!why;
+    strip.appendChild(iconBtn('rewind', { disabled, tip: disabled ? why : 'Rewind to before this prompt', onClick: (ev) => openPop(ev, 'rewind', chat, ix) }));
+  } else {
+    const m = document.createElement('div'); m.className = 'md'; m.innerHTML = e.md; el.appendChild(m);
+    if (e.tools) { const t = document.createElement('div'); t.className = 'tools'; e.tools.forEach(x => { const s = document.createElement('span'); s.textContent = x; t.appendChild(s); }); el.appendChild(t); }
+    strip.appendChild(ts);
+    strip.appendChild(iconBtn('copy', { onClick: (_, btn) => { btn.innerHTML = ICON.check; setTimeout(() => btn.innerHTML = ICON.copy, 1200); } }));
+    const cap = CAP[harness];
+    let why = '';
+    if (!cap.fork) why = cap.why;
+    else if (e.legacy) why = 'Recorded before anchors were tracked';
+    const disabled = !!why;
+    strip.appendChild(iconBtn('fork', { disabled, tip: disabled ? why : 'Fork chat from after this reply', onClick: (ev) => openPop(ev, 'fork', chat, ix + 1) }));
+  }
+  el.appendChild(strip);
+  into.appendChild(el);
+}
+
+function renderTranscript() {
+  const chat = S.chats[S.active];
+  const t = $('#transcript'); t.innerHTML = '';
+  const col = document.createElement('div'); col.className = 'col'; t.appendChild(col);
+  if (chat.forkOf) {
+    const o = document.createElement('div'); o.className = 'origin';
+    o.innerHTML = `${ICON.fork.replace('<svg', '<svg style="width:12px;height:12px"')} Forked from <b>${S.chats[chat.forkOf].title}</b> after “${chat.forkAt}”`;
+    col.appendChild(o);
+  }
+  if (chat.unwrapped) {
+    const o = document.createElement('div'); o.className = 'origin warn';
+    o.textContent = 'Forked from a sidechat: the harness history still holds the sidechat boundary; the first turn sends an unwrap note.';
+    col.appendChild(o);
+  }
+  chat.entries.forEach((e, ix) => renderEntry(chat, e, ix, col));
+  if (chat.rewound) { const n = document.createElement('div'); n.className = 'sysnote'; n.textContent = `Rewound: ${chat.rewound} messages removed, files on disk unchanged`; col.appendChild(n); }
+  const pct = S.ctx[S.active] ?? 0;
+  $('#ring').style.setProperty('--pct', pct + '%'); $('#pct').textContent = pct + '%';
+  $('#model').textContent = harness === 'claude' ? 'claude-fable-5-1' : harness === 'codex' ? 'gpt-5.6-sol' : harness === 'opencode' ? 'opencode/kimi' : 'cursor/composer';
+  $('#reopen').hidden = !(chat.id === 'c1' && !S.paneOpen && S.chats.s1);
+}
+
+function renderSidebar() {
+  const sb = $('#sidebar'); sb.innerHTML = '';
+  const h = document.createElement('div'); h.className = 'group-header'; h.textContent = 'zeron-fork'; sb.appendChild(h);
+  S.order.forEach(id => {
+    const c = S.chats[id]; if (!c) return;
+    const r = document.createElement('div'); r.className = 'row' + (id === S.active ? ' selected' : '') + (c.sidechatOf ? ' nested' : '');
+    r.innerHTML = `<div class="l1"><span>${c.folder}</span><span>${c.sidechatOf ? 'sidechat' : ''}</span></div><div class="l2">${c.title}</div><div class="l3">${c.forkOf ? '<span class="fork-tag">⑂ fork</span> · ' : ''}${c.branch}</div>`;
+    r.onclick = () => { if (c.sidechatOf) { openPane(); } else { S.active = id; if (!S.tabs.includes(id)) S.tabs.push(id); render(); } };
+    sb.appendChild(r);
+  });
+}
+
+function renderTabs() {
+  const t = $('#tabs'); t.innerHTML = '';
+  S.tabs.forEach(id => { const c = S.chats[id]; if (!c) return; const el = document.createElement('div'); el.className = 'tab' + (id === S.active ? ' active' : ''); el.innerHTML = `<span>${c.title}</span><span class="x">×</span>`; el.onclick = () => { S.active = id; render(); }; t.appendChild(el); });
+}
+
+function renderPane() {
+  const p = $('#pane'); p.hidden = !S.paneOpen; if (!S.paneOpen || !S.chats.s1) { if (!S.chats.s1) p.hidden = true; return; }
+  $('#pane-title').textContent = 'of ' + S.chats.c1.title;
+  const t = $('#pane-transcript'); t.innerHTML = '';
+  const col = document.createElement('div'); col.className = 'col'; t.appendChild(col);
+  S.chats.s1.entries.forEach((e, ix) => renderEntry(S.chats.s1, e, ix, col));
+}
+
+function render() { renderTabs(); renderSidebar(); renderTranscript(); renderPane(); }
+
+// ---- actions ----
+function closePop() { document.querySelectorAll('.scrim').forEach(p => p.remove()); }
+function openPop(ev, kind, chat, ix) {
+  closePop();
+  const e = kind === 'fork' ? (chat.entries[ix - 1] || { md: 'end of sidechat', anchor: 'tail' }) : chat.entries[ix];
+  const after = chat.entries.length - ix;
+  const label = (x) => { const t = x.text || x.md.replace(/<[^>]+>/g, ''); return t.slice(0, 60) + (t.length > 60 ? '…' : ''); };
+  const scrim = document.createElement('div'); scrim.className = 'scrim';
+  const m = document.createElement('div'); m.className = 'modal';
+  const opt = (icon, title, desc, cls, onClick) => {
+    const o = document.createElement('div'); o.className = 'opt ' + (cls || '');
+    o.innerHTML = `${icon}<div><div class="t">${title}</div><div class="d">${desc}</div></div>`;
+    o.onclick = () => { closePop(); onClick(); };
+    return o;
+  };
+  if (kind === 'fork') {
+    m.innerHTML = `<h3>Fork chat from here</h3><div class="ctx">After “${label(e)}” · ${ix} messages carried over${chat.sidechatOf ? ' · becomes a standalone chat' : ''}</div><div class="opts"></div>`;
+    const opts = m.querySelector('.opts');
+    opts.appendChild(opt(ICON.fork, 'Fork in this workspace', 'New chat on the same checkout and branch. This chat stays as is.', '', () => doFork(chat, ix, false)));
+    opts.appendChild(opt(ICON.worktree, 'Fork in a new worktree', 'New chat on an isolated worktree so both branches can edit files.', '', () => doFork(chat, ix, true)));
+  } else {
+    m.innerHTML = `<h3>Rewind to here</h3><div class="ctx">Before “${label(e)}” · ${after} messages removed · the prompt returns to the composer</div><div class="opts"></div>`;
+    const opts = m.querySelector('.opts');
+    opts.appendChild(opt(ICON.rewind, 'Restore conversation', 'Rewind the chat to this point. Files on disk stay as they are.', 'danger', () => doRewind(chat, ix)));
+    opts.appendChild(opt(ICON.code, 'Restore conversation and code', harness === 'claude' ? 'Also revert file edits made after this point (Write/Edit only).' : 'Not available on this harness.', harness === 'claude' ? 'danger' : 'disabled', () => harness === 'claude' && doRewind(chat, ix)));
+  }
+  m.insertAdjacentHTML('beforeend', '<div class="foot"><span><kbd>↑</kbd> <kbd>↓</kbd> choose · <kbd>↵</kbd> confirm</span><span><kbd>esc</kbd> cancel</span></div>');
+  scrim.appendChild(m);
+  scrim.onclick = (x) => { if (x.target === scrim) closePop(); };
+  document.querySelector('.window').appendChild(scrim);
+}
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closePop(); });
+
+function doFork(chat, ix, worktree) {
+  const id = 'f' + (++S.n);
+  const e = chat.entries[ix - 1] || { md: 'end of sidechat', anchor: 'tail' };
+  const fromSide = !!chat.sidechatOf;
+  S.chats[id] = { id, title: (fromSide ? 'From sidechat: ' : 'Fork: ') + chat.title.replace(/^Sidechat: /, ''), folder: chat.folder, branch: worktree ? chat.branch + '-fork' : chat.branch,
+    entries: chat.entries.slice(0, ix).map(x => ({ ...x })), forkOf: chat.id, forkAt: (e.text || e.md.replace(/<[^>]+>/g, '')).slice(0, 32), unwrapped: fromSide };
+  S.order.push(id); S.tabs.push(id); S.active = id; S.ctx[id] = Math.round((S.ctx[chat.id] ?? 20) * ix / chat.entries.length);
+  $('#composer').value = '';
+  render();
+  toast(harness === 'claude' ? `claude --resume ${chat.id} --fork-session --resume-session-at ${e.anchor}` : harness === 'codex' ? `thread/fork { threadId: ${chat.id}, lastTurnId: ${e.anchor} }` : `POST /session/${chat.id}/fork { messageID: ${e.anchor} }`);
+}
+
+function doRewind(chat, ix) {
+  const e = chat.entries[ix];
+  const removed = chat.entries.length - ix;
+  chat.entries = chat.entries.slice(0, ix);
+  chat.rewound = removed;
+  S.ctx[chat.id] = Math.round((S.ctx[chat.id] ?? 20) * ix / (ix + removed));
+  if (chat.id === S.active) $('#composer').value = e.text;
+  render();
+  toast(harness === 'claude' ? `claude --resume ${chat.id} --fork-session --resume-session-at ${e.anchor} → repoint harness_session_id` : harness === 'codex' ? `thread/fork { lastTurnId: ${e.anchor} } → repoint thread id` : `POST /session/${chat.id}/revert { messageID: ${e.anchor} }`);
+}
+
+function openPane() { S.paneOpen = true; render(); }
+$('#close-pane').onclick = () => { S.paneOpen = false; render(); };
+$('#reopen').onclick = openPane;
+$('#fork-side').onclick = (ev) => { const s = S.chats.s1; openPop({ currentTarget: ev.currentTarget }, 'fork', s, s.entries.length); };
+
+document.querySelectorAll('#harness button').forEach(b => b.onclick = () => { document.querySelectorAll('#harness button').forEach(x => x.classList.remove('on')); b.classList.add('on'); harness = b.dataset.h; render(); });
+$('#reset').onclick = () => { S = seed(); $('#composer').value = ''; render(); };
+
+render();
+</script>
+</body>
+</html>

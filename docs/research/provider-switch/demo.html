@@ -1,0 +1,477 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Zeron — provider switch mid-chat (interactive mock)</title>
+<style>
+  :root {
+    --bg: #1c1c1e; --sidebar: #1a1a1c; --main: #202022; --pane: #1e1e20;
+    --border: rgba(255,255,255,0.06);
+    --text: rgba(255,255,255,0.92); --text-80: rgba(255,255,255,0.74);
+    --muted: rgba(255,255,255,0.46); --muted-50: rgba(255,255,255,0.23);
+    --wash-hover: rgba(255,255,255,0.05); --wash-selected: rgba(255,255,255,0.08);
+    --ink-08: rgba(255,255,255,0.08);
+    --accent: #7aa2f7; --accent-wash: rgba(122,162,247,0.12);
+    --claude: #d29a6b; --codex: #9ece6a;
+    --working: #e0af68; --done: #9ece6a; --danger: #f7768e; --warning: #e0af68; --warning-wash: rgba(224,175,104,0.10);
+    --sidebar-w: 236px;
+    --font-ui: "Geist", "Inter", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    --font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  @property --pct { syntax: '<percentage>'; inherits: false; initial-value: 0%; }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; background: #111; color: var(--text); font-family: var(--font-ui); -webkit-font-smoothing: antialiased; }
+
+  .toolbar { width: 1180px; margin: 24px auto 0; display: flex; gap: 8px; align-items: center; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
+  .toolbar .seg { display: flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .toolbar .seg button { background: transparent; border: 0; color: var(--muted); padding: 5px 10px; font: inherit; cursor: pointer; }
+  .toolbar .seg button.on { background: var(--wash-selected); color: var(--text); }
+  .toolbar .hint { margin-left: auto; color: var(--muted-50); }
+  .toolbar .lbl { margin-left: 6px; }
+
+  .window { position: relative; width: 1180px; height: 720px; margin: 10px auto 40px; background: var(--bg); border-radius: 12px; overflow: hidden;
+    border: 1px solid rgba(255,255,255,0.08); display: grid; grid-template-rows: 44px 1fr; }
+  .titlebar { display: flex; align-items: center; height: 44px; border-bottom: 1px solid var(--border); }
+  .titlebar .left { width: var(--sidebar-w); display: flex; align-items: center; gap: 8px; padding-left: 78px; color: var(--muted); font-size: 12px; }
+  .tabs { flex: 1; display: flex; align-items: center; gap: 4px; padding-left: 12px; }
+  .tab { height: 28px; display: flex; align-items: center; gap: 6px; padding: 0 10px; border-radius: 7px; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; }
+  .tab.active { background: var(--wash-selected); color: var(--text); }
+  .tab .x { color: var(--muted-50); font-size: 11px; }
+  .tab.grow { animation: tab-in .32s cubic-bezier(.2,.8,.2,1) both; }
+  @keyframes tab-in { from { max-width: 0; opacity: 0; padding: 0; } to { max-width: 260px; opacity: 1; } }
+  .hdot { width: 7px; height: 7px; border-radius: 50%; flex: none; transition: background .3s; }
+  .hdot.claude { background: var(--claude); } .hdot.codex { background: var(--codex); }
+
+  .body { display: flex; min-height: 0; }
+  .sidebar { width: var(--sidebar-w); background: var(--sidebar); display: flex; flex-direction: column; padding: 8px; gap: 2px; }
+  .group-header { padding: 8px 8px 2px; font-size: 10px; font-weight: 500; color: var(--muted); }
+  .row { display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; border-radius: 8px; color: var(--text-80); }
+  .row.selected { background: var(--wash-selected); color: var(--text); }
+  .row .l1 { display: flex; justify-content: space-between; font-size: 10px; color: var(--muted-50); }
+  .row .l1 .h { display: inline-flex; align-items: center; gap: 4px; }
+  .row .l2 { font-size: 13px; line-height: 17px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .l3 { font-family: var(--font-mono); font-size: 10px; color: var(--muted); }
+  .row.child { margin-left: 14px; border-left: 1px solid var(--border); border-radius: 0 8px 8px 0; }
+  .row.grow { animation: row-in .35s cubic-bezier(.2,.8,.2,1) both; }
+  @keyframes row-in { from { opacity: 0; transform: translateY(-6px); max-height: 0; padding-top: 0; padding-bottom: 0; } to { opacity: 1; transform: none; max-height: 70px; } }
+
+  .main { flex: 1; min-width: 0; background: var(--main); border-left: 1px solid var(--border); display: flex; flex-direction: column; position: relative; overflow: hidden; }
+  .transcript { flex: 1; overflow-y: auto; padding: 28px 48px 12px; display: flex; flex-direction: column; align-items: center; }
+  .col { width: 100%; max-width: 640px; }
+  .transcript.leave { animation: slide-out .28s ease-in both; }
+  .transcript.enter { animation: slide-in .32s cubic-bezier(.2,.8,.2,1) both; }
+  @keyframes slide-out { to { opacity: 0; transform: translateX(-36px); } }
+  @keyframes slide-in { from { opacity: 0; transform: translateX(48px); } }
+
+  .entry { padding: 6px 0; transition: opacity .4s, filter .4s; }
+  .entry.user { display: flex; flex-direction: column; align-items: flex-end; }
+  .bubble { max-width: 80%; background: rgba(255,255,255,0.08); color: var(--text); padding: 9px 14px; border-radius: 16px; font-size: 14px; line-height: 20px; }
+  .assistant .md { font-size: 14px; line-height: 21px; color: var(--text); }
+  .assistant .md code { font-family: var(--font-mono); font-size: 12px; background: var(--ink-08); padding: 1px 5px; border-radius: 4px; }
+  .tools { font-size: 12px; color: var(--muted); margin: 6px 0; display: flex; gap: 6px; }
+  .tools span { background: var(--ink-08); padding: 2px 7px; border-radius: 5px; }
+  .entry.fresh { animation: fade-in .25s ease-out; }
+  /* option 1: after the switch, entries from the old provider sit behind a faint wash — they are text
+     the new provider was handed, not turns it produced. */
+  .entry.replayed { opacity: .55; }
+  .entry.replayed .tools span { text-decoration: line-through; text-decoration-color: var(--muted-50); }
+  .entry.replayed:hover { opacity: .9; }
+
+  .divider { display: flex; align-items: center; gap: 10px; margin: 14px 0; font-size: 13px; color: var(--muted); }
+  .divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+  .divider .lbl { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+  .divider svg { width: 15px; height: 15px; }
+  .divider .info { position: relative; display: inline-flex; color: var(--muted-50); cursor: default; }
+  .divider .info:hover { color: var(--text-80); }
+  .divider .info .tip { position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); width: 320px; text-align: center; white-space: normal;
+    background: #2a2a2d; border: 1px solid rgba(255,255,255,0.10); color: var(--text-80); font-size: 13px; line-height: 19px; padding: 10px 14px; border-radius: 12px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4); opacity: 0; pointer-events: none; transition: opacity .12s; z-index: 6; }
+  .divider .info:hover .tip { opacity: 1; }
+  .divider.fresh .lbl { animation: fade-in .25s ease-out; }
+  .divider .sw { display: inline-flex; align-items: center; gap: 5px; }
+  .divider .sw .hdot { animation: none; }
+  @keyframes fade-in { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+
+  /* option 1: the replay packet — the prose block the new provider receives on its first turn */
+  .packet { margin: 6px 0 4px; border: 1px dashed rgba(255,255,255,0.14); border-radius: 12px; padding: 10px 12px; font-size: 12px; color: var(--muted); background: rgba(255,255,255,0.02);
+    overflow: hidden; animation: packet-in .5s cubic-bezier(.2,.8,.2,1) both; }
+  @keyframes packet-in { from { max-height: 0; opacity: 0; padding-top: 0; padding-bottom: 0; margin: 0; } to { max-height: 160px; opacity: 1; } }
+  .packet .t { display: flex; align-items: center; gap: 6px; color: var(--text-80); margin-bottom: 4px; }
+  .packet .t svg { width: 13px; height: 13px; }
+  .packet .t .n { margin-left: auto; font-family: var(--font-mono); font-size: 10px; color: var(--muted-50); }
+  .packet pre { margin: 0; font: 11px/16px var(--font-mono); color: var(--muted); white-space: pre-wrap; }
+  .packet.thinking .t .n { color: var(--working); }
+
+  /* option 2: pinned context card at the top of the new chat */
+  .carry { margin: 0 0 14px; border: 1px solid var(--border); border-radius: 12px; background: rgba(255,255,255,0.025); overflow: hidden; animation: fade-in .3s .2s ease-out both; }
+  .carry .hd { display: flex; align-items: center; gap: 8px; padding: 9px 12px; font-size: 12px; color: var(--text-80); cursor: pointer; }
+  .carry .hd svg { width: 14px; height: 14px; color: var(--muted); }
+  .carry .hd .src { color: var(--accent); }
+  .carry .hd .n { margin-left: auto; font-family: var(--font-mono); font-size: 10px; color: var(--muted-50); }
+  .carry .hd .caret { color: var(--muted-50); font-size: 10px; transition: transform .2s; }
+  .carry.open .hd .caret { transform: rotate(90deg); }
+  .carry .bd { max-height: 0; transition: max-height .3s ease; border-top: 0 solid var(--border); }
+  .carry.open .bd { max-height: 220px; border-top-width: 1px; }
+  .carry .bd .line { padding: 6px 12px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--border); display: flex; gap: 8px; }
+  .carry .bd .line:last-child { border-bottom: 0; }
+  .carry .bd .line .who { width: 60px; flex: none; font-family: var(--font-mono); font-size: 10px; color: var(--muted-50); padding-top: 2px; }
+
+  .status { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); padding: 4px 0 8px; animation: fade-in .2s; }
+  .status .spin { width: 12px; height: 12px; border-radius: 50%; border: 1.5px solid var(--muted-50); border-top-color: var(--working); animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .composer-wrap { padding: 8px 48px 16px; display: flex; justify-content: center; position: relative; }
+  .composer { width: 100%; max-width: 640px; border: 1px solid rgba(255,255,255,0.1); border-radius: 14px; background: rgba(255,255,255,0.03); padding: 10px 12px 8px; position: relative; transition: border-color .3s; }
+  .composer.flash { border-color: rgba(158,206,106,0.45); }
+  .composer textarea { width: 100%; background: transparent; border: 0; outline: 0; color: var(--text); font: 14px/20px var(--font-ui); resize: none; height: 44px; }
+  .composer .ctl { display: flex; align-items: center; gap: 10px; font-size: 11px; color: var(--muted); }
+  .meter { display: inline-flex; align-items: center; gap: 5px; }
+  .ring { width: 14px; height: 14px; border-radius: 50%; background: conic-gradient(var(--accent) var(--pct), rgba(255,255,255,0.12) 0); transition: --pct .6s ease; }
+  .composer .ctl .send { margin-left: auto; background: var(--accent); color: #101010; border: 0; border-radius: 8px; padding: 4px 10px; font: 500 12px var(--font-ui); cursor: pointer; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; background: var(--ink-08); padding: 3px 9px; border-radius: 999px; cursor: pointer; color: var(--text-80); }
+  .chip:hover { background: var(--wash-selected); color: var(--text); }
+  .chip svg { width: 12px; height: 12px; }
+  .chip .caret { color: var(--muted-50); font-size: 9px; }
+  .chip.flip { animation: flip .4s ease; }
+  @keyframes flip { 0% { transform: rotateX(0); } 50% { transform: rotateX(90deg); opacity: .4; } 100% { transform: rotateX(0); } }
+
+  .picker { position: absolute; left: 0; bottom: 100%; margin-bottom: 8px; width: 440px; display: flex; background: rgba(36,36,39,0.96); backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px);
+    border: 1px solid rgba(255,255,255,0.10); border-radius: 14px; box-shadow: 0 18px 48px rgba(0,0,0,0.5); overflow: hidden; z-index: 10; }
+  .rail { width: 44px; border-right: 1px solid var(--border); padding: 8px 6px; display: flex; flex-direction: column; gap: 4px; }
+  .rail .h { width: 32px; height: 32px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font: 500 12px var(--font-mono); color: var(--muted); cursor: pointer; position: relative; }
+  .rail .h:hover { background: var(--wash-hover); color: var(--text); }
+  .rail .h.on { background: var(--wash-selected); color: var(--text); }
+  .rail .h .dot { position: absolute; right: 4px; top: 4px; width: 5px; height: 5px; border-radius: 50%; }
+  .list { flex: 1; padding: 8px; display: flex; flex-direction: column; }
+  .list .hd { padding: 4px 8px 8px; font-size: 10px; font-weight: 500; color: var(--muted); display: flex; gap: 6px; align-items: center; }
+  .list .hd .foreign { margin-left: auto; color: var(--warning); font-weight: 400; }
+  .mrow { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 9px; cursor: pointer; font-size: 13px; color: var(--text-80); }
+  .mrow:hover, .mrow.focus { background: var(--wash-selected); color: var(--text); }
+  .mrow .id { font-family: var(--font-mono); font-size: 10px; color: var(--muted-50); margin-left: 2px; }
+  .mrow .grow { flex: 1; }
+  .mrow .kb { font-family: var(--font-mono); font-size: 10px; color: var(--muted-50); background: var(--ink-08); padding: 1px 5px; border-radius: 4px; }
+  .mrow .chk { width: 14px; height: 14px; color: var(--accent); }
+  .mrow .chk svg { width: 14px; height: 14px; }
+  .mrow.cur { color: var(--text); }
+
+  .scrim { position: absolute; inset: 0; z-index: 20; display: flex; align-items: flex-start; justify-content: center; padding-top: 150px; background: rgba(0,0,0,0.28); animation: fade-in .15s; }
+  .modal { width: 540px; background: rgba(36,36,39,0.92); backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); border: 1px solid rgba(255,255,255,0.10); border-radius: 16px; box-shadow: 0 24px 60px rgba(0,0,0,0.55); overflow: hidden; animation: modal-in .2s cubic-bezier(.2,.8,.2,1); }
+  @keyframes modal-in { from { opacity: 0; transform: translateY(8px) scale(.98); } }
+  .modal h3 { margin: 0; padding: 18px 20px 4px; font-size: 18px; font-weight: 500; color: var(--text); display: flex; align-items: center; gap: 10px; }
+  .modal h3 .sw { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 400; color: var(--muted); margin-left: auto; }
+  .modal .sub { padding: 0 20px 10px; font-size: 13px; color: var(--warning); display: flex; align-items: center; gap: 6px; }
+  .modal .sub svg { width: 14px; height: 14px; }
+  .modal .ctx { padding: 0 20px 14px; font-size: 13px; line-height: 19px; color: var(--muted); border-bottom: 1px solid var(--border); }
+  .modal .ctx b { color: var(--text-80); font-weight: 500; }
+  .modal .ctx ul { margin: 6px 0 0; padding-left: 18px; }
+  .modal .ctx li { margin: 2px 0; }
+  .modal .opts { padding: 8px; }
+  .opt { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 10px; cursor: pointer; }
+  .opt:hover, .opt.focus { background: var(--wash-selected); }
+  .opt .n { width: 18px; font-family: var(--font-mono); font-size: 12px; color: var(--muted-50); text-align: right; }
+  .opt.focus .n { color: var(--accent); }
+  .opt .t { font-size: 14px; color: var(--text); }
+  .opt .d { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .modal .foot { display: flex; justify-content: space-between; padding: 8px 16px 10px; font-size: 11px; color: var(--muted-50); border-top: 1px solid var(--border); }
+  .modal .foot kbd { font-family: var(--font-mono); background: var(--ink-08); padding: 1px 5px; border-radius: 4px; color: var(--muted); }
+
+  .toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); background: #242427; border: 1px solid rgba(255,255,255,0.1); color: var(--text-80); font-size: 12px; padding: 8px 12px; border-radius: 8px; opacity: 0; transition: opacity .15s; pointer-events: none; font-family: var(--font-mono); max-width: 900px; }
+  .toast.on { opacity: 1; }
+</style>
+</head>
+<body>
+
+<div class="toolbar">
+  <span>Phương án:</span>
+  <div class="seg" id="variant">
+    <button class="on" data-v="inplace">1 · Đổi tại chỗ (replay lịch sử)</button>
+    <button data-v="newchat">2 · Tiếp tục trong chat mới</button>
+  </div>
+  <span class="chip" id="reset">Reset demo</span>
+  <span class="chip" id="autoplay">▶ Chạy tự động</span>
+  <span class="hint">Bấm chip model → chọn rail X (Codex) → chọn GPT → xác nhận → gửi tin nhắn.</span>
+</div>
+
+<div class="window">
+  <div class="titlebar">
+    <div class="left">All spaces</div>
+    <div class="tabs" id="tabs"></div>
+  </div>
+  <div class="body">
+    <div class="sidebar" id="sidebar"></div>
+    <div class="main">
+      <div class="transcript" id="transcript"></div>
+      <div class="composer-wrap">
+        <div class="composer" id="composer-box">
+          <textarea id="composer" placeholder="Message…"></textarea>
+          <div class="ctl">
+            <span class="meter"><span class="ring" id="ring" style="--pct:62%"></span><span id="pct">62%</span></span>
+            <span class="chip" id="model-chip"></span>
+            <button class="send" id="send">Send</button>
+          </div>
+          <div class="picker" id="picker" hidden></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const ICON = {
+  cube: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="M3 7l9 5 9-5M12 12v10"/></svg>',
+  info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>',
+  warn: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>',
+  check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M20 6 9 17l-5-5"/></svg>',
+  swap: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M7 16V4m0 0L3 8m4-4 4 4M17 8v12m0 0 4-4m-4 4-4-4"/></svg>',
+  pkg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M8 10h8M8 14h5"/></svg>',
+  branch: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="6" r="2"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="8" r="2"/><path d="M6 8v8M6 12c6 0 6-4 12-4"/></svg>',
+};
+
+const HARNESS = {
+  claude: { rail: 'C', name: 'Claude', color: 'var(--claude)', models: [
+    { id: 'claude-fable-5-1', label: 'Fable 5.1' }, { id: 'claude-opus-5', label: 'Opus 5' }, { id: 'claude-sonnet-5', label: 'Sonnet 5' } ]},
+  codex: { rail: 'X', name: 'Codex', color: 'var(--codex)', models: [
+    { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol' }, { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna' }, { id: 'gpt-5.5', label: 'GPT-5.5' } ]},
+};
+
+const HISTORY = [
+  { role: 'user', text: 'Fix the login retry loop in auth.rs, it retries forever on 401' },
+  { role: 'assistant', md: 'The loop in <code>auth.rs:88</code> never checks the status class. I will bound it to 3 attempts and stop on 4xx.', tools: ['Read auth.rs', 'Edit auth.rs'] },
+  { role: 'user', text: 'Also add a test for the 401 case' },
+  { role: 'assistant', md: 'Added <code>retry_stops_on_401</code> in <code>auth_tests.rs</code>. 12 tests pass.', tools: ['Write auth_tests.rs', 'Bash cargo test'] },
+];
+const PACKET = `<context from="Fix login retry loop" harness="claude" messages="4" chars="612">
+[user] Fix the login retry loop in auth.rs, it retries forever on 401
+[assistant] The loop in auth.rs:88 never checks the status class. I will bound it to 3 attempts…
+[user] Also add a test for the 401 case
+[assistant] Added retry_stops_on_401 in auth_tests.rs. 12 tests pass.
+</context>`;
+
+const seed = () => ({
+  variant: 'inplace',
+  chats: [{ id: 'a', title: 'Fix login retry loop', branch: 'feat/auth-retry', harness: 'claude', model: 0, entries: HISTORY.map(e => ({ ...e })), ctx: 62 }],
+  active: 'a', pickerOpen: false, railHarness: null, pending: null, focus: 0, phase: 'idle',
+});
+let S = seed();
+const $ = (s) => document.querySelector(s);
+const toast = (m) => { const t = $('#toast'); t.textContent = m; t.classList.add('on'); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('on'), 3200); };
+const chat = () => S.chats.find(c => c.id === S.active);
+const cur = () => HARNESS[chat().harness].models[chat().model];
+const hdot = (h) => `<span class="hdot ${h}"></span>`;
+
+function renderTabs() {
+  $('#tabs').innerHTML = S.chats.map(c => `<div class="tab ${c.id === S.active ? 'active' : ''} ${c.fresh ? 'grow' : ''}" data-id="${c.id}">${hdot(c.harness)}<span>${c.title}</span><span class="x">×</span></div>`).join('');
+  $('#tabs').querySelectorAll('.tab').forEach(t => t.onclick = () => { S.active = t.dataset.id; closePicker(); render(); });
+}
+function renderSidebar() {
+  const sb = $('#sidebar'); sb.innerHTML = '<div class="group-header">zeron-fork</div>';
+  S.chats.forEach(c => {
+    const r = document.createElement('div'); r.className = 'row' + (c.id === S.active ? ' selected' : '') + (c.parent ? ' child' : '') + (c.fresh ? ' grow' : '');
+    const cont = c.continuedIn ? `<span class="h">→ ${hdot(c.continuedIn)} ${HARNESS[c.continuedIn].name}</span>` : '';
+    r.innerHTML = `<div class="l1"><span class="h">${hdot(c.harness)} ${HARNESS[c.harness].name}</span>${cont}</div><div class="l2">${c.title}</div><div class="l3">${c.branch}</div>`;
+    r.onclick = () => { S.active = c.id; closePicker(); render(); };
+    sb.appendChild(r);
+  });
+  const other = document.createElement('div'); other.className = 'row';
+  other.innerHTML = `<div class="l1"><span class="h">${hdot('claude')} Claude</span></div><div class="l2">Sidebar redesign notes</div><div class="l3">main</div>`;
+  sb.appendChild(other);
+}
+function renderTranscript() {
+  const t = $('#transcript'); t.innerHTML = '';
+  const col = document.createElement('div'); col.className = 'col'; t.appendChild(col);
+  const c = chat();
+  if (c.carry) {
+    const k = document.createElement('div'); k.className = 'carry' + (c.carryOpen ? ' open' : '');
+    k.innerHTML = `<div class="hd">${ICON.branch}<span>Tiếp tục từ <span class="src">${c.carry.title}</span> (${HARNESS[c.carry.harness].name})</span><span class="n">${c.carry.entries.length} messages · 612 chars</span><span class="caret">▶</span></div>
+      <div class="bd">${c.carry.entries.map(e => `<div class="line"><span class="who">${e.role}</span><span>${e.role === 'user' ? e.text : e.md.replace(/<[^>]+>/g, '')}</span></div>`).join('')}</div>`;
+    k.querySelector('.hd').onclick = () => { c.carryOpen = !c.carryOpen; k.classList.toggle('open', c.carryOpen); };
+    col.appendChild(k);
+  }
+  c.entries.forEach(e => {
+    if (e.role === 'divider') {
+      const d = document.createElement('div'); d.className = 'divider' + (e.fresh ? ' fresh' : '');
+      d.innerHTML = `<span class="lbl">${ICON.swap}<span class="sw">Provider changed from ${hdot(e.fromH)} ${e.from} to ${hdot(e.toH)} ${e.to}.</span><span class="info">${ICON.info}<span class="tip">${HARNESS[e.fromH].name} session closed. The ${e.n} messages above were handed to ${HARNESS[e.toH].name} as text on the next turn. Tool results and file state from ${HARNESS[e.fromH].name} were not carried.</span></span></span>`;
+      col.appendChild(d); e.fresh = false; return;
+    }
+    if (e.role === 'packet') {
+      const p = document.createElement('div'); p.className = 'packet' + (e.thinking ? ' thinking' : '');
+      p.innerHTML = `<div class="t">${ICON.pkg}<span>Context handed to ${e.to}</span><span class="n">${e.thinking ? 'sending…' : 'first turn · 612 chars'}</span></div><pre>${PACKET.replace(/</g, '&lt;')}</pre>`;
+      col.appendChild(p); return;
+    }
+    if (e.role === 'status') { const s = document.createElement('div'); s.className = 'status'; s.innerHTML = `<span class="spin"></span>${e.text}`; col.appendChild(s); return; }
+    const el = document.createElement('div'); el.className = 'entry ' + e.role + (e.replayed ? ' replayed' : '') + (e.fresh ? ' fresh' : '');
+    if (e.role === 'user') { const b = document.createElement('div'); b.className = 'bubble'; b.textContent = e.text; el.appendChild(b); }
+    else {
+      const m = document.createElement('div'); m.className = 'md'; m.innerHTML = e.md; el.appendChild(m);
+      if (e.tools) { const tl = document.createElement('div'); tl.className = 'tools'; e.tools.forEach(x => { const s = document.createElement('span'); s.textContent = x; tl.appendChild(s); }); el.appendChild(tl); }
+    }
+    e.fresh = false;
+    col.appendChild(el);
+  });
+  t.scrollTop = t.scrollHeight;
+  $('#ring').style.setProperty('--pct', c.ctx + '%'); $('#pct').textContent = c.ctx + '%';
+}
+function renderChip() {
+  $('#model-chip').innerHTML = `${hdot(chat().harness)}<span>${cur().label}</span><span class="caret">▾</span>`;
+  $('#composer').placeholder = chat().pendingReplay ? `Message ${cur().label}… (history is handed over on this turn)` : `Message ${cur().label}…`;
+}
+
+function renderPicker() {
+  const p = $('#picker'); p.hidden = !S.pickerOpen; if (!S.pickerOpen) return;
+  const c = chat(); const rh = S.railHarness || c.harness; const h = HARNESS[rh]; const foreign = rh !== c.harness;
+  p.innerHTML = `<div class="rail">${Object.keys(HARNESS).map(k => `<div class="h ${k === rh ? 'on' : ''}" data-h="${k}" title="${HARNESS[k].name}">${HARNESS[k].rail}<span class="dot" style="background:${HARNESS[k].color}"></span></div>`).join('')}</div>
+    <div class="list"><div class="hd">${hdot(rh)} ${h.name} · models${foreign ? `<span class="foreign">${S.variant === 'inplace' ? 'đổi provider của chat này' : 'sẽ mở chat mới'}</span>` : ''}</div></div>`;
+  const list = p.querySelector('.list');
+  h.models.forEach((m, i) => {
+    const isCur = !foreign && i === c.model;
+    const r = document.createElement('div'); r.className = 'mrow' + (isCur ? ' cur' : '') + (i === S.focus ? ' focus' : '');
+    r.innerHTML = `<span class="chk">${isCur ? ICON.check : ''}</span><span>${m.label}</span><span class="id">${m.id}</span><span class="grow"></span><span class="kb">⌘${i + 1}</span>`;
+    r.onclick = () => choose(rh, i);
+    list.appendChild(r);
+  });
+  // re-rendering detaches the clicked rail button, so the document click guard would see it as outside the picker
+  p.querySelectorAll('.rail .h').forEach(el => el.onclick = (e) => { e.stopPropagation(); S.railHarness = el.dataset.h; S.focus = 0; S.pending = null; renderPicker(); });
+}
+function render() { renderTabs(); renderSidebar(); renderTranscript(); renderChip(); renderPicker(); }
+
+// ---- actions ----
+function choose(h, i) {
+  const c = chat();
+  if (h === c.harness) { if (i !== c.model) { c.model = i; toast(`setChatConfig { model: "${HARNESS[h].models[i].id}" }`); } closePicker(); render(); return; }
+  S.pending = { toH: h, toI: i }; openDialog();
+}
+
+function openDialog() {
+  closeDialog();
+  const c = chat(); const from = HARNESS[c.harness]; const toH = HARNESS[S.pending.toH]; const to = toH.models[S.pending.toI];
+  const inplace = S.variant === 'inplace';
+  const scrim = document.createElement('div'); scrim.className = 'scrim';
+  const m = document.createElement('div'); m.className = 'modal';
+  const n = c.entries.filter(e => e.role === 'user' || e.role === 'assistant').length;
+  m.innerHTML = inplace ? `<h3>Switch provider?<span class="sw">${hdot(c.harness)} ${from.name} → ${hdot(S.pending.toH)} ${toH.name}</span></h3>
+    <div class="sub">${ICON.warn}${to.label} has never seen this chat. It gets the history as text.</div>
+    <div class="ctx">The ${from.name} session for this chat is closed. On your next message Zeron hands <b>${n} messages</b> to <b>${to.label}</b> as plain text (newest first, capped at 48k chars). Tool results, open files and ${from.name}'s cache are not carried over.</div>
+    <div class="opts">
+      <div class="opt focus" data-k="yes"><span class="n">1.</span><div><div class="t">Yes, switch this chat to ${to.label}</div><div class="d">Same chat, same tab. A divider marks where ${from.name} stopped.</div></div></div>
+      <div class="opt" data-k="no"><span class="n">2.</span><div><div class="t">No, keep ${cur().label}</div><div class="d">Nothing changes.</div></div></div>
+    </div>` : `<h3>Continue with ${toH.name}?<span class="sw">${hdot(c.harness)} ${from.name} → ${hdot(S.pending.toH)} ${toH.name}</span></h3>
+    <div class="sub">${ICON.branch}This chat stays on ${from.name}. ${to.label} gets a new chat seeded from it.</div>
+    <div class="ctx">Zeron opens a new chat on <b>${to.label}</b> next to this one, with <b>${n} messages</b> pinned at the top as context (like a sidechat). You can keep using ${from.name} here; both chats share the checkout <b>${c.branch}</b>.</div>
+    <div class="opts">
+      <div class="opt focus" data-k="yes"><span class="n">1.</span><div><div class="t">Open a new ${toH.name} chat from here</div><div class="d">New tab, new sidebar row nested under this chat.</div></div></div>
+      <div class="opt" data-k="no"><span class="n">2.</span><div><div class="t">No, go back</div><div class="d">Keep ${cur().label} for this chat.</div></div></div>
+    </div>`;
+  m.innerHTML += `<div class="foot"><span><kbd>1</kbd> <kbd>2</kbd> or <kbd>↑</kbd> <kbd>↓</kbd> choose · <kbd>↵</kbd> confirm</span><span><kbd>esc</kbd> cancel</span></div>`;
+  m.querySelectorAll('.opt').forEach(o => { o.onclick = () => o.dataset.k === 'yes' ? confirmSwitch() : cancelSwitch(); o.onmouseenter = () => { m.querySelectorAll('.opt').forEach(x => x.classList.remove('focus')); o.classList.add('focus'); }; });
+  scrim.appendChild(m); scrim.onclick = (x) => { if (x.target === scrim) cancelSwitch(); };
+  $('.window').appendChild(scrim);
+}
+function closeDialog() { document.querySelectorAll('.scrim').forEach(x => x.remove()); }
+function cancelSwitch() { S.pending = null; closeDialog(); S.focus = chat().model; renderPicker(); }
+
+function confirmSwitch() {
+  const p = S.pending; if (!p) return; closeDialog(); S.pickerOpen = false; S.pending = null;
+  if (S.variant === 'inplace') switchInPlace(p); else switchNewChat(p);
+}
+
+// Option 1: same chat. Native session tombstoned, divider written, old entries washed, chip flips.
+function switchInPlace({ toH, toI }) {
+  const c = chat(); const from = HARNESS[c.harness]; const to = HARNESS[toH].models[toI];
+  const n = c.entries.filter(e => e.role !== 'divider').length;
+  c.entries.forEach(e => { if (e.role !== 'divider') e.replayed = true; });
+  c.entries.push({ role: 'divider', from: from.name, fromH: c.harness, to: HARNESS[toH].name, toH, n, fresh: true });
+  c.harness = toH; c.model = toI; c.ctx = 0; c.pendingReplay = true;
+  render();
+  $('#model-chip').classList.add('flip'); setTimeout(() => $('#model-chip').classList.remove('flip'), 450);
+  toast(`tombstone_harness_session(a) · setChatConfig { harness: "${toH}", model: "${to.id}", note: "provider_changed" }`);
+}
+
+// Option 2: new chat minted next to the source, seeded like a sidechat. Source keeps its session.
+function switchNewChat({ toH, toI }) {
+  const src = chat(); const to = HARNESS[toH].models[toI];
+  const id = 'b'; src.continuedIn = toH;
+  const nc = { id, title: src.title + ' · ' + HARNESS[toH].name, branch: src.branch, harness: toH, model: toI, entries: [], ctx: 0, parent: src.id, fresh: true,
+    carry: { title: src.title, harness: src.harness, entries: src.entries.filter(e => e.role === 'user' || e.role === 'assistant') }, carryOpen: false, pendingReplay: true };
+  const t = $('#transcript'); t.classList.add('leave');
+  setTimeout(() => {
+    S.chats.push(nc); S.active = id; render();
+    t.classList.remove('leave'); t.classList.add('enter'); setTimeout(() => t.classList.remove('enter'), 400);
+    setTimeout(() => { nc.fresh = false; }, 500);
+    $('#composer-box').classList.add('flash'); setTimeout(() => $('#composer-box').classList.remove('flash'), 900);
+    toast(`create_sidechat { source: "a", harness: "${toH}", model: "${to.id}" } → chat b · source keeps its ${HARNESS[src.harness].name} session`);
+  }, 280);
+}
+
+// Sending after a switch: the first turn shows the handover packet, then the new provider answers.
+function send() {
+  const c = chat(); const text = $('#composer').value.trim() || 'Now make the retry delay exponential';
+  $('#composer').value = '';
+  c.entries.push({ role: 'user', text, fresh: true });
+  const to = cur().label;
+  if (c.pendingReplay) {
+    c.pendingReplay = false;
+    if (S.variant === 'inplace') c.entries.push({ role: 'packet', to, thinking: true });
+    c.entries.push({ role: 'status', text: `${to} is reading ${S.variant === 'inplace' ? '4 replayed messages' : 'the pinned context'}…` });
+    render();
+    setTimeout(() => {
+      c.entries = c.entries.filter(e => e.role !== 'status');
+      c.entries.forEach(e => { if (e.role === 'packet') e.thinking = false; });
+      c.ctx = 9; render();
+      setTimeout(() => {
+        c.entries.push({ role: 'assistant', md: 'Picking up from the bounded retry in <code>auth.rs:88</code>. I will add exponential backoff (250ms base, ×2, cap 4s) and keep the 3-attempt limit.', tools: ['Read auth.rs', 'Edit auth.rs'], fresh: true });
+        c.ctx = 14; render();
+      }, 700);
+    }, 1400);
+    return;
+  }
+  render();
+  setTimeout(() => { c.entries.push({ role: 'assistant', md: 'Done.', fresh: true }); c.ctx += 3; render(); }, 600);
+}
+
+function openPicker() { S.pickerOpen = true; S.railHarness = null; S.focus = chat().model; renderPicker(); }
+function closePicker() { S.pickerOpen = false; S.pending = null; closeDialog(); renderPicker(); }
+$('#model-chip').onclick = (e) => { e.stopPropagation(); S.pickerOpen ? closePicker() : openPicker(); };
+$('#send').onclick = send;
+document.addEventListener('click', (e) => { if (S.pickerOpen && !$('#picker').contains(e.target) && !$('.scrim')) closePicker(); });
+document.addEventListener('keydown', (e) => {
+  const dlg = $('.scrim');
+  if (dlg) {
+    const opts = [...dlg.querySelectorAll('.opt')]; let k = opts.findIndex(o => o.classList.contains('focus'));
+    if (e.key === 'Escape' || e.key === '2') cancelSwitch();
+    else if (e.key === '1') confirmSwitch();
+    else if (e.key === 'Enter') opts[k].dataset.k === 'yes' ? confirmSwitch() : cancelSwitch();
+    else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { k = (k + (e.key === 'ArrowDown' ? 1 : opts.length - 1)) % opts.length; opts.forEach(o => o.classList.remove('focus')); opts[k].classList.add('focus'); }
+    e.preventDefault(); return;
+  }
+  if (e.target === $('#composer') && e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); return; }
+  if (!S.pickerOpen) return;
+  const rh = S.railHarness || chat().harness; const n = HARNESS[rh].models.length;
+  if (e.key === 'Escape') closePicker();
+  else if (e.key === 'Enter') choose(rh, S.focus);
+  else if (e.key === 'ArrowDown') { S.focus = (S.focus + 1) % n; renderPicker(); }
+  else if (e.key === 'ArrowUp') { S.focus = (S.focus + n - 1) % n; renderPicker(); }
+  else if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { const ks = Object.keys(HARNESS); S.railHarness = ks[(ks.indexOf(rh) + 1) % ks.length]; S.focus = 0; renderPicker(); }
+  else if (e.metaKey && /^[1-9]$/.test(e.key) && +e.key <= n) { choose(rh, +e.key - 1); e.preventDefault(); }
+});
+
+document.querySelectorAll('#variant button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#variant button').forEach(x => x.classList.remove('on')); b.classList.add('on');
+  S = seed(); S.variant = b.dataset.v; render();
+});
+$('#reset').onclick = () => { const v = S.variant; S = seed(); S.variant = v; closePicker(); render(); };
+const wait = (ms) => new Promise(r => setTimeout(r, ms));
+window.autoplay = async () => {
+  $('#reset').onclick();
+  await wait(400); openPicker();
+  await wait(700); S.railHarness = 'codex'; S.focus = 0; renderPicker();
+  await wait(700); choose('codex', 0);
+  await wait(1400); confirmSwitch();
+  await wait(1600); $('#composer').value = 'Now make the retry delay exponential'; send();
+};
+$('#autoplay').onclick = () => window.autoplay();
+render();
+</script>
+</body>
+</html>

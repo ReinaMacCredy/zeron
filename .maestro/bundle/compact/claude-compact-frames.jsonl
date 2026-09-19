@@ -1,0 +1,8 @@
+{"type":"system","subtype":"status","status":"compacting","session_id":"970271f7-bf5b-44f6-bdf5-046e9fb7aea1","uuid":"7e04ce76-33d1-4ddb-8d75-fd3ab0b01273"}
+{"type":"system","subtype":"status","status":"compacting","session_id":"970271f7-bf5b-44f6-bdf5-046e9fb7aea1","uuid":"e44a52e3-d8ec-4d96-adc5-7a2b519752fe"}
+{"type":"system","subtype":"status","status":null,"compact_result":"success","session_id":"970271f7-bf5b-44f6-bdf5-046e9fb7aea1","uuid":"024cb28a-79ca-437d-8259-3e97dac3d95e"}
+{"type": "system", "subtype": "init", "session_id": "970271f7-bf5b-44f6-bdf5-046e9fb7aea1", "note": "second init frame after compaction; tools/slash_commands elided"}
+{"type":"system","subtype":"compact_boundary","session_id":"970271f7-bf5b-44f6-bdf5-046e9fb7aea1","uuid":"2de360ec-3031-4b40-9863-a82d26ab60c0","compact_metadata":{"trigger":"manual","pre_tokens":22762,"post_tokens":2326,"cumulative_dropped_tokens":20436,"duration_ms":37695},"logical_parent_uuid":"3ccbab6c-c5ab-4057-8306-2488cc00bf3d"}
+{"type": "user", "note": "summary carrier frame, content elided", "uuid": "ee9e9997-e02f-45c0-8a39-8489d36857de"}
+{"type": "user", "note": "summary carrier frame, content elided", "uuid": "1b6a395b-cf56-4098-8e94-58ebd62d51cb"}
+{"type": "result", "subtype": "success", "result": "", "is_error": false, "num_turns": 0, "duration_ms": 37807, "session_id": "970271f7-bf5b-44f6-bdf5-046e9fb7aea1"}

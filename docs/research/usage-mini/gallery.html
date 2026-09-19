@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8" />
+<title>Usage mini — gallery</title>
+<style>
+  body { margin: 0; padding: 28px 32px 60px; background: #111; color: #ccc; font: 13px/1.6 "Geist", "Inter", -apple-system, system-ui, sans-serif; }
+  h1 { font-size: 16px; color: #eee; margin: 0 0 4px; }
+  h2 { font-size: 12px; font-weight: 500; letter-spacing: .04em; text-transform: uppercase; color: #888; margin: 30px 0 10px; }
+  p { margin: 0 0 6px; color: #999; max-width: 900px; }
+  .grid { display: flex; gap: 22px; flex-wrap: wrap; }
+  figure { margin: 0; width: 258px; }
+  iframe { width: 258px; height: 500px; border: 1px solid rgba(255,255,255,.12); border-radius: 10px; background: #1a1a1c; display: block; }
+  figcaption { margin-top: 8px; font-size: 12px; color: #aaa; }
+  figcaption b { color: #eee; }
+  a { color: #7aa2f7; }
+</style>
+</head>
+<body>
+<h1>Usage mini ở đáy sidebar</h1>
+<p>Mỗi khung là phần sidebar thật (256px). Bấm được như demo thật: click mini để mở/đóng quick view, click tên để mở menu. Trang tương tác đầy đủ với dropdown: <a href="index.html">index.html</a>.</p>
+
+<h2>1 · Bốn vị trí, trạng thái đóng (số thật của bạn)</h2>
+<div class="grid">
+  <figure><iframe src="index.html?bare&variant=a"></iframe><figcaption><b>A · subline.</b> Usage thế chỗ dòng phụ trống dưới "Local only". Chấm màu harness + bar nhỏ + %.</figcaption></figure>
+  <figure><iframe src="index.html?bare&variant=b"></iframe><figcaption><b>B · chip phải.</b> Hàng giữ nguyên, thêm chip 44px hai bar xếp chồng bên phải.</figcaption></figure>
+  <figure><iframe src="index.html?bare&variant=c"></iframe><figcaption><b>C · strip riêng.</b> Một strip "Usage" ngay trên hàng user, có % và giờ reset.</figcaption></figure>
+  <figure><iframe src="index.html?bare&variant=d"></iframe><figcaption><b>D · ring avatar.</b> Vòng quanh avatar hiện con số xấu nhất chung. Kín nhất, ít thông tin nhất.</figcaption></figure>
+</div>
+
+<h2>2 · Bấm vào mini: quick view mở</h2>
+<div class="grid">
+  <figure><iframe src="index.html?bare&variant=a&open=quick"></iframe><figcaption><b>A</b> + quick view</figcaption></figure>
+  <figure><iframe src="index.html?bare&variant=b&open=quick"></iframe><figcaption><b>B</b> + quick view</figcaption></figure>
+  <figure><iframe src="index.html?bare&variant=c&open=quick"></iframe><figcaption><b>C</b> + quick view (card nhấc lên trên strip)</figcaption></figure>
+  <figure><iframe src="index.html?bare&variant=d&open=quick"></iframe><figcaption><b>D</b> + quick view</figcaption></figure>
+</div>
+
+<h2>3 · Click model thứ hai: usage là một section trong menu cũ</h2>
+<p>Không có target click thứ hai. Bấm hàng user như trước, menu cũ mở ra, usage nằm giữa "Stored on this device" và "Enable sync / Settings".</p>
+<div class="grid">
+  <figure><iframe src="index.html?bare&variant=a&click=menu&open=menu"></iframe><figcaption><b>A</b> + menu có section Usage</figcaption></figure>
+  <figure><iframe src="index.html?bare&variant=b&click=menu&open=menu"></iframe><figcaption><b>B</b> + menu có section Usage</figcaption></figure>
+  <figure><iframe src="index.html?bare&variant=a&click=quick&open=menu"></iframe><figcaption>Để so sánh: <b>menu cũ</b> không có usage (click model 1)</figcaption></figure>
+</div>
+
+<h2>4 · Trạng thái màu và thiếu account (vị trí A)</h2>
+<div class="grid">
+  <figure><iframe src="index.html?bare&variant=a&state=warn&open=quick"></iframe><figcaption><b>Warn</b> ≥80%: amber</figcaption></figure>
+  <figure><iframe src="index.html?bare&variant=a&state=crit&open=quick"></iframe><figcaption><b>Critical</b> ≥95%: đỏ</figcaption></figure>
+  <figure><iframe src="index.html?bare&variant=a&state=codex&open=quick"></iframe><figcaption><b>Chỉ có Codex.</b> Claude hiện "isn't connected · Add account"</figcaption></figure>
+  <figure><iframe src="index.html?bare&variant=a&state=none"></iframe><figcaption><b>Chưa login gì.</b> Hàng "Local only" giữ nguyên như hiện tại, không vẽ mini.</figcaption></figure>
+</div>
+</body>
+</html>

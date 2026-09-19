@@ -1,0 +1,76 @@
+# Live proof 2026-09-18: Claude (claude-code CLI 2.1.274) <-> Codex (codex-cli 0.154.0) over zeron thread tools
+# Scratch headless engine: ZERON_DATA_DIR=/tmp/zeron-tt-live ZERON_IPC_PORT=27778, binary target/debug/zeron built from feat/thread-tools 8af57bb3 plus the slice 4 working tree
+
+## Watch log (WatchChats/WatchSessions/WatchDocMessages polled every 6s)
+{"commandId":"7e77ccc2-199f-4685-89b6-e7cda93686a2"}
+queued
+19:55:42 chats:
+  lead-live "Lead (Claude)" by=None harness=claude-code status=working
+19:55:42 lead user status=complete from=None tools=[] text=You have the zeron thread tools (mcp__zeron__*). Do exactly this, in order, using only those tools: 1) create_thread with harness "codex", title "Codex peer", p
+19:55:54 chats:
+  5fb4f8f3-ec4 "Codex peer" by=lead-liv harness=codex status=working
+  lead-live "Lead (Claude)" by=None harness=claude-code status=working
+19:55:54 lead assistant status=streaming from=None tools=['reasoning', 'tool', 'tool', 'tool'] text=The zeron tools are deferred, so I need one ToolSearch call to load their schemas before I can call them.
+19:56:12 chats:
+  5fb4f8f3-ec4 "Codex peer" by=lead-liv harness=codex status=idle
+  lead-live "Lead (Claude)" by=None harness=claude-code status=working
+19:56:12 lead user status=complete from=5fb4f8f3-ec45-4769-b078-b2792d0ddcd7 tools=[] text=pong from codex
+19:56:18 chats:
+  5fb4f8f3-ec4 "Codex peer" by=lead-liv harness=codex status=idle
+  lead-live "Lead (Claude)" by=None harness=claude-code status=idle
+19:56:18 lead assistant status=complete from=None tools=['reasoning', 'tool', 'tool', 'tool', 'tool', 'tool'] text=The zeron tools are deferred, so I need one ToolSearch call to load their schemas before I can call them. Note: one `ToolSearch` call was required first to load
+== peer transcript 5fb4f8f3-ec4
+   user status=complete from=lead-live tools=[] text=Reply with exactly the text: pong from codex
+   assistant status=complete from=None tools=['reasoning', 'tool'] text=I’ll send the exact requested reply to thread `lead-live`.   pong from codex  
+   user status=complete from=lead-live tools=[] text=thanks, all done
+   assistant status=complete from=None tools=[] text=No reply needed.  
+
+[exited with code 0]
+
+## Lead transcript (lead-live), full parts
+--- user from=None
+You have the zeron thread tools (mcp__zeron__*). Do exactly this, in order, using only those tools: 1) create_thread with harness "codex", title "Codex peer", prompt "Reply with exactly the text: pong from codex". 2) wait_threads on the returned threadId with timeoutSeconds 240. 3) read_thread on that threadId and quote the peer reply verbatim. 4) send_message_to_thread to that threadId with text "thanks, all done". Then answer with a short numbered summary of what each step returned. Do not use any other tools.
+--- assistant from=None
+[reasoning]
+The zeron tools are deferred, so I need one ToolSearch call to load their schemas before I can call them.
+[tool None] input=null output=None
+[tool None] input=null output=None
+[tool None] input=null output=None
+[tool None] input=null output=None
+[tool None] input=null output=None
+Note: one `ToolSearch` call was required first to load the deferred zeron tool schemas; no other tools were used.
+
+1. **create_thread** returned `threadId: 5fb4f8f3-ec45-4769-b078-b2792d0ddcd7`.
+2. **wait_threads** (timeout 240s) returned early with `reason: "message"`: one message from that thread (id `415e909b-…`) with text `pong from codex`; thread status reported as `working`.
+3. **read_thread** returned 2 entries: the user prompt, and the assistant entry whose text verbatim is:
+   ```
+   I’ll send the exact requested reply to thread `lead-live`.
+
+
+   [tool]
+   pong from codex
+
+   ```
+   The peer reply proper is `pong from codex`, delivered via a tool send to `lead-live` rather than as a bare final message.
+4. **send_message_to_thread** with "thanks, all done" returned `messageId: b61dae20-ace4-4db7-bd8d-63975fc1c3b7`.
+--- user from=5fb4f8f3-ec45-4769-b078-b2792d0ddcd7
+pong from codex
+
+## Codex peer transcript, full parts
+--- user from=lead-live
+Reply with exactly the text: pong from codex
+--- assistant from=None
+[reasoning]
+I’ll send the exact requested reply to thread `lead-live`.
+
+
+[tool None] input=null output=None
+pong from codex
+
+
+--- user from=lead-live
+thanks, all done
+--- assistant from=None
+No reply needed.
+
+

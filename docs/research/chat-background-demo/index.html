@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8" />
+<title>Zeron · chat background demo</title>
+<style>
+  :root {
+    --sidebar-w: 300px;
+    --bg: #0d0d0f;
+    --text: #e8e8ea;
+    --muted: #8b8b92;
+    --faint: #5d5d66;
+    --bubble: #2a2a2e;
+    --accent: #e57bb0;
+    --opacity: 0.2;
+    --blur: 24px;
+    --scrim: 1;
+    --column-alpha: 1;
+    --hero-h: 72vh;
+    --hero-cap: 760px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 15px/1.5 -apple-system, "SF Pro Text", "Inter", system-ui, sans-serif; overflow: hidden; }
+  .app { display: flex; height: 100vh; }
+
+  .sidebar { width: var(--sidebar-w); flex: none; background: #0b0b0d; border-right: 1px solid #1c1c20;
+    padding: 12px 10px; display: flex; flex-direction: column; gap: 10px; position: relative; z-index: 3; }
+  .traffic { display: flex; gap: 8px; padding: 6px 8px 14px; }
+  .traffic i { width: 12px; height: 12px; border-radius: 50%; background: #3a3a40; }
+  .traffic i:nth-child(1) { background: #ff5f57; } .traffic i:nth-child(2) { background: #febc2e; } .traffic i:nth-child(3) { background: #28c840; }
+  .sb-head { display: flex; justify-content: space-between; color: var(--text); font-weight: 500; padding: 0 8px; }
+  .row { border-radius: 10px; padding: 8px 10px; }
+  .row.active { background: #1a1a1e; }
+  .row .meta { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); }
+  .row .meta b { color: var(--accent); font-weight: 500; }
+  .row .title { font-size: 14px; margin: 2px 0; }
+  .row .branch { font-size: 12px; color: var(--faint); }
+  .archived { color: var(--muted); font-size: 13px; padding: 8px 10px; }
+  .sb-foot { margin-top: auto; padding: 8px; color: var(--muted); font-size: 13px; }
+
+  .column { position: relative; flex: 1; min-width: 0; overflow: hidden;
+    background: rgba(13, 13, 15, var(--column-alpha)); }
+
+  /* --- the layer under discussion ------------------------------------ */
+  .artwork { position: absolute; left: 0; right: 0; top: 0; pointer-events: none; z-index: 0;
+    background-image: url("artwork.jpg"); background-size: cover; background-position: center top;
+    opacity: var(--opacity); filter: blur(var(--blur)); transform: scale(1.08); }
+  .column[data-placement="hero"] .artwork { height: min(var(--hero-h), var(--hero-cap));
+    -webkit-mask-image: linear-gradient(to bottom, #000 0%, rgba(0,0,0,0.85) 35%, transparent 100%);
+    mask-image: linear-gradient(to bottom, #000 0%, rgba(0,0,0,0.85) 35%, transparent 100%); }
+  .column[data-placement="full"] .artwork { bottom: 0; }
+  .scrim { position: absolute; inset: 0; pointer-events: none; z-index: 1; opacity: var(--scrim);
+    background: linear-gradient(to bottom, rgba(13,13,15,0.1) 0%, rgba(13,13,15,0.4) 45%, rgba(13,13,15,0.75) 100%); }
+  /* -------------------------------------------------------------------- */
+
+  .titlebar { position: absolute; top: 0; left: 0; right: 0; height: 56px; z-index: 4; display: flex; align-items: center;
+    gap: 10px; padding: 0 20px; background: linear-gradient(rgba(13,13,15,0.75), rgba(13,13,15,0)); }
+  .titlebar .t { font-weight: 500; } .titlebar .s { color: var(--muted); }
+
+  .transcript { position: absolute; inset: 0; z-index: 2; overflow-y: auto; padding: 90px 40px 140px;
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 56px, #000 calc(100% - 120px), transparent 100%);
+    mask-image: linear-gradient(to bottom, transparent 0, #000 56px, #000 calc(100% - 120px), transparent 100%); }
+  .inner { max-width: 980px; margin: 0 auto; }
+  .user { margin-left: auto; max-width: 820px; background: var(--bubble); border-radius: 18px; padding: 14px 20px; font-size: 17px; line-height: 1.5; }
+  .stamp { text-align: right; color: var(--muted); font-size: 13px; margin: 8px 0 28px; }
+  .thought { color: var(--muted); font-size: 14px; margin: 0 0 14px; }
+  .thought::before, .steps-head::before { content: "›"; margin-right: 8px; color: var(--faint); }
+  .prose { font-size: 17px; line-height: 1.55; margin: 0 0 22px; }
+  .steps-head { color: var(--muted); font-size: 14px; margin-bottom: 10px; }
+  .steps-head::before { content: "⌄"; }
+  .step { display: flex; align-items: center; gap: 10px; padding: 7px 0 7px 26px; border-left: 1px solid #26262b; margin-left: 10px; font-size: 14.5px; }
+  .step .ic { width: 20px; height: 20px; border-radius: 5px; border: 1px solid #3a3a40; flex: none; display: grid; place-items: center; font-size: 10px; color: var(--muted); }
+  .step .k { color: var(--muted); min-width: 60px; flex: none; white-space: nowrap; }
+  .step code { font: 13px/1.4 ui-monospace, "SF Mono", Menlo, monospace; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .step .chip { background: #1e1e23; border: 1px solid #2c2c32; border-radius: 6px; padding: 2px 8px; font-size: 13px; }
+  .step .muted { color: var(--muted); }
+  .assist { margin-top: 30px; }
+
+  .composer { position: absolute; left: 50%; bottom: 28px; transform: translateX(-50%); width: min(980px, calc(100% - 80px)); z-index: 5;
+    background: rgba(30,30,34,0.86); border: 1px solid #2e2e34; border-radius: 22px; padding: 16px 20px; display: flex; align-items: center; gap: 12px;
+    -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px); box-shadow: 0 10px 40px rgba(0,0,0,0.35); }
+  .composer .ph { color: var(--muted); flex: 1; font-size: 17px; }
+  .composer .model { color: var(--muted); font-size: 15px; } .composer .model b { color: var(--text); font-weight: 500; }
+  .composer .send { width: 34px; height: 34px; border-radius: 50%; background: #fff; display: grid; place-items: center; color: #000; }
+  .under { position: absolute; left: 50%; bottom: 6px; transform: translateX(-50%); z-index: 5; color: var(--muted); font-size: 13px; width: min(980px, calc(100% - 80px)); padding-left: 24px; }
+
+  .panel { position: fixed; top: 14px; right: 14px; z-index: 50; width: 300px; background: rgba(22,22,26,0.92); border: 1px solid #34343a;
+    border-radius: 14px; padding: 14px 16px; font-size: 13px; -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px); box-shadow: 0 16px 50px rgba(0,0,0,0.5); }
+  .panel h3 { margin: 0 0 10px; font-size: 13px; letter-spacing: .02em; color: var(--muted); font-weight: 600; text-transform: uppercase; }
+  .ctl { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 8px 0; }
+  .ctl label { color: var(--text); }
+  .ctl input[type=range] { width: 130px; accent-color: var(--accent); }
+  .ctl output { width: 44px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .seg { display: inline-flex; border: 1px solid #3a3a40; border-radius: 8px; overflow: hidden; }
+  .seg button { background: transparent; border: 0; color: var(--muted); padding: 5px 10px; cursor: pointer; font: inherit; }
+  .seg button.on { background: rgba(229,123,176,0.18); color: var(--accent); }
+  .presets { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .presets button { background: #232328; border: 1px solid #34343a; color: var(--text); border-radius: 8px; padding: 5px 9px; cursor: pointer; font: inherit; font-size: 12px; }
+  .presets button:hover { border-color: var(--accent); }
+  .note { color: var(--faint); font-size: 11.5px; margin-top: 10px; line-height: 1.4; }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="traffic"><i></i><i></i><i></i></div>
+    <div class="sb-head"><span>▢ All projects</span><span style="color:var(--muted)">⌄ ≡</span></div>
+    <div class="row active">
+      <div class="meta"><span>zeron-fork @ Reina…</span><b>⋮ Working</b></div>
+      <div class="title">✸ Chat Forking Feature Di…</div>
+      <div class="branch">⎇ feat/sidechat-compact</div>
+    </div>
+    <div class="row">
+      <div class="meta"><span>zeron-fork @ Reina…</span><b>⋮ Working</b></div>
+      <div class="title">✸ Feature Availability Che…</div>
+      <div class="branch">⎇ feat/sidechat-compact</div>
+    </div>
+    <div class="archived">Archived (11) ────────── ›</div>
+    <div class="sb-foot">Ⓛ Local only</div>
+  </aside>
+
+  <main class="column" id="column" data-placement="hero">
+    <div class="artwork"></div>
+    <div class="scrim"></div>
+    <div class="titlebar"><span style="color:var(--accent)">✸</span><span class="t">Chat Forking Feature Discussion</span><span class="s">zeron-fork @ ReinaMacCredy's MacBook Pro</span></div>
+
+    <div class="transcript">
+      <div class="inner">
+        <div class="user">Hello tôi muốn thảo luận với bạn để làm cái này đó là fork button, fork chat á kế bên nút copy mỗi chat gồm cả sidechat cũng có thể fork thành local chat nhé và nút rewind chỗ này kế bên nút copy á</div>
+        <div class="stamp">Sep 17, 5:27 AM &nbsp;⧉</div>
+
+        <div class="thought">Thought process</div>
+        <p class="prose">Tôi sẽ xem ảnh và khảo sát code hiện tại (thanh action dưới message, sidechat, fork/rewind đã có gì chưa) trước khi thảo luận.</p>
+        <div class="steps-head">Thought 4 times · Ran 10 commands · <span style="color:var(--text)">read 3 files</span></div>
+        <div class="step"><span class="ic">▤</span><span class="k">Read</span><span class="chip">🖼 b184022c-CleanShot_2026-09-17_at_05.23.29_2x.png</span></div>
+        <div class="step"><span class="ic">›_</span><span class="k">Run</span><code>ls &amp;&amp; cat AGENTS.md 2&gt;/dev/null | head -80 &amp;&amp; rg -n -i "fork|rewind" --type rust --type ts --type tsx -l | head -40</code></div>
+        <div class="step"><span class="ic">›_</span><span class="k">Run</span><code>sed -n 1,120p ARCHITECTURE.md; echo ----; sed -n 1,80p CONTEXT.md; echo ----; ls crates apps; echo ----; rg…</code></div>
+        <div class="step"><span class="ic">›_</span><span class="k">Run</span><code>rg -n -i "copy" -l crates | grep -v target | head -30; echo ----; rg -n -i "sidechat|side_chat" -l crates | grep -v targ…</code></div>
+        <div class="step"><span class="ic">▤</span><span class="k muted">Thought process</span></div>
+        <div class="step"><span class="ic">›_</span><span class="k">Run</span><code>rg -n -i "side.?chat" -l . --glob '!target' --glob '!dist' | head -30; echo ----; rg -n -i "fork|rewind|checkpoint" crates…</code></div>
+        <div class="step"><span class="ic">›_</span><span class="k">Run</span><code>rg -n -i "copy" crates/ui/src/transcript.rs | head -40; echo ----; wc -l crates/ui/src/transcript.rs crates/ui/src…</code></div>
+        <div class="step"><span class="ic">▤</span><span class="k muted">Thought process</span></div>
+        <div class="step"><span class="ic">›_</span><span class="k">Run</span><code>cat .maestro/recon-sidechat-compact.md; echo ----; rg -n -i "side.?chat" crates/engine/src/doc_host.rs | head…</code></div>
+        <div class="step"><span class="ic">▤</span><span class="k">Read</span><span class="chip">🦀 transcript.rs</span></div>
+        <div class="step"><span class="ic">›_</span><span class="k">Run</span><code>ls crates/harness/src; rg -n -i "resume|fork-session|--fork|session-id|session_id" crates/harness/src --glob '!t…</code></div>
+        <div class="step"><span class="ic">›_</span><span class="k">Run</span><code>ls crates/engine/src crates/proto/src; rg -n "createChat|create_chat|CreateChat|NewChat|new_chat|newCha…</code></div>
+
+        <div class="assist">
+          <div class="thought">Thought process</div>
+          <p class="prose">Hiện transcript chưa có nút fork hay rewind. Thanh action dưới mỗi message chỉ có timestamp và copy. Sidechat đang là một entity riêng trong engine, có thể tách thành local chat bằng cách clone journal từ điểm cắt.</p>
+          <div class="steps-head">Thought 2 times · Ran 4 commands · <span style="color:var(--text)">read 2 files</span></div>
+          <div class="step"><span class="ic">▤</span><span class="k">Read</span><span class="chip">🦀 doc_host.rs</span></div>
+          <div class="step"><span class="ic">›_</span><span class="k">Run</span><code>rg -n "fn append|fn journal|fn snapshot" crates/engine/src/journal.rs | head -30</code></div>
+          <div class="step"><span class="ic">›_</span><span class="k">Run</span><code>rg -n "resume|--resume|session_id" crates/harness/src/claude.rs | head -20</code></div>
+          <div class="step"><span class="ic">▤</span><span class="k">Read</span><span class="chip">🦀 journal.rs</span></div>
+          <p class="prose" style="margin-top:22px">Ba lựa chọn cho fork: (1) copy journal tới message được chọn rồi resume harness bằng session id mới, (2) giữ chung session id và chỉ tách UI, (3) checkpoint theo git stash. Tôi nghiêng về (1) vì rewind cũng dùng chung cơ chế cắt journal.</p>
+        </div>
+
+        <div class="user" style="margin-top:20px">ok, làm phương án 1 đi, nhưng cho tôi xem ascii preview vị trí nút trước</div>
+        <div class="stamp">Sep 17, 5:41 AM &nbsp;⧉</div>
+        <p class="prose">Đây là vị trí đề xuất, hàng action nằm dưới bubble, cùng hàng với timestamp:</p>
+        <pre style="font:13px/1.5 ui-monospace,Menlo,monospace;color:var(--muted);background:rgba(20,20,24,0.7);border:1px solid #26262b;border-radius:10px;padding:14px 16px;">┌──────────────────────────────────────────┐
+│  Hello tôi muốn thảo luận với bạn ...    │
+└──────────────────────────────────────────┘
+                 Sep 17, 5:27 AM  ⧉  ⑂  ↺
+                                  copy fork rewind</pre>
+        <p class="prose">Fork mở chat mới ngay dưới chat hiện tại trong sidebar, giữ nguyên branch. Rewind cắt transcript tại đây và đưa nội dung message vào composer để sửa.</p>
+      </div>
+    </div>
+
+    <div class="composer"><span style="color:var(--muted)">⌘</span><span class="ph">Do anything...</span><span class="model"><span style="color:#e8834a">✸</span> <b>Fable 5.1</b> High · 200K</span><span class="send">↑</span></div>
+    <div class="under">▢ Local checkout &nbsp;&nbsp; ⎇ feat/sidechat-com… </div>
+  </main>
+</div>
+
+<div class="panel">
+  <h3>Chat background</h3>
+  <div class="ctl"><label>Placement</label>
+    <span class="seg" id="placement"><button data-v="hero" class="on">Hero</button><button data-v="full">Full</button></span></div>
+  <div class="ctl"><label>Surface</label>
+    <span class="seg" id="surface"><button data-v="opaque" class="on">Opaque</button><button data-v="frosted">Frosted</button></span></div>
+  <div class="ctl"><label>Opacity</label><input type="range" id="opacity" min="0" max="1" step="0.01" value="0.2"><output id="opacity-o">0.20</output></div>
+  <div class="ctl"><label>Blur</label><input type="range" id="blur" min="0" max="48" step="1" value="24"><output id="blur-o">24px</output></div>
+  <div class="ctl"><label>Scrim</label><input type="checkbox" id="scrim" checked></div>
+  <div class="presets">
+    <button data-p="0.2,24,1,hero">Subtle hero</button>
+    <button data-p="0.38,12,1,hero">Visible hero</button>
+    <button data-p="0.25,28,1,full">Wallpaper</button>
+    <button data-p="0.45,0,0,full">Raw (bad)</button>
+    <button data-p="0,0,0,hero">Off (today)</button>
+  </div>
+  <div class="note">CSS blur here is live; in the app the blur would be baked into the prepared image at effect-prepare time, same as Dither/ASCII. Frosted here only lowers the column alpha; real macOS vibrancy is not reproducible in a browser.</div>
+</div>
+
+<script>
+  const root = document.documentElement.style;
+  const col = document.getElementById('column');
+  const $ = id => document.getElementById(id);
+  function setSeg(id, v) { for (const b of $(id).querySelectorAll('button')) b.classList.toggle('on', b.dataset.v === v); }
+  $('opacity').oninput = e => { root.setProperty('--opacity', e.target.value); $('opacity-o').value = (+e.target.value).toFixed(2); };
+  $('blur').oninput = e => { root.setProperty('--blur', e.target.value + 'px'); $('blur-o').value = e.target.value + 'px'; };
+  $('scrim').onchange = e => root.setProperty('--scrim', e.target.checked ? 1 : 0);
+  $('placement').onclick = e => { const v = e.target.dataset.v; if (!v) return; col.dataset.placement = v; setSeg('placement', v); };
+  $('surface').onclick = e => { const v = e.target.dataset.v; if (!v) return; root.setProperty('--column-alpha', v === 'frosted' ? 0.55 : 1); setSeg('surface', v); };
+  document.querySelector('.presets').onclick = e => {
+    const p = e.target.dataset.p; if (!p) return;
+    const [o, b, s, pl] = p.split(',');
+    $('opacity').value = o; $('opacity').oninput({ target: $('opacity') });
+    $('blur').value = b; $('blur').oninput({ target: $('blur') });
+    $('scrim').checked = s === '1'; $('scrim').onchange({ target: $('scrim') });
+    col.dataset.placement = pl; setSeg('placement', pl);
+  };
+  const preset = decodeURIComponent(location.hash.slice(1));
+  if (preset) for (const b of document.querySelectorAll('.presets button')) if (b.textContent === preset) b.click();
+</script>
+</body>
+</html>

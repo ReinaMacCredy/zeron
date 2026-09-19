@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Zeron — pinned summary (interactive mock)</title>
+<style>
+  :root {
+    --bg: #1c1c1e; --sidebar: #1a1a1c; --main: #202022; --pane: #1e1e20;
+    --border: rgba(255,255,255,0.06);
+    --text: rgba(255,255,255,0.92); --text-80: rgba(255,255,255,0.74);
+    --muted: rgba(255,255,255,0.46); --muted-50: rgba(255,255,255,0.23);
+    --wash-hover: rgba(255,255,255,0.05); --wash-selected: rgba(255,255,255,0.08); --wash-11: rgba(255,255,255,0.11);
+    --ink-08: rgba(255,255,255,0.08);
+    --accent: #7aa2f7; --accent-wash: rgba(122,162,247,0.12);
+    --working: #e0af68; --done: #9ece6a; --danger: #f7768e;
+    --sidebar-w: 236px; --pane-w: 420px;
+    --font-ui: "Geist", "Inter", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    --font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; background: #111; color: var(--text); font-family: var(--font-ui); -webkit-font-smoothing: antialiased; }
+
+  .toolbar { width: 1180px; margin: 24px auto 0; display: flex; gap: 8px; align-items: center; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
+  .toolbar .seg { display: flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .toolbar .seg button { background: transparent; border: 0; color: var(--muted); padding: 5px 10px; font: inherit; cursor: pointer; }
+  .toolbar .seg button.on { background: var(--wash-selected); color: var(--text); }
+  .toolbar .hint { margin-left: auto; color: var(--muted-50); }
+  .toolbar .lbl { margin-left: 6px; }
+
+  .window { position: relative; width: 1180px; height: 720px; margin: 10px auto 40px; background: var(--bg); border-radius: 12px; overflow: hidden;
+    border: 1px solid rgba(255,255,255,0.08); display: grid; grid-template-rows: 44px 1fr; }
+
+  /* ---- titlebar: [+] [session tabs] … [summary] [toggle-changes]  (shell/tabs.rs render_session_title_bar) ---- */
+  .titlebar { display: flex; align-items: center; height: 44px; border-bottom: 1px solid var(--border); padding-right: 12px; gap: 8px; position: relative; z-index: 20; }
+  .titlebar .left { width: var(--sidebar-w); flex: none; display: flex; align-items: center; gap: 4px; padding-left: 78px; color: var(--muted); }
+  .tabs { flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; }
+  .tab { height: 28px; display: flex; align-items: center; gap: 6px; padding: 0 10px; border-radius: 7px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .tab.active { background: var(--wash-selected); color: var(--text); }
+  .tab .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--working); }
+  .tab .x { color: var(--muted-50); font-size: 11px; }
+
+  .ibtn { position: relative; width: 28px; height: 28px; flex: none; display: flex; align-items: center; justify-content: center; border-radius: 6px; color: var(--muted); cursor: pointer; transition: background .12s, color .12s; }
+  .ibtn:hover { background: var(--wash-11); color: var(--text); }
+  .ibtn.on { color: var(--text); }
+  .ibtn svg { width: 16px; height: 16px; }
+  .ibtn .badge { position: absolute; top: 4px; right: 4px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--bg); }
+  .ibtn .tip { position: absolute; top: 34px; right: 0; white-space: nowrap; background: #2a2a2d; border: 1px solid rgba(255,255,255,0.10); color: var(--text-80);
+    font-size: 12px; line-height: 16px; padding: 5px 9px; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); opacity: 0; pointer-events: none; transition: opacity .12s .35s; z-index: 30; }
+  .ibtn:hover .tip { opacity: 1; }
+  .ibtn.suppress-tip .tip { opacity: 0 !important; }
+
+  .trailing { flex: none; display: flex; align-items: center; gap: 4px; height: 100%; }
+  .pane-strip { display: flex; align-items: center; gap: 4px; padding-left: 8px; padding-right: 4px; width: 0; overflow: hidden; transition: width .2s ease-out; }
+  .pane-strip.open { width: calc(var(--pane-w) - 12px); }
+  .pane-strip .chips { flex: 1; min-width: 0; display: flex; gap: 2px; overflow: hidden; }
+  .chip { height: 26px; display: flex; align-items: center; gap: 6px; padding: 0 9px; border-radius: 6px; font-size: 12px; color: var(--muted); white-space: nowrap; cursor: pointer; }
+  .chip svg { width: 13px; height: 13px; flex: none; }
+  .chip.active { background: var(--wash-selected); color: var(--text); }
+  .chip.flash { animation: flash .9s ease-out; }
+  @keyframes flash { 0% { box-shadow: 0 0 0 2px var(--accent); } 100% { box-shadow: 0 0 0 2px transparent; } }
+
+  /* ---- body ---- */
+  .body { display: flex; min-height: 0; }
+  .sidebar { width: var(--sidebar-w); flex: none; background: var(--sidebar); display: flex; flex-direction: column; padding: 8px; gap: 2px; }
+  .group-header { padding: 8px 8px 2px; font-size: 10px; font-weight: 500; color: var(--muted); }
+  .row { display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; border-radius: 8px; color: var(--text-80); }
+  .row.selected { background: var(--wash-selected); color: var(--text); }
+  .row .l1 { display: flex; justify-content: space-between; font-size: 10px; color: var(--muted-50); }
+  .row .l2 { font-size: 13px; line-height: 17px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .l3 { font-family: var(--font-mono); font-size: 10px; color: var(--muted); }
+
+  .main { flex: 1; min-width: 0; background: var(--main); border-left: 1px solid var(--border); display: flex; flex-direction: column; position: relative; }
+  .transcript { flex: 1; overflow-y: auto; padding: 28px 48px 12px; display: flex; flex-direction: column; align-items: center; transition: padding-right .2s ease-out; }
+  /* Pinned + pane closed: the card reserves a gutter instead of covering the bubbles. With the
+     pane open the column is too narrow to give up 320px, so the card overlays there. */
+  .main.reserve .transcript { padding-right: 336px; }
+  .col { width: 100%; max-width: 640px; }
+  .entry { padding: 6px 0; }
+  .entry.user { display: flex; flex-direction: column; align-items: flex-end; }
+  .bubble { max-width: 80%; background: rgba(255,255,255,0.08); color: var(--text); padding: 9px 14px; border-radius: 16px; font-size: 14px; line-height: 20px; }
+  .assistant .md { font-size: 14px; line-height: 21px; color: var(--text); }
+  .assistant .md code { font-family: var(--font-mono); font-size: 12px; background: var(--ink-08); padding: 1px 5px; border-radius: 4px; }
+  .tools { font-size: 12px; color: var(--muted); margin: 6px 0; display: flex; gap: 6px; flex-wrap: wrap; }
+  .tools span { background: var(--ink-08); padding: 2px 7px; border-radius: 5px; }
+  .attach { display: flex; gap: 6px; margin-bottom: 4px; }
+  .attach .img { width: 54px; height: 40px; border-radius: 6px; background: linear-gradient(135deg, #3a3a44, #26262c); border: 1px solid var(--border); }
+
+  .composer-wrap { padding: 8px 48px 16px; display: flex; justify-content: center; }
+  .composer { width: 100%; max-width: 640px; border: 1px solid rgba(255,255,255,0.1); border-radius: 14px; background: rgba(255,255,255,0.03); padding: 10px 12px 8px; color: var(--muted-50); font-size: 14px; min-height: 64px; }
+
+  .pane { width: 0; flex: none; background: var(--pane); border-left: 1px solid var(--border); overflow: hidden; transition: width .2s ease-out; display: flex; flex-direction: column; }
+  .pane.open { width: var(--pane-w); }
+  .pane .surface { flex: 1; padding: 16px; color: var(--muted); font-size: 13px; }
+  .pane .surface .url { font-family: var(--font-mono); font-size: 11px; color: var(--muted-50); margin-bottom: 10px; }
+  .pane .surface .frame { height: 300px; border-radius: 8px; border: 1px dashed var(--border); display: flex; align-items: center; justify-content: center; color: var(--muted-50); }
+  .window.expanded .sidebar, .window.expanded .main { display: none; }
+  .window.expanded .pane.open { width: 100%; }
+  .window.expanded .tabs, .window.expanded .titlebar .left { display: none; }
+  .window.expanded .pane-strip.open { width: auto; flex: 1; }
+
+  /* ---- the summary card ---- */
+  .card { position: absolute; width: 300px; background: #1b1b1d; border: 1px solid rgba(255,255,255,0.10); border-radius: 14px; padding: 6px 8px 8px;
+    box-shadow: 0 16px 40px rgba(0,0,0,0.5); z-index: 25; font-size: 13px; animation: pop .14s ease-out; }
+  @keyframes pop { from { opacity: 0; transform: translateY(-4px) scale(.985); } to { opacity: 1; transform: none; } }
+  .card.popover { top: 40px; }
+  .card.pinned { top: 12px; animation: none; box-shadow: 0 10px 28px rgba(0,0,0,0.35); }
+  .card .sec { padding: 6px 0 2px; }
+  .card .sec + .sec { border-top: 1px solid var(--border); margin-top: 4px; }
+  .card .hd { display: flex; align-items: center; justify-content: space-between; padding: 6px 8px 4px; color: var(--muted); font-size: 12.5px; }
+  .card .hd .plus { width: 22px; height: 22px; display: flex; align-items: center; justify-content: center; border-radius: 6px; color: var(--muted-50); cursor: pointer; }
+  .card .hd .plus:hover { background: var(--wash-11); color: var(--text); }
+  .card .hd .plus svg { width: 14px; height: 14px; }
+  .card .it { display: flex; align-items: center; gap: 10px; padding: 7px 8px; border-radius: 8px; color: var(--text-80); cursor: pointer; min-width: 0; }
+  .card .it:hover { background: var(--wash-hover); color: var(--text); }
+  .card .it svg { width: 15px; height: 15px; flex: none; color: var(--muted); }
+  .card .it .t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .card .it .sub { margin-left: auto; font-family: var(--font-mono); font-size: 10.5px; color: var(--muted-50); flex: none; }
+  .card .it .unseen { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex: none; }
+  .avatars { display: flex; align-items: center; }
+  .avatars .av { width: 18px; height: 18px; border-radius: 50%; border: 2px solid #1b1b1d; margin-left: -5px; font-size: 9px; font-weight: 600; display: flex; align-items: center; justify-content: center; color: #111; }
+  .avatars .av:first-child { margin-left: 0; }
+  .avatars .av.working { box-shadow: 0 0 0 1.5px var(--working); }
+  .card .foot { display: flex; align-items: center; gap: 10px; padding: 8px 8px 4px; color: var(--muted); cursor: pointer; border-top: 1px solid var(--border); margin-top: 4px; }
+  .card .foot:hover { color: var(--text); }
+  .card .foot svg { width: 15px; height: 15px; }
+  .card .empty { padding: 14px 10px 10px; color: var(--muted-50); font-size: 12.5px; line-height: 17px; }
+
+  .toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%) translateY(12px); background: #2a2a2d; border: 1px solid rgba(255,255,255,0.12); color: var(--text-80);
+    font-family: var(--font-mono); font-size: 11.5px; padding: 8px 12px; border-radius: 8px; opacity: 0; transition: opacity .15s, transform .15s; pointer-events: none; }
+  .toast.on { opacity: 1; transform: translateX(-50%); }
+</style>
+</head>
+<body>
+
+<div class="toolbar">
+  <span class="lbl">Card</span>
+  <div class="seg" id="seg-mode"><button data-v="popover" class="on">popover</button><button data-v="pinned">pinned</button></div>
+  <span class="lbl">Right pane</span>
+  <div class="seg" id="seg-pane"><button data-v="closed" class="on">closed</button><button data-v="open">open</button><button data-v="expanded">expanded</button></div>
+  <span class="lbl">Data</span>
+  <div class="seg" id="seg-data"><button data-v="rich" class="on">rich</button><button data-v="empty">empty</button></div>
+  <span class="lbl">Unseen dot</span>
+  <div class="seg" id="seg-unseen"><button data-v="on" class="on">on</button><button data-v="off">off</button></div>
+  <span class="hint">click the ☰ button · Esc closes · rows focus a right-pane tab</span>
+</div>
+
+<div class="window" id="win">
+  <div class="titlebar">
+    <div class="left"><span class="ibtn" title="new session">＋</span></div>
+    <div class="tabs">
+      <div class="tab active"><span class="dot"></span>Fix login retry loop<span class="x">×</span></div>
+      <div class="tab">Sidebar redesign<span class="x">×</span></div>
+    </div>
+    <div class="trailing">
+      <div class="pane-strip" id="pane-strip">
+        <div class="chips" id="chips"></div>
+        <span class="ibtn" id="expand-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg></span>
+      </div>
+      <span class="ibtn" id="summary-btn"><span class="tip">Toggle pinned summary</span></span>
+      <span class="ibtn" id="toggle-changes"><span class="tip">Toggle right sidebar <kbd>⌘R</kbd></span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M15 4v16"/></svg></span>
+    </div>
+  </div>
+  <div class="body">
+    <div class="sidebar">
+      <div class="group-header">Working</div>
+      <div class="row selected"><div class="l1"><span>zeron-fork</span><span>now</span></div><div class="l2">Fix login retry loop</div><div class="l3">feat/auth-retry</div></div>
+      <div class="group-header">Today</div>
+      <div class="row"><div class="l1"><span>zeron-fork</span><span>2h</span></div><div class="l2">Sidebar redesign</div><div class="l3">main</div></div>
+      <div class="row"><div class="l1"><span>maestro</span><span>5h</span></div><div class="l2">Room intake copy</div><div class="l3">main</div></div>
+    </div>
+    <div class="main" id="main">
+      <div class="transcript" id="transcript"></div>
+      <div class="composer-wrap"><div class="composer">Reply…</div></div>
+      <div class="card pinned" id="card-pinned" hidden></div>
+    </div>
+    <div class="pane" id="pane"><div class="surface" id="surface"></div></div>
+  </div>
+  <div class="card popover" id="card-pop" hidden></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const ICON = {
+  globe: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>',
+  file: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>',
+  diff: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M12 3v18M5 8h6M5 16h6M13 12h6"/></svg>',
+  image: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="m21 16-5-5-8 8"/></svg>',
+  link: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1.5 1.5"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1.5-1.5"/></svg>',
+  plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
+  agent: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="4" y="7" width="16" height="12" rx="3"/><path d="M12 3v4M9 13h.01M15 13h.01"/></svg>',
+  term: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="m5 8 4 4-4 4M12 16h7"/></svg>',
+  // The trigger: outline when the card is closed, filled bars when it shows. Same
+  // glyph family as SIDEBAR_MINIMALISTIC so the pair reads as one cluster.
+  sumOff: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 6h10M4 12h10M4 18h7"/><path d="M18 4v7M18 4l-2.5 2.5M18 4l2.5 2.5"/></svg>',
+  sumOn: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M4 6h10M4 12h10M4 18h7"/><path d="M18 4v7M18 4l-2.5 2.5M18 4l2.5 2.5"/></svg>',
+};
+
+// RightSurface (shell.rs): Browser(id) / File(id) / Diff(id) / Terminal(id) / Subagent(id).
+const RICH = {
+  outputs: [
+    { kind: 'Browser', id: 1, icon: 'globe', title: 'Local preview', sub: ':5173', unseen: true },
+    { kind: 'Browser', id: 2, icon: 'globe', title: 'Local preview', sub: ':4321' },
+    { kind: 'Diff', id: 3, icon: 'diff', title: 'auth.rs, auth_tests.rs', sub: '+41 −9' },
+  ],
+  subagents: [
+    { id: 11, name: 'auth-tests', state: 'done', color: '#f2a1c1' },
+    { id: 12, name: 'retry-audit', state: 'done', color: '#f0a06a' },
+    { id: 13, name: 'docs-sweep', state: 'done', color: '#e9c46a' },
+    { id: 14, name: 'bench', state: 'working', color: '#8bd3a5', unseen: true },
+  ],
+  // Composer pastes. Zeron has no fixed paste-name yet; this mirrors the screenshot's <harness>-clipboard-<uuid> shape.
+  sources: [
+    { id: 21, name: 'clipboard-87ba1f06-e0c3.png' },
+    { id: 22, name: 'clipboard-50cb54e0-3d2a.png' },
+    { id: 23, name: 'clipboard-07741da3-a258.png' },
+  ],
+};
+const EMPTY = { outputs: [], subagents: [], sources: [] };
+
+const HISTORY = [
+  { role: 'user', text: 'Fix the login retry loop in auth.rs, it retries forever on 401', attach: 3 },
+  { role: 'assistant', md: 'The loop in <code>auth.rs:88</code> never checks the status class. I will bound it to 3 attempts and stop on 4xx.', tools: ['Read auth.rs', 'Edit auth.rs'] },
+  { role: 'user', text: 'Spin up subagents for the tests and a retry audit, and open the preview' },
+  { role: 'assistant', md: 'Four subagents ran; three finished, <code>bench</code> is still working. Preview is up on <code>:5173</code>.', tools: ['Agent auth-tests', 'Agent retry-audit', 'Agent docs-sweep', 'Agent bench', 'Browser localhost:5173'] },
+];
+
+const S = { mode: 'popover', pane: 'closed', data: 'rich', unseen: 'on', open: false, active: null, seen: new Set() };
+
+const $ = (s) => document.querySelector(s);
+const toast = (m) => { const t = $('#toast'); t.textContent = m; t.classList.add('on'); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('on'), 2600); };
+const data = () => S.data === 'rich' ? RICH : EMPTY;
+const isUnseen = (key) => S.unseen === 'on' && !S.seen.has(key);
+const unseenCount = () => data().outputs.filter(o => o.unseen && isUnseen('o' + o.id)).length + data().subagents.filter(a => a.unseen && isUnseen('a' + a.id)).length;
+
+function renderTranscript() {
+  const t = $('#transcript'); t.innerHTML = '';
+  const col = document.createElement('div'); col.className = 'col'; t.appendChild(col);
+  HISTORY.forEach(e => {
+    const el = document.createElement('div'); el.className = 'entry ' + e.role;
+    if (e.role === 'user') {
+      if (e.attach && S.data === 'rich') { const a = document.createElement('div'); a.className = 'attach'; for (let i = 0; i < e.attach; i++) a.appendChild(Object.assign(document.createElement('div'), { className: 'img' })); el.appendChild(a); }
+      const b = document.createElement('div'); b.className = 'bubble'; b.textContent = e.text; el.appendChild(b);
+    } else {
+      const m = document.createElement('div'); m.className = 'md'; m.innerHTML = e.md; el.appendChild(m);
+      if (e.tools && S.data === 'rich') { const tl = document.createElement('div'); tl.className = 'tools'; e.tools.forEach(x => { const s = document.createElement('span'); s.textContent = x; tl.appendChild(s); }); el.appendChild(tl); }
+    }
+    col.appendChild(el);
+  });
+}
+
+function surfaces() {
+  const d = data();
+  return [
+    ...d.outputs.map(o => ({ key: o.kind + '(' + o.id + ')', icon: o.icon, label: o.kind === 'Diff' ? 'Changes' : o.kind === 'Browser' ? 'localhost' + o.sub : o.title })),
+    ...d.subagents.map(a => ({ key: 'Subagent(' + a.id + ')', icon: 'agent', label: a.name })),
+  ];
+}
+
+function renderPane() {
+  const open = S.pane !== 'closed';
+  $('#win').classList.toggle('expanded', S.pane === 'expanded');
+  $('#pane').classList.toggle('open', open);
+  $('#pane-strip').classList.toggle('open', open);
+  $('#toggle-changes').classList.toggle('on', open);
+  const list = surfaces();
+  if (open && !S.active && list.length) S.active = list[0].key;
+  const chips = $('#chips'); chips.innerHTML = '';
+  list.forEach(s => {
+    const c = document.createElement('div'); c.className = 'chip' + (s.key === S.active ? ' active' : '');
+    c.dataset.key = s.key; c.innerHTML = ICON[s.icon] + '<span>' + s.label + '</span>';
+    c.onclick = () => focusSurface(s.key, false);
+    chips.appendChild(c);
+  });
+  const sf = $('#surface');
+  if (!open) { sf.innerHTML = ''; return; }
+  if (!list.length) { sf.innerHTML = '<div class="frame">Picker: open a file, browser or terminal</div>'; return; }
+  const a = list.find(s => s.key === S.active) || list[0];
+  sf.innerHTML = `<div class="url">RightSurface::${a.key}</div><div class="frame">${a.label}</div>`;
+}
+
+function renderButton() {
+  const b = $('#summary-btn');
+  const showing = S.open;
+  b.classList.toggle('on', showing);
+  b.innerHTML = `<span class="tip">${S.mode === 'pinned' ? (showing ? 'Unpin summary' : 'Pin summary') : 'Toggle pinned summary'}</span>` + (showing ? ICON.sumOn : ICON.sumOff)
+    + (!showing && unseenCount() ? '<span class="badge"></span>' : '');
+}
+
+function cardHtml() {
+  const d = data();
+  const secs = [];
+  if (d.outputs.length) secs.push(`<div class="sec"><div class="hd"><span>Outputs</span><span class="plus" data-act="plus-output">${ICON.plus}</span></div>` +
+    d.outputs.map(o => `<div class="it" data-key="${o.kind}(${o.id})">${ICON[o.icon]}<span class="t">${o.title}</span>${o.unseen && isUnseen('o' + o.id) ? '<span class="unseen"></span>' : ''}<span class="sub">${o.sub}</span></div>`).join('') + '</div>');
+  if (d.subagents.length) {
+    const done = d.subagents.filter(a => a.state === 'done').length, working = d.subagents.length - done;
+    const avs = d.subagents.map(a => `<span class="av${a.state === 'working' ? ' working' : ''}" style="background:${a.color}" title="${a.name}">${a.name[0].toUpperCase()}</span>`).join('');
+    secs.push(`<div class="sec"><div class="hd"><span>Subagents</span></div><div class="it" data-key="Subagent(${(d.subagents.find(a => a.state === 'working') || d.subagents[0]).id})"><span class="avatars">${avs}</span><span class="t">${done} done${working ? ` · <span style="color:var(--working)">${working} working</span>` : ''}</span>${d.subagents.some(a => a.unseen && isUnseen('a' + a.id)) ? '<span class="unseen"></span>' : ''}</div></div>`);
+  }
+  if (d.sources.length) secs.push(`<div class="sec"><div class="hd"><span>Sources</span><span class="plus" data-act="plus-source">${ICON.plus}</span></div>` +
+    d.sources.map(s => `<div class="it" data-act="source" data-id="${s.id}">${ICON.image}<span class="t">${s.name}</span></div>`).join('') + '</div>');
+  if (!secs.length) return `<div class="empty">Nothing to pin yet. Previews, files, subagents and pasted sources collect here as the session works.</div>`;
+  return secs.join('') + `<div class="foot" data-act="view-all">${ICON.link}<span>View all</span></div>`;
+}
+
+function renderCard() {
+  const pop = $('#card-pop'), pin = $('#card-pinned');
+  // Takeover hides the main column, so a pinned card has no host there: fall back to the popover.
+  const asPopover = S.mode === 'popover' || S.pane === 'expanded';
+  pop.hidden = !(S.open && asPopover);
+  pin.hidden = !(S.open && !asPopover);
+  $('#main').classList.toggle('reserve', S.open && S.mode === 'pinned' && S.pane === 'closed');
+  if (!S.open) return;
+  const el = asPopover ? pop : pin;
+  el.innerHTML = cardHtml();
+  if (asPopover) {
+    // Anchored under the trigger, right edge flush with the button (like the screenshot).
+    const b = $('#summary-btn').getBoundingClientRect(), w = $('#win').getBoundingClientRect();
+    el.style.right = (w.right - b.right) + 'px';
+  } else {
+    // Docked at the transcript's top-right; the pane pushes it left with the main column.
+    el.style.right = '12px';
+  }
+  el.querySelectorAll('.it[data-key]').forEach(r => r.onclick = () => focusSurface(r.dataset.key, true));
+  el.querySelectorAll('[data-act]').forEach(r => r.onclick = (ev) => { ev.stopPropagation(); act(r.dataset.act, r.dataset.id); });
+}
+
+function render() { renderTranscript(); renderPane(); renderButton(); renderCard(); }
+
+// ---- actions ----
+function toggleCard() {
+  S.open = !S.open;
+  if (S.open) { data().outputs.forEach(o => S.seen.add('o' + o.id)); data().subagents.forEach(a => S.seen.add('a' + a.id)); }
+  $('#summary-btn').classList.add('suppress-tip'); setTimeout(() => $('#summary-btn').classList.remove('suppress-tip'), 600);
+  toast(S.mode === 'pinned' ? `pinned_summary = ${S.open}` : `summary popover ${S.open ? 'open' : 'closed'}`);
+  render();
+}
+
+function focusSurface(key, fromCard) {
+  if (S.pane === 'closed') S.pane = 'open';
+  S.active = key;
+  const isSub = key.startsWith('Subagent');
+  toast((S.pane === 'open' ? '' : 'toggle_right_pane · ') + `set_right_active(RightSurface::${key})`);
+  // A popover is transient: picking a row dismisses it. A pinned card stays.
+  if (fromCard && S.mode === 'popover') S.open = false;
+  syncSeg('seg-pane', S.pane);
+  render();
+  const chip = document.querySelector(`.chip[data-key="${key}"]`); if (chip) chip.classList.add('flash');
+}
+
+function act(kind, id) {
+  if (kind === 'plus-output') { if (S.pane === 'closed') { S.pane = 'open'; syncSeg('seg-pane', S.pane); } S.active = null; toast('right_plus.open() — new browser / file / terminal'); if (S.mode === 'popover') S.open = false; render(); return; }
+  if (kind === 'plus-source') { toast('composer.attach() — file picker'); return; }
+  if (kind === 'source') { toast(`open_image_viewer(attachment ${id})`); return; }
+  if (kind === 'view-all') { if (S.pane === 'closed') { S.pane = 'open'; syncSeg('seg-pane', S.pane); } S.active = surfaces()[0]?.key || null; toast('toggle_right_pane · RightSurface::Picker'); if (S.mode === 'popover') S.open = false; render(); }
+}
+
+function syncSeg(id, v) { document.querySelectorAll('#' + id + ' button').forEach(b => b.classList.toggle('on', b.dataset.v === v)); }
+
+// ---- wiring ----
+$('#summary-btn').onclick = (e) => { e.stopPropagation(); toggleCard(); };
+$('#toggle-changes').onclick = (e) => { e.stopPropagation(); S.pane = S.pane === 'closed' ? 'open' : 'closed'; syncSeg('seg-pane', S.pane); toast('toggle_right_pane'); render(); };
+$('#expand-btn').onclick = (e) => { e.stopPropagation(); S.pane = S.pane === 'expanded' ? 'open' : 'expanded'; syncSeg('seg-pane', S.pane); render(); };
+$('#card-pop').onclick = (e) => e.stopPropagation();
+$('#card-pinned').onclick = (e) => e.stopPropagation();
+document.addEventListener('click', () => { if (S.open && S.mode === 'popover') { S.open = false; render(); } });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && S.open) { S.open = false; render(); } });
+window.addEventListener('resize', renderCard);
+
+for (const [id, key] of [['seg-mode', 'mode'], ['seg-pane', 'pane'], ['seg-data', 'data'], ['seg-unseen', 'unseen']]) {
+  document.querySelectorAll('#' + id + ' button').forEach(b => b.onclick = (e) => {
+    e.stopPropagation(); S[key] = b.dataset.v; syncSeg(id, b.dataset.v);
+    if (key === 'unseen' || key === 'data') S.seen.clear();
+    if (key === 'pane') S.active = null;
+    render();
+  });
+}
+render();
+</script>
+</body>
+</html>
