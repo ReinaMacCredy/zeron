@@ -513,6 +513,32 @@ pub fn anchored_menu_below_end(
         .into_any_element()
 }
 
+/// Open a top-level menu beside the trigger, clamped to the window.
+pub fn anchored_menu_right(
+    id: impl Into<SharedString>,
+    content: AnyElement,
+    closing: Option<std::time::Instant>,
+) -> AnyElement {
+    let exit = closing.map(exit_progress);
+    let content = frosted_menu(exit, content);
+    div()
+        .absolute()
+        .top_0()
+        .right(px(-6.0))
+        .size_0()
+        .child(
+            gpui::deferred(
+                gpui::anchored()
+                    .anchor(Anchor::TopLeft)
+                    .snap_to_window_with_margin(px(8.0))
+                    .child(menu_motion(id.into(), exit, div().occlude().child(content))),
+            )
+            .priority(1)
+            .into_any_element(),
+        )
+        .into_any_element()
+}
+
 /// A nested menu beside its trigger. Callers choose the side that has room;
 /// vertical placement still stays within the window's eight-pixel gutter.
 pub fn nested_menu(id: impl Into<SharedString>, content: AnyElement, left: bool) -> AnyElement {

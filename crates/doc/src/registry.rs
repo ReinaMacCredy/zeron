@@ -20,16 +20,22 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use zeron_proto::{Chat, ChatConfig, Device, Session, Space};
+use zeron_proto::{Chat, ChatConfig, Device, MAX_SIDEBAR_PINS, Session, SidebarPreferences, Space};
 
 use crate::schema::DocError;
 use crate::workspace::{DeletedSpace, WorkspaceState};
 
-/// Row kinds — the four sidebar tables.
+/// Row kinds — synced sidebar entities plus user preferences.
 pub const KIND_DEVICES: &str = "devices";
 pub const KIND_SPACES: &str = "spaces";
 pub const KIND_CHATS: &str = "chats";
 pub const KIND_SESSIONS: &str = "sessions";
+pub const KIND_PREFERENCES: &str = "preferences";
+
+/// Readiness only; membership and order live on individual pins.
+pub const SIDEBAR_PINS_STATE_ID: &str = "sidebarPins";
+pub const KIND_SIDEBAR_PINS: &str = "sidebarPins";
+mod sidebar_pins;
 
 /// Snapshot row id in the local `DocsStore` for the persisted registry state.
 pub const REGISTRY_DOC_ID: &str = "registry1";
@@ -713,6 +719,11 @@ impl RegistryDoc {
             ("lastSeenAt", opt_ms(device.last_seen_at)),
             ("createdAt", opt_ms(device.created_at)),
             ("version", opt_str(device.version.as_deref())),
+            (
+                "cursorSdkVersion",
+                opt_str(device.cursor_sdk_version.as_deref()),
+            ),
+            ("cursorSdkEngineVersion", opt_str(device.version.as_deref())),
             ("capabilities", json!(device.capabilities)),
         ]);
         self.write(KIND_DEVICES, &device.id.clone(), OpKind::Upsert, set);
@@ -1216,6 +1227,38 @@ impl RegistryDoc {
 
     // ── whole-doc read ──────────────────────────────────────────────────────
 
+    pub fn sidebar_preferences(&self) -> Option<SidebarPreferences> {
+        self.sidebar_pins_initialized().then(|| SidebarPreferences {
+            pinned_session_ids: self
+                .ordered_sidebar_pins()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect(),
+        })
+    }
+
+    /// Initialize readiness and clean deleted pins from one authoritative snapshot.
+    pub fn reconcile_sidebar_pins(&mut self, authoritative: bool) -> Result<bool, DocError> {
+        if !authoritative {
+            return Ok(false);
+        }
+        let initialized = self.sidebar_pins_initialized();
+        self.initialize_sidebar_pins();
+        let known: std::collections::HashSet<_> =
+            self.read_chats()?.into_iter().map(|c| c.id).collect();
+        let removed: Vec<_> = self
+            .ordered_sidebar_pins()
+            .into_iter()
+            .filter(|(id, _)| !known.contains(id))
+            .collect();
+        for (id, _) in &removed {
+            self.change_sidebar_pin(&zeron_proto::SidebarPinChange::Unpin {
+                session_id: id.clone(),
+            })?;
+        }
+        Ok(!initialized || !removed.is_empty())
+    }
+
     pub fn read_all(&self) -> Result<WorkspaceState, DocError> {
         Ok(WorkspaceState {
             devices: self.read_devices()?,
@@ -1258,6 +1301,11 @@ impl RegistryDoc {
                     ("lastSeenAt", opt_ms(device.last_seen_at)),
                     ("createdAt", opt_ms(device.created_at)),
                     ("version", opt_str(device.version.as_deref())),
+                    (
+                        "cursorSdkVersion",
+                        opt_str(device.cursor_sdk_version.as_deref()),
+                    ),
+                    ("cursorSdkEngineVersion", opt_str(device.version.as_deref())),
                     ("capabilities", json!(device.capabilities)),
                 ]),
             );

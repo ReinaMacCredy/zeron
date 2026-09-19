@@ -557,6 +557,71 @@ async fn a_steer_command_holds_for_an_agent_that_takes_no_mid_turn_prompt() {
     core.shutdown().await;
 }
 
+/// Remote sync can land a whole batch before the host gets a chance to drain.
+/// Every steer is a user message, including those preceding a newer steer.
+#[tokio::test]
+async fn batched_remote_steers_preserve_every_message_in_order_exactly_once() {
+    let (core, harness, prompts) = setup(SteeringMode::TurnBoundary).await;
+    core.doc_host
+        .queue_message(CHAT, "opening", Vec::new())
+        .unwrap();
+    wait_for(|| prompts.lock().unwrap().len() == 1, "opening turn").await;
+    let handle = core.doc_host.open(CHAT).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let expected: Vec<_> = (0..20).map(|i| format!("remote message {i}")).collect();
+    // No await: all entries are visible together, as with a remote document import.
+    for (i, prompt) in expected.iter().enumerate() {
+        handle
+            .doc()
+            .queue_command(&zeron_doc::SessionCommandEntry {
+                id: format!("remote-command-{i}"),
+                payload: SessionCommandPayload::Steer {
+                    prompt: prompt.clone(),
+                    message_id: Some(format!("remote-message-{i}")),
+                },
+                issued_by: "remote-device".into(),
+                issued_at: now + i as i64,
+                based_on: None,
+                expires_at: None,
+                status: zeron_doc::SessionCommandStatus::Pending,
+                resolution: None,
+            })
+            .unwrap();
+    }
+    core.doc_host.drain_commands(&handle).await;
+    assert_eq!(queue_texts(&core), expected);
+    // Repeated drains must not enqueue the same command again.
+    core.doc_host.drain_commands(&handle).await;
+    assert_eq!(queue_texts(&core), expected);
+    assert!(
+        handle
+            .doc()
+            .read_commands()
+            .unwrap()
+            .iter()
+            .all(|c| c.status == zeron_doc::SessionCommandStatus::Applied)
+    );
+    for (i, prompt) in expected.iter().enumerate() {
+        harness.finish.send(()).unwrap();
+        wait_for(
+            || prompts.lock().unwrap().len() == i + 2,
+            "next queued turn",
+        )
+        .await;
+        assert_eq!(prompts.lock().unwrap()[i + 1], *prompt);
+    }
+    let mut all = vec!["opening".to_owned()];
+    all.extend(expected);
+    assert_eq!(*prompts.lock().unwrap(), all);
+    assert_eq!(user_messages(&core), all);
+    assert!(queue_texts(&core).is_empty());
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
 /// Even agents that support mid-turn input deliver queue rows one turn at a time.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn queued_text_waits_for_a_steerable_turn_even_with_legacy_policy() {

@@ -976,11 +976,7 @@ async fn rpc_surface_over_in_memory_transport() {
     // Delta protocol: the stream opens with a full reset frame.
     assert_eq!(
         initial,
-        serde_json::json!({
-            "reset": [],
-            "contextUsage": null,
-            "replayBaseline": { "entries": {} }
-        })
+        serde_json::json!({ "reset": [], "contextUsage": null, "replayBaseline": {"entries": {}} })
     );
 
     // QueueCommand (as this device's composer would over IPC).

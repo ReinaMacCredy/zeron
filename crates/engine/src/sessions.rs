@@ -773,17 +773,17 @@ impl SessionsEngine {
         let Some((run_id, token, cancel, pending)) = target else {
             return Ok(false);
         };
-        // Unpark any blocked question FIRST (mirrors zeron: harness teardown can await a
-        // parked question callback — a run stuck on a question would deadlock the stop).
+        // Publish cancellation BEFORE waking the harness. Otherwise a fast
+        // EOF after token.cancel() can beat this watch notification and be
+        // classified as an error instead of an interrupted turn.
+        let _ = cancel.send(true);
+        // Unpark questions before harness teardown, which can await them.
         let parked: Vec<_> = lock(&pending).drain().map(|(_, tx)| tx).collect();
         for tx in parked {
             let _ = tx.send(Vec::new());
         }
         // Harness-level interrupt (protocol + child teardown) …
         token.cancel();
-        // … plus the engine-side grace deadline in the run task, so a harness that
-        // ignores its token still settles with a synthesized Done{interrupted}.
-        let _ = cancel.send(true);
         // Bounded settle wait (the run task appends Done + stamps `aborted`).
         for _ in 0..500 {
             if !self.is_live(chat_id, &run_id) {
@@ -2491,13 +2491,70 @@ struct RunResumeState {
     startup_retry: bool,
 }
 
+fn cursor_unstarted_history(
+    doc: &SessionDoc,
+    current_id: &str,
+    prompt: &str,
+    has_session: bool,
+) -> Result<String, DocError> {
+    let entries = doc.read_entries()?;
+    let preceding: Vec<_> = entries
+        .iter()
+        .take_while(|entry| entry.id != current_id)
+        .collect();
+    // With an existing session, only bridge the tail whose assistant never
+    // produced content. A process can die before writing its SDK-side receipt,
+    // even though an older session ID still exists.
+    let after = if has_session {
+        preceding
+            .iter()
+            .rposition(|entry| {
+                entry.role == MessageRole::Assistant
+                    && entry.parts.iter().any(|part| match part {
+                        MessagePart::Text { text, .. } | MessagePart::Reasoning { text, .. } => {
+                            !text.is_empty()
+                        }
+                        MessagePart::Tool { .. } | MessagePart::Input { .. } => true,
+                        _ => false,
+                    })
+            })
+            .map_or(0, |i| i + 1)
+    } else {
+        0
+    };
+    let previous: Vec<String> = preceding
+        .iter()
+        .skip(after)
+        .filter(|entry| entry.role == MessageRole::User)
+        .map(|entry| {
+            entry
+                .parts
+                .iter()
+                .filter_map(|part| match part {
+                    MessagePart::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .filter(|text| !text.is_empty())
+        .collect();
+    if previous.is_empty() {
+        return Ok(prompt.to_owned());
+    }
+    Ok(format!(
+        "The preceding user messages may not have reached a Cursor checkpoint before startup stopped. Retain this JSON as conversation history; do not rerun prior tools or side effects. Respond to the current message.\n{}",
+        serde_json::json!({"previousUserMessages": previous, "currentUserMessage": prompt})
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn drive_run(
     inner: Arc<Inner>,
     chat_id: String,
     run_id: String,
     harness: Arc<dyn Harness>,
-    request: RunRequest,
+    mut request: RunRequest,
     doc: Arc<SessionDoc>,
     controls: RunControls,
     mut engine_rx: mpsc::UnboundedReceiver<AgentEvent>,
@@ -2521,7 +2578,7 @@ async fn drive_run(
     });
     // After the retry snapshot and the titler's capture, both of which want the
     // typed text: only what crosses into the harness carries the sidechat wrap.
-    let request = match inner.harness_prompt(
+    let mut request = match inner.harness_prompt(
         &chat_id,
         &request.prompt,
         &resume_state.user_message_id,
@@ -2543,7 +2600,26 @@ async fn drive_run(
         }
         None => request,
     };
-    let mut stream = match harness.run(request, controls).await {
+    // Startup can stop before the SDK saves user text, with no new session
+    // ID or receipt. Bridge that unacknowledged tail from our transcript;
+    // a fresh session needs all prior user text, not just the latest tail.
+    let prepared = if harness_id == HarnessId::Cursor {
+        cursor_unstarted_history(
+            &doc,
+            &resume_state.user_message_id,
+            &request.prompt,
+            request.resume.is_some(),
+        )
+        .map(|prompt| request.prompt = prompt)
+        .map_err(|e| zeron_harness::HarnessError::Protocol(e.to_string()))
+    } else {
+        Ok(())
+    };
+    let started = match prepared {
+        Ok(()) => harness.run(request, controls).await,
+        Err(error) => Err(error),
+    };
+    let mut stream = match started {
         Ok(stream) => stream,
         Err(err) => {
             let message = err.to_string();
@@ -3516,6 +3592,59 @@ async fn drive_run(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cursor_without_a_session_id_retains_only_preceding_user_messages() {
+        let doc = zeron_doc::SessionDoc::init("cursor-unstarted").unwrap();
+        for (id, role, text) in [
+            (
+                "u1",
+                zeron_doc::MessageRole::User,
+                "first interrupted request",
+            ),
+            ("a1", zeron_doc::MessageRole::Assistant, "partial output"),
+            ("u2", zeron_doc::MessageRole::User, "current request"),
+            ("u3", zeron_doc::MessageRole::User, "future pending request"),
+        ] {
+            doc.push_message(&zeron_doc::SessionMessageEntry {
+                id: id.into(),
+                role,
+                parts: vec![zeron_doc::MessagePart::Text {
+                    id: format!("{id}-text"),
+                    text: text.into(),
+                }],
+                created_at: 0,
+                device_id: "test".into(),
+                status: None,
+                continuation_of: None,
+                from_chat_id: None,
+            })
+            .unwrap();
+        }
+        assert_eq!(
+            super::cursor_unstarted_history(&doc, "u1", "first interrupted request", false)
+                .unwrap(),
+            "first interrupted request"
+        );
+        let prompt = super::cursor_unstarted_history(&doc, "u2", "current request", false).unwrap();
+        assert!(prompt.contains("first interrupted request"));
+        assert!(prompt.contains("current request"));
+        assert!(!prompt.contains("partial output"));
+        assert!(!prompt.contains("future pending request"));
+        assert!(prompt.contains("do not rerun prior tools or side effects"));
+        assert_eq!(
+            super::cursor_unstarted_history(&doc, "u2", "current request", true).unwrap(),
+            "current request",
+            "content from the preceding turn is already in the native session"
+        );
+        assert!(
+            super::cursor_unstarted_history(&doc, "u3", "future pending request", true)
+                .unwrap()
+                .contains("current request"),
+            "an unacknowledged prompt after an older checkpoint must survive"
+        );
+        assert_eq!(doc.read_entries().unwrap().len(), 4);
+    }
+
     use super::{RuntimeConfig, subagent_doc_id};
     use zeron_proto::{HarnessId, RunRequest, SandboxLevel};
 
@@ -3570,7 +3699,9 @@ mod tests {
             output: None,
             diff,
         };
-        journal.append("chat", &result("t1", Some(diff("one")))).unwrap();
+        journal
+            .append("chat", &result("t1", Some(diff("one"))))
+            .unwrap();
         journal.append("chat", &result("t2", None)).unwrap();
         journal
             .append(

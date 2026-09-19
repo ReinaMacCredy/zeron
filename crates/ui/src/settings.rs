@@ -7,12 +7,14 @@
 //! defaults, and loaded values are clamped so a hand-edited file can't wedge the
 //! layout.
 
+use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use gpui::{App, Global, Task};
 use serde::{Deserialize, Serialize};
+use zeron_proto::{AuthState, WorkspaceScope};
 
 pub mod accounts;
 pub mod appearance;
@@ -785,6 +787,9 @@ pub struct UiSettings {
     pub sidebar_sort: SidebarSort,
     /// Optional harness branding and repository metadata shown below each
     /// session title.
+    pub sidebar_show_project_label: bool,
+    pub sidebar_compact: bool,
+    pub sidebar_show_project_icon: bool,
     pub sidebar_show_harness: bool,
     pub sidebar_show_branch: bool,
     pub sidebar_show_pull_request: bool,
@@ -802,6 +807,9 @@ pub struct UiSettings {
     /// Sidebar session filter: a space id, or `None` for "All spaces".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub space_filter: Option<String>,
+    /// Device-local pins for local profiles; synced profiles use registry pins.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub sidebar_pinned_session_ids_by_profile: HashMap<String, Vec<String>>,
     /// Legacy: per-space tab order, from when tabs were the selected space's
     /// non-archived sessions. Kept for file compatibility; no longer read.
     #[serde(skip_serializing_if = "std::collections::HashMap::is_empty")]
@@ -915,12 +923,17 @@ impl Default for UiSettings {
             sidebar_grouped: false,
             sidebar_organization: SidebarOrganization::InOneList,
             sidebar_sort: SidebarSort::LastUpdated,
+            sidebar_show_project_label: true,
+            // Upstream boots compact; this fork keeps its detailed rows.
+            sidebar_compact: false,
+            sidebar_show_project_icon: true,
             sidebar_show_harness: true,
             sidebar_show_branch: true,
             sidebar_show_pull_request: true,
             last_space_id: None,
             open_tabs: None,
             space_filter: None,
+            sidebar_pinned_session_ids_by_profile: HashMap::new(),
             tab_order: std::collections::HashMap::new(),
             space_order: Vec::new(),
             sound_enabled: true,
@@ -1138,6 +1151,47 @@ pub struct KeymapConfig {
     /// fixed-length array would let one malformed entry reset every unrelated
     /// setting. [`Self::healed`] restores the length instead.
     pub jump_session: Vec<String>,
+}
+
+/// Stable key for device-local preferences that belong to one workspace
+/// profile. Authentication may arrive after `EngineInfo`, so callers must
+/// treat `None` as "identity not ready" and avoid destructive cleanup.
+pub fn sidebar_pin_profile_key(
+    scope: Option<WorkspaceScope>,
+    auth: Option<&AuthState>,
+    development_org_id: Option<&str>,
+) -> Option<String> {
+    match scope? {
+        WorkspaceScope::Local => Some("local".to_string()),
+        WorkspaceScope::Synced => {
+            let AuthState::SignedIn {
+                user,
+                org_id: Some(org_id),
+            } = auth?
+            else {
+                return None;
+            };
+            Some(format!("synced:{org_id}:{}", user.id))
+        }
+        WorkspaceScope::Development => {
+            let AuthState::SignedIn { user, .. } = auth? else {
+                return None;
+            };
+            let (user_id, token_org_id) = user
+                .id
+                .split_once('@')
+                .map_or((user.id.as_str(), None), |(user_id, org_id)| {
+                    (user_id, (!org_id.is_empty()).then_some(org_id))
+                });
+            if user_id.is_empty() {
+                return None;
+            }
+            let org_id = token_org_id
+                .or(development_org_id.filter(|org_id| !org_id.is_empty()))
+                .unwrap_or(zeron_engine::DEFAULT_ORG_ID);
+            Some(format!("development:{org_id}:{user_id}"))
+        }
+    }
 }
 
 impl Default for KeymapConfig {
@@ -1412,6 +1466,19 @@ pub fn badge_combo_on(mac: bool, combo: &str) -> String {
 }
 
 impl UiSettings {
+    pub fn sidebar_pins(&self, profile_key: &str) -> &[String] {
+        self.sidebar_pinned_session_ids_by_profile
+            .get(profile_key)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    pub fn sidebar_pins_mut(&mut self, profile_key: String) -> &mut Vec<String> {
+        self.sidebar_pinned_session_ids_by_profile
+            .entry(profile_key)
+            .or_default()
+    }
+
     /// Whether this session event may produce audio. Appshot capture has its
     /// own feature-local preference once the Appshots contribution lands.
     pub fn session_sound_enabled(&self, sound: crate::sound::Sound) -> bool {
@@ -2083,12 +2150,25 @@ mod tests {
             sidebar_grouped: true,
             sidebar_organization: SidebarOrganization::ByDevice,
             sidebar_sort: SidebarSort::Created,
+            sidebar_compact: true,
+            sidebar_show_project_icon: false,
+            sidebar_show_project_label: false,
             sidebar_show_harness: false,
             sidebar_show_branch: false,
             sidebar_show_pull_request: false,
             last_space_id: Some("space-1".into()),
             open_tabs: Some(vec!["b".to_string(), "a".to_string()]),
             space_filter: Some("space-1".into()),
+            sidebar_pinned_session_ids_by_profile: HashMap::from([
+                (
+                    "local".to_string(),
+                    vec!["local-2".to_string(), "local-1".to_string()],
+                ),
+                (
+                    "synced:org-1:user-1".to_string(),
+                    vec!["synced-1".to_string()],
+                ),
+            ]),
             tab_order: std::collections::HashMap::from([(
                 "space-1".to_string(),
                 vec!["b".to_string(), "a".to_string()],
@@ -2297,7 +2377,25 @@ mod tests {
     }
 
     #[test]
-    fn project_organization_survives_load() {
+    fn sidebar_display_defaults_and_preferences_round_trip() {
+        let settings: UiSettings = serde_json::from_str("{}").unwrap();
+        assert!(!settings.sidebar_compact);
+        assert!(settings.sidebar_show_project_icon);
+        assert!(settings.sidebar_show_project_label);
+        let customized = UiSettings {
+            sidebar_compact: true,
+            sidebar_show_project_icon: false,
+            sidebar_show_project_label: false,
+            sidebar_organization: SidebarOrganization::ByProject,
+            ..settings
+        };
+        let restored: UiSettings =
+            serde_json::from_str(&serde_json::to_string(&customized).unwrap()).unwrap();
+        assert_eq!(restored.clamped(), customized);
+    }
+
+    #[test]
+    fn project_organization_survives_loading() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             UiSettings::path(dir.path()),
@@ -2327,6 +2425,7 @@ mod tests {
         assert_eq!(loaded.accent, zeron_theme::AccentSelection::ThemeDefault);
         assert_eq!(loaded.surface, zeron_theme::SurfacePreference::ThemeDefault);
         assert_eq!(loaded.sidebar_width, 300.0);
+        assert!(loaded.sidebar_pinned_session_ids_by_profile.is_empty());
         assert!(!loaded.sound_enabled, "other keys still parse");
         assert!(loaded.sound_completion_enabled);
         assert!(loaded.sound_input_enabled);
@@ -2475,6 +2574,102 @@ mod tests {
         assert_eq!(UiSettings::load(dir.path()), UiSettings::default());
         std::fs::write(UiSettings::path(dir.path()), "{not json").unwrap();
         assert_eq!(UiSettings::load(dir.path()), UiSettings::default());
+    }
+
+    fn signed_in(user_id: &str, org_id: Option<&str>) -> AuthState {
+        AuthState::SignedIn {
+            user: zeron_proto::UserProfile {
+                id: user_id.to_string(),
+                email: format!("{user_id}@example.com"),
+                name: None,
+            },
+            org_id: org_id.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn sidebar_pin_profile_keys_include_the_full_workspace_identity() {
+        assert_eq!(
+            sidebar_pin_profile_key(Some(WorkspaceScope::Local), None, None).as_deref(),
+            Some("local")
+        );
+        assert_eq!(
+            sidebar_pin_profile_key(
+                Some(WorkspaceScope::Synced),
+                Some(&signed_in("user-1", Some("org-1"))),
+                None,
+            )
+            .as_deref(),
+            Some("synced:org-1:user-1")
+        );
+        assert_eq!(
+            sidebar_pin_profile_key(
+                Some(WorkspaceScope::Development),
+                Some(&signed_in("dev-user@dev-org-2", None)),
+                Some("ignored-org"),
+            )
+            .as_deref(),
+            Some("development:dev-org-2:dev-user")
+        );
+        assert_eq!(
+            sidebar_pin_profile_key(
+                Some(WorkspaceScope::Development),
+                Some(&signed_in("dev-user", None)),
+                Some("configured-org"),
+            )
+            .as_deref(),
+            Some("development:configured-org:dev-user")
+        );
+    }
+
+    #[test]
+    fn sidebar_pin_profile_key_waits_for_a_complete_remote_identity() {
+        assert_eq!(
+            sidebar_pin_profile_key(Some(WorkspaceScope::Synced), None, None),
+            None
+        );
+        assert_eq!(
+            sidebar_pin_profile_key(
+                Some(WorkspaceScope::Synced),
+                Some(&signed_in("user-1", None)),
+                None,
+            ),
+            None
+        );
+        assert_eq!(
+            sidebar_pin_profile_key(Some(WorkspaceScope::Development), None, None),
+            None
+        );
+    }
+
+    #[test]
+    fn local_synced_local_switch_restores_each_profiles_pins() {
+        let mut settings = UiSettings::default();
+        settings
+            .sidebar_pins_mut("local".to_string())
+            .extend(["local-1".to_string(), "local-2".to_string()]);
+        settings
+            .sidebar_pins_mut("synced:org-1:user-1".to_string())
+            .push("synced-1".to_string());
+
+        assert_eq!(settings.sidebar_pins("local"), ["local-1", "local-2"]);
+        assert_eq!(settings.sidebar_pins("synced:org-1:user-1"), ["synced-1"]);
+        assert_eq!(settings.sidebar_pins("local"), ["local-1", "local-2"]);
+    }
+
+    #[test]
+    fn account_switch_restores_each_accounts_pins() {
+        let mut settings = UiSettings::default();
+        settings
+            .sidebar_pins_mut("synced:org-a:user-a".to_string())
+            .push("a-1".to_string());
+        settings
+            .sidebar_pins_mut("synced:org-b:user-b".to_string())
+            .push("b-1".to_string());
+
+        assert_eq!(settings.sidebar_pins("synced:org-a:user-a"), ["a-1"]);
+        assert_eq!(settings.sidebar_pins("synced:org-b:user-b"), ["b-1"]);
+        assert_eq!(settings.sidebar_pins("synced:org-a:user-a"), ["a-1"]);
     }
 
     #[test]

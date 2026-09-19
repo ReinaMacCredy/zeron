@@ -48,6 +48,8 @@ macro_rules! icon_assets {
 }
 
 icon_assets![
+    (PROJECT_DEFAULT, "project-default"),
+    (REMOTE_SERVER, "remote-server"),
     // Solar Icons (Linear), CC BY 4.0 — 480 Design.
     (MONITOR, "monitor"),
     (SUN, "sun"),
@@ -134,6 +136,8 @@ icon_assets![
     (EYE, "eye"),
     (EYE_CLOSED, "eye-closed"),
     (PAPERCLIP, "paperclip"),
+    // Hand-drawn pushpin in the Solar Linear style for local sidebar pins.
+    (PIN, "pin"),
     (PEN, "pen"),
     (ARCHIVE_MINIMALISTIC, "archive-minimalistic"),
     (TRASH_BIN_MINIMALISTIC, "trash-bin-minimalistic"),

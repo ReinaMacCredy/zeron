@@ -7,12 +7,14 @@ pub mod agent;
 pub mod entities;
 pub mod motion;
 pub mod preview;
+pub mod sidebar_pins;
 pub mod view;
 pub mod workspace;
 
 pub use agent::*;
 pub use entities::*;
 pub use preview::*;
+pub use sidebar_pins::*;
 pub use workspace::*;
 
 /// Parse "0.2.12" (tolerating a `-suffix`/`+build` tail on the last part)

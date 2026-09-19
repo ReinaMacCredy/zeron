@@ -680,6 +680,8 @@ mod drag_regressions {
                     zeron_proto::ChatIndicator::Idle,
                     false,
                     false,
+                    false,
+                    None,
                     None,
                     None,
                     &theme,

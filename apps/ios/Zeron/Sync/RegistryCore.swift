@@ -10,6 +10,44 @@
 
 import Foundation
 
+// MARK: - Sidebar pin order (byte-for-byte mirror of proto/sidebar_pins.rs)
+
+enum PinOrder {
+    static func valid(_ key: String) -> Bool {
+        !key.isEmpty && key.utf8.count <= 8192 && !key.hasSuffix("0") &&
+            key.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+    }
+
+    static func between(_ lower: String?, _ upper: String?, nonce: String) -> String? {
+        let bytes = Array(nonce.utf8)
+        guard lower.map(valid) ?? true, upper.map(valid) ?? true,
+              lower == nil || upper == nil || lower! < upper!,
+              !bytes.isEmpty, bytes.count <= 149, bytes.allSatisfy({ $0 > 0 && $0 < 128 }) else { return nil }
+        let loBytes = Array((lower ?? "").utf8)
+        var hiBytes = upper.map { Array($0.utf8) }
+        let hex = Array("0123456789abcdef".utf8)
+        func digit(_ b: UInt8) -> Int { Int(b <= 57 ? b - 48 : b - 97 + 10) }
+        var result: [UInt8] = []
+        for i in 0..<8192 {
+            let lo = i < loBytes.count ? digit(loBytes[i]) : 0
+            let hi = hiBytes.flatMap { i < $0.count ? digit($0[i]) : nil } ?? 16
+            if hi > lo + 1 {
+                result.append(hex[(lo + hi) / 2])
+                for j in 0..<149 {
+                    let byte = j < bytes.count ? bytes[j] : 0
+                    result.append(hex[Int(byte >> 4)])
+                    result.append(hex[Int(byte & 15)])
+                }
+                result.append(56)
+                return result.count <= 8192 ? String(decoding: result, as: UTF8.self) : nil
+            }
+            result.append(hex[lo])
+            if lo != hi { hiBytes = nil }
+        }
+        return nil
+    }
+}
+
 // MARK: - JSON field values
 
 /// A JSON value that distinguishes explicit `null` from an absent key: op
@@ -572,5 +610,54 @@ final class RegistryDoc {
 
     func rowExists(kind: String, id: String) -> Bool {
         overlayRow(kind: kind, id: id) != nil
+    }
+
+    var sidebarPinsInitialized: Bool { rowExists(kind: "preferences", id: "sidebarPins") }
+
+    var orderedSidebarPins: [(id: String, key: String)] {
+        overlayRows(kind: "sidebarPins").compactMap { row in
+            guard row.fields["pinned"]?.boolValue == true,
+                  let key = row.fields["orderKey"]?.stringValue, PinOrder.valid(key) else { return nil }
+            return (id: row.id, key: key)
+        }.sorted { $0.key == $1.key ? $0.id < $1.id : $0.key < $1.key }
+    }
+
+    /// Cache readiness for empty lists too, without importing old preferences.
+    func initializeSidebarPins() {
+        guard !sidebarPinsInitialized else { return }
+        write(kind: "preferences", id: "sidebarPins", op: .upsert, set: ["initialized": .bool(true)])
+    }
+
+    /// A move never writes membership. Explicit false survives delayed moves.
+    @discardableResult
+    func changeSidebarPin(id: String, pinned: Bool?, after: String? = nil, before: String? = nil) -> Bool {
+        guard sidebarPinsInitialized, !id.isEmpty else { return false }
+        if let latest = overlayRow(kind: "sidebarPins", id: id)?.clocks.values.max() {
+            let parts = latest.split(separator: "-", maxSplits: 2)
+            if parts.count == 3, let ms = Int64(parts[0]), let counter = UInt32(parts[1]),
+               ms > clock.lastMs || (ms == clock.lastMs && counter > clock.counter) {
+                clock.lastMs = ms
+                clock.counter = counter
+            }
+        }
+        let current = orderedSidebarPins
+        if pinned == false {
+            write(kind: "sidebarPins", id: id, op: .upsert, set: ["pinned": .bool(false)])
+            return true
+        }
+        let exists = current.contains { $0.id == id }
+        guard pinned != nil || exists else { return false }
+        guard exists || current.count < 200 else { return false }
+        let others = current.filter { $0.id != id }
+        let index = before.flatMap { anchor in others.firstIndex { $0.id == anchor } }
+            ?? after.flatMap { anchor in others.firstIndex { $0.id == anchor }.map { $0 + 1 } }
+            ?? others.count
+        let hlc = nextHlc()
+        guard let key = PinOrder.between(index > 0 ? others[index - 1].key : nil,
+                                        index < others.count ? others[index].key : nil, nonce: hlc) else { return false }
+        var fields: [String: JSONValue] = ["orderKey": .string(key)]
+        if pinned == true { fields["pinned"] = .bool(true) }
+        enqueue(ops: [RegistryOp(kind: "sidebarPins", id: id, op: .upsert, set: fields, hlc: hlc, clocks: nil)])
+        return true
     }
 }

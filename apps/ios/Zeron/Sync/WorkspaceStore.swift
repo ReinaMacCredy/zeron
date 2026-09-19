@@ -2,8 +2,9 @@
 // host (crates/doc/src/registry.rs + crates/engine WorkspaceHost). Joins the
 // per-user `/registry/{orgId}/ws` room, projects the row table into typed
 // rows, and performs the writes the writer discipline allows a viewer device:
-// chat creates, archives, renames and seen marks. iOS is a viewport, not an
-// engine device, so it owns no device row; it does publish a presence beat
+// chat creates, archives, renames, seen marks and sidebar preferences. iOS is
+// a viewport, not an engine device, so it owns no device row; it does publish
+// a presence beat
 // (registry presence replaced the old ws room's ephemeral store).
 //
 // Reads are OVERLAY reads: the server's authoritative rows plus the pending
@@ -17,10 +18,14 @@ import Observation
 @MainActor
 @Observable
 final class WorkspaceStore {
+    static let maxSidebarPins = 200
+
     private(set) var devices: [DeviceRow] = []
     private(set) var spaces: [Space] = []
     private(set) var chats: [Chat] = []
     private(set) var sessions: [String: SessionRow] = [:]
+    private(set) var pinnedSessionIds: [String] = []
+    private(set) var sidebarPreferencesInitialized = false
     private(set) var presence: [String: Int64] = [:]  // deviceId → last beat ms
     private(set) var changeRequestSnapshots: [ChangeRequestWatchKey: CheckoutChangeRequestStatus] = [:]
     private(set) var connected = false
@@ -217,9 +222,10 @@ final class WorkspaceStore {
                 presence[device] = at
                 presenceReceivedAt[device] = now
             }
-            project()
-            saver?.poke()
             synced = true
+            project()
+            pruneDeletedPinsIfNeeded()
+            saver?.poke()
         case .connected:
             let reconnected = !connected
             connected = true
@@ -234,6 +240,7 @@ final class WorkspaceStore {
             // every suspension, so convergence is quick without forcing one.
             _ = doc.applyRows(seq: seq, rows: rows)
             project()
+            pruneDeletedPinsIfNeeded()
             saver?.poke()
         case .ack(let batch, let seq, _):
             // Rows for this batch already arrived (server orders rows before
@@ -265,6 +272,19 @@ final class WorkspaceStore {
         if !connected {
             Task { await self.pushPendingOverHTTP() }
         }
+    }
+
+    /// Keep archived ids (unarchive restores their position), but once an
+    /// authoritative registry state has landed, remove ids whose chat row was
+    /// actually deleted. Cache readiness even when this first snapshot is empty.
+    private func pruneDeletedPinsIfNeeded() {
+        guard synced else { return }
+        let known = Set(chats.map(\.id))
+        let initialized = doc.sidebarPinsInitialized
+        doc.initializeSidebarPins()
+        let removed = pinnedSessionIds.filter { !known.contains($0) }
+        for id in removed { doc.changeSidebarPin(id: id, pinned: false) }
+        if !initialized || !removed.isEmpty { afterLocalWrite() }
     }
 
     // MARK: Presence
@@ -375,6 +395,14 @@ final class WorkspaceStore {
                                       updatedAt: f["updatedAt"]?.int64Value ?? 0)
         }
         sessions = rows
+
+        if doc.sidebarPinsInitialized {
+            sidebarPreferencesInitialized = true
+            pinnedSessionIds = doc.orderedSidebarPins.map(\.id)
+        } else {
+            sidebarPreferencesInitialized = false
+            pinnedSessionIds = []
+        }
         reconcileChangeRequestStreams()
     }
 
@@ -385,7 +413,7 @@ final class WorkspaceStore {
     var overviewChats: [Chat] {
         let liveSpaceIds = Set(spaces.map(\.id))
         let live = chats.filter { !$0.archived && ($0.spaceId.map(liveSpaceIds.contains) ?? true) }
-        return sortActive(live)
+        return sortPinnedFirst(live, pinnedSessionIds: pinnedSessionIds)
     }
 
     /// A space's sessions, in the sidebar's Sessions order (recency).
@@ -395,7 +423,10 @@ final class WorkspaceStore {
     /// no tabs — a space opens into the same list, with the same rows, as the
     /// Sessions section — so it follows that list's ordering instead.
     func chats(in spaceId: String) -> [Chat] {
-        sortActive(chats.filter { !$0.archived && $0.spaceId == spaceId })
+        sortPinnedFirst(
+            chats.filter { !$0.archived && $0.spaceId == spaceId },
+            pinnedSessionIds: pinnedSessionIds
+        )
     }
 
     /// Archived chats under an optional space scope, recency order — feeds the
@@ -722,6 +753,18 @@ final class WorkspaceStore {
 
     func setArchived(chatId: String, archived: Bool) {
         updateChat(chatId, set: ["archived": .bool(archived)])
+    }
+
+    func setPinned(chatId: String, pinned: Bool) {
+        guard chats.contains(where: { $0.id == chatId }) else { return }
+        // Known cached pins are editable offline. A fresh install waits for
+        // an authoritative snapshot before making membership/capacity decisions.
+        guard synced || sidebarPreferencesInitialized else { return }
+        guard pinnedSessionIds.contains(chatId) != pinned else { return }
+        guard !pinned || pinnedSessionIds.count < Self.maxSidebarPins else { return }
+        doc.initializeSidebarPins()
+        guard doc.changeSidebarPin(id: chatId, pinned: pinned, after: pinnedSessionIds.last) else { return }
+        afterLocalWrite()
     }
 
     /// Synced seen marker (LWW) with a monotonic guard: no write when the

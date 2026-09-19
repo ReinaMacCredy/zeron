@@ -33,7 +33,7 @@ use zeron_doc::{SessionMessageEntry, TranscriptDesync, TranscriptFrame};
 use zeron_engine::{Engine, EngineConfig, EngineRuntime, InstanceLock, rpc::AuthRpc};
 use zeron_proto::{
     AuthState, ChangeRequestSummary, Chat, ChatIndicator, CheckoutChangeRequestStatus, Device,
-    EngineInfo, HarnessId, Session, Space, WorkspaceScope,
+    EngineInfo, HarnessId, Session, SidebarPreferencesState, Space, WorkspaceScope,
 };
 use zeron_rpc::{RpcClient, RpcError, RpcReply, RpcService, connect_ws, memory_client, methods};
 
@@ -270,6 +270,10 @@ pub struct EngineHandle {
 }
 
 impl EngineHandle {
+    pub(crate) fn same_connection(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
     /// Probe the IPC port and connect (daemon listening) or embed (nothing there).
     /// Must run on the tokio runtime (`Tokio::spawn`): both transports spawn
     /// tokio tasks.
@@ -513,6 +517,7 @@ impl EngineHandle {
             engine_info: EngineInfo {
                 device_id: "local".into(),
                 workspace_scope: WorkspaceScope::Local,
+                cursor_sdk_version: None,
                 capabilities: Vec::new(),
             },
             deferred_state: None,
@@ -560,6 +565,7 @@ async fn query_engine_info(client: &RpcClient) -> Result<EngineInfo, RpcError> {
             Ok(EngineInfo {
                 device_id: legacy.device_id,
                 workspace_scope: WorkspaceScope::Synced,
+                cursor_sdk_version: None,
                 capabilities: Vec::new(),
             })
         }
@@ -679,6 +685,9 @@ pub struct AppState {
     /// Sorted (see [`sort_chats`]); includes archived rows — views filter.
     pub chats: Vec<Chat>,
     pub sessions: Vec<Session>,
+    /// Synced user/org sidebar pin state. Local workspaces deliberately ignore
+    /// this and continue reading their device-local settings entry.
+    pub sidebar_preferences: SidebarPreferencesState,
     session_presentation: Option<Vec<Session>>,
     /// The project the new-session canvas mints into. Healed by
     /// [`Self::apply_spaces`] when the row vanishes; selecting a chat implies
@@ -819,6 +828,7 @@ impl AppState {
             spaces: Vec::new(),
             chats: Vec::new(),
             sessions: Vec::new(),
+            sidebar_preferences: SidebarPreferencesState::default(),
             session_presentation: None,
             selected_space: None,
             no_project: false,
@@ -988,6 +998,14 @@ impl AppState {
     }
 
     // ---- reducers (pure) ----
+
+    pub(crate) fn apply_sidebar_preferences(&mut self, value: SidebarPreferencesState) -> bool {
+        if value.revision < self.sidebar_preferences.revision || value == self.sidebar_preferences {
+            return false;
+        }
+        self.sidebar_preferences = value;
+        true
+    }
 
     pub fn apply_chats(&mut self, mut chats: Vec<Chat>) {
         sort_chats(&mut chats);
@@ -1845,6 +1863,7 @@ impl AppState {
         self.spaces.clear();
         self.chats.clear();
         self.sessions.clear();
+        self.sidebar_preferences = SidebarPreferencesState::default();
         self.session_presentation = None;
         self.selected_space = None;
         self.no_project = false;
@@ -1916,7 +1935,7 @@ impl AppState {
         self.workspace_scope = Some(engine_info.workspace_scope);
         self.local_device_id = Some(engine_info.device_id.clone());
         self.engine = Some(handle.clone());
-        let mut watch_tasks = Vec::with_capacity(8);
+        let mut watch_tasks = Vec::with_capacity(10);
         if let Some(task) = spawn_deferred_engine_watch(cx, handle.clone()) {
             watch_tasks.push(task);
         }
@@ -1928,6 +1947,12 @@ impl AppState {
                 AppState::apply_sessions,
             ),
             spawn_chats_watch(cx, handle.clone()),
+            spawn_watch(
+                cx,
+                handle.clone(),
+                methods::WATCH_SIDEBAR_PREFERENCES,
+                AppState::apply_sidebar_preferences,
+            ),
             spawn_watch(
                 cx,
                 handle.clone(),
@@ -3195,6 +3220,7 @@ mod tests {
                 engine_info: EngineInfo {
                     device_id: "owner-device".into(),
                     workspace_scope: WorkspaceScope::Local,
+                    cursor_sdk_version: None,
                     capabilities: zeron_proto::capabilities::current(),
                 },
                 state: state_rx,
@@ -3851,6 +3877,7 @@ mod tests {
             last_seen_at: None,
             created_at: None,
             version: None,
+            cursor_sdk_version: None,
             capabilities: Vec::new(),
         }
     }
@@ -4800,6 +4827,7 @@ mod tests {
             last_seen_at: None,
             created_at: None,
             version: Some("0.2.12".into()),
+            cursor_sdk_version: None,
             capabilities: Vec::new(),
         }];
         assert!(s.device_version_at_least("d1", (0, 2, 12)));
@@ -4822,6 +4850,7 @@ mod tests {
                 last_seen_at: None,
                 created_at: None,
                 version: Some("0.2.31".into()),
+                cursor_sdk_version: None,
                 capabilities: vec![zeron_proto::capabilities::MESSAGE_QUEUE_V1.into()],
             },
             Device {
@@ -4831,6 +4860,7 @@ mod tests {
                 last_seen_at: None,
                 created_at: None,
                 version: Some("0.2.31".into()),
+                cursor_sdk_version: None,
                 capabilities: Vec::new(),
             },
         ];
@@ -4857,6 +4887,7 @@ mod tests {
             last_seen_at: Some(now),
             created_at: None,
             version: None,
+            cursor_sdk_version: None,
             capabilities: Vec::new(),
         }];
         s.connectivity.state = ConnectivityState::Connected;
@@ -4919,5 +4950,22 @@ impl AppState {
     /// Keep fixture documents deterministic while using the real attachment RPC.
     pub fn fixture_attachment_engine(&mut self, engine: EngineHandle) {
         self.engine = Some(engine);
+    }
+}
+
+#[cfg(feature = "project-palette-fixture")]
+impl AppState {
+    /// Seed provider metadata for the isolated native sidebar review fixture.
+    pub fn fixture_sidebar_change_request(
+        &mut self,
+        snapshot: zeron_proto::CheckoutChangeRequestStatus,
+    ) {
+        let key = crate::change_requests::ChangeRequestWatchKey {
+            device_id: snapshot.device_id.clone(),
+            cwd: snapshot.cwd.clone(),
+            branch: snapshot.branch.clone(),
+            checkout_id: Some(snapshot.checkout_id.clone()),
+        };
+        self.change_requests.store(key, snapshot);
     }
 }

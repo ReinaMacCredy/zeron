@@ -214,7 +214,7 @@ display EXCLUDED. File paths refer to the reference repo.
 - commands LoroList<LoroMap{id, kind, payload, issuedBy, issuedAt, basedOn?, expiresAt?, status,
   resolution?}>. Rules: (1) each device appends only its own immutable entries; (2) host sole
   outcome writer (composer may cancel own pending); (3) evaluateCommand: processed-id dedupe ->
-  skip; TTL -> expired; newer same-kind steer/interrupt -> superseded; interrupt past basedOn.turnId
+  skip; TTL -> expired; newer interrupt -> superseded (distinct steer messages are retained); interrupt past basedOn.turnId
   -> superseded; else execute. TTL 24h.
 - splitMessageEntry at part boundaries (text chunked by code points) so no op > MSG_INLINE_MAX
   256KB; continuationId = "root#cN"; joinContinuations render-time inverse.

@@ -28,6 +28,24 @@ const applied = (row: Row | undefined, op: Op): Row => {
   return result.row as Row;
 };
 
+describe("sidebar pin validation", () => {
+  it("accepts separate membership and order writes, but not malformed keys or row deletion", () => {
+    expect(validateOp(upsert({ kind: "sidebarPins", set: { pinned: false } }))).toBeNull();
+    expect(validateOp(upsert({ kind: "sidebarPins", set: { orderKey: "8ab8" } }))).toBeNull();
+    const invalidFields: NonNullable<Op["set"]>[] = [
+      { orderKey: "80" },
+      { orderKey: "" },
+      { orderKey: "G" },
+      { pinned: "true" },
+      { other: true }
+    ];
+    for (const set of invalidFields) {
+      expect(validateOp(upsert({ kind: "sidebarPins", set }))).not.toBeNull();
+    }
+    expect(validateOp({ kind: "sidebarPins", id: "a", op: "delete", hlc: hlc(1) })).not.toBeNull();
+  });
+});
+
 describe("hlc", () => {
   it("orders by (ms, counter, device) lexicographically", () => {
     expect(hlc(2) > hlc(1)).toBe(true);

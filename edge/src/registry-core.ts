@@ -83,6 +83,14 @@ export const validateOp = (op: Op): string | null => {
     }
   }
   if (JSON.stringify(op).length > MAX_OP_BYTES) return "op too large";
+  if (op.kind === "sidebarPins") {
+    if (op.op === "delete") return "pins use explicit membership, not row deletion";
+    for (const [key, value] of Object.entries(op.set ?? {})) {
+      if (key === "pinned" && typeof value === "boolean") continue;
+      if (key === "orderKey" && typeof value === "string" && value.length <= 8192 && /^[0-9a-f]*[1-9a-f]$/.test(value)) continue;
+      return "invalid sidebar pin field";
+    }
+  }
   return null;
 };
 

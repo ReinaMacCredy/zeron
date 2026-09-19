@@ -300,3 +300,181 @@ async fn engine_death_does_not_leave_an_orphan_owning_the_conversation() {
     assert_eq!(frame(&mut lines).await["status"], "finished");
     finish(&mut recovered, stdin).await;
 }
+
+#[tokio::test]
+async fn reported_auth_error_preserves_diagnostics_and_never_replays_the_turn() {
+    for prompt in ["incident-auth", "background-auth", "background-throw"] {
+        let fixture = SessionFixture::new();
+        let (mut child, stdin, mut lines) = fixture.start(prompt, false).await;
+        assert_eq!(frame(&mut lines).await["ev"], "ready");
+        assert_eq!(
+            frame(&mut lines).await["text"],
+            "retained-conversation-history"
+        );
+        let failure = frame(&mut lines).await;
+        let message = if prompt.starts_with("background-") {
+            assert_eq!(failure["ev"], "fatal");
+            failure["message"].as_str().unwrap()
+        } else {
+            assert_eq!(failure["status"], "error");
+            failure["error"].as_str().unwrap()
+        };
+        assert!(message.contains("Authentication error"), "{message}");
+        assert!(message.contains("code=unauthenticated"), "{message}");
+        assert!(message.contains("requestId=request-"), "{message}");
+        assert!(!message.contains("DO-NOT-LOG"));
+        finish(&mut child, stdin).await;
+        let (mut child, stdin, mut lines) = fixture.start("normal", true).await;
+        assert_eq!(frame(&mut lines).await["agentId"], "agent-fixture");
+        assert_eq!(
+            frame(&mut lines).await["text"],
+            "retained-conversation-history"
+        );
+        assert_eq!(frame(&mut lines).await["status"], "finished");
+        finish(&mut child, stdin).await;
+        let store =
+            std::fs::read_to_string(fixture.dir.path().join("state/by-agent/agent-fixture"))
+                .unwrap();
+        let prompts =
+            std::fs::read_to_string(std::path::Path::new(store.trim()).join("prompts.ndjson"))
+                .unwrap();
+        let prompts: Vec<String> = prompts
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(prompts, vec![prompt, "normal"]);
+    }
+}
+
+#[tokio::test]
+async fn uncheckpointed_user_text_survives_resume_without_replaying_the_turn() {
+    let fixture = SessionFixture::new();
+    let original = "uncheckpointed-remember TOKEN and append once to a file";
+    let (mut child, stdin, mut lines) = fixture.start(original, false).await;
+    assert_eq!(frame(&mut lines).await["ev"], "ready");
+    assert_eq!(frame(&mut lines).await["status"], "error");
+    finish(&mut child, stdin).await;
+    let (mut child, stdin, mut lines) = fixture.start("what was my last token?", true).await;
+    assert_eq!(frame(&mut lines).await["ev"], "ready");
+    assert_eq!(frame(&mut lines).await["ev"], "text");
+    assert_eq!(frame(&mut lines).await["status"], "finished");
+    finish(&mut child, stdin).await;
+    let (mut child, stdin, mut lines) = fixture.start("next explicit message", true).await;
+    assert_eq!(frame(&mut lines).await["ev"], "ready");
+    assert_eq!(frame(&mut lines).await["ev"], "text");
+    assert_eq!(frame(&mut lines).await["status"], "finished");
+    finish(&mut child, stdin).await;
+    let store =
+        std::fs::read_to_string(fixture.dir.path().join("state/by-agent/agent-fixture")).unwrap();
+    let log =
+        std::fs::read_to_string(std::path::Path::new(store.trim()).join("prompts.ndjson")).unwrap();
+    let prompts: Vec<String> = log
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(prompts.len(), 3, "no automatic prompt replay");
+    assert_eq!(prompts[0], original);
+    assert!(prompts[1].contains(original));
+    assert!(prompts[1].contains("do not rerun their tools or side effects"));
+    assert!(prompts[1].contains("what was my last token?"));
+    assert_eq!(
+        prompts[2], "next explicit message",
+        "already checkpointed context must not be duplicated"
+    );
+}
+
+#[tokio::test]
+async fn repeated_startup_failures_retain_all_user_messages_without_nesting_or_duplicates() {
+    let fixture = SessionFixture::new();
+    for round in 0..20 {
+        let (mut child, stdin, mut lines) = fixture
+            .start(&format!("uncheckpointed-{round}"), round > 0)
+            .await;
+        assert_eq!(frame(&mut lines).await["ev"], "ready");
+        assert_eq!(frame(&mut lines).await["status"], "error");
+        finish(&mut child, stdin).await;
+    }
+    let (mut child, stdin, mut lines) = fixture.start("continue explicitly", true).await;
+    assert_eq!(frame(&mut lines).await["ev"], "ready");
+    assert_eq!(frame(&mut lines).await["ev"], "text");
+    assert_eq!(frame(&mut lines).await["status"], "finished");
+    finish(&mut child, stdin).await;
+    let store =
+        std::fs::read_to_string(fixture.dir.path().join("state/by-agent/agent-fixture")).unwrap();
+    let receipt: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(std::path::Path::new(store.trim()).join(".zeron-user-receipt.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    let messages = receipt["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 21);
+    for (i, message) in messages.iter().take(20).enumerate() {
+        assert_eq!(message, &format!("uncheckpointed-{i}"));
+    }
+    assert_eq!(messages[20], "continue explicitly");
+    let log =
+        std::fs::read_to_string(std::path::Path::new(store.trim()).join("prompts.ndjson")).unwrap();
+    assert_eq!(log.lines().count(), 21, "no automatic retries");
+}
+
+#[tokio::test]
+async fn corrupt_interrupted_receipt_fails_before_sending_a_contextless_prompt() {
+    let fixture = SessionFixture::new();
+    let (mut child, stdin, mut lines) = fixture.start("normal", false).await;
+    assert_eq!(frame(&mut lines).await["ev"], "ready");
+    assert_eq!(frame(&mut lines).await["ev"], "text");
+    assert_eq!(frame(&mut lines).await["status"], "finished");
+    finish(&mut child, stdin).await;
+    let store =
+        std::fs::read_to_string(fixture.dir.path().join("state/by-agent/agent-fixture")).unwrap();
+    let root = std::path::Path::new(store.trim());
+    std::fs::write(root.join(".zeron-user-receipt.json"), "{\"version\":999}").unwrap();
+    let (mut child, stdin, mut lines) = fixture.start("must not send", true).await;
+    let error = frame(&mut lines).await;
+    assert_eq!(error["status"], "error");
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("receipt is invalid")
+    );
+    finish(&mut child, stdin).await;
+    assert_eq!(
+        std::fs::read_to_string(root.join("prompts.ndjson"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn startup_catalog_rate_limit_retries_before_sending_but_auth_does_not() {
+    for (message, succeeds) in [
+        (
+            "You have exceeded the rate limit of 30 requests per minute for the get_models endpoint",
+            true,
+        ),
+        ("Authentication error", false),
+    ] {
+        let fixture = SessionFixture::new();
+        let marker = fixture.dir.path().join("startup-limit.json");
+        std::fs::write(
+            &marker,
+            serde_json::json!({"attempts":0,"failures":1,"message":message}).to_string(),
+        )
+        .unwrap();
+        let (mut child, stdin, mut lines) = fixture.start("normal", false).await;
+        if succeeds {
+            assert_eq!(frame(&mut lines).await["ev"], "ready");
+            assert_eq!(frame(&mut lines).await["ev"], "text");
+            assert_eq!(frame(&mut lines).await["status"], "finished");
+        } else {
+            assert_eq!(frame(&mut lines).await["ev"], "fatal");
+        }
+        finish(&mut child, stdin).await;
+        let state: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(marker).unwrap()).unwrap();
+        assert_eq!(state["attempts"], if succeeds { 2 } else { 1 });
+    }
+}

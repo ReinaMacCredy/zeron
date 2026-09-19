@@ -4,7 +4,8 @@
 //! (`/registry/{orgId}/ws` → room `reg1/{orgId}/{userId}`, offline-tolerant —
 //! spaces/sessions are private to their owner, never org-visible), the device
 //! registry row for THIS device, and the typed watch channels the
-//! WatchChats/WatchDevices/WatchSessions RPC streams are fed from.
+//! WatchChats/WatchDevices/WatchSessions/WatchSidebarPreferences RPC streams
+//! are fed from.
 //!
 //! Writer discipline (kept from the doc schema): this host writes its own device row,
 //! its own session-status rows, and rows for chats it hosts; renames/archives are LWW
@@ -26,7 +27,7 @@ use chrono::Utc;
 use tokio::sync::watch;
 
 use zeron_doc::{DeletedSpace, REGISTRY_DOC_ID, RegistryDoc, WorkspaceDoc};
-use zeron_proto::{Chat, ChatConfig, Device, Session, Space};
+use zeron_proto::{Chat, ChatConfig, Device, Session, SidebarPreferencesState, Space};
 use zeron_sync::{DocsStore, RegistryClient, RegistryTuning};
 
 use crate::doc_host::EdgeConfig;
@@ -159,6 +160,7 @@ struct WorkspaceHostInner {
     devices_tx: watch::Sender<Vec<Device>>,
     sessions_tx: watch::Sender<Vec<Session>>,
     spaces_tx: watch::Sender<Vec<Space>>,
+    sidebar_preferences_tx: watch::Sender<SidebarPreferencesState>,
     room: Mutex<Option<Arc<RegistryClient>>>,
     /// Bumped on every registry change (local mutation or applied server
     /// frame) — drives republish + the snapshot debounce in `workspace_task`.
@@ -269,6 +271,7 @@ impl WorkspaceHost {
             // Every boot restamps the running binary's version (fleet staleness
             // on the Devices page; workspace version — same for every crate).
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            cursor_sdk_version: Some(zeron_harness::CursorHarness::sdk_version().into()),
             capabilities: zeron_proto::capabilities::current(),
         })?;
 
@@ -277,6 +280,15 @@ impl WorkspaceHost {
         let (devices_tx, _) = watch::channel(state.devices);
         let (sessions_tx, _) = watch::channel(state.sessions);
         let (spaces_tx, _) = watch::channel(state.spaces);
+        let preferences = doc.sidebar_preferences();
+        let (sidebar_preferences_tx, _) = watch::channel(SidebarPreferencesState {
+            revision: 0,
+            synced: false,
+            initialized: preferences.is_some(),
+            pinned_session_ids: preferences
+                .map(|preferences| preferences.pinned_session_ids)
+                .unwrap_or_default(),
+        });
         let (changed_tx, changed_rx) = watch::channel(0u64);
 
         let host = Self {
@@ -288,6 +300,7 @@ impl WorkspaceHost {
                 devices_tx,
                 sessions_tx,
                 spaces_tx,
+                sidebar_preferences_tx,
                 room: Mutex::new(None),
                 changed_tx,
                 presence_seen: Mutex::new(std::collections::HashMap::new()),
@@ -636,6 +649,19 @@ impl WorkspaceHost {
         Ok(self.read(|doc| doc.read_sessions())?)
     }
 
+    pub fn change_sidebar_pin(
+        &self,
+        change: &zeron_proto::SidebarPinChange,
+    ) -> Result<(), EngineError> {
+        let synced = self.sync_status().is_some_and(|status| status.synced);
+        self.mutate(|doc| {
+            if self.edge_expected() && !synced && doc.sidebar_preferences().is_none() {
+                return Err(EngineError::Other("Pins are still syncing".into()));
+            }
+            Ok(doc.change_sidebar_pin(change)?)
+        })
+    }
+
     // ── watches (WatchChats / WatchDevices / merged WatchSessions) ──────────
 
     pub fn watch_chats(&self) -> watch::Receiver<Vec<Chat>> {
@@ -653,6 +679,18 @@ impl WorkspaceHost {
 
     pub fn watch_spaces(&self) -> watch::Receiver<Vec<Space>> {
         self.inner.spaces_tx.subscribe()
+    }
+
+    pub fn watch_sidebar_preferences(&self) -> watch::Receiver<SidebarPreferencesState> {
+        self.inner.sidebar_preferences_tx.subscribe()
+    }
+
+    /// Mutation acknowledgements and watches share the same ordered revision.
+    pub fn sidebar_preferences_snapshot(&self) -> SidebarPreferencesState {
+        let synced = self.sync_status().is_some_and(|status| status.synced);
+        let doc = lock(&self.inner.reg);
+        self.inner.publish_sidebar_preferences(&doc, synced);
+        self.inner.sidebar_preferences_tx.borrow().clone()
     }
 
     /// WatchSessions source: remote devices' rows from the registry merged with
@@ -1248,7 +1286,26 @@ impl WorkspaceHostInner {
     }
 
     fn publish_lists(&self, clock_tick: bool) {
-        match lock(&self.reg).read_all() {
+        let registry_synced = lock(&self.room)
+            .as_ref()
+            .is_some_and(|room| room.stats().synced);
+        let snapshot = {
+            let mut doc = lock(&self.reg);
+            match doc.reconcile_sidebar_pins(registry_synced) {
+                Ok(true) => {
+                    // Persist and transmit cleanup just like a user mutation.
+                    self.bump_changed();
+                    if let Some(room) = lock(&self.room).as_ref() {
+                        room.nudge();
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => tracing::warn!(%error, "sidebar pin cleanup failed"),
+            }
+            self.publish_sidebar_preferences(&doc, registry_synced);
+            doc.read_all()
+        };
+        match snapshot {
             Ok(mut state) => {
                 self.overlay_presence(&mut state.devices);
                 // Retain the latest value even with no subscribers, but don't
@@ -1268,6 +1325,33 @@ impl WorkspaceHostInner {
                 tracing::warn!(error = %err, "registry read failed");
             }
         }
+    }
+
+    /// Called under the registry lock so publications cannot overtake one another.
+    fn publish_sidebar_preferences(&self, doc: &RegistryDoc, synced: bool) {
+        let preferences = doc.sidebar_preferences();
+        let initialized = preferences.is_some();
+        let pins = preferences
+            .map(|p| p.pinned_session_ids)
+            .unwrap_or_default();
+        self.sidebar_preferences_tx.send_if_modified(|current| {
+            // Readiness is sticky for this host. A caller that sampled stats
+            // before another publisher acquired the lock must not regress it.
+            let synced = synced || current.synced;
+            if current.synced == synced
+                && current.initialized == initialized
+                && current.pinned_session_ids == pins
+            {
+                return false;
+            }
+            *current = SidebarPreferencesState {
+                revision: current.revision + 1,
+                synced,
+                initialized,
+                pinned_session_ids: pins,
+            };
+            true
+        });
     }
 
     /// Fold the 15s presence heartbeats into the device rows' `lastSeenAt`
@@ -1374,17 +1458,19 @@ impl WorkspaceHostInner {
     }
 
     fn save_snapshot(&self) {
-        let bytes = lock(&self.reg).to_bytes();
-        match bytes {
-            Ok(bytes) => {
-                if let Err(err) = self.store.save_snapshot(REGISTRY_DOC_ID, &bytes) {
-                    tracing::warn!(error = %err, "registry snapshot save failed");
-                }
-            }
-            Err(err) => {
-                tracing::warn!(error = %err, "registry snapshot export failed");
-            }
+        if let Err(error) = self.persist_snapshot() {
+            tracing::warn!(%error, "registry snapshot save failed");
         }
+    }
+
+    fn persist_snapshot(&self) -> Result<(), EngineError> {
+        // Keep export and disk write serialized: an older background snapshot
+        // must not overwrite an acknowledged migration's durable snapshot.
+        let doc = lock(&self.reg);
+        let bytes = doc.to_bytes()?;
+        self.store
+            .save_snapshot(REGISTRY_DOC_ID, &bytes)
+            .map_err(|error| EngineError::Other(format!("registry snapshot save failed: {error}")))
     }
 
     /// Presence heartbeat — a memory-only frame on the room, never a row write.
@@ -1786,6 +1872,57 @@ mod tests {
             host.watch_spaces().borrow()[0].name.as_deref(),
             Some("Renamed")
         );
+    }
+
+    #[tokio::test]
+    async fn sidebar_preferences_watch_preserves_explicit_empty_state() {
+        use super::*;
+
+        let dir = tempfile::tempdir().unwrap();
+        let host = WorkspaceHost::open(
+            Arc::new(DocsStore::open(dir.path()).unwrap()),
+            WorkspaceHostConfig {
+                device_id: "test-device".into(),
+                device_name: "Test device".into(),
+                platform: "macos".into(),
+                org_id: "test-org".into(),
+                user_id: "test-user".into(),
+                edge: None,
+            },
+        )
+        .unwrap();
+        let mut preferences = host.watch_sidebar_preferences();
+        assert!(!preferences.borrow().initialized);
+
+        host.change_sidebar_pin(&zeron_proto::SidebarPinChange::Unpin {
+            session_id: "absent".into(),
+        })
+        .unwrap();
+        host.inner.publish();
+        assert!(preferences.has_changed().unwrap());
+        let state = preferences.borrow_and_update();
+        assert!(state.initialized);
+        assert!(!state.synced);
+        assert!(state.pinned_session_ids.is_empty());
+        let first_revision = state.revision;
+        drop(state);
+        let acknowledgement = host.sidebar_preferences_snapshot();
+        assert_eq!(acknowledgement.revision, first_revision);
+        assert!(
+            !preferences.has_changed().unwrap(),
+            "unchanged acknowledgements must not churn watches"
+        );
+        host.create_chat("cached", None, Some("test-device"), None, None)
+            .unwrap();
+        host.change_sidebar_pin(&zeron_proto::SidebarPinChange::Pin {
+            session_id: "cached".into(),
+            after: None,
+            before: None,
+        })
+        .unwrap();
+        let acknowledgement = host.sidebar_preferences_snapshot();
+        assert!(acknowledgement.revision > first_revision);
+        assert_eq!(*preferences.borrow(), acknowledgement);
     }
 
     #[test]

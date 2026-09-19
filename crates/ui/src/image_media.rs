@@ -174,6 +174,15 @@ pub(crate) fn decode_image(mime: &str, bytes: Vec<u8>) -> Result<MediaImage, Str
     decode_raster_image(bytes, zeron_proto::MAX_WORKSPACE_IMAGE_BYTES)
 }
 
+/// Repository icons retain only a small static thumbnail, even for large source logos.
+pub(crate) fn decode_project_icon(mime: &str, bytes: Vec<u8>) -> Result<MediaImage, String> {
+    if mime == "image/svg+xml" {
+        decode_image(mime, bytes).map(|media| media.for_view((16.0, 16.0), 2.0, 4096))
+    } else {
+        decode_raster_image_bounded(bytes, zeron_proto::MAX_WORKSPACE_IMAGE_BYTES, Some(64))
+    }
+}
+
 /// Validate generated raster metadata and retain a bounded static preview.
 pub(crate) fn decode_generated_image(
     bytes: Vec<u8>,
@@ -220,6 +229,7 @@ fn decode_raster_image_bounded(
     // Generated previews retain one bounded 8-bit frame. This keeps each
     // cache entry below the cache budget, including CPU and GPU copies.
     let decoded = if let Some(side) = max_side {
+        let side = side.min(decoded.width().max(decoded.height()));
         image::DynamicImage::ImageRgba8(decoded.thumbnail(side, side).to_rgba8())
     } else {
         decoded

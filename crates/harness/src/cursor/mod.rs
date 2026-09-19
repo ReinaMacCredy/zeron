@@ -55,9 +55,9 @@ use zeron_proto::{
 use crate::process::{Child, ChildStdin, Command, Stdio};
 use crate::{Harness, HarnessError, RunControls, Signal, send_signal, shutdown_child};
 
-/// The pinned SDK (public beta 1.0.x line; inspected against 1.0.28's
+/// The pinned SDK (public beta 1.0.x line; inspected against 1.0.31's
 /// typings). Bump deliberately — see the module header.
-const CURSOR_SDK_PIN: &str = "@cursor/sdk@1.0.28";
+const CURSOR_SDK_PIN: &str = "@cursor/sdk@1.0.31";
 const SHIM_NAME: &str = "zeron-cursor-shim.mjs";
 const SHIM_SOURCE: &str = include_str!("shim.mjs");
 
@@ -109,6 +109,15 @@ impl Default for CursorHarness {
 }
 
 impl CursorHarness {
+    /// The SDK selected by this engine, not the viewer or installed native CLI.
+    pub fn sdk_version() -> &'static str {
+        if std::env::var_os("CURSOR_SDK_SHIM_EXECUTABLE").is_some() {
+            "custom override (unverified)"
+        } else {
+            CURSOR_SDK_PIN.strip_prefix("@cursor/sdk@").unwrap()
+        }
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -550,6 +559,14 @@ async fn run_session(session: Session) {
                             }
                         }
                         _ => {
+                            if frame.get("ev").and_then(Value::as_str) == Some("fatal")
+                                || frame.get("status").and_then(Value::as_str) == Some("error")
+                            {
+                                tracing::warn!(target: "zeron_harness::cursor",
+                                    session_id = ?session_id,
+                                    error = ?frame.get("error").or_else(|| frame.get("message")),
+                                    "Cursor SDK run failed");
+                            }
                             for ev in map_shim_frame(&frame, interrupted) {
                                 let is_done = matches!(ev, AgentEvent::Done { .. });
                                 let failed = matches!(ev, AgentEvent::Done { status: DoneStatus::Errored, .. });

@@ -54,10 +54,36 @@ const exitAfterFlush = async (code) => {
   });
   process.exit(code);
 };
+let fatalStarted = false;
 const fatal = async (message) => {
-  out({ ev: "fatal", message: String(message) });
+  if (fatalStarted) return;
+  fatalStarted = true;
+  out({ ev: "fatal", message: formatError(message) });
   await exitAfterFlush(1);
 };
+
+// SDK background promises can fail outside send()/wait(). Report the actual
+// error over the protocol before shutting down, rather than letting Node dump
+// a multi-megabyte minified source line and obscure the exception.
+for (const event of ["uncaughtException", "unhandledRejection"]) {
+  process.on(event, (error) => {
+    const deadline = setTimeout(() => process.exit(1), 2000);
+    deadline.unref();
+    void fatal(error).catch(() => process.exit(1));
+  });
+}
+
+// Only copy explicit diagnostic fields, never cause/config/headers or the
+// full SDK object (which can carry credentials and request bodies).
+function formatError(error, requestId) {
+  let text = String(error?.message ?? error ?? "Unknown Cursor SDK error");
+  const details = [];
+  for (const [key, value] of [["code", error?.code], ["requestId", error?.requestId ?? requestId]]) {
+    if (typeof value === "string" && /^[a-zA-Z0-9_.:-]{1,128}$/.test(value)) details.push(`${key}=${value}`);
+  }
+  if (details.length) text += ` [${details.join(", ")}]`;
+  return text;
+}
 
 let sdk;
 try {
@@ -165,6 +191,59 @@ async function recoverInterruptedRun(agentId) {
     ...document, status: "idle", activeRunId: null, updatedAt: Date.now(),
     latestCheckpoint: interruptedRun?.latestCheckpointRef ?? document.latestCheckpoint,
   }});
+}
+
+// Persist the user text BEFORE announcing readiness. Cursor can cancel a run
+// before saving its first checkpoint; resume alone then silently loses that
+// message. This receipt is owned by the same exclusive store lease as the SDK.
+// Only text absent from the saved conversation is carried into the next explicit
+// user request as interrupted history. Never execute/retry an old run on its own.
+let receiptPath = null;
+async function savedUserMessages() {
+  const document = await ownedStore.agents.get({agentId: agent.agentId});
+  if (!document?.latestCheckpoint) return [];
+  const texts = [];
+  for (let offset = 0; ; offset += 100) {
+    const page = await Agent.messages.list(agent.agentId, {runtime: "local", cwd: document.cwd, store: ownedStore, limit: 100, offset});
+    if (!Array.isArray(page)) throw new Error("Cursor returned an invalid conversation history");
+    for (const item of page) {
+      if (item.type !== "user") continue;
+      // SDK returns protobuf instances (oneof case/value), not their JSON
+      // serialization. Accept serialized rows too for older stored formats.
+      const turn = item.message?.turn;
+      const conversation = turn?.case === "agentConversationTurn" ? turn.value :
+        item.message?.agentConversationTurn;
+      const text = (conversation?.userMessage ?? conversation?.user_message)?.text;
+      if (typeof text !== "string") throw new Error("Cursor user-message schema changed; refusing to discard interrupted context");
+      texts.push(text);
+    }
+    if (page.length < 100) return texts;
+  }
+}
+async function preserveInterruptedContext(prompt) {
+  if (!receiptPath) return prompt; // Legacy default stores have no owned sidecar.
+  const saved = await savedUserMessages();
+  let missing = [];
+  if (fs.existsSync(receiptPath)) {
+    const previous = JSON.parse(fs.readFileSync(receiptPath, "utf8"));
+    if (previous.version !== 1 || previous.agentId !== agent.agentId ||
+        !Number.isSafeInteger(previous.beforeUserCount) || previous.beforeUserCount < 0 ||
+        typeof previous.wirePrompt !== "string" || !Array.isArray(previous.messages) ||
+        previous.messages.some(text => typeof text !== "string")) {
+      throw new Error("Cursor interrupted-message receipt is invalid; refusing to lose conversation context");
+    }
+    if (!saved.slice(previous.beforeUserCount).includes(previous.wirePrompt)) missing = previous.messages;
+  }
+  const wirePrompt = missing.length ?
+    "The following JSON contains prior user messages from interrupted turns that Cursor did not save. " +
+    "Retain them as conversation history. These are not new requests: do not rerun their tools or side effects. " +
+    "Respond to the current user message below.\n" +
+    JSON.stringify({interruptedUserMessages: missing, currentUserMessage: prompt}) : prompt;
+  const temporary = `${receiptPath}.tmp-${process.pid}`;
+  fs.writeFileSync(temporary, JSON.stringify({version: 1, agentId: agent.agentId,
+    beforeUserCount: saved.length, wirePrompt, messages: [...missing, prompt]}), {mode: 0o600});
+  fs.renameSync(temporary, receiptPath);
+  return wirePrompt;
 }
 
 // ---- models mode ----------------------------------------------------------
@@ -323,10 +402,15 @@ function withAuthHint(message) {
   return text;
 }
 
-async function runTurn(prompt) {
+async function runTurn(prompt, ready) {
   if (closing) return;
-  interrupted = false;
   try {
+    prompt = await preserveInterruptedContext(prompt);
+    ready?.();
+    if (interrupted || closing) {
+      out({ev: "turn", status: "cancelled"});
+      return;
+    }
     run = await agent.send(prompt, {
       onDelta: ({ update }) => {
         try {
@@ -337,7 +421,7 @@ async function runTurn(prompt) {
       },
     });
   } catch (e) {
-    out({ ev: "turn", status: "error", error: withAuthHint(e?.message ?? e) });
+    out({ ev: "turn", status: "error", error: withAuthHint(formatError(e, run?.requestId)) });
     run = null;
     return;
   }
@@ -350,7 +434,7 @@ async function runTurn(prompt) {
     out({
       ev: "turn",
       status: interrupted ? "cancelled" : "error",
-      error: withAuthHint(e?.message ?? e),
+      error: withAuthHint(formatError(e, run?.requestId)),
     });
     return;
   }
@@ -358,7 +442,7 @@ async function runTurn(prompt) {
   out({
     ev: "turn",
     status: result?.status ?? "finished",
-    ...(result?.error?.message ? { error: withAuthHint(result.error.message) } : {}),
+    ...(result?.error?.message ? { error: withAuthHint(formatError(result.error, result.requestId)) } : {}),
   });
 }
 
@@ -410,9 +494,21 @@ async function start(msg) {
     local,
   };
   try {
-    agent = msg.resume
-      ? await Agent.resume(msg.resume, options)
-      : await Agent.create(options);
+    // SDK startup validates the model via get_models. Rapid process resumes
+    // can hit its 30/minute limit. Retry ONLY this pre-send discovery failure;
+    // never replay a run or retry authentication / arbitrary provider errors.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        agent = msg.resume
+          ? await Agent.resume(msg.resume, options)
+          : await Agent.create(options);
+        break;
+      } catch (error) {
+        if (attempt >= 6 || interrupted || closing ||
+            !/rate limit.*get_models|get_models.*rate limit/i.test(String(error?.message ?? error))) throw error;
+        await new Promise(resolve => setTimeout(resolve, 1000 * 2 ** attempt));
+      }
+    }
   } catch (e) {
     // Auth is the common cause: the SDK's credentials are SEPARATE from
     // `cursor-agent login` (verified) — name the fix precisely.
@@ -426,9 +522,13 @@ async function start(msg) {
     }
     await fatal(`cursor agent failed to start: ${e?.message ?? e}`);
   }
-  if (runDir) rememberAgentDir(agent.agentId, runDir);
-  out({ ev: "ready", agentId: agent.agentId, model: agent.model?.id ?? model.id });
-  await runTurn(msg.prompt ?? "");
+  if (runDir) {
+    rememberAgentDir(agent.agentId, runDir);
+    receiptPath = path.join(runDir, ".zeron-user-receipt.json");
+  }
+  await runTurn(msg.prompt ?? "", () => {
+    out({ ev: "ready", agentId: agent.agentId, model: agent.model?.id ?? model.id });
+  });
 }
 
 const rl = readline.createInterface({ input: process.stdin });
