@@ -384,7 +384,7 @@ async fn create_thread_picks_the_peers_run_settings_and_copies_the_creators_othe
 }
 
 #[tokio::test]
-async fn self_and_cross_project_sends_are_refused() {
+async fn self_and_cross_device_sends_are_refused_but_a_cross_project_send_is_delivered() {
     let rig = rig(Duration::from_millis(10));
     let err = rig
         .core
@@ -396,19 +396,16 @@ async fn self_and_cross_project_sends_are_refused() {
 
     rig.core
         .workspace
-        .create_space("space-other", "dev-a", "/tmp/other", None, false)
+        .create_chat("remote", Some("space-tt"), None, None, None)
         .unwrap();
-    rig.core
-        .workspace
-        .create_chat("elsewhere", Some("space-other"), None, None, None)
-        .unwrap();
+    rig.core.workspace.set_chat_host("remote", "dev-b").unwrap();
     let err = rig
         .core
         .doc_host
-        .queue_thread_message("elsewhere", "lead", "hi")
+        .queue_thread_message("remote", "lead", "hi")
         .await
-        .expect_err("cross-project send");
-    assert!(err.to_string().contains("same project"), "{err}");
+        .expect_err("cross-device send");
+    assert!(err.to_string().contains("same device"), "{err}");
     let err = rig
         .core
         .doc_host
@@ -417,6 +414,32 @@ async fn self_and_cross_project_sends_are_refused() {
         .expect_err("unknown target");
     assert!(err.to_string().contains("no such chat: nope"), "{err}");
     assert_eq!(rig.prompts.lock().unwrap().len(), 0);
+
+    // Another project on the same device is in the sidebar the human sees,
+    // so it is a peer: the idle target starts a turn with the message.
+    rig.core
+        .workspace
+        .create_space("space-other", "dev-a", "/tmp/other", None, false)
+        .unwrap();
+    rig.core
+        .workspace
+        .create_chat("elsewhere", Some("space-other"), None, None, None)
+        .unwrap();
+    rig.core
+        .doc_host
+        .queue_thread_message("elsewhere", "lead", "hi")
+        .await
+        .expect("cross-project send");
+    wait_for(
+        || rig.prompts.lock().unwrap().len() == 1,
+        "the cross-project message to start a turn",
+    )
+    .await;
+    let from_lead: Vec<_> = entries(&rig.core, "elsewhere")
+        .into_iter()
+        .filter(|e| e.from_chat_id.as_deref() == Some("lead"))
+        .collect();
+    assert_eq!(from_lead.len(), 1);
     rig.core.shutdown().await;
 }
 

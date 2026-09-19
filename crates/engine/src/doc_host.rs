@@ -2651,7 +2651,7 @@ impl DocHost {
     /// idle target starts a turn with it, a working one whose agent takes
     /// mid-turn input receives it at its next step, and only an agent that
     /// cannot keeps the row held for turn end. Refused for a self-send and
-    /// across projects; both rows must exist. Delivered before returning, so
+    /// across devices; both rows must exist. Delivered before returning, so
     /// an idle target is already Working when the sender's next
     /// `wait_threads` looks at it.
     pub async fn queue_thread_message(
@@ -2672,9 +2672,9 @@ impl DocHost {
                 .ok_or_else(|| EngineError::Other(format!("no such chat: {id}")))
         };
         let (target, from) = (row(chat_id)?, row(from_chat_id)?);
-        if target.device_id != from.device_id || target.space_id != from.space_id {
+        if target.device_id != from.device_id {
             return Err(EngineError::Other(
-                "threads can only message peers in the same project".into(),
+                "threads can only message peers on the same device".into(),
             ));
         }
         let handle = self.open(chat_id)?;

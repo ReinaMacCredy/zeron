@@ -58,7 +58,7 @@ pub fn tool_list() -> Value {
     json!([
         {
             "name": "list_threads",
-            "description": "List the chats (threads) in this chat's project with their live status and the role and first 120 prose characters of their newest transcript entry. `lastRole` identifies the author only; neither an assistant entry nor idle status proves the task is complete or safe to archive. Use status for runtime state and read_thread for context. Results are ordered by id, default 50 and max 200 per page; pass nextCursor as cursor for the next page. Archived threads are left out unless `includeArchived` is true. Threads are peers, not workers: every one is a real sidebar chat the human can open, and none can stop another.",
+            "description": "List the chats (threads) in the sidebar of this device, every project included (`spaceId` names each thread's project; null is a project-less chat), with their live status and the role and first 120 prose characters of their newest transcript entry. `lastRole` identifies the author only; neither an assistant entry nor idle status proves the task is complete or safe to archive. Use status for runtime state and read_thread for context. Results are ordered by id, default 50 and max 200 per page; pass nextCursor as cursor for the next page. Archived threads are left out unless `includeArchived` is true. Threads are peers, not workers: every one is a real sidebar chat the human can open, and none can stop another.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -86,7 +86,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "create_thread",
-            "description": "Open a new peer thread in this project and give it `prompt` as its first message. It runs this chat's harness, model and reasoning level unless `harness`, `model` or `reasoning` pick others; picking a different harness without a `model` uses that harness's default model, and an unknown harness or reasoning level is an error. Returns the new thread's row as list_threads reports it. Counts against this turn's send budget.",
+            "description": "Open a new peer thread in this chat's project and give it `prompt` as its first message. It runs this chat's harness, model and reasoning level unless `harness`, `model` or `reasoning` pick others; picking a different harness without a `model` uses that harness's default model, and an unknown harness or reasoning level is an error. Returns the new thread's row as list_threads reports it. Counts against this turn's send budget.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -102,7 +102,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "send_message_to_thread",
-            "description": "Send a message to another thread in this project. An idle thread starts a turn with it; a working thread receives it inside its current turn at the next step (a wait_threads call there returns with it), or at turn end if its agent takes no mid-turn input. Never to this chat itself. Counts against this turn's send budget.",
+            "description": "Send a message to another thread on this device, in any project. An idle thread starts a turn with it; a working thread receives it inside its current turn at the next step (a wait_threads call there returns with it), or at turn end if its agent takes no mid-turn input. Never to this chat itself. Counts against this turn's send budget.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "threadId": thread_id, "text": { "type": "string" } },
@@ -125,7 +125,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "set_thread_title",
-            "description": "Rename a thread in this project (this chat included).",
+            "description": "Rename a thread on this device, in any project (this chat included).",
             "inputSchema": {
                 "type": "object",
                 "properties": { "threadId": thread_id, "title": { "type": "string" } },
@@ -135,7 +135,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "set_thread_archived",
-            "description": "Archive or unarchive one thread (`threadId`) or several (`threadIds`) in this project. A working thread (this chat included, while its turn runs) cannot be archived; archiving never cascades to other threads.",
+            "description": "Archive or unarchive one thread (`threadId`) or several (`threadIds`) on this device, in any project. A working thread (this chat included, while its turn runs) cannot be archived; archiving never cascades to other threads.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -197,8 +197,8 @@ impl ThreadTools {
             .map_err(|e| format!("{method}: {e}"))
     }
 
-    /// The caller's row plus every other chat it may see: same device, same
-    /// project (space), not archived.
+    /// The caller's row plus every other chat it may see: the whole sidebar
+    /// of its device, every project (space) included.
     async fn peers(&self) -> Result<(Chat, Vec<Chat>), String> {
         let chats: Vec<Chat> = self.snapshot(methods::WATCH_CHATS, json!({})).await?;
         let caller = chats
@@ -208,7 +208,7 @@ impl ThreadTools {
             .ok_or_else(|| format!("this chat ({}) is not in the registry", self.chat_id))?;
         let peers = chats
             .into_iter()
-            .filter(|chat| chat.device_id == caller.device_id && chat.space_id == caller.space_id)
+            .filter(|chat| chat.device_id == caller.device_id)
             .collect();
         Ok((caller, peers))
     }
@@ -219,7 +219,7 @@ impl ThreadTools {
         peers
             .into_iter()
             .find(|chat| chat.id == thread_id)
-            .ok_or_else(|| format!("no thread {thread_id} in this project"))
+            .ok_or_else(|| format!("no thread {thread_id} on this device"))
     }
 
     fn thread_id<'a>(args: &'a Value) -> Result<&'a str, String> {
@@ -271,7 +271,7 @@ impl ThreadTools {
         if let Some(cursor) = cursor
             && !peers.iter().any(|chat| chat.id == cursor)
         {
-            return Err("cursor thread is no longer in this project; restart listing".into());
+            return Err("cursor thread is no longer on this device; restart listing".into());
         }
         let sessions: Vec<Session> = self.snapshot(methods::WATCH_SESSIONS, json!({})).await?;
         let now = Utc::now();
@@ -305,6 +305,7 @@ impl ThreadTools {
         Ok(json!({
             "id": chat.id,
             "title": chat.title,
+            "spaceId": chat.space_id,
             "status": status_of(sessions, &chat.id, now),
             "archived": chat.archived,
             "harness": chat.config.as_ref().map(|c| c.harness),
@@ -486,7 +487,7 @@ impl ThreadTools {
         let (_, peers) = self.peers().await?;
         for id in &ids {
             if !peers.iter().any(|chat| chat.id == *id) {
-                return Err(format!("no thread {id} in this project"));
+                return Err(format!("no thread {id} on this device"));
             }
         }
         let timeout = Duration::from_secs(
@@ -947,6 +948,8 @@ mod tests {
         b["config"] = json!({
             "harness": "codex", "model": "gpt-5", "reasoning": "high", "sandbox": "workspace-write"
         });
+        let mut far = chat("far", Some("s1"), false, None);
+        far["deviceId"] = json!("dev-b");
         Fake {
             chats: vec![
                 chat("a", Some("s1"), false, None),
@@ -954,6 +957,7 @@ mod tests {
                 chat("c", Some("s2"), false, None),
                 chat("d", Some("s1"), true, None),
                 chat("e", Some("s1"), false, None),
+                far,
                 chat("new-1", Some("s1"), false, Some("a")),
             ],
             session_snapshots: vec![vec![
@@ -1065,7 +1069,7 @@ mod tests {
         for args in [
             json!({"mode": "bad"}),
             json!({"mode": "all"}),
-            json!({"threadIds": ["c"]}),
+            json!({"threadIds": ["far"]}),
             json!({"threadIds": [1]}),
             json!({"threadIds": "b"}),
         ] {
@@ -1092,7 +1096,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_threads_scopes_to_the_callers_space_and_checks_staleness() {
+    async fn list_threads_scopes_to_the_callers_device_and_checks_staleness() {
         let out = rig(fixture()).tools.list_threads(&json!({})).await.unwrap();
         let rows: Vec<(String, String, bool)> = out["threads"]
             .as_array()
@@ -1106,17 +1110,21 @@ mod tests {
                 )
             })
             .collect();
-        // c is another space, d is archived; e's Working row is 2 minutes
+        // c is another project on the same device, so it is in the sidebar;
+        // far is another device, d is archived; e's Working row is 2 minutes
         // old, so it reads idle rather than eternally working.
         assert_eq!(
             rows,
             [
                 ("a".into(), "idle".into(), true),
                 ("b".into(), "working".into(), false),
+                ("c".into(), "idle".into(), false),
                 ("e".into(), "idle".into(), false),
                 ("new-1".into(), "working".into(), false),
             ]
         );
+        assert_eq!(out["threads"][1]["spaceId"], "s1");
+        assert_eq!(out["threads"][2]["spaceId"], "s2");
         assert_eq!(out["threads"][1]["archived"], false);
         assert_eq!(out["threads"][1]["createdByChatId"], "a");
         assert_eq!(out["threads"][1]["harness"], "codex");
@@ -1177,6 +1185,7 @@ mod tests {
             [
                 ("a", false),
                 ("b", false),
+                ("c", false),
                 ("d", true),
                 ("e", false),
                 ("new-1", false)
@@ -1215,7 +1224,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_thread_returns_a_bounded_tail_with_a_cursor_inside_the_project() {
+    async fn read_thread_returns_a_bounded_tail_with_a_cursor_on_this_device() {
         let rig = rig(fixture());
         let page = rig
             .tools
@@ -1279,13 +1288,13 @@ mod tests {
             rig.tools.read_thread(&json!({})).await.unwrap_err(),
             "threadId is required"
         );
-        // Another project's chat is out of scope even though it exists.
+        // Another device's chat is out of scope even though it exists.
         assert_eq!(
             rig.tools
-                .read_thread(&json!({ "threadId": "c" }))
+                .read_thread(&json!({ "threadId": "far" }))
                 .await
                 .unwrap_err(),
-            "no thread c in this project"
+            "no thread far on this device"
         );
     }
 
@@ -1332,10 +1341,10 @@ mod tests {
         );
         assert_eq!(
             rig.tools
-                .send_message_to_thread(&json!({ "threadId": "c", "text": "hi" }))
+                .send_message_to_thread(&json!({ "threadId": "far", "text": "hi" }))
                 .await
                 .unwrap_err(),
-            "no thread c in this project"
+            "no thread far on this device"
         );
     }
 
@@ -1383,10 +1392,10 @@ mod tests {
         );
         assert_eq!(
             rig.tools
-                .set_thread_archived(&json!({ "threadId": "c", "archived": true }))
+                .set_thread_archived(&json!({ "threadId": "far", "archived": true }))
                 .await
                 .unwrap_err(),
-            "no thread c in this project"
+            "no thread far on this device"
         );
 
         let out = rig
@@ -1416,10 +1425,10 @@ mod tests {
         // One out-of-scope id fails the whole batch before any mutation.
         assert_eq!(
             rig.tools
-                .set_thread_archived(&json!({ "threadIds": ["b", "c"], "archived": true }))
+                .set_thread_archived(&json!({ "threadIds": ["b", "far"], "archived": true }))
                 .await
                 .unwrap_err(),
-            "no thread c in this project"
+            "no thread far on this device"
         );
         assert_eq!(rig.calls.calls.lock().unwrap().len(), 5);
         assert_eq!(
