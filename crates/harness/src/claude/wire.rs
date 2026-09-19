@@ -107,6 +107,11 @@ pub(crate) struct MessageFrame {
     /// Terse assistant-level error code (`rate_limit`, `billing_error`, …).
     #[serde(default)]
     pub error: Option<String>,
+    /// The tool's structured Output object on a tool-result user frame —
+    /// per-tool shape (Write/Edit carry `filePath`, `originalFile`, `content`
+    /// or `oldString`/`newString`); a plain string on a tool error.
+    #[serde(default)]
+    pub tool_use_result: Option<Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]

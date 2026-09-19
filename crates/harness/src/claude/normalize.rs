@@ -2,7 +2,7 @@
 //! decoding, error-code mapping).
 
 use serde_json::Value;
-use zeron_proto::{AgentEvent, AnchorRole, DoneStatus, HarnessId, TodoItem, ToolCall};
+use zeron_proto::{AgentEvent, AnchorRole, DoneStatus, HarnessId, TodoItem, ToolCall, ToolDiff};
 
 use super::wire::{ContentBlock, Frame};
 
@@ -164,6 +164,36 @@ pub(crate) fn decode_tool_use(name: &str, input: &Value) -> ToolCall {
             },
         },
     }
+}
+
+/// A Write/Edit result's file change as a [`ToolDiff`]. Verified live
+/// (claude 2.1.278): Write carries `content` + `originalFile` (null on
+/// create), Edit carries `originalFile` + `oldString`/`newString`
+/// (`replaceAll` when every occurrence went); both keep `filePath`. A tool
+/// error rides as a plain string, and Read's object has no `filePath` at the
+/// top level — neither is a change.
+fn file_diff(result: &Value) -> Option<ToolDiff> {
+    use super::super::acp::normalize::{DIFF_TEXT_CAP, cap_text};
+    let path = opt_str_field(result, "filePath").filter(|p| !p.is_empty())?;
+    let original = opt_str_field(result, "originalFile");
+    let new_text = match opt_str_field(result, "content") {
+        Some(content) => content,
+        None => {
+            let old = opt_str_field(result, "oldString")?;
+            let new = opt_str_field(result, "newString")?;
+            let original = original.as_deref()?;
+            if result.get("replaceAll").and_then(Value::as_bool) == Some(true) {
+                original.replace(&old, &new)
+            } else {
+                original.replacen(&old, &new, 1)
+            }
+        }
+    };
+    Some(ToolDiff {
+        path,
+        old_text: original.map(|t| cap_text(&t, DIFF_TEXT_CAP)),
+        new_text: cap_text(&new_text, DIFF_TEXT_CAP),
+    })
 }
 
 fn new_message_id() -> String {
@@ -611,25 +641,27 @@ impl Normalizer {
             }
 
             Frame::User(f) => {
+                // One structured result per frame: it names the frame's one
+                // tool_result block, so a multi-result frame gets none.
+                let results: Vec<ContentBlock> = f
+                    .message
+                    .blocks()
+                    .filter(|b: &ContentBlock| b.kind == "tool_result")
+                    .collect();
+                let diff = (results.len() == 1)
+                    .then(|| f.tool_use_result.as_ref().and_then(file_diff))
+                    .flatten();
+                let tool_results = results.into_iter().map(|b| AgentEvent::ToolResult {
+                    id: b.tool_use_id.clone(),
+                    is_error: b.is_error.unwrap_or(false),
+                    output: None,
+                    diff: diff.clone(),
+                });
                 if let Some(parent) = &f.parent_tool_use_id {
                     // A subagent's tool results echo on the main channel too;
                     // they belong to its transcript, attributed like its calls.
-                    let mut out: Vec<AgentEvent> = f
-                        .message
-                        .blocks()
-                        .filter(|b: &ContentBlock| b.kind == "tool_result")
-                        .map(|b| {
-                            tag(
-                                parent,
-                                AgentEvent::ToolResult {
-                                    id: b.tool_use_id.clone(),
-                                    is_error: b.is_error.unwrap_or(false),
-                                    output: None,
-                                    diff: None,
-                                },
-                            )
-                        })
-                        .collect();
+                    let mut out: Vec<AgentEvent> =
+                        tool_results.map(|event| tag(parent, event)).collect();
                     // A tagged user frame's TEXT blocks are the parent
                     // steering its subagent (SendMessage-style follow-ups —
                     // tool results ride their own blocks, filtered above).
@@ -671,20 +703,7 @@ impl Normalizer {
                         id: uuid.to_owned(),
                         entry_id: None,
                     });
-                anchor
-                    .into_iter()
-                    .chain(
-                        f.message
-                            .blocks()
-                            .filter(|b: &ContentBlock| b.kind == "tool_result")
-                            .map(|b| AgentEvent::ToolResult {
-                                id: b.tool_use_id.clone(),
-                                is_error: b.is_error.unwrap_or(false),
-                                output: None,
-                                diff: None,
-                            }),
-                    )
-                    .collect()
+                anchor.into_iter().chain(tool_results).collect()
             }
 
             // A claude.ai plan window was hit. A hard `rejected` blocks the
@@ -947,6 +966,101 @@ mod tests {
             !child.iter().any(|e| matches!(e, AgentEvent::Anchor { .. })),
             "{child:?}"
         );
+    }
+
+    /// Live frames from claude 2.1.278 (`--output-format stream-json
+    /// --verbose`), paths shortened: a Write create, a Write update, an Edit.
+    #[test]
+    fn write_and_edit_results_carry_the_file_diff() {
+        let create = normalize_one(
+            r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"t1","type":"tool_result","content":"File created successfully at: /w/hello.txt"}]},"parent_tool_use_id":null,"tool_use_result":{"type":"create","filePath":"/w/hello.txt","content":"hi\nthere","structuredPatch":[],"originalFile":null,"userModified":false}}"#,
+        );
+        assert_eq!(
+            create,
+            vec![AgentEvent::ToolResult {
+                id: "t1".into(),
+                is_error: false,
+                output: None,
+                diff: Some(ToolDiff {
+                    path: "/w/hello.txt".into(),
+                    old_text: None,
+                    new_text: "hi\nthere".into(),
+                }),
+            }]
+        );
+        let update = normalize_one(
+            r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"t2","type":"tool_result","content":"The file /w/big.txt has been updated successfully."}]},"parent_tool_use_id":null,"tool_use_result":{"type":"update","filePath":"/w/big.txt","content":"one\nTWO\nthree\nfour\n","structuredPatch":[{"oldStart":1,"oldLines":3,"newStart":1,"newLines":4,"lines":[" one","-two","+TWO"," three","+four"]}],"originalFile":"one\ntwo\nthree\n","userModified":false}}"#,
+        );
+        assert_eq!(
+            update,
+            vec![AgentEvent::ToolResult {
+                id: "t2".into(),
+                is_error: false,
+                output: None,
+                diff: Some(ToolDiff {
+                    path: "/w/big.txt".into(),
+                    old_text: Some("one\ntwo\nthree\n".into()),
+                    new_text: "one\nTWO\nthree\nfour\n".into(),
+                }),
+            }]
+        );
+        // Edit names the replaced span, not the new file: rebuilt from the
+        // original, one occurrence unless `replaceAll`.
+        let edit = normalize_one(
+            r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"t3","type":"tool_result","content":"The file /w/notes.txt has been updated successfully."}]},"parent_tool_use_id":null,"tool_use_result":{"filePath":"/w/notes.txt","oldString":"beta","newString":"delta","originalFile":"alpha\nbeta\ngamma\nbeta\n","structuredPatch":[{"oldStart":1,"oldLines":3,"newStart":1,"newLines":3,"lines":[" alpha","-beta","+delta"," gamma"]}],"userModified":false,"replaceAll":false}}"#,
+        );
+        assert_eq!(
+            edit,
+            vec![AgentEvent::ToolResult {
+                id: "t3".into(),
+                is_error: false,
+                output: None,
+                diff: Some(ToolDiff {
+                    path: "/w/notes.txt".into(),
+                    old_text: Some("alpha\nbeta\ngamma\nbeta\n".into()),
+                    new_text: "alpha\ndelta\ngamma\nbeta\n".into(),
+                }),
+            }]
+        );
+        let all = normalize_one(
+            r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"t4","type":"tool_result","content":"ok"}]},"tool_use_result":{"filePath":"/w/notes.txt","oldString":"beta","newString":"delta","originalFile":"beta\nbeta\n","structuredPatch":[],"userModified":false,"replaceAll":true}}"#,
+        );
+        let Some(AgentEvent::ToolResult {
+            diff: Some(diff), ..
+        }) = all.first()
+        else {
+            panic!("{all:?}");
+        };
+        assert_eq!(diff.new_text, "delta\ndelta\n");
+        // A subagent's write is tagged like its call, diff intact.
+        let child = normalize_one(
+            r#"{"type":"user","parent_tool_use_id":"toolu_sub","message":{"role":"user","content":[{"tool_use_id":"t5","type":"tool_result","content":"ok"}]},"tool_use_result":{"type":"create","filePath":"/w/c.txt","content":"x","structuredPatch":[],"originalFile":null}}"#,
+        );
+        assert!(
+            matches!(
+                child.first(),
+                Some(AgentEvent::Subagent { parent_tool_use_id, event })
+                    if parent_tool_use_id == "toolu_sub"
+                        && matches!(**event, AgentEvent::ToolResult { diff: Some(_), .. })
+            ),
+            "{child:?}"
+        );
+        // Not a file change: a tool error (string), a Read (nested `file`),
+        // a Bash result — each resolves without a diff.
+        for raw in [
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"<tool_use_error>File has not been read yet.</tool_use_error>","is_error":true,"tool_use_id":"t6"}]},"tool_use_result":"Error: File has not been read yet."}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"t7","type":"tool_result","content":"1\tone\n"}]},"tool_use_result":{"type":"text","file":{"filePath":"/w/big.txt","content":"one\n","numLines":1,"startLine":1,"totalLines":1}}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"t8","type":"tool_result","content":"ok"}]},"tool_use_result":{"stdout":"ok","stderr":"","interrupted":false}}"#,
+        ] {
+            let events = normalize_one(raw);
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [AgentEvent::ToolResult { diff: None, .. }]
+                ),
+                "{events:?}"
+            );
+        }
     }
 
     #[test]

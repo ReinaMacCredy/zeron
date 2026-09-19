@@ -740,6 +740,23 @@ pub enum ToolDetail {
     },
 }
 
+impl ToolDetail {
+    pub fn is_file_change(&self) -> bool {
+        matches!(self, Self::Diff { .. } | Self::Stats { .. })
+    }
+
+    /// Added and deleted line totals of a file change — the header's `+N −M`.
+    pub fn line_stats(&self) -> Option<(u64, u64)> {
+        match self {
+            Self::Diff { file, .. } => Some((u64::from(file.additions), u64::from(file.deletions))),
+            Self::Stats { stats } => Some(stats.iter().fold((0, 0), |(add, del), stat| {
+                (add + stat.additions, del + stat.deletions)
+            })),
+            Self::Output { .. } | Self::Thought { .. } => None,
+        }
+    }
+}
+
 /// Max verbatim output lines per chip before the counted tail row.
 pub const OUTPUT_DETAIL_MAX_LINES: usize = 24;
 
@@ -1417,14 +1434,24 @@ pub fn rows_for_entry(
                 subagent_tail,
                 ..
             } => {
+                let detail = tool_detail(output.as_deref(), diff.as_ref(), diff_stats.as_deref());
+                // A file change's invocation is only its path (content never
+                // enters the doc), which the badge already names: the open
+                // card leads with the diff instead.
+                let invocation = if detail.as_ref().is_some_and(ToolDetail::is_file_change)
+                    && matches!(call, ToolCall::WriteFile { .. } | ToolCall::EditFile { .. })
+                {
+                    None
+                } else {
+                    call_block(call)
+                };
                 let item = ToolItem {
                     part_id: part.id().to_owned(),
                     call: call.clone(),
                     is_error: *is_error,
                     resolved: *resolved,
-                    detail: tool_detail(output.as_deref(), diff.as_ref(), diff_stats.as_deref())
-                        .map(Arc::new),
-                    invocation: call_block(call).map(Arc::new),
+                    detail: detail.map(Arc::new),
+                    invocation: invocation.map(Arc::new),
                     output_ref: output_ref.clone().map(SharedString::from),
                     output_bytes: *output_bytes,
                     diff_ref: diff_ref.clone().map(SharedString::from),
@@ -8321,6 +8348,31 @@ fn chip_header_row(
                     }
                 }),
         )
+        .when_some(
+            tool.detail.as_deref().and_then(ToolDetail::line_stats),
+            |row, (additions, deletions)| {
+                row.child(
+                    div()
+                        .flex_none()
+                        .h(px(TOOL_LABEL_LINE_HEIGHT))
+                        .flex()
+                        .items_center()
+                        .gap(px(4.0))
+                        .font_family(theme.font_mono.clone())
+                        .text_size(px(11.0))
+                        .child(
+                            div()
+                                .text_color(theme.success)
+                                .child(SharedString::from(format!("+{additions}"))),
+                        )
+                        .child(
+                            div()
+                                .text_color(theme.danger)
+                                .child(SharedString::from(format!("−{deletions}"))),
+                        ),
+                )
+            },
+        )
         .when_some(tool.call.subagent_model(), |row, model| {
             // Which model the child runs on, when the spawn named one.
             //
@@ -11189,6 +11241,97 @@ mod tests {
     }
 
     const MD: &str = "# Title\n\npara one\n\n```rust\nlet x = 1;\n```";
+
+    /// A Write/Edit whose result folded into stats opens on the change, not
+    /// on its path line; the header's `+N −M` sums the stats. A Read, and a
+    /// write still unresolved, keep the path invocation.
+    #[test]
+    fn a_file_change_with_stats_drops_the_path_invocation_and_sums_lines() {
+        let stat = |path: &str, additions, deletions| zeron_doc::ToolDiffStat {
+            path: path.into(),
+            additions,
+            deletions,
+        };
+        let file_part = |id: &str, call: ToolCall, stats: Option<Vec<zeron_doc::ToolDiffStat>>| {
+            MessagePart::Tool {
+                id: id.into(),
+                call,
+                is_error: false,
+                resolved: stats.is_some(),
+                output: None,
+                diff: None,
+                output_ref: None,
+                output_bytes: None,
+                diff_ref: None,
+                diff_stats: stats,
+                subagent_ref: None,
+                subagent_status: None,
+                subagent_tail: None,
+            }
+        };
+        let entry = assistant(
+            "m1",
+            MessageStatus::Complete,
+            vec![
+                file_part(
+                    "w",
+                    ToolCall::WriteFile {
+                        path: "/w/a.rs".into(),
+                        content: None,
+                    },
+                    Some(vec![stat("/w/a.rs", 12, 0)]),
+                ),
+                file_part(
+                    "e",
+                    ToolCall::EditFile {
+                        path: "/w/b.rs".into(),
+                        old_string: None,
+                        new_string: None,
+                    },
+                    Some(vec![stat("/w/b.rs", 3, 1), stat("/w/c.rs", 1, 1)]),
+                ),
+                file_part(
+                    "r",
+                    ToolCall::ReadFile {
+                        path: "/w/a.rs".into(),
+                    },
+                    None,
+                ),
+                file_part(
+                    "p",
+                    ToolCall::WriteFile {
+                        path: "/w/d.rs".into(),
+                        content: None,
+                    },
+                    None,
+                ),
+            ],
+        );
+        let rows = rows_for_entry(&entry, false, &mut parse);
+        let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
+            panic!("expected one tool group, got {} rows", rows.len());
+        };
+        let stats: Vec<Option<(u64, u64)>> = tools
+            .iter()
+            .map(|t| t.detail.as_deref().and_then(ToolDetail::line_stats))
+            .collect();
+        assert_eq!(stats, vec![Some((12, 0)), Some((4, 2)), None, None]);
+        let has_invocation: Vec<bool> = tools.iter().map(|t| t.invocation.is_some()).collect();
+        assert_eq!(has_invocation, vec![false, false, true, true]);
+        // An inline diff (ACP, or a fetched sidecar) reports the same sums.
+        let Some(diff) = tool_detail(
+            None,
+            Some(&zeron_proto::ToolDiff {
+                path: "/w/a.rs".into(),
+                old_text: Some("a\nb\n".into()),
+                new_text: "a\nc\nd\n".into(),
+            }),
+            None,
+        ) else {
+            panic!("diff detail");
+        };
+        assert_eq!(diff.line_stats(), Some((2, 1)));
+    }
 
     #[test]
     fn live_entry_splits_per_block_with_id_continuity() {
