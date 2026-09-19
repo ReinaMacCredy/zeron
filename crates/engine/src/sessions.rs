@@ -448,9 +448,13 @@ impl SessionsEngine {
 
     /// The full diff a tool result carried, read back from this host's run
     /// journal — the doc keeps only its stats. Subagent results are wrapped
-    /// in the parent's journal, so the scan looks through the tag. `None`
-    /// when this device never ran the chat (a remote peer's journal).
+    /// in the parent's journal (a subagent doc id names its parent, see
+    /// [`subagent_doc_id`]), so the scan looks through the tag. `None` when
+    /// this device never ran the chat (a remote peer's journal).
     pub fn journaled_tool_diff(&self, chat_id: &str, part_id: &str) -> Option<ToolDiff> {
+        let chat_id = chat_id
+            .split_once("--sub--")
+            .map_or(chat_id, |(parent, _)| parent);
         let events = match self.inner.journal.replay(chat_id, 0) {
             Ok(events) => events,
             Err(err) => {
@@ -3583,6 +3587,11 @@ mod tests {
         );
         assert_eq!(
             sessions.journaled_tool_diff("chat", "t3"),
+            Some(diff("child"))
+        );
+        // The subagent tab asks by its own doc id.
+        assert_eq!(
+            sessions.journaled_tool_diff(&subagent_doc_id("chat", "spawn"), "t3"),
             Some(diff("child"))
         );
         assert_eq!(sessions.journaled_tool_diff("chat", "t2"), None);
