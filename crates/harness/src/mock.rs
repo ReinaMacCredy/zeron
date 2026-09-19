@@ -523,6 +523,54 @@ impl Harness for MockHarness {
             })
             .into_iter()
             .flatten();
+        // Dev/testing knob: `ZERON_MOCK_WRITE=1` appends a Write (create) and
+        // an Edit whose results carry a diff — the `+N −M` chip header and
+        // the stats body a Claude Write/Edit folds to.
+        let mock_write = std::env::var("ZERON_MOCK_WRITE")
+            .ok()
+            .is_some_and(|v| !v.is_empty() && v != "0");
+        let write_events = mock_write
+            .then(|| {
+                [
+                    AgentEvent::ToolCall {
+                        id: "mock-write".into(),
+                        call: zeron_proto::ToolCall::WriteFile {
+                            path: "packages/schema/test/verdict.test.ts".into(),
+                            content: None,
+                        },
+                    },
+                    AgentEvent::ToolResult {
+                        id: "mock-write".into(),
+                        is_error: false,
+                        output: None,
+                        diff: Some(zeron_proto::ToolDiff {
+                            path: "packages/schema/test/verdict.test.ts".into(),
+                            old_text: None,
+                            new_text: "import { verdict } from \"../src/verdict\";\n\ntest(\"a verdict names its finding\", () => {\n  expect(verdict(\"f1\").finding).toBe(\"f1\");\n});\n".into(),
+                        }),
+                    },
+                    AgentEvent::ToolCall {
+                        id: "mock-edit".into(),
+                        call: zeron_proto::ToolCall::EditFile {
+                            path: "packages/schema/src/verdict.ts".into(),
+                            old_string: None,
+                            new_string: None,
+                        },
+                    },
+                    AgentEvent::ToolResult {
+                        id: "mock-edit".into(),
+                        is_error: false,
+                        output: None,
+                        diff: Some(zeron_proto::ToolDiff {
+                            path: "packages/schema/src/verdict.ts".into(),
+                            old_text: Some("export function verdict(id: string) {\n  return { id };\n}\n".into()),
+                            new_text: "export function verdict(finding: string) {\n  return { finding, severity: \"info\" };\n}\n".into(),
+                        }),
+                    },
+                ]
+            })
+            .into_iter()
+            .flatten();
         let events: Vec<Result<AgentEvent, HarnessError>> = body
             .iter()
             .cycle()
@@ -530,6 +578,7 @@ impl Harness for MockHarness {
             .cloned()
             .chain(thinking_events)
             .chain(code_tool_events)
+            .chain(write_events)
             .chain(subagent_events)
             .chain(read_file_events)
             .chain(code_event)

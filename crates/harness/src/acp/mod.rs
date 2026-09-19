@@ -30,7 +30,7 @@
 
 mod antigravity_paths;
 mod devin_models;
-mod normalize;
+pub(crate) mod normalize;
 mod subagent;
 mod subagent_devin;
 

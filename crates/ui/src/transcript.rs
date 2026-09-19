@@ -740,6 +740,23 @@ pub enum ToolDetail {
     },
 }
 
+impl ToolDetail {
+    pub fn is_file_change(&self) -> bool {
+        matches!(self, Self::Diff { .. } | Self::Stats { .. })
+    }
+
+    /// Added and deleted line totals of a file change — the header's `+N −M`.
+    pub fn line_stats(&self) -> Option<(u64, u64)> {
+        match self {
+            Self::Diff { file, .. } => Some((u64::from(file.additions), u64::from(file.deletions))),
+            Self::Stats { stats } => Some(stats.iter().fold((0, 0), |(add, del), stat| {
+                (add + stat.additions, del + stat.deletions)
+            })),
+            Self::Output { .. } | Self::Thought { .. } => None,
+        }
+    }
+}
+
 /// Max verbatim output lines per chip before the counted tail row.
 pub const OUTPUT_DETAIL_MAX_LINES: usize = 24;
 
@@ -1417,14 +1434,24 @@ pub fn rows_for_entry(
                 subagent_tail,
                 ..
             } => {
+                let detail = tool_detail(output.as_deref(), diff.as_ref(), diff_stats.as_deref());
+                // A file change's invocation is only its path (content never
+                // enters the doc), which the badge already names: the open
+                // card leads with the diff instead.
+                let invocation = if detail.as_ref().is_some_and(ToolDetail::is_file_change)
+                    && matches!(call, ToolCall::WriteFile { .. } | ToolCall::EditFile { .. })
+                {
+                    None
+                } else {
+                    call_block(call)
+                };
                 let item = ToolItem {
                     part_id: part.id().to_owned(),
                     call: call.clone(),
                     is_error: *is_error,
                     resolved: *resolved,
-                    detail: tool_detail(output.as_deref(), diff.as_ref(), diff_stats.as_deref())
-                        .map(Arc::new),
-                    invocation: call_block(call).map(Arc::new),
+                    detail: detail.map(Arc::new),
+                    invocation: invocation.map(Arc::new),
                     output_ref: output_ref.clone().map(SharedString::from),
                     output_bytes: *output_bytes,
                     diff_ref: diff_ref.clone().map(SharedString::from),
@@ -5001,6 +5028,20 @@ impl Transcript {
         rows
     }
 
+    /// The ref a chip's full diff is fetched by. A doc carrying only stats
+    /// (the fold never stamps a ref) still answers `{chat}/{part}.diff` from
+    /// the host's run journal, so the ref is derived rather than stored.
+    fn diff_ref_of(&self, tool: &ToolItem) -> Option<SharedString> {
+        tool.diff_ref.clone().or_else(|| {
+            let stats_only = matches!(tool.detail.as_deref(), Some(ToolDetail::Stats { .. }));
+            let chat_id = self.chat_id.as_deref().filter(|_| stats_only)?;
+            Some(SharedString::from(format!(
+                "{chat_id}/{}.diff",
+                tool.part_id
+            )))
+        })
+    }
+
     /// Fetch a sidecar blob (full tool output or diff) and build its upgraded
     /// [`ToolDetail`] once, off the render path. Re-entry while Loading/Ready
     /// is a no-op; Failed re-arms as a retry (the affordance label says so).
@@ -7075,9 +7116,12 @@ impl Transcript {
         // one, upgraded in place by a fetched sidecar blob (chat2-sync A3).
         // Resolved per paint (a HashMap probe per chip) so fetched content
         // needs no row rebuild — arrival is a cx.notify, like a fold toggle.
+        let diff_refs: Vec<Option<SharedString>> =
+            tools.iter().map(|tool| self.diff_ref_of(tool)).collect();
         let details: Vec<Option<Arc<ToolDetail>>> = tools
             .iter()
-            .map(|tool| {
+            .zip(&diff_refs)
+            .map(|(tool, diff_ref)| {
                 // Spawn chips never expand — the subagent doc is the record
                 // of what the tool did, and an inline body would only repeat
                 // it. The whole chip is the "open that doc" click instead.
@@ -7088,7 +7132,7 @@ impl Transcript {
                 // a tool can carry both a diff and an output ref, and the
                 // user's last click decides which upgrade is showing.
                 let mut best: Option<(u64, Arc<ToolDetail>)> = None;
-                for blob_ref in [&tool.diff_ref, &tool.output_ref].into_iter().flatten() {
+                for blob_ref in [diff_ref, &tool.output_ref].into_iter().flatten() {
                     if let Some(BlobFetch::Ready(detail)) = self.blob_details.get(blob_ref) {
                         let order = self.blob_fetch_order.get(blob_ref).copied().unwrap_or(0);
                         if best.as_ref().is_none_or(|(o, _)| order > *o) {
@@ -7112,13 +7156,14 @@ impl Transcript {
         // reachable when a tool has both).
         let affordances: Vec<Option<ChipAffordance>> = tools
             .iter()
-            .map(|tool| {
+            .zip(&diff_refs)
+            .map(|(tool, diff_ref)| {
                 // The currently-displayed ref (same recency rule as
                 // `details` above): its affordance is spent; any OTHER
                 // Ready ref stays offered as a no-fetch toggle.
                 let shown: Option<&SharedString> = {
                     let mut best: Option<(u64, &SharedString)> = None;
-                    for blob_ref in [&tool.diff_ref, &tool.output_ref].into_iter().flatten() {
+                    for blob_ref in [diff_ref, &tool.output_ref].into_iter().flatten() {
                         if matches!(self.blob_details.get(blob_ref), Some(BlobFetch::Ready(_))) {
                             let order = self.blob_fetch_order.get(blob_ref).copied().unwrap_or(0);
                             if best.is_none_or(|(o, _)| order > o) {
@@ -7129,7 +7174,7 @@ impl Transcript {
                     best.map(|(_, r)| r)
                 };
                 let candidates = [
-                    (tool.diff_ref.as_ref(), "diff", None),
+                    (diff_ref.as_ref(), "diff", None),
                     (tool.output_ref.as_ref(), "output", tool.output_bytes),
                 ];
                 for (blob_ref, what, bytes) in candidates {
@@ -7441,6 +7486,12 @@ impl Transcript {
                         .toggled_at
                         .is_some_and(|at| at.elapsed() < FOLD_TWEEN_WINDOW);
                 let toggle_key = key.clone();
+                // Opening a stats-only file change fetches its diff at once:
+                // the change IS what the click asks to see, not a stat row
+                // with a second "Show full diff" click under it.
+                let pending_diff = diff_refs[ix]
+                    .clone()
+                    .filter(|_| matches!(detail.as_deref(), Some(ToolDetail::Stats { .. })));
                 let mut card = div()
                     .my(px((base_row_height - CHIP_CARD_HEIGHT) / 2.0))
                     .when(collapses, |el| el.ml(px(ACTIVITY_TEXT_GAP)))
@@ -7458,6 +7509,7 @@ impl Transcript {
                     .child(
                         div()
                             .id(key.clone())
+                            .debug_selector(|| format!("tool-chip-header-{ix}"))
                             .h(px(if collapses {
                                 CHIP_CARD_HEIGHT
                             } else {
@@ -7476,6 +7528,9 @@ impl Transcript {
                                 entry.open = Some(!currently_open);
                                 entry.epoch += 1;
                                 entry.toggled_at = Some(Instant::now());
+                                if !currently_open && let Some(blob_ref) = pending_diff.clone() {
+                                    this.spawn_blob_fetch(blob_ref, cx);
+                                }
                                 cx.notify();
                             }))
                             .child(chip_header(
@@ -8320,6 +8375,31 @@ fn chip_header_row(
                         detail.into_any_element()
                     }
                 }),
+        )
+        .when_some(
+            tool.detail.as_deref().and_then(ToolDetail::line_stats),
+            |row, (additions, deletions)| {
+                row.child(
+                    div()
+                        .flex_none()
+                        .h(px(TOOL_LABEL_LINE_HEIGHT))
+                        .flex()
+                        .items_center()
+                        .gap(px(4.0))
+                        .font_family(theme.font_mono.clone())
+                        .text_size(px(11.0))
+                        .child(
+                            div()
+                                .text_color(theme.success)
+                                .child(SharedString::from(format!("+{additions}"))),
+                        )
+                        .child(
+                            div()
+                                .text_color(theme.danger)
+                                .child(SharedString::from(format!("−{deletions}"))),
+                        ),
+                )
+            },
         )
         .when_some(tool.call.subagent_model(), |row, model| {
             // Which model the child runs on, when the spawn named one.
@@ -10786,6 +10866,93 @@ mod tests {
         assert_eq!(header_clicks.get(), 1);
     }
 
+    /// Opening a stats-only Write chip asks for its full diff by the derived
+    /// `{chat}/{part}.diff` ref (the doc never stamps one) — the fetch is
+    /// ranked before the engine lookup, so the ask is observable offline.
+    #[gpui::test]
+    fn opening_a_stats_only_file_chip_requests_its_diff(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let state = cx.new(|_| AppState::new());
+        let transcript = cx.new(|cx| Transcript::new(state, cx));
+        transcript.update(cx, |this, _| {
+            this.chat_id = Some("chat".into());
+            this.folds.insert(
+                "row".into(),
+                FoldState {
+                    open: Some(true),
+                    ..Default::default()
+                },
+            );
+        });
+        struct GroupFixture(Entity<Transcript>);
+        impl Render for GroupFixture {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let theme = Theme::of(cx).clone();
+                let tools = Arc::new(vec![ToolItem {
+                    part_id: "toolu_w".into(),
+                    call: ToolCall::WriteFile {
+                        path: "/w/a.rs".into(),
+                        content: None,
+                    },
+                    is_error: false,
+                    resolved: true,
+                    detail: Some(Arc::new(ToolDetail::Stats {
+                        stats: Arc::new(vec![zeron_doc::ToolDiffStat {
+                            path: "/w/a.rs".into(),
+                            additions: 3,
+                            deletions: 1,
+                        }]),
+                    })),
+                    invocation: None,
+                    output_ref: None,
+                    output_bytes: None,
+                    diff_ref: None,
+                    subagent_ref: None,
+                    subagent_status: None,
+                    subagent_tail: None,
+                    is_thought: false,
+                }]);
+                let group = self.0.update(cx, |this, cx| {
+                    this.render_tool_group(
+                        &"row".into(),
+                        &tools,
+                        &"Edited 1 file".into(),
+                        false,
+                        &theme,
+                        cx,
+                    )
+                });
+                div().w(px(600.0)).h(px(400.0)).child(group)
+            }
+        }
+        let (_fixture, cx) = cx.add_window_view(|_, _| GroupFixture(transcript.clone()));
+        cx.run_until_parked();
+        transcript.read_with(cx, |this, _| {
+            assert!(this.blob_fetch_order.is_empty(), "no fetch before the click");
+        });
+        let header = cx
+            .debug_bounds("tool-chip-header-0")
+            .expect("chip header painted");
+        cx.simulate_click(header.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        transcript.read_with(cx, |this, _| {
+            assert_eq!(
+                this.tool_details.get("row#d0").and_then(|fold| fold.open),
+                Some(true)
+            );
+            assert!(
+                this.blob_fetch_order.contains_key("chat/toolu_w.diff"),
+                "{:?}",
+                this.blob_fetch_order.keys().collect::<Vec<_>>()
+            );
+        });
+    }
+
     #[gpui::test]
     fn generated_image_fixture_uses_cache_and_retries(cx: &mut gpui::TestAppContext) {
         use crate::attachments::*;
@@ -11189,6 +11356,97 @@ mod tests {
     }
 
     const MD: &str = "# Title\n\npara one\n\n```rust\nlet x = 1;\n```";
+
+    /// A Write/Edit whose result folded into stats opens on the change, not
+    /// on its path line; the header's `+N −M` sums the stats. A Read, and a
+    /// write still unresolved, keep the path invocation.
+    #[test]
+    fn a_file_change_with_stats_drops_the_path_invocation_and_sums_lines() {
+        let stat = |path: &str, additions, deletions| zeron_doc::ToolDiffStat {
+            path: path.into(),
+            additions,
+            deletions,
+        };
+        let file_part = |id: &str, call: ToolCall, stats: Option<Vec<zeron_doc::ToolDiffStat>>| {
+            MessagePart::Tool {
+                id: id.into(),
+                call,
+                is_error: false,
+                resolved: stats.is_some(),
+                output: None,
+                diff: None,
+                output_ref: None,
+                output_bytes: None,
+                diff_ref: None,
+                diff_stats: stats,
+                subagent_ref: None,
+                subagent_status: None,
+                subagent_tail: None,
+            }
+        };
+        let entry = assistant(
+            "m1",
+            MessageStatus::Complete,
+            vec![
+                file_part(
+                    "w",
+                    ToolCall::WriteFile {
+                        path: "/w/a.rs".into(),
+                        content: None,
+                    },
+                    Some(vec![stat("/w/a.rs", 12, 0)]),
+                ),
+                file_part(
+                    "e",
+                    ToolCall::EditFile {
+                        path: "/w/b.rs".into(),
+                        old_string: None,
+                        new_string: None,
+                    },
+                    Some(vec![stat("/w/b.rs", 3, 1), stat("/w/c.rs", 1, 1)]),
+                ),
+                file_part(
+                    "r",
+                    ToolCall::ReadFile {
+                        path: "/w/a.rs".into(),
+                    },
+                    None,
+                ),
+                file_part(
+                    "p",
+                    ToolCall::WriteFile {
+                        path: "/w/d.rs".into(),
+                        content: None,
+                    },
+                    None,
+                ),
+            ],
+        );
+        let rows = rows_for_entry(&entry, false, &mut parse);
+        let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
+            panic!("expected one tool group, got {} rows", rows.len());
+        };
+        let stats: Vec<Option<(u64, u64)>> = tools
+            .iter()
+            .map(|t| t.detail.as_deref().and_then(ToolDetail::line_stats))
+            .collect();
+        assert_eq!(stats, vec![Some((12, 0)), Some((4, 2)), None, None]);
+        let has_invocation: Vec<bool> = tools.iter().map(|t| t.invocation.is_some()).collect();
+        assert_eq!(has_invocation, vec![false, false, true, true]);
+        // An inline diff (ACP, or a fetched sidecar) reports the same sums.
+        let Some(diff) = tool_detail(
+            None,
+            Some(&zeron_proto::ToolDiff {
+                path: "/w/a.rs".into(),
+                old_text: Some("a\nb\n".into()),
+                new_text: "a\nc\nd\n".into(),
+            }),
+            None,
+        ) else {
+            panic!("diff detail");
+        };
+        assert_eq!(diff.line_stats(), Some((2, 1)));
+    }
 
     #[test]
     fn live_entry_splits_per_block_with_id_continuity() {

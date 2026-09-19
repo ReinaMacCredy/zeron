@@ -31,7 +31,7 @@ use zeron_doc::{
 use zeron_harness::{CancellationToken, Harness, HarnessError, RunControls, SteerMessage};
 use zeron_proto::{
     AgentEvent, AnchorRole, Chat, Compaction, DoneStatus, HarnessId, RunRequest, Session,
-    SessionBranch, SessionStatus, UserInputAnswer, UserInputQuestion,
+    SessionBranch, SessionStatus, ToolDiff, UserInputAnswer, UserInputQuestion,
 };
 
 use crate::doc_host::{ChatDocHandle, DocHost};
@@ -444,6 +444,38 @@ impl SessionsEngine {
             .map(|(seq, event)| JournaledEvent { seq, event })
             .collect();
         Ok((replay, rx))
+    }
+
+    /// The full diff a tool result carried, read back from this host's run
+    /// journal — the doc keeps only its stats. Subagent results are wrapped
+    /// in the parent's journal (a subagent doc id names its parent, see
+    /// [`subagent_doc_id`]), so the scan looks through the tag. `None` when
+    /// this device never ran the chat (a remote peer's journal).
+    pub fn journaled_tool_diff(&self, chat_id: &str, part_id: &str) -> Option<ToolDiff> {
+        let chat_id = chat_id
+            .split_once("--sub--")
+            .map_or(chat_id, |(parent, _)| parent);
+        let events = match self.inner.journal.replay(chat_id, 0) {
+            Ok(events) => events,
+            Err(err) => {
+                tracing::warn!(chat = %chat_id, error = %err, "journal scan for tool diff failed");
+                return None;
+            }
+        };
+        events.into_iter().rev().find_map(|(_, event)| {
+            let event = match event {
+                AgentEvent::Subagent { event, .. } => *event,
+                other => other,
+            };
+            match event {
+                AgentEvent::ToolResult {
+                    id,
+                    diff: Some(diff),
+                    ..
+                } if id == part_id => Some(diff),
+                _ => None,
+            }
+        })
     }
 
     fn ensure_sidechat_active(&self, chat_id: &str) -> Result<(), EngineError> {
@@ -3515,6 +3547,55 @@ mod tests {
             lock(&sessions.inner.pending_branches).get("chat"),
             Some(None)
         ));
+    }
+
+    #[test]
+    fn a_tool_diff_is_read_back_from_the_journal_through_the_subagent_tag() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Arc::new(RunJournal::open(dir.path().join("journals")).unwrap());
+        let sessions = SessionsEngine::new(
+            "host".into(),
+            journal.clone(),
+            Arc::new(HarnessRegistry::new()),
+        );
+        let diff = |new_text: &str| ToolDiff {
+            path: "/w/a.rs".into(),
+            old_text: None,
+            new_text: new_text.into(),
+        };
+        let result = |id: &str, diff: Option<ToolDiff>| AgentEvent::ToolResult {
+            id: id.into(),
+            is_error: false,
+            output: None,
+            diff,
+        };
+        journal.append("chat", &result("t1", Some(diff("one")))).unwrap();
+        journal.append("chat", &result("t2", None)).unwrap();
+        journal
+            .append(
+                "chat",
+                &AgentEvent::Subagent {
+                    parent_tool_use_id: "spawn".into(),
+                    event: Box::new(result("t3", Some(diff("child")))),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            sessions.journaled_tool_diff("chat", "t1"),
+            Some(diff("one"))
+        );
+        assert_eq!(
+            sessions.journaled_tool_diff("chat", "t3"),
+            Some(diff("child"))
+        );
+        // The subagent tab asks by its own doc id.
+        assert_eq!(
+            sessions.journaled_tool_diff(&subagent_doc_id("chat", "spawn"), "t3"),
+            Some(diff("child"))
+        );
+        assert_eq!(sessions.journaled_tool_diff("chat", "t2"), None);
+        assert_eq!(sessions.journaled_tool_diff("other", "t1"), None);
     }
 
     #[tokio::test]
