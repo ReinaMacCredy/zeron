@@ -4624,6 +4624,7 @@ impl Shell {
                     let composer_send_behavior = self.settings.composer_send_behavior;
                     let follow_up_behavior = self.settings.follow_up_behavior;
                     let switcher_window = self.settings.switcher_window;
+                    let switcher_limit = self.settings.switcher_limit;
                     let appshots_enabled = self.settings.appshots_enabled;
                     let appshot_sound_enabled = self.settings.appshot_sound_enabled;
                     let appshot_destination = self.settings.appshot_destination;
@@ -4635,6 +4636,7 @@ impl Shell {
                             composer_send_behavior,
                             follow_up_behavior,
                             switcher_window,
+                            switcher_limit,
                             appshots_enabled,
                             appshot_sound_enabled,
                             appshot_destination,
@@ -4660,6 +4662,9 @@ impl Shell {
                                 }
                                 ShortcutsEvent::SwitcherWindowChanged(window) => {
                                     this.settings.switcher_window = *window;
+                                }
+                                ShortcutsEvent::SwitcherLimitChanged(limit) => {
+                                    this.settings.switcher_limit = *limit;
                                 }
                                 ShortcutsEvent::AppshotsChanged {
                                     enabled,

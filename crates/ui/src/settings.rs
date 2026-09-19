@@ -772,6 +772,8 @@ pub struct UiSettings {
     pub follow_up_behavior: FollowUpBehavior,
     /// Recency limit on the sessions the Ctrl+Tab switcher offers.
     pub switcher_window: SwitcherWindow,
+    /// Most cards the Ctrl+Tab switcher shows; 0 for no cap.
+    pub switcher_limit: u32,
     pub sidebar_width: f32,
     pub sidebar_collapsed: bool,
     /// Legacy: the grouped-by-project toggle predates spaces (which group by
@@ -936,6 +938,7 @@ impl Default for UiSettings {
             composer_send_behavior: ComposerSendBehavior::default(),
             follow_up_behavior: FollowUpBehavior::default(),
             switcher_window: SwitcherWindow::default(),
+            switcher_limit: 0,
             appshots_enabled: false,
             appshot_sound_enabled: true,
             appshot_destination: crate::appshots::AppshotDestination::Automatic,
@@ -2109,6 +2112,7 @@ mod tests {
             composer_send_behavior: ComposerSendBehavior::ModEnter,
             follow_up_behavior: FollowUpBehavior::Steer,
             switcher_window: SwitcherWindow::Hours12,
+            switcher_limit: 8,
             appshots_enabled: false,
             appshot_sound_enabled: true,
             // The destination is only persisted where Appshots exist (macOS and

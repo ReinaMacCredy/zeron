@@ -21,6 +21,11 @@ use crate::settings::{
 use crate::state::AppState;
 use crate::theme::Theme;
 
+/// A cap of 1 would leave only the open session and Ctrl+Tab would go
+/// nowhere, so the stepper goes from "All" straight to 2.
+const SWITCHER_LIMIT_MIN: u32 = 2;
+const SWITCHER_LIMIT_MAX: u32 = 50;
+
 /// Outcome of one keystroke while recording. Pure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecordOutcome {
@@ -54,6 +59,8 @@ pub enum ShortcutsEvent {
     FollowUpBehaviorChanged(FollowUpBehavior),
     /// The switcher's recency window changed — persist it locally.
     SwitcherWindowChanged(SwitcherWindow),
+    /// The switcher's card cap changed — persist it locally.
+    SwitcherLimitChanged(u32),
     AppshotsChanged {
         enabled: bool,
         sound_enabled: bool,
@@ -71,6 +78,7 @@ pub struct ShortcutsPage {
     composer_send_behavior: ComposerSendBehavior,
     follow_up_behavior: FollowUpBehavior,
     switcher_window: SwitcherWindow,
+    switcher_limit: u32,
     recording: Option<ShortcutId>,
     recording_blur: Option<gpui::Subscription>,
     recording_interceptor: Option<gpui::Subscription>,
@@ -99,6 +107,7 @@ impl ShortcutsPage {
         composer_send_behavior: ComposerSendBehavior,
         follow_up_behavior: FollowUpBehavior,
         switcher_window: SwitcherWindow,
+        switcher_limit: u32,
         appshots_enabled: bool,
         appshot_sound_enabled: bool,
         appshot_destination: AppshotDestination,
@@ -115,6 +124,7 @@ impl ShortcutsPage {
             composer_send_behavior,
             follow_up_behavior,
             switcher_window,
+            switcher_limit,
             recording: None,
             recording_blur: None,
             recording_interceptor: None,
@@ -209,6 +219,14 @@ impl ShortcutsPage {
         if self.switcher_window != window {
             self.switcher_window = window;
             cx.emit(ShortcutsEvent::SwitcherWindowChanged(window));
+            cx.notify();
+        }
+    }
+
+    fn set_switcher_limit(&mut self, limit: u32, cx: &mut Context<Self>) {
+        if self.switcher_limit != limit {
+            self.switcher_limit = limit;
+            cx.emit(ShortcutsEvent::SwitcherLimitChanged(limit));
             cx.notify();
         }
     }
@@ -577,11 +595,13 @@ impl Render for ShortcutsPage {
         let send_behavior = self.composer_send_behavior;
         let follow_up_behavior = self.follow_up_behavior;
         let switcher_window = self.switcher_window;
+        let switcher_limit = self.switcher_limit;
         let customized = self.keymap != KeymapConfig::default()
             || escape_stops_active_agent
             || send_behavior != ComposerSendBehavior::default()
             || follow_up_behavior != FollowUpBehavior::default()
-            || switcher_window != SwitcherWindow::default();
+            || switcher_window != SwitcherWindow::default()
+            || switcher_limit != 0;
         let modifier_label = modifier_send_label(cfg!(target_os = "macos"));
 
         let escape_behavior_row = widgets::section_card(&theme).child(
@@ -858,6 +878,102 @@ impl Render for ShortcutsPage {
                         )),
                 ),
         );
+        let limit_step = |theme: &Theme,
+                          id: &'static str,
+                          glyph: &'static str,
+                          next: Option<u32>| {
+            let enabled = next.is_some();
+            div()
+                .id(id)
+                .size(px(26.0))
+                .rounded(px(7.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(14.0))
+                .text_color(if enabled {
+                    theme.text_muted
+                } else {
+                    theme.text_muted.opacity(0.35)
+                })
+                .when_some(next, |el, next| {
+                    let text = theme.text;
+                    el.cursor_pointer()
+                        .hover(move |s| s.bg(theme.bg).text_color(text))
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.set_switcher_limit(next, cx)),
+                        )
+                })
+                .child(SharedString::from(glyph))
+        };
+        let switcher_limit_row = widgets::section_card(&theme).child(
+            widgets::card_row(&theme, true)
+                .min_h(px(84.0))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(widgets::row_title(&theme, "Session switcher shows at most"))
+                        .child(
+                            div()
+                                .mt(px(4.0))
+                                .max_w(px(430.0))
+                                .text_size(px(11.5))
+                                .line_height(px(17.0))
+                                .text_color(theme.text_muted.opacity(0.65))
+                                .child(SharedString::from(
+                                    "Cap the number of cards Ctrl+Tab offers, most recently used first. The open session and running tabs are always included.",
+                                )),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("switcher-limit")
+                        .flex_none()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .rounded(px(9.0))
+                        .p(px(2.0))
+                        .bg(crate::theme::ink(0.04))
+                        .child(limit_step(
+                            &theme,
+                            "switcher-limit-down",
+                            "−",
+                            match switcher_limit {
+                                0 => None,
+                                n if n <= SWITCHER_LIMIT_MIN => Some(0),
+                                n => Some(n - 1),
+                            },
+                        ))
+                        .child(
+                            div()
+                                .min_w(px(44.0))
+                                .px(px(6.0))
+                                .flex()
+                                .justify_center()
+                                .text_size(px(12.0))
+                                .text_color(theme.text)
+                                .child(SharedString::from(if switcher_limit == 0 {
+                                    "All".to_string()
+                                } else {
+                                    switcher_limit.to_string()
+                                })),
+                        )
+                        .child(limit_step(
+                            &theme,
+                            "switcher-limit-up",
+                            "+",
+                            match switcher_limit {
+                                0 => Some(SWITCHER_LIMIT_MIN),
+                                n if n >= SWITCHER_LIMIT_MAX => None,
+                                n => Some(n + 1),
+                            },
+                        )),
+                ),
+        );
         // One card per group, each under its small section label — the flat
         // 16-row table read as one undifferentiated wall. `ix` (the id's
         // position in ALL) keys the interactive elements, so ids stay unique
@@ -973,6 +1089,7 @@ impl Render for ShortcutsPage {
                                                             SwitcherWindow::All,
                                                             cx,
                                                         );
+                                                        this.set_switcher_limit(0, cx);
                                                     }),
                                                 )
                                             })
@@ -986,6 +1103,7 @@ impl Render for ShortcutsPage {
                             )
                             .child(send_behavior_row.mt(px(32.0)))
                             .child(switcher_row.mt(px(12.0)))
+                            .child(switcher_limit_row.mt(px(12.0)))
                             .child(
                                 div()
                                     .mt(px(28.0))
@@ -1032,6 +1150,7 @@ mod tests {
                 ComposerSendBehavior::default(),
                 FollowUpBehavior::default(),
                 SwitcherWindow::default(),
+                0,
                 false,
                 false,
                 AppshotDestination::Automatic,
@@ -1127,6 +1246,7 @@ mod tests {
                 ComposerSendBehavior::default(),
                 FollowUpBehavior::default(),
                 SwitcherWindow::default(),
+                0,
                 false,
                 true,
                 AppshotDestination::Automatic,

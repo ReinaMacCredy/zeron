@@ -138,6 +138,22 @@ pub(super) fn switcher_order(mru: &[String], visible: &[String]) -> Vec<String> 
     order
 }
 
+/// Cap the card count at the Settings → Shortcuts limit (0 for none). The
+/// strip's tabs stay reachable past the cap, as they do past the recency
+/// window. Pure.
+pub(super) fn switcher_capped(mut order: Vec<String>, limit: u32, strip: &[String]) -> Vec<String> {
+    if limit == 0 {
+        return order;
+    }
+    order.truncate(limit as usize);
+    for id in strip {
+        if !order.contains(id) {
+            order.push(id.clone());
+        }
+    }
+    order
+}
+
 /// The conversation column inside a nominal-resolution window frame, as a
 /// pixel rect `(x, y, w, h)`: right of the sidebar, left of the right pane,
 /// below the titlebar. `None` when the column has no area. Pure.
@@ -297,8 +313,13 @@ impl Shell {
                 })
                 .collect()
         };
-        let candidates = switcher_candidates(recent, &self.open_tab_ids(cx));
-        let order = switcher_order(&self.session_mru, &candidates);
+        let strip = self.open_tab_ids(cx);
+        let candidates = switcher_candidates(recent, &strip);
+        let order = switcher_capped(
+            switcher_order(&self.session_mru, &candidates),
+            self.settings.switcher_limit,
+            &strip,
+        );
         match order.len() {
             0 => return,
             // One tab and nothing selected (the canvas): just go there.
@@ -567,6 +588,20 @@ mod tests {
             switcher_candidates(sidebar, &strip),
             ids(&["a", "b", "old", "draft"])
         );
+    }
+
+    #[test]
+    fn cap_keeps_the_head_and_the_strip_tabs() {
+        let order = ids(&["c", "a", "b", "d"]);
+        assert_eq!(
+            switcher_capped(order.clone(), 2, &ids(&["d"])),
+            ids(&["c", "a", "d"])
+        );
+        assert_eq!(
+            switcher_capped(order.clone(), 2, &ids(&["a"])),
+            ids(&["c", "a"])
+        );
+        assert_eq!(switcher_capped(order.clone(), 0, &ids(&["d"])), order);
     }
 
     #[test]

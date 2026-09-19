@@ -1806,6 +1806,14 @@ mod strip_regressions {
             assert_eq!(order, ["a", "fresh", "stale"]);
             shell.switcher_close(cx);
 
+            // A cap of 2 keeps the MRU head (the selected session) and one more.
+            shell.settings.switcher_limit = 2;
+            shell.switcher_step(true, cx);
+            assert_eq!(shell.switcher.as_ref().unwrap().order.len(), 2);
+            assert_eq!(shell.switcher.as_ref().unwrap().order[0], "a");
+            shell.switcher_close(cx);
+            shell.settings.switcher_limit = 0;
+
             // An 8h window drops the 9h-old row; the selected session stays.
             shell.settings.switcher_window = settings::SwitcherWindow::Hours8;
             shell.switcher_step(true, cx);
