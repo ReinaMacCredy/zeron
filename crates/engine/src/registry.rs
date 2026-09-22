@@ -14,7 +14,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use serde::{Deserialize, Serialize};
 
 use zeron_harness::{Harness, HarnessError, mock::MockHarness};
-use zeron_proto::{AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, SteeringMode};
+use zeron_proto::{
+    AgentEvent, DoneStatus, HarnessId, Model, ModelCatalog, ReasoningLevel, SteeringMode,
+};
 
 /// What `ListHarnesses` reports per harness.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,7 +112,17 @@ struct HarnessPrefsFile {
 struct SeenModels {
     harness: Option<HarnessId>,
     ids: Vec<String>,
+    arrived: Vec<ArrivedModel>,
 }
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct ArrivedModel {
+    id: String,
+    at_ms: i64,
+}
+
+const NEW_MODEL_WINDOW_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 /// Per-device automatic session title preferences.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -325,42 +337,66 @@ impl HarnessRegistry {
 
     /// The first listing for a harness seeds silently; otherwise every model
     /// on a fresh install would read as new.
-    pub fn mark_new_models(&self, harness: HarnessId, models: &[Model]) -> Vec<String> {
-        let ids: Vec<String> = models.iter().map(|model| model.id.clone()).collect();
+    pub fn model_catalog(
+        &self,
+        harness: HarnessId,
+        models: Vec<Model>,
+        now_ms: i64,
+    ) -> ModelCatalog {
         let mut prefs = self.prefs();
-        let seeded = prefs
-            .seen_models
-            .iter()
-            .any(|entry| entry.harness == Some(harness));
-        let new_ids = match prefs
+        let (new_ids, announce_ids, changed) = match prefs
             .seen_models
             .iter_mut()
             .find(|entry| entry.harness == Some(harness))
         {
             Some(entry) => {
-                let new_ids: Vec<String> = ids
+                let announce_ids: Vec<String> = models
                     .iter()
+                    .map(|model| &model.id)
                     .filter(|id| !entry.ids.contains(id))
                     .cloned()
                     .collect();
                 // Ids the listing dropped stay: a model returning after a
                 // failed probe is not news.
-                entry.ids.extend(new_ids.iter().cloned());
-                new_ids
+                entry.ids.extend(announce_ids.iter().cloned());
+                let before = entry.arrived.len();
+                entry
+                    .arrived
+                    .retain(|arrived| now_ms - arrived.at_ms < NEW_MODEL_WINDOW_MS);
+                let pruned = entry.arrived.len() != before;
+                entry
+                    .arrived
+                    .extend(announce_ids.iter().map(|id| ArrivedModel {
+                        id: id.clone(),
+                        at_ms: now_ms,
+                    }));
+                let new_ids = models
+                    .iter()
+                    .map(|model| &model.id)
+                    .filter(|id| entry.arrived.iter().any(|arrived| &arrived.id == *id))
+                    .cloned()
+                    .collect();
+                let changed = pruned || !announce_ids.is_empty();
+                (new_ids, announce_ids, changed)
             }
             None => {
                 prefs.seen_models.push(SeenModels {
                     harness: Some(harness),
-                    ids: ids.clone(),
+                    ids: models.iter().map(|model| model.id.clone()).collect(),
+                    arrived: Vec::new(),
                 });
-                Vec::new()
+                (Vec::new(), Vec::new(), true)
             }
         };
-        if !seeded || !new_ids.is_empty() {
-            drop(prefs);
+        drop(prefs);
+        if changed {
             self.persist_prefs();
         }
-        new_ids
+        ModelCatalog {
+            models,
+            new_ids,
+            announce_ids,
+        }
     }
 
     pub fn register(&self, harness: Arc<dyn Harness>) {
@@ -688,45 +724,39 @@ mod tests {
     }
 
     #[test]
-    fn the_first_listing_seeds_silently_then_only_additions_are_new() {
+    fn new_models_announce_once_and_stay_new_for_the_window() {
         let registry = HarnessRegistry::new();
-        let first = [model("claude-opus-5"), model("claude-sonnet-5")];
-        assert!(
-            registry
-                .mark_new_models(HarnessId::ClaudeCode, &first)
-                .is_empty()
-        );
+        let list = |ids: &[&str]| ids.iter().map(|id| model(id)).collect::<Vec<_>>();
+        let day = 24 * 60 * 60 * 1000;
 
-        let second = [
-            model("claude-opus-5-5"),
-            model("claude-opus-5"),
-            model("claude-sonnet-5"),
-        ];
-        assert_eq!(
-            registry.mark_new_models(HarnessId::ClaudeCode, &second),
-            vec!["claude-opus-5-5".to_string()]
+        let seeded = registry.model_catalog(
+            HarnessId::ClaudeCode,
+            list(&["claude-opus-5", "claude-sonnet-5"]),
+            0,
         );
-        assert!(
-            registry
-                .mark_new_models(HarnessId::ClaudeCode, &second)
-                .is_empty()
-        );
+        assert!(seeded.new_ids.is_empty() && seeded.announce_ids.is_empty());
+
+        let current = ["claude-opus-5-5", "claude-opus-5", "claude-sonnet-5"];
+        let arrived = registry.model_catalog(HarnessId::ClaudeCode, list(&current), day);
+        assert_eq!(arrived.announce_ids, vec!["claude-opus-5-5".to_string()]);
+        assert_eq!(arrived.new_ids, vec!["claude-opus-5-5".to_string()]);
+
+        // Reopening the picker must not clear the badge or re-announce.
+        let reopened = registry.model_catalog(HarnessId::ClaudeCode, list(&current), 3 * day);
+        assert!(reopened.announce_ids.is_empty());
+        assert_eq!(reopened.new_ids, vec!["claude-opus-5-5".to_string()]);
+
+        let expired = registry.model_catalog(HarnessId::ClaudeCode, list(&current), 9 * day);
+        assert!(expired.new_ids.is_empty() && expired.announce_ids.is_empty());
 
         // A model the listing drops and later restores is not news again.
-        let shrunk = [model("claude-opus-5-5")];
-        assert!(
-            registry
-                .mark_new_models(HarnessId::ClaudeCode, &shrunk)
-                .is_empty()
-        );
-        assert!(
-            registry
-                .mark_new_models(HarnessId::ClaudeCode, &second)
-                .is_empty()
-        );
+        registry.model_catalog(HarnessId::ClaudeCode, list(&["claude-opus-5-5"]), 10 * day);
+        let restored = registry.model_catalog(HarnessId::ClaudeCode, list(&current), 10 * day);
+        assert!(restored.announce_ids.is_empty());
 
         // Newness is tracked per harness, so another agent still seeds.
-        assert!(registry.mark_new_models(HarnessId::Codex, &first).is_empty());
+        let other = registry.model_catalog(HarnessId::Codex, list(&["gpt-6"]), 10 * day);
+        assert!(other.new_ids.is_empty() && other.announce_ids.is_empty());
     }
 
     #[test]

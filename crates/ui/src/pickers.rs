@@ -1528,6 +1528,39 @@ impl Pickers {
         }
     }
 
+    fn announce_new_models(
+        &mut self,
+        harness: HarnessId,
+        ids: &[String],
+        models: &[Model],
+        cx: &mut Context<Self>,
+    ) {
+        let labels: Vec<&str> = ids
+            .iter()
+            .map(|id| {
+                models
+                    .iter()
+                    .find(|model| &model.id == id)
+                    .map_or(id.as_str(), |model| model.label.as_str())
+            })
+            .collect();
+        let harness_name = self
+            .harnesses
+            .ready()
+            .and_then(|list| list.iter().find(|descriptor| descriptor.id == harness))
+            .map_or_else(|| format!("{harness:?}"), |descriptor| descriptor.name.clone());
+        let title = if labels.len() == 1 {
+            "New model available"
+        } else {
+            "New models available"
+        };
+        let body = format!("{harness_name} · {}", labels.join(", "));
+        self.state.update(cx, |state, cx| {
+            state.announce_new_models(title.to_owned(), body);
+            cx.notify();
+        });
+    }
+
     fn ensure_models(&mut self, harness: HarnessId, force: bool, cx: &mut Context<Self>) {
         // Normal prefetches load absent/Idle slots once. Picker-open refreshes
         // also retry Ready/Error slots, while an in-flight load is always
@@ -1601,7 +1634,16 @@ impl Pickers {
                             pickers
                                 .new_models
                                 .insert(harness, catalog.new_ids.into_iter().collect());
-                            Loadable::Ready(normalize_model_rows(harness, catalog.models))
+                            let models = normalize_model_rows(harness, catalog.models);
+                            if !catalog.announce_ids.is_empty() {
+                                pickers.announce_new_models(
+                                    harness,
+                                    &catalog.announce_ids,
+                                    &models,
+                                    cx,
+                                );
+                            }
+                            Loadable::Ready(models)
                         }
                         Err(err) => Loadable::Error(err.to_string()),
                     },

@@ -139,6 +139,10 @@ pub struct ModelCatalog {
     pub models: Vec<Model>,
     #[serde(default)]
     pub new_ids: Vec<String>,
+    /// Only the listing that first saw them, so a model is announced once
+    /// across every window and device view.
+    #[serde(default)]
+    pub announce_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

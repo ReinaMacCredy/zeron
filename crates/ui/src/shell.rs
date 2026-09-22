@@ -2376,6 +2376,14 @@ impl Shell {
         if let Some(notice) = state.update(cx, |state, _| state.take_deep_link_notice()) {
             self.sidebar_notice = Some(notice.into());
         }
+        let announcements = state.update(cx, |state, _| state.take_model_announcements());
+        // Background-only exists because a session ping has the sidebar dot
+        // to fall back on; a new model has none, so only the master switch applies.
+        if self.settings.notifications_enabled {
+            for (title, body) in announcements {
+                crate::notify::post(&title, &body, None);
+            }
+        }
         let next_sync_flow = {
             let state = state.read(cx);
             sync_flow_after_auth(self.sync_flow, state.workspace_scope, state.auth.as_ref())

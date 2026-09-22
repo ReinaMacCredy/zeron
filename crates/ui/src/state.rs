@@ -717,6 +717,7 @@ pub struct AppState {
     pub spaces_synced: bool,
     pending_deep_link: Option<crate::links::ConversationDeepLink>,
     deep_link_notice: Option<String>,
+    model_announcements: Vec<(String, String)>,
     /// Joined transcript of the selected chat (continuations folded engine-side).
     pub transcript: Vec<SessionMessageEntry>,
     /// The selected chat's pending-message queue — what was typed while the
@@ -871,6 +872,7 @@ impl AppState {
             spaces_synced: false,
             pending_deep_link: None,
             deep_link_notice: None,
+            model_announcements: Vec::new(),
         }
     }
 
@@ -2126,6 +2128,14 @@ impl AppState {
 
     pub fn take_deep_link_notice(&mut self) -> Option<String> {
         self.deep_link_notice.take()
+    }
+
+    pub fn announce_new_models(&mut self, title: String, body: String) {
+        self.model_announcements.push((title, body));
+    }
+
+    pub fn take_model_announcements(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.model_announcements)
     }
 
     /// Select a chat (or clear). Swaps the per-chat doc-transcript subscription:
