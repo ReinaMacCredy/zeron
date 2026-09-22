@@ -1,58 +1,99 @@
 //! Computer use: the desktop host that owns `cua-driver`.
 
+pub mod cursor_preference;
+pub mod desktop_lifecycle;
 #[cfg(target_os = "macos")]
 pub mod driver;
+pub mod emergency_stop_notice;
+#[cfg(target_os = "macos")]
+pub mod host;
+#[cfg(target_os = "macos")]
+pub mod host_socket;
+#[cfg(target_os = "macos")]
+pub mod runtime_ownership;
+#[cfg(target_os = "macos")]
+pub mod stop_native_helper;
 
-/// Proof knob (`ZERON_CUA_PROBE=<file>`): spawn the bundled driver from this
-/// process, handshake, run one grant-requiring read, and write the replies to
+/// Proof knob (`ZERON_CUA_PROBE=<file>`): spawn the bundled driver through the
+/// host, run one grant-requiring read, retire it, and write the replies to
 /// `<file>`.
 #[cfg(target_os = "macos")]
-pub fn run_probe_from_env(data_dir: &std::path::Path) {
+pub fn run_probe_from_env(_data_dir: &std::path::Path) {
     let Some(out) = std::env::var_os("ZERON_CUA_PROBE") else {
         return;
     };
-    let runtime_dir = data_dir.join("computer");
     std::thread::spawn(move || {
-        let report = probe(&runtime_dir);
+        let report = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime.block_on(probe()),
+            Err(err) => serde_json::json!({ "error": format!("runtime: {err}") }),
+        };
         let _ = std::fs::write(&out, serde_json::to_vec_pretty(&report).unwrap_or_default());
     });
 }
 
 #[cfg(target_os = "macos")]
-fn probe(runtime_dir: &std::path::Path) -> serde_json::Value {
+async fn probe() -> serde_json::Value {
     use serde_json::json;
+    use zeron_proto::computer::{ComputerHostCall, ComputerHostMethod};
+    use zeron_rpc::ComputerHost;
+
     let Some(binary) = driver::bundled_binary() else {
         return json!({ "error": "no bundled cua-driver" });
     };
     let bundle_id = std::env::var("ZERON_BUNDLE_ID").unwrap_or_else(|_| "sh.zeron.app".into());
-    let process = match driver::DriverProcess::spawn(&binary, runtime_dir, &bundle_id) {
-        Ok(process) => process,
-        Err(err) => return json!({ "error": format!("spawn: {err}") }),
+    let options = host::CuaDriverHostOptions::new(
+        binary.clone(),
+        bundle_id,
+        Box::new(|| Box::pin(async { Ok(()) })),
+    );
+    let host = match host::CuaDriverHost::new(options) {
+        Ok(host) => host,
+        Err(err) => return json!({ "error": format!("host: {err}") }),
     };
     let own_pid = std::process::id();
-    let metadata = process.request(&json!({ "method": "metadata" }), driver::DEFAULT_TIMEOUT);
-    let permissions = process.call("check_permissions", json!({}));
-    let windows = process.call("list_windows", json!({ "pid": own_pid }));
-    let window_id = windows.as_ref().ok().and_then(first_window_id);
-    let state = window_id.as_ref().map(|id| {
-        process.call(
-            "get_window_state",
-            json!({ "pid": own_pid, "window_id": id, "max_dimension": 256 }),
-        )
-    });
-    let show = |r: &std::io::Result<serde_json::Value>| match r {
-        Ok(v) => v.clone(),
-        Err(e) => json!({ "io_error": e.to_string() }),
+    let call = |id: &str, name: &str, args: serde_json::Value| ComputerHostCall {
+        correlation_id: id.into(),
+        method: ComputerHostMethod::Call,
+        name: Some(name.into()),
+        args,
+        task: None,
+        delivery_mode: None,
+        model_observation: None,
     };
+    let permissions = host
+        .request(call("probe-1", "check_permissions", json!({})))
+        .await;
+    let windows = host
+        .request(call("probe-2", "list_windows", json!({ "pid": own_pid })))
+        .await;
+    let window_id = serde_json::to_value(&windows)
+        .ok()
+        .as_ref()
+        .and_then(first_window_id);
+    let state = match window_id {
+        Some(id) => Some(
+            host.request(call(
+                "probe-3",
+                "get_window_state",
+                json!({ "pid": own_pid, "window_id": id, "max_dimension": 256 }),
+            ))
+            .await,
+        ),
+        None => None,
+    };
+    let retired = host.dispose().await;
     json!({
         "binary": binary,
         "host_pid": own_pid,
-        "driver_pid": process.pid(),
-        "expected_revision": driver::NATIVE_REVISION,
-        "metadata": show(&metadata),
-        "check_permissions": show(&permissions),
-        "list_windows": show(&windows),
-        "get_window_state": state.as_ref().map(show),
+        "expected_revision": zeron_proto::computer::CUA_NATIVE_REVISION,
+        "driver_native_revision": permissions.driver_native_revision,
+        "check_permissions": permissions,
+        "list_windows": windows,
+        "get_window_state": state,
+        "retired": retired,
     })
 }
 
