@@ -1628,8 +1628,16 @@ pub struct Shell {
     right_terminal: Option<Entity<TerminalPanel>>,
     /// The surface-tab strip's `+` menu (Files / Terminal / Diffs / History rows).
     right_plus: popover::Popup<()>,
-    /// The titlebar's pinned-summary card (outputs / subagents / sources).
+    /// The titlebar's pinned-summary card (environment / threads / sources /
+    /// project).
     summary_menu: popover::Popup<()>,
+    /// The card's Local Servers row is unfolded to list the browser tabs.
+    summary_servers_open: bool,
+    /// Per chat: the instructions file found at the checkout root (`AGENTS.md`
+    /// / `CLAUDE.md`), `None` once checked and absent. Refreshed each time the
+    /// card opens; the in-flight probe is keyed the same way.
+    summary_instructions: std::collections::HashMap<String, Option<String>>,
+    summary_instruction_probes: std::collections::HashMap<String, Task<()>>,
     /// Diff surfaces by id — each tab its own [`Changes`] viewer with its own
     /// scope/base pick and diff watch (multiple diff panels, user request).
     diffs: std::collections::HashMap<u64, Entity<Changes>>,
@@ -2119,6 +2127,9 @@ impl Shell {
             right_terminal: None,
             right_plus: popover::Popup::default(),
             summary_menu: popover::Popup::default(),
+            summary_servers_open: false,
+            summary_instructions: std::collections::HashMap::new(),
+            summary_instruction_probes: std::collections::HashMap::new(),
             diffs: std::collections::HashMap::new(),
             files: std::collections::HashMap::new(),
             files_subs: std::collections::HashMap::new(),
@@ -12319,7 +12330,7 @@ impl Render for Shell {
                     if self.right_pane_open(cx) {
                         self.toggle_right_pane(cx);
                     }
-                    self.summary_menu.open(());
+                    self.open_summary_menu(cx);
                 }
                 // `=background-send`: once the boot draft carries text (see
                 // `ZERON_DRAFT_TEXT`), fire the Mod+Enter background start
@@ -15267,16 +15278,24 @@ mod pinned_summary_regressions {
     }
 
     #[gpui::test]
-    fn output_row_opens_the_pane_on_that_surface_and_escape_closes(cx: &mut TestAppContext) {
+    fn server_row_opens_the_pane_on_that_browser_and_escape_closes(cx: &mut TestAppContext) {
         let (shell, cx) = setup(cx);
         shell.read_with(cx, |shell, cx| assert!(!shell.right_pane_open(cx)));
         let trigger = cx.debug_bounds("pinned-summary").unwrap().center();
         cx.simulate_click(trigger, gpui::Modifiers::default());
         shell.read_with(cx, |shell, _| assert!(shell.summary_menu.is_open()));
         cx.update(|window, cx| window.draw(cx).clear());
+        // Browser tabs sit folded under Local Servers: unfold, then pick one.
+        let servers = cx
+            .debug_bounds("pinned-summary-servers-0")
+            .expect("Local Servers row under Environment")
+            .center();
+        cx.simulate_click(servers, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, _| assert!(shell.summary_menu.is_open()));
+        cx.update(|window, cx| window.draw(cx).clear());
         let row = cx
-            .debug_bounds("pinned-summary-output-0")
-            .expect("browser tab listed under Outputs")
+            .debug_bounds("pinned-summary-server-0")
+            .expect("browser tab listed under Local Servers")
             .center();
         cx.simulate_click(row, gpui::Modifiers::default());
         shell.read_with(cx, |shell, cx| {

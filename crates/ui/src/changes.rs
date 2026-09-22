@@ -2016,6 +2016,15 @@ impl Changes {
         resolve_diff(&self.diffs, chat).cloned()
     }
 
+    /// `(files, additions, deletions)` of the selected chat's working-tree
+    /// diff, once the watch has delivered it.
+    pub fn working_tree_counts(&self, cx: &App) -> Option<(usize, u32, u32)> {
+        let state = self.state.read(cx);
+        let chat = state.selected_chat_row()?;
+        let diff = resolve_diff(&self.diffs, chat)?;
+        Some((diff.files.len(), diff.additions, diff.deletions))
+    }
+
     /// The checkout root the scoped RPCs address: the watch-resolved diff's
     /// canonical cwd when available, else the chat row's own.
     fn scoped_cwd(&self, cx: &App) -> Option<String> {

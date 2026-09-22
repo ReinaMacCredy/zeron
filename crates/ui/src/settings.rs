@@ -913,6 +913,8 @@ pub struct UiSettings {
     /// Keep the file tree collapsed in wide file surfaces; shared by every
     /// open file tab so one toggle applies everywhere.
     pub files_tree_sidebar_hidden: bool,
+    /// Pinned-summary card sections the user folded shut (section keys).
+    pub summary_collapsed: Vec<String>,
     /// Interactive identity overlay; imported themes default to their own accent.
     pub accent: zeron_theme::AccentSelection,
     /// Glass policy, independent from the selected appearance, theme, and accent.
@@ -995,6 +997,7 @@ impl Default for UiSettings {
             files_word_wrap: false,
             files_show_all: false,
             files_tree_sidebar_hidden: false,
+            summary_collapsed: Vec::new(),
             accent: zeron_theme::AccentSelection::default(),
             surface: zeron_theme::SurfacePreference::default(),
             new_thread_composer_background: None,
@@ -2305,6 +2308,7 @@ mod tests {
             code_font_size: 11.0,
             files_show_all: true,
             files_tree_sidebar_hidden: true,
+            summary_collapsed: vec!["threads".into()],
             accent: zeron_theme::AccentSelection::Preset(zeron_theme::AccentPreset::Cyan),
             surface: zeron_theme::SurfacePreference::Frosted,
             new_thread_composer_background: Some(NewThreadComposerBackground {
@@ -2512,6 +2516,7 @@ mod tests {
         );
         assert!(!loaded.files_show_all);
         assert!(!loaded.files_tree_sidebar_hidden);
+        assert!(loaded.summary_collapsed.is_empty());
         assert!(
             loaded.notifications_enabled,
             "pre-banner files default banners on"
