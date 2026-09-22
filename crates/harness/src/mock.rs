@@ -571,6 +571,21 @@ impl Harness for MockHarness {
             })
             .into_iter()
             .flatten();
+        let compact_events = std::env::var("ZERON_MOCK_COMPACT")
+            .ok()
+            .is_some_and(|v| !v.is_empty() && v != "0")
+            .then(|| {
+                [
+                    AgentEvent::Compacting { active: true },
+                    AgentEvent::Compacting { active: false },
+                    AgentEvent::Compacted {
+                        pre_tokens: Some(226_874),
+                        post_tokens: Some(12_451),
+                    },
+                ]
+            })
+            .into_iter()
+            .flatten();
         let events: Vec<Result<AgentEvent, HarnessError>> = body
             .iter()
             .cycle()
@@ -585,6 +600,7 @@ impl Harness for MockHarness {
             .chain(table_event)
             .chain(mend_event)
             .chain(error_event)
+            .chain(compact_events)
             .chain(tail.iter().cloned())
             .map(Ok)
             .collect();
