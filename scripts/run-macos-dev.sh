@@ -69,4 +69,7 @@ OPEN_ENV=(
 if [[ -n "${ZERON_OPEN_ROUTE:-}" ]]; then
   OPEN_ENV+=(--env "ZERON_OPEN_ROUTE=$ZERON_OPEN_ROUTE")
 fi
+if [[ -n "${ZERON_CUA_PROBE:-}" ]]; then
+  OPEN_ENV+=(--env "ZERON_CUA_PROBE=$ZERON_CUA_PROBE" --env "ZERON_BUNDLE_ID=sh.zeron.app.dev")
+fi
 exec open -W "${OPEN_ENV[@]}" "$APP" --args "$@"

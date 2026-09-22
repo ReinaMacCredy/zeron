@@ -22,6 +22,7 @@ pub mod change_requests;
 pub mod changes;
 mod comment_ui;
 pub mod comments;
+pub mod computer;
 pub mod composer;
 mod composer_dock;
 mod context_usage;
@@ -160,6 +161,8 @@ pub fn run_app(config: UiConfig) {
         gpui_tokio::init_from_handle(cx, runtime_handle);
         gpui_base::init(cx);
         let data_dir = config.boot().data_dir.clone();
+        #[cfg(target_os = "macos")]
+        computer::run_probe_from_env(&data_dir);
         let draft_dir = data_dir.clone();
         let drafts = cx
             .background_executor()
