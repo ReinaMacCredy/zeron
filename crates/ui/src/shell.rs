@@ -3056,6 +3056,26 @@ impl Shell {
         cx.notify();
     }
 
+    fn set_files_tree_sidebar_hidden(&mut self, hidden: bool, cx: &mut Context<Self>) {
+        if self.settings.files_tree_sidebar_hidden == hidden {
+            return;
+        }
+        self.settings.files_tree_sidebar_hidden = hidden;
+        let surfaces = self
+            .files
+            .values()
+            .chain(self.file_surfaces.values())
+            .cloned()
+            .collect::<Vec<_>>();
+        for surface in surfaces {
+            surface.update(cx, |surface, cx| {
+                surface.set_tree_sidebar_hidden(hidden, cx)
+            });
+        }
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
     fn set_files_show_all(&mut self, show_all_files: bool, cx: &mut Context<Self>) {
         self.settings.files_show_all = show_all_files;
         if let Some(page) = self.files_settings_page.clone() {
@@ -3218,6 +3238,7 @@ impl Shell {
             let editor_font_size = crate::typography::code_font_size(cx);
             let word_wrap = self.settings.files_word_wrap;
             let show_all_files = self.settings.files_show_all;
+            let tree_sidebar_hidden = self.settings.files_tree_sidebar_hidden;
             let files = cx.new(|cx| {
                 FilesSurface::new(
                     self.state.clone(),
@@ -3227,6 +3248,7 @@ impl Shell {
                     editor_font_size,
                     word_wrap,
                     show_all_files,
+                    tree_sidebar_hidden,
                     cx,
                 )
             });
@@ -3250,6 +3272,9 @@ impl Shell {
                     }
                     FilesEvent::ShowAllFilesChanged(show_all_files) => {
                         this.set_files_show_all(*show_all_files, cx)
+                    }
+                    FilesEvent::TreeSidebarHiddenChanged(hidden) => {
+                        this.set_files_tree_sidebar_hidden(*hidden, cx)
                     }
                     FilesEvent::CloseReady => {
                         this.on_file_close_ready(RightSurface::Files, &event_key, cx)
@@ -3294,6 +3319,7 @@ impl Shell {
                 crate::typography::code_font_size(cx),
                 self.settings.files_word_wrap,
                 self.settings.files_show_all,
+                self.settings.files_tree_sidebar_hidden,
                 cx,
             )
         });
@@ -3319,6 +3345,9 @@ impl Shell {
                 }
                 FilesEvent::ShowAllFilesChanged(show_all_files) => {
                     this.set_files_show_all(*show_all_files, cx)
+                }
+                FilesEvent::TreeSidebarHiddenChanged(hidden) => {
+                    this.set_files_tree_sidebar_hidden(*hidden, cx)
                 }
                 FilesEvent::CloseReady => {
                     this.on_file_close_ready(RightSurface::File(id), &event_panel_key, cx)
@@ -13700,6 +13729,7 @@ mod exit_regressions {
                         13.0,
                         false,
                         false,
+                        false,
                         cx,
                     )
                 });
@@ -14555,6 +14585,7 @@ mod exit_regressions {
                             false,
                             1000,
                             13.0,
+                            false,
                             false,
                             false,
                             cx,
