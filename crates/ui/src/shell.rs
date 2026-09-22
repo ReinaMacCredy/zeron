@@ -45,10 +45,10 @@ use crate::settings::notifications::{NotificationsEvent, NotificationsPage};
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::{
     self, CHAT_PANEL_MIN, ComposerSendBehavior, JUMP_SLOTS, KeymapConfig, RIGHT_PANE_DEFAULT,
-    RIGHT_PANE_MIN, SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, SavePolicy, ShortcutId,
-    SidebarOrganization, SidebarSort, TERMINAL_DEFAULT_HEIGHT, TERMINAL_MAX_VH,
-    TERMINAL_MIN_HEIGHT, UiSettings, badge_combo, jump_hints_visible, modifier_send_hint_visible,
-    platform_combo, sidebar_pin_profile_key,
+    RIGHT_PANE_MIN, SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, SPLIT_PANE_MIN, SPLIT_RATIO_DEFAULT,
+    SavePolicy, ShortcutId, SidebarOrganization, SidebarSort, TERMINAL_DEFAULT_HEIGHT,
+    TERMINAL_MAX_VH, TERMINAL_MIN_HEIGHT, UiSettings, badge_combo, jump_hints_visible,
+    modifier_send_hint_visible, platform_combo, sidebar_pin_profile_key,
 };
 use crate::state::{
     AppState, ConnectionStatus, EngineBootConfig, EngineMode, GatePhase, Indicator, OrgRow,
@@ -868,12 +868,18 @@ const NEW_THREAD_BACKGROUND_MAX_HEIGHT: f32 = 760.0;
 struct SidebarResize;
 /// Drag marker for the right-pane resize handle.
 struct RightPaneResize;
+/// Drag marker for the split view's seam.
+struct SplitResize;
+
+/// A seam drag this close to the column's midpoint lands exactly on 50/50.
+const SPLIT_SNAP: f32 = 14.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PaneResizeKind {
     Sidebar,
     Right,
     Terminal,
+    Split,
 }
 
 /// Resolve one pointer sample while keeping the persisted width legal. The
@@ -4462,7 +4468,35 @@ impl Shell {
             PaneResizeKind::Sidebar => self.sidebar_resize_edge = None,
             PaneResizeKind::Terminal => self.terminal_drag_anchor = None,
             PaneResizeKind::Right => self.right_resize_edge = None,
+            PaneResizeKind::Split => {}
         }
+    }
+
+    /// The split seam: the pointer's x becomes the LEFT pane's share of the
+    /// conversation column, each pane floored at [`SPLIT_PANE_MIN`].
+    fn on_split_drag(
+        &mut self,
+        event: &gpui::DragMoveEvent<SplitResize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let viewport = f32::from(window.viewport_size().width);
+        let left = self.sidebar_target();
+        let column = conversation_width(viewport, left, self.right_now(cx));
+        if column < SPLIT_PANE_MIN * 2.0 {
+            return;
+        }
+        let mut x = f32::from(event.event.position.x) - left;
+        if (x - column / 2.0).abs() < SPLIT_SNAP {
+            x = column / 2.0;
+        }
+        let sample =
+            motion::resize_drag_sample(x, SPLIT_PANE_MIN, column - SPLIT_PANE_MIN, None, true);
+        self.settings.split_ratio = sample.width / column;
+        self.pane_resize_dragging = Some(PaneResizeKind::Split);
+        self.pane_resize_active = sample.edge.is_none().then_some(PaneResizeKind::Split);
+        self.schedule_save(cx);
+        cx.notify();
     }
 
     fn on_right_pane_drag(
@@ -6766,6 +6800,9 @@ impl Shell {
         created_by: Option<SharedString>,
         status: zeron_proto::ChatIndicator,
         selected: bool,
+        // The side this row's session fills while the split is open; the
+        // unselected member wears a softer wash and both wear a side glyph.
+        split_side: Option<split::SplitSide>,
         archived: bool,
         preview: bool,
         drag: Option<SidebarSessionDrag>,
@@ -7074,7 +7111,7 @@ impl Shell {
                 .child(corner_body)
                 .into_any_element()
         };
-        let mut corner = Some(corner);
+        let secondary = split_side.is_some() && !selected;
         let (hover, text) = (theme.glass_hover(), theme.text);
         let selected_wash = crate::theme::glass_selected_bg();
         let subline = if search_query.is_some() {
@@ -7082,6 +7119,35 @@ impl Shell {
         } else {
             theme.text_muted.opacity(0.5)
         };
+        // A pane-shaped glyph, its filled half on the row's side, keeps the
+        // corner's status and hover swap intact.
+        let corner: AnyElement = match split_side {
+            Some(side) => {
+                let tone = if selected { theme.accent } else { subline };
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(12.0))
+                            .h(px(10.0))
+                            .rounded(px(2.5))
+                            .border_1()
+                            .border_color(tone)
+                            .flex()
+                            .flex_row()
+                            .when(side == split::SplitSide::Right, |el| el.justify_end())
+                            .child(div().w(px(5.0)).h_full().bg(tone.opacity(0.7))),
+                    )
+                    .child(corner)
+                    .into_any_element()
+            }
+            None => corner,
+        };
+        let mut corner = Some(corner);
         let select_id = id.clone();
         let menu_id = id.clone();
         // Hover fades over transition-colors (zeron session-row.tsx) — both
@@ -7089,6 +7155,8 @@ impl Shell {
         let fade_key = format!("{row_id}-hover");
         let rest_bg = if selected {
             selected_wash
+        } else if secondary {
+            crate::theme::glass_secondary_bg()
         } else {
             crate::theme::wash(0.0)
         };
@@ -7096,7 +7164,11 @@ impl Shell {
         // fills are identical so the blend is a no-op, but light's hover sits
         // below its near-opaque selected fill, and blending toward it visibly
         // dimmed the active row under the pointer (user report).
-        let hover_bg = if selected { selected_wash } else { hover };
+        let hover_bg = if selected || secondary {
+            rest_bg
+        } else {
+            hover
+        };
         let split_drag = !preview
             && search_query.is_none()
             && !archived
@@ -9768,7 +9840,11 @@ impl Shell {
                     Some(split::SplitSide::Left) => div()
                         .absolute()
                         .top_0()
-                        .left(px(-main_content_width))
+                        .left(px(-(conversation_width(
+                            self.viewport_width,
+                            self.sidebar_target(),
+                            self.right_now(cx),
+                        ) - main_content_width)))
                         .w(px(full_width))
                         .h(px(height))
                         .child(layer)
@@ -12130,6 +12206,7 @@ impl Render for Shell {
             .on_key_down(cx.listener(Self::on_key_down))
             .on_drag_move(cx.listener(Self::on_sidebar_drag))
             .on_drag_move(cx.listener(Self::on_right_pane_drag))
+            .on_drag_move(cx.listener(Self::on_split_drag))
             .on_drag_move(cx.listener(Self::on_terminal_drag))
             // The panel shortcuts are chat-scoped chrome: in Settings they are
             // no-ops (zeron __root.tsx gates the hotkey on `!isSettings`, and
@@ -12395,11 +12472,16 @@ impl Render for Shell {
                 let split_open = on_chat && self.split.is_some();
                 let main_target_width =
                     conversation_width(viewport, self.sidebar_target(), right_target_width);
-                // The secondary pane takes half the column (fixed 50/50).
-                let main_target_width = if split_open {
-                    main_target_width / 2.0
-                } else {
-                    main_target_width
+                // The persisted share belongs to the LEFT pane, whichever
+                // session sits there.
+                let main_target_width = match self.split.as_ref().map(|s| s.side) {
+                    Some(split::SplitSide::Left) if split_open => {
+                        main_target_width * (1.0 - self.settings.split_ratio)
+                    }
+                    Some(split::SplitSide::Right) if split_open => {
+                        main_target_width * self.settings.split_ratio
+                    }
+                    _ => main_target_width,
                 };
                 let main_transition = self.active_tween_endpoints(self.main_takeover_tween);
                 let main_content_width =
@@ -12480,7 +12562,9 @@ impl Render for Shell {
                 // flush and unbordered, the transcript directly on the frost
                 // glass; the changes pane is a flush left-bordered glass panel
                 // (built inside `render_right_pane`).
-                let main = if main_transition.is_some() {
+                // The split pane flexes into whatever the fixed-width main
+                // column leaves, so the seam's share holds.
+                let main = if main_transition.is_some() || split_open {
                     div()
                         .h_full()
                         .w(px(main_content_width))
@@ -12494,14 +12578,34 @@ impl Render for Shell {
                 let split_side = self.split.as_ref().map(|s| s.side).filter(|_| on_chat);
                 let split_pane = split_side.and_then(|_| self.render_split_pane(cx));
                 let drop_zones = on_chat.then(|| self.render_split_drop_zones(cx)).flatten();
-                let mut columns: Vec<AnyElement> = Vec::with_capacity(2);
+                // Floats over the panes' shared border like the sidebar seam
+                // below; the pane's own 1px border stays the visual divider.
+                let mut split_seam = split_pane.is_some().then(|| {
+                    let handle = self.resize_handle(
+                        "split-resize",
+                        PaneResizeKind::Split,
+                        || SplitResize,
+                        |shell, _| shell.settings.split_ratio = SPLIT_RATIO_DEFAULT,
+                        cx,
+                    );
+                    div()
+                        .w(px(0.0))
+                        .h_full()
+                        .flex_none()
+                        .relative()
+                        .child(handle.left(px(-PANE_RESIZE_HITBOX_HALF_WIDTH)))
+                        .into_any_element()
+                });
+                let mut columns: Vec<AnyElement> = Vec::with_capacity(3);
                 match (split_side, split_pane) {
                     (Some(split::SplitSide::Left), Some(pane)) => {
                         columns.push(pane);
+                        columns.extend(split_seam.take());
                         columns.push(main);
                     }
                     (Some(split::SplitSide::Right), Some(pane)) => {
                         columns.push(main);
+                        columns.extend(split_seam.take());
                         columns.push(pane);
                     }
                     _ => columns.push(main),

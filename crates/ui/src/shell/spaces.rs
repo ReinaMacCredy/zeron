@@ -3781,6 +3781,9 @@ impl Shell {
             let pins: HashSet<&str> = pinned_order.iter().map(String::as_str).collect();
             visible.retain(|id| !pins.contains(id.as_str()));
         }
+        if let Some(pair) = self.sidebar_split_card(pinned_order) {
+            pair.adjoin(&mut visible);
+        }
         visible
     }
 
@@ -4092,6 +4095,10 @@ impl Shell {
             let local_device_id = self.state.read(cx).local_device_id.clone();
             promote_local_device_group(&mut regular_groups, local_device_id.as_deref());
         }
+        let split_card = self.sidebar_split_card(pinned_order);
+        if let Some(pair) = &split_card {
+            pair.adjoin_grouped(&mut regular_groups, |row| row.chat.id.as_str());
+        }
         let mut sections = Vec::with_capacity(regular_groups.len() + usize::from(pinned_count > 0));
         if !pinned_rows.is_empty() {
             sections.push((None, pinned_rows));
@@ -4192,7 +4199,7 @@ impl Shell {
         }
 
         let selected = self.state.read(cx).selected_chat.clone();
-        let split = self.split_chat_id().map(str::to_string);
+        let split_pair = self.split.as_ref().and(self.split_pair.clone());
         // Re-checked at render so the chips drop the FRAME a popover opens,
         // not on the next modifier event — the jumps are suppressed under it.
         let jump_hints = self.jump_hints && !self.overlay_owns_keyboard(cx);
@@ -4230,8 +4237,8 @@ impl Shell {
                 } = row;
                 let time_ago: SharedString =
                     format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now).into();
-                let is_selected = selected.as_deref() == Some(chat.id.as_str())
-                    || split.as_deref() == Some(chat.id.as_str());
+                let is_selected = selected.as_deref() == Some(chat.id.as_str());
+                let split_side = split_pair.as_ref().and_then(|pair| pair.side_of(&chat.id));
                 let harness = self
                     .settings
                     .sidebar_show_harness
@@ -4311,6 +4318,7 @@ impl Shell {
                     created_by,
                     status,
                     is_selected,
+                    split_side,
                     false,
                     is_moving,
                     if is_moving { None } else { drag },
@@ -4404,6 +4412,9 @@ impl Shell {
                     ))
                     .into_any_element();
                 rendered_rows.push((format!("c:{}", chat.id), slot_height, element));
+            }
+            if let Some(pair) = &split_card {
+                self.join_split_rows(&mut rendered_rows, pair, theme, cx);
             }
 
             let Some((key, label)) = group else {
@@ -4779,6 +4790,7 @@ impl Shell {
                         None,
                         row.status,
                         is_selected,
+                        None,
                         true,
                         false,
                         None,
@@ -6439,6 +6451,27 @@ mod tests {
 
                 shell.settings.space_filter = Some("a".into());
                 assert_eq!(keys(shell, cx), ["c:a1", "c:a2"]);
+
+                // An open split pulls the pair's later row up beside the
+                // earlier one, across groups, in both the drawn rows (one
+                // card at a1's slot) and the jump/cycle order.
+                shell.settings.space_filter = None;
+                shell
+                    .state
+                    .update(cx, |state, cx| state.select_chat(Some("a1".into()), cx));
+                shell.drop_session_on_side("b1".into(), super::split::SplitSide::Right, cx);
+                assert!(shell.split.is_some());
+                assert_eq!(shell.sidebar_visible_order(cx), ["a1", "b1", "a2"]);
+                shell.settings.sidebar_organization = SidebarOrganization::InOneList;
+                assert_eq!(keys(shell, cx), ["c:a1", "c:a2"]);
+                assert_eq!(shell.sidebar_visible_order(cx), ["a1", "b1", "a2"]);
+
+                // Selecting outside the pair parks it: rows fall back apart.
+                shell
+                    .state
+                    .update(cx, |state, cx| state.select_chat(Some("a2".into()), cx));
+                shell.reconcile_split_with_selection(Some("a2"), cx);
+                assert_eq!(keys(shell, cx), ["c:a1", "c:b1", "c:a2"]);
             })
             .unwrap();
     }

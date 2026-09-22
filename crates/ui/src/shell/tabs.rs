@@ -134,10 +134,78 @@ fn slide_tab<E: gpui::Element + gpui::Styled + 'static>(
     }
 }
 
+/// A tab's trailing slot: the status at rest, the close button under the
+/// pointer. Fixed at 20px so the title never reflows on hover.
+///
+/// NB: no `.occlude()` on the close button — the TAB already occludes (for
+/// the titlebar drag region), and an occluding child would block the tab's
+/// own hover hit-test: a flicker loop (user-reported). `stop_propagation`
+/// on click is enough.
+fn tab_trailing(
+    id: &str,
+    status: ChatIndicator,
+    hovered: bool,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> AnyElement {
+    if hovered {
+        let close_id = id.to_string();
+        return div()
+            .id(SharedString::from(format!("session-tab-close-{id}")))
+            .size(px(20.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.0))
+            .hover(|s| s.bg(crate::theme::wash(0.14)))
+            // The tab owns a drag payload. Claim the close press
+            // before it reaches that parent or GPUI starts a tab
+            // drag instead of delivering the close click.
+            .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.close_session_tab(close_id.clone(), cx);
+            }))
+            .child(
+                icon(icons::CLOSE)
+                    .size(px(12.0))
+                    .text_color(theme.text_muted),
+            )
+            .into_any_element();
+    }
+    // Working animates (the sidebar's miniaturized glyph spinner) instead
+    // of a static dot; every other non-idle status stays a dot.
+    let dot = spaces::status_dot_color(status, theme);
+    div()
+        .size(px(20.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(status == ChatIndicator::Working, |el| {
+            el.child(loaders::mini_glyph_spinner(
+                format!("tab-working-{id}"),
+                2.0,
+                theme.glyph,
+                cx.entity_id(),
+                cx,
+            ))
+        })
+        .when(
+            !matches!(status, ChatIndicator::Idle | ChatIndicator::Working),
+            |el| el.child(div().size(px(6.0)).rounded_full().bg(dot)),
+        )
+        .into_any_element()
+}
+
 /// The split's double chip: both sessions in one selected pill, left half
-/// for the left pane. A half clicks, drags (into the drop zones or along
-/// the strip) and middle-closes like a tab; the pane header carries the
-/// split's own close.
+/// for the left pane. A half clicks, hovers a close, drags (into the drop
+/// zones or along the strip) and middle-closes like a tab; the pane header
+/// carries the split's own close.
 fn split_tab_chip(
     ix: usize,
     halves: [(
@@ -147,6 +215,7 @@ fn split_tab_chip(
         ChatIndicator,
     ); 2],
     selected: Option<&str>,
+    hovered: Option<&str>,
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> gpui::Stateful<gpui::Div> {
@@ -182,10 +251,11 @@ fn split_tab_chip(
         }
         let is_primary = selected == Some(id.as_str());
         let brand = harness.last().copied().map(crate::pickers::harness_brand_icon);
-        let dot = spaces::status_dot_color(status, theme);
+        let trailing = tab_trailing(&id, status, hovered == Some(id.as_str()), theme, cx);
         let select_id = id.clone();
         let middle_id = id.clone();
         let menu_id = id.clone();
+        let hover_id = id.clone();
         chip = chip.child(
             div()
                 .id(SharedString::from(format!("session-tab-{id}")))
@@ -198,7 +268,7 @@ fn split_tab_chip(
                 .items_center()
                 .gap(px(6.0))
                 .pl(px(8.0))
-                .pr(px(6.0))
+                .pr(px(4.0))
                 .rounded(px(8.0))
                 .text_color(if is_primary {
                     theme.text
@@ -208,6 +278,16 @@ fn split_tab_chip(
                     theme.text_muted.opacity(0.6)
                 })
                 .cursor_pointer()
+                // Per-half hover in Shell state, like a tab's: the trailing
+                // slot swaps status for close on the half under the pointer.
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    if *hovered {
+                        this.tab_hover = Some(hover_id.clone());
+                    } else if this.tab_hover.as_deref() == Some(hover_id.as_str()) {
+                        this.tab_hover = None;
+                    }
+                    cx.notify();
+                }))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
                     this.navigate_to(Some(select_id.clone()), true, cx);
@@ -252,19 +332,7 @@ fn split_tab_chip(
                     ))
                 })
                 .child(div().flex_1().min_w_0().truncate().child(title))
-                .when(status == ChatIndicator::Working, |el| {
-                    el.child(loaders::mini_glyph_spinner(
-                        format!("tab-working-{id}"),
-                        2.0,
-                        theme.glyph,
-                        cx.entity_id(),
-                        cx,
-                    ))
-                })
-                .when(
-                    !matches!(status, ChatIndicator::Idle | ChatIndicator::Working),
-                    |el| el.child(div().size(px(6.0)).rounded_full().bg(dot)),
-                ),
+                .child(trailing),
         );
     }
     chip
@@ -860,6 +928,7 @@ impl Shell {
                                     (id.clone(), title, harness, status)
                                 }),
                                 selected.as_deref(),
+                                hovered.as_deref(),
                                 &theme,
                                 cx,
                             );
@@ -884,67 +953,10 @@ impl Shell {
                     let glyph_alpha = if is_selected { 0.9 } else { 0.6 };
                     let brand = harness.last().copied().map(crate::pickers::harness_brand_icon);
                     let select_id = id.clone();
-                    let close_id = id.clone();
                     let middle_id = id.clone();
                     let menu_id = id.clone();
                     let hover_id = id.clone();
-                    // NB: no `.occlude()` on the close button — the TAB already
-                    // occludes (for the titlebar drag region), and an occluding
-                    // child would block the tab's own hover hit-test: a flicker
-                    // loop (user-reported). `stop_propagation` on click is enough.
-                    let trailing: AnyElement = if is_hovered {
-                        div()
-                            .id(SharedString::from(format!("session-tab-close-{id}")))
-                            .size(px(20.0))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(6.0))
-                            .hover(|s| s.bg(crate::theme::wash(0.14)))
-                            // The tab owns a drag payload. Claim the close press
-                            // before it reaches that parent or GPUI starts a tab
-                            // drag instead of delivering the close click.
-                            .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                                window.prevent_default();
-                                cx.stop_propagation();
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.close_session_tab(close_id.clone(), cx);
-                            }))
-                            .child(
-                                icon(icons::CLOSE)
-                                    .size(px(12.0))
-                                    .text_color(theme.text_muted),
-                            )
-                            .into_any_element()
-                    } else {
-                        // Working animates (the sidebar's miniaturized glyph
-                        // spinner) instead of a static dot; every other
-                        // non-idle status stays a dot.
-                        let dot = spaces::status_dot_color(status, &theme);
-                        div()
-                            .size(px(20.0))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .when(status == ChatIndicator::Working, |el| {
-                                el.child(loaders::mini_glyph_spinner(
-                                    format!("tab-working-{id}"),
-                                    2.0,
-                                    theme.glyph,
-                                    cx.entity_id(),
-                                    cx,
-                                ))
-                            })
-                            .when(
-                                !matches!(status, ChatIndicator::Idle | ChatIndicator::Working),
-                                |el| el.child(div().size(px(6.0)).rounded_full().bg(dot)),
-                            )
-                            .into_any_element()
-                    };
+                    let trailing = tab_trailing(&id, status, is_hovered, &theme, cx);
                     let tab_el = div()
                         .id(SharedString::from(format!("session-tab-{id}")))
                         .debug_selector(|| format!("session-tab-{id}"))

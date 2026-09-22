@@ -1652,6 +1652,16 @@ pub fn glass_selected_bg() -> Hsla {
     }
 }
 
+/// The split's partner row in the sidebar: [`glass_selected_bg`] one step
+/// softer, so the selected session reads as THE selection and its partner
+/// as merely also on screen.
+pub fn glass_secondary_bg() -> Hsla {
+    match current_appearance() {
+        Appearance::Dark => wash(0.05),
+        Appearance::Light => wash(0.03),
+    }
+}
+
 /// The user message bubble's plate: the same translucent wash family as
 /// [`glass_selected_bg`], one step softer — at the selection weight the
 /// bubble read too strong for settled content (user report), and an opaque

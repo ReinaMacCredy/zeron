@@ -37,6 +37,47 @@ impl SplitPair {
         }
     }
 
+    pub(super) fn side_of(&self, chat: &str) -> Option<SplitSide> {
+        if self.left == chat {
+            Some(SplitSide::Left)
+        } else if self.right == chat {
+            Some(SplitSide::Right)
+        } else {
+            None
+        }
+    }
+
+    /// Sidebar order while the split is open: the later member moves up
+    /// beside the earlier one (the strip's double-chip rule), so the two
+    /// rows can share one card wherever the earlier one sits.
+    pub(super) fn adjoin(&self, order: &mut Vec<String>) {
+        let (Some(a), Some(b)) = (
+            order.iter().position(|id| *id == self.left),
+            order.iter().position(|id| *id == self.right),
+        ) else {
+            return;
+        };
+        let (first, later) = if a < b { (a, b) } else { (b, a) };
+        let moved = order.remove(later);
+        order.insert(first + 1, moved);
+    }
+
+    /// [`Self::adjoin`] over grouped rows: the later member joins the
+    /// earlier one's group right after it.
+    pub(super) fn adjoin_grouped<G, T>(&self, groups: &mut [(G, Vec<T>)], id: impl Fn(&T) -> &str) {
+        let find = |chat: &str| {
+            groups.iter().enumerate().find_map(|(g, (_, rows))| {
+                rows.iter().position(|row| id(row) == chat).map(|r| (g, r))
+            })
+        };
+        let (Some(a), Some(b)) = (find(&self.left), find(&self.right)) else {
+            return;
+        };
+        let (first, later) = if a < b { (a, b) } else { (b, a) };
+        let moved = groups[later.0].1.remove(later.1);
+        groups[first.0].1.insert(first.1 + 1, moved);
+    }
+
     /// The other member and the side it sits on, for a member `chat`.
     pub(super) fn partner(&self, chat: &str) -> Option<(&str, SplitSide)> {
         if self.left == chat {
@@ -166,10 +207,111 @@ pub(super) fn split_drop(
     }
 }
 
+/// The sidebar pair card's caption strip and its inset around the rows.
+const SPLIT_CARD_CAPTION: f32 = 20.0;
+const SPLIT_CARD_INSET: f32 = 2.0;
+
 impl Shell {
     /// The chat shown in the secondary pane right now.
     pub(super) fn split_chat_id(&self) -> Option<&str> {
         self.split.as_ref().map(|s| s.chat_id.as_str())
+    }
+
+    /// The open split's pair, once [`SplitPair::adjoin`] has put its rows
+    /// side by side in the sidebar; a pinned member keeps its pin slot, so
+    /// the rows then stay apart and wear only their side glyphs.
+    pub(super) fn sidebar_split_card(&self, pinned: &[String]) -> Option<SplitPair> {
+        self.split.as_ref()?;
+        self.split_pair
+            .clone()
+            .filter(|pair| !pinned.contains(&pair.left) && !pinned.contains(&pair.right))
+    }
+
+    /// Fold the pair's two adjacent keyed rows into one card: a caption
+    /// with the split's close above the rows. The card's height adds up
+    /// exactly so the section's disclosure math is unchanged.
+    pub(super) fn join_split_rows(
+        &self,
+        rows: &mut Vec<(String, f32, AnyElement)>,
+        pair: &SplitPair,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) {
+        let keys = [format!("c:{}", pair.left), format!("c:{}", pair.right)];
+        let Some(ix) = rows
+            .windows(2)
+            .position(|w| keys.contains(&w[0].0) && keys.contains(&w[1].0) && w[0].0 != w[1].0)
+        else {
+            return;
+        };
+        let (_, second_height, second) = rows.remove(ix + 1);
+        let (key, first_height, first) = rows.remove(ix);
+        let height = SPLIT_CARD_INSET * 2.0
+            + SPLIT_CARD_CAPTION
+            + SIDEBAR_LIST_GAP * 2.0
+            + first_height
+            + second_height;
+        let caption = div()
+            .h(px(SPLIT_CARD_CAPTION))
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(5.0))
+            .px(px(Theme::SPACE_SM))
+            .text_size(crate::typography::ui_rems(10.0))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(theme.text_muted)
+            .child(
+                icon(icons::SPLIT_COLUMNS)
+                    .size(px(11.0))
+                    .flex_none()
+                    .text_color(theme.text_muted),
+            )
+            .child(SharedString::from("Split"))
+            .child(div().flex_1())
+            .child(
+                div()
+                    .id("sidebar-split-close")
+                    .debug_selector(|| "sidebar-split-close".into())
+                    .size(px(16.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(4.0))
+                    .opacity(0.0)
+                    .group_hover("sidebar-split-card", |s| s.opacity(1.0))
+                    .hover(|s| s.bg(crate::theme::wash(0.14)))
+                    .cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.dissolve_split_pair(cx);
+                    }))
+                    .child(
+                        icon(icons::CLOSE)
+                            .size(px(11.0))
+                            .text_color(theme.text_muted),
+                    ),
+            );
+        let card = div()
+            .id("sidebar-split-card")
+            .debug_selector(|| "sidebar-split-card".into())
+            .group("sidebar-split-card")
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(SIDEBAR_LIST_GAP))
+            .p(px(SPLIT_CARD_INSET))
+            .rounded(px(10.0))
+            .bg(crate::theme::wash(0.03))
+            .shadow(crate::theme::card_selected_shadows())
+            .child(caption)
+            .child(first)
+            .child(second)
+            .into_any_element();
+        rows.insert(ix, (key, height, card));
     }
 
     pub(super) fn split_pair_contains(&self, chat: &str) -> bool {
@@ -726,6 +868,7 @@ mod drag_regressions {
                     None,
                     zeron_proto::ChatIndicator::Idle,
                     false,
+                    None,
                     false,
                     false,
                     None,
@@ -927,6 +1070,41 @@ mod tests {
             pair,
             select: select.map(str::to_string),
         }
+    }
+
+    fn ids(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|id| id.to_string()).collect()
+    }
+
+    #[test]
+    fn adjoin_moves_the_later_member_up_beside_the_earlier_one() {
+        let mut order = ids(&["a", "b", "c", "d"]);
+        pair("a", "d").adjoin(&mut order);
+        assert_eq!(order, ids(&["a", "d", "b", "c"]));
+        let mut order = ids(&["a", "b", "c", "d"]);
+        pair("d", "b").adjoin(&mut order);
+        assert_eq!(order, ids(&["a", "b", "d", "c"]));
+        let mut order = ids(&["a", "b", "c"]);
+        pair("a", "b").adjoin(&mut order);
+        assert_eq!(order, ids(&["a", "b", "c"]));
+    }
+
+    #[test]
+    fn adjoin_leaves_the_order_alone_when_a_member_is_missing() {
+        let mut order = ids(&["a", "b", "c"]);
+        pair("a", "z").adjoin(&mut order);
+        assert_eq!(order, ids(&["a", "b", "c"]));
+    }
+
+    #[test]
+    fn adjoin_grouped_pulls_the_later_member_into_the_earlier_group() {
+        let mut groups = vec![("one", ids(&["a", "b"])), ("two", ids(&["c", "d"]))];
+        pair("d", "a").adjoin_grouped(&mut groups, String::as_str);
+        assert_eq!(groups[0].1, ids(&["a", "d", "b"]));
+        assert_eq!(groups[1].1, ids(&["c"]));
+        let mut groups = vec![("one", ids(&["a", "b", "c"]))];
+        pair("a", "c").adjoin_grouped(&mut groups, String::as_str);
+        assert_eq!(groups[0].1, ids(&["a", "c", "b"]));
     }
 
     #[test]
