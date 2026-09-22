@@ -286,6 +286,20 @@ impl CubicBezier {
         self.sample_y(self.solve_t_for_x(x)).clamp(0.0, 1.0)
     }
 
+    /// [`eval`](Self::eval) without the output clamp: a curve whose control
+    /// points leave the unit square (`y1 > 1`) overshoots past the endpoint
+    /// mid-flight. Manual-drive tweens only — gpui's animation element asserts
+    /// the `[0,1]` range.
+    pub fn eval_unclamped(&self, x: f32) -> f32 {
+        if x <= 0.0 {
+            return 0.0;
+        }
+        if x >= 1.0 {
+            return 1.0;
+        }
+        self.sample_y(self.solve_t_for_x(x))
+    }
+
     /// This curve as a gpui easing closure.
     pub fn easing(self) -> impl Fn(f32) -> f32 + 'static {
         move |x| self.eval(x)
@@ -385,6 +399,13 @@ pub const RESIZE: MotionSpec = MotionSpec::new(200, EASE_OUT);
 pub const TAB_SLIDE: MotionSpec = MotionSpec::new(150, EASE_OUT);
 /// Diff-pane per-file collapse: 180ms height (§1.11).
 pub const COLLAPSE: MotionSpec = MotionSpec::new(180, EASE_OUT);
+/// Stepped-slider snap — CSS `cubic-bezier(0.22, 1.1, 0.36, 1)`: quick, with
+/// a touch of overshoot so the thumb visibly lands on the stop instead of
+/// teleporting. Drive it through [`CubicBezier::eval_unclamped`].
+pub const EASE_SNAP: CubicBezier = CubicBezier::new(0.22, 1.1, 0.36, 1.0);
+pub const SNAP: MotionSpec = MotionSpec::new(180, EASE_SNAP);
+/// Slider thumb press feedback: 150ms ease-out disc scale + shadow.
+pub const PRESS: MotionSpec = MotionSpec::new(150, EASE_OUT);
 /// Reversible new-thread ↔ session handoff. The shared composer moves and
 /// morphs on a fast-starting, soft-landing curve while the canvas/transcript
 /// crossfade is staged around it. Slightly longer than a utility transition,
@@ -832,6 +853,21 @@ pub fn reduced_motion(cx: &App) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// The snap curve overshoots its stop mid-flight and lands exactly on it;
+    /// the clamped `eval` never reports the overshoot.
+    #[test]
+    fn snap_curve_overshoots_then_lands() {
+        use super::EASE_SNAP;
+        let peak = (1..100)
+            .map(|i| EASE_SNAP.eval_unclamped(i as f32 / 100.0))
+            .fold(0.0_f32, f32::max);
+        assert!(peak > 1.0, "no overshoot: peak {peak}");
+        assert!(peak < 1.05, "overshoot too large: peak {peak}");
+        assert_eq!(EASE_SNAP.eval_unclamped(1.0), 1.0);
+        assert_eq!(EASE_SNAP.eval_unclamped(0.0), 0.0);
+        assert!((0..=100).all(|i| EASE_SNAP.eval(i as f32 / 100.0) <= 1.0));
+    }
+
     #[test]
     fn pulse_stride_reestablishes_after_each_paint() {
         let now = Instant::now();

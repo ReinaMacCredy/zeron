@@ -24,8 +24,8 @@ use gpui::{
 use zeron_doc::MessageRole;
 use zeron_engine::registry::HarnessDescriptor;
 use zeron_proto::{
-    ChatConfig, FolderListing, HarnessId, Model, PermissionMode, ReasoningLevel, RepoRef,
-    SandboxLevel, Space,
+    ChatConfig, FolderListing, HarnessId, Model, ModelOption, ModelOptionChoice, PermissionMode,
+    ReasoningLevel, RepoRef, SandboxLevel, Space,
 };
 use zeron_rpc::methods;
 
@@ -545,6 +545,82 @@ struct SettingGroup {
     choices: Vec<SettingChoice>,
 }
 
+/// The speed selects the effort card's bolt can stand in for, as (option id,
+/// the choice that means "fast"): Claude's `fastMode` off/on and Codex's
+/// `serviceTier` Standard/Fast. The bolt owns one only while the model also
+/// has a ladder AND the select is exactly that pair; a richer tier list
+/// (Flex, Ultra Fast) has no bolt shape and stays a row.
+const SPEED_TOGGLES: [(&str, &str); 2] = [("fastMode", "on"), ("serviceTier", "fast")];
+
+/// The model's speed select as the bolt sees it: `(option, off choice, on
+/// choice)`.
+fn speed_toggle_option(
+    model: &Model,
+) -> Option<(&ModelOption, &ModelOptionChoice, &ModelOptionChoice)> {
+    SPEED_TOGGLES.into_iter().find_map(|(id, on_id)| {
+        let option = model.options.iter().find(|o| o.id == id)?;
+        if option.choices.len() != 2 {
+            return None;
+        }
+        let on = option.choices.iter().find(|c| c.id == on_id)?;
+        let off = option.choices.iter().find(|c| c.id != on_id)?;
+        Some((option, off, on))
+    })
+}
+
+/// The bolt's state for the selected model.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SpeedToggle {
+    option: String,
+    off: String,
+    on: String,
+    enabled: bool,
+    /// The current choice is the select's default (nothing to reset).
+    at_default: bool,
+}
+
+/// Effort-card geometry (the synara `Slider size="large"`): a 24px track, a
+/// 28px thumb edge-aligned so it never overhangs, and 4px stop marks on a
+/// rail inset by half the thumb so every mark sits under the thumb's centre.
+const EFFORT_TRACK_HEIGHT: f32 = 24.0;
+const EFFORT_THUMB_SIZE: f32 = 28.0;
+const EFFORT_MARK_SIZE: f32 = 4.0;
+/// Card height beyond a plain trait row (header + track + insets − 32).
+const EFFORT_CARD_EXTRA_HEIGHT: f32 = 30.0;
+
+/// A manual-drive tween (the shell `WidthTween` pattern) for the effort
+/// card: the thumb's glide between stops and the pressed disc's scale.
+#[derive(Clone, Copy, Debug)]
+struct EffortTween {
+    from: f32,
+    to: f32,
+    started: std::time::Instant,
+}
+
+impl EffortTween {
+    fn new(from: f32, to: f32) -> Self {
+        Self {
+            from,
+            to,
+            started: std::time::Instant::now(),
+        }
+    }
+
+    /// Value at `now` on `spec`'s curve (unclamped, so a snap overshoots) and
+    /// whether the tween is still mid-flight.
+    fn eval(&self, spec: motion::MotionSpec, now: std::time::Instant) -> (f32, bool) {
+        let total = spec.total().mul_f32(motion::speed_scale());
+        let raw = now.saturating_duration_since(self.started).as_secs_f32() / total.as_secs_f32();
+        if raw >= 1.0 {
+            return (self.to, false);
+        }
+        (
+            motion::lerp(self.from, self.to, spec.curve.eval_unclamped(raw)),
+            true,
+        )
+    }
+}
+
 /// A mid-chat model pick awaiting the switch-model dialog's answer. With
 /// `harness` set the pick is a provider switch: the chat moves to that
 /// harness, which starts a fresh session and gets the conversation as text.
@@ -646,6 +722,13 @@ pub struct Pickers {
     model_space_below: Option<f32>,
     setting_bounds: Option<gpui::Bounds<gpui::Pixels>>,
     setting_scroll: gpui::ScrollHandle,
+    /// Effort card: the thumb's glide to the last picked stop (as a 0..1
+    /// fraction of the rail), the pressed disc's scale, whether a drag is
+    /// live, and the track's last painted bounds (pointer → stop math).
+    effort_snap: Option<EffortTween>,
+    effort_press: Option<EffortTween>,
+    effort_dragging: bool,
+    effort_track: Option<gpui::Bounds<gpui::Pixels>>,
     harnesses: Loadable<Vec<HarnessDescriptor>>,
     models: HashMap<HarnessId, Loadable<Vec<Model>>>,
     refs: Loadable<Vec<RepoRef>>,
@@ -859,6 +942,10 @@ impl Pickers {
             model_space_below: None,
             setting_bounds: None,
             setting_scroll: gpui::ScrollHandle::new(),
+            effort_snap: None,
+            effort_press: None,
+            effort_dragging: false,
+            effort_track: None,
             harnesses: Loadable::Idle,
             models: HashMap::new(),
             refs: Loadable::Idle,
@@ -1159,6 +1246,9 @@ impl Pickers {
         self.viewed_harness = None;
         self.setting_menu = None;
         self.setting_bounds = None;
+        self.effort_dragging = false;
+        self.effort_press = None;
+        self.effort_snap = None;
         self.menu_bar = popover::MenuScrollbarState::default();
         if self.open.begin_close() {
             popover::reap_popup(cx, |pickers: &mut Self| &mut pickers.open);
@@ -1915,6 +2005,171 @@ impl Pickers {
         cx.notify();
     }
 
+    /// The bolt's speed toggle when the selected model exposes one
+    /// ([`speed_toggle_option`]).
+    fn speed_toggle(&self, cx: &App) -> Option<SpeedToggle> {
+        let model = self.selected_model(cx)?;
+        let (option, off, on) = speed_toggle_option(model)?;
+        let selections = self.explicit_options(cx);
+        let choice = selections
+            .get(&option.id)
+            .and_then(|v| v.as_str())
+            .unwrap_or(&option.default_choice);
+        Some(SpeedToggle {
+            option: option.id.clone(),
+            off: off.id.clone(),
+            on: on.id.clone(),
+            enabled: choice == on.id,
+            at_default: choice == option.default_choice,
+        })
+    }
+
+    /// The ladder stop the effective reasoning level sits on.
+    fn effort_index(&self, cx: &App) -> usize {
+        let ladder = self.trait_ladder(cx);
+        self.effective_reasoning(cx)
+            .and_then(|level| ladder.iter().position(|l| *l == level))
+            .unwrap_or(0)
+    }
+
+    /// Stop `index` as a 0..1 fraction of the rail.
+    fn effort_fraction(index: usize, len: usize) -> f32 {
+        let last = len.saturating_sub(1);
+        if last == 0 {
+            0.0
+        } else {
+            index as f32 / last as f32
+        }
+    }
+
+    /// The thumb's rail position this frame and whether it is still gliding:
+    /// mid-snap it eases from the previous stop, otherwise it sits on the
+    /// effective level. A snap whose target no longer matches the level (the
+    /// ladder or config changed underneath) is dropped, not replayed.
+    fn effort_thumb(&self, cx: &App) -> (f32, bool) {
+        let target = Self::effort_fraction(self.effort_index(cx), self.trait_ladder(cx).len());
+        let Some(snap) = self.effort_snap else {
+            return (target, false);
+        };
+        if (snap.to - target).abs() > 1e-4 || motion::reduced_motion(cx) {
+            return (target, false);
+        }
+        snap.eval(motion::SNAP, std::time::Instant::now())
+    }
+
+    /// The pressed-disc scale progress this frame and whether it is mid-flight.
+    fn effort_press(&self) -> (f32, bool) {
+        self.effort_press
+            .map(|press| press.eval(motion::PRESS, std::time::Instant::now()))
+            .unwrap_or((0.0, false))
+    }
+
+    /// Pick the ladder stop at `index`; the thumb glides there from wherever
+    /// it is now (mid-snap included, so a fast drag never jumps back).
+    fn pick_effort_index(&mut self, index: usize, cx: &mut Context<Self>) {
+        let ladder = self.trait_ladder(cx);
+        let Some(level) = ladder.get(index).copied() else {
+            return;
+        };
+        if self.effective_reasoning(cx) == Some(level) {
+            return;
+        }
+        let (from, _) = self.effort_thumb(cx);
+        self.effort_snap = Some(EffortTween::new(
+            from,
+            Self::effort_fraction(index, ladder.len()),
+        ));
+        self.pick_reasoning(level, cx);
+    }
+
+    fn step_effort(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let len = self.trait_ladder(cx).len();
+        if len == 0 {
+            return;
+        }
+        let next = (self.effort_index(cx) as isize + delta).clamp(0, len as isize - 1);
+        self.pick_effort_index(next as usize, cx);
+    }
+
+    /// Nearest stop to a pointer x over the rail (the track minus the
+    /// edge-aligned thumb), from the track's last painted bounds.
+    fn effort_index_at(&self, x: gpui::Pixels, cx: &App) -> Option<usize> {
+        let track = self.effort_track?;
+        let last = self.trait_ladder(cx).len().checked_sub(1)?;
+        let usable = (f32::from(track.size.width) - EFFORT_THUMB_SIZE).max(1.0);
+        let along = (f32::from(x - track.origin.x) - EFFORT_THUMB_SIZE / 2.0).clamp(0.0, usable);
+        Some((along / usable * last as f32).round() as usize)
+    }
+
+    fn set_effort_pressed(&mut self, pressed: bool, cx: &mut Context<Self>) {
+        if self.effort_dragging == pressed {
+            return;
+        }
+        let (from, _) = self.effort_press();
+        self.effort_dragging = pressed;
+        self.effort_press = Some(EffortTween::new(from, if pressed { 1.0 } else { 0.0 }));
+        cx.notify();
+    }
+
+    fn toggle_speed(&mut self, cx: &mut Context<Self>) {
+        let Some(toggle) = self.speed_toggle(cx) else {
+            return;
+        };
+        let choice = if toggle.enabled {
+            toggle.off
+        } else {
+            toggle.on
+        };
+        let default = self
+            .selected_model(cx)
+            .and_then(|m| m.options.iter().find(|o| o.id == toggle.option))
+            .is_some_and(|o| o.default_choice == choice);
+        self.pick_option(toggle.option, choice, default, cx);
+    }
+
+    /// The card's reset: default reasoning + the speed select back to its
+    /// default, in ONE write (`update_chat_config` is a single mutate slot;
+    /// two picks back to back would drop the first mid-flight).
+    fn reset_effort(&mut self, cx: &mut Context<Self>) {
+        let ladder = self.trait_ladder(cx);
+        let default_level = default_reasoning(&ladder);
+        let speed_option = self.speed_toggle(cx).map(|toggle| toggle.option);
+        if let Some(index) = default_level.and_then(|level| ladder.iter().position(|l| *l == level))
+            && self.effort_index(cx) != index
+        {
+            let (from, _) = self.effort_thumb(cx);
+            self.effort_snap = Some(EffortTween::new(
+                from,
+                Self::effort_fraction(index, ladder.len()),
+            ));
+        }
+        if self.chat_id(cx).is_some() {
+            self.update_chat_config(cx, None, move |config| {
+                if let Some(level) = default_level {
+                    config.reasoning = Some(level);
+                }
+                if let Some(option) = &speed_option {
+                    config.model_options.remove(option);
+                }
+            });
+        } else {
+            if let Some(level) = default_level {
+                self.config.reasoning = Some(level);
+                self.defaults.reasoning = Some(level);
+            }
+            if let Some(option) = &speed_option
+                && let Some(harness) = self.effective_harness(cx)
+                && let Some(model) = self.selected_model(cx).map(|m| m.id.clone())
+            {
+                self.defaults
+                    .model_options_mut(harness, &model)
+                    .remove(option);
+            }
+            self.save_defaults();
+        }
+        cx.notify();
+    }
+
     /// Apply `change` to the selected chat's effective config and persist it:
     /// optimistic row stamp (chips update on click) + `Mutate setChatConfig`
     /// (LWW workspace write — restarts and other devices see it). The written
@@ -2117,7 +2372,10 @@ impl Pickers {
         if self.setting_menu.is_some() {
             self.activate_setting_choice(cx);
         } else if let Some(index) = self.active.checked_sub(self.model_rows_len(cx)) {
-            if let Some(group) = self.setting_groups(cx).get(index) {
+            // The effort card has no choices menu (←/→ step it in place).
+            if let Some(group) = self.setting_groups(cx).get(index)
+                && group.id != ModelSetting::Reasoning
+            {
                 self.open_setting(group.id.clone(), cx);
             }
         } else {
@@ -2665,13 +2923,26 @@ impl Pickers {
             cx.notify();
             return;
         }
-        if event.keystroke.key == "right"
+        if matches!(event.keystroke.key.as_str(), "left" | "right")
             && self.open_kind() == Some(PickerKind::HarnessModel)
-            && self.active >= self.model_rows_len(cx)
+            && let Some(index) = self.active.checked_sub(self.model_rows_len(cx))
         {
-            self.activate_model_row(cx);
-            cx.stop_propagation();
-            return;
+            // ←/→ on the effort card step the ladder; → on any other trait
+            // row opens its choices.
+            let on_card = self
+                .setting_groups(cx)
+                .get(index)
+                .is_some_and(|g| g.id == ModelSetting::Reasoning);
+            if on_card {
+                self.step_effort(if event.keystroke.key == "left" { -1 } else { 1 }, cx);
+                cx.stop_propagation();
+                return;
+            }
+            if event.keystroke.key == "right" {
+                self.activate_model_row(cx);
+                cx.stop_propagation();
+                return;
+            }
         }
         // ⌘1…⌘9 jump-picks the Nth visible model row (t3 modelPickerKeys;
         // the chips on the rows advertise these).
@@ -3767,10 +4038,12 @@ impl Pickers {
         let list_height = if self.chat_id(cx).is_none() {
             // Keep the settings tray visible while the model list scrolls
             // within the room below the new-chat composer.
-            let tray_height = if self.setting_groups(cx).is_empty() {
+            let groups = self.setting_groups(cx);
+            let tray_height = if groups.is_empty() {
                 0.0
             } else {
-                self.setting_groups(cx).len() as f32 * 32.0 + 7.0
+                let card = groups.iter().any(|g| g.id == ModelSetting::Reasoning);
+                groups.len() as f32 * 32.0 + 7.0 + if card { EFFORT_CARD_EXTRA_HEIGHT } else { 0.0 }
             };
             (self.model_space_below.unwrap_or(640.0) - 82.0 - tray_height).clamp(30.0, 216.0)
         } else {
@@ -4288,6 +4561,12 @@ impl Pickers {
     fn setting_groups(&self, cx: &App) -> Vec<SettingGroup> {
         let mut groups = Vec::new();
         let levels = self.trait_ladder(cx);
+        // With a ladder the Reasoning group renders as the effort card, whose
+        // bolt owns the speed select; ladderless models keep it as a row.
+        let bolt_owns = (!levels.is_empty())
+            .then(|| self.selected_model(cx).and_then(speed_toggle_option))
+            .flatten()
+            .map(|(option, _, _)| option.id.clone());
         if !levels.is_empty() {
             let selected = self.effective_reasoning(cx);
             let default = default_reasoning(&levels);
@@ -4309,7 +4588,7 @@ impl Pickers {
         if let Some(model) = self.selected_model(cx) {
             let selections = self.explicit_options(cx);
             for option in &model.options {
-                if option.choices.is_empty() {
+                if option.choices.is_empty() || bolt_owns.as_deref() == Some(option.id.as_str()) {
                     continue;
                 }
                 let selected = selections
@@ -4438,6 +4717,10 @@ impl Pickers {
         let base_index = self.model_rows_len(cx);
         let mut rows = Vec::new();
         for (ix, group) in self.setting_groups(cx).into_iter().enumerate() {
+            if group.id == ModelSetting::Reasoning {
+                rows.push(self.render_effort_card(self.active == base_index + ix, &theme, cx));
+                continue;
+            }
             let open = self.setting_menu.as_ref() == Some(&group.id);
             let value = group
                 .choices
@@ -4678,7 +4961,8 @@ impl Pickers {
                             }
                         }),
                     )
-                    .child(row),
+                    .child(row)
+                    .into_any_element(),
             );
         }
         div()
@@ -4687,6 +4971,271 @@ impl Pickers {
             .gap(px(2.0))
             .py(px(popover::CARD_INSET))
             .children(rows)
+            .into_any_element()
+    }
+
+    /// The Reasoning group as the effort card (synara's
+    /// `ComposerEffortSliderCard`): bolt (speed) · level · reset over a stepped
+    /// track with one stop per ladder level. A press or drag commits the
+    /// nearest stop and the thumb glides there on [`motion::SNAP`]; the disc
+    /// swells while held. `highlighted` is the keyboard cursor (←/→ step).
+    fn render_effort_card(
+        &mut self,
+        highlighted: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let ladder = self.trait_ladder(cx);
+        let len = ladder.len();
+        let rail_len = len.saturating_sub(1).max(1) as f32;
+        let selected = self.effort_index(cx);
+        let (thumb, _) = self.effort_thumb(cx);
+        let (press, _) = self.effort_press();
+        let speed = self.speed_toggle(cx);
+        let effort_is_default = ladder.get(selected).copied() == default_reasoning(&ladder);
+        let can_reset = speed.as_ref().is_some_and(|t| !t.at_default) || !effort_is_default;
+        let dragging = self.effort_dragging;
+        let label = ladder
+            .get(selected)
+            .map(|level| reasoning_label(*level))
+            .unwrap_or("Effort");
+
+        let icon_button = |id: &'static str| {
+            div()
+                .id(id)
+                .flex_none()
+                .size(px(24.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(8.0))
+        };
+        let bolt = match speed.map(|t| t.enabled) {
+            Some(enabled) => icon_button("effort-fast")
+                .cursor_pointer()
+                .hover(|el| el.bg(crate::theme::wash(0.06)))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.toggle_speed(cx);
+                    cx.stop_propagation();
+                }))
+                .child(
+                    crate::icons::icon(if enabled {
+                        crate::icons::BOLT_BOLD
+                    } else {
+                        crate::icons::BOLT
+                    })
+                    .size(px(14.0))
+                    .text_color(if enabled {
+                        theme.accent
+                    } else {
+                        theme.text_muted
+                    }),
+                )
+                .into_any_element(),
+            None => div().flex_none().size(px(24.0)).into_any_element(),
+        };
+        let reset = icon_button("effort-reset")
+            .when(can_reset, |el| {
+                el.cursor_pointer()
+                    .hover(|el| el.bg(crate::theme::wash(0.06)))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.reset_effort(cx);
+                        cx.stop_propagation();
+                    }))
+            })
+            .when(!can_reset, |el| el.opacity(0.35))
+            .child(
+                crate::icons::icon(crate::icons::RESTART)
+                    .size(px(14.0))
+                    .text_color(theme.text_muted),
+            );
+        let header = div()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .child(bolt)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_center()
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.accent)
+                    .child(SharedString::from(label)),
+            )
+            .child(reset);
+
+        // At the first stop the fill sits entirely under the thumb, and
+        // anti-aliasing would leave a sliver of accent peeking out: fade it
+        // with the thumb's travel instead of relying on the overlap.
+        let fill_opacity = (thumb * rail_len).clamp(0.0, 1.0);
+        let fill = div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left_0()
+            .w(gpui::relative(thumb.max(0.0)))
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(px(-EFFORT_THUMB_SIZE / 2.0))
+                    .right(px(-EFFORT_THUMB_SIZE / 2.0))
+                    .rounded_full()
+                    .bg(theme.accent)
+                    .opacity(fill_opacity),
+            );
+        let marks = (0..len).map(|i| {
+            div()
+                .absolute()
+                .top(px((EFFORT_TRACK_HEIGHT - EFFORT_MARK_SIZE) / 2.0))
+                .left(gpui::relative(i as f32 / rail_len))
+                .ml(px(-EFFORT_MARK_SIZE / 2.0))
+                .size(px(EFFORT_MARK_SIZE))
+                .rounded_full()
+                .bg(if i <= selected {
+                    gpui::white().opacity(0.55)
+                } else {
+                    crate::theme::hairline(0.28)
+                })
+        });
+        // Press feedback swells the inner disc, not the thumb box: the box
+        // is what the rail positions, so scaling it would shift the thumb
+        // off the track edge and expose the fill behind it.
+        let disc = EFFORT_THUMB_SIZE * (1.0 + 0.05 * press);
+        let mut shadows = vec![
+            gpui::BoxShadow {
+                color: gpui::black().opacity(motion::lerp(0.18, 0.22, press)),
+                offset: gpui::point(px(0.0), px(motion::lerp(1.0, 2.0, press))),
+                blur_radius: px(motion::lerp(2.0, 5.0, press)),
+                spread_radius: px(0.0),
+                inset: false,
+            },
+            gpui::BoxShadow {
+                color: gpui::black().opacity(0.08),
+                offset: gpui::point(px(0.0), px(0.0)),
+                blur_radius: px(0.0),
+                spread_radius: px(0.5),
+                inset: false,
+            },
+        ];
+        if highlighted {
+            shadows.push(gpui::BoxShadow {
+                color: theme.accent.opacity(0.4),
+                offset: gpui::point(px(0.0), px(0.0)),
+                blur_radius: px(0.0),
+                spread_radius: px(3.0),
+                inset: false,
+            });
+        }
+        let thumb_el = div()
+            .debug_selector(|| "effort-thumb".into())
+            .absolute()
+            .top(px((EFFORT_TRACK_HEIGHT - EFFORT_THUMB_SIZE) / 2.0))
+            .left(gpui::relative(thumb))
+            .ml(px(-EFFORT_THUMB_SIZE / 2.0))
+            .size(px(EFFORT_THUMB_SIZE))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(disc))
+                    .rounded_full()
+                    .bg(gpui::white())
+                    .shadow(shadows),
+            );
+        let rail = div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left(px(EFFORT_THUMB_SIZE / 2.0))
+            .right(px(EFFORT_THUMB_SIZE / 2.0))
+            .child(fill)
+            .children(marks)
+            .child(thumb_el);
+
+        // The pointer may leave the track mid-drag, so while held the move
+        // and release are read window-wide from the canvas paint (the same
+        // hook the submenu corridor uses) rather than from the track's own
+        // listeners.
+        let measure = cx.entity().downgrade();
+        let follow = cx.entity().downgrade();
+        let canvas = gpui::canvas(
+            move |bounds, _, cx| {
+                let _ = measure.update(cx, |this, _| this.effort_track = Some(bounds));
+            },
+            move |_, _, window, _| {
+                if !dragging {
+                    return;
+                }
+                let on_move = follow.clone();
+                window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, _, cx| {
+                    if phase != gpui::DispatchPhase::Bubble {
+                        return;
+                    }
+                    let _ = on_move.update(cx, |this, cx| {
+                        if !this.effort_dragging {
+                            return;
+                        }
+                        if let Some(index) = this.effort_index_at(event.position.x, cx) {
+                            this.pick_effort_index(index, cx);
+                        }
+                    });
+                });
+                let on_up = follow.clone();
+                window.on_mouse_event(move |_: &gpui::MouseUpEvent, phase, _, cx| {
+                    if phase != gpui::DispatchPhase::Bubble {
+                        return;
+                    }
+                    let _ = on_up.update(cx, |this, cx| this.set_effort_pressed(false, cx));
+                });
+            },
+        )
+        .absolute()
+        .inset_0();
+        let track = div()
+            .debug_selector(|| "effort-track".into())
+            .relative()
+            .h(px(EFFORT_TRACK_HEIGHT))
+            .w_full()
+            .rounded_full()
+            .bg(crate::theme::hairline(0.14))
+            .cursor_grab()
+            .when(dragging, |el| el.cursor_grabbing())
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                    if let Some(index) = this.effort_index_at(event.position.x, cx) {
+                        this.pick_effort_index(index, cx);
+                    }
+                    this.set_effort_pressed(true, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            // A click can release before the frame that arms the window-wide
+            // hook above paints; the track's own listeners cover that case.
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.set_effort_pressed(false, cx)),
+            )
+            .on_mouse_up_out(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.set_effort_pressed(false, cx)),
+            )
+            .child(rail)
+            .child(canvas);
+
+        div()
+            .px(px(4.0))
+            .pt(px(2.0))
+            .pb(px(4.0))
+            .child(header)
+            .child(div().mt(px(4.0)).px(px(2.0)).py(px(2.0)).child(track))
             .into_any_element()
     }
 }
@@ -5251,6 +5800,13 @@ impl Render for Pickers {
             }
             None => None,
         };
+        // The effort card's tweens are manual-drive (see `EffortTween`): keep
+        // frames coming while the thumb glides or the pressed disc settles.
+        if matches!(overlay, Some((PickerKind::HarnessModel, _)))
+            && (self.effort_thumb(cx).1 || self.effort_press().1)
+        {
+            window.request_animation_frame();
+        }
 
         // The composer places this model chip beside the attachment button.
         // ONE chip for the whole run identity (user request): brand icon +
@@ -5833,12 +6389,16 @@ mod tests {
                     is_held: false,
                     prefer_character_input: false,
                 };
+                // The effort card is the first trait row: ←/→ step the ladder
+                // in place (clamped at the ends), Enter opens no submenu.
                 pickers.active = pickers.model_rows_len(cx);
+                assert_eq!(pickers.effective_reasoning(cx), Some(ReasoningLevel::High));
                 pickers.on_key_down(&key("right"), window, cx);
-                assert_eq!(pickers.setting_menu, Some(ModelSetting::Reasoning));
-                pickers.on_key_down(&key("up"), window, cx);
-                pickers.on_key_down(&key("enter"), window, cx);
+                assert_eq!(pickers.effective_reasoning(cx), Some(ReasoningLevel::High));
+                pickers.on_key_down(&key("left"), window, cx);
                 assert_eq!(pickers.effective_reasoning(cx), Some(ReasoningLevel::Low));
+                assert!(pickers.effort_snap.is_some());
+                pickers.on_key_down(&key("enter"), window, cx);
                 assert!(pickers.setting_menu.is_none());
                 assert!(pickers.is_open());
                 for id in ["contextWindow", "serviceTier"] {
@@ -5864,18 +6424,17 @@ mod tests {
                     pickers.resolved(cx).model_options["serviceTier"],
                     "extended"
                 );
-                pickers.open_setting(ModelSetting::Reasoning, cx);
+                pickers.open_setting(ModelSetting::Option("serviceTier".into()), cx);
                 pickers.on_key_down(&key("escape"), window, cx);
                 assert!(pickers.is_open());
                 assert!(pickers.setting_menu.is_none());
-                pickers.open_setting(ModelSetting::Reasoning, cx);
+                pickers.open_setting(ModelSetting::Option("serviceTier".into()), cx);
                 pickers.pick_model("haiku".into(), cx);
                 assert!(pickers.setting_menu.is_none());
                 assert!(pickers.setting_groups(cx).is_empty());
             })
             .unwrap();
         for setting in [
-            ModelSetting::Reasoning,
             ModelSetting::Option("contextWindow".into()),
             ModelSetting::Option("serviceTier".into()),
         ] {
@@ -5897,13 +6456,9 @@ mod tests {
             .unwrap();
         cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
             .unwrap();
+        // Arrowing down past the model rows lands on the effort card; → steps
+        // the ladder from the Low picked above.
         cx.simulate_keystrokes(handle.into(), "down down right");
-        handle
-            .read_with(cx, |pickers, _| {
-                assert_eq!(pickers.setting_menu, Some(ModelSetting::Reasoning))
-            })
-            .unwrap();
-        cx.simulate_keystrokes(handle.into(), "down enter");
         handle
             .read_with(cx, |pickers, cx| {
                 assert_eq!(pickers.effective_reasoning(cx), Some(ReasoningLevel::High));
@@ -5911,6 +6466,228 @@ mod tests {
                 assert!(pickers.is_open());
             })
             .unwrap();
+        cx.simulate_keystrokes(handle.into(), "down right");
+        handle
+            .read_with(cx, |pickers, _| {
+                assert_eq!(
+                    pickers.setting_menu,
+                    Some(ModelSetting::Option("contextWindow".into()))
+                )
+            })
+            .unwrap();
+    }
+
+    /// A model with a ladder folds its speed select into the effort card's
+    /// bolt (no Fast Mode / Service Tier row): Claude's `fastMode` off/on and
+    /// Codex's `serviceTier` Standard/Fast alike. A ladderless model keeps
+    /// the row, and so does a tier list the bolt cannot express. The card's
+    /// reset restores the default level and drops the select in one write.
+    #[gpui::test]
+    fn effort_card_bolt_owns_the_speed_select_and_reset_clears_both(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            crate::composer::init(cx, Default::default());
+        });
+        let handle = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Pickers::new(state, cx)
+        });
+        let select = |id: &str, label: &str, choices: &[&str]| ModelOption {
+            id: id.into(),
+            label: label.into(),
+            default_choice: choices[0].into(),
+            choices: choices
+                .iter()
+                .map(|id| ModelOptionChoice {
+                    id: (*id).into(),
+                    label: (*id).into(),
+                })
+                .collect(),
+        };
+        let ladder = vec![
+            ReasoningLevel::Low,
+            ReasoningLevel::Medium,
+            ReasoningLevel::High,
+        ];
+        let group_ids = |pickers: &Pickers, cx: &App| -> Vec<ModelSetting> {
+            pickers
+                .setting_groups(cx)
+                .into_iter()
+                .map(|g| g.id)
+                .collect()
+        };
+        handle
+            .update(cx, |pickers, _, cx| {
+                let mut opus = bare_model("opus", "Opus");
+                opus.reasoning_levels = ladder.clone();
+                opus.options = vec![select("fastMode", "Fast Mode", &["off", "on"])];
+                let mut hermes = bare_model("hermes", "Hermes");
+                hermes.options = vec![select("fastMode", "Fast Mode", &["off", "on"])];
+                let mut astra = bare_model("astra", "GPT-6-Astra");
+                astra.reasoning_levels = ladder.clone();
+                astra.options = vec![select("serviceTier", "Service Tier", &["default", "fast"])];
+                let mut tiered = bare_model("tiered", "Tiered");
+                tiered.reasoning_levels = ladder.clone();
+                tiered.options = vec![select(
+                    "serviceTier",
+                    "Service Tier",
+                    &["default", "fast", "flex"],
+                )];
+                pickers.config.harness = Some(HarnessId::ClaudeCode);
+                pickers.harnesses =
+                    Loadable::Ready(vec![descriptor(HarnessId::ClaudeCode, "Claude Code")]);
+                pickers.models.insert(
+                    HarnessId::ClaudeCode,
+                    Loadable::Ready(vec![opus, hermes, astra, tiered]),
+                );
+                pickers.pick_model("opus".into(), cx);
+                pickers.open.open(PickerKind::HarnessModel);
+
+                assert_eq!(group_ids(pickers, cx), vec![ModelSetting::Reasoning]);
+                let toggle = pickers.speed_toggle(cx).expect("fastMode bolt");
+                assert_eq!((toggle.enabled, toggle.at_default), (false, true));
+                assert_eq!(pickers.effort_index(cx), 2);
+
+                pickers.toggle_speed(cx);
+                let toggle = pickers.speed_toggle(cx).expect("fastMode bolt");
+                assert_eq!((toggle.enabled, toggle.at_default), (true, false));
+                assert_eq!(pickers.resolved(cx).model_options["fastMode"], "on");
+                pickers.pick_effort_index(0, cx);
+                assert_eq!(pickers.effective_reasoning(cx), Some(ReasoningLevel::Low));
+                assert_eq!(
+                    pickers.effort_snap.map(|s| (s.from, s.to)),
+                    Some((1.0, 0.0))
+                );
+
+                pickers.reset_effort(cx);
+                assert_eq!(pickers.effective_reasoning(cx), Some(ReasoningLevel::High));
+                assert!(!pickers.speed_toggle(cx).unwrap().enabled);
+                assert!(!pickers.resolved(cx).model_options.contains_key("fastMode"));
+                assert_eq!(pickers.effort_snap.map(|s| s.to), Some(1.0));
+
+                // Codex: the Standard/Fast tier select is the bolt.
+                pickers.pick_model("astra".into(), cx);
+                assert_eq!(group_ids(pickers, cx), vec![ModelSetting::Reasoning]);
+                let toggle = pickers.speed_toggle(cx).expect("serviceTier bolt");
+                assert_eq!(
+                    (toggle.off.as_str(), toggle.on.as_str()),
+                    ("default", "fast")
+                );
+                pickers.toggle_speed(cx);
+                assert_eq!(pickers.resolved(cx).model_options["serviceTier"], "fast");
+                assert!(pickers.speed_toggle(cx).unwrap().enabled);
+                pickers.toggle_speed(cx);
+                assert!(
+                    !pickers
+                        .resolved(cx)
+                        .model_options
+                        .contains_key("serviceTier")
+                );
+
+                // Three tiers have no bolt shape: the row stays.
+                pickers.pick_model("tiered".into(), cx);
+                assert_eq!(pickers.speed_toggle(cx), None);
+                assert_eq!(
+                    group_ids(pickers, cx),
+                    vec![
+                        ModelSetting::Reasoning,
+                        ModelSetting::Option("serviceTier".into()),
+                    ]
+                );
+
+                // No ladder, no card: the toggle is a plain row.
+                pickers.pick_model("hermes".into(), cx);
+                assert_eq!(
+                    group_ids(pickers, cx),
+                    vec![ModelSetting::Option("fastMode".into())]
+                );
+            })
+            .unwrap();
+    }
+
+    /// A press on the track picks the nearest stop and starts the snap; once
+    /// it lands, the thumb's painted box sits edge-aligned on that stop of the
+    /// rail (the geometry `effort_index_at` inverts).
+    #[gpui::test]
+    fn effort_card_press_snaps_the_thumb_to_the_stop(cx: &mut gpui::TestAppContext) {
+        struct CardFixture {
+            pickers: Entity<Pickers>,
+        }
+        impl Render for CardFixture {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let menu = self
+                    .pickers
+                    .update(cx, |pickers, cx| pickers.render_harness_model_popover(cx));
+                div()
+                    .size_full()
+                    .p(px(40.0))
+                    .child(div().w(px(304.0)).child(menu))
+            }
+        }
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            crate::composer::init(cx, Default::default());
+        });
+        let pickers = cx.update(|cx| {
+            let state = cx.new(|_| AppState::new());
+            cx.new(|cx| Pickers::new(state, cx))
+        });
+        pickers.update(cx, |pickers, cx| {
+            let mut model = bare_model("fable", "Fable");
+            model.reasoning_levels = vec![
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High,
+                ReasoningLevel::XHigh,
+            ];
+            pickers.config.harness = Some(HarnessId::ClaudeCode);
+            pickers.harnesses =
+                Loadable::Ready(vec![descriptor(HarnessId::ClaudeCode, "Claude Code")]);
+            pickers
+                .models
+                .insert(HarnessId::ClaudeCode, Loadable::Ready(vec![model]));
+            pickers.pick_model("fable".into(), cx);
+            pickers.open.open(PickerKind::HarnessModel);
+        });
+        let (_fixture, cx) = cx.add_window_view(|_, _| CardFixture {
+            pickers: pickers.clone(),
+        });
+        cx.run_until_parked();
+        let track = cx.debug_bounds("effort-track").expect("track painted");
+        let thumb = cx.debug_bounds("effort-thumb").expect("thumb painted");
+        let usable = track.size.width - px(EFFORT_THUMB_SIZE);
+        // Default High = stop 2 of 4.
+        let high_x = track.origin.x + usable * (2.0 / 3.0);
+        assert!(
+            (thumb.origin.x - high_x).abs() < px(1.0),
+            "{thumb:?} vs {high_x:?}"
+        );
+        assert_eq!(thumb.size.width, px(EFFORT_THUMB_SIZE));
+
+        // Press on the Low stop (the thumb's centre when it sits there).
+        cx.simulate_click(
+            gpui::point(
+                track.origin.x + px(EFFORT_THUMB_SIZE / 2.0),
+                track.center().y,
+            ),
+            gpui::Modifiers::default(),
+        );
+        pickers.read_with(cx, |pickers, cx| {
+            assert_eq!(pickers.effective_reasoning(cx), Some(ReasoningLevel::Low));
+            let (position, gliding) = pickers.effort_thumb(cx);
+            assert!(gliding, "snap runs after the press");
+            assert!(position > 0.0, "thumb starts from High, not on Low");
+            assert!(!pickers.effort_dragging, "click released");
+        });
+        std::thread::sleep(Duration::from_millis(400));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
+        let landed = cx.debug_bounds("effort-thumb").expect("thumb painted");
+        assert!(
+            (landed.origin.x - track.origin.x).abs() < px(1.0),
+            "thumb edge-aligned on the first stop: {landed:?} vs {track:?}"
+        );
+        pickers.read_with(cx, |pickers, cx| assert!(!pickers.effort_thumb(cx).1));
     }
 
     #[gpui::test]
@@ -5951,19 +6728,26 @@ mod tests {
                 let state = cx.new(|_| AppState::new());
                 let pickers = cx.new(|cx| Pickers::new(state, cx));
                 pickers.update(cx, |pickers, cx| {
+                    // Two submenu rows (a ladder would render as the effort
+                    // card, which opens no child): the corridor logic under
+                    // test needs a hovered trigger and a sibling trigger.
                     let mut model = bare_model("test", "Test model");
-                    model.reasoning_levels = vec![ReasoningLevel::Low, ReasoningLevel::High];
-                    model.options.push(ModelOption {
-                        id: "contextWindow".into(),
-                        label: "Context window".into(),
-                        choices: ["200k", "1m"]
-                            .map(|id| ModelOptionChoice {
-                                id: id.into(),
-                                label: id.into(),
-                            })
-                            .into(),
-                        default_choice: "200k".into(),
-                    });
+                    for (id, label) in [
+                        ("serviceTier", "Service tier"),
+                        ("contextWindow", "Context window"),
+                    ] {
+                        model.options.push(ModelOption {
+                            id: id.into(),
+                            label: label.into(),
+                            choices: ["200k", "1m"]
+                                .map(|id| ModelOptionChoice {
+                                    id: id.into(),
+                                    label: id.into(),
+                                })
+                                .into(),
+                            default_choice: "200k".into(),
+                        });
+                    }
                     pickers.config.harness = Some(HarnessId::ClaudeCode);
                     pickers.harnesses =
                         Loadable::Ready(vec![descriptor(HarnessId::ClaudeCode, "Claude Code")]);
@@ -6034,7 +6818,10 @@ mod tests {
             })
             .unwrap();
             let submenu = pickers.read_with(cx, |pickers, _| {
-                assert_eq!(pickers.setting_menu, Some(ModelSetting::Reasoning));
+                assert_eq!(
+                    pickers.setting_menu,
+                    Some(ModelSetting::Option("serviceTier".into()))
+                );
                 assert_eq!(pickers.setting_on_left, on_left);
                 pickers
                     .setting_bounds
@@ -6078,7 +6865,10 @@ mod tests {
             );
             cx.update_window(handle.into(), |_, window, cx| {
                 hover(window, cx, diagonal);
-                assert_eq!(pickers.read(cx).setting_menu, Some(ModelSetting::Reasoning));
+                assert_eq!(
+                    pickers.read(cx).setting_menu,
+                    Some(ModelSetting::Option("serviceTier".into()))
+                );
                 assert!(pickers.read(cx).setting_hover_pending.is_some());
             })
             .unwrap();
@@ -6099,7 +6889,7 @@ mod tests {
             cx.update_window(handle.into(), |_, window, cx| {
                 assert_eq!(
                     pickers.read(cx).setting_menu,
-                    Some(ModelSetting::Reasoning),
+                    Some(ModelSetting::Option("serviceTier".into())),
                     "forward progress renews grace"
                 );
                 hover(window, cx, submenu.center());
@@ -6109,7 +6899,10 @@ mod tests {
             cx.executor().advance_clock(Duration::from_millis(400));
             cx.run_until_parked();
             pickers.read_with(cx, |pickers, _| {
-                assert_eq!(pickers.setting_menu, Some(ModelSetting::Reasoning));
+                assert_eq!(
+                    pickers.setting_menu,
+                    Some(ModelSetting::Option("serviceTier".into()))
+                );
                 assert!(pickers.setting_hover_pending.is_none());
             });
             // Resting on the sibling expresses intent to switch after grace.
@@ -6171,7 +6964,10 @@ mod tests {
                     assert_eq!(pickers.read(cx).active, 0);
                     assert!(pickers.read(cx).is_open());
                     hover(window, cx, trigger);
-                    assert_eq!(pickers.read(cx).setting_menu, Some(ModelSetting::Reasoning));
+                    assert_eq!(
+                        pickers.read(cx).setting_menu,
+                        Some(ModelSetting::Option("serviceTier".into()))
+                    );
                 })
                 .unwrap();
             }
@@ -6196,13 +6992,27 @@ mod tests {
                 cx.run_until_parked();
                 pickers.read_with(cx, |pickers, _| {
                     assert!(pickers.is_open());
-                    assert_eq!(pickers.setting_menu, Some(ModelSetting::Reasoning));
+                    assert_eq!(
+                        pickers.setting_menu,
+                        Some(ModelSetting::Option("serviceTier".into()))
+                    );
                 });
             }
+            // The target is the submenu's "200k" (default) choice: seed the
+            // non-default first so the click has something to undo.
+            pickers.update(cx, |pickers, cx| {
+                pickers.pick_option("serviceTier".into(), "1m".into(), false, cx);
+                assert_eq!(pickers.resolved(cx).model_options["serviceTier"], "1m");
+            });
             cx.update_window(handle.into(), |_, window, cx| click(window, cx, target))
                 .unwrap();
             pickers.read_with(cx, |pickers, cx| {
-                assert_eq!(pickers.effective_reasoning(cx), Some(ReasoningLevel::Low));
+                assert!(
+                    !pickers
+                        .resolved(cx)
+                        .model_options
+                        .contains_key("serviceTier")
+                );
                 assert!(pickers.setting_menu.is_none());
                 assert!(pickers.is_open());
             });
