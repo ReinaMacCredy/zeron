@@ -3273,8 +3273,9 @@ impl DocHost {
 
     /// Promote one held row without ever interrupting a turn. A live,
     /// steerable turn receives it as steering; if that turn has already ended,
-    /// it starts normally as the next turn. Unsupported harnesses and
-    /// attachment-bearing rows stay untouched.
+    /// it starts normally as the next turn. Unsupported harnesses stay
+    /// untouched. Attachments ride the steer as path refs in the prompt
+    /// trailer (the agent opens them), never as inline image blocks.
     pub async fn steer_queued_now(&self, chat_id: &str, id: &str) -> Result<bool, EngineError> {
         if !self.is_host(chat_id) {
             return Err(EngineError::Other(format!(
@@ -3300,11 +3301,6 @@ impl DocHost {
         else {
             return Ok(false);
         };
-        if !candidate.attachments.is_empty() {
-            return Err(EngineError::Other(
-                "messages with attachments cannot be steered mid-turn".into(),
-            ));
-        }
         if candidate.delivery_gate.is_some() {
             return Err(EngineError::Other(
                 "queued message is blocked for editing or review".into(),

@@ -705,6 +705,52 @@ async fn a_steer_now_submit_steers_a_live_steerable_turn() {
     core.shutdown().await;
 }
 
+/// A steer-now submit carrying attachments steers too: the files ride the
+/// prompt as path refs instead of leaving the row parked in the queue
+/// (user report: a screenshot sent with the steer chord landed in the queue).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_steer_now_submit_with_attachments_steers_a_live_steerable_turn() {
+    let (core, harness, prompts) = setup(SteeringMode::StepBoundary).await;
+    let client = zeron_rpc::memory_client(core.rpc_service());
+
+    core.doc_host
+        .queue_message(CHAT, "opening", Vec::new())
+        .expect("queue opening");
+    wait_for(
+        || prompts.lock().unwrap().iter().any(|p| p == "opening"),
+        "the first turn to start",
+    )
+    .await;
+
+    client
+        .call(
+            zeron_rpc::methods::QUEUE_MESSAGE,
+            serde_json::json!({
+                "chatId": CHAT,
+                "text": "look at this",
+                "attachments": ["/tmp/shot.png"],
+                "holdForTurnEnd": true,
+                "steerNow": true,
+            }),
+        )
+        .await
+        .expect("queue steer-now message with attachments");
+    wait_for(
+        || {
+            user_messages(&core).iter().any(|m| {
+                m == "look at this\n\nAttached images (local files — open them to view):\n- /tmp/shot.png"
+            })
+        },
+        "the submit to steer the live turn with its path refs",
+    )
+    .await;
+    assert!(queue_texts(&core).is_empty());
+    assert!(core.sessions.turn_in_flight(CHAT), "steering never interrupts");
+
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
 /// The same submit against an agent that only takes input between turns is
 /// an ordinary queue row: held, then flushed at turn end.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -886,8 +932,8 @@ async fn steer_now_starts_the_next_turn_when_the_previous_turn_is_already_idle()
     core.shutdown().await;
 }
 
-/// Attachments never steer: the steer path carries a prompt and nothing else,
-/// so a message with files waits for a turn that can inline them.
+/// Without `steerNow`, a message with files is an ordinary held row: it waits
+/// for the turn to end and dispatches with its attachments inlined.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_message_with_attachments_holds_even_for_a_steerable_agent() {
     let (core, harness, prompts) = setup(SteeringMode::StepBoundary).await;
