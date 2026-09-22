@@ -4160,13 +4160,22 @@ impl Shell {
             }
             RightSurface::Sidechat(id) => {
                 // Same teardown; the source composer's pill takes over as the
-                // way back in.
+                // way back in. A tab closed before anything was sent leaves
+                // an unstarted row behind that no sidebar shows: archive it
+                // so the pill mints a fresh one instead of reopening it.
                 if let Some(tab) = self.sidechat_tabs.remove(&id) {
-                    self.state.update(cx, |s, cx| {
+                    let unstarted = self.state.update(cx, |s, cx| {
                         s.unwatch_subagent_doc(&tab.chat_id);
                         s.open_sidechat_tabs.remove(&tab.chat_id);
                         cx.notify();
+                        s.chats
+                            .iter()
+                            .find(|chat| chat.id == tab.chat_id)
+                            .is_some_and(|chat| s.unstarted_sidechat(chat, Utc::now()))
                     });
+                    if unstarted {
+                        self.set_chat_archived(tab.chat_id, true, cx);
+                    }
                 }
             }
             RightSurface::Picker => {}

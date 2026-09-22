@@ -454,6 +454,56 @@ mod pinned_session_tests {
     }
 
     #[gpui::test]
+    fn closing_an_unstarted_sidechat_tab_archives_its_row(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (engine, mut requests, _replies) = pin_test_engine();
+        let dir = tempfile::tempdir().unwrap();
+        let window = pin_test_shell(cx, dir.path());
+        let sidechat = |id: &str, last_message_at: Option<chrono::DateTime<chrono::Utc>>| {
+            serde_json::from_value::<zeron_proto::Chat>(serde_json::json!({
+                "id": id, "title": id, "deviceId": "local", "archived": false,
+                "createdAt": chrono::Utc::now(), "lastMessageAt": last_message_at,
+                "sidechatSourceChatId": "src",
+            }))
+            .unwrap()
+        };
+        let unstarted = sidechat("empty", None);
+        let started = sidechat("used", Some(chrono::Utc::now()));
+        window
+            .update(cx, |shell, window, cx| {
+                shell.state.update(cx, |state, _| {
+                    state.set_test_engine(engine);
+                    state.apply_chats(vec![
+                        pin_test_chat("src"),
+                        unstarted.clone(),
+                        started.clone(),
+                    ]);
+                });
+                let empty_tab = shell.add_sidechat_surface(&unstarted, cx);
+                let used_tab = shell.add_sidechat_surface(&started, cx);
+                shell.close_right_surface(super::RightSurface::Sidechat(used_tab), window, cx);
+                shell.close_right_surface(super::RightSurface::Sidechat(empty_tab), window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let mut archived = Vec::new();
+        while let Ok(raw) = requests.try_recv() {
+            let request: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            if request["params"]["op"] == "setChatArchived" {
+                archived.push((
+                    request["params"]["chatId"].as_str().unwrap().to_string(),
+                    request["params"]["archived"].as_bool().unwrap(),
+                ));
+            }
+        }
+        assert_eq!(archived, [("empty".to_string(), true)]);
+    }
+
+    #[gpui::test]
     fn sidebar_unconfirmed_write_stops_the_queue_without_overwriting_observed_pins(
         cx: &mut gpui::TestAppContext,
     ) {

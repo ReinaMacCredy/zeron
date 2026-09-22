@@ -1754,9 +1754,21 @@ impl AppState {
         display_status(chat, self.session_for(&chat.id), now)
     }
 
+    /// A sidechat whose row exists but nothing was ever sent into it: the
+    /// engine mints the row when the tab opens, so until the first send it
+    /// is the sidechat analogue of an empty draft and earns no sidebar row.
+    /// A send in flight counts as started so the row appears with the send,
+    /// not a round-trip later.
+    pub fn unstarted_sidechat(&self, chat: &Chat, now: DateTime<Utc>) -> bool {
+        chat.sidechat_source_chat_id.is_some()
+            && chat.last_message_at.is_none()
+            && !self.send_pending(&chat.id, now)
+    }
+
     /// The sidebar's Sessions list: every non-archived chat of a LIVE space,
     /// on any device — idle included — in pure recency order (status drives
-    /// the dot, never the position; see [`sort_active`]).
+    /// the dot, never the position; see [`sort_active`]). An unstarted
+    /// sidechat ([`Self::unstarted_sidechat`]) has no row yet.
     pub fn overview_chats(&self, now: DateTime<Utc>) -> Vec<(ChatIndicator, &Chat)> {
         let mut rows: Vec<(ChatIndicator, &Chat)> = self
             .visible_chats()
@@ -1765,6 +1777,7 @@ impl AppState {
                 None => true,
                 Some(id) => self.space_row(id).is_some(),
             })
+            .filter(|c| !self.unstarted_sidechat(c, now))
             .map(|c| (self.display_status_for(c, now), c))
             .collect();
         sort_active(&mut rows);
@@ -4471,6 +4484,40 @@ mod tests {
         state.apply_chats(vec![archived, chat("b", 1, None)]);
         let visible: Vec<&str> = state.visible_chats().map(|c| c.id.as_str()).collect();
         assert_eq!(visible, ["b"]);
+    }
+
+    #[test]
+    fn unstarted_sidechat_has_no_sidebar_row_until_its_first_send() {
+        let now = Utc::now();
+        let mut state = AppState::new();
+        let mut fresh = chat("side", 1, None);
+        fresh.sidechat_source_chat_id = Some("src".into());
+        // An ordinary chat with no message yet keeps its row.
+        state.apply_chats(vec![chat("src", 0, Some(5)), fresh, chat("plain", 2, None)]);
+        let rows = |state: &AppState| -> Vec<String> {
+            state
+                .overview_chats(now)
+                .into_iter()
+                .map(|(_, c)| c.id.clone())
+                .collect()
+        };
+        assert_eq!(rows(&state), ["src", "plain"]);
+
+        // The row appears with the send, not a round-trip later.
+        state.begin_pending_send("side", "m1", now);
+        assert_eq!(rows(&state), ["src", "plain", "side"]);
+        state.end_pending_send("side", "m1");
+        assert_eq!(rows(&state), ["src", "plain"]);
+
+        // The host wrote the message back: the row is permanent.
+        let mut started = chat("side", 1, Some(7));
+        started.sidechat_source_chat_id = Some("src".into());
+        state.apply_chats(vec![
+            chat("src", 0, Some(5)),
+            started,
+            chat("plain", 2, None),
+        ]);
+        assert_eq!(rows(&state), ["side", "src", "plain"]);
     }
 
     #[test]
