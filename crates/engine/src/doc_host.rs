@@ -3266,8 +3266,13 @@ impl DocHost {
     /// degrades to the plain queue the row was just appended to, so the
     /// caller never has to unwind anything.
     pub async fn steer_queued_on_submit(&self, chat_id: &str, id: &str) {
+        // A remote submit syncs the row to the host, which drains it; only the
+        // host can steer, so its refusal is routine, not a downgrade.
+        if !self.is_host(chat_id) {
+            return;
+        }
         if let Err(err) = self.steer_queued_now(chat_id, id).await {
-            tracing::debug!(chat = %chat_id, error = %err, "steer on submit left the row queued");
+            tracing::warn!(chat = %chat_id, error = %err, "steer on submit left the row queued");
         }
     }
 
