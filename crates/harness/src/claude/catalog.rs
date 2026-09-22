@@ -107,6 +107,14 @@ pub(crate) fn context_window() -> ModelOption {
     }
 }
 
+pub fn context_window_tokens(choice_id: &str) -> Option<u64> {
+    match choice_id {
+        "200k" => Some(200_000),
+        "1m" => Some(1_000_000),
+        _ => None,
+    }
+}
+
 const FULL_LADDER: &[ReasoningLevel] = &[
     ReasoningLevel::Low,
     ReasoningLevel::Medium,
@@ -217,6 +225,16 @@ pub fn static_models() -> Vec<Model> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_window_tokens_covers_every_choice() {
+        for choice in context_window().choices {
+            assert!(context_window_tokens(&choice.id).is_some(), "{}", choice.id);
+        }
+        assert_eq!(context_window_tokens("200k"), Some(200_000));
+        assert_eq!(context_window_tokens("1m"), Some(1_000_000));
+        assert_eq!(context_window_tokens("standard"), None);
+    }
 
     #[test]
     fn effort_maps_special_modes() {
