@@ -90,8 +90,10 @@ pub struct ShortcutsPage {
     appshot_sound_enabled: bool,
     appshot_destination: AppshotDestination,
     appshot_capabilities: AppshotCapabilities,
+    input_access_prompted: bool,
     capture_access_prompted: bool,
     semantic_access_prompted: bool,
+    permissions: appshots_page::PermissionsUi,
     // The page never talks RPC; state is kept for parity with sibling pages
     // (and future per-device keymaps).
     _state: Entity<AppState>,
@@ -134,8 +136,10 @@ impl ShortcutsPage {
             appshot_sound_enabled,
             appshot_destination,
             appshot_capabilities: crate::appshots::capabilities(),
+            input_access_prompted: false,
             capture_access_prompted: false,
             semantic_access_prompted: false,
+            permissions: appshots_page::PermissionsUi::default(),
             _state: state,
         }
     }
@@ -179,6 +183,33 @@ impl ShortcutsPage {
         self.recording_blur = None;
         self.recording_interceptor = None;
         crate::appshots::set_recording(false);
+    }
+
+    fn adopt_recorded_combo(
+        &mut self,
+        recording: ShortcutId,
+        combo: String,
+        cx: &mut Context<Self>,
+    ) {
+        // A combo already bound elsewhere is REFUSED, naming the owner
+        // (zeron settings.shortcuts.tsx: "… is already assigned to …").
+        if let Some(owner) = conflict_owner(&self.keymap, recording, &combo) {
+            self.conflict_notice = Some(
+                format!(
+                    "{} is already assigned to {}.",
+                    display_combo(&combo),
+                    owner.label()
+                )
+                .into(),
+            );
+            self.stop_recording();
+            cx.notify();
+        } else {
+            self.keymap.set(recording, combo);
+            self.stop_recording();
+            self.conflict_notice = None;
+            self.commit(cx);
+        }
     }
 
     fn commit(&mut self, cx: &mut Context<Self>) {
@@ -257,19 +288,14 @@ impl ShortcutsPage {
             }
             RecordOutcome::Ignored => {}
             RecordOutcome::Set(combo) => {
+                // Linux records the Appshot key combo here; macOS picks a
+                // modifier chord from a menu instead and never records.
                 if recording == ShortcutId::CaptureAppshot
                     && crate::appshots::validate_shortcut(&combo).is_err()
                 {
                     self.conflict_notice = Some(
-                        format!(
-                            "Use {} with a letter, number, function key or navigation key.",
-                            if cfg!(target_os = "macos") {
-                                "Control, Option or Command"
-                            } else {
-                                "Control or Alt"
-                            }
-                        )
-                        .into(),
+                        "Use Control or Alt with a letter, number, function key or navigation key."
+                            .into(),
                     );
                     self.stop_recording();
                     cx.notify();
@@ -285,25 +311,7 @@ impl ShortcutsPage {
                     cx.stop_propagation();
                     return;
                 }
-                // A combo already bound elsewhere is REFUSED, naming the owner
-                // (zeron settings.shortcuts.tsx: "… is already assigned to …").
-                if let Some(owner) = conflict_owner(&self.keymap, recording, &combo) {
-                    self.conflict_notice = Some(
-                        format!(
-                            "{} is already assigned to {}.",
-                            display_combo(&combo),
-                            owner.label()
-                        )
-                        .into(),
-                    );
-                    self.stop_recording();
-                    cx.notify();
-                } else {
-                    self.keymap.set(recording, combo);
-                    self.stop_recording();
-                    self.conflict_notice = None;
-                    self.commit(cx);
-                }
+                self.adopt_recorded_combo(recording, combo, cx);
             }
         }
         cx.stop_propagation();
@@ -353,7 +361,14 @@ impl ShortcutsPage {
                             .child(SharedString::from(description(id))),
                     ),
             )
-            .child(self.render_binding_control(id, ix, recording, theme, cx))
+            .child(
+                if id == ShortcutId::CaptureAppshot && cfg!(target_os = "macos") {
+                    self.render_hotkey_dropdown("shortcuts", theme, cx)
+                } else {
+                    self.render_binding_control(id, ix, recording, theme, cx)
+                        .into_any_element()
+                },
+            )
     }
 
     fn render_binding_control(
@@ -587,7 +602,7 @@ impl Render for ShortcutsPage {
             if std::mem::take(&mut self.appshots_focus_pending) {
                 window.focus(&self.focus, cx);
             }
-            return self.render_appshots(cx);
+            return self.render_appshots(window, cx);
         }
         let theme = Theme::of(cx).clone();
         let recording = self.recording;
@@ -1157,6 +1172,9 @@ mod tests {
                 cx,
             );
             page.show_appshots(true);
+            // The permission was "asked" already: enabling must not raise the
+            // native prompt from a test.
+            page.capture_access_prompted = true;
             page
         });
         window
@@ -1185,17 +1203,15 @@ mod tests {
             })
             .unwrap();
         };
+        // Sound starts off (non-default), so Restore defaults is the first stop.
+        press(cx, "tab");
         press(cx, "tab");
         press(cx, "space");
         window
             .update(cx, |page, _, _| assert!(page.appshots_enabled))
             .unwrap();
-        press(cx, "tab");
-        press(cx, "enter");
-        window
-            .update(cx, |page, _, _| assert!(page.appshot_sound_enabled))
-            .unwrap();
-        // Skip the shortcut trigger and Automatic to choose Last session.
+        // The reset glyph that enabling reveals sits before the toggle in tree
+        // order; ahead are the recorder and Automatic, then Last session.
         for key in ["tab", "tab", "tab", "space"] {
             press(cx, key);
         }
@@ -1220,6 +1236,72 @@ mod tests {
                 assert_eq!(page.appshot_destination, AppshotDestination::LastSession)
             })
             .unwrap();
+        // Past New session, the sound row's reset glyph (sound is off) and
+        // Preview to the sound toggle.
+        for key in ["tab", "tab", "tab", "tab", "enter"] {
+            press(cx, key);
+        }
+        window
+            .update(cx, |page, _, _| assert!(page.appshot_sound_enabled))
+            .unwrap();
+        // Restore defaults is reachable again at the top of the page.
+        window
+            .update(cx, |page, _, cx| page.restore_appshot_defaults(cx))
+            .unwrap();
+        window
+            .update(cx, |page, _, _| {
+                assert!(!page.appshots_enabled);
+                assert!(page.appshot_sound_enabled);
+                assert_eq!(page.appshot_destination, AppshotDestination::Automatic);
+            })
+            .unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn hotkey_menu_picks_a_chord_and_persists_it(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+        });
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            let mut page = ShortcutsPage::new(
+                state,
+                KeymapConfig::default(),
+                false,
+                ComposerSendBehavior::default(),
+                FollowUpBehavior::default(),
+                SwitcherWindow::default(),
+                0,
+                false,
+                true,
+                AppshotDestination::Automatic,
+                cx,
+            );
+            page.show_appshots(true);
+            page
+        });
+        cx.run_until_parked();
+        let trigger = cx
+            .debug_bounds("appshots-appshot-hotkey")
+            .expect("hotkey trigger painted");
+        cx.simulate_click(trigger.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        // Row order follows HOTKEY_CHOICES: ⌘, ⌥, ⇧, None.
+        let option_row = cx
+            .debug_bounds("appshots-appshot-hotkey-option-1")
+            .expect("menu open with the ⌥ + ⌥ row");
+        cx.simulate_click(option_row.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        page.update(cx, |page, _| {
+            assert_eq!(
+                page.keymap.capture_appshot,
+                crate::appshots::ChordModifier::Option.combo()
+            );
+            // The menu is closing (its exit tween still paints for ~100ms).
+            assert!(!page.permissions_hotkey_menu_open());
+        });
     }
 
     #[gpui::test]

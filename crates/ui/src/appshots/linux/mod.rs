@@ -61,6 +61,7 @@ impl AppshotBackend for LinuxBackend {
                 global_shortcut: status.shortcut,
                 window_capture: status.capture,
                 application_text: CapabilityState::Unavailable,
+                input_monitoring: CapabilityState::Unavailable,
                 target: status.target,
             }
         } else {
@@ -69,6 +70,7 @@ impl AppshotBackend for LinuxBackend {
                 global_shortcut: x11::shortcut_state(),
                 window_capture: CapabilityState::Ready,
                 application_text: CapabilityState::Ready,
+                input_monitoring: CapabilityState::Unavailable,
                 target: CaptureTarget::ActiveWindow,
             }
         }

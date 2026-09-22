@@ -22,7 +22,7 @@ mod macos;
 
 mod shortcut;
 pub(crate) use shortcut::capture_allowed;
-pub use shortcut::{set_recording, set_shortcut, validate_shortcut};
+pub use shortcut::{ChordModifier, NO_HOTKEY, set_recording, set_shortcut, validate_shortcut};
 
 pub const fn is_desktop() -> bool {
     cfg!(any(target_os = "macos", target_os = "linux"))
@@ -37,14 +37,27 @@ pub fn set_capture_sound_enabled(enabled: bool) {
     }
 }
 
-/// Acknowledge saved pixels immediately; optional semantic enrichment may still be running.
-fn capture_ready() {
+/// The shutter cue. Synara plays it when the capture reaches the renderer,
+/// after the flash; the caller sequences it right before delivery.
+pub(crate) fn capture_ready() {
     if CAPTURE_SOUND_ENABLED.load(Ordering::Relaxed) {
         crate::sound::play_appshot();
     }
 }
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
+static WELCOME_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// Armed once at boot from the settings file, so only a real desktop launch
+/// (including a fresh install with no file yet) owes the introduction sheet;
+/// in-memory defaults never do.
+pub fn set_welcome_pending(pending: bool) {
+    WELCOME_PENDING.store(pending && is_desktop(), Ordering::Relaxed);
+}
+
+pub fn welcome_pending() -> bool {
+    WELCOME_PENDING.load(Ordering::Relaxed)
+}
 
 /// Bounds native capture buffers before platform APIs allocate or stage them.
 pub const MAX_CAPTURE_DIMENSION: u32 = 8_192;
@@ -61,6 +74,9 @@ const SCREEN_RECORDING_SETTINGS_URL: &str =
 #[cfg(target_os = "macos")]
 const ACCESSIBILITY_SETTINGS_URL: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
+#[cfg(target_os = "macos")]
+const INPUT_MONITORING_SETTINGS_URL: &str =
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppshotPlatform {
@@ -109,6 +125,9 @@ pub struct AppshotCapabilities {
     pub global_shortcut: CapabilityState,
     pub window_capture: CapabilityState,
     pub application_text: CapabilityState,
+    /// macOS only: the passive event tap behind the double-modifier chord
+    /// needs Input Monitoring.
+    pub input_monitoring: CapabilityState,
     pub target: CaptureTarget,
 }
 
@@ -198,10 +217,14 @@ pub trait AppshotBackend: Sync {
     async fn capture_active_window(&self) -> Result<CapturedAppshot, CaptureError>;
     fn request_capture_access(&self) {}
     fn request_semantic_access(&self) {}
+    fn request_input_monitoring_access(&self) {}
     fn capture_settings_url(&self) -> Option<&'static str> {
         None
     }
     fn semantic_settings_url(&self) -> Option<&'static str> {
+        None
+    }
+    fn input_monitoring_settings_url(&self) -> Option<&'static str> {
         None
     }
 }
@@ -223,6 +246,7 @@ impl AppshotBackend for UnsupportedBackend {
             global_shortcut: CapabilityState::Unavailable,
             window_capture: CapabilityState::Unavailable,
             application_text: CapabilityState::Unavailable,
+            input_monitoring: CapabilityState::Unavailable,
             target: CaptureTarget::ActiveWindow,
         }
     }
@@ -246,6 +270,33 @@ static BACKEND: UnsupportedBackend = UnsupportedBackend;
 
 fn backend() -> &'static dyn AppshotBackend {
     &BACKEND
+}
+
+/// Synara's `APPSNAP_RECENT_TARGET_WINDOW_MS`: how long an interaction or a
+/// previous snap keeps a session as the Automatic destination.
+pub const RECENT_TARGET_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Synara's `resolveAppSnapTarget` for the Automatic destination: the session
+/// the user interacted with in the last minute wins; otherwise consecutive
+/// snaps stay with the session the previous snap went to; otherwise a fresh
+/// session (`None`). A newer interaction overrides an older snap's affinity.
+pub fn resolve_automatic_target(
+    now: std::time::Instant,
+    last_interaction: Option<(&str, std::time::Instant)>,
+    last_appshot: Option<(&str, std::time::Instant)>,
+    is_available: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let fresh = |chat: &str, at: std::time::Instant| {
+        now.saturating_duration_since(at) <= RECENT_TARGET_WINDOW && is_available(chat)
+    };
+    let interaction = last_interaction.filter(|(chat, at)| fresh(chat, *at));
+    let appshot = last_appshot.filter(|(chat, at)| fresh(chat, *at));
+    match (interaction, appshot) {
+        (Some((chat, at)), Some((_, snap_at))) if at >= snap_at => Some(chat.to_string()),
+        (Some((chat, _)), None) => Some(chat.to_string()),
+        (_, Some((chat, _))) => Some(chat.to_string()),
+        (None, None) => None,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -301,6 +352,9 @@ pub struct CapturedAppshot {
     /// Presentation-only. The icon is never uploaded or serialized into the
     /// model context.
     pub app_icon: Option<Arc<gpui::Image>>,
+    /// Screen rect of the captured window in CoreGraphics coordinates
+    /// (`x, y, width, height`, top-left origin), for the capture flash.
+    pub window_bounds: Option<[f64; 4]>,
     pub captured_at: DateTime<Utc>,
 }
 
@@ -580,12 +634,26 @@ pub fn request_semantic_access() {
     backend().request_semantic_access();
 }
 
+pub fn request_input_monitoring_access() {
+    backend().request_input_monitoring_access();
+}
+
 pub fn capture_settings_url() -> Option<&'static str> {
     backend().capture_settings_url()
 }
 
 pub fn semantic_settings_url() -> Option<&'static str> {
     backend().semantic_settings_url()
+}
+
+pub fn input_monitoring_settings_url() -> Option<&'static str> {
+    backend().input_monitoring_settings_url()
+}
+
+/// Re-apply the active shortcut to the native listener. A chord tap that
+/// failed for lack of Input Monitoring is retried here once the grant lands.
+pub fn refresh_registration() {
+    shortcut::enabled_changed();
 }
 
 /// Register the platform global shortcut and, on Linux, the local activation
@@ -597,12 +665,7 @@ pub fn start_global_shortcut(
 }
 
 pub async fn capture_active_window() -> Result<CapturedAppshot, CaptureError> {
-    let result = backend().capture_active_window().await;
-    #[cfg(target_os = "linux")]
-    if result.is_ok() {
-        capture_ready();
-    }
-    result
+    backend().capture_active_window().await
 }
 
 /// Ask the running headed Zeron process to capture an Appshot. Linux desktop
@@ -616,6 +679,50 @@ pub fn request_running_appshot(data_dir: &Path) -> Result<(), CaptureError> {
 #[cfg(not(target_os = "linux"))]
 pub fn request_running_appshot(_data_dir: &Path) -> Result<(), CaptureError> {
     Err(CaptureError::ShortcutUnavailable)
+}
+
+/// The name macOS lists this build under in System Settings: the bundle's
+/// display name for a packaged app ("Zeron", "Zeron Dev 2"), the product name
+/// otherwise. Permission guides tell the user which entry to look for.
+pub fn app_display_name() -> String {
+    if let zeron_update::InstallKind::MacApp { bundle } = zeron_update::detect_install() {
+        if let Some(stem) = bundle.file_stem().and_then(|stem| stem.to_str()) {
+            return stem.to_string();
+        }
+    }
+    "Zeron".to_string()
+}
+
+pub fn can_restart_app() -> bool {
+    matches!(
+        zeron_update::detect_install(),
+        zeron_update::InstallKind::MacApp { .. }
+    )
+}
+
+/// TCC grants are read at launch by some macOS versions; the guide offers a
+/// relaunch through the updater's detached relauncher.
+pub fn restart_app(cx: &mut gpui::App) {
+    if let zeron_update::InstallKind::MacApp { bundle } = zeron_update::detect_install() {
+        zeron_update::relaunch_app_after_exit(&bundle);
+        crate::app_menus::request_quit(cx);
+    }
+}
+
+/// Synara's capture feedback: a white flash over the captured window, played
+/// on the UI thread after the pixels are safe and before Zeron comes forward.
+/// Resolves when the flash has faded; `None` when nothing was shown (reduced
+/// motion, no display under the window, or a platform without the flash).
+pub fn play_capture_flash(bounds: [f64; 4]) -> Option<futures::channel::oneshot::Receiver<()>> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::play_capture_flash(bounds)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = bounds;
+        None
+    }
 }
 
 /// Complete the user-requested capture handoff after staging, on the UI thread.
@@ -779,6 +886,7 @@ pub(crate) fn restore_queued_appshots(
             screenshot_dimensions: png_dimensions(screenshot.bytes()),
             screenshot,
             app_icon: None,
+            window_bounds: None,
             captured_at: Utc::now(),
         });
     }
@@ -942,6 +1050,7 @@ pub(crate) mod tests {
             },
             screenshot_dimensions: Some((1440, 900)),
             app_icon: None,
+            window_bounds: None,
             captured_at: Utc::now(),
         }
     }
@@ -990,7 +1099,7 @@ pub(crate) mod tests {
         assert_eq!(decoded, [22, 33, 44, 255].repeat(264 * 165));
         assert_eq!(profile, Some(png::SrgbRenderingIntent::Perceptual));
         assert!(trim_appshot_padding(staged.bytes()).unwrap().is_none());
-        let (width, height) = crate::composer::appshot_contained_size(Some(dimensions), 320.0);
+        let (width, height) = crate::composer::appshot_contained_size(Some(dimensions));
         assert!((width / height - 264.0 / 165.0).abs() < 0.0001);
     }
 
@@ -1212,12 +1321,45 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn automatic_destination_follows_recent_interaction_then_previous_snap() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        let ago = |secs: u64| now - Duration::from_secs(secs);
+        let all = |_: &str| true;
+        assert_eq!(
+            resolve_automatic_target(now, Some(("a", ago(10))), None, all),
+            Some("a".into())
+        );
+        // A stale interaction no longer claims the capture.
+        assert_eq!(
+            resolve_automatic_target(now, Some(("a", ago(90))), None, all),
+            None
+        );
+        // Consecutive snaps stay together while the user is in the other app.
+        assert_eq!(
+            resolve_automatic_target(now, Some(("a", ago(90))), Some(("b", ago(20))), all),
+            Some("b".into())
+        );
+        // A newer interaction overrides the older snap's affinity.
+        assert_eq!(
+            resolve_automatic_target(now, Some(("a", ago(5))), Some(("b", ago(20))), all),
+            Some("a".into())
+        );
+        // A session that no longer exists falls through.
+        assert_eq!(
+            resolve_automatic_target(now, Some(("a", ago(5))), Some(("b", ago(20))), |c| c == "b"),
+            Some("b".into())
+        );
+    }
+
+    #[test]
     fn wayland_capabilities_explain_picker_and_system_shortcut_fallbacks() {
         let capabilities = AppshotCapabilities {
             platform: AppshotPlatform::LinuxWayland,
             global_shortcut: CapabilityState::SetupRequired,
             window_capture: CapabilityState::UserSelection,
             application_text: CapabilityState::Ready,
+            input_monitoring: CapabilityState::Unavailable,
             target: CaptureTarget::PortalWindowPicker,
         };
         assert!(

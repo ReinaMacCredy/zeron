@@ -527,12 +527,11 @@ fn modified_submit_target(has_content: bool) -> ModifiedSubmitTarget {
     }
 }
 
-pub const APPSHOT_TILE_MIN_WIDTH: f32 = 96.0;
-pub const APPSHOT_IMAGE_INSET: f32 = 12.0;
-pub const APPSHOT_PREVIEW_HEIGHT: f32 = 148.0;
-pub const APPSHOT_IMAGE_MAX_WIDTH: f32 = 320.0;
-pub const APPSHOT_IMAGE_MAX_HEIGHT: f32 = 132.0;
-pub const APPSHOT_TILE_HEIGHT: f32 = 192.0;
+/// Synara's AppSnap chip: a fixed `w-52 h-32` card, the capture contained
+/// inside a 4px inset, provenance on a bottom gradient.
+pub const APPSHOT_TILE_WIDTH: f32 = 208.0;
+pub const APPSHOT_TILE_HEIGHT: f32 = 128.0;
+pub const APPSHOT_IMAGE_INSET: f32 = 4.0;
 
 struct AppshotActionTooltip(SharedString);
 
@@ -553,20 +552,30 @@ impl Render for AppshotActionTooltip {
     }
 }
 
-/// Give ordinary captures a shared height while their width follows the
-/// source window. Extreme panoramas and narrow composers cap width without
-/// cropping. Explicit dimensions also bound the native image while decoding.
-pub fn appshot_contained_size(dimensions: Option<(u32, u32)>, max_width: f32) -> (f32, f32) {
-    let max_width = if max_width.is_finite() {
-        max_width.clamp(1.0, APPSHOT_IMAGE_MAX_WIDTH)
-    } else {
-        APPSHOT_IMAGE_MAX_WIDTH
-    };
+/// Contain the capture inside the chip's inset box without cropping. Explicit
+/// dimensions also bound the native image while decoding.
+pub fn appshot_contained_size(dimensions: Option<(u32, u32)>) -> (f32, f32) {
+    let box_width = APPSHOT_TILE_WIDTH - 2.0 * APPSHOT_IMAGE_INSET;
+    let box_height = APPSHOT_TILE_HEIGHT - 2.0 * APPSHOT_IMAGE_INSET;
     let (width, height) = dimensions
         .filter(|(width, height)| *width > 0 && *height > 0)
         .unwrap_or((16, 10));
-    let scale = (max_width / width as f32).min(APPSHOT_IMAGE_MAX_HEIGHT / height as f32);
+    let scale = (box_width / width as f32).min(box_height / height as f32);
     (width as f32 * scale, height as f32 * scale)
+}
+
+/// The chip's provenance line: the window title, then the app, unless the
+/// title merely echoes the app's name ("ChatGPT / ChatGPT").
+pub fn appshot_provenance(app_name: &str, window_title: Option<&str>) -> String {
+    let app = app_name.trim();
+    let app = if app.is_empty() { "Captured app" } else { app };
+    match window_title
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+    {
+        Some(title) if !title.eq_ignore_ascii_case(app) => format!("{title} / {app}"),
+        _ => app.to_string(),
+    }
 }
 
 pub fn appshot_strip_height(count: usize) -> f32 {
@@ -5018,6 +5027,14 @@ impl Composer {
                 self.appshots.entry(key).or_default().push(appshot);
             }
         } else {
+            // A key the composer has not switched to yet is reloaded from the
+            // draft store on the switch, which would replace this bucket:
+            // record the capture there too so the swap brings it back.
+            if key != self.current_key {
+                let mut entry = crate::draft_store::entry(&key, cx);
+                entry.appshots.push(appshot.clone());
+                crate::draft_store::set(&key, entry, cx);
+            }
             self.appshots.entry(key).or_default().push(appshot);
         }
         self.failure = None;
@@ -5430,13 +5447,9 @@ impl Composer {
             .px(px(STRIP_PAD_X))
             .pt(px(STRIP_PAD_TOP))
             .overflow_x_scroll();
-        let max_image_width = self.last_available_width.unwrap_or(COMPOSER_MAX_WIDTH)
-            - 2.0 * Theme::SPACE_LG
-            - 2.0
-            - 2.0 * STRIP_PAD_X
-            - 2.0 * APPSHOT_IMAGE_INSET;
         for (ix, appshot) in appshots.iter().enumerate() {
             let group: SharedString = format!("composer-appshot-{}", appshot.id).into();
+            let hover_key = group.to_string();
             let preview = crate::attachments::PreviewImage::new(
                 appshot.screenshot.name.clone(),
                 appshot.screenshot.image.clone(),
@@ -5448,47 +5461,45 @@ impl Composer {
             let remove_on_key_id = remove_id.clone();
             let remove_on_a11y_id = remove_id.clone();
             let composer_for_remove = cx.entity().downgrade();
-            let source: SharedString = appshot
-                .window_title
-                .as_deref()
-                .filter(|title| !title.trim().is_empty())
-                .map(str::to_owned)
-                .unwrap_or_else(|| appshot.app_name.clone())
-                .into();
-            let preview_label: SharedString = format!("Preview {source}").into();
-            let remove_label: SharedString = format!("Remove {source}").into();
+            let app_name = if appshot.app_name.trim().is_empty() {
+                "Captured app".to_string()
+            } else {
+                appshot.app_name.trim().to_string()
+            };
+            let provenance: SharedString =
+                appshot_provenance(&appshot.app_name, appshot.window_title.as_deref()).into();
+            let preview_label: SharedString = format!("Preview Appshot from {app_name}").into();
+            let remove_label: SharedString = format!("Remove Appshot from {app_name}").into();
             let preview_aria = preview_label.clone();
             let remove_aria = remove_label.clone();
-            let (image_width, image_height) =
-                appshot_contained_size(appshot.screenshot_dimensions, max_image_width);
-            let tile_width = (image_width + 2.0 * APPSHOT_IMAGE_INSET).max(APPSHOT_TILE_MIN_WIDTH);
+            let tooltip_label = provenance.clone();
+            let (image_width, image_height) = appshot_contained_size(appshot.screenshot_dimensions);
+            // `transition-colors duration-150`: the border lifts from the light
+            // hairline to the full border while hovered.
+            let hover_t = motion::hover_t(&hover_key);
+            let border = motion::mix(theme.border.opacity(0.55), theme.border, hover_t);
             let mut card = div()
                 .id(("composer-appshot", ix))
                 .group(group.clone())
                 .relative()
-                .w(px(tile_width))
+                .w(px(APPSHOT_TILE_WIDTH))
                 .h(px(APPSHOT_TILE_HEIGHT))
                 .flex_none()
-                .flex()
-                .flex_col()
-                .items_center()
-                .rounded(px(14.0))
+                .rounded(px(12.0))
+                .border_1()
+                .border_color(border)
+                .bg(theme.surface_raised)
                 .overflow_hidden()
                 .cursor_pointer()
-                .hover(|style| style.bg(crate::theme::ink(0.045)))
+                .on_hover(motion::hover_listener(hover_key.clone()))
                 .tooltip(move |_, cx| {
-                    cx.new(|_| AppshotActionTooltip(preview_label.clone()))
+                    cx.new(|_| AppshotActionTooltip(tooltip_label.clone()))
                         .into()
                 })
                 .role(gpui::Role::Button)
                 .aria_label(preview_aria)
                 .tab_index(0)
-                .focus_visible(|style| {
-                    style
-                        .bg(crate::theme::ink(0.06))
-                        .border_1()
-                        .border_color(theme.accent)
-                })
+                .focus_visible(|style| style.border_2().border_color(theme.accent))
                 .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
                     if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                         cx.stop_propagation();
@@ -5517,83 +5528,118 @@ impl Composer {
                 .child(
                     div()
                         .id(("composer-appshot-preview", ix))
-                        .w(px(tile_width))
-                        .h(px(APPSHOT_PREVIEW_HEIGHT))
-                        .relative()
-                        .flex_none()
+                        .size_full()
+                        .p(px(APPSHOT_IMAGE_INSET))
                         .flex()
-                        .items_end()
+                        .items_center()
                         .justify_center()
                         .overflow_hidden()
-                        .rounded(px(12.0))
                         .child(
                             div()
                                 .w(px(image_width))
                                 .h(px(image_height))
                                 .flex_none()
                                 .overflow_hidden()
-                                .rounded(px(4.0))
-                                .shadow_sm()
-                                .child(crate::edge_fade::edge_faded(
-                                    44.0,
-                                    false,
-                                    true,
+                                .rounded(px(6.0))
+                                .child(
                                     img(appshot.screenshot.image.clone())
                                         .w(px(image_width))
                                         .h(px(image_height))
                                         .object_fit(ObjectFit::Contain),
-                                )),
+                                ),
                         ),
-                )
-                .child(
-                    div()
-                        .mt(px(20.0))
-                        .max_w(px(tile_width - 20.0))
-                        .truncate()
-                        .text_center()
-                        .text_size(px(12.5))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.text)
-                        .child(source),
                 );
-            if let Some(icon) = &appshot.app_icon {
-                card = card.child(crate::frost::layered(
-                    div()
-                        .absolute()
-                        .top(px(APPSHOT_PREVIEW_HEIGHT - 22.0))
-                        .left(px((tile_width - 28.0) / 2.0))
-                        .size(px(28.0))
-                        .rounded(px(7.0))
-                        .bg(theme.bg)
-                        .border_1()
-                        .border_color(theme.border)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            img(icon.clone())
-                                .size(px(24.0))
-                                .rounded(px(5.0))
-                                .object_fit(ObjectFit::Contain),
-                        ),
-                ));
-            }
-            card = card.child(crate::frost::layered(
+            // `bg-linear-to-t from-black/90 via-black/55 to-transparent` over
+            // `pt-10 pb-2`: two stacked stops, since one gradient carries two.
+            let scrim = |from: f32, to: f32| {
+                div().w_full().flex_1().bg(gpui::linear_gradient(
+                    180.0,
+                    gpui::linear_color_stop(gpui::black().opacity(from), 0.0),
+                    gpui::linear_color_stop(gpui::black().opacity(to), 1.0),
+                ))
+            };
+            let source_icon = match &appshot.app_icon {
+                Some(icon) => img(icon.clone())
+                    .size(px(20.0))
+                    .flex_none()
+                    .rounded(px(5.0))
+                    .object_fit(ObjectFit::Contain)
+                    .into_any_element(),
+                None => div()
+                    .size(px(20.0))
+                    .flex_none()
+                    .rounded(px(5.0))
+                    .bg(gpui::white().opacity(0.15))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        crate::icons::icon(crate::icons::MONITOR)
+                            .size(px(12.0))
+                            .text_color(gpui::white().opacity(0.85)),
+                    )
+                    .into_any_element(),
+            };
+            card = card.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .h(px(68.0))
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .flex_col()
+                            .child(scrim(0.0, 0.55))
+                            .child(scrim(0.55, 0.9)),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .bottom_0()
+                            .px(px(10.0))
+                            .pb(px(8.0))
+                            .flex()
+                            .items_end()
+                            .gap(px(8.0))
+                            .child(source_icon)
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .pb(px(1.0))
+                                    .truncate()
+                                    .text_size(crate::typography::ui_rems(12.0))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(gpui::white())
+                                    .child(provenance),
+                            ),
+                    ),
+            );
+            // `AttachmentRemoveButton size="sm"`: a 14px solid disc at 70%,
+            // full opacity while the card or the disc is hovered.
+            let remove_opacity = motion::lerp(0.7, 1.0, hover_t);
+            card = card.child(
                 div()
                     .id(("composer-appshot-remove", ix))
                     .absolute()
-                    .top(px(6.0))
-                    .right(px(6.0))
-                    .size(px(22.0))
+                    .top(px(4.0))
+                    .right(px(4.0))
+                    .size(px(14.0))
                     .rounded_full()
-                    .bg(theme.bg.opacity(0.92))
+                    .bg(theme.text.opacity(0.8))
                     .flex()
                     .items_center()
                     .justify_center()
                     .cursor_pointer()
                     .shadow_sm()
-                    .opacity(0.0)
-                    .group_hover(group, |style| style.opacity(1.0))
+                    .opacity(remove_opacity)
+                    .hover(|style| style.bg(theme.text))
                     .tooltip(move |_, cx| {
                         cx.new(|_| AppshotActionTooltip(remove_label.clone()))
                             .into()
@@ -5620,11 +5666,11 @@ impl Composer {
                         this.remove_appshot(&remove_id, cx);
                     }))
                     .child(
-                        crate::icons::icon(crate::icons::CLOSE_CIRCLE)
-                            .size(px(15.0))
-                            .text_color(theme.text_muted),
+                        crate::icons::icon(crate::icons::CLOSE)
+                            .size(px(10.0))
+                            .text_color(theme.bg),
                     ),
-            ));
+            );
             // Entity-owned timestamps prevent the entrance replaying on route remount.
             if let Some(start) = self.appshot_entrances.get(&appshot.id) {
                 let raw = (start.elapsed().as_secs_f32() / (0.24 * motion::speed_scale()))
@@ -10735,27 +10781,30 @@ mod tests {
     }
 
     #[test]
-    fn appshot_images_share_height_and_adapt_width_without_losing_aspect_ratio() {
-        let landscape = appshot_contained_size(Some((1600, 900)), 320.0);
-        assert!((landscape.0 - 234.66667).abs() < 0.01);
-        assert_eq!(landscape.1, APPSHOT_IMAGE_MAX_HEIGHT);
-        let portrait = appshot_contained_size(Some((900, 1600)), 320.0);
-        assert!((portrait.0 - 74.25).abs() < 0.01);
-        assert_eq!(portrait.1, landscape.1);
+    fn appshot_images_fit_the_chip_inset_without_losing_aspect_ratio() {
+        // The inset box is 200×120: landscape fills the width, portrait the height.
+        let landscape = appshot_contained_size(Some((1600, 900)));
+        assert_eq!(landscape, (200.0, 112.5));
+        let portrait = appshot_contained_size(Some((900, 1600)));
+        assert!((portrait.0 - 67.5).abs() < 0.01);
+        assert!((portrait.1 - 120.0).abs() < 0.01);
+        let square = appshot_contained_size(Some((1000, 1000)));
+        assert!((square.0 - 120.0).abs() < 0.01 && (square.1 - 120.0).abs() < 0.01);
+        // Panoramas fit without distortion.
+        assert_eq!(appshot_contained_size(Some((4000, 1000))), (200.0, 50.0));
+        let fallback = appshot_contained_size(None);
+        assert_eq!(fallback, (192.0, 120.0));
+    }
+
+    #[test]
+    fn appshot_provenance_leads_with_the_window_title_unless_it_echoes_the_app() {
         assert_eq!(
-            appshot_contained_size(Some((1000, 1000)), 320.0),
-            (132.0, 132.0)
+            appshot_provenance("Safari", Some("API documentation")),
+            "API documentation / Safari"
         );
-        // Narrow side-by-side layouts and panoramas fit without distortion.
-        let narrow = appshot_contained_size(Some((1600, 900)), 160.0);
-        assert_eq!(narrow, (160.0, 90.0));
-        assert_eq!(
-            appshot_contained_size(Some((4000, 1000)), 900.0),
-            (320.0, 80.0)
-        );
-        let fallback = appshot_contained_size(None, 320.0);
-        assert!((fallback.0 - 211.2).abs() < 0.01);
-        assert_eq!(fallback.1, 132.0);
+        assert_eq!(appshot_provenance("ChatGPT", Some("chatgpt")), "ChatGPT");
+        assert_eq!(appshot_provenance("Terminal", Some("  ")), "Terminal");
+        assert_eq!(appshot_provenance("", None), "Captured app");
     }
 
     #[test]

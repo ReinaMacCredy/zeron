@@ -238,6 +238,7 @@ pub(super) async fn capture_target(target: CaptureTarget) -> Result<CapturedApps
         screenshot,
         screenshot_dimensions: Some(dimensions),
         app_icon: None,
+        window_bounds: None,
         captured_at: chrono::Utc::now(),
     })
 }

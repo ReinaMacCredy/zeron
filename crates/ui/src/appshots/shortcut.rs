@@ -4,6 +4,48 @@ use std::sync::{Mutex, OnceLock};
 use futures::channel::mpsc;
 use gpui::Keystroke;
 
+/// The macOS hotkey is one of three double-modifier chords (both keys of one
+/// modifier pressed together), watched by a passive event tap, or none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChordModifier {
+    Command,
+    Option,
+    Shift,
+}
+
+impl ChordModifier {
+    pub const ALL: [Self; 3] = [Self::Command, Self::Option, Self::Shift];
+
+    /// The stored keymap spelling.
+    pub fn combo(self) -> &'static str {
+        match self {
+            Self::Command => "command-command",
+            Self::Option => "option-option",
+            Self::Shift => "shift-shift",
+        }
+    }
+
+    pub fn from_combo(combo: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|chord| chord.combo() == combo)
+    }
+
+    pub fn glyph(self) -> &'static str {
+        match self {
+            Self::Command => "⌘",
+            Self::Option => "⌥",
+            Self::Shift => "⇧",
+        }
+    }
+
+    /// "⌘ + ⌘", the menu and trigger label.
+    pub fn label(self) -> String {
+        format!("{} + {}", self.glyph(), self.glyph())
+    }
+}
+
+/// The stored spelling for "no hotkey": captures then come only from the UI.
+pub const NO_HOTKEY: &str = "none";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Shortcut {
     pub key: String,
@@ -11,10 +53,22 @@ pub(crate) struct Shortcut {
     pub alt: bool,
     pub shift: bool,
     pub platform: bool,
+    pub chord: Option<ChordModifier>,
 }
 
 impl Shortcut {
     pub fn parse(combo: &str) -> Result<Self, ()> {
+        if cfg!(target_os = "macos") {
+            if combo == NO_HOTKEY {
+                return Ok(Self::none());
+            }
+            if let Some(chord) = ChordModifier::from_combo(combo) {
+                return Ok(Self {
+                    chord: Some(chord),
+                    ..Self::none()
+                });
+            }
+        }
         let stroke = Keystroke::parse(&crate::settings::platform_combo(combo)).map_err(|_| ())?;
         let modifiers = stroke.modifiers;
         let key = stroke.key;
@@ -52,7 +106,24 @@ impl Shortcut {
             alt: modifiers.alt,
             shift: modifiers.shift,
             platform: modifiers.platform,
+            chord: None,
         })
+    }
+
+    fn none() -> Self {
+        Self {
+            key: String::new(),
+            control: false,
+            alt: false,
+            shift: false,
+            platform: false,
+            chord: None,
+        }
+    }
+
+    /// "None" in the hotkey menu: nothing to register.
+    pub fn is_none(&self) -> bool {
+        self.key.is_empty() && self.chord.is_none()
     }
 
     #[cfg(any(target_os = "linux", test))]
@@ -106,7 +177,8 @@ fn preferences() -> &'static Mutex<Preferences> {
 
 impl Preferences {
     fn active(&self) -> Option<Shortcut> {
-        (super::enabled() && !self.recording).then(|| self.shortcut.clone())
+        (super::enabled() && !self.recording && !self.shortcut.is_none())
+            .then(|| self.shortcut.clone())
     }
 }
 
@@ -179,6 +251,22 @@ mod tests {
             assert!(Shortcut::parse(combo).is_ok(), "{combo}");
         }
     }
+    #[test]
+    fn macos_hotkey_is_a_double_modifier_chord_or_none() {
+        if cfg!(target_os = "macos") {
+            for chord in ChordModifier::ALL {
+                let parsed = Shortcut::parse(chord.combo()).unwrap();
+                assert_eq!(parsed.chord, Some(chord));
+                assert!(!parsed.is_none());
+            }
+            assert!(Shortcut::parse(NO_HOTKEY).unwrap().is_none());
+            assert_eq!(ChordModifier::Command.label(), "⌘ + ⌘");
+        } else {
+            assert!(Shortcut::parse(NO_HOTKEY).is_err());
+            assert!(Shortcut::parse("command-command").is_err());
+        }
+    }
+
     #[test]
     fn portal_uses_xkb_key_names_and_selected_modifiers() {
         assert_eq!(

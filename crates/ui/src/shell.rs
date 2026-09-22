@@ -1731,6 +1731,9 @@ pub struct Shell {
     rename_dialog: Option<RenameChatDialog>,
     /// Chat id awaiting delete confirmation.
     delete_confirm: Option<String>,
+    /// Synara's one-time AppSnap introduction: shown on desktop until the
+    /// user dismisses it or follows it into Settings → Appshots.
+    appshot_welcome: bool,
     /// The fork/rewind confirmation, centered like the delete dialog.
     branch_modal: Option<BranchModal>,
     /// Space-row context menu (dropdown rows): (space id, window position).
@@ -1812,6 +1815,10 @@ pub struct Shell {
     active_chat: String,
     /// Last selected session survives opening the blank Appshot destination.
     last_appshot_chat: Option<String>,
+    /// Automatic Appshot affinity (Synara): the session last interacted with
+    /// and the session the previous snap went to, each with its moment.
+    appshot_last_interaction: Option<(String, std::time::Instant)>,
+    appshot_last_target: Option<(String, std::time::Instant)>,
     /// Last rendered sidebar order (key + estimated height) — the FLIP baseline
     /// for the §1.6 resort glide.
     sidebar_prev_order: Vec<(String, f32)>,
@@ -2025,6 +2032,9 @@ impl Shell {
         });
         crate::appshots::set_enabled(settings.appshots_enabled);
         crate::appshots::set_capture_sound_enabled(settings.appshot_sound_enabled);
+        let appshot_welcome = crate::appshots::welcome_pending()
+            || (crate::appshots::is_desktop()
+                && std::env::var("ZERON_OPEN_DIALOG").as_deref() == Ok("appshot-welcome"));
         // Bind the customizable shortcuts from the persisted keymap.
         apply_keymap(cx, &settings.keymap, settings.composer_send_behavior);
         // Dev/testing knob: `ZERON_OPEN_ROUTE=settings[/<section>]` boots
@@ -2163,6 +2173,7 @@ impl Shell {
             chat_menu: popover::Popup::default(),
             rename_dialog: None,
             delete_confirm: None,
+            appshot_welcome,
             branch_modal: None,
             space_menu: popover::Popup::default(),
             rename_space_dialog: None,
@@ -2208,6 +2219,8 @@ impl Shell {
             panels: SessionPanels::default(),
             active_chat: String::new(),
             last_appshot_chat: None,
+            appshot_last_interaction: None,
+            appshot_last_target: None,
             sidebar_prev_order: Vec::new(),
             sidebar_resort: std::collections::HashMap::new(),
             sidebar_new_keys: std::collections::HashSet::new(),
@@ -2268,13 +2281,25 @@ impl Shell {
 
         let selected = self.state.read(cx).selected_chat.clone();
         let target = match self.settings.appshot_destination {
-            AppshotDestination::Automatic if selected.is_some() => selected,
+            AppshotDestination::Automatic => {
+                let state = self.state.read(cx);
+                crate::appshots::resolve_automatic_target(
+                    std::time::Instant::now(),
+                    self.appshot_last_interaction
+                        .as_ref()
+                        .map(|(chat, at)| (chat.as_str(), *at)),
+                    self.appshot_last_target
+                        .as_ref()
+                        .map(|(chat, at)| (chat.as_str(), *at)),
+                    |chat| state.chats.iter().any(|row| row.id == chat),
+                )
+            }
             AppshotDestination::LastSession if selected.is_some() => selected,
             AppshotDestination::LastSession => self
                 .last_appshot_chat
                 .clone()
                 .filter(|id| self.state.read(cx).chats.iter().any(|chat| &chat.id == id)),
-            AppshotDestination::Automatic | AppshotDestination::NewSession => None,
+            AppshotDestination::NewSession => None,
         };
         if let Some(chat_id) = &target {
             self.open_chat(chat_id.clone(), cx);
@@ -2287,12 +2312,32 @@ impl Shell {
         } else {
             self.route = Route::Chat;
         }
-        let key = target.unwrap_or_default();
+        // The canvas is always a draft with its own key (d20): a capture with
+        // no session target belongs to that draft, never to the bare "" key
+        // the composer only merges on its next key change.
+        let key = target
+            .unwrap_or_else(|| self.state.read(cx).focused_id().unwrap_or_default());
         self.composer.update(cx, |composer, cx| {
-            composer.stage_appshot_for(key, appshot, cx)
+            composer.stage_appshot_for(key.clone(), appshot, cx)
         });
+        // A fresh canvas has no id yet; the next snap within the window
+        // resolves to it through the interaction the composer focus records.
+        self.appshot_last_target = Some((key, std::time::Instant::now()));
         window.focus(&self.composer.focus_handle(cx), cx);
         cx.notify();
+    }
+
+    /// Any keystroke or click while a session is selected refreshes the
+    /// Automatic destination's affinity, as Synara's coordinator does from
+    /// `pointerdown`/`keydown`.
+    fn note_appshot_interaction(&mut self, cx: &mut Context<Self>) {
+        let selected = self
+            .state
+            .read(cx)
+            .selected_chat
+            .clone()
+            .unwrap_or_default();
+        self.appshot_last_interaction = Some((selected, std::time::Instant::now()));
     }
 
     pub fn show_appshot_error(
@@ -2592,6 +2637,9 @@ impl Shell {
         let selected = state.read(cx).selected_chat.clone().unwrap_or_default();
         if !selected.is_empty() {
             self.last_appshot_chat = Some(selected.clone());
+        }
+        if selected != self.active_chat {
+            self.appshot_last_interaction = Some((selected.clone(), std::time::Instant::now()));
         }
         if selected != self.active_chat {
             self.suspend_file_images(cx);
@@ -4607,6 +4655,14 @@ impl Shell {
         cx.notify();
     }
 
+    fn acknowledge_appshot_welcome(&mut self, cx: &mut Context<Self>) {
+        self.appshot_welcome = false;
+        crate::appshots::set_welcome_pending(false);
+        self.settings.appshot_welcome_acknowledged = true;
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
     fn open_settings(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
         self.command_palette = None;
         // Recreate per visit: the page's ListHarnesses load re-probes which
@@ -6550,7 +6606,7 @@ impl Shell {
             SettingsSection::Files => icons::FOLDER,
             SettingsSection::Notifications => icons::BELL,
             SettingsSection::Shortcuts => icons::KEYBOARD,
-            SettingsSection::Appshots => icons::MONITOR,
+            SettingsSection::Appshots => icons::SCREEN_CAPTURE,
             SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
         };
         let query = self.settings_search.read(cx).text().to_string();
@@ -8838,6 +8894,10 @@ impl Shell {
         // Modals and context menus sit above the rest of the shell. Preserve
         // their existing behavior: only surfaces that already have a Cancel
         // path close here; the others remain explicit blockers.
+        if self.appshot_welcome && !self.sync_flow.has_visible_overlay() {
+            self.acknowledge_appshot_welcome(cx);
+            return true;
+        }
         if self.sync_flow.has_visible_overlay()
             || self.delete_confirm.is_some()
             || self.delete_space_confirm.is_some()
@@ -8894,6 +8954,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.note_appshot_interaction(cx);
         if event.keystroke.key == "escape" && self.sidebar_session_transfer.is_some() {
             cx.stop_active_drag(window);
             self.cancel_sidebar_session_transfer(cx);
@@ -9260,6 +9321,99 @@ impl Shell {
 
         if let Some(modal) = self.branch_modal.clone() {
             overlays.push(self.render_branch_modal(modal, viewport, &theme, cx));
+        }
+
+        // Synara's AnnouncementSheet geometry: 420 wide, 20px padding, 64px
+        // hero, fixed 19px title, 32px buttons. It waits behind the sync gate
+        // so a fresh install never stacks it on the sign-in flow.
+        if self.appshot_welcome && !self.sync_flow.has_visible_overlay() {
+            let action = |label: &str| {
+                div()
+                    .h(px(32.0))
+                    .px(px(14.0))
+                    .rounded(px(10.0))
+                    .flex()
+                    .items_center()
+                    .text_size(crate::typography::ui_rems(14.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .cursor_pointer()
+                    .child(SharedString::from(label.to_string()))
+            };
+            let card = popover::dialog_card(&theme)
+                .w(px(420.0))
+                .rounded(px(20.0))
+                .child(
+                    div().mb(px(32.0)).h(px(64.0)).flex().items_center().child(
+                        div()
+                            .size(px(64.0))
+                            .rounded(px(16.0))
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(crate::theme::ink(0.04))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                icons::icon(icons::SCREEN_CAPTURE)
+                                    .size(px(32.0))
+                                    .text_color(theme.text),
+                            ),
+                    ),
+                )
+                .child(
+                    div()
+                        .text_size(px(19.0))
+                        .line_height(px(23.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme.text)
+                        .child("Zeron Appshots are live!"),
+                )
+                .child(
+                    div()
+                        .mt(px(8.0))
+                        .text_size(crate::typography::ui_rems(14.0))
+                        .line_height(px(21.0))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(format!(
+                            "Press both {glyph} keys ({glyph}\u{2009}{glyph}) to snap any app\u{2019}s window into the session you\u{2019}re working in.",
+                            glyph = crate::appshots::ChordModifier::Command.glyph()
+                        ))),
+                )
+                .child(
+                    div()
+                        .mt(px(12.0))
+                        .flex()
+                        .flex_row()
+                        .justify_end()
+                        .gap(px(8.0))
+                        .child(
+                            action("Not now")
+                                .id("appshot-welcome-dismiss")
+                                .text_color(theme.text_muted)
+                                .hover(|s| s.bg(crate::theme::ink(0.06)).text_color(theme.text))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.acknowledge_appshot_welcome(cx);
+                                })),
+                        )
+                        .child(
+                            action("Set up Appshots")
+                                .id("appshot-welcome-confirm")
+                                .bg(theme.text)
+                                .text_color(theme.on_solid)
+                                .hover(|s| s.opacity(0.9))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.acknowledge_appshot_welcome(cx);
+                                    this.open_settings(SettingsSection::Appshots, cx);
+                                })),
+                        ),
+                )
+                .into_any_element();
+            overlays.push(popover::modal_glass(
+                "appshot-welcome-sheet",
+                viewport,
+                card,
+                20.0,
+            ));
         }
 
         if let Some(sync) = self.render_sync_overlay(viewport, cx) {
@@ -11972,6 +12126,7 @@ impl Render for Shell {
                 }),
             )
             .capture_key_down(cx.listener(Self::on_key_down_capture))
+            .capture_any_mouse_down(cx.listener(|this, _, _, cx| this.note_appshot_interaction(cx)))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_drag_move(cx.listener(Self::on_sidebar_drag))
             .on_drag_move(cx.listener(Self::on_right_pane_drag))
@@ -12672,6 +12827,10 @@ mod tests {
         // `apply_keymap` silently falls back on an unparseable combo, so a
         // default gpui cannot parse would ship as a dead shortcut.
         for id in crate::settings::ShortcutId::ALL {
+            // The Appshot chord is a native listener, never a gpui binding.
+            if crate::appshots::ChordModifier::from_combo(id.default_combo()).is_some() {
+                continue;
+            }
             let combo = platform_combo(id.default_combo());
             assert!(
                 Keystroke::parse(&combo).is_ok(),
@@ -13656,7 +13815,17 @@ mod exit_regressions {
                 shell.receive_appshot(crate::appshots::tests::shot(), window, cx);
                 assert!(shell.state.read(cx).selected_chat.is_none());
                 assert_eq!(shell.state.read(cx).selected_space.as_deref(), Some("b"));
-                assert_eq!(shell.composer.read(cx).appshots[""].len(), 1);
+                let draft = shell.state.read(cx).focused_id().unwrap();
+                assert!(shell.state.read(cx).is_draft(&draft));
+                assert_eq!(shell.composer.read(cx).appshots[&draft].len(), 1);
+            })
+            .unwrap();
+        // Once the composer observes the new draft and swaps keys, the capture
+        // is the one it shows (the old "" bucket was never drawn).
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, cx| {
+                assert_eq!(shell.composer.read(cx).staged_appshots().len(), 1);
             })
             .unwrap();
     }

@@ -109,6 +109,7 @@ fn main() -> anyhow::Result<()> {
             screenshot,
             screenshot_dimensions: Some(dimensions),
             app_icon: None,
+            window_bounds: None,
             captured_at: chrono::Utc::now(),
         };
         let path = inputs
@@ -193,17 +194,17 @@ fn main() -> anyhow::Result<()> {
                     window.update(cx,|s,w,cx|{ s.fixture_appshots_sidebar(true,cx); w.resize(size(px(width),px(850.))); })?;
                     pause(cx,700).await;capture(window.into(), cx, &output,&format!("appshots-chat-light-{width}"))?;
                 }
-                window.update(cx,|s,w,cx| {s.fixture_appshots_sidebar(false,cx);w.resize(size(px(1100.),px(850.)));s.fixture_appshots_settings(true,cx);})?;
+                window.update(cx,|s,w,cx| {s.fixture_appshots_sidebar(false,cx);w.resize(size(px(1100.),px(1500.)));s.fixture_appshots_settings(true,cx);})?;
                 pause(cx,900).await;capture(window.into(), cx, &output,"appshots-settings-light-1100")?;
                 cx.update(|cx|appearance::set_mode(appearance::AppearanceMode::Dark,cx));pause(cx,500).await;capture(window.into(), cx, &output,"appshots-settings-dark-1100")?;
                 press(window.into(),cx,"tab")?;press(window.into(),cx,"space")?;
                 pause(cx,500).await;capture(window.into(),cx,&output,"appshots-settings-enabled-keyboard")?;
-                for key in ["tab","tab","tab","tab","space"] { press(window.into(),cx,key)?; }
+                for key in ["tab","tab","tab","space"] { press(window.into(),cx,key)?; }
                 pause(cx,500).await;capture(window.into(),cx,&output,"appshots-settings-last-session")?;
                 for key in ["shift-tab","shift-tab","enter"] { press(window.into(),cx,key)?; }
                 pause(cx,500).await;capture(window.into(),cx,&output,"appshots-settings-recording")?;
                 press(window.into(),cx,"escape")?;
-                window.update(cx,|_,w,_|w.resize(size(px(600.),px(850.))))?;pause(cx,700).await;capture(window.into(), cx, &output,"appshots-settings-dark-600")?;
+                window.update(cx,|_,w,_|w.resize(size(px(600.),px(1500.))))?;pause(cx,700).await;capture(window.into(), cx, &output,"appshots-settings-dark-600")?;
                 window.update(cx,|s,w,cx| {w.resize(size(px(1100.),px(850.)));s.fixture_appshots_settings(false,cx);})?;
                 composer.update(cx,|c,cx|c.fixture_clear_appshots(cx));
                 let state_paths=vec![paths[0].clone(), "pending://appshot-test/notes.png".into(), "/missing/appshot-test.png".into()];

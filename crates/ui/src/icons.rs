@@ -52,6 +52,9 @@ icon_assets![
     (REMOTE_SERVER, "remote-server"),
     // Solar Icons (Linear), CC BY 4.0 — 480 Design.
     (MONITOR, "monitor"),
+    // Central Icons "screen-capture" (Synara's AppSnap glyph): a viewfinder
+    // frame around a lens.
+    (SCREEN_CAPTURE, "screen-capture"),
     (SUN, "sun"),
     (MOON, "moon"),
     // Browser globe, drawn in the same linear weight as the toolbar family.

@@ -232,6 +232,7 @@ pub(super) async fn capture() -> Result<CapturedAppshot, CaptureError> {
         app_icon: native
             .icon_png
             .map(|bytes| Arc::new(Image::from_bytes(GpuiImageFormat::Png, bytes))),
+        window_bounds: None,
         captured_at: chrono::Utc::now(),
     })
 }

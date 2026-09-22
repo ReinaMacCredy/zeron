@@ -200,6 +200,7 @@ pub fn run_app(config: UiConfig) {
                 );
                 composer::init(cx, ui_settings.composer_send_behavior);
                 appshots::set_enabled(ui_settings.appshots_enabled);
+                appshots::set_welcome_pending(!ui_settings.appshot_welcome_acknowledged);
                 terminal::panel::init(cx);
                 app_menus::init(cx);
                 cx.register_url_scheme("zeron").detach();
@@ -452,6 +453,17 @@ fn start_appshot_service(activation_dir: std::path::PathBuf, cx: &mut App) {
                 continue;
             };
             let capture = capture.await;
+            // Synara flashes the captured window before the renderer attaches
+            // the snap and comes forward: the flash runs after the pixels are
+            // safe, and delivery waits for it to fade.
+            if let Some(bounds) = capture.as_ref().ok().and_then(|shot| shot.window_bounds) {
+                if let Some(done) = cx.update(|_| appshots::play_capture_flash(bounds)) {
+                    let _ = done.await;
+                }
+            }
+            if capture.is_ok() {
+                appshots::capture_ready();
+            }
             // Coalesce presses made while capture was in flight. Delivery
             // focuses Zeron; replaying old activations would capture the wrong
             // app or show a misleading self-capture error after success.

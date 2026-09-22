@@ -851,6 +851,9 @@ pub struct UiSettings {
     pub appshot_sound_enabled: bool,
     #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), serde(skip))]
     pub appshot_destination: crate::appshots::AppshotDestination,
+    /// The one-time Appshots introduction sheet was dismissed or followed.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), serde(skip))]
+    pub appshot_welcome_acknowledged: bool,
     /// Whether bare Escape stops the active agent after contextual consumers
     /// decline it. Device-local and opt-in.
     pub escape_stops_active_agent: bool,
@@ -958,6 +961,7 @@ impl Default for UiSettings {
             appshots_enabled: false,
             appshot_sound_enabled: true,
             appshot_destination: crate::appshots::AppshotDestination::Automatic,
+            appshot_welcome_acknowledged: false,
             appearance: crate::appearance::AppearanceMode::default(),
             git_history_columns: GitHistoryColumns::default(),
             git_history_column_widths: GitHistoryColumnWidths::default(),
@@ -1091,7 +1095,8 @@ impl ShortcutId {
     /// this guards against only exists off macOS).
     pub fn default_combo_on(self, mac: bool) -> &'static str {
         match self {
-            ShortcutId::CaptureAppshot if mac => "ctrl-alt-space",
+            // Both Command keys, watched by a passive tap (the Codex default).
+            ShortcutId::CaptureAppshot if mac => crate::appshots::ChordModifier::Command.combo(),
             ShortcutId::CaptureAppshot => "mod-alt-space",
             ShortcutId::SaveFile => "mod-s",
             ShortcutId::BrowserReload => "mod-shift-r",
@@ -1420,6 +1425,14 @@ pub fn display_combo(combo: &str) -> String {
 
 /// [`display_combo`] for an explicit platform (see [`combo_from_keystroke_on`]).
 pub fn display_combo_on(mac: bool, combo: &str) -> String {
+    if mac {
+        if let Some(chord) = crate::appshots::ChordModifier::from_combo(combo) {
+            return chord.label();
+        }
+        if combo == crate::appshots::NO_HOTKEY {
+            return "None".to_string();
+        }
+    }
     combo
         .split('-')
         .map(|part| match part {
@@ -1641,6 +1654,14 @@ impl UiSettings {
             self.accent = zeron_theme::AccentSelection::Preset(accent.into());
         }
         self.legacy_accent_color = None;
+        // The macOS Appshot hotkey became a modifier chord picked from a
+        // menu; a recorded key combo from before that has no menu entry.
+        if cfg!(target_os = "macos")
+            && self.keymap.capture_appshot != crate::appshots::NO_HOTKEY
+            && crate::appshots::ChordModifier::from_combo(&self.keymap.capture_appshot).is_none()
+        {
+            self.keymap.reset(ShortcutId::CaptureAppshot);
+        }
         self
     }
 
@@ -1931,7 +1952,7 @@ mod tests {
     fn appshot_shortcut_defaults_round_trip_and_reset() {
         assert_eq!(
             ShortcutId::CaptureAppshot.default_combo_on(true),
-            "ctrl-alt-space"
+            "command-command"
         );
         assert_eq!(
             ShortcutId::CaptureAppshot.default_combo_on(false),
@@ -1949,16 +1970,37 @@ mod tests {
             ShortcutId::CaptureAppshot.default_combo()
         );
         assert_eq!(settings.keymap.new_session, "mod-shift-n");
+        // macOS stores a menu chord; Linux a recorded key combo. A macOS
+        // file carrying an old recorded combo reloads as the default chord.
+        let custom = if cfg!(target_os = "macos") {
+            crate::appshots::ChordModifier::Shift.combo()
+        } else {
+            "mod-alt-k"
+        };
         settings
             .keymap
-            .set(ShortcutId::CaptureAppshot, "mod-alt-k".into());
+            .set(ShortcutId::CaptureAppshot, custom.into());
         std::fs::write(
             UiSettings::path(dir.path()),
             serde_json::to_vec(&settings).unwrap(),
         )
         .unwrap();
         let mut restored = UiSettings::load(dir.path());
-        assert_eq!(restored.keymap.capture_appshot, "mod-alt-k");
+        assert_eq!(restored.keymap.capture_appshot, custom);
+        if cfg!(target_os = "macos") {
+            restored
+                .keymap
+                .set(ShortcutId::CaptureAppshot, "ctrl-alt-space".into());
+            std::fs::write(
+                UiSettings::path(dir.path()),
+                serde_json::to_vec(&restored).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                UiSettings::load(dir.path()).keymap.capture_appshot,
+                ShortcutId::CaptureAppshot.default_combo()
+            );
+        }
         restored.keymap.reset(ShortcutId::CaptureAppshot);
         assert_eq!(
             restored.keymap.capture_appshot,
@@ -2207,6 +2249,7 @@ mod tests {
             } else {
                 crate::appshots::AppshotDestination::Automatic
             },
+            appshot_welcome_acknowledged: cfg!(any(target_os = "macos", target_os = "linux")),
             appearance: crate::appearance::AppearanceMode::Light,
             git_history_columns: GitHistoryColumns {
                 author: false,
@@ -2924,6 +2967,11 @@ mod tests {
         // its default must parse on this platform.
         assert!(conflicted_shortcuts(&KeymapConfig::default()).is_empty());
         for id in ShortcutId::ALL {
+            // The Appshot chord is a native listener, never a gpui binding.
+            if crate::appshots::ChordModifier::from_combo(id.default_combo()).is_some() {
+                assert!(crate::appshots::validate_shortcut(id.default_combo()).is_ok());
+                continue;
+            }
             assert!(
                 gpui::Keystroke::parse(&platform_combo(id.default_combo())).is_ok(),
                 "{:?} default combo does not parse",
@@ -2983,6 +3031,11 @@ mod tests {
         for mac in [true, false] {
             for id in ShortcutId::ALL {
                 let combo = id.default_combo_on(mac);
+                // The macOS hotkey is a modifier chord picked from a menu,
+                // never recorded as a keystroke.
+                if crate::appshots::ChordModifier::from_combo(combo).is_some() {
+                    continue;
+                }
                 // Via the platform spelling, where modifier names are
                 // unambiguous, so the decode can't inherit the bug it checks.
                 let bound = platform_combo_on(mac, combo);

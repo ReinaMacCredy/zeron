@@ -2,9 +2,43 @@
 
 Appshots capture an application window on the desktop and stage it in a composer
 for review before sending. Enable the feature in **Settings → Appshots**, choose
-a global shortcut and destination, and optionally enable capture sound. Invoke
-the shortcut while another application is focused. Invoking it inside Zeron is
-ignored. No message is sent automatically.
+a hotkey and destination, and optionally enable capture sound. Invoke the hotkey
+while another application is focused. Invoking it inside Zeron is ignored. No
+message is sent automatically. A one-time introduction sheet on desktop routes
+to the settings page.
+
+## Hotkey
+
+On macOS the hotkey is a double-modifier chord picked from a menu: both ⌘ keys
+(default), both ⌥ keys, both ⇧ keys, or None. A listen-only session event tap on
+`flagsChanged` tells the left and right keys apart by their device flags and
+fires once per press while both are held; it needs **Input Monitoring**. Older
+recorded key combos reload as the default chord. Linux keeps a recorded key
+combo (default Ctrl+Alt+Space) and needs no extra permission.
+
+## Settings page
+
+Modeled on Synara's AppSnap panel: an introduction card, a Capture card (Enable
+with a live status line, Hotkey, Destination, Capture sound with Preview), and
+a macOS permissions card. Each permission row shows Granted/Denied/Not requested
+with a Grant button that asks macOS, deep-links the pane, and expands numbered
+steps that poll the grant every two seconds until it lands; a Recheck row
+re-reads the state without prompting. Restore defaults sits in the page header
+and each customized row carries a reset glyph.
+
+Automatic destination follows Synara's affinity: the session interacted with
+in the last minute wins, consecutive snaps stay with the previous snap's session,
+and otherwise a fresh session opens with the capture attached. A capture landing
+on the new-session canvas is keyed to that draft.
+
+## Capture feedback
+
+After the pixels are safe, macOS flashes a white, click-through panel over the
+captured window (35 ms to 34 % opacity, 170 ms back to clear, skipped under
+Reduce Motion), then plays the shutter cue, then brings Zeron forward and stages
+the capture. Composer cards are fixed 208×128 chips with the capture contained
+inside a 4 px inset, the app icon and "window title / app" on a bottom gradient,
+and a corner remove button that brightens on hover.
 
 ## Platforms and permissions
 

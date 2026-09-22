@@ -385,6 +385,7 @@ fn restore_entry(entry: PersistedEntry) -> DraftEntry {
                     screenshot,
                     screenshot_dimensions: shot.screenshot_dimensions,
                     app_icon: None,
+                    window_bounds: None,
                     captured_at: shot.captured_at,
                 })
             })
