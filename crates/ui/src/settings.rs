@@ -2308,7 +2308,7 @@ mod tests {
             code_font_size: 11.0,
             files_show_all: true,
             files_tree_sidebar_hidden: true,
-            summary_collapsed: vec!["threads".into()],
+            summary_collapsed: vec!["subagents".into()],
             accent: zeron_theme::AccentSelection::Preset(zeron_theme::AccentPreset::Cyan),
             surface: zeron_theme::SurfacePreference::Frosted,
             new_thread_composer_background: Some(NewThreadComposerBackground {

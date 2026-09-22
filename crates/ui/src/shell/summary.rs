@@ -1,7 +1,7 @@
 //! The pinned summary: a titlebar card, left of the right-pane toggle, that
 //! answers "where is this session and what did it produce" — the checkout
-//! (working-tree changes, local servers, branch), the child conversations
-//! (sidechats and subagents), the images the user attached, and the project
+//! (working-tree changes, local servers, branch), the sidechats, the
+//! subagents, the images the user attached, and the project
 //! (instructions file, open files). Each row focuses the thing it names;
 //! sections fold, and the folds persist. The card itself is a transient
 //! popover.
@@ -16,7 +16,8 @@ const SECTION_CAP: usize = 8;
 const INSTRUCTION_FILES: &[&str] = &["AGENTS.md", "CLAUDE.md"];
 
 const SECTION_ENVIRONMENT: &str = "environment";
-const SECTION_THREADS: &str = "threads";
+const SECTION_SIDECHATS: &str = "sidechats";
+const SECTION_SUBAGENTS: &str = "subagents";
 const SECTION_SOURCES: &str = "sources";
 const SECTION_PROJECT: &str = "project";
 
@@ -435,21 +436,20 @@ impl Shell {
             }
         }
 
-        // ---- Threads ----
-        let has_threads = source.is_some() || !subagents.is_empty();
-        if has_threads {
-            let threads_open = !self.summary_section_collapsed(SECTION_THREADS);
+        // ---- Sidechats ----
+        if source.is_some() {
+            let sidechats_open = !self.summary_section_collapsed(SECTION_SIDECHATS);
             card = card
                 .child(popover::menu_separator())
                 .child(self.summary_heading(
                     theme,
-                    SECTION_THREADS,
-                    "Threads",
+                    SECTION_SIDECHATS,
+                    "Sidechats",
                     None,
-                    threads_open,
+                    sidechats_open,
                     cx,
                 ));
-            if threads_open {
+            if sidechats_open {
                 for (ix, chat) in sidechats.into_iter().enumerate() {
                     let expired = chat.sidechat_expired(Utc::now());
                     let title = chat.title.clone().unwrap_or_else(|| "Sidechat".into());
@@ -463,6 +463,33 @@ impl Shell {
                             .when(expired, |row| row.child(value(theme, "Expired".into()))),
                     );
                 }
+                card = card.child(
+                    row(theme, "pinned-summary-new-sidechat", 0, icons::PLUS)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(source) = source.clone() {
+                                this.create_sidechat(source, None, cx);
+                            }
+                            this.close_summary_menu(cx);
+                        }))
+                        .child(label("New sidechat".into())),
+                );
+            }
+        }
+
+        // ---- Subagents ----
+        if !subagents.is_empty() {
+            let subagents_open = !self.summary_section_collapsed(SECTION_SUBAGENTS);
+            card = card
+                .child(popover::menu_separator())
+                .child(self.summary_heading(
+                    theme,
+                    SECTION_SUBAGENTS,
+                    "Subagents",
+                    None,
+                    subagents_open,
+                    cx,
+                ));
+            if subagents_open {
                 let hidden = subagents.len().saturating_sub(SECTION_CAP);
                 for (ix, agent) in subagents.into_iter().take(SECTION_CAP).enumerate() {
                     let (state, tone) = match agent.status {
@@ -489,18 +516,6 @@ impl Shell {
                     );
                 }
                 card = card.when(hidden > 0, |card| card.child(more(theme, hidden)));
-                if source.is_some() {
-                    card = card.child(
-                        row(theme, "pinned-summary-new-sidechat", 0, icons::PLUS)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(source) = source.clone() {
-                                    this.create_sidechat(source, None, cx);
-                                }
-                                this.close_summary_menu(cx);
-                            }))
-                            .child(label("New sidechat".into())),
-                    );
-                }
             }
         }
 
@@ -759,14 +774,14 @@ mod summary_fold_regressions {
     }
 
     #[gpui::test]
-    fn folding_threads_hides_its_rows_and_reaches_the_settings_store(cx: &mut TestAppContext) {
+    fn folding_sidechats_hides_its_rows_and_reaches_the_settings_store(cx: &mut TestAppContext) {
         let (shell, cx) = setup(cx);
         shell.update(cx, |shell, cx| shell.open_summary_menu(cx));
         cx.update(|window, cx| window.draw(cx).clear());
         assert!(cx.debug_bounds("pinned-summary-sidechat-0").is_some());
         let heading = cx
-            .debug_bounds("pinned-summary-section-threads")
-            .expect("Threads heading")
+            .debug_bounds("pinned-summary-section-sidechats")
+            .expect("Sidechats heading")
             .center();
         cx.simulate_click(heading, gpui::Modifiers::default());
         cx.update(|window, cx| window.draw(cx).clear());
@@ -774,11 +789,11 @@ mod summary_fold_regressions {
             assert!(shell.summary_menu.is_open(), "folding keeps the card open");
             assert_eq!(
                 shell.settings.summary_collapsed,
-                vec!["threads".to_string()]
+                vec!["sidechats".to_string()]
             );
             assert_eq!(
                 crate::settings::current(cx).summary_collapsed,
-                vec!["threads".to_string()]
+                vec!["sidechats".to_string()]
             );
         });
         assert!(cx.debug_bounds("pinned-summary-sidechat-0").is_none());
