@@ -311,6 +311,7 @@ async fn steering_uses_turn_steer_with_expected_turn_id() {
         .send(SteerMessage {
             prompt: "redirect please".into(),
             message_id: None,
+            attachments: Vec::new(),
         })
         .await
         .expect("steer queued");
@@ -354,6 +355,7 @@ async fn rejected_steer_falls_back_to_a_follow_up_turn() {
         .send(SteerMessage {
             prompt: "redirect please".into(),
             message_id: None,
+            attachments: Vec::new(),
         })
         .await
         .expect("steer queued");
@@ -1017,6 +1019,7 @@ async fn live_subagent_spawn_and_followup_keep_one_transcript() {
             steer.send(SteerMessage {
                 prompt: "Reuse the SAME existing subagent for one more task: reply exactly child-second. Use followup_task if available, otherwise send_input. Do not spawn a new agent. Wait for it to finish, then reply exactly parent-second. Do not inspect or change files.".into(),
                 message_id: None,
+                attachments: Vec::new(),
             }).await.unwrap();
         }
         if turn == 2 {

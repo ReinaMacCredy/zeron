@@ -38,6 +38,8 @@ struct HeldHarness {
     finish: tokio::sync::broadcast::Sender<()>,
     prompts: Arc<Mutex<Vec<String>>>,
     requests: Mutex<Vec<RunRequest>>,
+    /// Every steer the mailbox delivered, as (prompt, attachments).
+    steers: Arc<Mutex<Vec<(String, Vec<String>)>>>,
     /// Park the first turn on a question instead of just hanging, so the chat
     /// sits in `AwaitingInput` rather than `Working`.
     asks: bool,
@@ -61,6 +63,7 @@ impl HeldHarness {
                 finish,
                 prompts: prompts.clone(),
                 requests: Mutex::new(Vec::new()),
+                steers: Arc::new(Mutex::new(Vec::new())),
                 asks,
             }),
             prompts,
@@ -108,6 +111,7 @@ impl Harness for HeldHarness {
         }
         let mut finish = self.finish.subscribe();
         let mut steering = controls.steering;
+        let steers = self.steers.clone();
         let started = futures::stream::iter(vec![Ok(AgentEvent::SessionStarted {
             harness: HarnessId::Mock,
             model: "mock-1".into(),
@@ -128,14 +132,15 @@ impl Harness for HeldHarness {
                         });
                     }
                     steer = steering.recv() => {
-                        if steer.is_none() {
+                        let Some(steer) = steer else {
                             return Ok(AgentEvent::Done {
                                 status: DoneStatus::Completed,
                                 result: None,
                                 error: None,
                                 session_id: Some("sess-queue".into()),
                             });
-                        }
+                        };
+                        steers.lock().unwrap().push((steer.prompt, steer.attachments));
                     }
                 }
             }
@@ -705,9 +710,10 @@ async fn a_steer_now_submit_steers_a_live_steerable_turn() {
     core.shutdown().await;
 }
 
-/// A steer-now submit carrying attachments steers too: the files ride the
-/// prompt as path refs instead of leaving the row parked in the queue
-/// (user report: a screenshot sent with the steer chord landed in the queue).
+/// A steer-now submit carrying attachments steers too, with the files on the
+/// mailbox message and as path refs in the prompt, instead of leaving the
+/// row parked in the queue (user report: a screenshot sent with the steer
+/// chord landed in the queue).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_steer_now_submit_with_attachments_steers_a_live_steerable_turn() {
     let (core, harness, prompts) = setup(SteeringMode::StepBoundary).await;
@@ -746,6 +752,12 @@ async fn a_steer_now_submit_with_attachments_steers_a_live_steerable_turn() {
     .await;
     assert!(queue_texts(&core).is_empty());
     assert!(core.sessions.turn_in_flight(CHAT), "steering never interrupts");
+    let steers = harness.steers.lock().unwrap().clone();
+    assert_eq!(
+        steers.iter().map(|(_, files)| files.as_slice()).collect::<Vec<_>>(),
+        vec![["/tmp/shot.png".to_string()].as_slice()],
+        "the mailbox message carries the files, not only the prompt trailer"
+    );
 
     let _ = harness.finish.send(());
     core.shutdown().await;

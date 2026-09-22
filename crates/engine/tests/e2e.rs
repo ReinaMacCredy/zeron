@@ -2619,7 +2619,7 @@ async fn pending_steer_handoff_does_not_publish_a_completion() {
         } else {
             assert_eq!(
                 core.sessions
-                    .steer(CHAT, "redirect", Some("user-steer".into()))
+                    .steer(CHAT, "redirect", &[], Some("user-steer".into()))
                     .await
                     .unwrap(),
                 zeron_engine::sessions::SteerOutcome::Accepted

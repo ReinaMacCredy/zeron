@@ -28,8 +28,8 @@
 //!   with the parent's own stream — folding them in split contiguous text
 //!   around phantom tool calls).
 //! - Steering: queued [`SteerMessage`]s are written to stdin as user lines at
-//!   any time; the CLI folds them into the running turn at its own step
-//!   boundary.
+//!   any time, their attachments inlined like a first turn's; the CLI folds
+//!   them into the running turn at its own step boundary.
 //! - Interrupt: cancelling [`RunControls::interrupt`] sends the protocol-level
 //!   interrupt control request, then escalates to SIGTERM and SIGKILL.
 
@@ -748,7 +748,11 @@ async fn run_session(session: Session) {
 
             steer = steering.recv(), if steering_open && !interrupted => match steer {
                 Some(msg) => {
-                    let line = wire::user_message_line(&apply_ultrathink(reasoning, &msg.prompt));
+                    let images = load_image_blocks(&msg.attachments).await;
+                    let line = wire::user_message_line_with_images(
+                        &apply_ultrathink(reasoning, &msg.prompt),
+                        &images,
+                    );
                     let _ = stdin_tx.send(StdinMsg::Line(line));
                     // The CLI consumes the queued line at its own step
                     // boundary; rotate the assistant message id so post-steer

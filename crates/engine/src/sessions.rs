@@ -208,6 +208,7 @@ impl RunSetup {
 struct RoutedSteer {
     prompt: String,
     message_id: String,
+    attachments: Vec<String>,
 }
 
 struct Inner {
@@ -567,11 +568,13 @@ impl SessionsEngine {
                         .harness_prompt(chat_id, &request.prompt, &user_id)
                         .map_or_else(|| request.prompt.clone(), |wrapped| wrapped.prompt),
                     message_id: Some(user_id.clone()),
+                    attachments: request.attachments.clone(),
                 };
                 if steer_tx.try_send(message).is_ok() {
                     pending.push_back(RoutedSteer {
                         prompt: request.prompt.clone(),
                         message_id: user_id.clone(),
+                        attachments: request.attachments.clone(),
                     });
                     true
                 } else {
@@ -696,6 +699,7 @@ impl SessionsEngine {
         &self,
         chat_id: &str,
         prompt: &str,
+        attachments: &[String],
         message_id: Option<String>,
     ) -> Result<SteerOutcome, EngineError> {
         self.ensure_sidechat_active(chat_id)?;
@@ -722,6 +726,7 @@ impl SessionsEngine {
                 .harness_prompt(chat_id, prompt, &user_id)
                 .map_or_else(|| prompt.to_string(), |wrapped| wrapped.prompt),
             message_id: Some(user_id.clone()),
+            attachments: attachments.to_vec(),
         };
         {
             // Serialize mailbox acceptance with confirmation and Done-time
@@ -733,6 +738,7 @@ impl SessionsEngine {
             pending.push_back(RoutedSteer {
                 prompt: prompt.to_string(),
                 message_id: user_id.clone(),
+                attachments: attachments.to_vec(),
             });
         }
         let handle = self.doc_handle(chat_id)?;
@@ -3583,7 +3589,7 @@ async fn drive_run(
                 };
                 request.prompt = steer.prompt.clone();
                 request.resume = None;
-                request.attachments = Vec::new();
+                request.attachments = steer.attachments.clone();
                 tracing::info!(chat = %chat, "re-dispatching steer orphaned by a dying run");
                 let Some(host) = engine.inner.doc_host() else {
                     tracing::warn!(chat = %chat, "orphaned steer lost: doc host unavailable");

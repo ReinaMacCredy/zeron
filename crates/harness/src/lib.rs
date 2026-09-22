@@ -42,6 +42,9 @@ pub enum HarnessError {
 pub struct SteerMessage {
     pub prompt: String,
     pub message_id: Option<String>,
+    /// Local file paths the prompt's trailer already names; a harness that
+    /// can inline them on a first turn does so on a steer too.
+    pub attachments: Vec<String>,
 }
 
 /// The MCP stdio server the engine serves to a run's agent (the thread

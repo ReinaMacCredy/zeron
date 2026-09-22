@@ -466,7 +466,7 @@ async fn a_steered_prompt_is_wrapped_too() {
 
     rig.core
         .sessions
-        .steer(SIDE, "and the fix?", Some("side-2".into()))
+        .steer(SIDE, "and the fix?", &[], Some("side-2".into()))
         .await
         .expect("steer");
     wait_for(
@@ -558,7 +558,7 @@ async fn expired_sidechat_rejects_dispatch_and_steering_without_removing_history
     let err = rig
         .core
         .sessions
-        .steer(SIDE, "after expiry", Some("side-3".into()))
+        .steer(SIDE, "after expiry", &[], Some("side-3".into()))
         .await
         .unwrap_err();
     assert!(err.to_string().contains("Sidechat expired"), "{err}");

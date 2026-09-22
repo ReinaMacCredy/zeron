@@ -287,7 +287,7 @@ async fn steered_turn_keeps_the_normal_window() {
     // the short window (its Done is genuinely coming).
     rig.core
         .sessions
-        .steer(CHAT, "and then?", None)
+        .steer(CHAT, "and then?", &[], None)
         .await
         .expect("steer accepted");
     wait_for(

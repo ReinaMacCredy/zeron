@@ -3274,8 +3274,8 @@ impl DocHost {
     /// Promote one held row without ever interrupting a turn. A live,
     /// steerable turn receives it as steering; if that turn has already ended,
     /// it starts normally as the next turn. Unsupported harnesses stay
-    /// untouched. Attachments ride the steer as path refs in the prompt
-    /// trailer (the agent opens them), never as inline image blocks.
+    /// untouched. Attachments ride the steer like a first turn: inlined by
+    /// harnesses that can, path refs in the prompt trailer for the rest.
     pub async fn steer_queued_now(&self, chat_id: &str, id: &str) -> Result<bool, EngineError> {
         if !self.is_host(chat_id) {
             return Err(EngineError::Other(format!(
@@ -3465,7 +3465,12 @@ impl DocHost {
         }
         if send == QueueSend::Steer {
             match sessions
-                .steer(chat_id, &prompt, Some(message_id.clone()))
+                .steer(
+                    chat_id,
+                    &prompt,
+                    &item.attachments,
+                    Some(message_id.clone()),
+                )
                 .await?
             {
                 SteerOutcome::Accepted => return Ok(()),
@@ -4660,7 +4665,10 @@ impl DocHost {
         {
             tracing::warn!(chat = %chat_id, error = %err, "canonical user-message write failed");
         }
-        match sessions.steer(chat_id, &prompt, message_id.clone()).await? {
+        match sessions
+            .steer(chat_id, &prompt, &[], message_id.clone())
+            .await?
+        {
             SteerOutcome::Accepted => {
                 handle.queue_paused.store(false, Ordering::Release);
                 Ok((SessionCommandStatus::Applied, None))

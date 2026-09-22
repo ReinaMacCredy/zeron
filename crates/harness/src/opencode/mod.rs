@@ -1536,7 +1536,7 @@ async fn run_session(session: Session) {
     let mut pending_spawns: VecDeque<PendingSpawn> = VecDeque::new();
     // Child sessions created before their spawn chip was seen (id → title).
     let mut unbound_children: HashMap<String, String> = HashMap::new();
-    let mut queued_steers: VecDeque<String> = VecDeque::new();
+    let mut queued_steers: VecDeque<crate::SteerMessage> = VecDeque::new();
     let mut steering_open = true;
     let mut interrupt_requested = false;
     let mut pending_usage: Option<AgentEvent> = None;
@@ -1586,11 +1586,11 @@ async fn run_session(session: Session) {
                     &session_id,
                     dir,
                     &commands,
-                    &steer,
+                    &steer.prompt,
                     TurnSpec {
                         model: model.as_ref(),
                         variant: variant.as_deref(),
-                        attachments: &[],
+                        attachments: &steer.attachments,
                     },
                 )
                 .await
@@ -1692,7 +1692,7 @@ async fn run_session(session: Session) {
                 match steer {
                     Some(steer) => {
                         if turn.active {
-                            queued_steers.push_back(steer.prompt);
+                            queued_steers.push_back(steer);
                         } else {
                             // Between turns (shouldn't happen — the engine
                             // steers live runs — but deliver, don't drop).
@@ -1710,7 +1710,7 @@ async fn run_session(session: Session) {
                                 TurnSpec {
                                     model: model.as_ref(),
                                     variant: variant.as_deref(),
-                                    attachments: &[],
+                                    attachments: &steer.attachments,
                                 },
                             )
                             .await

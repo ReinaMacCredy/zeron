@@ -388,6 +388,7 @@ async fn steering_lines_are_written_to_stdin_mid_run() {
         .send(SteerMessage {
             prompt: "redirect please".into(),
             message_id: None,
+            attachments: Vec::new(),
         })
         .await
         .expect("steer queued");
@@ -420,6 +421,31 @@ async fn steering_lines_are_written_to_stdin_mid_run() {
             ..
         })
     ));
+}
+
+#[tokio::test]
+async fn steering_lines_inline_their_image_attachments() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shot = dir.path().join("shot.png");
+    std::fs::write(&shot, [0x89, b'P', b'N', b'G', 0, 0, 0, 0]).expect("write png");
+    let (controls, steer, _token) = controls("A");
+    steer
+        .send(SteerMessage {
+            prompt: "look at this".into(),
+            message_id: None,
+            attachments: vec![shot.to_string_lossy().into_owned()],
+        })
+        .await
+        .expect("steer queued");
+    let events = run_to_end(&harness(), request("scenario:steer-image"), controls).await;
+
+    // The fake CLI reports whether the steer line carried an image block.
+    assert!(
+        events.contains(&AgentEvent::TextDelta {
+            text: "steered:image".into()
+        }),
+        "steer line must inline the attachment like a first turn: {events:?}"
+    );
 }
 
 #[tokio::test]
