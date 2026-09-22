@@ -426,8 +426,9 @@ impl Shell {
     }
 
     /// A pair member vanished (archived, deleted): the pair goes. A draft
-    /// counts as live, and so does the selected chat: a just-promoted draft
-    /// is neither a draft nor a synced row until its doc frame lands.
+    /// counts as live, and so does a selected chat with no row yet: a
+    /// just-promoted draft is neither a draft nor a synced row until its
+    /// doc frame lands. A selected chat whose row IS archived is gone.
     pub(super) fn prune_split(&mut self, cx: &mut Context<Self>) {
         let Some(pair) = self.split_pair.clone() else {
             return;
@@ -437,8 +438,10 @@ impl Shell {
             !state.chats_synced
                 || [&pair.left, &pair.right].iter().all(|id| {
                     state.is_draft(id)
-                        || state.selected_chat.as_deref() == Some(id.as_str())
-                        || state.chats.iter().any(|c| c.id == **id && !c.archived)
+                        || match state.chats.iter().find(|c| c.id == **id) {
+                            Some(chat) => !chat.archived,
+                            None => state.selected_chat.as_deref() == Some(id.as_str()),
+                        }
                 })
         };
         if !live {

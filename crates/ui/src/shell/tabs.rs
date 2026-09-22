@@ -1701,6 +1701,33 @@ mod strip_regressions {
         });
     }
 
+    /// Archiving the SELECTED member dissolves the pair on that very sync,
+    /// so the partner's sidebar row drops its side glyph without a click.
+    #[gpui::test]
+    fn archiving_the_selected_member_dissolves_the_pair(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                state.chats = vec![chat("a"), chat("b")];
+                state.chats_synced = true;
+                state.spaces_synced = true;
+                state.apply_sessions(vec![working("a"), working("b")]);
+                state.select_chat(Some("a".into()), cx);
+            });
+            shell.on_state_changed(&shell.state.clone(), cx);
+            shell.drop_session_on_side("b".into(), split::SplitSide::Right, cx);
+            shell.on_state_changed(&shell.state.clone(), cx);
+            assert_eq!(shell.split_chat_id(), Some("b"));
+            shell
+                .state
+                .update(cx, |state, _| state.chats[0].archived = true);
+            shell.on_state_changed(&shell.state.clone(), cx);
+            assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("a"));
+            assert_eq!(shell.split_pair, None, "archived member must end the pair");
+            assert_eq!(shell.split_chat_id(), None);
+        });
+    }
+
     #[gpui::test]
     fn background_start_keeps_the_tab_and_mints_the_next_draft(cx: &mut TestAppContext) {
         let (shell, cx) = setup(cx);
