@@ -66,6 +66,7 @@ async fn check_persistence(
         worktree: None,
         branch: None,
         resume: None,
+        forked_at: None,
     };
     core.sessions
         .dispatch(

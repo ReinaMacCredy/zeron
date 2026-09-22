@@ -28,6 +28,7 @@ const FORK: &str = "chat-fork";
 struct Seen {
     resume: Option<String>,
     branch: Option<SessionBranch>,
+    forked_at: Option<String>,
 }
 
 struct TestHarness {
@@ -88,6 +89,7 @@ impl Harness for TestHarness {
         self.runs.lock().unwrap().push(Seen {
             resume: request.resume.clone(),
             branch: request.branch.clone(),
+            forked_at: request.forked_at.clone(),
         });
         let n = self.turns.fetch_add(1, Ordering::SeqCst) + 1;
         let session_id = match (&request.resume, &request.branch) {
@@ -198,6 +200,7 @@ fn run_payload(prompt: &str, message_id: &str, cwd: &str) -> SessionCommandPaylo
             resume: None,
             worktree: None,
             branch: None,
+            forked_at: None,
         },
         message_id: message_id.into(),
     }
@@ -310,6 +313,11 @@ async fn fork_copies_through_the_reply_and_branches_the_next_run() {
         .sessions
         .fork_chat(SOURCE, &rig.reply_id(SOURCE, 1), FORK)
         .expect("fork");
+    let forked_at = Some(
+        forked
+            .created_at
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    );
     assert_eq!(forked.title.as_deref(), Some("Fork: Auth work"));
     assert_eq!(forked.sidechat_source_chat_id, None);
     assert_eq!(forked.space_id, row_before.space_id);
@@ -338,6 +346,7 @@ async fn fork_copies_through_the_reply_and_branches_the_next_run() {
                 keep: Some("uuid-reply-1".into()),
                 drop: Some("uuid-user-2".into()),
             }),
+            forked_at: forked_at.clone(),
         }
     );
     assert_eq!(
@@ -357,6 +366,7 @@ async fn fork_copies_through_the_reply_and_branches_the_next_run() {
         Seen {
             resume: Some("sess-forked".into()),
             branch: None,
+            forked_at,
         }
     );
 }
@@ -374,6 +384,11 @@ async fn fork_survives_an_engine_restart_before_its_first_run() {
         rig.core.shutdown().await;
     }
     let rig = rig(tmp.path(), true).await;
+    let forked_at = Some(
+        rig.chat(FORK)
+            .created_at
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    );
     rig.turn(FORK, "after restart", "m2").await;
     assert_eq!(
         rig.seen()[0],
@@ -383,6 +398,7 @@ async fn fork_survives_an_engine_restart_before_its_first_run() {
                 keep: Some("uuid-reply-1".into()),
                 drop: None,
             }),
+            forked_at,
         }
     );
 }
@@ -411,6 +427,7 @@ async fn rewind_survives_an_engine_restart_before_the_next_run() {
                 keep: Some("uuid-reply-1".into()),
                 drop: Some("uuid-user-2".into()),
             }),
+            forked_at: None,
         }
     );
 }
@@ -451,6 +468,7 @@ async fn rewind_truncates_the_doc_and_branches_after_the_previous_reply() {
                 keep: Some("uuid-reply-1".into()),
                 drop: Some("uuid-user-2".into()),
             }),
+            forked_at: None,
         }
     );
     assert_eq!(
@@ -490,6 +508,7 @@ async fn rewind_retires_a_parked_persistent_session() {
                 keep: Some("uuid-reply-2".into()),
                 drop: Some("uuid-user-3".into()),
             }),
+            forked_at: None,
         },
         "the retired child's mailbox must not take the prompt: the branch rides a fresh run"
     );
@@ -516,6 +535,7 @@ async fn rewind_before_the_first_prompt_starts_fresh() {
         Seen {
             resume: None,
             branch: None,
+            forked_at: None,
         }
     );
 }

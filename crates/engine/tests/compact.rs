@@ -191,6 +191,7 @@ fn run_payload(message_id: &str, cwd: &str) -> SessionCommandPayload {
             resume: None,
             worktree: None,
             branch: None,
+            forked_at: None,
         },
         message_id: message_id.into(),
     }

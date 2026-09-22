@@ -189,6 +189,9 @@ pub struct RunRequest {
     /// callers send `None`. Additive + serde-defaulted for wire compat.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<SessionBranch>,
+    // History before this instant is the source thread's; its background agents are not ours.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_at: Option<String>,
 }
 
 /// Where a resumed harness session is cut when the run starts: history
@@ -612,6 +615,8 @@ pub enum AgentEvent {
     BranchPending {
         keep: Option<String>,
         drop: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        forked_at: Option<String>,
     },
     /// Engine-written journal record: the chat's harness session was
     /// tombstoned (a provider switch, a rewind to the first prompt). Anchors

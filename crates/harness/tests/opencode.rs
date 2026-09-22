@@ -258,6 +258,7 @@ fn request(prompt: &str) -> RunRequest {
         resume: None,
         worktree: None,
         branch: None,
+        forked_at: None,
     }
 }
 

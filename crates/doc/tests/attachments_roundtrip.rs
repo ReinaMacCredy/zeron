@@ -20,6 +20,7 @@ fn run_request_attachments_survive_command_round_trip() {
         worktree: None,
         branch: None,
         resume: None,
+        forked_at: None,
     };
     doc.queue_command(&SessionCommandEntry {
         id: "c1".into(),

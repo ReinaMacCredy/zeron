@@ -48,6 +48,7 @@ async fn managed_install_reaches_session_started() {
         worktree: None,
         branch: None,
         resume: None,
+        forked_at: None,
     };
 
     let mut stream = tokio::time::timeout(

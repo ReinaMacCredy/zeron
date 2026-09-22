@@ -90,6 +90,7 @@ fn request(prompt: &str, cwd: &str) -> RunRequest {
         resume: None,
         worktree: None,
         branch: None,
+        forked_at: None,
     }
 }
 

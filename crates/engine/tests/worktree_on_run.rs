@@ -125,6 +125,7 @@ fn run_payload(message_id: &str, repo_path: &str) -> SessionCommandPayload {
                 base: "main".into(),
             }),
             branch: None,
+            forked_at: None,
         },
         message_id: message_id.into(),
     }

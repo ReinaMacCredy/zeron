@@ -86,6 +86,7 @@ fn start(core: &EngineCore, cwd: &std::path::Path, prompt: String) {
                     worktree: None,
                     branch: None,
                     resume: None,
+                    forked_at: None,
                 },
             },
         )

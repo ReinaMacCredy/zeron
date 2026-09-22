@@ -40,6 +40,7 @@ fn run_request(prompt: &str) -> RunRequest {
         worktree: None,
         branch: None,
         resume: None,
+        forked_at: None,
     }
 }
 
@@ -1924,6 +1925,7 @@ async fn real_claude_sees_uploaded_image_inline() {
         resume: None,
         worktree: None,
         branch: None,
+        forked_at: None,
     };
     core.doc_host
         .queue_command(

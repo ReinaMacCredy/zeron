@@ -260,6 +260,7 @@ async fn turn(core: &EngineCore, cwd: &std::path::Path, live: bool, second: bool
                 worktree: None,
                 branch: None,
                 resume: None,
+                forked_at: None,
             },
             Some(if second { "second-user" } else { "first-user" }.into()),
         )

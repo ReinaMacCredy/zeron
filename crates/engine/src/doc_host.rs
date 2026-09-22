@@ -4870,6 +4870,7 @@ impl DocHost {
             resume: None,
             worktree: None,
             branch: None,
+            forked_at: None,
         })
     }
 

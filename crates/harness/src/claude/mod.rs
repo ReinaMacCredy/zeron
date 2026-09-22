@@ -242,6 +242,21 @@ impl ClaudeHarness {
         cmd.args(["--permission-mode", cli_mode]);
         if let Some(resume) = &request.resume {
             cmd.arg(format!("--resume={resume}"));
+            // Naming the source's id, or no id, also skips copying file checkpoints (CLI 2.1.280).
+            if let Some(forked_at) = &request.forked_at {
+                let session = match &request.branch {
+                    Some(_) => {
+                        let minted = uuid::Uuid::new_v4().to_string();
+                        cmd.args(["--session-id", &minted]);
+                        minted
+                    }
+                    None => resume.clone(),
+                };
+                cmd.env(
+                    "CLAUDE_CODE_RESUME_SOURCE_ALIVE",
+                    format!("{session}|{forked_at}"),
+                );
+            }
             // A branch runs on a COPY of the resumed session cut at the kept
             // reply; `--resume-drops-turn` names the discarded prompt so the
             // CLI accepts a cut that spans its own bookkeeping frames. Both
@@ -1371,6 +1386,7 @@ mod tests {
                 attachments: Vec::new(),
                 worktree: None,
                 branch: None,
+                forked_at: None,
             };
             if let Some(choice) = choice {
                 request
@@ -1421,6 +1437,7 @@ mod tests {
                 attachments: Vec::new(),
                 worktree: None,
                 branch: None,
+                forked_at: None,
             };
             harness
                 .build_command(&exe, &request)
@@ -1484,6 +1501,7 @@ mod tests {
                 keep: Some("uuid-reply-1".into()),
                 drop: Some("uuid-prompt-2".into()),
             }),
+            forked_at: None,
         };
         let args = |cmd: &Command| -> Vec<String> {
             cmd.as_std()
@@ -1523,6 +1541,12 @@ mod tests {
             "{env:?}"
         );
 
+        assert!(!argv.iter().any(|a| a == "--session-id"));
+        assert!(
+            !env.iter()
+                .any(|(k, _)| k == "CLAUDE_CODE_RESUME_SOURCE_ALIVE")
+        );
+
         // No branch: a plain resume, never a fork.
         request.branch = None;
         let argv = args(&harness.build_command(&exe, &request));
@@ -1532,6 +1556,72 @@ mod tests {
                 .iter()
                 .any(|a| a.starts_with("--fork") || a.starts_with("--resume-"))
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_forked_chat_keeps_the_source_s_background_agents_off_its_books() {
+        let harness = ClaudeHarness::new();
+        let exe = PathBuf::from("/usr/bin/true");
+        let at = "2026-09-22T17:30:00.000Z";
+        let mut request = RunRequest {
+            prompt: "again".into(),
+            harness: None,
+            model: None,
+            reasoning: None,
+            model_options: serde_json::Map::new(),
+            cwd: String::new(),
+            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+            permission_mode: zeron_proto::PermissionMode::Full,
+            auto_approve: false,
+            resume: Some("sess-source".into()),
+            attachments: Vec::new(),
+            worktree: None,
+            branch: Some(zeron_proto::SessionBranch {
+                keep: Some("uuid-reply-1".into()),
+                drop: None,
+            }),
+            forked_at: Some(at.into()),
+        };
+        let run = |request: &RunRequest| {
+            let cmd = harness.build_command(&exe, request);
+            let argv: Vec<String> = cmd
+                .as_std()
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            let alive = cmd
+                .as_std()
+                .get_envs()
+                .find(|(k, _)| *k == "CLAUDE_CODE_RESUME_SOURCE_ALIVE")
+                .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()));
+            (argv, alive)
+        };
+
+        let (argv, alive) = run(&request);
+        let minted = argv
+            .iter()
+            .position(|a| a == "--session-id")
+            .map(|i| argv[i + 1].clone())
+            .expect("a branch of a fork names its session up front");
+        assert!(uuid::Uuid::parse_str(&minted).is_ok());
+        assert_ne!(minted, "sess-source");
+        assert!(argv.iter().any(|a| a == "--fork-session"));
+        assert!(argv.iter().any(|a| a == "--resume=sess-source"));
+        assert_eq!(alive, Some(format!("{minted}|{at}")));
+        let (again, _) = run(&request);
+        assert_ne!(again, argv, "every branch run mints a fresh session id");
+
+        request.branch = None;
+        request.resume = Some("sess-fork".into());
+        let (argv, alive) = run(&request);
+        assert!(!argv.iter().any(|a| a == "--session-id"));
+        assert_eq!(alive, Some(format!("sess-fork|{at}")));
+
+        request.resume = None;
+        let (argv, alive) = run(&request);
+        assert!(!argv.iter().any(|a| a == "--session-id"));
+        assert_eq!(alive, None);
     }
 
     #[test]

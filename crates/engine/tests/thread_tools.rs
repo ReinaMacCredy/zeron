@@ -209,6 +209,7 @@ fn queue_human_run(core: &EngineCore, chat_id: &str, command_id: &str, message_i
                     worktree: None,
                     branch: None,
                     resume: None,
+                    forked_at: None,
                 },
                 message_id: message_id.into(),
             },

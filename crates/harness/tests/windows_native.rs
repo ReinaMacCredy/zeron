@@ -216,6 +216,7 @@ fn request(cwd: &Path, prompt: &str, resume: Option<&str>) -> RunRequest {
         worktree: None,
         branch: None,
         resume: resume.map(str::to_owned),
+        forked_at: None,
     }
 }
 

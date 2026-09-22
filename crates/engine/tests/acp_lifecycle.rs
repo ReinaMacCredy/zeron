@@ -66,6 +66,7 @@ async fn quiet_acp_prompt_stays_working_until_response() {
                 worktree: None,
                 branch: None,
                 resume: None,
+                forked_at: None,
             },
         },
     );

@@ -50,6 +50,7 @@ fn run_request(prompt: &str, cwd: &str) -> RunRequest {
         worktree: None,
         branch: None,
         resume: None,
+        forked_at: None,
     }
 }
 
@@ -859,6 +860,7 @@ async fn real_claude_remembers_codeword_across_engine_restart() {
         worktree: None,
         branch: None,
         resume: None,
+        forked_at: None,
     };
     let assemble_real = || {
         EngineCore::assemble(

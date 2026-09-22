@@ -243,6 +243,7 @@ struct Inner {
     /// newer than the chat's last `SessionStarted`; the run that applies it
     /// retires both through its own `SessionStarted`.
     pending_branches: Mutex<HashMap<String, Option<SessionBranch>>>,
+    forked_at: Mutex<HashMap<String, Option<String>>>,
     sidechat_contexts: Mutex<HashMap<String, SidechatContext>>,
     /// Chats with a compaction in flight — one per chat, and the reservation
     /// is taken before the run slot so two RPCs can never both pass the check.
@@ -313,6 +314,7 @@ impl SessionsEngine {
                 last_requests: Mutex::new(HashMap::new()),
                 harness_sessions: Mutex::new(HashMap::new()),
                 pending_branches: Mutex::new(HashMap::new()),
+                forked_at: Mutex::new(HashMap::new()),
                 sidechat_contexts: Mutex::new(HashMap::new()),
                 compacting: Mutex::new(std::collections::HashSet::new()),
                 compaction_timed_out: Mutex::new(std::collections::HashSet::new()),
@@ -1027,7 +1029,11 @@ impl SessionsEngine {
         if let (Some((session, cwd)), Some(branch)) = (session, branch) {
             self.inner
                 .remember_harness_session(new_chat_id, &session, &cwd);
-            self.inner.set_pending_branch(new_chat_id, branch);
+            let forked_at = chat
+                .created_at
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            self.inner
+                .set_pending_branch(new_chat_id, branch, Some(forked_at));
         }
         Ok(chat)
     }
@@ -1098,6 +1104,7 @@ impl SessionsEngine {
                     keep: Some(keep),
                     drop: anchors.live.get(entry_id).cloned(),
                 },
+                None,
             ),
             None => {
                 let cwd = self
@@ -1215,6 +1222,7 @@ impl SessionsEngine {
                     attachments: Vec::new(),
                     worktree: None,
                     branch: None,
+                    forked_at: None,
                 }
             }
         };
@@ -1354,6 +1362,7 @@ impl SessionsEngine {
                             resume: None,
                             worktree: None,
                             branch: None,
+                            forked_at: None,
                         })
                     });
                 let Some(mut request) = request else {
@@ -1947,9 +1956,32 @@ impl Inner {
     /// Copy the chat's pending branch onto a request that resumes; a request
     /// starting fresh has nothing to cut.
     fn inject_branch(&self, chat_id: &str, request: &mut RunRequest) {
-        if request.branch.is_none() && request.resume.is_some() {
+        if request.resume.is_none() {
+            return;
+        }
+        if request.branch.is_none() {
             request.branch = self.pending_branch(chat_id);
         }
+        request.forked_at = self.forked_at(chat_id);
+    }
+
+    fn forked_at(&self, chat_id: &str) -> Option<String> {
+        let mut forked = lock(&self.forked_at);
+        if let Some(at) = forked.get(chat_id) {
+            return at.clone();
+        }
+        let at = self
+            .journal
+            .replay(chat_id, 0)
+            .ok()?
+            .into_iter()
+            .filter_map(|(_, event)| match event {
+                AgentEvent::BranchPending { forked_at, .. } => forked_at,
+                _ => None,
+            })
+            .last();
+        forked.insert(chat_id.to_string(), at.clone());
+        at
     }
 
     /// The branch the chat's next run must apply: the live map, else the
@@ -1963,7 +1995,7 @@ impl Inner {
         let mut pending = None;
         for (_, event) in events {
             match event {
-                AgentEvent::BranchPending { keep, drop } => {
+                AgentEvent::BranchPending { keep, drop, .. } => {
                     pending = Some(SessionBranch { keep, drop })
                 }
                 AgentEvent::SessionStarted { .. } => pending = None,
@@ -1974,13 +2006,17 @@ impl Inner {
         pending
     }
 
-    fn set_pending_branch(&self, chat_id: &str, branch: SessionBranch) {
+    fn set_pending_branch(&self, chat_id: &str, branch: SessionBranch, forked_at: Option<String>) {
         lock(&self.pending_branches).insert(chat_id.to_string(), Some(branch.clone()));
+        if forked_at.is_some() {
+            lock(&self.forked_at).insert(chat_id.to_string(), forked_at.clone());
+        }
         self.publish(
             chat_id,
             &AgentEvent::BranchPending {
                 keep: branch.keep,
                 drop: branch.drop,
+                forked_at,
             },
         );
     }
@@ -3692,7 +3728,9 @@ mod tests {
             keep: Some("reply-1".into()),
             drop: None,
         };
-        sessions.inner.set_pending_branch("chat", branch.clone());
+        sessions
+            .inner
+            .set_pending_branch("chat", branch.clone(), None);
         assert_eq!(sessions.inner.pending_branch("chat"), Some(branch));
         sessions
             .inner
@@ -3702,6 +3740,72 @@ mod tests {
             lock(&sessions.inner.pending_branches).get("chat"),
             Some(None)
         ));
+    }
+
+    #[test]
+    fn a_fork_instant_outlives_its_branch_and_later_rewinds() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Arc::new(RunJournal::open(dir.path().join("journals")).unwrap());
+        let sessions = SessionsEngine::new(
+            "host".into(),
+            journal.clone(),
+            Arc::new(HarnessRegistry::new()),
+        );
+        let at = "2026-09-22T17:30:00.000Z".to_string();
+        let branch = SessionBranch {
+            keep: Some("reply-1".into()),
+            drop: None,
+        };
+        sessions
+            .inner
+            .set_pending_branch("fork", branch.clone(), Some(at.clone()));
+        let mut request = request();
+        request.resume = Some("source".into());
+        sessions.inner.inject_branch("fork", &mut request);
+        assert_eq!(request.branch, Some(branch.clone()));
+        assert_eq!(request.forked_at.as_deref(), Some(at.as_str()));
+
+        journal
+            .append(
+                "fork",
+                &AgentEvent::SessionStarted {
+                    harness: HarnessId::ClaudeCode,
+                    model: "m".into(),
+                    tools: Vec::new(),
+                    cwd: "/tmp".into(),
+                    session_id: "forked".into(),
+                    assistant_message_id: "a".into(),
+                },
+            )
+            .unwrap();
+        sessions
+            .inner
+            .remember_harness_session("fork", "forked", "/tmp");
+        sessions.inner.set_pending_branch("fork", branch, None);
+
+        let restarted =
+            SessionsEngine::new("host".into(), journal, Arc::new(HarnessRegistry::new()));
+        let mut request = request_with_resume("forked");
+        restarted.inner.inject_branch("fork", &mut request);
+        assert_eq!(request.forked_at.as_deref(), Some(at.as_str()));
+
+        let mut fresh = request_with_resume("forked");
+        fresh.resume = None;
+        restarted.inner.inject_branch("fork", &mut fresh);
+        assert_eq!(fresh.forked_at, None);
+
+        let mut plain = request_with_resume("other");
+        restarted.inner.inject_branch("plain", &mut plain);
+        assert_eq!(plain.forked_at, None);
+        assert_eq!(plain.branch, None);
+    }
+
+    fn request_with_resume(session: &str) -> RunRequest {
+        RunRequest {
+            resume: Some(session.into()),
+            ..request()
+        }
     }
 
     #[test]
@@ -3832,6 +3936,7 @@ mod tests {
             attachments: Vec::new(),
             worktree: None,
             branch: None,
+            forked_at: None,
         }
     }
 

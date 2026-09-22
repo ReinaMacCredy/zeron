@@ -57,6 +57,7 @@ async fn silent_npm_enoent_death_surfaces_decoded_error() {
         worktree: None,
         branch: None,
         resume: None,
+        forked_at: None,
     };
 
     let err = match harness.run(request, controls).await {

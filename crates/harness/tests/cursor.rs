@@ -44,6 +44,7 @@ fn request(prompt: &str) -> RunRequest {
         worktree: None,
         branch: None,
         resume: None,
+        forked_at: None,
     }
 }
 
