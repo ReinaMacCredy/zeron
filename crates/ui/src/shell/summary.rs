@@ -676,3 +676,119 @@ fn url_host(url: &str) -> String {
     let rest = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
     rest.split('/').next().unwrap_or(rest).to_string()
 }
+
+#[cfg(test)]
+mod summary_fold_regressions {
+    use super::*;
+    use gpui::{AppContext, TestAppContext, VisualTestContext};
+
+    struct TriggerHost {
+        shell: Entity<Shell>,
+        _data_dir: tempfile::TempDir,
+    }
+
+    impl Render for TriggerHost {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.shell.update(cx, |shell, cx| {
+                let trigger = shell.render_summary_trigger(cx);
+                shell.titlebar_drag_region(
+                    "pinned-summary-fold-titlebar",
+                    div().w(px(400.)).h(px(40.)).child(trigger),
+                    cx,
+                )
+            })
+        }
+    }
+
+    fn setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::draft_store::init(dir.path(), cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let (host, cx) = cx.add_window_view(|_, cx| {
+            let shell = cx.new(|cx| {
+                let state = cx.new(|_| AppState::new());
+                let mut shell = Shell::new(
+                    state,
+                    EngineBootConfig {
+                        data_dir: dir.path().into(),
+                        ipc_port: 0,
+                        edge_url: "http://127.0.0.1:1".into(),
+                        edge_token: None,
+                        org_id: None,
+                        workos_client_id: None,
+                        default_harness: zeron_proto::HarnessId::Mock,
+                    },
+                    cx,
+                );
+                shell.active_chat = "parent".into();
+                shell.state.update(cx, |state, _| {
+                    let source: zeron_proto::Chat = serde_json::from_value(serde_json::json!({
+                        "id": "parent", "deviceId": "dev", "title": "Parent",
+                        "archived": false, "createdAt": "2026-09-18T00:00:00Z"
+                    }))
+                    .unwrap();
+                    state.chats.push(source.clone());
+                    let mut side = source;
+                    side.id = "side-a".into();
+                    side.sidechat_source_chat_id = Some("parent".into());
+                    state.chats.push(side);
+                    state.selected_chat = Some("parent".into());
+                });
+                shell
+            });
+            TriggerHost {
+                shell,
+                _data_dir: dir,
+            }
+        });
+        let shell = host.read_with(cx, |host, _| host.shell.clone());
+        cx.update(|window, cx| window.draw(cx).clear());
+        (shell, cx)
+    }
+
+    #[gpui::test]
+    fn folding_threads_hides_its_rows_and_reaches_the_settings_store(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| shell.open_summary_menu(cx));
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("pinned-summary-sidechat-0").is_some());
+        let heading = cx
+            .debug_bounds("pinned-summary-section-threads")
+            .expect("Threads heading")
+            .center();
+        cx.simulate_click(heading, gpui::Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear());
+        shell.read_with(cx, |shell, cx| {
+            assert!(shell.summary_menu.is_open(), "folding keeps the card open");
+            assert_eq!(
+                shell.settings.summary_collapsed,
+                vec!["threads".to_string()]
+            );
+            assert_eq!(
+                crate::settings::current(cx).summary_collapsed,
+                vec!["threads".to_string()]
+            );
+        });
+        assert!(cx.debug_bounds("pinned-summary-sidechat-0").is_none());
+        assert!(cx.debug_bounds("pinned-summary-new-sidechat-0").is_none());
+        cx.simulate_click(heading, gpui::Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("pinned-summary-sidechat-0").is_some());
+        shell.read_with(cx, |shell, cx| {
+            assert!(shell.settings.summary_collapsed.is_empty());
+            assert!(crate::settings::current(cx).summary_collapsed.is_empty());
+        });
+    }
+}
