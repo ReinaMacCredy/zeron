@@ -317,6 +317,7 @@ impl Shell {
                     None,
                     state.display_status_for(chat, Utc::now()),
                     ix == active,
+                    None,
                     chat.archived,
                     false,
                     None,

@@ -40,6 +40,14 @@ pub const RIGHT_PANE_DEFAULT: f32 = 520.0;
 /// Minimum width retained for the conversation when the right pane is open.
 pub const CHAT_PANEL_MIN: f32 = 300.0;
 
+/// Split view: each pane's floor (px) while the seam is dragged, and the
+/// persisted left-pane share bounds. The share is a fraction so a window
+/// resize keeps the proportion rather than one pane's pixel width.
+pub const SPLIT_PANE_MIN: f32 = 320.0;
+pub const SPLIT_RATIO_MIN: f32 = 0.2;
+pub const SPLIT_RATIO_MAX: f32 = 0.8;
+pub const SPLIT_RATIO_DEFAULT: f32 = 0.5;
+
 /// Terminal panel height bounds: 160px … 55% of the viewport (§1.10). The
 /// viewport-relative cap applies at runtime; the absolute cap here only heals
 /// hand-edited files.
@@ -834,6 +842,8 @@ pub struct UiSettings {
     /// the foreground case).
     pub notifications_background_only: bool,
     pub right_pane_width: f32,
+    /// Split view: the LEFT pane's share of the conversation column.
+    pub split_ratio: f32,
     /// Legacy: panel *open* flags are session-scoped in-memory state now
     /// (`shell::SessionPanels`, zeron `sessionPanels` parity). Kept for file
     /// compatibility; no longer read or written by the shell.
@@ -946,6 +956,7 @@ impl Default for UiSettings {
             notifications_enabled: true,
             notifications_background_only: true,
             right_pane_width: RIGHT_PANE_DEFAULT,
+            split_ratio: SPLIT_RATIO_DEFAULT,
             right_pane_open: false,
             terminal_height: TERMINAL_DEFAULT_HEIGHT,
             terminal_open: false,
@@ -1507,6 +1518,12 @@ impl UiSettings {
         // The right pane has no persisted upper bound: its live drag clamps
         // against the current window, which is unavailable while loading.
         self.right_pane_width = min_or(self.right_pane_width, RIGHT_PANE_MIN, RIGHT_PANE_DEFAULT);
+        self.split_ratio = clamp_or(
+            self.split_ratio,
+            SPLIT_RATIO_MIN,
+            SPLIT_RATIO_MAX,
+            SPLIT_RATIO_DEFAULT,
+        );
         self.terminal_height = clamp_or(
             self.terminal_height,
             TERMINAL_MIN_HEIGHT,
@@ -2185,6 +2202,7 @@ mod tests {
             notifications_enabled: false,
             notifications_background_only: false,
             right_pane_width: 700.0,
+            split_ratio: 0.35,
             right_pane_open: true,
             terminal_height: 320.0,
             terminal_open: true,
