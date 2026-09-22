@@ -22,8 +22,9 @@ fi
 cd "$ROOT"
 cargo build -p zeron
 
-mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources" "$DATA_DIR"
+mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources/cua-driver" "$DATA_DIR"
 install -m 755 "$ROOT/target/debug/zeron" "$CONTENTS/MacOS/zeron"
+"$ROOT/scripts/build-cua-driver.sh" "$CONTENTS/Resources/cua-driver/cua-driver" >/dev/null
 sed "s/__VERSION__/$VERSION/g" "$ROOT/dist/macos/Info-dev.plist" >"$CONTENTS/Info.plist"
 plutil -replace LSEnvironment.ZERON_DATA_DIR -string "$DATA_DIR" "$CONTENTS/Info.plist"
 plutil -replace LSEnvironment.ZERON_IPC_PORT -string "$IPC_PORT" "$CONTENTS/Info.plist"
@@ -46,9 +47,12 @@ IDENTITY="${ZERON_DEV_CODESIGN_IDENTITY:-}"
 if [[ -z "$IDENTITY" ]]; then
   IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | head -1)"
 fi
+DRIVER="$CONTENTS/Resources/cua-driver/cua-driver"
 if [[ -n "$IDENTITY" ]]; then
+  codesign --force --options runtime --sign "$IDENTITY" --identifier sh.zeron.cua-driver.dev "$DRIVER"
   codesign --force --sign "$IDENTITY" --identifier sh.zeron.app.dev "$APP"
 else
+  codesign --force --sign - --identifier sh.zeron.cua-driver.dev "$DRIVER"
   codesign --force --sign - --identifier sh.zeron.app.dev "$APP"
   echo "warning: no Apple Development signing identity found; macOS may ask for permissions again after a rebuild" >&2
 fi
