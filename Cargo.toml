@@ -142,6 +142,10 @@ strip = "symbols"
 [profile.dev]
 # gpui is slow unoptimized; match zed's approach for deps
 opt-level = 0
+# macOS keeps every codegen .o in target/debug/deps as the debuginfo carrier
+# (split-debuginfo=unpacked) and Cargo never prunes stale hashes, so full
+# DWARF grew the dir past 130G. Line tables keep file:line backtraces.
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 2
