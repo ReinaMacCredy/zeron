@@ -359,8 +359,9 @@ pub struct TodoItem {
     pub done: bool,
 }
 
-/// A slash command advertised by the agent (ACP `availableCommands`): typed as
-/// `/name` at the start of the composer, sent to the agent as prompt text.
+/// A command advertised by the agent (ACP `availableCommands`), sent to the
+/// agent as prompt text. Its kind picks the composer sigil: built-ins are
+/// typed as `/name` at the start of the prompt, skills as `$name` anywhere.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SlashCommand {
@@ -370,6 +371,18 @@ pub struct SlashCommand {
     /// Placeholder hint for the command's argument, when it takes one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_hint: Option<String>,
+    #[serde(default)]
+    pub kind: SlashCommandKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SlashCommandKind {
+    /// The agent's own command (claude's `/clear`, `/model`), or zeron's.
+    #[default]
+    BuiltIn,
+    /// A `SKILL.md` the agent loads on request.
+    Skill,
 }
 
 /// How a harness compacts its own conversation context.

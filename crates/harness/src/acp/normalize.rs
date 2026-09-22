@@ -9,7 +9,7 @@
 //! statuses are snake_case).
 
 use serde_json::Value;
-use zeron_proto::{AgentEvent, SlashCommand, TodoItem, ToolCall, ToolDiff};
+use zeron_proto::{AgentEvent, SlashCommand, SlashCommandKind, TodoItem, ToolCall, ToolDiff};
 
 /// Byte cap applied to tool output text at the harness boundary. The doc-side
 /// fold applies its own (smaller) cap before anything persists; this one only
@@ -478,6 +478,7 @@ pub(crate) fn parse_commands(value: Option<&Value>) -> Vec<SlashCommand> {
                     .and_then(|i| i.get("hint"))
                     .and_then(Value::as_str)
                     .map(str::to_owned),
+                kind: SlashCommandKind::BuiltIn,
             })
         })
         .collect()
@@ -691,11 +692,13 @@ mod tests {
                         name: "compact".into(),
                         description: "Compact the session".into(),
                         input_hint: None,
+                        kind: SlashCommandKind::BuiltIn,
                     },
                     SlashCommand {
                         name: "goal".into(),
                         description: "Set a goal".into(),
                         input_hint: Some("the goal".into()),
+                        kind: SlashCommandKind::BuiltIn,
                     },
                 ]
             }]

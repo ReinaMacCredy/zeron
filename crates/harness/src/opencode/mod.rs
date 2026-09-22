@@ -50,7 +50,7 @@ use tokio::sync::mpsc;
 
 use zeron_proto::{
     AgentEvent, Compaction, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand,
-    SteeringMode, TodoItem, ToolCall, UserInputAnswer, UserInputQuestion,
+    SlashCommandKind, SteeringMode, TodoItem, ToolCall, UserInputAnswer, UserInputQuestion,
 };
 
 use crate::process::{Child, Command, Stdio};
@@ -1094,6 +1094,7 @@ fn commands_from_wire(commands: &Value) -> Vec<SlashCommand> {
                             .unwrap_or_default()
                             .to_owned(),
                         input_hint: None,
+                        kind: SlashCommandKind::BuiltIn,
                     })
                 })
                 .collect()

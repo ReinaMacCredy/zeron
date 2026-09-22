@@ -26,8 +26,8 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use zeron_doc::{MessagePart, MessageRole, SessionCommandPayload, SessionMessageEntry};
 use zeron_proto::{
-    FileSearchMatch, HarnessId, RunRequest, SandboxLevel, SlashCommand, UserInputAnswer,
-    UserInputQuestion, capabilities,
+    FileSearchMatch, HarnessId, RunRequest, SandboxLevel, SlashCommand, SlashCommandKind,
+    UserInputAnswer, UserInputQuestion, capabilities,
 };
 use zeron_rpc::{RpcError, methods};
 
@@ -4188,6 +4188,47 @@ fn slash_token(text: &str, cursor: usize) -> Option<MentionToken> {
     })
 }
 
+/// A skill is mentioned as `$name` anywhere in the prompt, like `@`: the `$`
+/// must start a token, and the name must start with a lowercase letter so
+/// `$5` and `$HOME` never open the popup.
+fn dollar_token(text: &str, cursor: usize) -> Option<MentionToken> {
+    if cursor > text.len() || !text.is_char_boundary(cursor) {
+        return None;
+    }
+    let token_start = text[..cursor]
+        .char_indices()
+        .rev()
+        .find_map(|(at, ch)| ch.is_whitespace().then_some(at + ch.len_utf8()))
+        .unwrap_or(0);
+    if !text[token_start..].starts_with('$') {
+        return None;
+    }
+    let query = &text[token_start + 1..cursor];
+    if query
+        .chars()
+        .next()
+        .is_some_and(|ch| !ch.is_ascii_lowercase())
+    {
+        return None;
+    }
+    let end = text[cursor..]
+        .char_indices()
+        .find_map(|(at, ch)| ch.is_whitespace().then_some(cursor + at))
+        .unwrap_or(text.len());
+    Some(MentionToken {
+        range: token_start..end,
+        query: query.to_string(),
+    })
+}
+
+/// Which popup a command belongs to: `/` lists built-ins, `$` lists skills.
+fn command_sigil(kind: SlashCommandKind) -> char {
+    match kind {
+        SlashCommandKind::BuiltIn => '/',
+        SlashCommandKind::Skill => '$',
+    }
+}
+
 /// Zeron's own slash command — the composer runs it, the prompt never
 /// reaches the agent.
 const COMPACT_COMMAND: &str = "compact";
@@ -4232,6 +4273,7 @@ fn with_compact_entry(mut commands: Vec<SlashCommand>) -> Vec<SlashCommand> {
             name: COMPACT_COMMAND.into(),
             description: "Free up context by summarizing the conversation".into(),
             input_hint: Some("focus".into()),
+            kind: SlashCommandKind::BuiltIn,
         },
     );
     commands
@@ -4249,6 +4291,7 @@ fn with_sidechat_entry(mut commands: Vec<SlashCommand>) -> Vec<SlashCommand> {
             name: SIDECHAT_COMMAND.into(),
             description: "Ask about this chat on the side, without touching it".into(),
             input_hint: Some("prompt".into()),
+            kind: SlashCommandKind::BuiltIn,
         },
     );
     commands
@@ -4289,6 +4332,8 @@ pub(crate) fn harness_display_name(harness: HarnessId) -> &'static str {
 #[derive(Debug, Clone, Default)]
 struct SlashState {
     token: Option<MentionToken>,
+    /// `/` (built-ins) or `$` (skills): the popup only lists that kind.
+    sigil: char,
     /// Indices into the cached command list, filter-ranked for the query.
     filtered: Vec<usize>,
     active: Option<usize>,
@@ -6225,10 +6270,15 @@ impl Composer {
 
     // ---- slash commands ---------------------------------------------------
 
-    /// Track the `/` token on every edit: open/refresh the popup, fetch the
-    /// harness's command list on first open, filter locally per keystroke.
+    /// Track the `/` or `$` token on every edit: open/refresh the popup,
+    /// fetch the harness's command list on first open, filter locally per
+    /// keystroke. Both sigils share one list and one popup; the sigil picks
+    /// which kind of command it shows.
     fn update_slash(&mut self, text: &str, cursor: usize, cx: &mut Context<Self>) {
-        let token = slash_token(text, cursor);
+        let (sigil, token) = match slash_token(text, cursor) {
+            Some(token) => ('/', Some(token)),
+            None => ('$', dollar_token(text, cursor)),
+        };
         let still_dismissed = token.as_ref().is_some_and(|token| {
             self.slash.dismissed.as_ref().is_some_and(|(range, value)| {
                 token.range == *range && text.get(range.clone()) == Some(value.as_str())
@@ -6242,11 +6292,12 @@ impl Composer {
         self.slash.dismissed = None;
         let harness = self.pickers.read(cx).resolved(cx).harness;
         let harness_changed = self.slash.harness != harness;
-        if token == self.slash.token && !harness_changed {
+        if token == self.slash.token && sigil == self.slash.sigil && !harness_changed {
             self.refilter_slash(cx);
             return;
         }
         self.slash.token = token.clone();
+        self.slash.sigil = sigil;
         self.slash.harness = harness;
         self.slash.error = None;
         if token.is_none() {
@@ -6330,8 +6381,16 @@ impl Composer {
             .and_then(|h| self.slash_cache.get(&h))
             .map(Vec::as_slice)
             .unwrap_or_default();
-        let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
-        self.slash.filtered = crate::popover::filter_indices(&query, &names);
+        let (indices, names): (Vec<usize>, Vec<&str>) = commands
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| command_sigil(c.kind) == self.slash.sigil)
+            .map(|(ix, c)| (ix, c.name.as_str()))
+            .unzip();
+        self.slash.filtered = crate::popover::filter_indices(&query, &names)
+            .into_iter()
+            .map(|ix| indices[ix])
+            .collect();
         self.slash.active = (!self.slash.filtered.is_empty()).then_some(0);
         // A fresh query/reopen restarts the row stack at the top.
         crate::popover::reset_menu_scroll(&self.slash_scroll, &mut self.popup_bar);
@@ -6384,8 +6443,9 @@ impl Composer {
         if command.name == COMPACT_COMMAND && self.unsupported_compaction(cx).is_some() {
             return;
         }
+        let sigil = self.slash.sigil;
         self.input.update(cx, |input, cx| {
-            input.replace_plain_token(token.range, &format!("/{}", command.name), cx)
+            input.replace_plain_token(token.range, &format!("{sigil}{}", command.name), cx)
         });
         self.reset_slash(None, cx);
         cx.notify();
@@ -6701,10 +6761,15 @@ impl Composer {
                     .py(px(10.0))
                     .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.text_muted)
-                    .child(if commands.is_empty() {
-                        "This agent has no slash commands"
-                    } else {
-                        "No matching commands"
+                    .child({
+                        let sigil = self.slash.sigil;
+                        let any = commands.iter().any(|c| command_sigil(c.kind) == sigil);
+                        match (sigil, any) {
+                            ('$', false) => "This agent has no skills",
+                            ('$', true) => "No matching skills",
+                            (_, false) => "This agent has no slash commands",
+                            (_, true) => "No matching commands",
+                        }
                     }),
             );
         } else {
@@ -6715,7 +6780,7 @@ impl Composer {
                     continue;
                 };
                 let selected = self.slash.active == Some(row_ix);
-                let name: SharedString = format!("/{}", command.name).into();
+                let name: SharedString = format!("{}{}", self.slash.sigil, command.name).into();
                 // The reason replaces the description rather than hiding the
                 // row: the entry exists on every harness, so its absence
                 // would read as a bug.
@@ -10056,6 +10121,119 @@ mod tests {
     }
 
     #[test]
+    fn dollar_token_is_a_mention_anywhere_but_never_a_shell_variable() {
+        assert_eq!(
+            dollar_token("làm ui bằng $front", 21),
+            Some(MentionToken {
+                range: 15..21,
+                query: "front".into(),
+            })
+        );
+        assert_eq!(
+            dollar_token("$maestro-work fix it", 4),
+            Some(MentionToken {
+                range: 0..13,
+                query: "mae".into(),
+            })
+        );
+        // Bare `$` after a space opens the full list.
+        assert_eq!(
+            dollar_token("use $", 5).map(|t| t.query),
+            Some(String::new())
+        );
+        // Digits and uppercase after `$` are prose, not a skill.
+        assert!(dollar_token("cost is $5", 10).is_none());
+        assert!(dollar_token("echo $HOME", 10).is_none());
+        // `$` inside a word (`a$b`) is not a token start.
+        assert!(dollar_token("a$b", 3).is_none());
+        // Cursor before the `$` is not inside the token.
+        assert!(dollar_token("use $front", 3).is_none());
+    }
+
+    #[gpui::test]
+    fn each_sigil_lists_only_its_kind_and_accepts_with_it(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        handle
+            .update(cx, |composer, _, cx| {
+                let command = |name: &str, kind: SlashCommandKind| SlashCommand {
+                    name: name.into(),
+                    description: String::new(),
+                    input_hint: None,
+                    kind,
+                };
+                // A bound chat pins the harness the popup keys its cache on.
+                let harness = HarnessId::ClaudeCode;
+                composer.state.update(cx, |state, _| {
+                    state.chats = vec![zeron_proto::Chat {
+                        id: "c1".into(),
+                        device_id: "dev".into(),
+                        title: None,
+                        archived: false,
+                        cwd: None,
+                        branch: None,
+                        checkout_id: None,
+                        source_context: None,
+                        config: Some(zeron_proto::ChatConfig {
+                            harness,
+                            model: None,
+                            reasoning: None,
+                            model_options: serde_json::Map::new(),
+                            sandbox: SandboxLevel::WorkspaceWrite,
+                            permission_mode: zeron_proto::PermissionMode::Full,
+                        }),
+                        last_message_preview: None,
+                        last_message_at: None,
+                        created_at: chrono::Utc::now(),
+                        harness_session_id: None,
+                        harness_session_cwd: None,
+                        space_id: None,
+                        last_seen_at: None,
+                        room_gen: None,
+                        sidechat_source_chat_id: None,
+                        created_by_chat_id: None,
+                        previous_harnesses: Vec::new(),
+                    }];
+                    state.selected_chat = Some("c1".into());
+                });
+                composer.slash_cache.insert(
+                    harness,
+                    with_compact_entry(vec![
+                        command("maestro-work", SlashCommandKind::Skill),
+                        command("model", SlashCommandKind::BuiltIn),
+                        command("maestro-verify", SlashCommandKind::Skill),
+                    ]),
+                );
+                let listed = |composer: &Composer| -> Vec<String> {
+                    let commands = &composer.slash_cache[&harness];
+                    composer
+                        .slash
+                        .filtered
+                        .iter()
+                        .map(|&ix| commands[ix].name.clone())
+                        .collect()
+                };
+                composer.update_slash("/", 1, cx);
+                assert_eq!(listed(composer), vec!["compact", "model"]);
+                composer.update_slash("$", 1, cx);
+                assert_eq!(listed(composer), vec!["maestro-work", "maestro-verify"]);
+                // Mid-prompt `$` mention: accept writes the sigil it opened with.
+                let text = "làm ui bằng $maestro-v";
+                composer
+                    .input
+                    .update(cx, |input, cx| input.set_text(text, cx));
+                composer.update_slash(text, text.len(), cx);
+                assert_eq!(listed(composer), vec!["maestro-verify"]);
+                composer.accept_slash(cx);
+                assert_eq!(
+                    composer.input.read(cx).text(),
+                    "làm ui bằng $maestro-verify "
+                );
+                assert!(composer.slash.token.is_none());
+            })
+            .unwrap();
+    }
+
+    #[test]
     fn compact_is_intercepted_with_its_focus_and_nothing_else_is() {
         assert_eq!(compact_focus("/compact"), Some(None));
         assert_eq!(
@@ -10076,6 +10254,7 @@ mod tests {
             name: name.into(),
             description: "harness copy".into(),
             input_hint: None,
+            kind: SlashCommandKind::BuiltIn,
         };
         let names = |commands: &[SlashCommand]| -> Vec<String> {
             commands.iter().map(|c| c.name.clone()).collect()
@@ -10234,6 +10413,7 @@ mod tests {
             name: name.into(),
             description: "harness copy".into(),
             input_hint: None,
+            kind: SlashCommandKind::BuiltIn,
         };
         let names = |commands: &[SlashCommand]| -> Vec<String> {
             commands.iter().map(|c| c.name.clone()).collect()

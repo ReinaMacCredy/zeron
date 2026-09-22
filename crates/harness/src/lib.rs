@@ -361,3 +361,66 @@ pub fn supports_titles(id: HarnessId) -> bool {
         HarnessId::Codex | HarnessId::ClaudeCode | HarnessId::Mock
     )
 }
+
+/// The composer writes a skill as `$name` anywhere in the prompt; agents
+/// that load skills by slash command get `/name` instead. Only names in
+/// `skills` are rewritten, so `$path` in a shell snippet stays as typed.
+pub(crate) fn skill_mentions_as_slash(prompt: &str, skills: &[String]) -> String {
+    if skills.is_empty() || !prompt.contains('$') {
+        return prompt.to_owned();
+    }
+    let is_name_char = |ch: char| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | ':');
+    let mut out = String::with_capacity(prompt.len());
+    let mut rest = prompt;
+    while let Some(at) = rest.find('$') {
+        let (head, tail) = rest.split_at(at);
+        out.push_str(head);
+        let boundary = out.chars().next_back().is_none_or(char::is_whitespace);
+        // Longest skill name, so `$frontend-design.` matches and
+        // `$frontend-designer` does not.
+        let mentioned = boundary
+            && skills
+                .iter()
+                .filter(|skill| tail[1..].starts_with(skill.as_str()))
+                .any(|skill| !tail[1 + skill.len()..].starts_with(is_name_char));
+        out.push(if mentioned { '/' } else { '$' });
+        rest = &tail[1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+#[cfg(test)]
+mod skill_mention_tests {
+    use super::skill_mentions_as_slash;
+
+    #[test]
+    fn rewrites_known_skills_at_word_boundaries_only() {
+        let skills = vec!["frontend-design".to_string(), "codex:review".to_string()];
+        assert_eq!(
+            skill_mentions_as_slash("làm ui bằng $frontend-design rồi $codex:review", &skills),
+            "làm ui bằng /frontend-design rồi /codex:review"
+        );
+        assert_eq!(
+            skill_mentions_as_slash("$frontend-design fix it", &skills),
+            "/frontend-design fix it"
+        );
+        assert_eq!(
+            skill_mentions_as_slash(
+                "cost $5, $HOME, $frontend-designer, a$frontend-design",
+                &skills
+            ),
+            "cost $5, $HOME, $frontend-designer, a$frontend-design"
+        );
+        assert_eq!(
+            skill_mentions_as_slash("no skills $here", &[]),
+            "no skills $here"
+        );
+        assert_eq!(skill_mentions_as_slash("trailing $", &skills), "trailing $");
+        // Sentence punctuation ends the name; a doubled `$` is not a boundary.
+        assert_eq!(
+            skill_mentions_as_slash("dùng $frontend-design. $$frontend-design", &skills),
+            "dùng /frontend-design. $$frontend-design"
+        );
+    }
+}

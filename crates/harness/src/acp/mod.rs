@@ -48,7 +48,8 @@ use tokio::sync::mpsc;
 
 use zeron_proto::{
     AgentEvent, Compaction, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice,
-    ReasoningLevel, RunRequest, SlashCommand, SteeringMode, UserInputAnswer, UserInputQuestion,
+    ReasoningLevel, RunRequest, SlashCommand, SlashCommandKind, SteeringMode, UserInputAnswer,
+    UserInputQuestion,
 };
 
 use crate::jsonrpc::{Incoming, RpcClient};
@@ -646,6 +647,7 @@ fn skill_commands(dirs: &[PathBuf]) -> Vec<SlashCommand> {
                 name,
                 description: first_sentence(&description),
                 input_hint: None,
+                kind: SlashCommandKind::Skill,
             });
         }
     }
@@ -1749,6 +1751,10 @@ impl Harness for AcpHarness {
             .ok_or_else(|| HarnessError::Protocol("agent child has no stdout".into()))?;
         let (client, incoming) = RpcClient::new(stdin, stdout);
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
+        let skills: Vec<String> = skill_commands(&(self.spec.skill_dirs)())
+            .into_iter()
+            .map(|command| command.name)
+            .collect();
         tokio::spawn(run_session(Session {
             child,
             client,
@@ -1756,6 +1762,7 @@ impl Harness for AcpHarness {
             event_tx,
             controls,
             request,
+            skills,
             harness: self.spec.id,
             agent_name: self.spec.display_name,
             prompt_transform: self.spec.prompt_transform,
@@ -1790,6 +1797,8 @@ struct Session {
     event_tx: mpsc::Sender<Result<AgentEvent, HarnessError>>,
     controls: RunControls,
     request: RunRequest,
+    /// Skill names the `$name` rewrite recognizes (the spec's `SKILL.md` dirs).
+    skills: Vec<String>,
     harness: HarnessId,
     agent_name: &'static str,
     prompt_complete_extension: bool,
@@ -2712,6 +2721,7 @@ async fn run_session(session: Session) {
         event_tx,
         controls,
         request,
+        skills,
         harness,
         agent_name,
         prompt_complete_extension,
@@ -3042,7 +3052,10 @@ async fn run_session(session: Session) {
         prompt_turn(
             client.clone(),
             session_id.clone(),
-            prompt_transform(request.reasoning, &request.prompt),
+            prompt_transform(
+                request.reasoning,
+                &crate::skill_mentions_as_slash(&request.prompt, &skills),
+            ),
             current_prompt_id.clone(),
         )
     });
@@ -3680,7 +3693,10 @@ async fn run_session(session: Session) {
                 Some(msg) => {
                     // Same transform as the initial prompt: Claude's
                     // Ultrathink prefix rides every steer too.
-                    let text = prompt_transform(request.reasoning, &msg.prompt);
+                    let text = prompt_transform(
+                        request.reasoning,
+                        &crate::skill_mentions_as_slash(&msg.prompt, &skills),
+                    );
                     if turn.is_none() && cancel_flush_deadline.is_some() {
                         // A busy-session cancel is already in flight: this
                         // steer lines up behind it and dispatches at flush.

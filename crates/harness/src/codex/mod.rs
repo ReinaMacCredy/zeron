@@ -56,8 +56,8 @@ use tokio::sync::mpsc;
 
 use zeron_proto::{
     AgentEvent, AnchorRole, Compaction, DoneStatus, HarnessId, Model, ModelOption,
-    ModelOptionChoice, ReasoningLevel, RunRequest, SlashCommand, SteeringMode, UserInputAnswer,
-    UserInputQuestion,
+    ModelOptionChoice, ReasoningLevel, RunRequest, SlashCommand, SlashCommandKind, SteeringMode,
+    UserInputAnswer, UserInputQuestion,
 };
 
 use crate::jsonrpc::{Incoming, RpcClient};
@@ -515,6 +515,7 @@ fn parse_skill_commands(result: &Value) -> Vec<SlashCommand> {
                 name: name.to_owned(),
                 description: description.to_owned(),
                 input_hint: None,
+                kind: SlashCommandKind::Skill,
             });
         }
     }

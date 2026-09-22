@@ -50,7 +50,7 @@ use tokio::sync::mpsc;
 
 use zeron_proto::{
     AgentEvent, Compaction, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand,
-    SteeringMode, UserInputAnswer, UserInputQuestion,
+    SlashCommandKind, SteeringMode, UserInputAnswer, UserInputQuestion,
 };
 
 use crate::process::{Child, ChildStdin, Command, Stdio};
@@ -125,6 +125,29 @@ impl ClaudeHarness {
         self.interrupt_grace = interrupt_grace;
         self.kill_grace = kill_grace;
         self
+    }
+
+    /// Skill names for the `$name` rewrite. The picker's list is reused when
+    /// it was already probed (opening the `$` popup probes it); otherwise the
+    /// probe runs only when the prompt carries a `$` at all, so an ordinary
+    /// first turn never waits on it.
+    async fn skill_names(&self, prompt: &str) -> Vec<String> {
+        let commands = match self.commands.get() {
+            Some(commands) => commands.clone(),
+            None if !prompt.contains('$') => return Vec::new(),
+            None => match self.commands().await {
+                Ok(commands) => commands,
+                Err(error) => {
+                    tracing::debug!(%error, "skill probe failed; `$` mentions sent as typed");
+                    return Vec::new();
+                }
+            },
+        };
+        commands
+            .into_iter()
+            .filter(|command| command.kind == SlashCommandKind::Skill)
+            .map(|command| command.name)
+            .collect()
     }
 
     fn resolve_executable(&self) -> Result<PathBuf, HarnessError> {
@@ -336,7 +359,8 @@ impl ClaudeHarness {
 }
 
 /// `commands` out of an `initialize` control_response payload
-/// (`response.response.commands`: name / description / argumentHint).
+/// (`response.response.commands`: name / description / argumentHint /
+/// builtin). Entries without `builtin: true` are skills and user commands.
 fn parse_initialize_commands(response: &Value) -> Vec<SlashCommand> {
     response
         .get("response")
@@ -363,6 +387,11 @@ fn parse_initialize_commands(response: &Value) -> Vec<SlashCommand> {
                     .map(str::trim)
                     .filter(|h| !h.is_empty())
                     .map(str::to_owned),
+                kind: if c.get("builtin").and_then(Value::as_bool) == Some(true) {
+                    SlashCommandKind::BuiltIn
+                } else {
+                    SlashCommandKind::Skill
+                },
             })
         })
         .collect()
@@ -520,8 +549,16 @@ impl ClaudeHarness {
         // also ride the prompt text, so a skipped/unreadable file degrades to
         // the old-app behavior (the agent opens the path with its Read tool).
         let images = load_image_blocks(&request.attachments).await;
+        let skills = if title_only {
+            Vec::new()
+        } else {
+            self.skill_names(&request.prompt).await
+        };
         let first = wire::user_message_line_with_images(
-            &apply_ultrathink(request.reasoning, &request.prompt),
+            &apply_ultrathink(
+                request.reasoning,
+                &crate::skill_mentions_as_slash(&request.prompt, &skills),
+            ),
             &images,
         );
         let _ = stdin_tx.send(StdinMsg::Line(first));
@@ -536,6 +573,7 @@ impl ClaudeHarness {
             event_tx,
             controls,
             reasoning: request.reasoning,
+            skills,
             interrupt_grace: self.interrupt_grace,
             kill_grace: self.kill_grace,
             stderr_tail,
@@ -661,6 +699,8 @@ struct Session {
     event_tx: mpsc::Sender<Result<AgentEvent, HarnessError>>,
     controls: RunControls,
     reasoning: Option<ReasoningLevel>,
+    /// Skill names the `$name` rewrite recognizes, for steers too.
+    skills: Vec<String>,
     interrupt_grace: Duration,
     kill_grace: Duration,
     /// Rolling stderr tail for the crash message on an unexpected exit.
@@ -679,6 +719,7 @@ async fn run_session(session: Session) {
         event_tx,
         controls,
         reasoning,
+        skills,
         interrupt_grace,
         kill_grace,
         stderr_tail,
@@ -750,7 +791,10 @@ async fn run_session(session: Session) {
                 Some(msg) => {
                     let images = load_image_blocks(&msg.attachments).await;
                     let line = wire::user_message_line_with_images(
-                        &apply_ultrathink(reasoning, &msg.prompt),
+                        &apply_ultrathink(
+                            reasoning,
+                            &crate::skill_mentions_as_slash(&msg.prompt, &skills),
+                        ),
                         &images,
                     );
                     let _ = stdin_tx.send(StdinMsg::Line(line));
@@ -1002,6 +1046,28 @@ fn updated_input_with_answers(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn initialize_commands_split_builtins_from_skills() {
+        let response = json!({ "response": { "commands": [
+            { "name": "compact", "description": "Free up context", "argumentHint": "<focus>", "builtin": true },
+            { "name": "maestro-work", "description": "Implement one unit (user)", "argumentHint": "" },
+            { "name": "codex:review", "description": "(codex) Review" },
+        ]}});
+        let commands = parse_initialize_commands(&response);
+        let kinds: Vec<(&str, SlashCommandKind)> =
+            commands.iter().map(|c| (c.name.as_str(), c.kind)).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ("compact", SlashCommandKind::BuiltIn),
+                ("maestro-work", SlashCommandKind::Skill),
+                ("codex:review", SlashCommandKind::Skill),
+            ]
+        );
+        assert_eq!(commands[0].input_hint.as_deref(), Some("<focus>"));
+        assert_eq!(commands[1].input_hint, None);
+    }
 
     // The Windows `Command` wrapper has no `as_std` to read the built line back.
     #[cfg(not(windows))]
