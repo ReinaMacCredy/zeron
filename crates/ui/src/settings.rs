@@ -2803,6 +2803,22 @@ mod tests {
     }
 
     #[test]
+    fn split_ratio_is_clamped_and_healed() {
+        let loaded = UiSettings {
+            split_ratio: 0.05,
+            ..Default::default()
+        }
+        .clamped();
+        assert_eq!(loaded.split_ratio, SPLIT_RATIO_MIN);
+        let loaded = UiSettings {
+            split_ratio: f32::NAN,
+            ..Default::default()
+        }
+        .clamped();
+        assert_eq!(loaded.split_ratio, SPLIT_RATIO_DEFAULT);
+    }
+
+    #[test]
     fn large_right_pane_width_is_preserved() {
         let loaded = UiSettings {
             right_pane_width: 2400.0,

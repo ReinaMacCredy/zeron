@@ -6451,6 +6451,27 @@ mod tests {
 
                 shell.settings.space_filter = Some("a".into());
                 assert_eq!(keys(shell, cx), ["c:a1", "c:a2"]);
+
+                // An open split pulls the pair's later row up beside the
+                // earlier one, across groups, in both the drawn rows (one
+                // card at a1's slot) and the jump/cycle order.
+                shell.settings.space_filter = None;
+                shell
+                    .state
+                    .update(cx, |state, cx| state.select_chat(Some("a1".into()), cx));
+                shell.drop_session_on_side("b1".into(), super::split::SplitSide::Right, cx);
+                assert!(shell.split.is_some());
+                assert_eq!(shell.sidebar_visible_order(cx), ["a1", "b1", "a2"]);
+                shell.settings.sidebar_organization = SidebarOrganization::InOneList;
+                assert_eq!(keys(shell, cx), ["c:a1", "c:a2"]);
+                assert_eq!(shell.sidebar_visible_order(cx), ["a1", "b1", "a2"]);
+
+                // Selecting outside the pair parks it: rows fall back apart.
+                shell
+                    .state
+                    .update(cx, |state, cx| state.select_chat(Some("a2".into()), cx));
+                shell.reconcile_split_with_selection(Some("a2"), cx);
+                assert_eq!(keys(shell, cx), ["c:a1", "c:b1", "c:a2"]);
             })
             .unwrap();
     }
