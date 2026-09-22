@@ -173,6 +173,12 @@ pub fn composer_total_height(content_height: f32) -> f32 {
         + PILL_BORDER_V
 }
 
+/// The question card's free-text field grows with the note up to the same
+/// content cap as the expanded composer, then scrolls.
+fn wizard_input_height(content_height: f32) -> f32 {
+    content_height.clamp(INPUT_LINE_HEIGHT, TEXTAREA_MAX - TEXTAREA_PAD_V)
+}
+
 fn input_max_scroll(content_height: f32, viewport_height: f32) -> f32 {
     (content_height - viewport_height).max(0.0)
 }
@@ -8764,6 +8770,23 @@ impl Render for Composer {
         });
 
         if wizard_active {
+            // The card returns before the pill sizing below, so the input
+            // would keep the compact pill's one-line viewport and a wrapped
+            // note would vanish under the scroll fades.
+            let height = wizard_input_height(content_height);
+            self.input.update(cx, |input, cx| {
+                if input.viewport_height != Some(height)
+                    || input.settled_viewport_height != Some(height)
+                    || input.resizing
+                    || input.overflow_top_padding != 0.0
+                {
+                    input.resizing = false;
+                    input.overflow_top_padding = 0.0;
+                    input.viewport_height = Some(height);
+                    input.settled_viewport_height = Some(height);
+                    cx.notify();
+                }
+            });
             let wizard = self.render_wizard(cx);
             return container.child(motion::fade_quick("composer-wizard", div().child(wizard)));
         }
@@ -11595,6 +11618,61 @@ mod tests {
             vec!["custom answer"],
             "typed overrides picked, trimmed"
         );
+    }
+
+    #[gpui::test]
+    fn wizard_note_viewport_grows_with_wrapped_lines(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        handle
+            .update(cx, |composer, _, cx| {
+                composer.state.update(cx, |state, _| {
+                    state.selected_chat = Some("chat".into());
+                });
+                composer.on_state_changed(cx);
+                composer.expanded_mode = false;
+                composer
+                    .input
+                    .update(cx, |input, cx| input.set_text("Hi", cx));
+            })
+            .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        handle
+            .read_with(cx, |composer, cx| {
+                assert_eq!(
+                    composer.input.read(cx).viewport_height,
+                    Some(INPUT_LINE_HEIGHT),
+                    "compact pill starts one line tall"
+                );
+            })
+            .unwrap();
+        handle
+            .update(cx, |composer, _, cx| {
+                composer.wizard = Some(Wizard::new(
+                    "req".into(),
+                    vec![question("q", &["a", "b"], false)],
+                ));
+                composer
+                    .input
+                    .update(cx, |input, cx| input.set_text("one\ntwo\nthree\nfour", cx));
+            })
+            .unwrap();
+        for _ in 0..2 {
+            cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+                .unwrap();
+        }
+        handle
+            .read_with(cx, |composer, cx| {
+                let input = composer.input.read(cx);
+                let expected = wizard_input_height(input.content_height);
+                assert!(expected >= 4.0 * INPUT_LINE_HEIGHT - 0.1);
+                assert_eq!(input.viewport_height, Some(expected));
+                assert_eq!(input.settled_viewport_height, Some(expected));
+                assert_eq!(input.overflow_top_padding, 0.0);
+            })
+            .unwrap();
+        assert_eq!(wizard_input_height(0.0), INPUT_LINE_HEIGHT);
+        assert_eq!(wizard_input_height(1000.0), TEXTAREA_MAX - TEXTAREA_PAD_V);
     }
 
     #[test]
