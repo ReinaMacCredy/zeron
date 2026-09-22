@@ -2593,16 +2593,16 @@ impl Shell {
         if !selected.is_empty() {
             self.last_appshot_chat = Some(selected.clone());
         }
+        // The split follows the FOCUSED id (a chat or the canvas draft) on
+        // every change: a draft-to-draft switch never moves `selected_chat`.
+        let focused = state.read(cx).focused_id();
+        self.reconcile_split_with_selection(focused.as_deref(), cx);
         if selected != self.active_chat {
             self.suspend_file_images(cx);
             if !selected.is_empty() {
                 self.touch_session_mru(&selected);
             }
             self.active_chat = selected.clone();
-            self.reconcile_split_with_selection(
-                Some(selected.as_str()).filter(|s| !s.is_empty()),
-                cx,
-            );
             // Route history: a chat switch is a navigation. The very first
             // selection off the untouched boot canvas REPLACES that entry —
             // zeron's `/` route redirected into the last-used chat, leaving no
@@ -12180,11 +12180,12 @@ impl Render for Shell {
                     .detach();
                 }
                 // `=split` (capture knob; the drag gesture has no input-free
-                // path): once a session is selected, open the next sidebar
-                // session as the split view's secondary pane — polling a few
-                // seconds, since a seeded second chat may land after boot.
+                // path): once a session or the canvas draft is focused, open
+                // the next sidebar session as the split view's secondary
+                // pane — polling a few seconds, since a seeded second chat
+                // may land after boot.
                 if self.debug_dialog.as_deref() == Some("split")
-                    && self.state.read(cx).selected_chat.is_some()
+                    && self.state.read(cx).focused_id().is_some()
                 {
                     self.debug_dialog = None;
                     cx.spawn(async move |this, cx| {

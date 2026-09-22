@@ -180,10 +180,12 @@ impl Shell {
     /// current secondary.
     fn open_split(&mut self, chat_id: String, side: SplitSide, cx: &mut Context<Self>) {
         if self.split_chat_id() == Some(chat_id.as_str()) {
-            if let Some(split) = self.split.as_mut() {
+            if let Some(split) = self.split.as_mut()
+                && split.side != side
+            {
                 split.side = side;
+                cx.notify();
             }
-            cx.notify();
             return;
         }
         self.close_split(cx);
@@ -258,9 +260,11 @@ impl Shell {
         self.close_split(cx);
     }
 
-    /// Selection changed (every path lands in `on_state_changed`): a
-    /// selected pair member shows its partner beside it; anything else shows
-    /// full width.
+    /// Focus changed (every path lands in `on_state_changed`): a focused
+    /// pair member shows its partner beside it; anything else shows full
+    /// width. The canvas draft is a member like any other (its id becomes
+    /// the chat's on send), but a draft partner has no doc to show, so the
+    /// pair is one-way until it promotes.
     pub(super) fn reconcile_split_with_selection(
         &mut self,
         selected: Option<&str>,
@@ -270,6 +274,7 @@ impl Shell {
             self.split_pair
                 .as_ref()
                 .and_then(|pair| pair.partner(selected))
+                .filter(|(chat, _)| !self.state.read(cx).is_draft(chat))
                 .map(|(chat, side)| (chat.to_string(), side))
         });
         match partner {
@@ -278,7 +283,9 @@ impl Shell {
         }
     }
 
-    /// A pair member vanished (archived, deleted): the pair goes.
+    /// A pair member vanished (archived, deleted): the pair goes. A draft
+    /// counts as live, and so does the selected chat: a just-promoted draft
+    /// is neither a draft nor a synced row until its doc frame lands.
     pub(super) fn prune_split(&mut self, cx: &mut Context<Self>) {
         let Some(pair) = self.split_pair.clone() else {
             return;
@@ -286,9 +293,11 @@ impl Shell {
         let live = {
             let state = self.state.read(cx);
             !state.chats_synced
-                || [&pair.left, &pair.right]
-                    .iter()
-                    .all(|id| state.chats.iter().any(|c| c.id == **id && !c.archived))
+                || [&pair.left, &pair.right].iter().all(|id| {
+                    state.is_draft(id)
+                        || state.selected_chat.as_deref() == Some(id.as_str())
+                        || state.chats.iter().any(|c| c.id == **id && !c.archived)
+                })
         };
         if !live {
             self.dissolve_split_pair(cx);
@@ -306,7 +315,7 @@ impl Shell {
         if self.state.read(cx).is_draft(&chat_id) {
             return;
         }
-        let selected = self.state.read(cx).selected_chat.clone();
+        let selected = self.state.read(cx).focused_id();
         let verdict = split_drop(
             &chat_id,
             side,
