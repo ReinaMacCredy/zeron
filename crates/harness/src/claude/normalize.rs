@@ -440,6 +440,11 @@ impl Normalizer {
                         post_tokens: meta.post_tokens,
                     }];
                 }
+                if f.subtype == "status" {
+                    return vec![AgentEvent::Compacting {
+                        active: f.status.as_deref() == Some("compacting"),
+                    }];
+                }
                 if f.subtype != "init" || self.saw_init {
                     return Vec::new();
                 }
@@ -1090,7 +1095,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_boundary_is_the_only_event_a_compaction_run_produces() {
+    fn a_compaction_run_reports_its_start_end_and_boundary() {
         let mut normalizer = Normalizer::new();
         let mut feed = |raw: &str| {
             let frame = crate::claude::wire::parse_frame(raw).expect("frame parses");
@@ -1101,15 +1106,15 @@ mod tests {
                 .as_slice(),
             [AgentEvent::SessionStarted { .. }]
         ));
-        assert!(
-            feed(r#"{"type":"system","subtype":"status","status":"compacting","session_id":"s1"}"#)
-                .is_empty()
+        assert_eq!(
+            feed(r#"{"type":"system","subtype":"status","status":"compacting","session_id":"s1"}"#),
+            vec![AgentEvent::Compacting { active: true }]
         );
-        assert!(
+        assert_eq!(
             feed(
                 r#"{"type":"system","subtype":"status","status":null,"compact_result":"success","session_id":"s1"}"#
-            )
-            .is_empty()
+            ),
+            vec![AgentEvent::Compacting { active: false }]
         );
         // The CLI re-inits after compacting; the dedupe must keep swallowing it.
         assert!(feed(r#"{"type":"system","subtype":"init","session_id":"s1"}"#).is_empty());
@@ -1149,6 +1154,20 @@ mod tests {
                 pre_tokens: None,
                 post_tokens: None,
             }]
+        );
+    }
+
+    #[test]
+    fn a_failed_compaction_still_ends_the_compacting_status() {
+        assert_eq!(
+            normalize_one(
+                r#"{"type":"system","subtype":"status","status":null,"compact_result":"failed","session_id":"s1"}"#
+            ),
+            vec![AgentEvent::Compacting { active: false }]
+        );
+        assert_eq!(
+            normalize_one(r#"{"type":"system","subtype":"status","session_id":"s1"}"#),
+            vec![AgentEvent::Compacting { active: false }]
         );
     }
 

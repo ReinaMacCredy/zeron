@@ -149,6 +149,7 @@ fn main() -> anyhow::Result<()> {
                         state.apply_sessions(vec![zeron_proto::Session {
                             last_completed_turn: None,
                             held_by_subagents: false,
+                            compacting: false,
                             chat_id: "profile".into(),
                             device_id: "local".into(),
                             status: if streaming {

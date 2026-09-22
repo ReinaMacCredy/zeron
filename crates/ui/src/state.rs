@@ -1808,6 +1808,11 @@ impl AppState {
         self.sessions.iter().find(|s| s.chat_id == chat_id)
     }
 
+    pub fn chat_compacting(&self, chat_id: &str) -> bool {
+        self.compacting_chat.as_deref() == Some(chat_id)
+            || self.session_for(chat_id).is_some_and(|s| s.compacting)
+    }
+
     /// Staleness-checked status dot for a chat row. A send in flight reads as
     /// Working (see [`Self::display_status_for`]).
     pub fn indicator_for(&self, chat_id: &str, now: DateTime<Utc>) -> Indicator {
@@ -3652,6 +3657,7 @@ mod tests {
         Session {
             last_completed_turn: None,
             held_by_subagents: false,
+            compacting: false,
             chat_id: chat_id.into(),
             device_id: "dev".into(),
             status,
@@ -3932,6 +3938,7 @@ mod tests {
         let mut row = Session {
             last_completed_turn: None,
             held_by_subagents: false,
+            compacting: false,
             chat_id: "chat".into(),
             device_id: "host".into(),
             status: SessionStatus::Working,
@@ -3964,6 +3971,7 @@ mod tests {
         state.sessions = vec![Session {
             last_completed_turn: None,
             held_by_subagents: false,
+            compacting: false,
             chat_id: "chat".into(),
             device_id: "host".into(),
             status: SessionStatus::Working,
@@ -4189,6 +4197,22 @@ mod tests {
         // Future timestamps (clock skew) count as fresh.
         let skewed = session("c", SessionStatus::Working, -30, now);
         assert_eq!(effective_indicator(Some(&skewed), now), Indicator::Working);
+    }
+
+    #[test]
+    fn a_harness_compaction_marks_only_its_own_chat_compacting() {
+        let now = Utc::now();
+        let mut state = AppState::new();
+        let mut compacting = session("c", SessionStatus::Working, 0, now);
+        compacting.compacting = true;
+        state.sessions = vec![compacting, session("d", SessionStatus::Working, 0, now)];
+        assert!(state.chat_compacting("c"));
+        assert!(!state.chat_compacting("d"));
+        state.sessions[0].compacting = false;
+        assert!(!state.chat_compacting("c"));
+        state.compacting_chat = Some("d".into());
+        assert!(state.chat_compacting("d"));
+        assert!(!state.chat_compacting("c"));
     }
 
     #[test]

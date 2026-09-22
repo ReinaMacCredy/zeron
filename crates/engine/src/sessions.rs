@@ -940,20 +940,7 @@ impl SessionsEngine {
                 ),
             });
         };
-        // Read the window BEFORE clearing: the meter stores tokens and window
-        // as one atomic value, so the clear takes the window with it.
-        let window = handle.doc().context_usage().and_then(|usage| usage.window);
-        handle.write_system_message(
-            &new_id(),
-            &compaction_note(pre_tokens, post_tokens),
-            now_ms(),
-        )?;
-        handle.doc().clear_context_usage()?;
-        if let Some(post_tokens) = post_tokens {
-            handle
-                .doc()
-                .update_context_usage(Some(post_tokens), window)?;
-        }
+        record_compaction(handle.doc(), &self.inner.device_id, pre_tokens, post_tokens)?;
         Ok(CompactOutcome {
             compacted: true,
             pre_tokens,
@@ -1810,6 +1797,7 @@ impl Inner {
                     device_id: self.device_id.clone(),
                     status,
                     held_by_subagents,
+                    compacting: false,
                     started_at: None,
                     updated_at: now,
                 });
@@ -1835,6 +1823,7 @@ impl Inner {
                 SessionStatus::Working | SessionStatus::AwaitingInput => {}
                 SessionStatus::Idle | SessionStatus::Errored => {
                     entry.started_at = None;
+                    entry.compacting = false;
                 }
             }
             let session = entry.clone();
@@ -1847,6 +1836,28 @@ impl Inner {
         };
         // Mirror the transition into the workspace doc's session-status row so
         // remote devices' sidebars show this run (staleness-checked client-side).
+        if let Some(ws) = self.workspace() {
+            ws.record_session(&session);
+        }
+    }
+
+    fn set_compacting(&self, chat_id: &str, compacting: bool) {
+        let session = {
+            let mut statuses = lock(&self.statuses);
+            let Some(entry) = statuses.get_mut(chat_id) else {
+                return;
+            };
+            if entry.compacting == compacting {
+                return;
+            }
+            entry.compacting = compacting;
+            entry.updated_at = Utc::now();
+            let session = entry.clone();
+            let mut list: Vec<Session> = statuses.values().cloned().collect();
+            list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+            self.sessions_tx.send_replace(list);
+            session
+        };
         if let Some(ws) = self.workspace() {
             ws.record_session(&session);
         }
@@ -2186,6 +2197,35 @@ async fn drain_compaction(
         }
     }
     drain
+}
+
+fn record_compaction(
+    doc: &SessionDoc,
+    device_id: &str,
+    pre_tokens: Option<u64>,
+    post_tokens: Option<u64>,
+) -> Result<(), DocError> {
+    // Read the window BEFORE clearing: the meter stores tokens and window
+    // as one atomic value, so the clear takes the window with it.
+    let window = doc.context_usage().and_then(|usage| usage.window);
+    doc.push_message(&SessionMessageEntry {
+        id: new_id(),
+        role: MessageRole::System,
+        parts: vec![MessagePart::Text {
+            id: "t0".into(),
+            text: compaction_note(pre_tokens, post_tokens),
+        }],
+        created_at: now_ms(),
+        device_id: device_id.to_string(),
+        status: Some(MessageStatus::Complete),
+        continuation_of: None,
+        from_chat_id: None,
+    })?;
+    doc.clear_context_usage()?;
+    if let Some(post_tokens) = post_tokens {
+        doc.update_context_usage(Some(post_tokens), window)?;
+    }
+    Ok(())
 }
 
 /// The system entry's text: the boundary, plus the harness's own before/after
@@ -3137,6 +3177,47 @@ async fn drive_run(
         // push the quiesce watchdog's window out.
         inner.touch_session(&chat_id);
         last_stream_activity = tokio::time::Instant::now();
+        if let AgentEvent::Compacting { active } = &event {
+            // A compaction can begin after a stray Done parked the session
+            // (2026-09-22); the gate below would hold it Idle throughout.
+            if *active && idle_since.take().is_some() {
+                entry_id = new_id();
+                segment_started = now_ms();
+                inner.set_status(&chat_id, SessionStatus::Working, true);
+            }
+            inner.set_compacting(&chat_id, *active);
+            continue;
+        }
+        if let AgentEvent::Compacted {
+            pre_tokens,
+            post_tokens,
+        } = &event
+        {
+            inner.set_compacting(&chat_id, false);
+            inner.publish(&chat_id, &event);
+            if !folded.is_empty() || writer.is_some() {
+                if let Err(err) = finish_segment(
+                    doc_ref,
+                    writer.take(),
+                    &entry_id,
+                    &device_id,
+                    segment_started,
+                    &folded,
+                    MessageStatus::Complete,
+                ) {
+                    tracing::warn!(chat = %chat_id, error = %err, "segment finish failed");
+                }
+                inner.note_message(&chat_id, &folded_text(&folded));
+                folded.clear();
+                dirty = false;
+                entry_id = new_id();
+                segment_started = now_ms();
+            }
+            if let Err(err) = record_compaction(doc_ref, &device_id, *pre_tokens, *post_tokens) {
+                tracing::warn!(chat = %chat_id, error = %err, "compaction note write failed");
+            }
+            continue;
+        }
         // The engine's input bridge is the sole authority on input requests:
         // it mints the id and parks the resolver BEFORE emitting the event,
         // so a legitimate id is always pending here. A harness emitting its
@@ -3439,6 +3520,7 @@ async fn drive_run(
         }
 
         if let AgentEvent::Done { status, .. } = &event {
+            inner.set_compacting(&chat_id, false);
             // A question still pending at turn end can never be legitimately
             // answered (its turn is over): drain the resolvers NOW, or a late
             // `respond_input` finds one, emits InputResolved, and un-parks

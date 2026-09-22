@@ -306,6 +306,8 @@ pub struct Session {
     /// queue). The dot still reads Working.
     #[serde(default)]
     pub held_by_subagents: bool,
+    #[serde(default)]
+    pub compacting: bool,
     pub started_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
 }

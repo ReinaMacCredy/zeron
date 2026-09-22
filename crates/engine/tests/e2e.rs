@@ -2496,6 +2496,168 @@ async fn live_subagent_holds_a_parked_session_working() {
     core.shutdown().await;
 }
 
+#[tokio::test]
+async fn a_compaction_after_a_stray_done_reopens_working_and_writes_its_note() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(ControlledHarness(std::sync::Mutex::new(Some(rx)))),
+    );
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-compact-parked",
+        SessionCommandPayload::Run {
+            request: run_request("test 200k"),
+            message_id: "user-compact".into(),
+        },
+    );
+    let session = || core.sessions.session_status(CHAT);
+    tx.send(done(DoneStatus::Completed)).unwrap();
+    wait_for(
+        || session().is_some_and(|s| s.status == SessionStatus::Idle),
+        "stray done parks the session",
+    )
+    .await;
+
+    tx.send(AgentEvent::Compacting { active: true }).unwrap();
+    wait_for(
+        || session().is_some_and(|s| s.status == SessionStatus::Working && s.compacting),
+        "compaction reopens Working",
+    )
+    .await;
+
+    tx.send(AgentEvent::Compacting { active: false }).unwrap();
+    tx.send(AgentEvent::Compacted {
+        pre_tokens: Some(226_874),
+        post_tokens: Some(12_451),
+    })
+    .unwrap();
+    tx.send(AgentEvent::TextDelta {
+        text: "reply".into(),
+    })
+    .unwrap();
+    tx.send(done(DoneStatus::Completed)).unwrap();
+    wait_for(
+        || {
+            session().is_some_and(|s| s.status == SessionStatus::Idle)
+                && entries_now(&core)
+                    .iter()
+                    .any(|e| e.role == MessageRole::Assistant)
+        },
+        "reply settles",
+    )
+    .await;
+    assert!(!session().unwrap().compacting);
+    let rows: Vec<(MessageRole, String)> = entries_now(&core)
+        .iter()
+        .map(|e| {
+            let text = e
+                .parts
+                .iter()
+                .filter_map(|p| match p {
+                    MessagePart::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>();
+            (e.role, text)
+        })
+        .filter(|(role, _)| *role != MessageRole::User)
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            (
+                MessageRole::System,
+                "Context compacted · 226.9k → 12.5k tokens".to_string()
+            ),
+            (MessageRole::Assistant, "reply".to_string()),
+        ]
+    );
+    assert_eq!(
+        handle.doc().context_usage().and_then(|u| u.tokens),
+        Some(12_451)
+    );
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_mid_turn_compaction_splits_the_reply_around_its_note_and_clears_on_done() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(ControlledHarness(std::sync::Mutex::new(Some(rx)))),
+    );
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-compact-mid",
+        SessionCommandPayload::Run {
+            request: run_request("long task"),
+            message_id: "user-mid".into(),
+        },
+    );
+    let session = || core.sessions.session_status(CHAT);
+    tx.send(AgentEvent::TextDelta {
+        text: "before".into(),
+    })
+    .unwrap();
+    tx.send(AgentEvent::Compacting { active: true }).unwrap();
+    wait_for(
+        || session().is_some_and(|s| s.status == SessionStatus::Working && s.compacting),
+        "compacting flag set mid-turn",
+    )
+    .await;
+    tx.send(AgentEvent::Compacted {
+        pre_tokens: None,
+        post_tokens: None,
+    })
+    .unwrap();
+    tx.send(AgentEvent::TextDelta {
+        text: "after".into(),
+    })
+    .unwrap();
+    tx.send(AgentEvent::Compacting { active: true }).unwrap();
+    wait_for(
+        || session().is_some_and(|s| s.compacting),
+        "second compaction starts",
+    )
+    .await;
+    tx.send(done(DoneStatus::Completed)).unwrap();
+    wait_for(
+        || session().is_some_and(|s| s.status == SessionStatus::Idle),
+        "turn settles",
+    )
+    .await;
+    assert!(!session().unwrap().compacting, "Done ends a compaction");
+    let rows: Vec<(MessageRole, String)> = entries_now(&core)
+        .iter()
+        .filter(|e| e.role != MessageRole::User)
+        .map(|e| {
+            let text = e
+                .parts
+                .iter()
+                .filter_map(|p| match p {
+                    MessagePart::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>();
+            (e.role, text)
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            (MessageRole::Assistant, "before".to_string()),
+            (MessageRole::System, "Context compacted".to_string()),
+            (MessageRole::Assistant, "after".to_string()),
+        ]
+    );
+    core.shutdown().await;
+}
+
 /// A prompt sent while a parked turn is held Working by a background subagent
 /// is the next turn, not a queued one: the row says so, the drain releases it
 /// into the warm mailbox, and the routed turn takes the status over.

@@ -1085,6 +1085,7 @@ mod drag_regressions {
                 state.sessions.push(zeron_proto::Session {
                     last_completed_turn: None,
                     held_by_subagents: false,
+                    compacting: false,
                     chat_id: "b".into(),
                     device_id: "dev".into(),
                     status: zeron_proto::SessionStatus::Working,
