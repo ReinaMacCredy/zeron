@@ -4323,6 +4323,16 @@ struct ThreadMatch {
     chat_id: String,
     title: String,
     marks: Vec<HarnessId>,
+    project: String,
+}
+
+/// Where the prompt will run and read from: the device `read_thread`
+/// resolves ids on, the project whose threads list first, and the chat
+/// being composed for (which can't mention itself).
+struct MentionScope<'a> {
+    device_id: &'a str,
+    space_id: Option<&'a str>,
+    exclude: Option<&'a str>,
 }
 
 impl FileMentionState {
@@ -4340,33 +4350,41 @@ fn chat_mention_title(chat: &zeron_proto::Chat) -> String {
 }
 
 /// Threads whose title contains the query (case-insensitive) or whose id
-/// starts with it, in sidebar order, on the device the prompt will run on
-/// (`read_thread` resolves ids per device), minus the chat being composed
-/// for and drafts (nothing to read). An empty query lists the first few.
+/// starts with it, on the scope's device, minus the composed-for chat and
+/// drafts (nothing to read). The scope's own project lists first, then the
+/// rest, each in sidebar (recency) order. An empty query lists the first few.
 fn thread_matches<'a>(
     chats: impl Iterator<Item = &'a zeron_proto::Chat>,
     query: &str,
-    device_id: &str,
-    exclude: Option<&str>,
+    scope: MentionScope<'_>,
     is_draft: impl Fn(&str) -> bool,
+    project_of: impl Fn(&zeron_proto::Chat) -> String,
 ) -> Vec<ThreadMatch> {
     let query = query.trim().to_lowercase();
-    chats
+    let mut matches: Vec<(bool, String, &zeron_proto::Chat)> = chats
         .filter(|chat| {
-            chat.device_id == device_id && Some(chat.id.as_str()) != exclude && !is_draft(&chat.id)
+            chat.device_id == scope.device_id
+                && Some(chat.id.as_str()) != scope.exclude
+                && !is_draft(&chat.id)
         })
         .filter_map(|chat| {
             let title = chat_mention_title(chat);
             (query.is_empty()
                 || title.to_lowercase().contains(&query)
                 || chat.id.to_lowercase().starts_with(&query))
-            .then(|| ThreadMatch {
-                chat_id: chat.id.clone(),
-                title,
-                marks: crate::pickers::chat_harness_marks(chat),
-            })
+            .then(|| (chat.space_id.as_deref() != scope.space_id, title, chat))
         })
+        .collect();
+    matches.sort_by_key(|(other_project, _, _)| *other_project);
+    matches
+        .into_iter()
         .take(THREAD_MENTION_LIMIT)
+        .map(|(_, title, chat)| ThreadMatch {
+            chat_id: chat.id.clone(),
+            title,
+            marks: crate::pickers::chat_harness_marks(chat),
+            project: project_of(chat),
+        })
         .collect()
 }
 
@@ -5149,6 +5167,18 @@ impl Composer {
             .map(|device| (device, None))
     }
 
+    /// The project whose threads the picker lists first: the composed-for
+    /// chat's, else the one the new-session canvas would mint into.
+    fn mention_space(&self, cx: &App) -> Option<String> {
+        if let Some(chat) = self.bound_chat_row(cx) {
+            return chat.space_id.clone();
+        }
+        self.state
+            .read(cx)
+            .selected_space_row()
+            .map(|space| space.id.clone())
+    }
+
     fn insert_link(&mut self, link: String, window: &mut Window, cx: &mut Context<Self>) {
         // A drop while the `@` picker is open completes that token instead
         // of leaving a stray `@` beside the chip.
@@ -5792,13 +5822,22 @@ impl Composer {
         self.mention.threads = match &token {
             Some(token) => match self.mention_device(cx) {
                 Some((device, exclude)) => {
+                    let space = self.mention_space(cx);
                     let state = self.state.read(cx);
                     thread_matches(
                         state.visible_chats(),
                         &token.query,
-                        &device,
-                        exclude.as_deref(),
+                        MentionScope {
+                            device_id: &device,
+                            space_id: space.as_deref(),
+                            exclude: exclude.as_deref(),
+                        },
                         |id| state.is_draft(id),
+                        |chat| match (state.space_for_chat(chat), chat.space_id.as_deref()) {
+                            (Some(space), _) => space.display_name().to_string(),
+                            (None, None) => "~".to_string(),
+                            (None, Some(_)) => "?".to_string(),
+                        },
                     )
                 }
                 None => Vec::new(),
@@ -6027,6 +6066,16 @@ impl Composer {
                                     .text_size(px(13.0))
                                     .text_color(theme.text)
                                     .child(SharedString::from(thread.title.clone())),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .max_w(px(160.0))
+                                    .overflow_hidden()
+                                    .truncate()
+                                    .text_size(px(12.5))
+                                    .text_color(theme.text_muted)
+                                    .child(SharedString::from(thread.project.clone())),
                             ),
                     )
                     .into_any_element(),
@@ -10641,18 +10690,55 @@ mod tests {
             chat("c3", None),
             chat("d4", Some("Fix Claude context")),
             chat("e5", Some("Fix on the laptop")),
+            chat("f6", Some("Fix the sidebar")),
         ];
         chats[4].device_id = "laptop".into();
-        let titles = |query: &str| {
-            thread_matches(chats.iter(), query, "dev", Some("d4"), |id| id == "b2")
-                .into_iter()
-                .map(|m| m.title)
-                .collect::<Vec<_>>()
+        chats[0].space_id = Some("other".into());
+        chats[5].space_id = Some("mine".into());
+        let scope = |space_id| MentionScope {
+            device_id: "dev",
+            space_id,
+            exclude: Some("d4"),
         };
-        assert_eq!(titles(""), vec!["Fix PR fetching", "New session"]);
-        assert_eq!(titles("fix"), vec!["Fix PR fetching"]);
-        assert_eq!(titles("C3"), vec!["New session"]);
+        let project_of = |chat: &zeron_proto::Chat| match chat.space_id.as_deref() {
+            Some("mine") => "zeron".to_string(),
+            Some("other") => "synara".to_string(),
+            _ => "~".to_string(),
+        };
+        let titles = |query: &str| {
+            thread_matches(
+                chats.iter(),
+                query,
+                scope(Some("mine")),
+                |id| id == "b2",
+                project_of,
+            )
+            .into_iter()
+            .map(|m| format!("{} · {}", m.title, m.project))
+            .collect::<Vec<_>>()
+        };
+        // The composer's own project first, then the rest in sidebar order.
+        assert_eq!(
+            titles(""),
+            vec![
+                "Fix the sidebar · zeron",
+                "Fix PR fetching · synara",
+                "New session · ~"
+            ]
+        );
+        assert_eq!(
+            titles("fix"),
+            vec!["Fix the sidebar · zeron", "Fix PR fetching · synara"]
+        );
+        assert_eq!(titles("C3"), vec!["New session · ~"]);
         assert!(titles("zzz").is_empty());
+        // A project-less composer puts project-less threads first.
+        let ids: Vec<String> =
+            thread_matches(chats.iter(), "", scope(None), |id| id == "b2", project_of)
+                .into_iter()
+                .map(|m| m.chat_id)
+                .collect();
+        assert_eq!(ids, vec!["c3", "a1", "f6"]);
     }
 
     /// Ordinary prompts must stay on the zero-cost path, including ones that
