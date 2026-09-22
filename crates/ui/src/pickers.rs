@@ -551,6 +551,7 @@ struct SettingChoice {
     value: String,
     selected: bool,
     default: bool,
+    warning: Option<String>,
 }
 
 struct SettingGroup {
@@ -1017,6 +1018,15 @@ impl Pickers {
         self.chat_override
             .clone()
             .or_else(|| self.state.read(cx).selected_chat.clone())
+    }
+
+    // AppState::context_usage tracks only the selection's watch.
+    fn chat_context_usage(&self, cx: &App) -> Option<zeron_proto::ContextUsage> {
+        let state = self.state.read(cx);
+        let selected = state.selected_chat.as_deref()?;
+        (self.chat_override.as_deref().unwrap_or(selected) == selected)
+            .then_some(state.context_usage)
+            .flatten()
     }
 
     fn chat_row<'a>(&self, cx: &'a App) -> Option<&'a zeron_proto::Chat> {
@@ -4657,12 +4667,14 @@ impl Pickers {
                         reasoning: Some(level),
                         selected: selected == Some(level),
                         default: default == Some(level),
+                        warning: None,
                     })
                     .collect(),
             });
         }
         if let Some(model) = self.selected_model(cx) {
             let selections = self.explicit_options(cx);
+            let usage = self.chat_context_usage(cx);
             for option in &model.options {
                 if option.choices.is_empty() || bolt_owns.as_deref() == Some(option.id.as_str()) {
                     continue;
@@ -4683,6 +4695,7 @@ impl Pickers {
                             reasoning: None,
                             selected: selected == choice.id,
                             default: option.default_choice == choice.id,
+                            warning: context_window_warning(&option.id, &choice.id, usage),
                         })
                         .collect(),
                 });
@@ -4944,13 +4957,28 @@ impl Pickers {
                                     .h(px(30.0))
                                     .py(px(0.0))
                                     .flex_none()
+                                    .when(choice.warning.is_some(), |el| el.h_auto().py(px(6.0)))
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.setting_active = choice_ix;
                                         this.activate_setting_choice(cx);
                                         cx.stop_propagation();
                                     }))
-                                    .child(SharedString::from(choice.label))
-                                    .child(div().flex_1())
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .child(SharedString::from(choice.label))
+                                            .when_some(choice.warning, |el, warning| {
+                                                el.child(
+                                                    div()
+                                                        .text_size(crate::typography::ui_rems(12.0))
+                                                        .text_color(theme.warning)
+                                                        .child(SharedString::from(warning)),
+                                                )
+                                            }),
+                                    )
                                     .when(choice.default, |el| el.child(default_badge(&theme)))
                                     .when(
                                         choice.selected,
@@ -5327,6 +5355,32 @@ impl popover::ScrollRailHost for Pickers {
 
     fn rail_scroll(&self) -> Option<gpui::ScrollHandle> {
         Some(self.active_menu_scroll())
+    }
+}
+
+fn context_window_warning(
+    option_id: &str,
+    choice_id: &str,
+    usage: Option<zeron_proto::ContextUsage>,
+) -> Option<String> {
+    if option_id != "contextWindow" {
+        return None;
+    }
+    let capacity = zeron_harness::claude::catalog::context_window_tokens(choice_id)?;
+    let tokens = usage?.tokens?;
+    (tokens > capacity).then(|| {
+        format!(
+            "~{} in use; the next message compacts it",
+            compact_tokens(tokens)
+        )
+    })
+}
+
+fn compact_tokens(tokens: u64) -> String {
+    if tokens >= 999_500 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    } else {
+        format!("{}K", (tokens + 500) / 1_000)
     }
 }
 
@@ -7307,6 +7361,91 @@ mod tests {
             );
             pickers
         })
+    }
+
+    #[test]
+    fn context_window_warning_needs_usage_above_the_choice() {
+        let usage = |tokens| {
+            Some(zeron_proto::ContextUsage {
+                tokens,
+                window: Some(1_000_000),
+            })
+        };
+        assert_eq!(
+            context_window_warning("contextWindow", "200k", usage(Some(230_412))).as_deref(),
+            Some("~230K in use; the next message compacts it")
+        );
+        assert_eq!(
+            context_window_warning("contextWindow", "200k", usage(Some(200_000))),
+            None
+        );
+        assert_eq!(
+            context_window_warning("contextWindow", "1m", usage(Some(230_412))),
+            None
+        );
+        assert_eq!(
+            context_window_warning("contextWindow", "200k", usage(None)),
+            None
+        );
+        assert_eq!(context_window_warning("contextWindow", "200k", None), None);
+        assert_eq!(
+            context_window_warning("serviceTier", "200k", usage(Some(230_412))),
+            None
+        );
+        assert_eq!(compact_tokens(200_001), "200K");
+        assert_eq!(compact_tokens(1_240_000), "1.2M");
+    }
+
+    #[gpui::test]
+    fn the_context_window_menu_warns_from_the_selected_chat_usage(cx: &mut gpui::TestAppContext) {
+        let handle = existing_claude_chat(cx);
+        handle
+            .update(cx, |pickers, _, cx| {
+                let mut model = bare_model("fable", "Fable");
+                model.options = vec![ModelOption {
+                    id: "contextWindow".into(),
+                    label: "Context Window".into(),
+                    default_choice: "1m".into(),
+                    choices: ["200k", "1m"]
+                        .map(|id| ModelOptionChoice {
+                            id: id.into(),
+                            label: id.to_uppercase(),
+                        })
+                        .into(),
+                }];
+                pickers
+                    .models
+                    .insert(HarnessId::ClaudeCode, Loadable::Ready(vec![model]));
+                let warnings = |pickers: &Pickers, cx: &App| -> Vec<bool> {
+                    pickers
+                        .setting_groups(cx)
+                        .into_iter()
+                        .find(|g| g.id == ModelSetting::Option("contextWindow".into()))
+                        .expect("context window group")
+                        .choices
+                        .iter()
+                        .map(|c| c.warning.is_some())
+                        .collect()
+                };
+                assert_eq!(warnings(pickers, cx), [false, false]);
+                let set = |pickers: &mut Pickers, tokens, cx: &mut Context<Pickers>| {
+                    pickers.state.update(cx, |s, _| {
+                        s.context_usage = Some(zeron_proto::ContextUsage {
+                            tokens: Some(tokens),
+                            window: Some(1_000_000),
+                        })
+                    });
+                };
+                set(pickers, 150_000, cx);
+                assert_eq!(warnings(pickers, cx), [false, false]);
+                set(pickers, 230_000, cx);
+                assert_eq!(warnings(pickers, cx), [true, false]);
+                pickers.bind_chat("c1".into());
+                assert_eq!(warnings(pickers, cx), [true, false]);
+                pickers.bind_chat("other".into());
+                assert!(pickers.chat_context_usage(cx).is_none());
+            })
+            .unwrap();
     }
 
     #[gpui::test]
