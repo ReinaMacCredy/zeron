@@ -291,7 +291,9 @@ impl HarnessesPage {
                     .await
                     .map_err(|e| e.to_string())
                     .and_then(|v| {
-                        serde_json::from_value::<Vec<Model>>(v).map_err(|e| e.to_string())
+                        serde_json::from_value::<zeron_proto::ModelCatalog>(v)
+                            .map(|catalog| catalog.models)
+                            .map_err(|e| e.to_string())
                     });
                 this.update(cx, |page, cx| {
                     page.title_models = match result {

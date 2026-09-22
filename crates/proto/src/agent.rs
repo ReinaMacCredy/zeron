@@ -132,6 +132,15 @@ pub struct ModelOptionChoice {
     pub label: String,
 }
 
+/// Newness is decided in the engine so every harness gets it from one path.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCatalog {
+    pub models: Vec<Model>,
+    #[serde(default)]
+    pub new_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunRequest {

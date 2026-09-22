@@ -12,7 +12,7 @@
 //! in free functions with unit tests; RPC results land in [`Loadable`] slots
 //! rendered as skeletons / inline errors with Retry.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -24,10 +24,24 @@ use gpui::{
 use zeron_doc::MessageRole;
 use zeron_engine::registry::HarnessDescriptor;
 use zeron_proto::{
-    ChatConfig, FolderListing, HarnessId, Model, ModelOption, ModelOptionChoice, PermissionMode,
-    ReasoningLevel, RepoRef, SandboxLevel, Space,
+    ChatConfig, FolderListing, HarnessId, Model, ModelCatalog, ModelOption, ModelOptionChoice,
+    PermissionMode, ReasoningLevel, RepoRef, SandboxLevel, Space,
 };
 use zeron_rpc::methods;
+
+fn new_model_badge(theme: &Theme) -> AnyElement {
+    div()
+        .flex_none()
+        .px(px(5.0))
+        .py(px(1.0))
+        .rounded(px(4.0))
+        .bg(theme.accent_wash)
+        .text_size(crate::typography::ui_rems(9.5))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(theme.accent)
+        .child("NEW")
+        .into_any_element()
+}
 
 /// Display cap for the ref list (t3code shows pages of 100 with a status
 /// footer; a flat cap + "Showing X of Y refs" reads the same without
@@ -731,6 +745,7 @@ pub struct Pickers {
     effort_track: Option<gpui::Bounds<gpui::Pixels>>,
     harnesses: Loadable<Vec<HarnessDescriptor>>,
     models: HashMap<HarnessId, Loadable<Vec<Model>>>,
+    new_models: HashMap<HarnessId, HashSet<String>>,
     refs: Loadable<Vec<RepoRef>>,
     /// Space id the `refs` slot belongs to (invalidated on space change).
     refs_space: Option<String>,
@@ -948,6 +963,7 @@ impl Pickers {
             effort_track: None,
             harnesses: Loadable::Idle,
             models: HashMap::new(),
+            new_models: HashMap::new(),
             refs: Loadable::Idle,
             refs_space: None,
             active: 0,
@@ -1577,11 +1593,16 @@ impl Pickers {
                     return;
                 }
                 let loaded = match result {
-                    Ok(value) => match serde_json::from_value::<Vec<Model>>(value) {
+                    Ok(value) => match serde_json::from_value::<ModelCatalog>(value) {
                         // Display hygiene for catalogs from older engines
                         // (`default` alias rows, orphan `[1m]` variants,
                         // version-less alias labels).
-                        Ok(models) => Loadable::Ready(normalize_model_rows(harness, models)),
+                        Ok(catalog) => {
+                            pickers
+                                .new_models
+                                .insert(harness, catalog.new_ids.into_iter().collect());
+                            Loadable::Ready(normalize_model_rows(harness, catalog.models))
+                        }
                         Err(err) => Loadable::Error(err.to_string()),
                     },
                     Err(err) => Loadable::Error(err.to_string()),
@@ -4379,6 +4400,10 @@ impl Pickers {
             && self.selected_model(cx).map(|m| m.id.as_str()) == Some(row.model.id.as_str());
         let is_active = ix == self.active;
         let is_fav = self.defaults.is_favorite(row.harness, &row.model.id);
+        let is_new = self
+            .new_models
+            .get(&row.harness)
+            .is_some_and(|ids| ids.contains(&row.model.id));
         let (icon_path, tint) = harness_brand_icon(row.harness);
         let label: SharedString = row.model.label.clone().into();
         let harness_name = row.harness_name.clone();
@@ -4449,6 +4474,7 @@ impl Pickers {
                         .text_color(theme.text)
                         .child(label),
                 )
+                .when(is_new, |el| el.child(new_model_badge(&theme)))
                 .when_some(attribution, |el, attribution| {
                     el.child(
                         div()
@@ -4469,12 +4495,20 @@ impl Pickers {
                 .gap(px(2.0))
                 .child(
                     div()
-                        .w_full()
-                        .truncate()
-                        .text_size(crate::typography::ui_rems(12.5))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.text)
-                        .child(label),
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(crate::typography::ui_rems(12.5))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child(label),
+                        )
+                        .when(is_new, |el| el.child(new_model_badge(&theme))),
                 )
                 .child(
                     // Harness identity subline (t3 `showProvider`), plus
@@ -7510,7 +7544,7 @@ mod tests {
         );
         assert_eq!(
             models.iter().map(|m| m.label.as_str()).collect::<Vec<_>>(),
-            vec!["Opus 5", "Fable 5", "Sonnet 5", "Haiku 4.5", "Nova 1"]
+            vec!["Opus 5.5", "Fable 5", "Sonnet 5", "Haiku 4.5", "Nova 1"]
         );
         assert_eq!(
             models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),

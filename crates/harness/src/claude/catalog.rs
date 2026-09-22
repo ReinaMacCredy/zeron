@@ -65,7 +65,7 @@ pub(crate) fn to_effort(
 
 /// A boolean toggle rendered as an off/on select (the Rust `ModelOption` wire
 /// type has no dedicated boolean kind).
-fn toggle(id: &str, label: &str) -> ModelOption {
+pub(crate) fn toggle(id: &str, label: &str) -> ModelOption {
     ModelOption {
         id: id.into(),
         label: label.into(),
@@ -168,6 +168,13 @@ pub fn static_models() -> Vec<Model> {
             "Previous generation Fable",
             FULL_LADDER,
             vec![context_window()],
+        ),
+        model(
+            "claude-opus-5-5",
+            "Opus 5.5",
+            "Best for everyday, complex tasks",
+            FULL_LADDER,
+            vec![context_window(), toggle("fastMode", "Fast Mode")],
         ),
         model(
             "claude-opus-5",

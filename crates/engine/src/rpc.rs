@@ -1530,7 +1530,8 @@ impl RpcService for EngineRpc {
                     .models()
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&models)
+                let new_ids = self.registry.mark_new_models(p.harness, &models);
+                RpcReply::value(&zeron_proto::ModelCatalog { models, new_ids })
             }
             methods::LIST_COMMANDS => {
                 // Same shape as ListModels: forces a lazy resolve, then the

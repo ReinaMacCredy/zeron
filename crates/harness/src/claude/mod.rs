@@ -49,8 +49,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
 use zeron_proto::{
-    AgentEvent, Compaction, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand,
-    SlashCommandKind, SteeringMode, UserInputAnswer, UserInputQuestion,
+    AgentEvent, Compaction, DoneStatus, HarnessId, Model, ModelOption, ReasoningLevel, RunRequest,
+    SlashCommand, SlashCommandKind, SteeringMode, UserInputAnswer, UserInputQuestion,
 };
 
 use crate::process::{Child, ChildStdin, Command, Stdio};
@@ -96,6 +96,8 @@ pub struct ClaudeHarness {
     /// Command discovery cache: only a successful probe is cached, so a
     /// broken CLI retries on the next picker open (ACP-harness parity).
     commands: tokio::sync::OnceCell<Vec<SlashCommand>>,
+    /// Keyed on the installed build (see `cli_fingerprint`).
+    models: tokio::sync::Mutex<Option<(String, Vec<Model>)>>,
 }
 
 impl Default for ClaudeHarness {
@@ -105,6 +107,7 @@ impl Default for ClaudeHarness {
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_secs(3),
             commands: tokio::sync::OnceCell::new(),
+            models: tokio::sync::Mutex::new(None),
         }
     }
 }
@@ -283,7 +286,13 @@ impl ClaudeHarness {
     /// control_response. No user message is ever written, so no turn (and no
     /// API call) happens; the child is torn down as soon as the response
     /// lands.
-    async fn discover_commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
+    /// Sequential, not batched: the CLI wires its control handlers during
+    /// `initialize` (live-verified on 2.1.280). Neither probe costs a turn.
+    async fn control_probe(
+        &self,
+        requests: &[Value],
+        timeout: Duration,
+    ) -> Result<Vec<Result<Value, String>>, HarnessError> {
         let exe = self.resolve_executable()?;
         let mut cmd = Command::new(&exe);
         crate::compose_child_path(&mut cmd, &exe);
@@ -312,49 +321,111 @@ impl ClaudeHarness {
             shutdown_child(&mut child, self.kill_grace).await;
             return Err(HarnessError::Protocol("claude child has no stdio".into()));
         };
-        const PROBE_ID: &str = "zeron-command-probe";
-        let discovery = async {
-            let request = serde_json::json!({
-                "type": "control_request",
-                "request_id": PROBE_ID,
-                "request": { "subtype": "initialize" },
-            });
-            stdin
-                .write_all(format!("{request}\n").as_bytes())
-                .await
-                .map_err(HarnessError::Io)?;
-            stdin.flush().await.map_err(HarnessError::Io)?;
+        let exchange = async {
             let mut lines = BufReader::new(stdout).lines();
-            while let Some(line) = lines.next_line().await.map_err(HarnessError::Io)? {
-                let Ok(frame) = serde_json::from_str::<Value>(&line) else {
-                    continue;
+            let mut answers = Vec::with_capacity(requests.len());
+            for (index, request) in requests.iter().enumerate() {
+                let id = format!("zeron-probe-{index}");
+                let frame = serde_json::json!({
+                    "type": "control_request",
+                    "request_id": id,
+                    "request": request,
+                });
+                stdin
+                    .write_all(format!("{frame}\n").as_bytes())
+                    .await
+                    .map_err(HarnessError::Io)?;
+                stdin.flush().await.map_err(HarnessError::Io)?;
+                let mut answer = None;
+                while let Some(line) = lines.next_line().await.map_err(HarnessError::Io)? {
+                    let Ok(frame) = serde_json::from_str::<Value>(&line) else {
+                        continue;
+                    };
+                    if frame.get("type").and_then(Value::as_str) != Some("control_response") {
+                        continue;
+                    }
+                    let response = frame.get("response").cloned().unwrap_or(Value::Null);
+                    if response.get("request_id").and_then(Value::as_str) != Some(id.as_str()) {
+                        continue;
+                    }
+                    answer = Some(
+                        if response.get("subtype").and_then(Value::as_str) == Some("error") {
+                            Err(response
+                                .get("error")
+                                .and_then(Value::as_str)
+                                .unwrap_or("control request failed")
+                                .to_owned())
+                        } else {
+                            Ok(response)
+                        },
+                    );
+                    break;
+                }
+                let Some(answer) = answer else {
+                    return Err(HarnessError::Protocol(
+                        "claude exited before answering a control request".into(),
+                    ));
                 };
-                if frame.get("type").and_then(Value::as_str) != Some("control_response") {
-                    continue;
-                }
-                let response = frame.get("response").cloned().unwrap_or(Value::Null);
-                if response.get("request_id").and_then(Value::as_str) != Some(PROBE_ID) {
-                    continue;
-                }
-                if response.get("subtype").and_then(Value::as_str) == Some("error") {
-                    let msg = response
-                        .get("error")
-                        .and_then(Value::as_str)
-                        .unwrap_or("initialize control request failed");
-                    return Err(HarnessError::Protocol(msg.into()));
-                }
-                return Ok(parse_initialize_commands(&response));
+                answers.push(answer);
             }
-            Err(HarnessError::Protocol(
-                "claude exited before answering the initialize control request".into(),
-            ))
+            Ok(answers)
         };
-        let result = tokio::time::timeout(Duration::from_secs(10), discovery).await;
+        let result = tokio::time::timeout(timeout, exchange).await;
         shutdown_child(&mut child, self.kill_grace).await;
         match result {
             Ok(inner) => inner,
-            Err(_) => Err(HarnessError::Protocol("command discovery timed out".into())),
+            Err(_) => Err(HarnessError::Protocol("claude probe timed out".into())),
         }
+    }
+
+    async fn discover_commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
+        let initialize = serde_json::json!({ "subtype": "initialize" });
+        let mut answers = self
+            .control_probe(std::slice::from_ref(&initialize), Duration::from_secs(10))
+            .await?;
+        match answers.remove(0) {
+            Ok(response) => Ok(parse_initialize_commands(&response)),
+            Err(error) => Err(HarnessError::Protocol(error)),
+        }
+    }
+
+    /// A curated model the CLI stopped advertising is kept only while
+    /// `set_model` still resolves it, so a retired model drops out on its own.
+    async fn discover_models(&self) -> Result<Vec<Model>, HarnessError> {
+        let catalog = static_models();
+        let mut requests = Vec::with_capacity(catalog.len() + 1);
+        requests.push(serde_json::json!({ "subtype": "initialize" }));
+        requests.extend(catalog.iter().map(|entry| {
+            serde_json::json!({ "subtype": "set_model", "model": entry.id })
+        }));
+        let answers = self
+            .control_probe(&requests, Duration::from_secs(30))
+            .await?;
+        let Some(Ok(initialize)) = answers.first() else {
+            return Err(HarnessError::Protocol(
+                "claude did not answer the initialize control request".into(),
+            ));
+        };
+        let mut models = parse_initialize_models(initialize, &catalog);
+        let advertised: std::collections::HashSet<String> =
+            models.iter().map(|model| model.id.clone()).collect();
+        for (entry, answer) in catalog.iter().zip(answers.iter().skip(1)) {
+            if advertised.contains(&entry.id) || answer.is_err() {
+                continue;
+            }
+            models.push(entry.clone());
+        }
+        Ok(models)
+    }
+
+    /// A CLI update is the one event that changes the advertised models, and
+    /// it moves the launcher symlink (`…/versions/<version>`).
+    fn cli_fingerprint(&self) -> String {
+        self.resolve_executable()
+            .ok()
+            .map(|exe| std::fs::canonicalize(&exe).unwrap_or(exe))
+            .map(|path| path.display().to_string())
+            .unwrap_or_default()
     }
 }
 
@@ -395,6 +466,116 @@ fn parse_initialize_commands(response: &Value) -> Vec<SlashCommand> {
             })
         })
         .collect()
+}
+
+/// Identity must stay bare: zeron appends this suffix itself, so a stored one
+/// breaks the 200K/1M toggle (see [`catalog::context_window`]).
+fn strip_context_suffix(model: &str) -> &str {
+    model
+        .strip_suffix("[1m]")
+        .or_else(|| model.strip_suffix("[2m]"))
+        .unwrap_or(model)
+}
+
+/// The wire's `displayName` is the alias label ("Default (recommended)"),
+/// which would hide the version being picked.
+fn label_from_id(id: &str) -> String {
+    let stem = id.strip_prefix("claude-").unwrap_or(id);
+    let mut parts = stem.split('-');
+    let Some(family) = parts.next().filter(|family| family.is_ascii()) else {
+        return id.to_owned();
+    };
+    let Some(initial) = family.get(..1) else {
+        return id.to_owned();
+    };
+    let mut label = initial.to_uppercase();
+    label.push_str(&family[1..]);
+    let version: Vec<&str> = parts
+        .take_while(|part| part.len() < 5 && part.chars().all(|c| c.is_ascii_digit()))
+        .collect();
+    if !version.is_empty() {
+        label.push(' ');
+        label.push_str(&version.join("."));
+    }
+    label
+}
+
+/// Ultracode and ultrathink are zeron's own levels; the CLI never emits them.
+fn ladder_from_wire(row: &Value, id: &str) -> Vec<ReasoningLevel> {
+    if row.get("supportsEffort").and_then(Value::as_bool) != Some(true) {
+        return Vec::new();
+    }
+    let mut ladder: Vec<ReasoningLevel> = row
+        .get("supportedEffortLevels")
+        .and_then(Value::as_array)
+        .map(|levels| levels.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(Value::as_str)
+        .filter_map(|level| match level {
+            "low" => Some(ReasoningLevel::Low),
+            "medium" => Some(ReasoningLevel::Medium),
+            "high" => Some(ReasoningLevel::High),
+            "xhigh" => Some(ReasoningLevel::XHigh),
+            "max" => Some(ReasoningLevel::Max),
+            _ => None,
+        })
+        .collect();
+    if ladder.is_empty() {
+        return ladder;
+    }
+    if catalog::supports_xhigh(id) {
+        ladder.push(ReasoningLevel::Ultracode);
+    }
+    ladder.push(ReasoningLevel::Ultrathink);
+    ladder
+}
+
+fn options_from_wire(row: &Value, resolved: &str) -> Vec<ModelOption> {
+    let mut options = Vec::new();
+    if strip_context_suffix(resolved) != resolved {
+        options.push(catalog::context_window());
+    }
+    if row.get("supportsFastMode").and_then(Value::as_bool) == Some(true) {
+        options.push(catalog::toggle("fastMode", "Fast Mode"));
+    }
+    options
+}
+
+/// Rows are aliases and several resolve to the same model, so identity is the
+/// stripped `resolvedModel` and the first row for an id wins.
+fn parse_initialize_models(response: &Value, catalog: &[Model]) -> Vec<Model> {
+    let rows = response
+        .get("response")
+        .and_then(|r| r.get("models"))
+        .and_then(Value::as_array)
+        .map(|rows| rows.as_slice())
+        .unwrap_or_default();
+    let mut models: Vec<Model> = Vec::new();
+    for row in rows {
+        let Some(resolved) = row.get("resolvedModel").and_then(Value::as_str) else {
+            continue;
+        };
+        let id = strip_context_suffix(resolved);
+        if id.is_empty() || models.iter().any(|model| model.id == id) {
+            continue;
+        }
+        if let Some(curated) = catalog.iter().find(|model| model.id == id) {
+            models.push(curated.clone());
+            continue;
+        }
+        models.push(Model {
+            id: id.to_owned(),
+            label: label_from_id(id),
+            description: row
+                .get("description")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            reasoning_levels: ladder_from_wire(row, id),
+            options: options_from_wire(row, resolved),
+        });
+    }
+    models
 }
 
 #[async_trait]
@@ -445,7 +626,26 @@ impl Harness for ClaudeHarness {
     /// like the discovery call would.
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         self.resolve_executable()?;
-        Ok(static_models())
+        let fingerprint = self.cli_fingerprint();
+        if let Some((cached_for, models)) = &*self.models.lock().await
+            && *cached_for == fingerprint
+        {
+            return Ok(models.clone());
+        }
+        match self.discover_models().await {
+            Ok(models) if !models.is_empty() => {
+                *self.models.lock().await = Some((fingerprint, models.clone()));
+                Ok(models)
+            }
+            Ok(_) => Ok(static_models()),
+            Err(error) => {
+                tracing::debug!(
+                    target: "zeron_harness::claude",
+                    "model discovery failed; using fallback catalog: {error}"
+                );
+                Ok(static_models())
+            }
+        }
     }
 
     /// Slash commands from the CLI's `initialize` control-request handshake —
@@ -1067,6 +1267,87 @@ mod tests {
         );
         assert_eq!(commands[0].input_hint.as_deref(), Some("<focus>"));
         assert_eq!(commands[1].input_hint, None);
+    }
+
+    /// The exact `models` payload CLI 2.1.280 answered `initialize` with.
+    fn live_initialize_models() -> Value {
+        json!({ "response": { "models": [
+            { "value": "default", "resolvedModel": "claude-opus-5-5[1m]", "displayName": "Default (recommended)",
+              "description": "Opus 5.5 with 1M context · Best for everyday, complex tasks",
+              "supportsEffort": true, "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"],
+              "supportsAdaptiveThinking": true, "supportsFastMode": true, "supportsAutoMode": true },
+            { "value": "opus[1m]", "resolvedModel": "claude-opus-5-5[1m]", "displayName": "Opus (1M context)",
+              "description": "Opus 5.5 with 1M context · Best for everyday, complex tasks",
+              "supportsEffort": true, "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"],
+              "supportsAdaptiveThinking": true, "supportsFastMode": true, "supportsAutoMode": true },
+            { "value": "claude-fable-5-1[1m]", "resolvedModel": "claude-fable-5-1", "displayName": "Fable",
+              "description": "Fable 5.1 · Most capable for your hardest and longest-running tasks",
+              "supportsEffort": true, "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"],
+              "supportsAdaptiveThinking": true, "supportsAutoMode": true },
+            { "value": "sonnet", "resolvedModel": "claude-sonnet-5", "displayName": "Sonnet",
+              "description": "Sonnet 5 · Efficient for routine tasks",
+              "supportsEffort": true, "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"],
+              "supportsAdaptiveThinking": true, "supportsAutoMode": true },
+            { "value": "haiku", "resolvedModel": "claude-haiku-4-5-20251001", "displayName": "Haiku",
+              "description": "Haiku 4.5 · Fastest for quick answers" },
+        ]}})
+    }
+
+    #[test]
+    fn initialize_models_dedupe_aliases_onto_the_resolved_id() {
+        let models = parse_initialize_models(&live_initialize_models(), &static_models());
+        assert_eq!(
+            models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec![
+                "claude-opus-5-5",
+                "claude-fable-5-1",
+                "claude-sonnet-5",
+                "claude-haiku-4-5-20251001",
+            ]
+        );
+        assert_eq!(models[0].label, "Opus 5.5");
+        assert_eq!(models[3].label, "Haiku 4.5");
+    }
+
+    #[test]
+    fn unknown_models_derive_their_ladder_and_options_from_the_wire() {
+        let response = json!({ "response": { "models": [
+            { "value": "opus", "resolvedModel": "claude-opus-6[1m]", "displayName": "Opus",
+              "description": "Opus 6 · next", "supportsEffort": true,
+              "supportedEffortLevels": ["low", "high", "max"], "supportsFastMode": true },
+            { "value": "haiku", "resolvedModel": "claude-haiku-5", "displayName": "Haiku" },
+        ]}});
+        let models = parse_initialize_models(&response, &static_models());
+        assert_eq!(models[0].label, "Opus 6");
+        assert_eq!(models[0].description.as_deref(), Some("Opus 6 · next"));
+        assert_eq!(
+            models[0].reasoning_levels,
+            vec![
+                ReasoningLevel::Low,
+                ReasoningLevel::High,
+                ReasoningLevel::Max,
+                ReasoningLevel::Ultracode,
+                ReasoningLevel::Ultrathink,
+            ]
+        );
+        assert_eq!(
+            models[0]
+                .options
+                .iter()
+                .map(|o| o.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["contextWindow", "fastMode"]
+        );
+        assert!(models[1].reasoning_levels.is_empty());
+        assert!(models[1].options.is_empty());
+    }
+
+    #[test]
+    fn label_from_id_drops_the_date_stamp() {
+        assert_eq!(label_from_id("claude-opus-5-5"), "Opus 5.5");
+        assert_eq!(label_from_id("claude-haiku-4-5-20251001"), "Haiku 4.5");
+        assert_eq!(label_from_id("claude-sonnet-5"), "Sonnet 5");
+        assert_eq!(label_from_id("claude-fable-5-1"), "Fable 5.1");
     }
 
     // The Windows `Command` wrapper has no `as_std` to read the built line back.

@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use serde::{Deserialize, Serialize};
 
 use zeron_harness::{Harness, HarnessError, mock::MockHarness};
-use zeron_proto::{AgentEvent, DoneStatus, HarnessId, ReasoningLevel, SteeringMode};
+use zeron_proto::{AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, SteeringMode};
 
 /// What `ListHarnesses` reports per harness.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,10 +98,18 @@ struct HarnessPrefsFile {
     /// the user's explicit opt-ins, for the harnesses [`opt_in`] keeps off.
     opted_in: Vec<HarnessId>,
     titles: TitleSettings,
+    seen_models: Vec<SeenModels>,
     /// The allow-list written back when enablement was a fixed default set.
     /// Read once, folded into `disabled`, and never written again.
     #[serde(skip_serializing)]
     enabled: Option<Vec<HarnessId>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct SeenModels {
+    harness: Option<HarnessId>,
+    ids: Vec<String>,
 }
 
 /// Per-device automatic session title preferences.
@@ -313,6 +321,46 @@ impl HarnessRegistry {
         self.prefs().titles = settings;
         self.persist_prefs();
         Ok(())
+    }
+
+    /// The first listing for a harness seeds silently; otherwise every model
+    /// on a fresh install would read as new.
+    pub fn mark_new_models(&self, harness: HarnessId, models: &[Model]) -> Vec<String> {
+        let ids: Vec<String> = models.iter().map(|model| model.id.clone()).collect();
+        let mut prefs = self.prefs();
+        let seeded = prefs
+            .seen_models
+            .iter()
+            .any(|entry| entry.harness == Some(harness));
+        let new_ids = match prefs
+            .seen_models
+            .iter_mut()
+            .find(|entry| entry.harness == Some(harness))
+        {
+            Some(entry) => {
+                let new_ids: Vec<String> = ids
+                    .iter()
+                    .filter(|id| !entry.ids.contains(id))
+                    .cloned()
+                    .collect();
+                // Ids the listing dropped stay: a model returning after a
+                // failed probe is not news.
+                entry.ids.extend(new_ids.iter().cloned());
+                new_ids
+            }
+            None => {
+                prefs.seen_models.push(SeenModels {
+                    harness: Some(harness),
+                    ids: ids.clone(),
+                });
+                Vec::new()
+            }
+        };
+        if !seeded || !new_ids.is_empty() {
+            drop(prefs);
+            self.persist_prefs();
+        }
+        new_ids
     }
 
     pub fn register(&self, harness: Arc<dyn Harness>) {
@@ -628,6 +676,58 @@ pub fn default_registry() -> HarnessRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn model(id: &str) -> Model {
+        Model {
+            id: id.into(),
+            label: id.into(),
+            description: None,
+            reasoning_levels: Vec::new(),
+            options: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_first_listing_seeds_silently_then_only_additions_are_new() {
+        let registry = HarnessRegistry::new();
+        let first = [model("claude-opus-5"), model("claude-sonnet-5")];
+        assert!(
+            registry
+                .mark_new_models(HarnessId::ClaudeCode, &first)
+                .is_empty()
+        );
+
+        let second = [
+            model("claude-opus-5-5"),
+            model("claude-opus-5"),
+            model("claude-sonnet-5"),
+        ];
+        assert_eq!(
+            registry.mark_new_models(HarnessId::ClaudeCode, &second),
+            vec!["claude-opus-5-5".to_string()]
+        );
+        assert!(
+            registry
+                .mark_new_models(HarnessId::ClaudeCode, &second)
+                .is_empty()
+        );
+
+        // A model the listing drops and later restores is not news again.
+        let shrunk = [model("claude-opus-5-5")];
+        assert!(
+            registry
+                .mark_new_models(HarnessId::ClaudeCode, &shrunk)
+                .is_empty()
+        );
+        assert!(
+            registry
+                .mark_new_models(HarnessId::ClaudeCode, &second)
+                .is_empty()
+        );
+
+        // Newness is tracked per harness, so another agent still seeds.
+        assert!(registry.mark_new_models(HarnessId::Codex, &first).is_empty());
+    }
 
     #[test]
     fn mid_turn_steering_requires_support_and_a_step_boundary() {
