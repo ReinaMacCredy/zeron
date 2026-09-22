@@ -2147,7 +2147,9 @@ not ask whether to continue: pick up the remaining work at the point it stopped 
 /// True when the chat's last turn stopped short and the chat sits idle (the
 /// composer's send circle becomes the resume triangle): the reply was interrupted (its entry is `Aborted`), or the interrupt landed
 /// before anything streamed — the engine writes no empty aborted stub then,
-/// so the user's prompt is the trailing entry with no reply behind it.
+/// so the user's prompt is the trailing entry with no reply behind it — or
+/// the harness failed mid-reply (an API 500): the engine finishes that entry
+/// `Complete`, so the trailing `Error` part is the only mark it left.
 pub fn resume_offer(entries: &[SessionMessageEntry], indicator: crate::state::Indicator) -> bool {
     if matches!(
         indicator,
@@ -2156,7 +2158,10 @@ pub fn resume_offer(entries: &[SessionMessageEntry], indicator: crate::state::In
         return false;
     }
     entries.last().is_some_and(|last| {
-        last.role == MessageRole::User || last.status == Some(MessageStatus::Aborted)
+        last.role == MessageRole::User
+            || last.status == Some(MessageStatus::Aborted)
+            || (last.status != Some(MessageStatus::Streaming)
+                && matches!(last.parts.last(), Some(MessagePart::Error { .. })))
     })
 }
 
@@ -14376,9 +14381,39 @@ mod tests {
             user("u1"),
             assistant("m1", MessageStatus::Streaming, vec![text_part("t", "…")]),
         ];
+        let error_part = |id: &str| MessagePart::Error {
+            id: id.into(),
+            message: "API Error: 500 Internal server error".into(),
+        };
+        // A harness failure mid-reply: the engine finishes the entry
+        // `Complete` with the error as its trailing part.
+        let failed = vec![
+            user("u1"),
+            assistant(
+                "m1",
+                MessageStatus::Complete,
+                vec![text_part("t", "half"), error_part("e1")],
+            ),
+        ];
+        let recovered = vec![
+            user("u1"),
+            assistant(
+                "m1",
+                MessageStatus::Complete,
+                vec![error_part("e0"), text_part("t", "done anyway")],
+            ),
+        ];
+        let failing = vec![
+            user("u1"),
+            assistant("m1", MessageStatus::Streaming, vec![error_part("e0")]),
+        ];
         assert!(resume_offer(&aborted, Indicator::None));
         assert!(resume_offer(&unanswered, Indicator::None));
         assert!(resume_offer(&unanswered, Indicator::Errored));
+        assert!(resume_offer(&failed, Indicator::Errored));
+        assert!(resume_offer(&failed, Indicator::None));
+        assert!(!resume_offer(&recovered, Indicator::None));
+        assert!(!resume_offer(&failing, Indicator::None));
         assert!(!resume_offer(&complete, Indicator::None));
         assert!(!resume_offer(&streaming, Indicator::None));
         assert!(!resume_offer(&[], Indicator::None));

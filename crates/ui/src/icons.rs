@@ -198,6 +198,9 @@ icon_assets![
     // favorited state and the picker's favorites rail tab.
     (STAR, "star"),
     (STAR_BOLD, "star-bold"),
+    // Hand-drawn lightning bolt (fast mode): outline off, filled on.
+    (BOLT, "bolt"),
+    (BOLT_BOLD, "bolt-bold"),
     (ZERON_LOGO, "zeron-logo"),
     // Harness brand marks (icons.tsx).
     (CLAUDE_MARK, "claude-mark"),
