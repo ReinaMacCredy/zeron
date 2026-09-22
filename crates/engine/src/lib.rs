@@ -20,6 +20,7 @@ pub mod auth;
 pub mod change_requests;
 pub mod chat2_host;
 mod chat_persistence;
+pub mod computer;
 pub mod diff_sync;
 pub mod doc_host;
 mod http_error;

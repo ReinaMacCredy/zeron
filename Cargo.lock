@@ -11774,6 +11774,7 @@ dependencies = [
  "notify",
  "nucleo-matcher",
  "portable-pty",
+ "regex",
  "reqwest",
  "rusqlite",
  "serde",

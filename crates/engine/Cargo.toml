@@ -35,6 +35,7 @@ sha2.workspace = true
 reqwest.workspace = true
 ignore.workspace = true
 nucleo-matcher.workspace = true
+regex = "1"
 
 tempfile.workspace = true
 
@@ -42,6 +43,7 @@ tempfile.workspace = true
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_Threading"] }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 tokio-tungstenite.workspace = true
 # In-process registry server for the two-engine workspace integration tests.
 zeron-sync = { workspace = true, features = ["mock-server"] }
