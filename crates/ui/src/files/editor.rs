@@ -220,7 +220,17 @@ mod lifetime_tests {
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| crate::state::AppState::new());
-            FilesSurface::new(state, "test".into(), false, 1000, 13.0, false, false, cx)
+            FilesSurface::new(
+                state,
+                "test".into(),
+                false,
+                1000,
+                13.0,
+                false,
+                false,
+                false,
+                cx,
+            )
         });
         let weak = window
             .update(cx, |_, window, cx| {

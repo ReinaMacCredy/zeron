@@ -178,6 +178,7 @@ impl FilePreviewState {
         autosave_delay_ms: u64,
         word_wrap: bool,
         editor_font_size: f32,
+        tree_sidebar_hidden: bool,
     ) -> Self {
         Self {
             images_visible: true,
@@ -196,7 +197,7 @@ impl FilePreviewState {
             reload_confirmation: None,
             close_requested: false,
             tree_sidebar_visible: false,
-            tree_sidebar_dismissed: false,
+            tree_sidebar_dismissed: tree_sidebar_hidden,
             tree_width: TREE_SPLIT_DEFAULT,
             tree_motion: TreeSidebarMotion::default(),
             tree_edge_bounce: None,
@@ -366,6 +367,19 @@ impl FilePreviewState {
         }
         self.tree_motion
             .animate_to(previous, self.tree_sidebar_visible(), Instant::now());
+    }
+
+    /// Adopt the shared dismissal without motion: the toggle that changed it
+    /// animated its own surface, and every other tab should simply agree.
+    pub(super) fn apply_tree_sidebar_hidden(&mut self, hidden: bool) -> bool {
+        if self.tree_sidebar_dismissed == hidden {
+            return false;
+        }
+        self.tree_sidebar_dismissed = hidden;
+        if hidden {
+            self.tree_sidebar_visible = false;
+        }
+        true
     }
 
     fn word_wrap(&self) -> bool {
@@ -738,7 +752,11 @@ impl FilesSurface {
     }
 
     pub(super) fn show_tree_sidebar(&mut self, cx: &mut Context<Self>) {
+        let was_dismissed = self.preview.tree_sidebar_dismissed;
         self.preview.show_tree_sidebar();
+        if was_dismissed {
+            cx.emit(FilesEvent::TreeSidebarHiddenChanged(false));
+        }
         cx.notify();
     }
 
@@ -748,6 +766,9 @@ impl FilesSurface {
             // A hidden search input must not keep receiving editor keystrokes.
             self.focus_editor(window, cx);
         }
+        cx.emit(FilesEvent::TreeSidebarHiddenChanged(
+            self.preview.tree_sidebar_dismissed,
+        ));
         cx.notify();
     }
 
@@ -3448,13 +3469,13 @@ mod tests {
     // `render_preview_line` read.
     #[test]
     fn preview_rows_track_the_code_font_size_from_the_default_to_the_maximum() {
-        let default = FilePreviewState::new(false, 900, false, 12.5);
+        let default = FilePreviewState::new(false, 900, false, 12.5, false);
         assert_eq!(default.line_height(), px(PREVIEW_LINE_HEIGHT));
 
-        let maximum = FilePreviewState::new(false, 900, false, 32.0);
+        let maximum = FilePreviewState::new(false, 900, false, 32.0, false);
         assert!(maximum.line_height() > px(PREVIEW_LINE_HEIGHT));
 
-        let minimum = FilePreviewState::new(false, 900, false, 8.0);
+        let minimum = FilePreviewState::new(false, 900, false, 8.0, false);
         assert_eq!(minimum.line_height(), px(PREVIEW_LINE_HEIGHT));
     }
 
@@ -3462,8 +3483,13 @@ mod tests {
     /// setting silently resized them on a fresh install.
     #[test]
     fn the_default_code_font_size_reproduces_the_historical_per_surface_sizes() {
-        let default =
-            FilePreviewState::new(false, 900, false, crate::typography::CODE_FONT_SIZE_DEFAULT);
+        let default = FilePreviewState::new(
+            false,
+            900,
+            false,
+            crate::typography::CODE_FONT_SIZE_DEFAULT,
+            false,
+        );
         assert_eq!(default.editor_text_size(), 13.0);
         assert_eq!(default.preview_text_size(), 11.5);
     }
@@ -3475,12 +3501,14 @@ mod tests {
             900,
             false,
             2.0 * crate::typography::CODE_FONT_SIZE_DEFAULT,
+            false,
         );
         assert_eq!(doubled.editor_text_size(), 26.0);
         assert_eq!(doubled.preview_text_size(), 23.0);
 
         // The editor ratio is >1, so the maximum setting would overshoot.
-        let maximum = FilePreviewState::new(false, 900, false, crate::typography::FONT_SIZE_MAX);
+        let maximum =
+            FilePreviewState::new(false, 900, false, crate::typography::FONT_SIZE_MAX, false);
         assert_eq!(maximum.editor_text_size(), crate::typography::FONT_SIZE_MAX);
         assert!(maximum.preview_text_size() < crate::typography::FONT_SIZE_MAX);
     }
@@ -3532,7 +3560,7 @@ mod tests {
 
     #[test]
     fn reset_drops_documents_and_active_preview_from_the_previous_target() {
-        let mut preview = FilePreviewState::new(false, 900, false, 11.5);
+        let mut preview = FilePreviewState::new(false, 900, false, 11.5, false);
         preview.active = Some("private.env".into());
         preview.documents.insert(
             "private.env".into(),
@@ -3558,7 +3586,7 @@ mod tests {
 
     #[test]
     fn document_cache_evicts_the_oldest_safe_entries() {
-        let mut preview = FilePreviewState::new(false, 900, false, 11.5);
+        let mut preview = FilePreviewState::new(false, 900, false, 11.5, false);
         for index in 0..18 {
             let path = format!("src/{index}.rs");
             preview
@@ -3589,7 +3617,7 @@ mod tests {
 
     #[test]
     fn document_cache_uses_retained_bytes_not_only_entry_count() {
-        let mut preview = FilePreviewState::new(false, 900, false, 11.5);
+        let mut preview = FilePreviewState::new(false, 900, false, 11.5, false);
         for path in ["old.rs", "active.rs"] {
             preview
                 .documents
@@ -3612,7 +3640,7 @@ mod tests {
 
     #[test]
     fn document_eviction_cleans_path_scoped_companion_state() {
-        let mut preview = FilePreviewState::new(false, 900, false, 11.5);
+        let mut preview = FilePreviewState::new(false, 900, false, 11.5, false);
         for path in ["old.rs", "active.rs"] {
             preview
                 .documents
@@ -3649,7 +3677,7 @@ mod tests {
 
     #[test]
     fn reset_preserves_global_editor_preferences() {
-        let mut preview = FilePreviewState::new(false, 900, true, 15.0);
+        let mut preview = FilePreviewState::new(false, 900, true, 15.0, false);
 
         preview.reset();
 
@@ -3717,7 +3745,7 @@ mod tests {
     #[test]
     fn autosave_is_opt_in_and_enabling_schedules_dirty_documents() {
         let path = "src/lib.rs";
-        let mut preview = FilePreviewState::new(false, 900, false, 11.5);
+        let mut preview = FilePreviewState::new(false, 900, false, 11.5, false);
         let mut document = FileDocument::loading(DocumentKey {
             chat_id: "chat-1".into(),
             checkout_id: Some("checkout-1".into()),
@@ -3745,7 +3773,7 @@ mod tests {
 
     #[test]
     fn sidebar_layout_changes_are_immediate_without_a_user_toggle() {
-        let mut preview = FilePreviewState::new(false, 900, false, 11.5);
+        let mut preview = FilePreviewState::new(false, 900, false, 11.5, false);
         let now = Instant::now();
         assert_eq!(
             preview
@@ -3824,7 +3852,7 @@ mod tests {
 
     #[test]
     fn wide_layout_respects_an_explicitly_hidden_tree_sidebar() {
-        let mut preview = FilePreviewState::new(false, 900, false, 11.5);
+        let mut preview = FilePreviewState::new(false, 900, false, 11.5, false);
         preview.surface_width.set(WIDE_BREAKPOINT);
 
         assert!(preview.tree_sidebar_visible());
@@ -3838,8 +3866,37 @@ mod tests {
     }
 
     #[test]
+    fn a_surface_opened_after_a_global_hide_starts_with_the_tree_sidebar_hidden() {
+        let mut preview = FilePreviewState::new(false, 900, false, 11.5, true);
+        preview.surface_width.set(WIDE_BREAKPOINT);
+        assert!(!preview.tree_sidebar_visible());
+
+        assert!(preview.apply_tree_sidebar_hidden(false));
+        assert!(preview.tree_sidebar_visible());
+        assert!(!preview.apply_tree_sidebar_hidden(false));
+    }
+
+    #[test]
+    fn a_global_hide_closes_an_open_narrow_drawer_without_motion() {
+        let mut preview = FilePreviewState::new(false, 900, false, 11.5, false);
+        preview.surface_width.set(WIDE_BREAKPOINT - 1.0);
+        preview.show_tree_sidebar();
+        assert!(preview.tree_sidebar_visible());
+
+        assert!(preview.apply_tree_sidebar_hidden(true));
+        assert!(!preview.tree_sidebar_visible());
+        let now = Instant::now();
+        assert_eq!(
+            preview
+                .tree_motion
+                .sample(preview.tree_sidebar_visible(), now, false),
+            (0.0, false)
+        );
+    }
+
+    #[test]
     fn explicitly_showing_tree_sidebar_clears_responsive_dismissal() {
-        let mut preview = FilePreviewState::new(false, 900, false, 11.5);
+        let mut preview = FilePreviewState::new(false, 900, false, 11.5, false);
         preview.surface_width.set(WIDE_BREAKPOINT);
         preview.toggle_tree_sidebar();
 
@@ -3853,7 +3910,7 @@ mod tests {
     #[test]
     fn dirty_reload_waits_for_explicit_discard_confirmation() {
         let path = "src/lib.rs";
-        let mut preview = FilePreviewState::new(false, 900, false, 11.5);
+        let mut preview = FilePreviewState::new(false, 900, false, 11.5, false);
         let mut document = FileDocument::loading(DocumentKey {
             chat_id: "chat-1".into(),
             checkout_id: Some("checkout-1".into()),
@@ -3879,7 +3936,7 @@ mod tests {
     #[test]
     fn clean_reload_proceeds_without_confirmation() {
         let path = "src/lib.rs";
-        let mut preview = FilePreviewState::new(false, 900, false, 11.5);
+        let mut preview = FilePreviewState::new(false, 900, false, 11.5, false);
         preview.documents.insert(
             path.into(),
             FileDocument::loading(DocumentKey {
@@ -4090,6 +4147,7 @@ mod markdown_buffer_tests {
                                 false,
                                 1000,
                                 13.0,
+                                false,
                                 false,
                                 false,
                                 cx,
@@ -4337,7 +4395,17 @@ mod markdown_buffer_tests {
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| crate::state::AppState::new());
-            FilesSurface::new(state, "chat".into(), false, 1000, 13.0, false, false, cx)
+            FilesSurface::new(
+                state,
+                "chat".into(),
+                false,
+                1000,
+                13.0,
+                false,
+                false,
+                false,
+                cx,
+            )
         });
         window
             .update(cx, |surface, window, cx| {
@@ -4443,7 +4511,17 @@ mod markdown_buffer_tests {
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| crate::state::AppState::new());
-            FilesSurface::new(state, "chat".into(), false, 1000, 13.0, false, false, cx)
+            FilesSurface::new(
+                state,
+                "chat".into(),
+                false,
+                1000,
+                13.0,
+                false,
+                false,
+                false,
+                cx,
+            )
         });
         window
             .update(cx, |surface, window, cx| {
@@ -4526,7 +4604,17 @@ mod markdown_buffer_tests {
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| crate::state::AppState::new());
-            FilesSurface::new(state, "owner".into(), false, 1000, 13.0, false, false, cx)
+            FilesSurface::new(
+                state,
+                "owner".into(),
+                false,
+                1000,
+                13.0,
+                false,
+                false,
+                false,
+                cx,
+            )
         });
         let (owner, preview) = window
             .update(cx, |surface, _, cx| {
@@ -4662,7 +4750,17 @@ mod markdown_buffer_tests {
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| crate::state::AppState::new());
-            FilesSurface::new(state, "chat".into(), false, 1000, 13.0, false, false, cx)
+            FilesSurface::new(
+                state,
+                "chat".into(),
+                false,
+                1000,
+                13.0,
+                false,
+                false,
+                false,
+                cx,
+            )
         });
         let preview = window
             .update(cx, |surface, window, cx| {

@@ -144,6 +144,7 @@ pub enum FilesEvent {
     FileRenamed { old_path: String, new_path: String },
     WordWrapChanged(bool),
     ShowAllFilesChanged(bool),
+    TreeSidebarHiddenChanged(bool),
     CloseReady,
     CloseCancelled,
 }
@@ -445,6 +446,7 @@ impl FilesSurface {
         editor_font_size: f32,
         word_wrap: bool,
         show_all_files: bool,
+        tree_sidebar_hidden: bool,
         cx: &mut Context<Self>,
     ) -> Self {
         Self::new_with_presentation(
@@ -457,6 +459,7 @@ impl FilesSurface {
             editor_font_size,
             word_wrap,
             show_all_files,
+            tree_sidebar_hidden,
             cx,
         )
     }
@@ -470,6 +473,7 @@ impl FilesSurface {
         editor_font_size: f32,
         word_wrap: bool,
         show_all_files: bool,
+        tree_sidebar_hidden: bool,
         cx: &mut Context<Self>,
     ) -> Self {
         Self::new_with_presentation(
@@ -482,6 +486,7 @@ impl FilesSurface {
             editor_font_size,
             word_wrap,
             show_all_files,
+            tree_sidebar_hidden,
             cx,
         )
     }
@@ -496,6 +501,7 @@ impl FilesSurface {
         editor_font_size: f32,
         word_wrap: bool,
         show_all_files: bool,
+        tree_sidebar_hidden: bool,
         cx: &mut Context<Self>,
     ) -> Self {
         let search = cx.new(|cx| {
@@ -570,6 +576,7 @@ impl FilesSurface {
                 autosave_delay_ms,
                 word_wrap,
                 editor_font_size,
+                tree_sidebar_hidden,
             ),
             editor_context_menu: crate::popover::Popup::default(),
             loads: HashMap::new(),
@@ -732,6 +739,12 @@ impl FilesSurface {
 
     pub fn set_show_all_files(&mut self, show_all_files: bool, cx: &mut Context<Self>) {
         self.apply_show_all_files(show_all_files, cx);
+    }
+
+    pub fn set_tree_sidebar_hidden(&mut self, hidden: bool, cx: &mut Context<Self>) {
+        if self.preview.apply_tree_sidebar_hidden(hidden) {
+            cx.notify();
+        }
     }
 
     pub fn ensure_loaded(&mut self, cx: &mut Context<Self>) {
