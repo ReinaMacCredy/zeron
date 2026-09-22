@@ -1622,6 +1622,73 @@ mod strip_regressions {
         });
     }
 
+    /// A drop on the new-session canvas splits beside the draft instead of
+    /// opening the session; the pair survives state syncs, rides the
+    /// draft's promotion into the chat carrying its id, and never shows the
+    /// draft as a secondary (it has no doc).
+    #[gpui::test]
+    fn dropping_on_the_draft_canvas_splits_and_survives_promotion(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.chats = vec![chat("b")];
+                state.chats_synced = true;
+                state.spaces_synced = true;
+                // Stay on the canvas: no boot landing into b.
+                state.auto_selected = true;
+            });
+            shell.on_state_changed(&shell.state.clone(), cx);
+            let draft = shell.state.read(cx).active_draft.clone().unwrap();
+            invest(&draft, "keep me", cx);
+            shell.drop_session_on_side("b".into(), split::SplitSide::Right, cx);
+            assert_eq!(
+                shell.state.read(cx).selected_chat,
+                None,
+                "drop must not open b"
+            );
+            assert_eq!(shell.split_chat_id(), Some("b"));
+            assert_eq!(
+                shell.split_pair,
+                Some(split::SplitPair {
+                    left: draft.clone(),
+                    right: "b".into(),
+                })
+            );
+            shell.on_state_changed(&shell.state.clone(), cx);
+            assert_eq!(
+                shell.split_chat_id(),
+                Some("b"),
+                "the draft pair survives a sync"
+            );
+            // The chat side of the pair shows full width: no draft pane.
+            shell.open_chat("b".into(), cx);
+            shell.on_state_changed(&shell.state.clone(), cx);
+            assert_eq!(shell.split_chat_id(), None);
+            assert!(shell.split_pair.is_some());
+            shell.navigate_to(Some(draft.clone()), false, cx);
+            shell.on_state_changed(&shell.state.clone(), cx);
+            assert_eq!(
+                shell.split_chat_id(),
+                Some("b"),
+                "back on the draft the split returns"
+            );
+            // Send: the chat minted with the draft's id is selected before
+            // its row syncs, and the pair holds through the gap.
+            shell
+                .state
+                .update(cx, |s, cx| s.select_chat(Some(draft.clone()), cx));
+            shell.on_state_changed(&shell.state.clone(), cx);
+            assert!(!shell.state.read(cx).is_draft(&draft));
+            assert_eq!(shell.split_chat_id(), Some("b"));
+            shell
+                .state
+                .update(cx, |state, _| state.chats.push(chat(&draft)));
+            shell.on_state_changed(&shell.state.clone(), cx);
+            assert_eq!(shell.split_chat_id(), Some("b"));
+            assert_eq!(shell.open_tab_ids(cx), [draft, "b".into()]);
+        });
+    }
+
     #[gpui::test]
     fn background_start_keeps_the_tab_and_mints_the_next_draft(cx: &mut TestAppContext) {
         let (shell, cx) = setup(cx);
