@@ -9495,15 +9495,10 @@ impl Shell {
                 .into_any_element();
         }
 
-        let _ = (text, border);
+        let _ = (text, border, faint);
         let has_selection = self.state.read(cx).selected_chat.is_some();
-        let has_spaces = !self.state.read(cx).spaces.is_empty();
-        let has_appshots = !self.composer.read(cx).staged_appshots().is_empty();
-        let no_project = self.state.read(cx).no_project;
-        let transcript_geometry_ready = bottom_stack_measurement_matches(
-            self.bottom_stack_has_composer.get(),
-            (has_spaces || no_project || has_appshots) && has_selection,
-        );
+        let transcript_geometry_ready =
+            bottom_stack_measurement_matches(self.bottom_stack_has_composer.get(), has_selection);
         let ui_settings = settings::current(cx);
         let new_thread_background_setting = ui_settings.new_thread_composer_background;
         let new_thread_background_effect = ui_settings.new_thread_background_effect;
@@ -9646,53 +9641,6 @@ impl Shell {
                     el.child(div().absolute().inset_0().occlude())
                 })
                 .into_any_element()
-        } else if !has_spaces && !no_project {
-            // Onboarding (first boot / after the destructive wipe): no folders
-            // to work in yet — one clear affordance.
-            let _ = faint;
-            div()
-                .size_full()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .child(motion::fade_in(
-                    "no-spaces-canvas",
-                    div()
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .child(
-                            icon(icons::ZERON_LOGO)
-                                .w(px(41.9))
-                                .h(px(48.0))
-                                .text_color(theme.text.opacity(0.09)),
-                        )
-                        .child(
-                            div()
-                                .mt(px(24.0))
-                                .text_size(crate::typography::ui_rems(16.0))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(theme.text)
-                                .child(SharedString::from("Add a project to get started")),
-                        )
-                        .child(
-                            div()
-                                .mt(px(6.0))
-                                .text_size(crate::typography::ui_rems(13.0))
-                                .text_color(theme.text_muted.opacity(0.7))
-                                .child(SharedString::from(
-                                    "A project is a folder on one of your devices.",
-                                )),
-                        )
-                        .child(
-                            popover::btn_primary(&theme_owned, "Add a project")
-                                .id("onboarding-add-space")
-                                .mt(px(20.0))
-                                .on_click(cx.listener(|this, _, _, cx| this.open_add_space(cx))),
-                        ),
-                ))
-                .into_any_element()
         } else {
             Empty.into_any_element()
         };
@@ -9794,7 +9742,7 @@ impl Shell {
             .child({
                 let measured = self.bottom_stack.clone();
                 let measured_has_composer = self.bottom_stack_has_composer.clone();
-                let contains_composer = (has_spaces || no_project || has_appshots) && has_selection;
+                let contains_composer = has_selection;
                 let composer = self.composer.clone();
                 div()
                     .flex_none()
@@ -9821,9 +9769,9 @@ impl Shell {
                         .inset_0(),
                     )
                     .child(status)
-                    .when(has_spaces || no_project || has_appshots, |el| {
+                    .child({
                         let composer_opacity = self.composer_dock.borrow().opacity();
-                        el.child(crate::composer_dock::docked_composer(
+                        crate::composer_dock::docked_composer(
                             div()
                                 .id("persistent-composer")
                                 .relative()
@@ -9840,7 +9788,7 @@ impl Shell {
                             self.viewport_height,
                             self.reduced_motion,
                             frame_time,
-                        ))
+                        )
                     })
                     .child(self.render_terminal_container(window, cx))
             })
@@ -12259,10 +12207,7 @@ impl Render for Shell {
                 // `render_main`), so only the chrome above it overlaps.
                 let term_h = self.eval_tween(self.terminal_tween, self.terminal_target(cx));
                 let stack_h = (self.bottom_stack.get() - term_h).max(0.0);
-                let expected_has_composer = {
-                    let state = self.state.read(cx);
-                    (!state.spaces.is_empty() || state.no_project) && state.selected_chat.is_some()
-                };
+                let expected_has_composer = self.state.read(cx).selected_chat.is_some();
                 let bottom_stack_ready = bottom_stack_measurement_matches(
                     self.bottom_stack_has_composer.get(),
                     expected_has_composer,

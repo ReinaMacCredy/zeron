@@ -1079,9 +1079,13 @@ impl AppState {
         // First frame with no selection yet: pick the first project so the
         // canvas never boots project-less by accident — unless the user
         // deliberately opted out.
-        if self.selected_space.is_none() && !self.no_project {
+        if self.selected_space.is_none() {
             self.selected_space = self.first_space_on_picked_device();
         }
+        // No project anywhere: the canvas IS the projectless one (the composer
+        // picker ticks "Don't work in a project"); adding the first project
+        // selects it and clears this.
+        self.no_project = self.selected_space.is_none();
     }
 
     /// Optimistic local echo of a `setChatConfig` mutate: stamp the row now so
@@ -4301,8 +4305,14 @@ mod tests {
         // Vanished selection heals to the first space.
         state.apply_spaces(vec![space("s1", "dev", "/a", 1)]);
         assert_eq!(state.selected_space.as_deref(), Some("s1"));
-        // No spaces at all: selection clears.
+        // No spaces at all: the canvas is the projectless one.
         state.apply_spaces(vec![]);
+        assert_eq!(state.selected_space, None);
+        assert!(state.no_project);
+        // A project appearing later (synced from elsewhere) does not re-aim
+        // the canvas underneath the user; adding one locally selects it.
+        state.apply_spaces(vec![space("s1", "dev", "/a", 1)]);
+        assert!(state.no_project);
         assert_eq!(state.selected_space, None);
     }
 
