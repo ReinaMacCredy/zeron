@@ -9637,6 +9637,7 @@ impl Shell {
         let release_out_key = fade_key.clone();
         div()
             .id(id)
+            .debug_selector(move || id.to_string())
             .absolute()
             .top(px(PANE_RESIZE_HITBOX_TOP))
             .bottom_0()
@@ -12427,18 +12428,18 @@ impl Render for Shell {
                     self.motion_active.set(true);
                 }
                 let split_open = on_chat && self.split.is_some();
-                let main_target_width =
+                let column =
                     conversation_width(viewport, self.sidebar_target(), right_target_width);
                 // The persisted share belongs to the LEFT pane, whichever
                 // session sits there.
                 let main_target_width = match self.split.as_ref().map(|s| s.side) {
                     Some(split::SplitSide::Left) if split_open => {
-                        main_target_width * (1.0 - self.settings.split_ratio)
+                        column * (1.0 - self.settings.split_ratio)
                     }
                     Some(split::SplitSide::Right) if split_open => {
-                        main_target_width * self.settings.split_ratio
+                        column * self.settings.split_ratio
                     }
-                    _ => main_target_width,
+                    _ => column,
                 };
                 let main_transition = self.active_tween_endpoints(self.main_takeover_tween);
                 let main_content_width =
@@ -12518,19 +12519,24 @@ impl Render for Shell {
                 // (built inside `render_right_pane`).
                 // The split pane flexes into whatever the fixed-width main
                 // column leaves, so the seam's share holds.
+                let split_side = self.split.as_ref().map(|s| s.side).filter(|_| on_chat);
+                let main_veil = split_side
+                    .and_then(|side| self.render_split_size_veil(main_content_width, side, cx));
                 let main = if main_transition.is_some() || split_open {
                     div()
                         .h_full()
                         .w(px(main_content_width))
                         .flex_none()
+                        .relative()
                         .flex()
                         .child(main)
+                        .children(main_veil)
                         .into_any_element()
                 } else {
                     main
                 };
-                let split_side = self.split.as_ref().map(|s| s.side).filter(|_| on_chat);
-                let split_pane = split_side.and_then(|_| self.render_split_pane(cx));
+                let split_pane = split_side
+                    .and_then(|_| self.render_split_pane(column - main_content_width, cx));
                 let drop_zones = on_chat.then(|| self.render_split_drop_zones(cx)).flatten();
                 // Floats over the panes' shared border like the sidebar seam
                 // below; the pane's own 1px border stays the visual divider.

@@ -517,9 +517,71 @@ impl Shell {
             .map(|bounds| bounds.top())
     }
 
+    /// While the seam is held, each pane dims under a centred `W × H`
+    /// badge (Ghostty's resize overlay) so the resulting size reads at a
+    /// glance. `width` is the pane's laid-out width; the veil is inset 1px
+    /// on the seam-facing edge so the seam highlight stays on top.
+    pub(super) fn render_split_size_veil(
+        &self,
+        width: f32,
+        seam_edge: SplitSide,
+        cx: &App,
+    ) -> Option<AnyElement> {
+        if self.pane_resize_dragging != Some(PaneResizeKind::Split) {
+            return None;
+        }
+        let theme = Theme::of(cx);
+        let height = (self.viewport_height - Theme::TITLEBAR_HEIGHT).max(0.0);
+        let (inset_l, inset_r) = match seam_edge {
+            SplitSide::Left => (1.0, 0.0),
+            SplitSide::Right => (0.0, 1.0),
+        };
+        let badge = div()
+            .px(px(9.0))
+            .py(px(5.0))
+            .rounded(px(6.0))
+            .bg(theme.surface_overlay)
+            .border_1()
+            .border_color(theme.border_strong)
+            .shadow_md()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .font_family(theme.font_mono.clone())
+            .text_size(crate::typography::ui_rems(12.0))
+            .text_color(theme.text)
+            .child(SharedString::from(format!("{}", width.round() as i32)))
+            .child(div().text_color(theme.text_muted).child("×"))
+            .child(SharedString::from(format!("{}", height.round() as i32)));
+        let selector = match seam_edge {
+            SplitSide::Left => "split-size-veil-right",
+            SplitSide::Right => "split-size-veil-left",
+        };
+        Some(
+            div()
+                .debug_selector(|| selector.into())
+                .absolute()
+                .top(px(Theme::TITLEBAR_HEIGHT))
+                .bottom_0()
+                .left(px(inset_l))
+                .right(px(inset_r))
+                .bg(theme.scrim().opacity(0.35))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(badge)
+                .into_any_element(),
+        )
+    }
+
     /// The secondary pane: a header (brand, title, close) under the
-    /// titlebar band, the live transcript, its own composer.
-    pub(super) fn render_split_pane(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// titlebar band, the live transcript, its own composer. `width` is the
+    /// pane's laid-out width, for the resize badge.
+    pub(super) fn render_split_pane(
+        &mut self,
+        width: f32,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let split = self.split.as_ref()?;
         let theme = Theme::of(cx).clone();
         let (chat_id, side, transcript, composer) = (
@@ -528,6 +590,11 @@ impl Shell {
             split.transcript.clone(),
             split.composer.clone(),
         );
+        let seam_edge = match side {
+            SplitSide::Left => SplitSide::Right,
+            SplitSide::Right => SplitSide::Left,
+        };
+        let veil = self.render_split_size_veil(width, seam_edge, cx);
         let (title, brand) = {
             let state = self.state.read(cx);
             let chat = state.chats.iter().find(|c| c.id == chat_id);
@@ -610,6 +677,7 @@ impl Shell {
                 .h_full()
                 .flex_1()
                 .min_w_0()
+                .relative()
                 .flex()
                 .flex_col()
                 .pt(px(Theme::TITLEBAR_HEIGHT))
@@ -622,6 +690,7 @@ impl Shell {
                 .child(header)
                 .child(div().flex_1().min_h_0().child(transcript))
                 .child(div().flex_none().child(composer))
+                .children(veil)
                 .into_any_element(),
         )
     }
@@ -1051,6 +1120,46 @@ mod drag_regressions {
             cx.debug_bounds("split-pane").is_some(),
             "secondary pane not rendered"
         );
+    }
+
+    /// Holding the seam mounts a size veil over each pane, meeting at the
+    /// seam; releasing unmounts both.
+    #[gpui::test]
+    fn holding_the_seam_shows_a_size_veil_over_each_pane(cx: &mut TestAppContext) {
+        init(cx);
+        let dir = tempfile::tempdir().unwrap();
+        let (_shell, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            let mut shell = Shell::new(state, boot_config(&dir), cx);
+            shell.debug_gate = Some(GatePhase::Ready);
+            seed(&shell, cx);
+            shell.open_split("b".into(), SplitSide::Right, cx);
+            std::mem::forget(dir);
+            shell
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("split-size-veil-left").is_none());
+        let seam = cx.debug_bounds("split-resize").expect("seam handle");
+        cx.simulate_mouse_down(seam.center(), MouseButton::Left, gpui::Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear());
+        let left = cx.debug_bounds("split-size-veil-left").expect("left veil");
+        let right = cx
+            .debug_bounds("split-size-veil-right")
+            .expect("right veil");
+        let seam_x = f32::from(seam.center().x);
+        assert!(
+            (f32::from(left.right()) + 1.0 - seam_x).abs() <= 1.0,
+            "{left:?} vs {seam_x}"
+        );
+        assert!(
+            (f32::from(right.left()) - 1.0 - seam_x).abs() <= 1.0,
+            "{right:?} vs {seam_x}"
+        );
+        assert_eq!(left.top(), right.top());
+        cx.simulate_mouse_up(seam.center(), MouseButton::Left, gpui::Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("split-size-veil-left").is_none());
+        assert!(cx.debug_bounds("split-size-veil-right").is_none());
     }
 }
 
