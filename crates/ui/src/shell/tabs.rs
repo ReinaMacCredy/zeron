@@ -1422,6 +1422,7 @@ mod strip_regressions {
         zeron_proto::Session {
             last_completed_turn: None,
             held_by_subagents: false,
+            compacting: false,
             chat_id: id.into(),
             device_id: "local".into(),
             status: zeron_proto::SessionStatus::Working,

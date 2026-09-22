@@ -551,6 +551,9 @@ pub enum AgentEvent {
         pre_tokens: Option<u64>,
         post_tokens: Option<u64>,
     },
+    Compacting {
+        active: bool,
+    },
     /// Kept as a harness passthrough (rate-limit probes); never persisted to docs.
     #[serde(rename_all = "camelCase")]
     Usage {

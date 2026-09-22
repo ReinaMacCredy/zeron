@@ -6181,10 +6181,11 @@ impl Transcript {
         };
         // A compaction holds the session Working with nothing streaming: a
         // rotating flavour word over it reads as a stalled run.
-        let compacting = self.doc_override.is_none() && {
-            let state = self.state.read(cx);
-            state.compacting_chat.is_some() && state.compacting_chat == self.chat_id
-        };
+        let compacting = self.doc_override.is_none()
+            && self
+                .chat_id
+                .as_deref()
+                .is_some_and(|id| self.state.read(cx).chat_compacting(id));
         let word = if queued {
             "Queued — will send automatically"
         } else if sending {
@@ -12411,6 +12412,7 @@ mod tests {
                         state.sessions.push(zeron_proto::Session {
                             last_completed_turn: None,
                             held_by_subagents: false,
+                            compacting: false,
                             chat_id: "chat".into(),
                             device_id: "test".into(),
                             status: zeron_proto::SessionStatus::Working,
