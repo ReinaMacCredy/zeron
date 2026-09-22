@@ -16,11 +16,11 @@ use std::time::{Duration, Instant};
 use gpui::{
     AnyTooltip, App, BorderStyle, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle,
     DispatchPhase, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
-    Focusable, GlobalElementId, KeyBinding, KeyDownEvent, LayoutId, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ObjectFit, PaintQuad, PathPromptOptions, Pixels, Point, Role,
-    ScrollWheelEvent, SharedString, Style, StyledImage as _, Subscription, Task, TextRun,
-    TextStyle, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill, img, point,
-    prelude::*, px, quad, relative, size,
+    Focusable, GlobalElementId, Hsla, KeyBinding, KeyDownEvent, LayoutId, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PaintQuad, PathPromptOptions, Pixels,
+    Point, Role, ScrollWheelEvent, SharedString, Style, StyledImage as _, Subscription, Task,
+    TextRun, TextStyle, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill,
+    img, point, prelude::*, px, quad, relative, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -888,6 +888,54 @@ const MENTION_SIDE_PAD: &str = "\u{00A0}";
 /// A private URI scheme keeps file mentions distinguishable from ordinary
 /// Markdown links pasted into the composer.
 const FILE_MENTION_SCHEME: &str = "zeron-file:";
+/// A thread mention names another chat by id; the agent reads it through
+/// the `zeron` MCP server's `read_thread`, so the prompt carries the id
+/// verbatim and the label is only the title at insert time.
+const THREAD_MENTION_SCHEME: &str = "zeron-thread:";
+/// Reserved run at the head of a thread mention: the harness brand mark is
+/// painted over these non-breaking spaces. Synara's in-composer mention is
+/// the model: plain inline flow (no wash), medium weight in the accent
+/// color, a 1em mark then a small gap before the title. The mark hugs the
+/// slot's left edge; the slot's remainder is that gap.
+pub(crate) const THREAD_ICON_SLOT: &str = "\u{00A0}\u{00A0}\u{00A0}\u{00A0}\u{00A0}";
+const THREAD_ICON_SIZE: f32 = 14.0;
+
+/// The mark painted in a thread chip's icon slot: the thread's current
+/// harness brand, or a plain chat glyph when the chat is not in this
+/// device's list (another device, archived, gone).
+pub(crate) fn thread_chip_icon(chat: Option<&zeron_proto::Chat>) -> (&'static str, Option<Hsla>) {
+    chat.and_then(|chat| crate::pickers::chat_harness_marks(chat).last().copied())
+        .map(crate::pickers::harness_brand_icon)
+        .unwrap_or((crate::icons::CHAT_ROUND_LINE, None))
+}
+
+/// The display sub-range a thread chip reserves for its mark, given the
+/// chip's full projected range.
+pub(crate) fn thread_icon_slot(chip: &Range<usize>) -> Range<usize> {
+    let start = chip.start + MENTION_SIDE_PAD.len();
+    start..start + THREAD_ICON_SLOT.len()
+}
+
+/// Paint a thread chip's mark at the head of its slot rect, vertically
+/// centered on the line.
+pub(crate) fn paint_thread_icon(
+    slot: Bounds<Pixels>,
+    icon: (&'static str, Option<Hsla>),
+    fallback: Hsla,
+    window: &mut Window,
+    cx: &App,
+) {
+    let size = px(THREAD_ICON_SIZE);
+    let origin = point(slot.left(), slot.top() + (slot.size.height - size) / 2.0);
+    let _ = window.paint_svg(
+        Bounds::new(origin, gpui::size(size, size)),
+        SharedString::from(icon.0),
+        None,
+        gpui::TransformationMatrix::unit(),
+        icon.1.unwrap_or(fallback),
+        cx,
+    );
+}
 
 /// A restorable point in the input's history: text plus where the caret and
 /// selection sat when the edit landed.
@@ -907,6 +955,28 @@ struct FileMentionLink {
     basename: String,
     path: String,
     is_dir: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ThreadMentionLink {
+    range: Range<usize>,
+    chat_id: String,
+    title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MentionLink {
+    File(FileMentionLink),
+    Thread(ThreadMentionLink),
+}
+
+impl MentionLink {
+    fn range(&self) -> &Range<usize> {
+        match self {
+            Self::File(link) => &link.range,
+            Self::Thread(link) => &link.range,
+        }
+    }
 }
 
 fn percent_encode_path(path: &str) -> String {
@@ -961,6 +1031,35 @@ fn local_file_link(path: &str, is_dir: bool) -> String {
     )
 }
 
+fn unescape_mention_label(label: &str) -> String {
+    let mut out = String::with_capacity(label.len());
+    let mut chars = label.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(next) = chars.next() {
+                out.push(next);
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn chat_id_is_safe(chat_id: &str) -> bool {
+    !chat_id.is_empty()
+        && chat_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+}
+
+fn thread_link(chat_id: &str, title: &str) -> String {
+    format!(
+        "[{}]({THREAD_MENTION_SCHEME}{chat_id})",
+        escape_mention_label(title)
+    )
+}
+
 /// Build the text inserted when a workspace item is dropped at an arbitrary
 /// selection. Unlike completion, a drop does not necessarily happen at a
 /// token boundary, so it supplies its own leading separator when needed.
@@ -970,10 +1069,14 @@ fn dropped_file_mention(
     path: &str,
     is_dir: bool,
 ) -> Option<(String, usize)> {
-    if range.start > range.end
-        || !local_path_is_safe(path)
-        || !content.is_char_boundary(range.start)
-    {
+    if !local_path_is_safe(path) {
+        return None;
+    }
+    dropped_mention(content, range, &local_file_link(path, is_dir))
+}
+
+fn dropped_mention(content: &str, range: Range<usize>, link: &str) -> Option<(String, usize)> {
+    if range.start > range.end || !content.is_char_boundary(range.start) {
         return None;
     }
     let suffix = content.get(range.end..)?;
@@ -996,7 +1099,7 @@ fn dropped_file_mention(
     } else {
         " "
     };
-    let inserted = format!("{prefix}{}{trailing}", local_file_link(path, is_dir));
+    let inserted = format!("{prefix}{link}{trailing}");
     let cursor_advance = inserted.len() + existing_separator.map(char::len_utf8).unwrap_or(0);
     Some((inserted, cursor_advance))
 }
@@ -1026,6 +1129,16 @@ fn label_close(text: &str, start: usize) -> Option<usize> {
 }
 
 fn file_mention_links(text: &str) -> Vec<FileMentionLink> {
+    mention_links(text)
+        .into_iter()
+        .filter_map(|link| match link {
+            MentionLink::File(link) => Some(link),
+            MentionLink::Thread(_) => None,
+        })
+        .collect()
+}
+
+fn mention_links(text: &str) -> Vec<MentionLink> {
     let mut links = Vec::new();
     let mut search = 0;
     while let Some(relative_start) = text[search..].find('[') {
@@ -1041,29 +1154,40 @@ fn file_mention_links(text: &str) -> Vec<FileMentionLink> {
         };
         let end = target_start + relative_end + 1;
         let label = &text[start + 1..label_end];
-        let Some(encoded) = text[target_start..end - 1].strip_prefix(FILE_MENTION_SCHEME) else {
-            search = end;
-            continue;
-        };
-        let parsed = percent_decode_path(encoded).and_then(|target| {
-            let is_dir = target.ends_with('/');
-            let path = target.strip_suffix('/').unwrap_or(&target);
-            (local_path_is_safe(path)
-                && percent_encode_path(&target) == encoded
-                && path
-                    .rsplit('/')
-                    .next()
-                    .is_some_and(|basename| escape_mention_label(basename) == label))
-            .then(|| (path.to_string(), is_dir))
-        });
-        if let Some((path, is_dir)) = parsed {
-            let basename = path.rsplit('/').next().unwrap_or_default().to_string();
-            links.push(FileMentionLink {
-                range: start..end,
-                basename,
-                path,
-                is_dir,
+        let target = &text[target_start..end - 1];
+        if let Some(encoded) = target.strip_prefix(FILE_MENTION_SCHEME) {
+            let parsed = percent_decode_path(encoded).and_then(|target| {
+                let is_dir = target.ends_with('/');
+                let path = target.strip_suffix('/').unwrap_or(&target);
+                (local_path_is_safe(path)
+                    && percent_encode_path(&target) == encoded
+                    && path
+                        .rsplit('/')
+                        .next()
+                        .is_some_and(|basename| escape_mention_label(basename) == label))
+                .then(|| (path.to_string(), is_dir))
             });
+            if let Some((path, is_dir)) = parsed {
+                let basename = path.rsplit('/').next().unwrap_or_default().to_string();
+                links.push(MentionLink::File(FileMentionLink {
+                    range: start..end,
+                    basename,
+                    path,
+                    is_dir,
+                }));
+            }
+        } else if let Some(chat_id) = target.strip_prefix(THREAD_MENTION_SCHEME) {
+            let title = unescape_mention_label(label);
+            if chat_id_is_safe(chat_id)
+                && !title.trim().is_empty()
+                && escape_mention_label(&title) == label
+            {
+                links.push(MentionLink::Thread(ThreadMentionLink {
+                    range: start..end,
+                    chat_id: chat_id.to_string(),
+                    title,
+                }));
+            }
         }
         search = end;
     }
@@ -1073,7 +1197,7 @@ fn file_mention_links(text: &str) -> Vec<FileMentionLink> {
 #[derive(Debug, Clone, Default)]
 struct TextProjection {
     display: String,
-    mentions: Vec<(FileMentionLink, Range<usize>)>,
+    mentions: Vec<(MentionLink, Range<usize>)>,
 }
 
 /// A path alone is not enough: two identical relative paths can appear in a
@@ -1177,12 +1301,14 @@ struct MentionHit {
 
 impl TextProjection {
     fn new(raw: &str) -> Self {
-        let links = file_mention_links(raw);
+        let links = mention_links(raw);
         let labels = mention_display_labels(&links);
         let mut projection = Self::default();
         let mut raw_at = 0;
         for (link, label) in links.into_iter().zip(labels) {
-            projection.display.push_str(&raw[raw_at..link.range.start]);
+            projection
+                .display
+                .push_str(&raw[raw_at..link.range().start]);
             let display_start = projection.display.len();
             // The chip is plain projected text — `@` plus the label between
             // non-breaking side bearings; the rounded code wash beneath it is
@@ -1190,7 +1316,10 @@ impl TextProjection {
             // must exist in Geist (no exotic whitespace — U+2003/U+202F shape
             // at fallback width and collapsed the chip once already).
             projection.display.push_str(MENTION_SIDE_PAD);
-            projection.display.push(MENTION_PREFIX);
+            match &link {
+                MentionLink::File(_) => projection.display.push(MENTION_PREFIX),
+                MentionLink::Thread(_) => projection.display.push_str(THREAD_ICON_SLOT),
+            }
             for ch in label.chars() {
                 projection
                     .display
@@ -1198,10 +1327,8 @@ impl TextProjection {
             }
             projection.display.push('\u{00A0}');
             let display_end = projection.display.len();
-            projection
-                .mentions
-                .push((link.clone(), display_start..display_end));
-            raw_at = link.range.end;
+            raw_at = link.range().end;
+            projection.mentions.push((link, display_start..display_end));
         }
         projection.display.push_str(&raw[raw_at..]);
         projection
@@ -1211,13 +1338,14 @@ impl TextProjection {
         let mut raw_at = 0;
         let mut display_at = 0;
         for (link, display) in &self.mentions {
-            if raw <= link.range.start {
+            let link = link.range();
+            if raw <= link.start {
                 return display_at + raw.saturating_sub(raw_at);
             }
-            if raw < link.range.end {
+            if raw < link.end {
                 return display.start;
             }
-            raw_at = link.range.end;
+            raw_at = link.end;
             display_at = display.end;
         }
         display_at + raw.saturating_sub(raw_at)
@@ -1227,17 +1355,18 @@ impl TextProjection {
         let mut raw_at = 0;
         let mut display_at = 0;
         for (link, display) in &self.mentions {
+            let link = link.range();
             if display_offset <= display.start {
                 return raw_at + display_offset.saturating_sub(display_at);
             }
             if display_offset < display.end {
                 return if display_offset - display.start < display.len() / 2 {
-                    link.range.start
+                    link.start
                 } else {
-                    link.range.end
+                    link.end
                 };
             }
-            raw_at = link.range.end;
+            raw_at = link.end;
             display_at = display.end;
         }
         raw_at + display_offset.saturating_sub(display_at)
@@ -1246,12 +1375,13 @@ impl TextProjection {
     fn normalize_range(&self, range: Range<usize>) -> Range<usize> {
         if range.is_empty() {
             for (link, _) in &self.mentions {
-                if link.range.start < range.start && range.start < link.range.end {
-                    let midpoint = link.range.start + link.range.len() / 2;
+                let link = link.range();
+                if link.start < range.start && range.start < link.end {
+                    let midpoint = link.start + link.len() / 2;
                     let at = if range.start < midpoint {
-                        link.range.start
+                        link.start
                     } else {
-                        link.range.end
+                        link.end
                     };
                     return at..at;
                 }
@@ -1260,9 +1390,10 @@ impl TextProjection {
         }
         let mut normalized = range;
         for (link, _) in &self.mentions {
-            if normalized.start < link.range.end && normalized.end > link.range.start {
-                normalized.start = normalized.start.min(link.range.start);
-                normalized.end = normalized.end.max(link.range.end);
+            let link = link.range();
+            if normalized.start < link.end && normalized.end > link.start {
+                normalized.start = normalized.start.min(link.start);
+                normalized.end = normalized.end.max(link.end);
             }
         }
         normalized
@@ -1271,48 +1402,63 @@ impl TextProjection {
     fn previous_boundary(&self, raw: usize) -> Option<usize> {
         self.mentions
             .iter()
-            .find_map(|(link, _)| (raw == link.range.end).then_some(link.range.start))
+            .find_map(|(link, _)| (raw == link.range().end).then_some(link.range().start))
     }
 
     fn next_boundary(&self, raw: usize) -> Option<usize> {
         self.mentions
             .iter()
-            .find_map(|(link, _)| (raw == link.range.start).then_some(link.range.end))
+            .find_map(|(link, _)| (raw == link.range().start).then_some(link.range().end))
     }
 }
 
 /// Basenames are compact in the common case. When the same basename appears
 /// more than once, use the shortest unique path suffix so chips remain
 /// distinguishable without always expanding to full paths.
-fn mention_display_labels(links: &[FileMentionLink]) -> Vec<String> {
+fn mention_display_labels(links: &[MentionLink]) -> Vec<String> {
+    let files: Vec<&FileMentionLink> = links
+        .iter()
+        .filter_map(|link| match link {
+            MentionLink::File(link) => Some(link),
+            MentionLink::Thread(_) => None,
+        })
+        .collect();
+    let file_label = |ix: usize, link: &FileMentionLink| {
+        if files
+            .iter()
+            .filter(|other| other.basename == link.basename)
+            .count()
+            == 1
+        {
+            return link.basename.clone();
+        }
+        let parts: Vec<_> = link.path.split('/').collect();
+        (1..=parts.len())
+            .map(|count| parts[parts.len() - count..].join("/"))
+            .find(|suffix| {
+                let suffix: Vec<_> = suffix.split('/').collect();
+                files.iter().enumerate().all(|(other_ix, other)| {
+                    other_ix == ix
+                        || !other
+                            .path
+                            .split('/')
+                            .rev()
+                            .take(suffix.len())
+                            .eq(suffix.iter().rev().copied())
+                })
+            })
+            .unwrap_or_else(|| link.path.clone())
+    };
+    let mut file_ix = 0;
     links
         .iter()
-        .enumerate()
-        .map(|(ix, link)| {
-            if links
-                .iter()
-                .filter(|other| other.basename == link.basename)
-                .count()
-                == 1
-            {
-                return link.basename.clone();
+        .map(|link| match link {
+            MentionLink::File(link) => {
+                let label = file_label(file_ix, link);
+                file_ix += 1;
+                label
             }
-            let parts: Vec<_> = link.path.split('/').collect();
-            (1..=parts.len())
-                .map(|count| parts[parts.len() - count..].join("/"))
-                .find(|suffix| {
-                    let suffix: Vec<_> = suffix.split('/').collect();
-                    links.iter().enumerate().all(|(other_ix, other)| {
-                        other_ix == ix
-                            || !other
-                                .path
-                                .split('/')
-                                .rev()
-                                .take(suffix.len())
-                                .eq(suffix.iter().rev().copied())
-                    })
-                })
-                .unwrap_or_else(|| link.path.clone())
+            MentionLink::Thread(link) => link.title.clone(),
         })
         .collect()
 }
@@ -1323,9 +1469,19 @@ fn mention_display_labels(links: &[FileMentionLink]) -> Vec<String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SentMentionSpan {
     pub range: Range<usize>,
-    /// Full workspace-relative path (labels can be shortened to basenames).
-    pub path: SharedString,
-    pub is_dir: bool,
+    pub target: SentMentionTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SentMentionTarget {
+    File {
+        /// Full workspace-relative path (labels can be shortened to basenames).
+        path: SharedString,
+        is_dir: bool,
+    },
+    Thread {
+        chat_id: SharedString,
+    },
 }
 
 /// Project a sent message's raw Markdown for transcript display: mention links
@@ -1334,7 +1490,7 @@ pub struct SentMentionSpan {
 /// substring probe keeps ordinary prompts on the zero-allocation path, so this
 /// is safe to call for every user row.
 pub fn sent_mention_display(raw: &str) -> Option<(String, Vec<SentMentionSpan>)> {
-    if !raw.contains(FILE_MENTION_SCHEME) {
+    if !raw.contains(FILE_MENTION_SCHEME) && !raw.contains(THREAD_MENTION_SCHEME) {
         return None;
     }
     let projection = TextProjection::new(raw);
@@ -1346,12 +1502,19 @@ pub fn sent_mention_display(raw: &str) -> Option<(String, Vec<SentMentionSpan>)>
         .iter()
         .map(|(link, display)| SentMentionSpan {
             range: display.clone(),
-            path: SharedString::from(format!(
-                "{}{}",
-                link.path,
-                if link.is_dir { "/" } else { "" }
-            )),
-            is_dir: link.is_dir,
+            target: match link {
+                MentionLink::File(link) => SentMentionTarget::File {
+                    path: SharedString::from(format!(
+                        "{}{}",
+                        link.path,
+                        if link.is_dir { "/" } else { "" }
+                    )),
+                    is_dir: link.is_dir,
+                },
+                MentionLink::Thread(link) => SentMentionTarget::Thread {
+                    chat_id: SharedString::from(link.chat_id.clone()),
+                },
+            },
         })
         .collect();
     Some((projection.display, spans))
@@ -1699,6 +1862,9 @@ pub struct ComposerInput {
     /// wrapper — it recomputes and re-sets this on every render pass, so the
     /// input never has to know what the completion means.
     ghost: Option<SharedString>,
+    /// Where thread chips look up their brand mark; only the message
+    /// composer sets it.
+    thread_state: Option<Entity<AppState>>,
     /// File mentions are a composer feature, not a behavior of generic inputs
     /// (picker searches and rename fields also use this type).
     mentions_enabled: bool,
@@ -1787,6 +1953,7 @@ impl ComposerInput {
             projection: TextProjection::default(),
             ghost: None,
             mentions_enabled: false,
+            thread_state: None,
             layout_epoch: 0,
             display_is_placeholder: true,
             blink_anchor: Instant::now(),
@@ -1898,24 +2065,17 @@ impl ComposerInput {
     }
 
     /// Replace a completed `@query` token as one non-coalescing undo step.
-    pub fn replace_mention(
-        &mut self,
-        range: Range<usize>,
-        path: &str,
-        is_dir: bool,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn replace_mention(&mut self, range: Range<usize>, link: String, cx: &mut Context<Self>) {
         if self.read_only {
             return;
         }
         self.invalidate_mention_tooltip();
-        let path = local_file_link(path, is_dir);
         let next = self.content[range.end..].chars().next();
         let existing_separator = next.filter(|ch| ch.is_whitespace() && *ch != '\n' && *ch != '\r');
         let inserted = if existing_separator.is_some() {
-            path
+            link
         } else {
-            format!("{path} ")
+            format!("{link} ")
         };
         self.record_edit(&range, &inserted);
         self.content =
@@ -1935,13 +2095,12 @@ impl ComposerInput {
     /// Insert a workspace reference at the current selection. Drag-and-drop
     /// uses the same strict local Markdown transport and projected chip as an
     /// `@` mention selected from completion.
-    fn insert_dropped_mention(&mut self, path: &str, is_dir: bool, cx: &mut Context<Self>) -> bool {
+    fn insert_dropped_mention(&mut self, link: &str, cx: &mut Context<Self>) -> bool {
         if self.read_only {
             return false;
         }
         let range = self.selected_range.clone();
-        let Some((inserted, cursor_advance)) =
-            dropped_file_mention(&self.content, range.clone(), path, is_dir)
+        let Some((inserted, cursor_advance)) = dropped_mention(&self.content, range.clone(), link)
         else {
             return false;
         };
@@ -3033,20 +3192,32 @@ impl ComposerInput {
         let font_size = style.font_size.to_pixels(window.rem_size());
         self.line_height = px(self.configured_line_height);
 
-        // Chips read as inline code: the markdown renderer's recipe (mono font
-        // + the spectrum's `code_text`) over the rounded `code_wash` beneath.
-        let (chip_font, chip_color) = {
+        // File chips read as inline code: the markdown renderer's recipe (mono
+        // font + the spectrum's `code_text`) over the rounded `code_wash`
+        // beneath. Thread mentions are plain accent text at medium weight.
+        let (chip_font, chip_color, thread_font, thread_color) = {
             let theme = Theme::of(cx);
-            (gpui::font(theme.font_mono.clone()), theme.code_text)
+            let mut thread_font = style.font();
+            thread_font.weight = gpui::FontWeight::MEDIUM;
+            (
+                gpui::font(theme.font_mono.clone()),
+                theme.code_text,
+                thread_font,
+                theme.accent,
+            )
         };
-        let run_for = |len: usize, underline: bool, chip: bool| TextRun {
+        let run_for = |len: usize, underline: bool, chip: Option<&MentionLink>| TextRun {
             len,
-            font: if chip {
-                chip_font.clone()
-            } else {
-                style.font()
+            font: match chip {
+                Some(MentionLink::File(_)) => chip_font.clone(),
+                Some(MentionLink::Thread(_)) => thread_font.clone(),
+                None => style.font(),
             },
-            color: if chip { chip_color } else { style.color },
+            color: match chip {
+                Some(MentionLink::File(_)) => chip_color,
+                Some(MentionLink::Thread(_)) => thread_color,
+                None => style.color,
+            },
             // Rounded mention washes are painted explicitly beneath the text;
             // TextRun backgrounds are square and can disappear in wrapped runs.
             background_color: None,
@@ -3062,27 +3233,27 @@ impl ComposerInput {
                 let start = self.projection.raw_to_display(marked.start);
                 let end = self.projection.raw_to_display(marked.end);
                 vec![
-                    run_for(start, false, false),
-                    run_for(end.saturating_sub(start), true, false),
-                    run_for(display.len() - end, false, false),
+                    run_for(start, false, None),
+                    run_for(end.saturating_sub(start), true, None),
+                    run_for(display.len() - end, false, None),
                 ]
                 .into_iter()
                 .filter(|r| r.len > 0)
                 .collect()
             }
-            _ if is_placeholder => vec![run_for(display.len(), false, false)],
+            _ if is_placeholder => vec![run_for(display.len(), false, None)],
             _ => {
                 let mut runs = Vec::new();
                 let mut at = 0;
-                for (_, chip) in &self.projection.mentions {
+                for (link, chip) in &self.projection.mentions {
                     if at < chip.start {
-                        runs.push(run_for(chip.start - at, false, false));
+                        runs.push(run_for(chip.start - at, false, None));
                     }
-                    runs.push(run_for(chip.len(), false, true));
+                    runs.push(run_for(chip.len(), false, Some(link)));
                     at = chip.end;
                 }
                 if at < display.len() {
-                    runs.push(run_for(display.len() - at, false, false));
+                    runs.push(run_for(display.len() - at, false, None));
                 }
                 runs
             }
@@ -3412,6 +3583,8 @@ impl Render for MentionPathTooltip {
 struct ComposerTextPrepaint {
     cursor: Option<PaintQuad>,
     mention_quads: Vec<PaintQuad>,
+    /// Thread chip marks: the slot rect plus the icon to paint in it.
+    mention_icons: Vec<(Bounds<Pixels>, (&'static str, Option<Hsla>))>,
     mention_hits: Vec<MentionHit>,
     selection_quads: Vec<PaintQuad>,
     /// Completion preview: window-space origin of the end-of-text caret plus
@@ -3500,14 +3673,41 @@ impl gpui::Element for ComposerTextElement {
 
         let mut mention_quads = Vec::new();
         let mut mention_hits = Vec::new();
+        let mut mention_icons = Vec::new();
         for (mention, display) in &input.projection.mentions {
-            let target = MentionTooltipTarget {
-                range: mention.range.clone(),
-                path: SharedString::from(format!(
-                    "{}{}",
-                    mention.path,
-                    if mention.is_dir { "/" } else { "" }
-                )),
+            if let MentionLink::Thread(thread) = mention {
+                let chat = input.thread_state.as_ref().and_then(|state| {
+                    state
+                        .read(cx)
+                        .chats
+                        .iter()
+                        .find(|chat| chat.id == thread.chat_id)
+                });
+                let icon = thread_chip_icon(chat);
+                if let Some(slot) = input
+                    .bounds_for_display_range(thread_icon_slot(display))
+                    .into_iter()
+                    .next()
+                {
+                    let slot = Bounds::new(
+                        point(origin.x + slot.origin.x, origin.y + slot.origin.y),
+                        slot.size,
+                    );
+                    mention_icons.push((slot, icon));
+                }
+            }
+            // Thread chips carry no hover popup: the title is already the
+            // whole label, so only file chips register a tooltip target.
+            let target = match mention {
+                MentionLink::File(mention) => Some(MentionTooltipTarget {
+                    range: mention.range.clone(),
+                    path: SharedString::from(format!(
+                        "{}{}",
+                        mention.path,
+                        if mention.is_dir { "/" } else { "" }
+                    )),
+                }),
+                MentionLink::Thread(_) => None,
             };
             for local_bounds in input.bounds_for_display_range(display.clone()) {
                 let chip_bounds = Bounds::new(
@@ -3517,14 +3717,17 @@ impl gpui::Element for ComposerTextElement {
                     ),
                     size(local_bounds.size.width, local_bounds.size.height - px(4.0)),
                 );
-                mention_quads.push(quad(
-                    chip_bounds,
-                    px(5.0),
-                    mention_color,
-                    px(0.0),
-                    gpui::transparent_black(),
-                    BorderStyle::default(),
-                ));
+                // Thread mentions sit in plain flow; only file chips get the wash.
+                if matches!(mention, MentionLink::File(_)) {
+                    mention_quads.push(quad(
+                        chip_bounds,
+                        px(5.0),
+                        mention_color,
+                        px(0.0),
+                        gpui::transparent_black(),
+                        BorderStyle::default(),
+                    ));
+                }
                 let above_anchor = chip_bounds.top() - px(MENTION_TOOLTIP_HEIGHT) - px(1.0);
                 let anchor_y = if above_anchor >= px(0.0) {
                     above_anchor
@@ -3537,8 +3740,11 @@ impl gpui::Element for ComposerTextElement {
                 if visible_bounds.size.width == px(0.0) || visible_bounds.size.height == px(0.0) {
                     continue;
                 }
+                let Some(target) = target.clone() else {
+                    continue;
+                };
                 mention_hits.push(MentionHit {
-                    target: target.clone(),
+                    target,
                     bounds: visible_bounds,
                     // The fixed-height popup starts at anchor + 1px. Moving
                     // the anchor above the chip therefore yields conventional
@@ -3638,6 +3844,7 @@ impl gpui::Element for ComposerTextElement {
         ComposerTextPrepaint {
             cursor,
             mention_quads,
+            mention_icons,
             mention_hits,
             selection_quads,
             ghost,
@@ -3689,6 +3896,10 @@ impl gpui::Element for ComposerTextElement {
             |window| {
                 for quad in prepaint.mention_quads.drain(..) {
                     window.paint_quad(quad);
+                }
+                let icon_fallback = Theme::of(cx).text_muted;
+                for (slot, icon) in prepaint.mention_icons.drain(..) {
+                    paint_thread_icon(slot, icon, icon_fallback, window, cx);
                 }
                 for quad in prepaint.selection_quads.drain(..) {
                     window.paint_quad(quad);
@@ -4077,6 +4288,9 @@ struct SlashState {
 #[derive(Debug, Clone, Default)]
 struct FileMentionState {
     token: Option<MentionToken>,
+    /// Sidebar threads matching the token, filtered locally (no RPC) and
+    /// listed above the file results; `active` indexes threads then files.
+    threads: Vec<ThreadMatch>,
     results: Vec<FileSearchMatch>,
     active: Option<usize>,
     request: u64,
@@ -4093,6 +4307,58 @@ struct FileMentionState {
 
 fn mention_response_is_current(state: &FileMentionState, request: u64) -> bool {
     state.request == request && state.token.is_some()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ThreadMatch {
+    chat_id: String,
+    title: String,
+    marks: Vec<HarnessId>,
+}
+
+impl FileMentionState {
+    fn item_count(&self) -> usize {
+        self.threads.len() + self.results.len()
+    }
+}
+
+const THREAD_MENTION_LIMIT: usize = 6;
+
+/// The sidebar title as the chip label; an untitled chat mentions as the
+/// same placeholder the sidebar shows for it.
+fn chat_mention_title(chat: &zeron_proto::Chat) -> String {
+    crate::transcript::single_line(chat.title.as_deref().unwrap_or("New session"))
+}
+
+/// Threads whose title contains the query (case-insensitive) or whose id
+/// starts with it, in sidebar order, on the device the prompt will run on
+/// (`read_thread` resolves ids per device), minus the chat being composed
+/// for and drafts (nothing to read). An empty query lists the first few.
+fn thread_matches<'a>(
+    chats: impl Iterator<Item = &'a zeron_proto::Chat>,
+    query: &str,
+    device_id: &str,
+    exclude: Option<&str>,
+    is_draft: impl Fn(&str) -> bool,
+) -> Vec<ThreadMatch> {
+    let query = query.trim().to_lowercase();
+    chats
+        .filter(|chat| {
+            chat.device_id == device_id && Some(chat.id.as_str()) != exclude && !is_draft(&chat.id)
+        })
+        .filter_map(|chat| {
+            let title = chat_mention_title(chat);
+            (query.is_empty()
+                || title.to_lowercase().contains(&query)
+                || chat.id.to_lowercase().starts_with(&query))
+            .then(|| ThreadMatch {
+                chat_id: chat.id.clone(),
+                title,
+                marks: crate::pickers::chat_harness_marks(chat),
+            })
+        })
+        .take(THREAD_MENTION_LIMIT)
+        .collect()
 }
 
 /// A failed file search, translated for the popup. `UnknownMethod` is the
@@ -4350,6 +4616,7 @@ impl Composer {
             let mut input =
                 ComposerInput::with_context("Do anything…", MESSAGE_COMPOSER_CONTEXT, cx);
             input.enable_mentions();
+            input.thread_state = Some(state.clone());
             input
         });
         let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
@@ -4813,8 +5080,68 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let inserted = self.input.update(cx, |input, cx| {
-            input.insert_dropped_mention(path, is_directory, cx)
+        if !local_path_is_safe(path) {
+            return;
+        }
+        self.insert_link(local_file_link(path, is_directory), window, cx);
+    }
+
+    /// A sidebar row or strip tab dropped on the composer becomes a thread
+    /// mention chip. The open chat cannot mention itself (`read_thread` on
+    /// the caller is meaningless), and a draft has no transcript to read.
+    pub(crate) fn add_thread_mention(
+        &mut self,
+        chat_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((device, bound)) = self.mention_device(cx) else {
+            return;
+        };
+        if bound.as_deref() == Some(chat_id) {
+            self.failure = Some("This is the open thread; it can't mention itself.".into());
+            self.failure_key = bound;
+            cx.notify();
+            return;
+        }
+        let state = self.state.read(cx);
+        if state.is_draft(chat_id) || !chat_id_is_safe(chat_id) {
+            return;
+        }
+        let Some(chat) = state
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id && chat.device_id == device)
+        else {
+            return;
+        };
+        let link = thread_link(chat_id, &chat_mention_title(chat));
+        self.insert_link(link, window, cx);
+    }
+
+    /// The device a thread mention must live on, plus the chat it must not
+    /// be: the bound chat's device, or the selected device for a draft.
+    fn mention_device(&self, cx: &App) -> Option<(String, Option<String>)> {
+        if let Some(chat) = self.bound_chat_row(cx) {
+            return Some((chat.device_id.clone(), Some(chat.id.clone())));
+        }
+        self.state
+            .read(cx)
+            .selected_device
+            .clone()
+            .map(|device| (device, None))
+    }
+
+    fn insert_link(&mut self, link: String, window: &mut Window, cx: &mut Context<Self>) {
+        // A drop while the `@` picker is open completes that token instead
+        // of leaving a stray `@` beside the chip.
+        let token = self.mention.token.clone();
+        let inserted = self.input.update(cx, |input, cx| match token {
+            Some(token) => {
+                input.replace_mention(token.range, link, cx);
+                true
+            }
+            None => input.insert_dropped_mention(&link, cx),
         });
         if inserted {
             self.reset_mention(None, cx);
@@ -5416,6 +5743,30 @@ impl Composer {
         }
         self.mention.error = None;
         self.mention.loading = token.is_some();
+        self.mention.threads = match &token {
+            Some(token) => match self.mention_device(cx) {
+                Some((device, exclude)) => {
+                    let state = self.state.read(cx);
+                    thread_matches(
+                        state.visible_chats(),
+                        &token.query,
+                        &device,
+                        exclude.as_deref(),
+                        |id| state.is_draft(id),
+                    )
+                }
+                None => Vec::new(),
+            },
+            None => Vec::new(),
+        };
+        // Threads are known before the file search answers, so the keyboard
+        // cursor lands on the first thread now instead of on the first file
+        // later (and stays within range when a refinement shrinks the list).
+        let count = self.mention.item_count();
+        self.mention.active = match self.mention.active {
+            Some(active) if active < count => Some(active),
+            _ => (count > 0).then_some(0),
+        };
         self.sync_mention_controls(cx);
         let Some(token) = token else {
             cx.notify();
@@ -5486,8 +5837,12 @@ impl Composer {
                     Ok(value) => match serde_json::from_value::<Vec<FileSearchMatch>>(value) {
                         Ok(results) => {
                             composer.mention.error = None;
-                            composer.mention.active = (!results.is_empty()).then_some(0);
                             composer.mention.results = results;
+                            let count = composer.mention.item_count();
+                            composer.mention.active = match composer.mention.active {
+                                Some(active) if active < count => Some(active),
+                                _ => (count > 0).then_some(0),
+                            };
                             // New result set: the row stack restarts at the top.
                             crate::popover::reset_menu_scroll(
                                 &composer.mention_scroll,
@@ -5499,7 +5854,9 @@ impl Composer {
                     Err(err) => {
                         tracing::warn!(%err, "file mention search failed");
                         composer.mention.results.clear();
-                        composer.mention.active = None;
+                        let count = composer.mention.item_count();
+                        composer.mention.active =
+                            composer.mention.active.filter(|active| *active < count);
                         composer.mention.error = Some(mention_error_message(&err));
                     }
                 }
@@ -5513,10 +5870,19 @@ impl Composer {
 
     fn move_mention(&mut self, delta: isize, cx: &mut Context<Self>) {
         self.mention.active =
-            crate::popover::menu_step(self.mention.active, self.mention.results.len(), delta);
+            crate::popover::menu_step(self.mention.active, self.mention.item_count(), delta);
         if let Some(active) = self.mention.active {
-            // Keep the keyboard cursor visible in the scrolled row stack.
-            self.mention_scroll.scroll_to_item(active);
+            // Keep the keyboard cursor visible in the scrolled row stack; the
+            // section headings occupy list slots of their own.
+            let threads = self.mention.threads.len();
+            let list_ix = if threads == 0 {
+                active
+            } else if active < threads {
+                active + 1
+            } else {
+                active + 2
+            };
+            self.mention_scroll.scroll_to_item(list_ix);
         }
         self.sync_mention_controls(cx);
         cx.notify();
@@ -5538,17 +5904,22 @@ impl Composer {
         let Some(token) = self.mention.token.clone() else {
             return;
         };
-        let Some((path, is_dir)) = self
-            .mention
-            .active
-            .and_then(|active| self.mention.results.get(active))
-            .map(|result| (result.path.clone(), result.is_dir))
-        else {
+        let Some(active) = self.mention.active else {
             return;
         };
-        self.input.update(cx, |input, cx| {
-            input.replace_mention(token.range, &path, is_dir, cx)
-        });
+        let link = if let Some(thread) = self.mention.threads.get(active) {
+            thread_link(&thread.chat_id, &thread.title)
+        } else if let Some(result) = self
+            .mention
+            .results
+            .get(active - self.mention.threads.len())
+        {
+            local_file_link(&result.path, result.is_dir)
+        } else {
+            return;
+        };
+        self.input
+            .update(cx, |input, cx| input.replace_mention(token.range, link, cx));
         self.reset_mention(None, cx);
         cx.notify();
     }
@@ -5573,39 +5944,92 @@ impl Composer {
                 }),
             )
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_mention(cx)));
+        let thread_count = self.mention.threads.len();
+        let mut rows: Vec<gpui::AnyElement> = Vec::with_capacity(self.mention.item_count() + 2);
+        if thread_count > 0 {
+            rows.push(crate::popover::menu_heading(theme, "Threads").into_any_element());
+        }
+        for (ix, thread) in self.mention.threads.iter().enumerate() {
+            let selected = self.mention.active == Some(ix);
+            rows.push(
+                crate::popover::menu_row(theme, selected, format!("thread-mention-result-{ix}"))
+                    .id(("thread-mention-result", ix))
+                    .debug_selector(|| format!("thread-mention-result-{ix}"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.mention.active = Some(ix);
+                        this.accept_mention(cx);
+                    }))
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(crate::pickers::harness_mark_stack(
+                                &thread.marks,
+                                14.0,
+                                theme.text_muted,
+                                1.0,
+                            ))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .overflow_hidden()
+                                    .truncate()
+                                    .text_size(px(13.0))
+                                    .text_color(theme.text)
+                                    .child(SharedString::from(thread.title.clone())),
+                            ),
+                    )
+                    .into_any_element(),
+            );
+        }
+        // The file half keeps its own states under the thread rows: a
+        // skeleton while the search is out, the error, or the empty note
+        // (only when no thread matched either).
+        let mut status: Option<gpui::AnyElement> = None;
         if self.mention.loading && self.mention.results.is_empty() {
-            card = card.child(crate::popover::skeleton_rows(
+            status = Some(crate::popover::skeleton_rows(
                 "file-mention-loading",
                 theme,
-                3,
+                if thread_count > 0 { 1 } else { 3 },
                 cx.entity_id(),
                 cx,
             ));
         } else if let Some(error) = self.mention.error.clone() {
-            card = card.child(
+            status = Some(
                 div()
                     .px(px(12.0))
                     .py(px(10.0))
                     .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.danger_muted)
-                    .child(error),
+                    .child(error)
+                    .into_any_element(),
             );
         } else if self.mention.results.is_empty() {
-            card = card.child(
-                div()
-                    .px(px(12.0))
-                    .py(px(10.0))
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(theme.text_muted)
-                    .child(if token.query.is_empty() {
-                        "No files available"
-                    } else {
-                        "No matching files"
-                    }),
-            );
+            if thread_count == 0 {
+                status = Some(
+                    div()
+                        .px(px(12.0))
+                        .py(px(10.0))
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.text_muted)
+                        .child(if token.query.is_empty() {
+                            "No files available"
+                        } else {
+                            "No matching files or threads"
+                        })
+                        .into_any_element(),
+                );
+            }
         } else {
-            let mut rows: Vec<gpui::AnyElement> = Vec::with_capacity(self.mention.results.len());
-            for (ix, result) in self.mention.results.iter().enumerate() {
+            if thread_count > 0 {
+                rows.push(crate::popover::menu_heading(theme, "Files").into_any_element());
+            }
+            for (file_ix, result) in self.mention.results.iter().enumerate() {
+                let ix = thread_count + file_ix;
                 let selected = self.mention.active == Some(ix);
                 let (directory, name) = match result.path.rsplit_once('/') {
                     Some((directory, name)) => (directory.to_string(), name.to_string()),
@@ -5663,6 +6087,8 @@ impl Composer {
                         .into_any_element(),
                 );
             }
+        }
+        if !rows.is_empty() {
             // Overflowing rows wheel-scroll inside a bounded viewport; the
             // floating rail mirrors the model-list scrollbar treatment.
             card = card.child(
@@ -5684,6 +6110,7 @@ impl Composer {
                     .children(crate::popover::rail(self, "mention-scrollbar", theme, cx)),
             );
         }
+        card = card.children(status);
         Some(crate::popover::full_width_menu_above(
             "file-mention-popup",
             card.into_any_element(),
@@ -8728,9 +9155,38 @@ impl Render for Composer {
         // (the popover glass treatment; radius matches the pill's rounding).
         // The shell keeps this entity under one parent on both routes. The
         // surface itself never fades, and frost follows the same morph radius.
+        // A session dragged from the sidebar or the tab strip drops here as
+        // a thread mention; the ring only shows while such a drag hovers the
+        // pill (typed `drag_over`, so file drags and pane resizes never light
+        // it). The shell's split halves stop above the pill so this listener
+        // is the one that receives the drop.
+        let drop_ring = {
+            let accent = theme.accent;
+            div()
+                .absolute()
+                .inset_0()
+                .rounded(px(surface_radius))
+                .border_1()
+                .border_dashed()
+                .border_color(accent)
+                .opacity(0.0)
+                .drag_over::<crate::shell::SessionRowDrag>(|style, _, _, _| style.opacity(1.0))
+                .drag_over::<crate::shell::TabDragPayload>(|style, _, _, _| style.opacity(1.0))
+        };
         let pill_surface = div()
             .relative()
             .id("composer-surface")
+            .debug_selector(|| "composer-surface".to_string())
+            .on_drop::<crate::shell::SessionRowDrag>(cx.listener(
+                |this, payload: &crate::shell::SessionRowDrag, window, cx| {
+                    this.add_thread_mention(&payload.chat_id, window, cx);
+                },
+            ))
+            .on_drop::<crate::shell::TabDragPayload>(cx.listener(
+                |this, payload: &crate::shell::TabDragPayload, window, cx| {
+                    this.add_thread_mention(&payload.chat_id, window, cx);
+                },
+            ))
             .child(crate::frost::frosted(surface_radius, 16.0, body))
             .child({
                 let measured = self.surface_bounds.clone();
@@ -8743,6 +9199,7 @@ impl Render for Composer {
                 .absolute()
                 .inset_0()
             })
+            .child(drop_ring)
             // Both completion popups span the full pill width above it —
             // the file-mention and slash tokens are mutually exclusive.
             .children(self.render_file_mention_popup(&theme, cx))
@@ -10003,18 +10460,18 @@ mod tests {
     #[test]
     fn mention_suffixes_compare_path_components() {
         let links = vec![
-            FileMentionLink {
+            MentionLink::File(FileMentionLink {
                 range: 0..0,
                 basename: "mod.rs".into(),
                 path: "foo/mod.rs".into(),
                 is_dir: false,
-            },
-            FileMentionLink {
+            }),
+            MentionLink::File(FileMentionLink {
                 range: 0..0,
                 basename: "oomod.rs".into(),
                 path: "bar/oomod.rs".into(),
                 is_dir: false,
-            },
+            }),
         ];
         assert_eq!(
             mention_display_labels(&links),
@@ -10027,23 +10484,18 @@ mod tests {
         let raw = format!("open {} now", local_file_link("src/composer.rs", false));
         let projection = TextProjection::new(&raw);
         let (link, chip) = &projection.mentions[0];
+        let link = link.range().clone();
         assert_eq!(
             &projection.display[chip.clone()],
             "\u{00A0}@composer.rs\u{00A0}"
         );
-        assert_eq!(projection.display_to_raw(chip.start + 1), link.range.start);
-        assert_eq!(projection.display_to_raw(chip.end - 1), link.range.end);
+        assert_eq!(projection.display_to_raw(chip.start + 1), link.start);
+        assert_eq!(projection.display_to_raw(chip.end - 1), link.end);
+        assert_eq!(projection.previous_boundary(link.end), Some(link.start));
+        assert_eq!(projection.next_boundary(link.start), Some(link.end));
         assert_eq!(
-            projection.previous_boundary(link.range.end),
-            Some(link.range.start)
-        );
-        assert_eq!(
-            projection.next_boundary(link.range.start),
-            Some(link.range.end)
-        );
-        assert_eq!(
-            projection.normalize_range(link.range.start + 2..link.range.end - 2),
-            link.range
+            projection.normalize_range(link.start + 2..link.end - 2),
+            link
         );
     }
 
@@ -10063,10 +10515,98 @@ mod tests {
             &display[spans[0].range.clone()],
             "\u{00A0}@composer.rs\u{00A0}"
         );
-        assert!(!spans[0].is_dir);
-        assert_eq!(spans[0].path.as_ref(), "src/composer.rs");
-        assert!(spans[1].is_dir);
-        assert_eq!(spans[1].path.as_ref(), "src/components/");
+        assert_eq!(
+            spans[0].target,
+            SentMentionTarget::File {
+                path: "src/composer.rs".into(),
+                is_dir: false,
+            }
+        );
+        assert_eq!(
+            spans[1].target,
+            SentMentionTarget::File {
+                path: "src/components/".into(),
+                is_dir: true,
+            }
+        );
+    }
+
+    #[test]
+    fn thread_mentions_serialize_and_project_to_a_title_chip() {
+        let raw = thread_link("2f9e1d58-aa", "Fix [PR] rate limits");
+        assert_eq!(raw, "[Fix \\[PR\\] rate limits](zeron-thread:2f9e1d58-aa)");
+        let links = mention_links(&raw);
+        assert_eq!(
+            links,
+            vec![MentionLink::Thread(ThreadMentionLink {
+                range: 0..raw.len(),
+                chat_id: "2f9e1d58-aa".into(),
+                title: "Fix [PR] rate limits".into(),
+            })]
+        );
+        let projection = TextProjection::new(&raw);
+        assert_eq!(
+            &projection.display[projection.mentions[0].1.clone()],
+            format!("\u{00A0}{THREAD_ICON_SLOT}Fix\u{00A0}[PR]\u{00A0}rate\u{00A0}limits\u{00A0}")
+        );
+        let (display, spans) = sent_mention_display(&format!("see {raw} first")).unwrap();
+        assert!(!display.contains(THREAD_MENTION_SCHEME));
+        assert_eq!(
+            spans[0].target,
+            SentMentionTarget::Thread {
+                chat_id: "2f9e1d58-aa".into()
+            }
+        );
+        // Unsafe ids, empty labels, and labels that do not round-trip are
+        // ordinary Markdown, not chips.
+        assert!(mention_links("[t](zeron-thread:../x)").is_empty());
+        assert!(mention_links("[](zeron-thread:abc)").is_empty());
+        assert!(mention_links("[a]b](zeron-thread:abc)").is_empty());
+        assert_eq!(sent_mention_display("what is a zeron-thread: link?"), None);
+    }
+
+    #[test]
+    fn thread_matches_filter_by_title_or_id_prefix_and_skip_self_and_drafts() {
+        let chat = |id: &str, title: Option<&str>| zeron_proto::Chat {
+            id: id.into(),
+            device_id: "dev".into(),
+            title: title.map(str::to_string),
+            archived: false,
+            cwd: None,
+            branch: None,
+            checkout_id: None,
+            source_context: None,
+            config: None,
+            last_message_preview: None,
+            last_message_at: None,
+            created_at: chrono::Utc::now(),
+            harness_session_id: None,
+            harness_session_cwd: None,
+            space_id: None,
+            last_seen_at: None,
+            room_gen: None,
+            sidechat_source_chat_id: None,
+            created_by_chat_id: None,
+            previous_harnesses: Vec::new(),
+        };
+        let mut chats = vec![
+            chat("a1", Some("Fix PR fetching")),
+            chat("b2", Some("Minimize slider")),
+            chat("c3", None),
+            chat("d4", Some("Fix Claude context")),
+            chat("e5", Some("Fix on the laptop")),
+        ];
+        chats[4].device_id = "laptop".into();
+        let titles = |query: &str| {
+            thread_matches(chats.iter(), query, "dev", Some("d4"), |id| id == "b2")
+                .into_iter()
+                .map(|m| m.title)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(titles(""), vec!["Fix PR fetching", "New session"]);
+        assert_eq!(titles("fix"), vec!["Fix PR fetching"]);
+        assert_eq!(titles("C3"), vec!["New session"]);
+        assert!(titles("zzz").is_empty());
     }
 
     /// Ordinary prompts must stay on the zero-cost path, including ones that

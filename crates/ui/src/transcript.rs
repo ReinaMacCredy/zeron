@@ -5467,6 +5467,24 @@ impl Transcript {
     ) -> AnyElement {
         let fold = self.user_folds.get(row_id).copied().unwrap_or_default();
         let expanded = fold.open.unwrap_or(false);
+        // Thread chips resolve their brand mark against the live chat list
+        // here (the sent Markdown carries only the id).
+        let thread_icons: Vec<(Range<usize>, (&'static str, Option<gpui::Hsla>))> = {
+            let state = self.state.read(cx);
+            mentions
+                .iter()
+                .filter_map(|span| match &span.target {
+                    crate::composer::SentMentionTarget::Thread { chat_id } => {
+                        let chat = state.chats.iter().find(|chat| chat.id == chat_id.as_ref());
+                        Some((
+                            crate::composer::thread_icon_slot(&span.range),
+                            crate::composer::thread_chip_icon(chat),
+                        ))
+                    }
+                    crate::composer::SentMentionTarget::File { .. } => None,
+                })
+                .collect()
+        };
         let line_height =
             f32::from(crate::typography::ui_rems(USER_LINE_HEIGHT).to_pixels(window.rem_size()));
         let collapsed_text_h = USER_COLLAPSED_LINES as f32 * line_height;
@@ -5533,6 +5551,7 @@ impl Transcript {
                 row_id,
                 text,
                 mentions,
+                thread_icons,
                 theme,
                 measured_h.clone(),
                 cx.entity_id(),
@@ -7712,6 +7731,7 @@ fn user_bubble_text(
     row_id: &SharedString,
     text: SharedString,
     mentions: Arc<Vec<crate::composer::SentMentionSpan>>,
+    thread_icons: Vec<(Range<usize>, (&'static str, Option<gpui::Hsla>))>,
     theme: &Theme,
     measured_h: Rc<Cell<f32>>,
     entity_id: gpui::EntityId,
@@ -7735,13 +7755,30 @@ fn user_bubble_text(
         underline: None,
         strikethrough: None,
     };
+    // A sent thread mention echoes exactly as the composer showed it: mark,
+    // then the title in the accent color at medium weight, no wash.
+    let thread_run = |len: usize| {
+        let mut font = gpui::font(theme.font_sans.clone());
+        font.weight = gpui::FontWeight::MEDIUM;
+        TextRun {
+            len,
+            font,
+            color: theme.accent,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }
+    };
     let mut runs = Vec::with_capacity(mentions.len() * 2 + 1);
     let mut at = 0;
     for span in mentions.iter() {
         if at < span.range.start {
             runs.push(body_run(span.range.start - at));
         }
-        runs.push(chip_run(span.range.len()));
+        runs.push(match span.target {
+            crate::composer::SentMentionTarget::File { .. } => chip_run(span.range.len()),
+            crate::composer::SentMentionTarget::Thread { .. } => thread_run(span.range.len()),
+        });
         at = span.range.end;
     }
     if at < text.len() {
@@ -7750,12 +7787,16 @@ fn user_bubble_text(
     let styled = StyledText::new(text.clone()).with_runs(runs);
     let layout = styled.layout().clone();
     let wash = theme.code_wash;
+    let icon_fallback = theme.text_muted;
     let sel_key: std::sync::Arc<str> = format!("{row_id}:u").into();
     let sel_theme = theme.clone();
     let underlay = canvas(
         |_, _, _| (),
         move |_, _, window, cx| {
             for span in mentions.iter() {
+                if matches!(span.target, crate::composer::SentMentionTarget::Thread { .. }) {
+                    continue;
+                }
                 for rect in render::range_rects(&layout, &span.range, 0.0, 2.0) {
                     window.paint_quad(quad(
                         rect,
@@ -7765,6 +7806,14 @@ fn user_bubble_text(
                         gpui::transparent_black(),
                         BorderStyle::default(),
                     ));
+                }
+            }
+            for (slot, icon) in &thread_icons {
+                if let Some(rect) = render::range_rects(&layout, slot, 0.0, 2.0)
+                    .into_iter()
+                    .next()
+                {
+                    crate::composer::paint_thread_icon(rect, *icon, icon_fallback, window, cx);
                 }
             }
             render::paint_text_selection(window, &sel_key, &text, &layout, &sel_theme);
@@ -10933,7 +10982,10 @@ mod tests {
         let (_fixture, cx) = cx.add_window_view(|_, _| GroupFixture(transcript.clone()));
         cx.run_until_parked();
         transcript.read_with(cx, |this, _| {
-            assert!(this.blob_fetch_order.is_empty(), "no fetch before the click");
+            assert!(
+                this.blob_fetch_order.is_empty(),
+                "no fetch before the click"
+            );
         });
         let header = cx
             .debug_bounds("tool-chip-header-0")
@@ -13517,8 +13569,13 @@ mod tests {
         );
         assert!(text.contains("composer.rs"));
         assert_eq!(mentions.len(), 1);
-        assert!(!mentions[0].is_dir);
-        assert_eq!(mentions[0].path.as_ref(), "crates/ui/src/composer.rs");
+        assert_eq!(
+            mentions[0].target,
+            crate::composer::SentMentionTarget::File {
+                path: "crates/ui/src/composer.rs".into(),
+                is_dir: false,
+            }
+        );
         assert_eq!(&text[mentions[0].range.clone()], {
             let projected: &str = "\u{00A0}@composer.rs\u{00A0}";
             projected

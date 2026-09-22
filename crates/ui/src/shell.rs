@@ -68,6 +68,9 @@ mod summary;
 mod switcher;
 mod tabs;
 
+pub(crate) use split::SessionRowDrag;
+pub(crate) use tabs::TabDragPayload;
+
 use spaces::{AddSpaceFlow, RenameSpaceDialog};
 
 actions!(

@@ -78,7 +78,7 @@ impl SplitPair {
 /// The secondary pane: its chat, side, and the transcript + composer bound
 /// to that chat (the same wiring as [`SidechatTab`]).
 pub(super) struct SplitPane {
-    pub(super) chat_id: String,
+    pub(crate) chat_id: String,
     pub(super) side: SplitSide,
     transcript: Entity<Transcript>,
     composer: Entity<Composer>,
@@ -89,8 +89,8 @@ pub(super) struct SplitPane {
 /// A sidebar row being dragged. Distinct from the strip's
 /// [`tabs::TabDragPayload`] on purpose: the strip's drag-move/drop
 /// listeners read a tab index and would reorder on a row drag.
-pub(super) struct SessionRowDrag {
-    pub(super) chat_id: String,
+pub(crate) struct SessionRowDrag {
+    pub(crate) chat_id: String,
     pub(super) title: SharedString,
     pub(super) brand: Option<(&'static str, Option<gpui::Hsla>)>,
 }
@@ -103,6 +103,10 @@ pub(super) struct SplitDropHot {
     pub(super) prev: Option<SplitSide>,
     pub(super) epoch: usize,
 }
+
+/// Slack above the composer pill where the split halves already yield to
+/// it, so a drop aimed at the pill's top edge still lands as a mention.
+const COMPOSER_DROP_MARGIN: f32 = 8.0;
 
 /// What a drop on `side` does: the pair afterwards and the chat to select
 /// (when the drop replaced or created the primary's slot). Pure.
@@ -332,9 +336,16 @@ impl Shell {
 
     /// GPUI fires `on_drag_move` on EVERY listener, hovered or not, so the
     /// side comes from the pointer against the layer's bounds (outside the
-    /// layer: no zone is hot).
-    fn split_zone_at(bounds: gpui::Bounds<Pixels>, position: Point<Pixels>) -> Option<SplitSide> {
+    /// layer, or over the composer's own drop target: no zone is hot).
+    fn split_zone_at(
+        bounds: gpui::Bounds<Pixels>,
+        position: Point<Pixels>,
+        composer_top: Option<Pixels>,
+    ) -> Option<SplitSide> {
         if !bounds.contains(&position) {
+            return None;
+        }
+        if composer_top.is_some_and(|top| position.y >= top - px(COMPOSER_DROP_MARGIN)) {
             return None;
         }
         Some(if position.x < bounds.center().x {
@@ -342,6 +353,17 @@ impl Shell {
         } else {
             SplitSide::Right
         })
+    }
+
+    /// Window-space top of the composer pill, measured last frame. The split
+    /// halves stop above it so the pill's own drop listeners (thread
+    /// mention) receive a drop instead of the half behind it.
+    fn composer_drop_top(&self, cx: &App) -> Option<Pixels> {
+        self.composer
+            .read(cx)
+            .surface_bounds()
+            .get()
+            .map(|bounds| bounds.top())
     }
 
     /// The secondary pane: a header (brand, title, close) under the
@@ -550,6 +572,12 @@ impl Shell {
         };
         let left = zone(SplitSide::Left, cx);
         let right = zone(SplitSide::Right, cx);
+        // A listener-free spacer keeps the halves off the composer pill, so
+        // a drop there reaches the pill's own thread-mention target.
+        let composer_top = self.composer_drop_top(cx);
+        let spacer_h = composer_top
+            .map(|top| (self.viewport_height - f32::from(top) + COMPOSER_DROP_MARGIN).max(0.0))
+            .unwrap_or(0.0);
         let inert_tab = inert.clone();
         Some(
             div()
@@ -560,18 +588,20 @@ impl Shell {
                 .right_0()
                 .bottom_0()
                 .flex()
-                .flex_row()
+                .flex_col()
                 .opacity(0.0)
                 .bg(theme.scrim().opacity(0.35))
                 .on_drag_move::<tabs::TabDragPayload>(cx.listener(
                     |this, event: &gpui::DragMoveEvent<tabs::TabDragPayload>, _, cx| {
-                        let side = Self::split_zone_at(event.bounds, event.event.position);
+                        let top = this.composer_drop_top(cx);
+                        let side = Self::split_zone_at(event.bounds, event.event.position, top);
                         this.set_split_drop_hot(side, cx);
                     },
                 ))
                 .on_drag_move::<SessionRowDrag>(cx.listener(
                     |this, event: &gpui::DragMoveEvent<SessionRowDrag>, _, cx| {
-                        let side = Self::split_zone_at(event.bounds, event.event.position);
+                        let top = this.composer_drop_top(cx);
+                        let side = Self::split_zone_at(event.bounds, event.event.position, top);
                         this.set_split_drop_hot(side, cx);
                     },
                 ))
@@ -589,8 +619,16 @@ impl Shell {
                         1.0
                     })
                 })
-                .child(left)
-                .child(right)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .flex_row()
+                        .child(left)
+                        .child(right),
+                )
+                .child(div().flex_none().h(px(spacer_h)))
                 .into_any_element(),
         )
     }
@@ -688,13 +726,28 @@ mod drag_regressions {
                     cx,
                 );
                 let zones = shell.render_split_drop_zones(cx);
+                // The column carries the real composer at its foot, as the
+                // shell lays it out, so the halves' spacer has a pill to
+                // stop above.
+                let composer = shell.composer.clone();
+                shell.viewport_height = 500.0;
                 div()
                     .flex()
                     .flex_row()
                     .w(px(1000.))
                     .h(px(500.))
                     .child(div().w(px(240.)).child(row))
-                    .child(div().relative().flex_1().h_full().children(zones))
+                    .child(
+                        div()
+                            .relative()
+                            .flex_1()
+                            .h_full()
+                            .flex()
+                            .flex_col()
+                            .child(div().flex_1())
+                            .child(composer)
+                            .children(zones),
+                    )
             })
         }
     }
@@ -735,6 +788,60 @@ mod drag_regressions {
         shell.read_with(cx, |shell, _| {
             assert_eq!(shell.split_chat_id(), Some("b"));
             assert_eq!(shell.split.as_ref().map(|s| s.side), Some(SplitSide::Right));
+        });
+    }
+
+    /// The same row dragged onto the composer pill does not split: the
+    /// halves yield above the pill and the drop lands in the composer as a
+    /// thread mention link (the strict Markdown the chip projects from).
+    #[gpui::test]
+    fn dragging_a_sidebar_row_onto_the_composer_inserts_a_thread_mention(cx: &mut TestAppContext) {
+        init(cx);
+        let dir = tempfile::tempdir().unwrap();
+        let (host, cx) = cx.add_window_view(|_, cx| {
+            let shell = cx.new(|cx| {
+                let state = cx.new(|_| AppState::new());
+                let shell = Shell::new(state, boot_config(&dir), cx);
+                seed(&shell, cx);
+                shell
+            });
+            RowHost {
+                shell,
+                _data_dir: dir,
+            }
+        });
+        let shell = host.read_with(cx, |host, _| host.shell.clone());
+        cx.update(|window, cx| window.draw(cx).clear());
+        let start = cx.debug_bounds("chat-b").unwrap().center();
+        cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(
+            start + gpui::point(px(12.), px(12.)),
+            Some(MouseButton::Left),
+            gpui::Modifiers::default(),
+        );
+        cx.update(|window, cx| window.draw(cx).clear());
+        let pill = cx
+            .debug_bounds("composer-surface")
+            .expect("composer pill rendered")
+            .center();
+        cx.simulate_mouse_move(pill, Some(MouseButton::Left), gpui::Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear());
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(
+                shell.split_drop_hot.as_ref().and_then(|h| h.hot),
+                None,
+                "no split half is hot over the pill"
+            );
+        });
+        cx.simulate_mouse_up(pill, MouseButton::Left, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(
+                shell.split_chat_id(),
+                None,
+                "a drop on the pill must not split"
+            );
+            let text = shell.composer.read(cx).input.read(cx).text().to_string();
+            assert_eq!(text, "[b](zeron-thread:b) ");
         });
     }
 

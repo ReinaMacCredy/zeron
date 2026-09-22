@@ -40,9 +40,9 @@ pub(super) struct TabDragState {
 
 /// The dragged-tab payload (gpui drag-and-drop). `chat_id` is what the split
 /// view's drop zones read; the strip itself reorders by `from`.
-pub(super) struct TabDragPayload {
+pub(crate) struct TabDragPayload {
     from: usize,
-    pub(super) chat_id: String,
+    pub(crate) chat_id: String,
     title: SharedString,
     brand: Option<(&'static str, Option<gpui::Hsla>)>,
 }
