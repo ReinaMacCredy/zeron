@@ -534,6 +534,19 @@ impl Tool for ScrollTool {
             None
         };
 
+        if refuses_unresolved_element(pre_focus_ptr.is_some(), wheel_target.is_some()) {
+            return ToolResult::error(
+                "scroll: the element has no readable screen position, so no wheel was sent. \
+                 Arrow keys are not substituted because they would change its selection or \
+                 value. An AXScrollToVisible reveal may have run. Observe fresh state and \
+                 target a visible point with x,y instead."
+                    .to_string(),
+            )
+            .with_structured(serde_json::json!({
+                "code": "scroll_target_unresolved", "effect": "refused", "verified": false
+            }));
+        }
+
         if let Some(target) = wheel_target {
             if !delivery_mode.is_foreground() {
                 if let Some(wid) = target.wid {
@@ -790,6 +803,10 @@ fn needs_reveal(center: Option<(f64, f64)>, frame: Option<(f64, f64, f64, f64)>)
     }
 }
 
+fn refuses_unresolved_element(has_element: bool, has_wheel_target: bool) -> bool {
+    has_element && !has_wheel_target
+}
+
 fn semantic_scroll_axis<'a>(
     direction: &'a str,
     amount: usize,
@@ -1019,6 +1036,14 @@ mod tests {
         assert!(needs_reveal(Some((50.0, 300.0)), frame));
         assert!(needs_reveal(None, frame));
         assert!(needs_reveal(Some((500.0, 300.0)), None));
+    }
+
+    #[test]
+    fn an_element_without_a_wheel_point_refuses_instead_of_pressing_arrow_keys() {
+        assert!(refuses_unresolved_element(true, false));
+        assert!(!refuses_unresolved_element(true, true));
+        assert!(!refuses_unresolved_element(false, false));
+        assert!(!refuses_unresolved_element(false, true));
     }
 
     #[test]
