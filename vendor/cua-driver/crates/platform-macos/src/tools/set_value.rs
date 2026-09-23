@@ -222,6 +222,7 @@ impl Tool for SetValueTool {
         // child option which can trigger app activation in some setups.
         let prior_front = apps::frontmost_pid();
         let snapshot = WindowChangeDetector::snapshot(prior_front);
+        let web_content = ax_echo_surface;
 
         let result = focus_guard::with_focus_suppressed(
             Some(pid),
@@ -229,7 +230,7 @@ impl Tool for SetValueTool {
             "set_value.AXValue",
             || async move {
                 tokio::task::spawn_blocking(move || {
-                    set_value_blocking(element_ptr, element_index, &value, append)
+                    set_value_blocking(element_ptr, element_index, &value, append, web_content)
                 })
                 .await
             },
@@ -402,6 +403,7 @@ fn set_value_blocking(
     element_index: usize,
     value: &str,
     append: bool,
+    web_content: bool,
 ) -> anyhow::Result<SetValueOutcome> {
     let element = element_ptr as AXUIElementRef;
 
@@ -491,7 +493,9 @@ fn set_value_blocking(
                         .check_target()
                         .map_err(AxActionFailure::before_dispatch)?;
                     write()?;
-                    if needs_string_retry(&route, unsafe { copy_number_attr(element, "AXValue") }) {
+                    if web_content
+                        && needs_string_retry(&route, unsafe { copy_number_attr(element, "AXValue") })
+                    {
                         let error = unsafe { set_string_attr(element, "AXValue", value) };
                         if error != kAXErrorSuccess {
                             return Err(AxActionFailure::uncertain(format!(

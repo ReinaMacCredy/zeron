@@ -1388,7 +1388,8 @@ fn type_text_blocking(
         // setter, and AppKit still answers success for the ignored write.
         let splice_base = unsafe {
             (!is_attribute_settable(element, "AXSelectedText")
-                && is_attribute_settable(element, "AXValue"))
+                && is_attribute_settable(element, "AXValue")
+                && before.is_some())
             .then(|| {
                 let placeholder = copy_string_attr(element, "AXPlaceholderValue");
                 before
