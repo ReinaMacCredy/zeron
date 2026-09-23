@@ -629,7 +629,12 @@ impl ComputerTools {
                     "A conditional wait requires a nonempty label and window_id.",
                 ));
             };
-            let signal = desktop_operation_signal();
+            // Each poll re-mints authority, so only the one held from the start sees a Stop or Escape.
+            let authority = manager.thread_authority_signal(chat_id);
+            let signal = Some(match desktop_operation_signal() {
+                Some(signal) => signal.any(&authority),
+                None => authority,
+            });
             let readiness = wait_for_control(
                 || {
                     let window_id = window_id.clone();

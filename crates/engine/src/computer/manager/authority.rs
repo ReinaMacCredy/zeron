@@ -152,6 +152,30 @@ impl ComputerManager {
             && self.control_state.allows(thread_id, generation)
     }
 
+    fn thread_authority(&self, thread_id: &str) -> Authority {
+        let mut state = self.state();
+        let current = state
+            .authority_revocations
+            .get(thread_id)
+            .filter(|authority| !authority.aborted())
+            .cloned();
+        match current {
+            Some(authority) => authority,
+            None => {
+                let authority = Authority::new();
+                state
+                    .authority_revocations
+                    .insert(thread_id.to_owned(), authority.clone());
+                state.revoked_threads.remove(thread_id);
+                authority
+            }
+        }
+    }
+
+    pub fn thread_authority_signal(&self, thread_id: &str) -> OperationSignal {
+        self.thread_authority(thread_id).token.clone().into()
+    }
+
     pub async fn with_agent_activity<A, F, Fut>(
         &self,
         thread_id: &str,
@@ -176,25 +200,7 @@ impl ComputerManager {
                 return Err(revoked(REVOKED_ADMISSION).into());
             }
         }
-        let authority = {
-            let mut state = self.state();
-            let current = state
-                .authority_revocations
-                .get(thread_id)
-                .filter(|authority| !authority.aborted())
-                .cloned();
-            match current {
-                Some(authority) => authority,
-                None => {
-                    let authority = Authority::new();
-                    state
-                        .authority_revocations
-                        .insert(thread_id.to_owned(), authority.clone());
-                    state.revoked_threads.remove(thread_id);
-                    authority
-                }
-            }
-        };
+        let authority = self.thread_authority(thread_id);
         let broadcast: OperationSignal = authority.token.clone().into();
         let admission = match signal {
             Some(signal) => signal.any(&broadcast),
