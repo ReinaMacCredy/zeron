@@ -979,6 +979,19 @@ fn verify_typed(before: Option<&str>, after: Option<&str>, text: &str) -> bool {
 /// Classify an observable insertion without mistaking a prefix for complete
 /// delivery. A positive length delta is an exact delivered-character count for
 /// insert-at-cursor typing; it is capped at the request size defensively.
+// Only an observed, unchanged value proves nothing landed; an unreadable one must not invite a retype.
+fn unlanded_semantic_count(progress: Option<TypedProgress>, web_unchanged: bool) -> Option<usize> {
+    match progress {
+        Some(TypedProgress::Unchanged) if !web_unchanged => Some(0),
+        _ => None,
+    }
+}
+
+// Keystroke synthesis after an AX write that may have landed would type the text twice.
+fn blocks_synthesis(attempt: AxAttempt) -> bool {
+    attempt == AxAttempt::Unverifiable
+}
+
 fn typed_progress(before: Option<&str>, after: Option<&str>, text: &str) -> TypedProgress {
     if text.is_empty() {
         return TypedProgress::Complete;
@@ -986,6 +999,10 @@ fn typed_progress(before: Option<&str>, after: Option<&str>, text: &str) -> Type
     let Some(after) = after else {
         return TypedProgress::Unverifiable;
     };
+    // A field that already held the text proves nothing about this write.
+    if before == Some(after) {
+        return TypedProgress::Unchanged;
+    }
     if after.contains(text) {
         return TypedProgress::Complete;
     }
@@ -1466,10 +1483,7 @@ fn type_text_blocking(
         // exceed its transport-safe budget, rejected/unchanged AX writes fail
         // safely and unreadable AX state is reported as indeterminate.
         let mut after = unsafe { copy_string_attr(element, "AXValue") };
-        if splice_base.is_some()
-            && err == kAXErrorSuccess
-            && interruption.is_none()
-        {
+        if splice_base.is_some() && err == kAXErrorSuccess && interruption.is_none() {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
             while !after.as_deref().is_some_and(|value| value.contains(text))
                 && std::time::Instant::now() < deadline
@@ -1543,11 +1557,7 @@ fn type_text_blocking(
                 ),
                 path: PATH_AX,
                 verified: false,
-                delivered_chars: if unchanged_web_readback {
-                    None
-                } else {
-                    Some(0)
-                },
+                delivered_chars: unlanded_semantic_count(ax_progress, unchanged_web_readback),
             }));
         }
         ax_attempt = match ax_progress {
@@ -1557,6 +1567,17 @@ fn type_text_blocking(
             None => AxAttempt::Rejected,
             Some(TypedProgress::Complete | TypedProgress::Partial(_)) => unreachable!(),
         };
+        if blocks_synthesis(ax_attempt) {
+            let idx_str = idx_opt.map(|i| format!(" [{i}]")).unwrap_or_default();
+            return Ok(TypeTextDelivery::Typed(TypeTextOutcome {
+                detail: format!(
+                    " via an AX write into{idx_str} {role} \"{title}\" whose effect could not be read back"
+                ),
+                path: PATH_AX,
+                verified: false,
+                delivered_chars: None,
+            }));
+        }
         tracing::debug!(
             "AX write did not land for {role} \"{title}\" (err={err}); \
              falling back to CGEvent keystrokes"
@@ -1736,6 +1757,46 @@ mod tests {
         assert_eq!(indeterminate["synthesized_chars"], 0);
         assert_eq!(indeterminate["retryable"], false);
         assert_eq!(indeterminate["escalation"]["recommended"], "verify_state");
+    }
+
+    #[test]
+    fn a_field_that_already_held_the_text_is_unchanged_not_complete() {
+        assert_eq!(
+            typed_progress(Some("10"), Some("10"), "1"),
+            TypedProgress::Unchanged
+        );
+        assert_eq!(
+            typed_progress(Some("abc."), Some("abc."), "."),
+            TypedProgress::Unchanged
+        );
+        assert_eq!(
+            typed_progress(Some("10"), Some("101"), "1"),
+            TypedProgress::Complete
+        );
+    }
+
+    #[test]
+    fn an_unreadable_semantic_readback_never_reports_zero_delivered() {
+        assert_eq!(
+            unlanded_semantic_count(Some(TypedProgress::Unverifiable), false),
+            None
+        );
+        assert_eq!(
+            unlanded_semantic_count(Some(TypedProgress::Unchanged), true),
+            None
+        );
+        assert_eq!(
+            unlanded_semantic_count(Some(TypedProgress::Unchanged), false),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn an_unobservable_ax_write_blocks_keystroke_synthesis() {
+        assert!(blocks_synthesis(AxAttempt::Unverifiable));
+        assert!(!blocks_synthesis(AxAttempt::Unchanged));
+        assert!(!blocks_synthesis(AxAttempt::Rejected));
+        assert!(!blocks_synthesis(AxAttempt::NotAttempted));
     }
 
     #[test]
