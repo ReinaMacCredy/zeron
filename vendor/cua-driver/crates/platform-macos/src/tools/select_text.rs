@@ -49,8 +49,12 @@ fn def() -> &'static ToolDef {
         name: "select_text".into(),
         description:
             "Select an exact character range in a text element through \
-             AXSelectedTextRange. Offsets count UTF-16 code units; `length` 0 \
-             places a collapsed caret at `start`. The selection is confirmed \
+             AXSelectedTextRange. Offsets count UTF-16 code units of the \
+             element's complete, untrimmed AXValue (an emoji outside the Basic \
+             Multilingual Plane counts as 2; a range that splits one is refused \
+             with range_splits_character); `length` 0 places a collapsed caret at \
+             `start`. When AXValue is readable the result carries the text that \
+             range covers as `selected_text`. The selection is confirmed \
              only by an attribute read-back that reports the requested range. \
              \n\
              Elements without a settable AXSelectedTextRange — including most \
@@ -259,6 +263,9 @@ impl Tool for SelectTextTool {
                 if ax_echo_surface {
                     structured["observation_required"] = serde_json::json!(true);
                 }
+                if let Some(text) = outcome.selected_text {
+                    structured["selected_text"] = serde_json::json!(text);
+                }
                 ToolResult::text(msg).with_structured(structured)
             }
             Ok(Err(e)) => action_failure_result(e, "select_text failed"),
@@ -280,6 +287,7 @@ impl Tool for SelectTextTool {
 struct SelectTextOutcome {
     detail: String,
     verified: Option<bool>,
+    selected_text: Option<String>,
 }
 
 fn apply_surface_trust(outcome: &mut SelectTextOutcome, ax_echo_surface: bool) {
@@ -328,18 +336,10 @@ fn select_text_blocking(
     // is a bad request, refused before dispatch rather than a write the app
     // may silently clamp. When AXValue is not readable the post-write
     // read-back is the sole arbiter and a mismatch reports unconfirmed.
-    if let Some(value) =
-        unsafe { copy_stringish_attr(element, "AXValue") }.and_then(|value| value.string_value)
-    {
-        let units = value.encode_utf16().count() as i64;
-        if start > units || start + length > units {
-            return Err(AxActionFailure::refused(format!(
-                "range start={start} length={length} exceeds the element's {units} \
-                 UTF-16 code units; the request is refused rather than clamped."
-            ))
-            .into());
-        }
-    }
+    let selected_text = unsafe { copy_stringish_attr(element, "AXValue") }
+        .and_then(|value| value.string_value)
+        .map(|value| range_text(&value, start, length))
+        .transpose()?;
 
     (|| -> anyhow::Result<()> {
         crate::input::ax_actions::ensure_ax_action_enabled(element_ptr, "AXSelectedTextRange")?;
@@ -368,5 +368,60 @@ fn select_text_blocking(
             "✅ Selected {length} characters at {start} on [{element_index}] {role}.{suffix}"
         ),
         verified,
+        selected_text,
     })
+}
+
+fn range_text(value: &str, start: i64, length: i64) -> anyhow::Result<String> {
+    let units: Vec<u16> = value.encode_utf16().collect();
+    let count = units.len() as i64;
+    if start > count || start + length > count {
+        return Err(AxActionFailure::refused(format!(
+            "range start={start} length={length} exceeds the element's {count} \
+             UTF-16 code units; the request is refused rather than clamped."
+        ))
+        .into());
+    }
+    let (start, end) = (start as usize, (start + length) as usize);
+    let splits = |at: usize| {
+        units
+            .get(at)
+            .is_some_and(|unit| (0xDC00..0xE000).contains(unit))
+    };
+    if splits(start) || splits(end) {
+        return Err(AxActionFailure::refused_with_code(
+            "range_splits_character",
+            "The range starts or ends inside a character that takes two UTF-16 code units \
+             (most emoji and other characters outside the Basic Multilingual Plane count \
+             as 2); nothing was selected. Recount the offsets in UTF-16 code units.",
+        )
+        .into());
+    }
+    Ok(String::from_utf16_lossy(&units[start..end]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{range_text, AxActionFailure};
+
+    #[test]
+    fn a_range_is_read_from_the_untrimmed_value_in_utf16_units() {
+        assert_eq!(range_text("\n\nTotal: 10", 9, 2).unwrap(), "10");
+        assert_eq!(range_text("a🦀b", 1, 2).unwrap(), "🦀");
+        assert_eq!(range_text("a🦀b", 3, 1).unwrap(), "b");
+        assert_eq!(range_text("abc", 3, 0).unwrap(), "");
+    }
+
+    #[test]
+    fn a_range_that_splits_a_surrogate_pair_or_overruns_is_refused() {
+        for (start, length) in [(2, 1), (1, 1), (0, 5), (5, 0)] {
+            let error = range_text("a🦀b", start, length).unwrap_err();
+            assert!(!error.downcast_ref::<AxActionFailure>().unwrap().attempted);
+        }
+        let error = range_text("a🦀b", 2, 1).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<AxActionFailure>().unwrap().code(),
+            Some("range_splits_character")
+        );
+    }
 }
