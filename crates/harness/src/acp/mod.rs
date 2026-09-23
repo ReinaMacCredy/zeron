@@ -1656,6 +1656,10 @@ impl Harness for AcpHarness {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+    fn computer_tools_reachable(&self) -> bool {
+        // pi-acp 0.0.33 never forwards mcpServers to pi; Antigravity gets no catalog (SPEC d34).
+        !matches!(self.spec.id, HarnessId::Pi | HarnessId::Antigravity)
+    }
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         self.spec.reasoning_levels
     }

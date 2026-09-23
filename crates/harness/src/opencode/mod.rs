@@ -321,6 +321,9 @@ impl Harness for OpencodeHarness {
     fn id(&self) -> HarnessId {
         HarnessId::Opencode
     }
+    fn computer_tools_reachable(&self) -> bool {
+        false
+    }
     fn display_name(&self) -> &str {
         // Must match the registry's lazy descriptor.
         "OpenCode"

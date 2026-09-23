@@ -223,6 +223,9 @@ impl Harness for CursorHarness {
     fn id(&self) -> HarnessId {
         HarnessId::Cursor
     }
+    fn computer_tools_reachable(&self) -> bool {
+        false
+    }
     fn display_name(&self) -> &str {
         "Cursor"
     }

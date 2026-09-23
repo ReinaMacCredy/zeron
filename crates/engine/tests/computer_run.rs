@@ -49,6 +49,7 @@ struct Probe {
     runs: Mutex<Vec<Arc<RunCtl>>>,
     resume: Option<bool>,
     swallow_steers: std::sync::atomic::AtomicBool,
+    tools_unreachable: std::sync::atomic::AtomicBool,
 }
 
 struct ComputerHarness(Arc<Probe>);
@@ -78,6 +79,12 @@ impl Harness for ComputerHarness {
     }
     fn resume_supported(&self) -> Option<bool> {
         self.0.resume.or(Some(true))
+    }
+    fn computer_tools_reachable(&self) -> bool {
+        !self
+            .0
+            .tools_unreachable
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         &[]
@@ -642,6 +649,32 @@ async fn an_agent_that_cannot_reload_its_session_refuses_the_flip_visibly() {
     );
     let steered = rig.saw(2).await;
     assert!(steered.steer && !steered.computer);
+    assert!(
+        rig.system_notes()
+            .iter()
+            .any(|note| note.starts_with("Computer is unavailable for this turn"))
+    );
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_agent_that_cannot_see_the_computer_tools_refuses_computer_visibly() {
+    let rig = rig();
+    rig.probe
+        .tools_unreachable
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    rig.run(
+        "c1",
+        "/computer-use open Calculator",
+        PermissionMode::Full,
+        None,
+    );
+    let seen = rig.saw(1).await;
+    assert!(!seen.computer, "no catalog for an agent that cannot see it");
+    assert!(
+        seen.guidance.is_none(),
+        "no guidance for tools it cannot see"
+    );
     assert!(
         rig.system_notes()
             .iter()

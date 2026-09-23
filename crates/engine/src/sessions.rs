@@ -654,6 +654,16 @@ impl SessionsEngine {
         // Every dispatched prompt is a turn — routed steer or fresh run alike.
         self.note_turn_start(chat_id, &request.cwd);
         self.label_computer_chat(chat_id);
+        if request.computer_control
+            && self
+                .inner
+                .registry
+                .resolve(harness_id)
+                .is_ok_and(|harness| !harness.computer_tools_reachable())
+        {
+            self.note_computer_unreachable(chat_id, harness_id);
+            request.computer_control = false;
+        }
         let mut turn_computer = request.computer_control;
         let live_computer = lock(&self.inner.runs)
             .get(chat_id)
@@ -841,13 +851,28 @@ impl SessionsEngine {
         }
     }
 
-    fn note_computer_unavailable(&self, chat_id: &str, harness_id: HarnessId) {
-        let name = self
-            .inner
+    fn harness_display_name(&self, harness_id: HarnessId) -> String {
+        self.inner
             .registry
             .resolve(harness_id)
             .map(|harness| harness.display_name().to_owned())
-            .unwrap_or_else(|_| "This agent".into());
+            .unwrap_or_else(|_| "This agent".into())
+    }
+
+    fn note_computer_unreachable(&self, chat_id: &str, harness_id: HarnessId) {
+        let name = self.harness_display_name(harness_id);
+        let hint = format!(
+            "{name} does not receive Zeron's Computer tools. Switch this chat to Claude, Codex or another agent that does to use Computer."
+        );
+        self.write_computer_note(
+            chat_id,
+            "Computer is unavailable for this turn",
+            Some(&hint),
+        );
+    }
+
+    fn note_computer_unavailable(&self, chat_id: &str, harness_id: HarnessId) {
+        let name = self.harness_display_name(harness_id);
         let hint = format!(
             "{name} cannot reload its session, so Zeron cannot restart it with the Computer tools without losing the conversation. Start a new chat to use Computer with it."
         );

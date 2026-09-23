@@ -199,6 +199,11 @@ pub trait Harness: Send + Sync {
         Some(true)
     }
 
+    /// Whether the agent can see the Zeron MCP server's computer tools.
+    fn computer_tools_reachable(&self) -> bool {
+        true
+    }
+
     /// Run one (persistent) session; the stream ends with `AgentEvent::Done`.
     async fn run(
         &self,
