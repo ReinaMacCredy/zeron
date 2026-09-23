@@ -24,8 +24,11 @@ mod apps_windows_menus;
 mod boundary;
 mod hardening_preview_browser;
 mod host_transport;
+mod lock_resume;
 mod permissions_readiness;
+mod preview_eviction;
 mod routes_keys_scroll_drag;
+mod space_churn;
 mod still_cadence;
 mod text_lanes;
 
@@ -83,6 +86,7 @@ pub(crate) struct Knobs {
     pub overview_wait: Option<Gate>,
     pub window_state_wait: Option<Gate>,
     pub type_gate: Option<Gate>,
+    pub click_gate: Option<Gate>,
     pub typing_in_flight: usize,
     pub typing_max_in_flight: usize,
     pub extra_windows: Vec<Value>,
@@ -143,6 +147,12 @@ impl ScriptedHost {
     async fn respond(&self, call: &ComputerHostCall) -> Value {
         let name = call.name.as_deref();
         let args = call.args.as_object().cloned().unwrap_or_default();
+        let click_gate = self.knobs.lock().unwrap().click_gate.clone();
+        if name == Some("click")
+            && let Some(gate) = click_gate
+        {
+            gate.wait().await;
+        }
         let (epoch, platform) = {
             let knobs = self.knobs.lock().unwrap();
             (knobs.desktop_epoch, knobs.host_platform.clone())
@@ -152,6 +162,27 @@ impl ScriptedHost {
             ComputerHostMethod::Probe | ComputerHostMethod::Stop
         ) {
             return json!({ "ok": true, "desktopEpoch": epoch, "hostPlatform": platform });
+        }
+        let paused = self
+            .knobs
+            .lock()
+            .unwrap()
+            .pauses
+            .as_ref()
+            .is_some_and(|pauses| !pauses.is_empty());
+        if paused && call.method == ComputerHostMethod::Call {
+            return json!({
+                "ok": true,
+                "desktopEpoch": epoch,
+                "result": {
+                    "isError": true,
+                    "structuredContent": {
+                        "effect": "refused",
+                        "code": "desktop_input_paused",
+                        "message": "Desktop is locked.",
+                    },
+                },
+            });
         }
         if self.knobs.lock().unwrap().desktop_paused && (name == Some("click") || is_typing(name)) {
             return json!({
@@ -386,6 +417,7 @@ pub(crate) fn fixture_with(options: FixtureOptions) -> Fixture {
         overview_wait: None,
         window_state_wait: None,
         type_gate: None,
+        click_gate: None,
         typing_in_flight: 0,
         typing_max_in_flight: 0,
         extra_windows: Vec::new(),
@@ -457,6 +489,10 @@ impl Fixture {
 
     pub(super) fn gate_type_text(&self, gate: Option<Gate>) {
         self.knobs().type_gate = gate;
+    }
+
+    pub(super) fn gate_clicks(&self, gate: Option<Gate>) {
+        self.knobs().click_gate = gate;
     }
 
     pub(super) fn typing_max_in_flight(&self) -> usize {

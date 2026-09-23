@@ -32,17 +32,23 @@ use crate::computer::backend::{
 };
 use crate::computer::fake_backend::{FakeComputerBackend, FakeComputerBackendOptions};
 
+mod approval_lease;
 mod authority;
 mod background;
 mod consent;
+mod control_invariants;
 mod denylist_audit;
 mod detached;
+mod emergency_stop;
 mod foreground;
 mod gateway;
 mod lease;
 mod observe;
+mod provision;
 mod publish;
+mod revoke;
 mod scroll;
+mod spaces;
 mod targeting;
 
 pub(super) type Hook<A, T> = Arc<
@@ -81,6 +87,9 @@ pub(super) struct Hooks {
     pub end_task: Option<Hook<(String, Option<String>), ()>>,
     pub set_driving_agent: Option<Hook<Option<String>, ()>>,
     pub check_input_ready: Option<Hook<String, ()>>,
+    pub focus_window: Option<Hook<String, ()>>,
+    pub provision: Option<Hook<(), String>>,
+    pub list_spaces: Option<Hook<(), ComputerSpaceInventory>>,
     pub supports_action: Option<SupportsAction>,
 }
 
@@ -194,10 +203,12 @@ impl ComputerBackend for Scripted {
         if self.unsupported.lock().unwrap().contains(&method) {
             return false;
         }
-        if method == ComputerBackendMethod::CheckInputReady {
-            return self.hooks().check_input_ready.is_some();
+        match method {
+            ComputerBackendMethod::CheckInputReady => self.hooks().check_input_ready.is_some(),
+            ComputerBackendMethod::Provision => self.hooks().provision.is_some(),
+            ComputerBackendMethod::ListSpaces => self.hooks().list_spaces.is_some(),
+            _ => self.fake.supports(method),
         }
-        self.fake.supports(method)
     }
 
     async fn probe_availability(&self) -> Result<ComputerAvailability, ComputerError> {
@@ -234,7 +245,11 @@ impl ComputerBackend for Scripted {
     }
 
     async fn list_spaces(&self) -> Result<ComputerSpaceInventory, ComputerError> {
-        self.fake.list_spaces().await
+        hooked!(self, list_spaces, (), self.fake.list_spaces().await)
+    }
+
+    async fn provision(&self) -> Result<String, ComputerError> {
+        hooked!(self, provision, (), self.fake.provision().await)
     }
 
     async fn get_screen_size(&self) -> Result<ComputerScreenSize, ComputerError> {
@@ -261,7 +276,12 @@ impl ComputerBackend for Scripted {
     }
 
     async fn focus_window(&self, window_id: &str) -> Result<(), ComputerError> {
-        self.fake.focus_window(window_id).await
+        hooked!(
+            self,
+            focus_window,
+            window_id.to_owned(),
+            self.fake.focus_window(window_id).await
+        )
     }
 
     async fn raise_window(&self, window_id: &str) -> Result<(), ComputerError> {
@@ -653,6 +673,7 @@ impl ComputerBackend for Scripted {
 #[derive(Default)]
 pub(super) struct Seams {
     pub mode: Mutex<Option<PermissionMode>>,
+    pub turn_inactive: AtomicBool,
     pub consent: Mutex<Vec<(ComputerConsentCard, Option<ApprovalDecision>)>>,
     pub disclosures: Mutex<Vec<(String, Option<String>)>>,
     pub bumps: Mutex<Vec<(String, u64)>>,
@@ -667,6 +688,9 @@ impl ComputerManagerSeams for Seams {
         _chat_id: &str,
         _turn_id: Option<&str>,
     ) -> Result<Option<PermissionMode>, ComputerError> {
+        if self.turn_inactive.load(Ordering::SeqCst) {
+            return Err(ComputerError::Other("original turn ended".into()));
+        }
         Ok(*self.mode.lock().unwrap())
     }
 

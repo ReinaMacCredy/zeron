@@ -207,4 +207,97 @@ mod tests {
                 .starts_with("Zeron needs a macOS privacy permission")
         );
     }
+
+    mod signature_change {
+        use zeron_proto::computer::{
+            computer_permission_setup_message, computer_stale_grant_advice,
+        };
+
+        use super::*;
+
+        const BUNDLE_ID: &str = "com.zeron.test";
+
+        #[test]
+        fn an_adhoc_rebuild_re_raises_the_missing_grant_with_the_stale_build_explanation() {
+            let message = computer_permission_setup_message(
+                &[ComputerPermission::Accessibility],
+                ComputerBuildSignature::Adhoc,
+                None,
+            );
+            assert!(message.contains("Zeron needs Accessibility"));
+            assert!(message.contains("earlier build"));
+            let with_reset = computer_permission_setup_message(
+                &[ComputerPermission::ScreenRecording],
+                ComputerBuildSignature::Adhoc,
+                Some(BUNDLE_ID),
+            );
+            assert!(with_reset.contains("tccutil reset ScreenCapture com.zeron.test"));
+            assert!(
+                computer_stale_grant_advice(
+                    &[
+                        ComputerPermission::Accessibility,
+                        ComputerPermission::ScreenRecording
+                    ],
+                    ComputerBuildSignature::Adhoc,
+                    Some(BUNDLE_ID),
+                )
+                .unwrap()
+                .contains("tccutil reset Accessibility com.zeron.test")
+            );
+        }
+
+        #[test]
+        fn a_signed_or_unknown_build_never_blames_the_cdhash() {
+            for signature in [
+                ComputerBuildSignature::Signed,
+                ComputerBuildSignature::Unknown,
+            ] {
+                let message = computer_permission_setup_message(
+                    &[ComputerPermission::Accessibility],
+                    signature,
+                    None,
+                );
+                assert!(!message.contains("earlier build"));
+                assert!(!message.contains("tccutil"));
+                assert_eq!(
+                    computer_stale_grant_advice(
+                        &[ComputerPermission::Accessibility],
+                        signature,
+                        Some(BUNDLE_ID),
+                    ),
+                    None
+                );
+            }
+        }
+
+        #[test]
+        fn the_card_branch_carries_the_signature_while_the_grant_stays_missing() {
+            let availability = ComputerAvailability::PermissionRequired {
+                missing: vec![ComputerPermission::Accessibility],
+                message: "Zeron needs Accessibility to control this Mac.".into(),
+                build_signature: ComputerBuildSignature::Adhoc,
+                bundle_id: Some(BUNDLE_ID.into()),
+            };
+            let expected = Some(ComputerSetupSignal {
+                missing: vec![ComputerPermission::Accessibility],
+                blocking: true,
+                build_signature: Some(ComputerBuildSignature::Adhoc),
+                bundle_id: Some(BUNDLE_ID.into()),
+            });
+            let input = ComputerSetupInput {
+                availability: Some(&availability),
+                bundle_id: Some(BUNDLE_ID),
+                ..ComputerSetupInput::default()
+            };
+            assert_eq!(computer_setup_signal(input), expected);
+            assert_eq!(computer_setup_signal(input), expected);
+            assert_eq!(
+                computer_setup_signal(ComputerSetupInput {
+                    bundle_id: Some(BUNDLE_ID),
+                    ..ComputerSetupInput::default()
+                }),
+                None
+            );
+        }
+    }
 }

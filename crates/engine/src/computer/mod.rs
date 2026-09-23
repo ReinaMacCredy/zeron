@@ -23,6 +23,7 @@ pub mod screenshot_frames;
 pub mod scroll_calibration;
 pub mod scroll_gearing_file;
 pub mod scroll_units;
+pub mod service;
 pub mod setup_signal;
 pub mod shield;
 pub mod space_broker;
