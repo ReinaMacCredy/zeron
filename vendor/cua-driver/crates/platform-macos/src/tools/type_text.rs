@@ -32,7 +32,8 @@ use std::sync::Arc;
 
 use crate::apps;
 use crate::ax::bindings::{
-    copy_string_attr, focused_element_of_pid, kAXErrorSuccess, set_string_attr, AXUIElementRef,
+    copy_string_attr, focused_element_of_pid, is_attribute_settable, kAXErrorSuccess,
+    set_string_attr, AXUIElementRef,
 };
 use crate::focus_guard;
 use crate::window_change_detector::WindowChangeDetector;
@@ -1383,7 +1384,36 @@ fn type_text_blocking(
             matches!(&keyboard_policy, BackgroundKeyboardPolicy::SemanticOnly(_));
         let mut accepted_chars = 0usize;
         let mut interruption = None;
-        let err = if semantic_progressive {
+        // accesskit text inputs (gpui) accept AXValue but have no AXSelectedText
+        // setter, and AppKit still answers success for the ignored write.
+        let splice_base = unsafe {
+            (!is_attribute_settable(element, "AXSelectedText")
+                && is_attribute_settable(element, "AXValue"))
+            .then(|| {
+                let placeholder = copy_string_attr(element, "AXPlaceholderValue");
+                before
+                    .clone()
+                    .filter(|value| Some(value) != placeholder.as_ref())
+                    .unwrap_or_default()
+            })
+        };
+        let err = if let Some(base) = &splice_base {
+            let next = format!("{base}{text}");
+            match crate::input::cancellation::gate().post_ax(element as usize, || unsafe {
+                set_string_attr(element, "AXValue", &next)
+            }) {
+                Ok(code) => {
+                    if code == kAXErrorSuccess {
+                        accepted_chars = text.chars().count();
+                    }
+                    code
+                }
+                Err(error) => {
+                    interruption = Some(error.to_string());
+                    kAXErrorSuccess
+                }
+            }
+        } else if semantic_progressive {
             let chars = text.chars().collect::<Vec<_>>();
             let mut result = kAXErrorSuccess;
             for (index, character) in chars.iter().enumerate() {
@@ -1434,9 +1464,27 @@ fn type_text_blocking(
         // instead of appending the full payload again. When synthesis would
         // exceed its transport-safe budget, rejected/unchanged AX writes fail
         // safely and unreadable AX state is reported as indeterminate.
-        let after = unsafe { copy_string_attr(element, "AXValue") };
+        let mut after = unsafe { copy_string_attr(element, "AXValue") };
+        if splice_base.is_some()
+            && err == kAXErrorSuccess
+            && interruption.is_none()
+        {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+            while !after.as_deref().is_some_and(|value| value.contains(text))
+                && std::time::Instant::now() < deadline
+            {
+                if crate::input::cancellation::gate()
+                    .pause(std::time::Duration::from_millis(25))
+                    .is_err()
+                {
+                    break;
+                }
+                after = unsafe { copy_string_attr(element, "AXValue") };
+            }
+        }
+        let progress_base = splice_base.as_deref().or(before.as_deref());
         let ax_progress = if err == kAXErrorSuccess {
-            Some(typed_progress(before.as_deref(), after.as_deref(), text))
+            Some(typed_progress(progress_base, after.as_deref(), text))
         } else {
             None
         };
