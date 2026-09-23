@@ -2478,6 +2478,10 @@ impl CuaInner {
             } else {
                 CuaEffect::DispatchedUnknown
             }),
+            value: data
+                .get("selected_text")
+                .and_then(Value::as_str)
+                .map(|text| js_slice(text, 16384).to_owned()),
             ..ComputerBackendActionResult::default()
         })
     }

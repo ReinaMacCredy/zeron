@@ -449,13 +449,13 @@ pub(super) fn desktop_entries(dialect: ComputerAgentDialect) -> Vec<ComputerTool
             "type": "integer",
             "minimum": 0,
             "maximum": COMPUTER_SELECT_TEXT_RANGE_MAX,
-            "description": "Zero-based character offset into the element's value where the selection begins. Counts the same characters a string index does; a start past the end is refused rather than clamped.",
+            "description": "Zero-based offset where the selection begins, counted in UTF-16 code units of the element's complete value as computer_get_state's text shows it (untrimmed; the elements list clamps values). Most characters count 1; an emoji or other character outside the Basic Multilingual Plane counts 2, and a range that splits one is refused. A start past the end is refused rather than clamped.",
         },
         "length": {
             "type": "integer",
             "minimum": 0,
             "maximum": COMPUTER_SELECT_TEXT_RANGE_MAX,
-            "description": "Number of characters to select; 0 collapses the selection to a caret at start. A range running past the element's end is refused rather than clamped.",
+            "description": "Number of UTF-16 code units to select; 0 collapses the selection to a caret at start. A range running past the element's end is refused rather than clamped. The result's value is the text the range covered; compare it with the text you meant to select before typing over it.",
         },
     })));
     let rect_properties = |window: &str| {
