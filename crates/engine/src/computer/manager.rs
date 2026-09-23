@@ -701,6 +701,19 @@ impl ComputerManager {
         &self.control_state
     }
 
+    pub fn holds_desktop(&self, thread_id: &str) -> bool {
+        let state = self.state();
+        state
+            .lease
+            .as_ref()
+            .is_some_and(|lease| lease.thread_id == thread_id)
+            || state.owns_background_lease(thread_id)
+            || state
+                .active_authorities
+                .get(thread_id)
+                .is_some_and(|live| !live.is_empty())
+    }
+
     pub fn space_broker(&self) -> &ComputerSpaceBroker<ComputerError> {
         &self.space_broker
     }

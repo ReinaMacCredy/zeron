@@ -3482,6 +3482,21 @@ impl DocHost {
         // therefore wait without disturbing the active turn's runway, then
         // anchor the prompt only once this exact row reaches the transcript.
         let message_id = item.id.clone();
+        let computer_control = self.computer_control_for(
+            &sessions,
+            handle,
+            &item.text,
+            item.from_chat_id.as_deref(),
+            item.computer_generation,
+        );
+        // d38 before any transcript write: a re-queued row must not already read as delivered.
+        if send == QueueSend::Steer
+            && self.computer_flip_waits(&sessions, chat_id, computer_control)
+        {
+            handle.doc.insert_queued(0, item)?;
+            handle.publish_queue();
+            return Ok(());
+        }
         let mut prompt = queued_message_prompt(&item.text, &item.attachments);
         if let Some(from) = &item.from_chat_id {
             // The entry keeps the raw text with its provenance; only what the
@@ -3499,13 +3514,6 @@ impl DocHost {
                 .and_then(|chat| chat.title);
             prompt = thread_message_prompt(from, title.as_deref(), &prompt);
         }
-        let computer_control = self.computer_control_for(
-            &sessions,
-            handle,
-            &item.text,
-            item.from_chat_id.as_deref(),
-            item.computer_generation,
-        );
         if send == QueueSend::Steer {
             match sessions
                 .steer_with(
@@ -4636,9 +4644,7 @@ impl DocHost {
             }
             SessionCommandPayload::Interrupt {} => {
                 if let Some(computer) = sessions.computer() {
-                    computer
-                        .stop_chat(chat_id, handle.doc.computer_generation())
-                        .await;
+                    computer.stop_chat(chat_id, handle.doc.computer_generation());
                 }
                 self.interrupt_and_pause_queue(sessions, handle).await?;
                 Ok((SessionCommandStatus::Applied, None))
@@ -4719,6 +4725,18 @@ impl DocHost {
                 if let Err(err) = handle.doc.resolve_input(request_id, Some(answers)) {
                     tracing::warn!(chat = %chat_id, request = %request_id, error = %err,
                         "orphaned input resolve failed");
+                }
+                if self.computer_flip_waits(sessions, chat_id, request.computer_control) {
+                    self.hold_for_turn_end(
+                        chat_id,
+                        &request.prompt,
+                        None,
+                        entry.computer_generation,
+                    )?;
+                    return Ok((
+                        SessionCommandStatus::Applied,
+                        Some("held until the turn ends".into()),
+                    ));
                 }
                 let answer_id = new_id();
                 handle.write_input_answer(&answer_id, &request.prompt, now_ms(), request_id)?;

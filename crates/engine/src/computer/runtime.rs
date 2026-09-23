@@ -1,12 +1,13 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use futures::StreamExt;
 use futures::stream::BoxStream;
-use tokio::sync::{broadcast, oneshot, watch};
+use futures::{FutureExt, StreamExt};
+use tokio::sync::{broadcast, watch};
 use zeron_proto::computer::{
     ComputerEvent, ComputerHostStreamItem, ComputerSettings, ComputerStillFrame,
     RespondComputerHostRequestParams,
@@ -24,8 +25,8 @@ use super::tool_calls::ComputerCalls;
 use crate::sessions::SessionsEngine;
 
 const SETTINGS_FILE: &str = "computer-settings.json";
-const STILL_FRAME_WAIT: Duration = Duration::from_secs(2);
 const EVENT_BUFFER: usize = 256;
+const SHUTDOWN_BUDGET: Duration = Duration::from_secs(5);
 
 pub const COMPUTER_ESCAPE_STOP_NOTICE: &str = "Computer use stopped: Escape was pressed";
 
@@ -37,7 +38,8 @@ pub struct ComputerRuntime {
     seams: Arc<dyn ComputerManagerSeams>,
     hosts: Arc<HostSlot>,
     service: watch::Sender<Option<Arc<ComputerService>>>,
-    rebuilds: tokio::sync::Mutex<bool>,
+    rebuilds: tokio::sync::Mutex<()>,
+    shut_down: AtomicBool,
     settings: Mutex<ComputerSettings>,
     events: broadcast::Sender<ComputerEvent>,
     forwarding: Mutex<Option<ComputerManagerSubscription>>,
@@ -61,7 +63,8 @@ impl ComputerRuntime {
             engine_seams,
             hosts: Arc::default(),
             service: watch::channel(None).0,
-            rebuilds: tokio::sync::Mutex::new(false),
+            rebuilds: tokio::sync::Mutex::new(()),
+            shut_down: AtomicBool::new(false),
             settings: Mutex::new(settings),
             events: broadcast::channel(EVENT_BUFFER).0,
             forwarding: Mutex::new(None),
@@ -179,19 +182,23 @@ impl ComputerRuntime {
         self.service.send_replace(Some(Arc::new(service)));
     }
 
-    pub async fn stop_chat(&self, chat_id: &str, doc_generation: u64) {
+    pub fn stop_chat(&self, chat_id: &str, doc_generation: u64) {
         self.calls.cancel_chat(chat_id, None);
         self.control_state.seed(chat_id, doc_generation);
-        match self.service() {
-            Some(service) => {
-                if let Err(error) = service.manager.stop_thread(chat_id).await {
-                    tracing::warn!(chat = %chat_id, %error, "computer stop failed");
-                }
+        let Some(service) = self.service() else {
+            let generation = self.control_state.bump(chat_id);
+            self.seams.generation_bumped(chat_id, generation);
+            return;
+        };
+        let chat = chat_id.to_owned();
+        let mut stop = Box::pin(async move {
+            if let Err(error) = service.manager.stop_thread(&chat).await {
+                tracing::warn!(chat = %chat, %error, "computer stop failed");
             }
-            None => {
-                let generation = self.control_state.bump(chat_id);
-                self.seams.generation_bumped(chat_id, generation);
-            }
+        });
+        // The first poll bumps, records and revokes; only the host teardown is left to the task.
+        if (&mut stop).now_or_never().is_none() {
+            tokio::spawn(stop);
         }
     }
 
@@ -255,10 +262,11 @@ impl ComputerRuntime {
         let json = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
         let path = self.data_dir.join(SETTINGS_FILE);
         let tmp = path.with_extension("json.tmp");
+        let mut current = self.settings.lock().unwrap_or_else(PoisonError::into_inner);
         std::fs::write(&tmp, json)
             .and_then(|()| std::fs::rename(&tmp, &path))
             .map_err(|e| format!("computer settings save failed: {e}"))?;
-        *self.settings.lock().unwrap_or_else(PoisonError::into_inner) = settings;
+        *current = settings;
         Ok(())
     }
 
@@ -308,8 +316,10 @@ impl ComputerRuntime {
     }
 
     async fn rebuild(self: Arc<Self>, host: Option<(u64, Arc<dyn ComputerHost>)>) {
-        let shut_down = self.rebuilds.lock().await;
-        if *shut_down || self.hosts.live_id() != host.as_ref().map(|(id, _)| *id) {
+        let _rebuilding = self.rebuilds.lock().await;
+        if self.shut_down.load(Ordering::SeqCst)
+            || self.hosts.live_id() != host.as_ref().map(|(id, _)| *id)
+        {
             return;
         }
         if let Some(previous) = self.service.send_replace(None) {
@@ -334,11 +344,20 @@ impl ComputerRuntime {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(forwarding);
         self.service.send_replace(Some(Arc::new(service)));
+        // Pairs with shutdown's flag-then-take: one side always sees the other.
+        if self.shut_down.load(Ordering::SeqCst) {
+            self.forwarding
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take();
+            if let Some(service) = self.service.send_replace(None) {
+                service.dispose().await;
+            }
+        }
     }
 
     pub async fn shutdown(&self) {
-        let mut shut_down = self.rebuilds.lock().await;
-        *shut_down = true;
+        self.shut_down.store(true, Ordering::SeqCst);
         if let Some(watcher) = self
             .chat_watch
             .lock()
@@ -352,32 +371,28 @@ impl ComputerRuntime {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
-        if let Some(service) = self.service.send_replace(None) {
-            service.dispose().await;
+        if let Some(service) = self.service.send_replace(None)
+            && tokio::time::timeout(SHUTDOWN_BUDGET, service.dispose())
+                .await
+                .is_err()
+        {
+            tracing::warn!("computer service dispose exceeded the shutdown budget");
         }
     }
 
-    pub async fn still_frame(&self) -> Option<ComputerStillFrame> {
+    pub fn still_frame(&self, chat_id: &str) -> Option<ComputerStillFrame> {
+        let task_live = self
+            .engine_seams
+            .sessions()
+            .is_some_and(|sessions| sessions.computer_turn_live(chat_id));
+        if !task_live && !self.settings().computer_control_enabled {
+            return None;
+        }
         let service = self.service()?;
-        let manager = &service.manager;
-        let frame = match manager.latest_frame() {
-            Some(frame) => frame,
-            None => {
-                let (sender, received) = oneshot::channel();
-                let sender = Mutex::new(Some(sender));
-                let _subscription = manager.subscribe_frames(Arc::new(move |frame| {
-                    if let Some(sender) =
-                        sender.lock().unwrap_or_else(PoisonError::into_inner).take()
-                    {
-                        let _ = sender.send(frame.clone());
-                    }
-                }));
-                tokio::time::timeout(STILL_FRAME_WAIT, received)
-                    .await
-                    .ok()?
-                    .ok()?
-            }
-        };
+        if !service.manager.holds_desktop(chat_id) {
+            return None;
+        }
+        let frame = service.manager.latest_frame()?;
         Some(ComputerStillFrame {
             sequence: frame.sequence,
             timestamp_ms: frame.timestamp_ms,
@@ -421,12 +436,15 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use futures::FutureExt;
+    use tokio::sync::oneshot;
     use tokio_util::sync::CancellationToken;
     use zeron_proto::PermissionMode;
     use zeron_proto::computer::{ComputerHostMethod, CuaReply};
 
     use super::*;
     use crate::computer::approval_gate::{ApprovalDecision, ApprovalRequest};
+    use crate::computer::backend::ComputerStreamFrame;
+    use crate::computer::fake_backend::{FakeComputerBackend, FakeComputerBackendOptions};
 
     async fn next_service(
         watch: &mut watch::Receiver<Option<Arc<ComputerService>>>,
@@ -562,6 +580,143 @@ mod tests {
         let reopened = ComputerRuntime::start(dir.path());
         assert_eq!(reopened.settings(), on);
         reopened.shutdown().await;
+    }
+
+    async fn faked(dir: &Path) -> (Arc<ComputerRuntime>, Arc<FakeComputerBackend>) {
+        let runtime = ComputerRuntime::start(dir);
+        next_service(&mut runtime.watch_service(), false).await;
+        let fake = Arc::new(FakeComputerBackend::new(
+            FakeComputerBackendOptions::default(),
+        ));
+        runtime.install_backend(fake.clone()).await;
+        runtime
+            .set_settings(ComputerSettings {
+                computer_control_enabled: true,
+                ..ComputerSettings::default()
+            })
+            .unwrap();
+        (runtime, fake)
+    }
+
+    #[tokio::test]
+    async fn a_still_frame_read_never_starts_a_capture() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, fake) = faked(dir.path()).await;
+        assert!(runtime.still_frame("chat-a").is_none());
+        assert!(fake.calls_for("attachStream").is_empty());
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_still_frame_is_served_only_to_the_chat_on_the_desktop() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, _fake) = faked(dir.path()).await;
+        let manager = runtime.service().unwrap().manager.clone();
+        let _viewer = manager.subscribe_frames(Arc::new(|_: &ComputerStreamFrame| {}));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while manager.latest_frame().is_none() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the viewer's capture delivers a frame");
+        assert!(
+            runtime.still_frame("chat-a").is_none(),
+            "no chat holds the desktop"
+        );
+
+        let (release, released) = oneshot::channel::<()>();
+        let (entered_tx, entered) = oneshot::channel::<()>();
+        let activity = {
+            let manager = manager.clone();
+            tokio::spawn(async move {
+                manager
+                    .with_agent_activity(
+                        "chat-a",
+                        move || async move {
+                            let _ = entered_tx.send(());
+                            let _ = released.await;
+                            Ok(())
+                        },
+                        None,
+                        Some("turn"),
+                        None,
+                    )
+                    .await
+            })
+        };
+        entered.await.unwrap();
+        assert!(runtime.still_frame("chat-a").is_some());
+        assert!(
+            runtime.still_frame("chat-b").is_none(),
+            "another chat never sees the desktop"
+        );
+        runtime.set_settings(ComputerSettings::default()).unwrap();
+        assert!(
+            runtime.still_frame("chat-a").is_none(),
+            "Settings off with no live Computer turn"
+        );
+        let _ = release.send(());
+        let _ = activity.await;
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_does_not_wait_out_a_hung_boot_and_nothing_publishes_after_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = ComputerRuntime::start(dir.path());
+        next_service(&mut runtime.watch_service(), false).await;
+        let mut host = runtime.register_host("sh.zeron.test".into());
+        let Some(ComputerHostStreamItem::Registered { host_token }) = host.next().await else {
+            panic!("the first item carries the host token");
+        };
+        let Some(ComputerHostStreamItem::Request(probe)) = host.next().await else {
+            panic!("the rebuild probes the host");
+        };
+        tokio::time::timeout(Duration::from_secs(5), runtime.shutdown())
+            .await
+            .expect("shutdown is bounded while a boot waits on the host");
+        let _ = runtime.respond(RespondComputerHostRequestParams {
+            host_token,
+            correlation_id: probe.call.correlation_id,
+            result: CuaReply {
+                ok: true,
+                ..CuaReply::default()
+            },
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            runtime.service().is_none(),
+            "a boot finished after shutdown"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_settings_writes_leave_memory_and_disk_in_agreement() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = ComputerRuntime::start(dir.path());
+        for round in 0..200 {
+            let writers: Vec<_> = (0..4)
+                .map(|writer| {
+                    let runtime = runtime.clone();
+                    std::thread::spawn(move || {
+                        runtime.set_settings(ComputerSettings {
+                            agent_cursor_fill_color: format!("#{round:02x}{writer:02x}00"),
+                            ..ComputerSettings::default()
+                        })
+                    })
+                })
+                .collect();
+            for writer in writers {
+                writer.join().unwrap().expect("each write lands");
+            }
+            let disk: ComputerSettings = serde_json::from_str(
+                &std::fs::read_to_string(dir.path().join(SETTINGS_FILE)).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(disk, runtime.settings(), "round {round}");
+        }
+        runtime.shutdown().await;
     }
 
     #[test]

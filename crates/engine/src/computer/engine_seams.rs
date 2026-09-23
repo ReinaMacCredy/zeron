@@ -40,7 +40,7 @@ impl EngineComputerSeams {
         lock(&self.sessions).take();
     }
 
-    fn sessions(&self) -> Option<SessionsEngine> {
+    pub(super) fn sessions(&self) -> Option<SessionsEngine> {
         lock(&self.sessions).clone()
     }
 }

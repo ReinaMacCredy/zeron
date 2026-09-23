@@ -496,7 +496,6 @@ impl EngineCore {
         self.doc_host.pause_all_queues();
         self.sessions.shutdown().await;
         self.terminals.shutdown();
-        self.computer.shutdown().await;
         self.agent_accounts.shutdown();
         self.change_requests.shutdown();
         // Cancel + await every worker that can reach Edge before flushing: a
@@ -524,6 +523,7 @@ impl EngineCore {
         self.spaces_sync.shutdown().await;
         self.doc_host.shutdown_workers().await;
         self.doc_host.flush_all();
+        self.computer.shutdown().await;
         self.workspace.shutdown();
         // Break the sessions ⇄ doc-host retain cycle so the replaced graph can
         // actually be freed once the last handle drops.
@@ -584,6 +584,7 @@ fn relay_refused(method: &str) -> bool {
             | methods::GET_COMPUTER_CATALOG
             | methods::COMPUTER_ACTION
             | methods::COMPUTER_EMERGENCY_STOP
+            | methods::WATCH_COMPUTER_EVENTS
     )
 }
 

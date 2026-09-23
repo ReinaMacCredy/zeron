@@ -1475,6 +1475,13 @@ impl SessionsEngine {
         })
     }
 
+    pub fn computer_turn_live(&self, chat_id: &str) -> bool {
+        lock(&self.inner.runs)
+            .get(chat_id)
+            .and_then(|run| run.computer.turn())
+            .is_some_and(|turn| turn.computer_control)
+    }
+
     pub fn computer_caller(
         &self,
         chat_id: &str,
@@ -1657,15 +1664,14 @@ impl SessionsEngine {
                     tracing::warn!(chat = %chat_id, "auto-resume skipped: no run config");
                     return;
                 };
+                request.computer_control = false;
                 if let (Some(computer), Ok(handle)) = (sessions.computer(), host.open(&chat_id)) {
-                    let current =
-                        computer.chat_generation(&chat_id, handle.doc().computer_generation());
                     request.computer_control = computer.resolve_computer_control(
                         &chat_id,
-                        current,
+                        handle.doc().computer_generation(),
                         &prompt_text,
                         user_authored,
-                        Some(current),
+                        dispatched_generation(handle.doc(), &user_id),
                     );
                 }
                 request.prompt = prompt_text;
@@ -2999,7 +3005,7 @@ async fn drive_run(
     let harness_id = harness.id();
     let user_prompt = request.prompt.clone();
     let run_cwd = request.cwd.clone();
-    let run_computer_control = request.computer_control;
+    let mut last_turn_computer = resume_state.turn_computer;
     let run_computer = resume_state.computer.clone();
     run_computer.begin_turn(&resume_state.user_message_id, resume_state.turn_computer);
     if request.resume.is_none() {
@@ -3679,7 +3685,7 @@ async fn drive_run(
                 // fall through — this event is the new segment's first part.
                 entry_id = new_id();
                 segment_started = now_ms();
-                run_computer.begin_turn(&current_user_id, run_computer_control);
+                run_computer.begin_turn(&current_user_id, last_turn_computer);
                 inner.set_status(&chat_id, SessionStatus::Working, true);
             } else {
                 match &event {
@@ -3859,6 +3865,7 @@ async fn drive_run(
             if let Some(steer) = steer {
                 let previous = run_computer.turn().map(|turn| turn.id);
                 run_computer.begin_turn(&steer.message_id, steer.computer_control);
+                last_turn_computer = steer.computer_control;
                 if previous.as_deref() != Some(steer.message_id.as_str()) {
                     inner.computer_turn_ended(&chat_id, previous);
                 }
@@ -3885,14 +3892,14 @@ async fn drive_run(
             AgentEvent::InputRequested { questions, .. } => {
                 // Known-id guaranteed: the unknown-id twin was dropped above,
                 // before the parked gate.
-                if !questions.iter().all(UserInputQuestion::is_consent) {
+                if !questions.iter().any(UserInputQuestion::is_consent) {
                     inner.set_status(&chat_id, SessionStatus::AwaitingInput, false);
                 }
             }
             AgentEvent::InputResolved { request_id, .. } => {
                 let question_open = folded.iter().any(|part| {
                     matches!(part, MessagePart::Input { request_id: rid, questions, resolved: false, .. }
-                        if rid != request_id && !questions.iter().all(UserInputQuestion::is_consent))
+                        if rid != request_id && !questions.iter().any(UserInputQuestion::is_consent))
                 });
                 let status = if question_open {
                     SessionStatus::AwaitingInput
@@ -4074,6 +4081,7 @@ async fn drive_run(
                 request.prompt = steer.prompt.clone();
                 request.resume = None;
                 request.attachments = steer.attachments.clone();
+                request.computer_control = steer.computer_control;
                 tracing::info!(chat = %chat, "re-dispatching steer orphaned by a dying run");
                 let Some(host) = engine.inner.doc_host() else {
                     tracing::warn!(chat = %chat, "orphaned steer lost: doc host unavailable");
@@ -4098,6 +4106,22 @@ async fn drive_run(
             }
         });
     }
+}
+
+fn dispatched_generation(doc: &SessionDoc, message_id: &str) -> Option<u64> {
+    doc.read_commands()
+        .ok()?
+        .into_iter()
+        .rev()
+        .find(|command| match &command.payload {
+            zeron_doc::SessionCommandPayload::Run { message_id: id, .. } => id == message_id,
+            zeron_doc::SessionCommandPayload::Steer {
+                message_id: Some(id),
+                ..
+            } => id == message_id,
+            _ => false,
+        })?
+        .computer_generation
 }
 
 #[cfg(test)]

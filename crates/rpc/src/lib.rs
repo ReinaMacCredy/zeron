@@ -230,7 +230,7 @@ pub mod methods {
     /// installs; the service restart is scheduled after the reply flushes).
     pub const APPLY_UPDATE: &str = "ApplyUpdate";
     // Computer use (w88). Never relay-forwarded; relay clients are refused every
-    // method here except the still-frame and audit-history reads.
+    // method here except the settings, still-frame and audit-history reads.
     /// Register as the desktop host that owns `cua-driver`. First stream wins; a
     /// second is refused. `{bundleId}` → stream of `ComputerHostStreamItem`: first
     /// `registered {hostToken}` then `request`/`cancel` items, or a lone

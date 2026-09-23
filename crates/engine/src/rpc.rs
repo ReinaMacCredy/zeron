@@ -2822,8 +2822,8 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&serde_json::json!({}))
             }
             methods::GET_COMPUTER_STILL_FRAME => {
-                let _: zeron_proto::computer::GetComputerStillFrameParams = parse_params(params)?;
-                let frame = self.computer()?.still_frame().await;
+                let p: zeron_proto::computer::GetComputerStillFrameParams = parse_params(params)?;
+                let frame = self.computer()?.still_frame(&p.chat_id);
                 RpcReply::value(&serde_json::json!({ "frame": frame }))
             }
             methods::GET_COMPUTER_AUDIT_HISTORY => {

@@ -322,6 +322,16 @@ async fn relay_clients_are_refused_the_host_and_computer_writes() {
             .expect_err("relay-refused method");
         assert_eq!(error.to_string(), refusal(method));
     }
+    let events = tokio::time::timeout(
+        Duration::from_secs(5),
+        relay.subscribe_checked(methods::WATCH_COMPUTER_EVENTS, json!({})),
+    )
+    .await
+    .expect("the event watch is answered at once");
+    match events {
+        Ok(_) => panic!("a relay client must never watch the Computer events"),
+        Err(error) => assert_eq!(error.to_string(), refusal(methods::WATCH_COMPUTER_EVENTS)),
+    }
     let settings: ComputerSettings = local_b
         .call_as(methods::GET_COMPUTER_SETTINGS, json!({}))
         .await

@@ -14,7 +14,9 @@ use zeron_engine::computer::manager::{COMPUTER_CONTROL_ON_DISCLOSURE, ComputerCa
 use zeron_engine::computer::runtime::COMPUTER_ESCAPE_STOP_NOTICE;
 use zeron_engine::{EngineCore, HarnessRegistry, SteerOutcome};
 use zeron_harness::{CancellationToken, Harness, HarnessError, RunControls};
-use zeron_proto::computer::{ComputerConsentScope, ComputerSettings};
+use zeron_proto::computer::{
+    ComputerConsentScope, ComputerHostMethod, ComputerHostStreamItem, ComputerSettings,
+};
 use zeron_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, PermissionMode, ReasoningLevel, RunRequest,
     SandboxLevel, SessionStatus, SteeringMode, UserInputAnswer, UserInputKind, UserInputQuestion,
@@ -34,10 +36,18 @@ struct Seen {
 }
 
 #[derive(Default)]
+struct RunCtl {
+    finish: tokio::sync::Notify,
+    exit: tokio::sync::Notify,
+    speak: tokio::sync::Notify,
+}
+
+#[derive(Default)]
 struct Probe {
     seen: Mutex<Vec<Seen>>,
-    runs: Mutex<Vec<Arc<tokio::sync::Notify>>>,
+    runs: Mutex<Vec<Arc<RunCtl>>>,
     resume: Option<bool>,
+    swallow_steers: std::sync::atomic::AtomicBool,
 }
 
 struct ComputerHarness(Arc<Probe>);
@@ -96,8 +106,9 @@ impl Harness for ComputerHarness {
         });
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let probe = self.0.clone();
-        let finish = Arc::new(tokio::sync::Notify::new());
-        self.0.runs.lock().unwrap().push(finish.clone());
+        let ctl = Arc::new(RunCtl::default());
+        self.0.runs.lock().unwrap().push(ctl.clone());
+        let ask_empty = request.prompt == "ask-empty";
         tokio::spawn(async move {
             let _ = tx.send(Ok(AgentEvent::SessionStarted {
                 harness: HarnessId::Mock,
@@ -110,14 +121,22 @@ impl Harness for ComputerHarness {
             let _ = tx.send(Ok(AgentEvent::TextDelta {
                 text: "working".into(),
             }));
+            let _asked = ask_empty.then(|| (controls.request_input)(Vec::new()));
             loop {
                 tokio::select! {
                     _ = controls.interrupt.cancelled() => {
                         let _ = tx.send(Ok(done(DoneStatus::Interrupted)));
                         break;
                     }
-                    _ = finish.notified() => {
+                    _ = ctl.finish.notified() => {
                         let _ = tx.send(Ok(done(DoneStatus::Completed)));
+                    }
+                    _ = ctl.exit.notified() => {
+                        let _ = tx.send(Ok(done(DoneStatus::Completed)));
+                        break;
+                    }
+                    _ = ctl.speak.notified() => {
+                        let _ = tx.send(Ok(AgentEvent::TextDelta { text: "self-continued".into() }));
                     }
                     Some(message) = controls.steering.recv() => {
                         probe.seen.lock().unwrap().push(Seen {
@@ -127,6 +146,9 @@ impl Harness for ComputerHarness {
                             secret: None,
                             steer: true,
                         });
+                        if probe.swallow_steers.load(std::sync::atomic::Ordering::SeqCst) {
+                            continue;
+                        }
                         let _ = tx.send(Ok(AgentEvent::Steered {
                             assistant_message_id: None,
                             next_assistant_message_id: None,
@@ -152,6 +174,10 @@ struct Rig {
 fn rig_with(resume: Option<bool>) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("device-id"), "dev-a").unwrap();
+    rig_in(dir, resume)
+}
+
+fn rig_in(dir: tempfile::TempDir, resume: Option<bool>) -> Rig {
     let probe = Arc::new(Probe {
         resume,
         ..Probe::default()
@@ -277,7 +303,11 @@ impl Rig {
     }
 
     fn finish(&self) {
-        self.probe.runs.lock().unwrap().last().unwrap().notify_one();
+        self.ctl().finish.notify_one();
+    }
+
+    fn ctl(&self) -> Arc<RunCtl> {
+        self.probe.runs.lock().unwrap().last().unwrap().clone()
     }
 
     async fn finish_turn(&self) {
@@ -1017,6 +1047,383 @@ async fn archiving_a_chat_suspends_its_computer_control_and_restoring_lifts_it()
     wait_for(
         || manager.can_activate_control(CHAT, generation),
         "restore to lift the suspension",
+    )
+    .await;
+    rig.core.shutdown().await;
+}
+
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+fn crashed_slash_turn(root: &std::path::Path, chat: &str, text: &str, stamp: Option<u64>) {
+    let profile = root.join("orgs/dev-org/dev-user");
+    let journal = zeron_engine::RunJournal::open(profile.join("journals")).unwrap();
+    journal
+        .append(
+            chat,
+            &AgentEvent::SessionStarted {
+                harness: HarnessId::Mock,
+                model: "probe".into(),
+                tools: vec![],
+                cwd: "/tmp".into(),
+                session_id: format!("hs-{chat}"),
+                assistant_message_id: format!("a-{chat}"),
+            },
+        )
+        .unwrap();
+    journal
+        .append(
+            chat,
+            &AgentEvent::TextDelta {
+                text: "doomed".into(),
+            },
+        )
+        .unwrap();
+    let doc = zeron_doc::SessionDoc::init(chat).unwrap();
+    doc.set_computer_generation(1).unwrap();
+    let user_id = format!("m-{chat}");
+    doc.push_message(&SessionMessageEntry {
+        id: user_id.clone(),
+        role: MessageRole::User,
+        parts: vec![MessagePart::Text {
+            id: "t0".into(),
+            text: text.into(),
+        }],
+        created_at: now_ms(),
+        device_id: "dev-a".into(),
+        status: Some(MessageStatus::Complete),
+        continuation_of: None,
+        from_chat_id: None,
+        fork_import: false,
+        answers_request_id: None,
+    })
+    .unwrap();
+    doc.queue_command(&SessionCommandEntry {
+        id: format!("c-{chat}"),
+        payload: SessionCommandPayload::Run {
+            request: request(text, PermissionMode::Full),
+            message_id: user_id,
+        },
+        issued_by: "viewer".into(),
+        issued_at: now_ms(),
+        based_on: None,
+        expires_at: None,
+        status: SessionCommandStatus::Applied,
+        resolution: None,
+        computer_generation: stamp,
+    })
+    .unwrap();
+    let mut writer =
+        zeron_doc::SegmentWriter::begin(&doc, &format!("a-{chat}"), "dev-a", now_ms()).unwrap();
+    writer
+        .sync(&[MessagePart::Text {
+            id: "t0".into(),
+            text: "doomed".into(),
+        }])
+        .unwrap();
+    zeron_sync::DocsStore::open(profile)
+        .unwrap()
+        .save_snapshot(chat, &doc.export_snapshot().unwrap())
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_restart_resumes_a_slash_turn_with_the_generation_it_was_dispatched_with() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("device-id"), "dev-a").unwrap();
+    crashed_slash_turn(dir.path(), CHAT, "/computer-use open Calculator", Some(0));
+    crashed_slash_turn(dir.path(), LEAD, "/computer-use open Safari", Some(1));
+    let rig = rig_in(dir, None);
+    wait_for(|| rig.seen().len() >= 2, "both crashed turns to resume").await;
+    let seen = rig.seen();
+    let fenced = seen
+        .iter()
+        .find(|seen| seen.prompt == "open Calculator")
+        .expect("the fenced turn resumed");
+    assert!(!fenced.computer, "a turn the Stop fenced off resumes off");
+    let current = seen
+        .iter()
+        .find(|seen| seen.prompt == "open Safari")
+        .expect("the current turn resumed");
+    assert!(
+        current.computer,
+        "a turn stamped at the current generation resumes on"
+    );
+    rig.core.shutdown().await;
+}
+
+fn fake_host(rig: &Rig, withheld: ComputerHostMethod) -> tokio::task::JoinHandle<()> {
+    let client = zeron_rpc::memory_client(rig.core.rpc_service());
+    tokio::spawn(async move {
+        let mut host = client
+            .subscribe_checked(
+                methods::WATCH_COMPUTER_HOST_REQUESTS,
+                json!({ "bundleId": "sh.zeron.test" }),
+            )
+            .await
+            .expect("the host registers");
+        let mut token = String::new();
+        while let Some(value) = host.recv().await {
+            match serde_json::from_value(value).expect("host stream item") {
+                ComputerHostStreamItem::Registered { host_token } => token = host_token,
+                ComputerHostStreamItem::Request(request) if request.call.method != withheld => {
+                    let _ = client
+                        .call(
+                            methods::RESPOND_COMPUTER_HOST_REQUEST,
+                            json!({
+                                "hostToken": token,
+                                "correlationId": request.call.correlation_id,
+                                "result": { "ok": true },
+                            }),
+                        )
+                        .await;
+                }
+                _ => {}
+            }
+        }
+    })
+}
+
+#[tokio::test]
+async fn a_stop_interrupts_the_turn_without_waiting_for_the_host_teardown() {
+    let rig = rig();
+    let host = fake_host(&rig, ComputerHostMethod::Stop);
+    wait_for(
+        || {
+            rig.core
+                .computer
+                .service()
+                .is_some_and(|service| service.supported)
+        },
+        "the hosted service",
+    )
+    .await;
+    rig.run("c1", "plain", PermissionMode::Full, None);
+    rig.saw(1).await;
+    let manager = manager(&rig).await;
+    let (release, released) = tokio::sync::oneshot::channel::<()>();
+    let (entered_tx, entered) = tokio::sync::oneshot::channel::<()>();
+    let activity = {
+        let manager = manager.clone();
+        tokio::spawn(async move {
+            manager
+                .with_agent_activity(
+                    CHAT,
+                    move || async move {
+                        let _ = entered_tx.send(());
+                        let _ = released.await;
+                        Ok(())
+                    },
+                    None,
+                    Some("m-c1"),
+                    None,
+                )
+                .await
+        })
+    };
+    entered.await.unwrap();
+
+    let started = tokio::time::Instant::now();
+    rig.command("stop", SessionCommandPayload::Interrupt {}, None);
+    rig.applied("stop").await;
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "Stop waited on the host teardown"
+    );
+    assert!(!rig.in_flight());
+    assert_eq!(rig.generation(), 1);
+    let _ = release.send(());
+    host.abort();
+    let _ = activity.await;
+    rig.core.shutdown().await;
+}
+
+fn push_open_question(rig: &Rig, request_id: &str) {
+    rig.core
+        .doc_host
+        .open(CHAT)
+        .unwrap()
+        .doc()
+        .push_message(&SessionMessageEntry {
+            id: format!("a-{request_id}"),
+            role: MessageRole::Assistant,
+            parts: vec![MessagePart::Input {
+                id: request_id.into(),
+                request_id: request_id.into(),
+                questions: vec![UserInputQuestion {
+                    id: "q1".into(),
+                    header: "Foreground".into(),
+                    question: "Can I bring Safari to the front?".into(),
+                    options: vec!["Yes".into(), "No".into()],
+                    multi_select: false,
+                    kind: None,
+                }],
+                resolved: false,
+                answers: None,
+            }],
+            created_at: 1,
+            device_id: "dev-a".into(),
+            status: Some(MessageStatus::Aborted),
+            continuation_of: None,
+            from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
+        })
+        .unwrap();
+}
+
+#[tokio::test]
+async fn an_orphan_answer_that_flips_computer_waits_for_the_turn_end() {
+    let rig = rig();
+    rig.run("c1", "plain", PermissionMode::Full, None);
+    assert!(!rig.saw(1).await.computer);
+    push_open_question(&rig, "r-visible");
+    rig.settings(true);
+    rig.command(
+        "late-answer",
+        SessionCommandPayload::RespondInput {
+            request_id: "r-visible".into(),
+            answers: vec![UserInputAnswer {
+                question_id: "q1".into(),
+                labels: vec!["No".into()],
+            }],
+        },
+        None,
+    );
+    let (status, resolution) = rig.applied("late-answer").await;
+    assert_eq!(status, SessionCommandStatus::Applied);
+    assert_eq!(resolution.as_deref(), Some("held until the turn ends"));
+    assert_eq!(rig.seen().len(), 1, "the live turn was not interrupted");
+    assert!(rig.in_flight());
+
+    rig.finish();
+    let answered = rig.saw(2).await;
+    assert!(answered.computer && !answered.steer);
+    rig.finish_turn().await;
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_thread_message_held_for_a_computer_flip_leaves_no_delivered_entry() {
+    let rig = rig();
+    rig.run("c1", "plain", PermissionMode::Full, None);
+    assert!(!rig.saw(1).await.computer);
+    rig.settings(true);
+    let row = rig
+        .core
+        .doc_host
+        .queue_thread_message(CHAT, LEAD, "note from lead")
+        .await
+        .unwrap();
+    assert!(
+        rig.entries(CHAT).iter().all(|entry| entry.id != row),
+        "a row held for the turn end is not in the transcript"
+    );
+    let queue = rig
+        .core
+        .doc_host
+        .open(CHAT)
+        .unwrap()
+        .doc()
+        .read_queue()
+        .unwrap();
+    assert_eq!(
+        queue.first().map(|item| item.id.as_str()),
+        Some(row.as_str())
+    );
+    assert_eq!(rig.seen().len(), 1);
+
+    rig.finish();
+    let delivered = rig.saw(2).await;
+    assert!(delivered.computer && delivered.prompt.contains("note from lead"));
+    wait_for(
+        || {
+            rig.entries(CHAT)
+                .iter()
+                .any(|entry| entry.id == row && entry.from_chat_id.as_deref() == Some(LEAD))
+        },
+        "the delivered entry with its provenance",
+    )
+    .await;
+    rig.finish_turn().await;
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_orphaned_steer_is_redispatched_with_its_own_computer_flag() {
+    let rig = rig_with(Some(false));
+    rig.probe
+        .swallow_steers
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    rig.settings(true);
+    rig.run("c1", "plain", PermissionMode::Full, None);
+    assert!(rig.saw(1).await.computer);
+    rig.finish_turn().await;
+
+    rig.settings(false);
+    rig.run("c2", "second", PermissionMode::Full, None);
+    assert!(rig.saw(2).await.steer);
+    rig.ctl().exit.notify_one();
+    let redispatched = rig.saw(3).await;
+    assert_eq!(redispatched.prompt, "second");
+    assert!(!redispatched.steer);
+    assert!(
+        !redispatched.computer,
+        "the orphan keeps the flag its turn resolved"
+    );
+    rig.finish_turn().await;
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_self_continued_turn_keeps_the_last_turns_computer_flag() {
+    let rig = rig_with(Some(false));
+    rig.settings(true);
+    rig.run("c1", "plain", PermissionMode::Full, None);
+    let first = rig.saw(1).await;
+    assert!(first.computer);
+    let secret = first.secret.unwrap();
+    rig.finish_turn().await;
+
+    rig.settings(false);
+    rig.run("c2", "second", PermissionMode::Full, None);
+    assert!(rig.saw(2).await.steer);
+    let turn = || {
+        rig.core
+            .sessions
+            .computer_run(CHAT, &secret)
+            .and_then(|run| run.turn_id.map(|id| (id, run.turn_computer_control)))
+    };
+    wait_for(
+        || turn().is_some_and(|(id, _)| id == "m-c2"),
+        "the steered turn",
+    )
+    .await;
+    assert_eq!(turn(), Some(("m-c2".to_owned(), false)));
+    rig.finish_turn().await;
+    wait_for(|| turn().is_none(), "the park").await;
+
+    tokio::time::sleep(Duration::from_millis(1_200)).await;
+    rig.ctl().speak.notify_one();
+    wait_for(|| turn().is_some(), "the self-continued turn").await;
+    assert_eq!(turn(), Some(("m-c2".to_owned(), false)));
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_input_request_with_no_questions_still_parks_the_composer() {
+    let rig = rig();
+    rig.run("c1", "ask-empty", PermissionMode::Full, None);
+    rig.saw(1).await;
+    wait_for(
+        || {
+            rig.core
+                .sessions
+                .session_status(CHAT)
+                .is_some_and(|session| session.status == SessionStatus::AwaitingInput)
+        },
+        "AwaitingInput",
     )
     .await;
     rig.core.shutdown().await;
