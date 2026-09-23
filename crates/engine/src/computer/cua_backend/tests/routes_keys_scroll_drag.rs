@@ -455,7 +455,7 @@ async fn prefers_the_ax_scroll_bar_route_for_an_unmodified_vertical_element_scro
         .unwrap();
     assert_subset(
         &f.first_args("scroll"),
-        json!({ "element_token": "scroll-token", "direction": "down", "amount": 2, "by": "line" }),
+        json!({ "element_token": "scroll-token", "direction": "down", "amount": 2, "by": "line", "delta_x": 0, "delta_y": -2 }),
     );
     f.backend
         .scroll(

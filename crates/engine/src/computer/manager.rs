@@ -71,7 +71,7 @@ const OBSERVED_APP_NAME_LIMIT: usize = 256;
 
 pub type ManagerClock = Arc<dyn Fn() -> u64 + Send + Sync>;
 pub type MeasureScrollTravel =
-    Arc<dyn Fn(Vec<u8>, Vec<u8>) -> BoxFuture<'static, Option<f64>> + Send + Sync>;
+    Arc<dyn Fn(Vec<u8>, Vec<u8>, Option<f64>) -> BoxFuture<'static, Option<f64>> + Send + Sync>;
 pub type ComputerManagerListener = Arc<dyn Fn(&ComputerManagerEvent) + Send + Sync>;
 pub type ComputerFrameSubscriber = Arc<dyn Fn(&ComputerStreamFrame) + Send + Sync>;
 
@@ -534,11 +534,15 @@ fn system_now_ms() -> u64 {
         .map_or(0, |elapsed| elapsed.as_millis() as u64)
 }
 
-async fn measure_scroll_travel_from_png(before: Vec<u8>, after: Vec<u8>) -> Option<f64> {
+async fn measure_scroll_travel_from_png(
+    before: Vec<u8>,
+    after: Vec<u8>,
+    column_center: Option<f64>,
+) -> Option<f64> {
     tokio::task::spawn_blocking(move || {
         let before = decode_png_luma(&before)?;
         let after = decode_png_luma(&after)?;
-        estimate_vertical_travel(&before, &after, None).map(|travel| travel as f64)
+        estimate_vertical_travel(&before, &after, None, column_center).map(|travel| travel as f64)
     })
     .await
     .ok()
@@ -610,7 +614,9 @@ impl ComputerManager {
                 action_settle_ms,
                 windows_publish_debounce_ms: options.windows_publish_debounce_ms,
                 measure_scroll_travel: options.measure_scroll_travel.unwrap_or_else(|| {
-                    Arc::new(|before, after| measure_scroll_travel_from_png(before, after).boxed())
+                    Arc::new(|before, after, column_center| {
+                        measure_scroll_travel_from_png(before, after, column_center).boxed()
+                    })
                 }),
                 env: options.env,
                 state: Mutex::new(State {

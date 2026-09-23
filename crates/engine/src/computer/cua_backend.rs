@@ -2499,6 +2499,15 @@ impl CuaInner {
         right: bool,
         synthetic_by_default: bool,
     ) -> Result<ComputerBackendActionResult, ComputerError> {
+        if right && self.is_darwin() && desktop_delivery_mode() != ComputerDeliveryMode::Foreground
+        {
+            return Err(CuaActionError::new(
+                "A background right-click was not sent. Its context menu opens in a separate window that window screenshots, the window list and background element actions never see or address, so the menu could stay open unseen and absorb the next click. Use computer_invoke_menu for a menu-bar command, or, only when the user's task asks to see the screen, retry with delivery_mode \"foreground\".",
+                CuaEffect::NotDispatched,
+            )
+            .code("context_menu_unobservable")
+            .into());
+        }
         let mut args = Map::new();
         if synthetic_by_default || self.native_revision().unwrap_or(0) < 34 || !modifiers.is_empty()
         {
@@ -2680,6 +2689,8 @@ impl CuaInner {
                 );
                 args.insert("amount".into(), num(ticks_y));
                 args.insert("by".into(), json!("line"));
+                args.insert("delta_x".into(), num(0.0));
+                args.insert("delta_y".into(), num(wheel_sign * dy.signum() * ticks_y));
                 args.insert("element_token".into(), json!(token));
             }
             _ => {

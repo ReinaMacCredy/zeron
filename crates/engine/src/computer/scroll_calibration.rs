@@ -138,6 +138,7 @@ fn paeth(left: u8, up: u8, up_left: u8) -> u8 {
 }
 
 const PROFILE_COLUMN_BAND: f64 = 0.5;
+const POINT_COLUMN_BAND: f64 = 0.25;
 const PROFILE_ROW_BAND: f64 = 0.8;
 const MIN_PROFILE_OVERLAP_ROWS: i64 = 32;
 const MIN_PROFILE_DEVIATION: f64 = 2.0;
@@ -148,13 +149,25 @@ pub fn estimate_vertical_travel(
     before: &LumaImage,
     after: &LumaImage,
     max_shift: Option<f64>,
+    column_center: Option<f64>,
 ) -> Option<i64> {
     if before.width != after.width || before.height != after.height {
         return None;
     }
     let (width, height) = (before.width as f64, before.height as f64);
-    let column_start = (width * ((1.0 - PROFILE_COLUMN_BAND) / 2.0)).floor() as usize;
-    let column_count = ((width * PROFILE_COLUMN_BAND).floor() as usize).max(1);
+    let (column_start, column_count) = match column_center {
+        None => (
+            (width * ((1.0 - PROFILE_COLUMN_BAND) / 2.0)).floor() as usize,
+            ((width * PROFILE_COLUMN_BAND).floor() as usize).max(1),
+        ),
+        Some(center) => {
+            let count = ((width * POINT_COLUMN_BAND).floor() as usize).clamp(1, before.width);
+            let start = (center.clamp(0.0, 1.0) * width - count as f64 / 2.0)
+                .floor()
+                .max(0.0) as usize;
+            (start.min(before.width - count), count)
+        }
+    };
     let row_start = (height * ((1.0 - PROFILE_ROW_BAND) / 2.0)).floor() as usize;
     let row_count = ((height * PROFILE_ROW_BAND).floor() as usize).max(1);
     let rows = row_count as i64;
@@ -522,7 +535,10 @@ mod tests {
                 })
                 .collect(),
         };
-        assert_eq!(estimate_vertical_travel(&frame(0), &frame(17), None), None);
+        assert_eq!(
+            estimate_vertical_travel(&frame(0), &frame(17), None, None),
+            None
+        );
     }
 
     const WIDTH: usize = 64;
@@ -537,7 +553,10 @@ mod tests {
         let page = page();
         let before = page_window(&page, WIDTH, HEIGHT, 150);
         let after = page_window(&page, WIDTH, HEIGHT, 187);
-        assert_eq!(estimate_vertical_travel(&before, &after, None), Some(37));
+        assert_eq!(
+            estimate_vertical_travel(&before, &after, None, None),
+            Some(37)
+        );
     }
 
     #[test]
@@ -545,7 +564,10 @@ mod tests {
         let page = page();
         let before = page_window(&page, WIDTH, HEIGHT, 150);
         let after = page_window(&page, WIDTH, HEIGHT, 67);
-        assert_eq!(estimate_vertical_travel(&before, &after, None), Some(-83));
+        assert_eq!(
+            estimate_vertical_travel(&before, &after, None, None),
+            Some(-83)
+        );
     }
 
     #[test]
@@ -554,14 +576,53 @@ mod tests {
         let before = page_window(&page, WIDTH, HEIGHT, 0);
         let enough = page_window(&page, WIDTH, HEIGHT, 192);
         let too_little = page_window(&page, WIDTH, HEIGHT, 193);
-        assert_eq!(estimate_vertical_travel(&before, &enough, None), Some(192));
-        assert_eq!(estimate_vertical_travel(&before, &too_little, None), None);
+        assert_eq!(
+            estimate_vertical_travel(&before, &enough, None, None),
+            Some(192)
+        );
+        assert_eq!(
+            estimate_vertical_travel(&before, &too_little, None, None),
+            None
+        );
     }
 
     #[test]
     fn reports_zero_for_a_window_that_did_not_move() {
         let before = page_window(&page(), WIDTH, HEIGHT, 150);
-        assert_eq!(estimate_vertical_travel(&before, &before, None), Some(0));
+        assert_eq!(
+            estimate_vertical_travel(&before, &before, None, None),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn measures_a_side_scroller_at_the_scroll_point_instead_of_the_window_center() {
+        let (width, height, strip) = (800, 400, 200);
+        let page = noise(width, height + 40, 7_331);
+        let frame = |strip_top: usize| LumaImage {
+            width,
+            height,
+            luma: (0..width * height)
+                .map(|index| {
+                    let (row, column) = (index / width, index % width);
+                    let top = if column < strip { strip_top } else { 0 };
+                    page[(row + top) * width + column]
+                })
+                .collect(),
+        };
+        let (before, after) = (frame(0), frame(40));
+        assert_eq!(
+            estimate_vertical_travel(&before, &after, None, None),
+            Some(0)
+        );
+        assert_eq!(
+            estimate_vertical_travel(&before, &after, None, Some(0.125)),
+            Some(40)
+        );
+        assert_eq!(
+            estimate_vertical_travel(&before, &after, None, Some(0.75)),
+            Some(0)
+        );
     }
 
     #[test]
@@ -578,7 +639,7 @@ mod tests {
                 .collect(),
             ..before.clone()
         };
-        assert_eq!(estimate_vertical_travel(&before, &after, None), None);
+        assert_eq!(estimate_vertical_travel(&before, &after, None, None), None);
     }
 
     #[test]
@@ -588,7 +649,7 @@ mod tests {
             height: HEIGHT,
             luma: vec![128; WIDTH * HEIGHT],
         };
-        assert_eq!(estimate_vertical_travel(&blank, &blank, None), None);
+        assert_eq!(estimate_vertical_travel(&blank, &blank, None, None), None);
     }
 
     #[test]
@@ -596,13 +657,13 @@ mod tests {
         let page = page();
         let before = page_window(&page, WIDTH, HEIGHT, 150);
         let after = page_window(&page, WIDTH, HEIGHT - 40, 150);
-        assert_eq!(estimate_vertical_travel(&before, &after, None), None);
+        assert_eq!(estimate_vertical_travel(&before, &after, None, None), None);
     }
 
     #[test]
     fn refuses_a_capture_too_short_to_correlate() {
         let short = decode_png_luma(&gray_png(WIDTH as u32, 40, &noise(WIDTH, 40, 3))).unwrap();
-        assert_eq!(estimate_vertical_travel(&short, &short, None), None);
+        assert_eq!(estimate_vertical_travel(&short, &short, None, None), None);
     }
 
     #[test]
@@ -610,7 +671,10 @@ mod tests {
         let page = page();
         let before = page_window(&page, WIDTH, HEIGHT, 150);
         let after = page_window(&page, WIDTH, HEIGHT, 187);
-        assert_eq!(estimate_vertical_travel(&before, &after, Some(10.0)), None);
+        assert_eq!(
+            estimate_vertical_travel(&before, &after, Some(10.0), None),
+            None
+        );
     }
 
     #[test]

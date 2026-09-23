@@ -449,23 +449,33 @@ impl Tool for ScrollTool {
             let target_guard = pre_focus_guard.clone();
             let target_task = tokio::task::spawn_blocking(move || {
                 let _target_guard = target_guard;
+                let bounds = wid.and_then(crate::windows::window_bounds_by_id);
+                let mut center = unsafe { element_screen_center(element_ptr as AXUIElementRef) };
+                let reveal = needs_reveal(
+                    center,
+                    bounds.as_ref().map(|b| (b.x, b.y, b.width, b.height)),
+                );
                 // Web content can be present in AX while its frame is below
                 // the outer page viewport. Ask the accessibility hierarchy to
                 // reveal the target before taking the screen-space center;
                 // otherwise the wheel is posted outside the rendered window
                 // and nested overflow regions never receive it.
-                after_exact_target_gate(semantic_gate, || unsafe {
-                    crate::ax::bindings::perform_action(
-                        element_ptr as AXUIElementRef,
-                        "AXScrollToVisible",
-                    )
+                after_exact_target_gate(semantic_gate, || {
+                    if reveal {
+                        unsafe {
+                            crate::ax::bindings::perform_action(
+                                element_ptr as AXUIElementRef,
+                                "AXScrollToVisible",
+                            );
+                        }
+                    }
                 })?;
-                std::thread::sleep(std::time::Duration::from_millis(40));
-                let center = unsafe { element_screen_center(element_ptr as AXUIElementRef) };
+                if reveal {
+                    std::thread::sleep(std::time::Duration::from_millis(40));
+                    center = unsafe { element_screen_center(element_ptr as AXUIElementRef) };
+                }
                 Ok(center.map(|(cx, cy)| {
-                    let win_local = wid
-                        .and_then(crate::windows::window_bounds_by_id)
-                        .map(|b| (cx - b.x, cy - b.y));
+                    let win_local = bounds.as_ref().map(|b| (cx - b.x, cy - b.y));
                     WheelTarget {
                         screen_x: cx,
                         screen_y: cy,
@@ -523,6 +533,19 @@ impl Tool for ScrollTool {
         } else {
             None
         };
+
+        if refuses_unresolved_element(pre_focus_ptr.is_some(), wheel_target.is_some()) {
+            return ToolResult::error(
+                "scroll: the element has no readable screen position, so no wheel was sent. \
+                 Arrow keys are not substituted because they would change its selection or \
+                 value. An AXScrollToVisible reveal may have run. Observe fresh state and \
+                 target a visible point with x,y instead."
+                    .to_string(),
+            )
+            .with_structured(serde_json::json!({
+                "code": "scroll_target_unresolved", "effect": "refused", "verified": false
+            }));
+        }
 
         if let Some(target) = wheel_target {
             if !delivery_mode.is_foreground() {
@@ -771,6 +794,19 @@ impl Tool for ScrollTool {
     }
 }
 
+fn needs_reveal(center: Option<(f64, f64)>, frame: Option<(f64, f64, f64, f64)>) -> bool {
+    match (center, frame) {
+        (Some((cx, cy)), Some((x, y, width, height))) => {
+            cx < x || cy < y || cx > x + width || cy > y + height
+        }
+        _ => true,
+    }
+}
+
+fn refuses_unresolved_element(has_element: bool, has_wheel_target: bool) -> bool {
+    has_element && !has_wheel_target
+}
+
 fn semantic_scroll_axis<'a>(
     direction: &'a str,
     amount: usize,
@@ -865,7 +901,7 @@ unsafe fn scroll_advertised_action(
         }
         // A nested scroll area without a semantic actuator must use a wheel
         // at its own point; never replace it with an outer area's scrollbar.
-        if role.as_deref() == Some("AXScrollArea") {
+        if ascent_stops_at(role.as_deref()) {
             return Ok(false);
         }
         let Some(parent) = copy_element_attr(ptr, "AXParent") else {
@@ -875,6 +911,10 @@ unsafe fn scroll_advertised_action(
         CFRelease(parent as CFTypeRef);
     }
     Ok(false)
+}
+
+fn ascent_stops_at(role: Option<&str>) -> bool {
+    matches!(role, Some("AXScrollArea" | "AXWebArea"))
 }
 
 unsafe fn scroll_native_text_area(
@@ -990,6 +1030,39 @@ mod tests {
         );
         assert_eq!(semantic_scroll_axis("up", 3, Some(1), Some(2), false), None);
         assert_eq!(semantic_scroll_axis("up", 3, None, Some(2), true), None);
+    }
+
+    #[test]
+    fn reveals_only_a_target_whose_center_is_not_inside_the_window() {
+        let frame = Some((100.0, 50.0, 800.0, 600.0));
+        assert!(!needs_reveal(Some((500.0, 300.0)), frame));
+        assert!(needs_reveal(Some((500.0, 900.0)), frame));
+        assert!(needs_reveal(Some((50.0, 300.0)), frame));
+        assert!(needs_reveal(None, frame));
+        assert!(needs_reveal(Some((500.0, 300.0)), None));
+    }
+
+    #[test]
+    fn an_element_without_a_wheel_point_refuses_instead_of_pressing_arrow_keys() {
+        assert!(refuses_unresolved_element(true, false));
+        assert!(!refuses_unresolved_element(true, true));
+        assert!(!refuses_unresolved_element(false, false));
+        assert!(!refuses_unresolved_element(false, true));
+    }
+
+    #[test]
+    fn scroll_bar_ascent_never_leaves_web_content_for_the_outer_page() {
+        let chain = [
+            Some("AXGroup"),
+            Some("AXGroup"),
+            Some("AXWebArea"),
+            Some("AXScrollArea"),
+        ];
+        let stop = chain.iter().position(|role| ascent_stops_at(*role));
+        assert_eq!(stop, Some(2));
+        assert!(ascent_stops_at(Some("AXScrollArea")));
+        assert!(!ascent_stops_at(Some("AXGroup")));
+        assert!(!ascent_stops_at(None));
     }
 
     #[test]
