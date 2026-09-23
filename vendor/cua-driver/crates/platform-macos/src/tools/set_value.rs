@@ -400,6 +400,18 @@ fn needs_string_retry(route: &ValueRoute, after: Option<f64>) -> bool {
     }
 }
 
+fn poll_until_moved(previous: f64, mut read: impl FnMut() -> Option<f64>) -> Option<f64> {
+    let mut value = read();
+    for _ in 0..30 {
+        if value.is_some_and(|value| !numbers_match(value, previous)) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        value = read();
+    }
+    value
+}
+
 // Both absolute writes were ignored (the value never moved), so stepping cannot double-apply.
 fn needs_stepping(before: Option<f64>, after: Option<f64>, target: f64) -> bool {
     match (before, after) {
@@ -533,12 +545,22 @@ fn set_value_blocking(
                                     .iter()
                                     .any(|advertised| advertised == action)
                             {
+                                let last = std::cell::Cell::new(initial);
                                 step_to_value_with(
                                     initial,
                                     *target,
                                     || crate::input::cancellation::gate().check_target(),
                                     |action| unsafe { perform_action(element, action) },
-                                    || unsafe { copy_number_attr(element, "AXValue") },
+                                    // Chromium applies each step asynchronously.
+                                    || {
+                                        let read = poll_until_moved(last.get(), || unsafe {
+                                            copy_number_attr(element, "AXValue")
+                                        });
+                                        if let Some(value) = read {
+                                            last.set(value);
+                                        }
+                                        read
+                                    },
                                 )?;
                             }
                         }
@@ -791,8 +813,8 @@ mod tests {
     use super::{
         apply_surface_trust, apply_verification_label, choose_value_route, classify_write,
         compose_append_value, kAXErrorSuccess, needs_stepping, needs_string_retry,
-        step_to_value_with, validate_append_target, write_value_with, AxActionFailure,
-        SetValueOutcome, ValueRoute, MAX_APPENDED_TEXT_UTF16,
+        poll_until_moved, step_to_value_with, validate_append_target, write_value_with,
+        AxActionFailure, SetValueOutcome, ValueRoute, MAX_APPENDED_TEXT_UTF16,
     };
     use std::cell::Cell;
 
@@ -878,6 +900,17 @@ mod tests {
                 target: 7.0
             }
         );
+    }
+
+    #[test]
+    fn a_step_read_back_waits_for_an_asynchronous_move() {
+        let reads = std::cell::Cell::new(0);
+        let value = poll_until_moved(50.0, || {
+            reads.set(reads.get() + 1);
+            Some(if reads.get() < 4 { 50.0 } else { 51.0 })
+        });
+        assert_eq!(value, Some(51.0));
+        assert_eq!(reads.get(), 4);
     }
 
     #[test]
