@@ -155,9 +155,13 @@ impl InputTarget {
         Ok(target)
     }
 
-    pub(crate) fn verify_modal(&self, element: Option<usize>) -> Result<(), TargetRefusal> {
+    pub(crate) fn verify_modal(
+        &self,
+        addressed_element: bool,
+        facts: Option<&super::modal_guard::ElementFacts>,
+    ) -> Result<(), TargetRefusal> {
         if let Some(modal) = &self.modal {
-            modal.verify(self.pid, self.window_id, element)?;
+            modal.verify(self.pid, self.window_id, addressed_element, facts)?;
         }
         Ok(())
     }

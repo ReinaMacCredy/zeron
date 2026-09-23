@@ -151,9 +151,33 @@ impl InputGate {
         }
     }
 
-    fn validate_modal_target(state: &State, element: Option<usize>) -> anyhow::Result<()> {
+    fn modal_element_facts(
+        &self,
+        element: Option<usize>,
+    ) -> Option<super::modal_guard::ElementFacts> {
+        let element = element?;
+        let armed = {
+            let state = self.lock();
+            state
+                .target
+                .as_ref()
+                .is_some_and(|target| target.has_modal())
+                || state
+                    .concurrent_targets
+                    .values()
+                    .any(|target| target.has_modal())
+        };
+        // SAFETY: callers pass an element they keep retained for the call.
+        armed.then(|| unsafe { super::modal_guard::ElementFacts::gather(element) })
+    }
+
+    fn validate_modal_target(
+        state: &State,
+        addressed_element: bool,
+        facts: Option<&super::modal_guard::ElementFacts>,
+    ) -> anyhow::Result<()> {
         if let Some(target) = &state.target {
-            target.verify_modal(element)?;
+            target.verify_modal(addressed_element, facts)?;
             return Ok(());
         }
         if !state
@@ -163,12 +187,8 @@ impl InputGate {
         {
             return Ok(());
         }
-        if let Some(element) = element {
-            let window_id = unsafe {
-                crate::ax::exact_target::element_window_id(
-                    element as crate::ax::bindings::AXUIElementRef,
-                )
-            };
+        if addressed_element {
+            let window_id = facts.and_then(super::modal_guard::ElementFacts::window_id);
             let target = state
                 .concurrent_targets
                 .values()
@@ -178,19 +198,20 @@ impl InputGate {
                         "modal_target_mismatch: the semantic element's window cannot be proven"
                     )
                 })?;
-            target.verify_modal(Some(element))?;
+            target.verify_modal(true, facts)?;
         } else {
             for target in state.concurrent_targets.values() {
-                target.verify_modal(None)?;
+                target.verify_modal(false, None)?;
             }
         }
         Ok(())
     }
 
     pub fn check_modal_target(&self, element: Option<usize>) -> anyhow::Result<()> {
+        let facts = self.modal_element_facts(element);
         let mut state = self.lock();
         Self::validate_target(&mut state)?;
-        Self::validate_modal_target(&state, element)
+        Self::validate_modal_target(&state, element.is_some(), facts.as_ref())
     }
 
     /// Semantic dispatch may address an exact descendant of a normal modal.
@@ -200,9 +221,10 @@ impl InputGate {
     }
 
     pub fn post_ax<T>(&self, element: usize, send: impl FnOnce() -> T) -> anyhow::Result<T> {
+        let facts = self.modal_element_facts(Some(element));
         let mut state = self.lock();
         Self::validate_target(&mut state)?;
-        Self::validate_modal_target(&state, Some(element))?;
+        Self::validate_modal_target(&state, true, facts.as_ref())?;
         Ok(send())
     }
 
@@ -210,7 +232,7 @@ impl InputGate {
     pub fn post<T>(&self, send: impl FnOnce() -> T) -> anyhow::Result<T> {
         let mut state = self.lock();
         Self::validate_target(&mut state)?;
-        Self::validate_modal_target(&state, None)?;
+        Self::validate_modal_target(&state, false, None)?;
         Ok(send())
     }
 
@@ -289,6 +311,7 @@ impl InputGate {
         down: impl FnOnce(),
         release: R,
     ) -> anyhow::Result<HeldInput<'_, R>> {
+        let facts = self.modal_element_facts(element);
         // Declared before the mutex guard so unwinding unlocks before release.
         let mut held = HeldInput {
             gate: self,
@@ -296,7 +319,7 @@ impl InputGate {
         };
         let mut state = self.lock();
         Self::validate_target(&mut state)?;
-        Self::validate_modal_target(&state, element)?;
+        Self::validate_modal_target(&state, element.is_some(), facts.as_ref())?;
         held.release = Some(release);
         state.held += 1;
         down();

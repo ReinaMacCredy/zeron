@@ -11,6 +11,7 @@ use core_foundation::base::{CFEqual, CFRelease, CFTypeRef};
 use super::target_guard::TargetRefusal;
 
 const MAX_ANCESTORS: usize = 40;
+const MODAL_TIMEOUT_SECONDS: f32 = 0.1;
 
 #[derive(Clone)]
 pub(crate) struct ModalTarget {
@@ -134,15 +135,11 @@ impl ModalTarget {
         &self,
         pid: i32,
         window_id: u32,
-        element: Option<usize>,
+        addressed_element: bool,
+        facts: Option<&ElementFacts>,
     ) -> Result<(), TargetRefusal> {
-        let descendant = element.is_some_and(|element| unsafe {
-            is_descendant(
-                element as AXUIElementRef,
-                self.element.as_ptr() as AXUIElementRef,
-            )
-        });
-        if modal_target_matches(element.is_some(), descendant, self.raw_window_id, window_id) {
+        let descendant = facts.is_some_and(|facts| facts.has_ancestor(&self.element));
+        if modal_target_matches(addressed_element, descendant, self.raw_window_id, window_id) {
             Ok(())
         } else {
             Err(TargetRefusal::new(
@@ -155,23 +152,47 @@ impl ModalTarget {
     }
 }
 
-unsafe fn is_descendant(element: AXUIElementRef, modal: AXUIElementRef) -> bool {
-    let mut current = Some(RetainedElement::retain(element as usize));
-    for _ in 0..MAX_ANCESTORS {
-        let Some(retained) = current.take() else {
-            break;
-        };
-        let element = retained.as_ptr() as AXUIElementRef;
-        if CFEqual(element as CFTypeRef, modal as CFTypeRef) != 0 {
-            return true;
+// Gathered before the input gate locks: AX IPC under that lock stalls every app's input.
+pub(crate) struct ElementFacts {
+    ancestors: Vec<RetainedElement>,
+    window_id: Option<u32>,
+}
+
+impl ElementFacts {
+    pub(crate) unsafe fn gather(element: usize) -> Self {
+        let element = element as AXUIElementRef;
+        AXUIElementSetMessagingTimeout(element, crate::ax::tree::AX_MESSAGING_TIMEOUT_SECONDS);
+        let window_id = crate::ax::exact_target::element_window_id(element);
+        let mut ancestors = Vec::new();
+        let mut current = Some(RetainedElement::retain(element as usize));
+        while let Some(retained) = current.take() {
+            if ancestors.len() == MAX_ANCESTORS {
+                break;
+            }
+            current =
+                copy_element_attr(retained.as_ptr() as AXUIElementRef, "AXParent").map(|parent| {
+                    AXUIElementSetMessagingTimeout(parent, MODAL_TIMEOUT_SECONDS);
+                    let parent_retained = RetainedElement::retain(parent as usize);
+                    CFRelease(parent as CFTypeRef);
+                    parent_retained
+                });
+            ancestors.push(retained);
         }
-        current = copy_element_attr(element, "AXParent").map(|parent| {
-            let retained = RetainedElement::retain(parent as usize);
-            CFRelease(parent as CFTypeRef);
-            retained
-        });
+        Self {
+            ancestors,
+            window_id,
+        }
     }
-    false
+
+    pub(crate) fn window_id(&self) -> Option<u32> {
+        self.window_id
+    }
+
+    fn has_ancestor(&self, modal: &RetainedElement) -> bool {
+        self.ancestors.iter().any(|ancestor| unsafe {
+            CFEqual(ancestor.as_ptr() as CFTypeRef, modal.as_ptr() as CFTypeRef) != 0
+        })
+    }
 }
 
 #[cfg(test)]
@@ -200,6 +221,35 @@ mod tests {
         assert!(!modal_target_matches(true, false, None, 7));
         assert!(!modal_target_matches(false, false, None, 7));
         assert!(!modal_target_matches(true, false, Some(7), 7));
+    }
+
+    fn app_element(pid: i32) -> RetainedElement {
+        unsafe {
+            let app = AXUIElementCreateApplication(pid);
+            let retained = RetainedElement::retain(app as usize);
+            CFRelease(app as CFTypeRef);
+            retained
+        }
+    }
+
+    #[test]
+    fn modal_verification_reads_only_ancestry_gathered_before_the_gate_lock() {
+        let modal = ModalTarget {
+            element: app_element(424_242),
+            raw_window_id: None,
+        };
+        let inside = ElementFacts {
+            ancestors: vec![app_element(424_241), app_element(424_242)],
+            window_id: Some(7),
+        };
+        let outside = ElementFacts {
+            ancestors: vec![app_element(424_241)],
+            window_id: Some(7),
+        };
+        assert!(modal.verify(424_242, 7, true, Some(&inside)).is_ok());
+        assert!(modal.verify(424_242, 7, true, Some(&outside)).is_err());
+        assert!(modal.verify(424_242, 7, true, None).is_err());
+        assert!(modal.verify(424_242, 7, false, None).is_err());
     }
 
     #[test]
