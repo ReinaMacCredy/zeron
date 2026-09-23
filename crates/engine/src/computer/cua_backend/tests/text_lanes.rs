@@ -815,3 +815,13 @@ async fn scopes_the_recent_tree_to_its_window_and_re_walks_after_it_ages_out() {
         .unwrap();
     assert_eq!(f.named("get_window_state").len(), 2);
 }
+
+#[test]
+fn the_semantic_lane_outlasts_the_drivers_typing_budget_and_ends_before_the_call_timeout() {
+    use crate::computer::cua_backend::{CUA_HOST_CALL_TIMEOUT_MS, CUA_SEMANTIC_TEXT_LANE_HOLD_MS};
+    const DRIVER_TYPING_BUDGET_MS: u64 = 25_000;
+    const UI_HOST_CALL_TIMEOUT_MS: u64 = 30_000;
+    assert!(CUA_SEMANTIC_TEXT_LANE_HOLD_MS > DRIVER_TYPING_BUDGET_MS);
+    assert!(CUA_SEMANTIC_TEXT_LANE_HOLD_MS < UI_HOST_CALL_TIMEOUT_MS);
+    assert!(CUA_SEMANTIC_TEXT_LANE_HOLD_MS < CUA_HOST_CALL_TIMEOUT_MS);
+}

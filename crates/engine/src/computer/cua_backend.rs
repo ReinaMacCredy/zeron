@@ -61,7 +61,8 @@ use super::task_context::{current_computer_task, with_computer_task};
 use super::ui_tree_targeting::ComputerTargetError;
 use super::utf8_truncation::utf16_len;
 
-pub const CUA_SEMANTIC_TEXT_LANE_HOLD_MS: u64 = 15_000;
+// Longer than the driver's 25 s typing budget so the lane never reports a timeout while typing runs.
+pub const CUA_SEMANTIC_TEXT_LANE_HOLD_MS: u64 = 28_000;
 pub const CUA_SEMANTIC_TEXT_LANE_GAP_MS: u64 = 100;
 pub const CUA_HOST_CALL_TIMEOUT_MS: u64 = 35_000;
 pub const CLIPBOARD_NOT_RESTORABLE_CODE: &str = "clipboard_not_restorable";
@@ -1623,7 +1624,10 @@ impl CuaInner {
         fallback: Option<ComputerRect>,
     ) -> Result<ComputerScreenshot, ComputerError> {
         let data = result.structured_content.clone().unwrap_or_default();
-        match data.get("screenshot_frame_freshness").and_then(Value::as_str) {
+        match data
+            .get("screenshot_frame_freshness")
+            .and_then(Value::as_str)
+        {
             Some("unverified_off_space") => {
                 return Err(CuaActionError::new(
                     "The exact window is on another macOS Space. Cua returned pixels, but their freshness cannot be proven without switching Spaces, so Zeron will not present them as a live observation.",
