@@ -386,6 +386,15 @@ fn write_value_with(
     Ok(())
 }
 
+// Chromium's <input type=number> reports AXValue as a CFNumber but accepts only a string write;
+// a numeric write blanks it. Setting the same absolute value again cannot double-apply.
+fn needs_string_retry(route: &ValueRoute, after: Option<f64>) -> bool {
+    match route {
+        ValueRoute::Number(target) => !after.is_some_and(|after| numbers_match(after, *target)),
+        _ => false,
+    }
+}
+
 fn set_value_blocking(
     element_ptr: usize,
     element_index: usize,
@@ -480,6 +489,16 @@ fn set_value_blocking(
                         .check_target()
                         .map_err(AxActionFailure::before_dispatch)?;
                     write()?;
+                    if needs_string_retry(&route, unsafe { copy_number_attr(element, "AXValue") }) {
+                        let error = unsafe { set_string_attr(element, "AXValue", value) };
+                        if error != kAXErrorSuccess {
+                            return Err(AxActionFailure::uncertain(format!(
+                                "string AXValue retry returned {error} after an unconfirmed \
+                                 numeric write. Observe fresh state; do not replay."
+                            ))
+                            .into());
+                        }
+                    }
                 }
                 false
             }
@@ -727,8 +746,9 @@ fn select_popup_option(
 mod tests {
     use super::{
         apply_surface_trust, apply_verification_label, choose_value_route, classify_write,
-        compose_append_value, kAXErrorSuccess, step_to_value_with, validate_append_target,
-        write_value_with, AxActionFailure, SetValueOutcome, ValueRoute, MAX_APPENDED_TEXT_UTF16,
+        compose_append_value, kAXErrorSuccess, needs_string_retry, step_to_value_with,
+        validate_append_target, write_value_with, AxActionFailure, SetValueOutcome, ValueRoute,
+        MAX_APPENDED_TEXT_UTF16,
     };
     use std::cell::Cell;
 
@@ -814,6 +834,14 @@ mod tests {
                 target: 7.0
             }
         );
+    }
+
+    #[test]
+    fn an_unconfirmed_numeric_write_is_retried_once_as_a_string() {
+        assert!(needs_string_retry(&ValueRoute::Number(2.0), None));
+        assert!(needs_string_retry(&ValueRoute::Number(2.0), Some(0.0)));
+        assert!(!needs_string_retry(&ValueRoute::Number(2.0), Some(2.0)));
+        assert!(!needs_string_retry(&ValueRoute::String, None));
     }
 
     #[test]
