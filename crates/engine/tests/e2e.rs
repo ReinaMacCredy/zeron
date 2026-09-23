@@ -2561,6 +2561,51 @@ async fn idle_reaper_waits_for_live_subagents_and_restarts_at_their_settle() {
     core.shutdown().await;
 }
 
+/// A spawn that was refused shows only its seeded prompt and never settles;
+/// it must not hold the reaper off forever.
+#[tokio::test(start_paused = true)]
+async fn a_spawn_that_never_ran_does_not_hold_the_idle_reaper() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(ControlledHarness(std::sync::Mutex::new(Some(rx)))),
+    );
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-refused-spawn",
+        SessionCommandPayload::Run {
+            request: run_request("spawn"),
+            message_id: "user-spawn".into(),
+        },
+    );
+    tx.send(AgentEvent::Subagent {
+        parent_tool_use_id: "agent-1".into(),
+        event: Box::new(AgentEvent::UserMessage {
+            text: "scan the fold path".into(),
+        }),
+    })
+    .unwrap();
+    tx.send(done(DoneStatus::Completed)).unwrap();
+    wait_for(
+        || {
+            core.sessions
+                .session_status(CHAT)
+                .is_some_and(|s| s.last_completed_turn.is_some() && s.status == SessionStatus::Idle)
+        },
+        "parent turn parks Idle",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_secs(31 * 60)).await;
+    wait_for(
+        || tx.is_closed(),
+        "reaped 30 minutes after the parent's Done",
+    )
+    .await;
+    core.shutdown().await;
+}
+
 /// A subagent cut off by its run ending says why, instead of just stopping.
 #[tokio::test]
 async fn a_subagent_cut_off_by_the_run_ending_says_why() {

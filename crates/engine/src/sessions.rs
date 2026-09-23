@@ -3149,7 +3149,13 @@ async fn drive_run(
                 {
                     idle_since = Some(tokio::time::Instant::now());
                 }
-            } else if !matches!(sub_event.as_ref(), AgentEvent::ContextUsage { .. }) {
+            } else if !matches!(
+                sub_event.as_ref(),
+                // The seeded spawn prompt (a UserMessage) arrives even for a
+                // spawn that is refused and never settles; only the agent's
+                // own output proves it is running.
+                AgentEvent::ContextUsage { .. } | AgentEvent::UserMessage { .. }
+            ) {
                 live_subagents.insert(parent_tool_use_id.clone());
             }
             if let Some(sink) = subagents.get_mut(parent_tool_use_id) {
