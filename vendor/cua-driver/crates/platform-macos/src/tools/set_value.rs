@@ -20,9 +20,9 @@ use std::sync::Arc;
 
 use crate::apps;
 use crate::ax::bindings::{
-    copy_action_names, copy_children, copy_number_attr, copy_string_attr, copy_value_kind,
-    is_attribute_settable, kAXErrorSuccess, perform_action, set_number_attr, set_string_attr,
-    AXError, AXUIElementRef, CfValueKind,
+    copy_action_names, copy_binary_attr, copy_children, copy_number_attr, copy_string_attr,
+    copy_value_kind, is_attribute_settable, kAXErrorSuccess, perform_action, set_bool_attr,
+    set_number_attr, set_string_attr, AXError, AXUIElementRef, CfValueKind,
 };
 use crate::focus_guard;
 use crate::input::ax_actions::{action_failure_result, AxActionFailure};
@@ -312,6 +312,7 @@ fn apply_verification_label(outcome: &mut SetValueOutcome) {
 enum ValueRoute {
     String,
     Number(f64),
+    Bool(bool),
     Steps { initial: f64, target: f64 },
 }
 
@@ -341,6 +342,22 @@ fn choose_value_route(
         role,
         "AXTextField" | "AXTextArea" | "AXSearchField" | "AXComboBox"
     );
+    if !is_text && kind == Some(CfValueKind::Boolean) {
+        let target = match requested.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "on" => true,
+            "0" | "false" | "off" => false,
+            _ => {
+                return Err(
+                    AxActionFailure::refused("boolean AXValue requires true/false or 1/0").into(),
+                )
+            }
+        };
+        return if settable {
+            Ok(ValueRoute::Bool(target))
+        } else {
+            Err(AxActionFailure::refused("boolean AXValue is not writable").into())
+        };
+    }
     let is_numeric = !is_text
         && (current_number.is_some() || matches!(role, "AXSlider" | "AXStepper" | "AXIncrementor"));
     if !is_numeric {
@@ -384,6 +401,7 @@ fn write_value_with(
     route: &ValueRoute,
     before_write: impl FnOnce() -> anyhow::Result<()>,
     number_write: impl FnOnce(f64) -> AXError,
+    bool_write: impl FnOnce(bool) -> AXError,
     string_write: impl FnOnce() -> AXError,
 ) -> anyhow::Result<()> {
     if matches!(route, ValueRoute::Steps { .. }) {
@@ -394,6 +412,7 @@ fn write_value_with(
     before_write().map_err(AxActionFailure::before_dispatch)?;
     let error = match route {
         ValueRoute::Number(value) => number_write(*value),
+        ValueRoute::Bool(value) => bool_write(*value),
         ValueRoute::String => string_write(),
         ValueRoute::Steps { .. } => unreachable!("stepping refused before any write"),
     };
@@ -488,15 +507,26 @@ fn set_value_blocking(
             )?
         };
         let numeric = !matches!(route, ValueRoute::String);
-        let before = if numeric {
-            current_number.map(|number| number.to_string())
-        } else {
-            unsafe { copy_string_attr(element, "AXValue") }
+        let read_back = || match route {
+            ValueRoute::String => unsafe { copy_string_attr(element, "AXValue") },
+            ValueRoute::Bool(_) => unsafe { copy_binary_attr(element, "AXValue") }
+                .map(|state| if state { "1" } else { "0" }.to_owned()),
+            _ => unsafe { copy_number_attr(element, "AXValue") }.map(|number| number.to_string()),
         };
+        let before = read_back();
         let appended = append
             .then(|| compose_append_value(before.as_deref(), value))
             .transpose()?;
-        let value = appended.as_deref().unwrap_or(value);
+        let value = match route {
+            ValueRoute::Bool(state) => {
+                if state {
+                    "1"
+                } else {
+                    "0"
+                }
+            }
+            _ => appended.as_deref().unwrap_or(value),
+        };
         let stepped = match &route {
             ValueRoute::Steps { initial, target } => {
                 step_to_value_with(
@@ -522,6 +552,7 @@ fn set_value_blocking(
                         &route,
                         || Ok(()),
                         |number| unsafe { set_number_attr(element, "AXValue", number) },
+                        |state| unsafe { set_bool_attr(element, "AXValue", state) },
                         || unsafe { set_string_attr(element, "AXValue", value) },
                     )
                 };
@@ -586,11 +617,7 @@ fn set_value_blocking(
                 false
             }
         };
-        let after = if numeric {
-            unsafe { copy_number_attr(element, "AXValue") }.map(|number| number.to_string())
-        } else {
-            unsafe { copy_string_attr(element, "AXValue") }
-        };
+        let after = read_back();
         let (verified, changed) =
             classify_write(before.as_deref(), after.as_deref(), value, numeric);
         let suffix = match (verified, changed) {
@@ -920,6 +947,55 @@ mod tests {
     }
 
     #[test]
+    fn a_boolean_value_is_written_as_a_cf_boolean() {
+        for (requested, expected) in [("true", true), ("1", true), ("Off", false), ("0", false)] {
+            assert_eq!(
+                choose_value_route(
+                    Some(CfValueKind::Boolean),
+                    "AXCheckBox",
+                    None,
+                    true,
+                    false,
+                    false,
+                    requested
+                )
+                .unwrap(),
+                ValueRoute::Bool(expected)
+            );
+        }
+        for (requested, settable) in [("maybe", true), ("true", false)] {
+            let error = choose_value_route(
+                Some(CfValueKind::Boolean),
+                "AXSwitch",
+                None,
+                settable,
+                false,
+                false,
+                requested,
+            )
+            .unwrap_err();
+            assert!(!error.downcast_ref::<AxActionFailure>().unwrap().attempted);
+        }
+        let written = Cell::new(None);
+        write_value_with(
+            &ValueRoute::Bool(true),
+            || Ok(()),
+            |_| panic!("boolean written as a number"),
+            |state| {
+                written.set(Some(state));
+                kAXErrorSuccess
+            },
+            || panic!("boolean written as a string"),
+        )
+        .unwrap();
+        assert_eq!(written.get(), Some(true));
+        assert_eq!(
+            classify_write(Some("0"), Some("1"), "1", true),
+            (Some(true), Some(true))
+        );
+    }
+
+    #[test]
     fn date_controls_are_refused_before_any_write() {
         for (kind, role) in [
             (Some(CfValueKind::Date), "AXUnknown"),
@@ -993,6 +1069,7 @@ mod tests {
                 writes.set(writes.get() + 1);
                 -25204
             },
+            |_| panic!("numeric write replayed as a boolean"),
             || panic!("numeric write replayed as a string"),
         )
         .unwrap_err();
@@ -1009,6 +1086,7 @@ mod tests {
             &route,
             || Ok(()),
             |_| panic!("text was rewritten as a number"),
+            |_| panic!("text was rewritten as a boolean"),
             || {
                 writes.set(writes.get() + 1);
                 kAXErrorSuccess
@@ -1024,6 +1102,7 @@ mod tests {
             &ValueRoute::Number(7.0),
             || anyhow::bail!("cancelled"),
             |_| panic!("refused numeric write"),
+            |_| panic!("refused boolean write"),
             || panic!("refused string write"),
         )
         .unwrap_err();
