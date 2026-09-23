@@ -29,6 +29,10 @@ use crate::computer::ui_tree_targeting::{
     ComputerTargetError, ComputerTargetErrorCode, resolve_computer_window_target,
 };
 
+// macOS adds a ~66x20 "window sharing" pill over the traffic lights while a window is captured;
+// it is a new window of the target's pid, never an outcome of the action.
+const MIN_OPENED_WINDOW_SIDE: f64 = 28.0;
+
 fn count(name: &str) {
     if let Some(call) = current_computer_call()
         && let Some(timing) = &call.timing
@@ -308,7 +312,10 @@ impl ComputerManager {
                         Some(pid) => window.pid == Some(pid),
                         None => owner.app_name.is_some() && window.app_name == owner.app_name,
                     }
-                    && window.bounds.is_some()
+                    && window.bounds.as_ref().is_some_and(|bounds| {
+                        bounds.width >= MIN_OPENED_WINDOW_SIDE
+                            && bounds.height >= MIN_OPENED_WINDOW_SIDE
+                    })
                     && window.visible
                     && !window.minimized
             })

@@ -1520,6 +1520,49 @@ async fn photographs_a_window_the_action_opened_instead_of_reporting_nothing_cha
 }
 
 #[tokio::test]
+async fn keeps_the_target_window_when_the_only_new_window_is_the_capture_indicator() {
+    let h = harness();
+    h.call(
+        "computer_press_key",
+        json!({ "key": "enter", "window_id": "fake-terminal" }),
+    )
+    .await;
+
+    let before = h.backend.fake.list_windows().await.unwrap();
+    let mut with_pill: Vec<ComputerWindow> = before.clone();
+    with_pill.push(ComputerWindow {
+        app_name: Some("org.kde.konsole".into()),
+        pid: before
+            .iter()
+            .find(|window| window.id == "fake-terminal")
+            .and_then(|window| window.pid),
+        ..window("fake-sharing-pill", "", Some(rect(16.0, 16.0, 66.0, 20.0)))
+    });
+    h.backend.hooks().press_key = Some(Arc::new(move |fake, _| {
+        let windows = with_pill.clone();
+        async move {
+            fake.emit_windows_changed(windows);
+            Ok(ComputerBackendActionResult::default())
+        }
+        .boxed()
+    }));
+
+    let pressed = h
+        .call(
+            "computer_press_key",
+            json!({ "key": "enter", "window_id": "fake-terminal" }),
+        )
+        .await;
+    assert!(!pressed.is_error, "{pressed:?}");
+    assert_eq!(
+        result_json(&pressed)["screenshot"]["windowId"],
+        json!("fake-terminal"),
+        "{pressed:?}"
+    );
+    h.dispose().await;
+}
+
+#[tokio::test]
 async fn says_an_unchanged_frame_is_unsettled_rather_than_asserting_the_action_missed() {
     let h = harness();
     h.call(
