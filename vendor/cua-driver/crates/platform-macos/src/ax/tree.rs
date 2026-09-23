@@ -93,6 +93,8 @@ pub struct AXNode {
     /// This trust marker is independent of actionable ancestry because
     /// AXWebArea is commonly non-actionable and therefore has no element index.
     pub in_web_content: bool,
+    /// AXPlaceholderValue, reported separately so no consumer mistakes it for content.
+    pub placeholder: Option<String>,
 }
 
 #[derive(Default)]
@@ -731,6 +733,10 @@ unsafe fn walk_element(
         .as_ref()
         .and_then(|copied| copied.string_value.clone());
     // AXPlaceholderValue as fallback for empty text fields.
+    let placeholder = placeholder_value
+        .as_ref()
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty());
     let value = value.filter(|v| !v.trim().is_empty()).or(placeholder_value);
     let help = help.filter(|h| !h.trim().is_empty());
     // `actions` and `value_settable` were resolved alongside the batch fetch
@@ -781,12 +787,7 @@ unsafe fn walk_element(
     // Structured `elements` only contains actionable nodes. Keep all new AX
     // round-trips behind that same gate so display-only rows pay no cost.
     let control_state = read_control_state_if_actionable(is_actionable, || ControlState {
-        value_state: copied_value
-            .map(|copied| copied.state_value)
-            .filter(|v| !v.trim().is_empty())
-            .or_else(|| value.clone())
-            .map(|v| v.trim().to_owned())
-            .filter(|v| !v.is_empty()),
+        value_state: copied_value.map(|copied| copied.state_value),
         value_description: attr_value_description
             .map(|v| v.trim().to_owned())
             .filter(|v| !v.is_empty()),
@@ -833,6 +834,7 @@ unsafe fn walk_element(
             enabled: control_state.enabled,
             selected: control_state.selected,
             in_web_content,
+            placeholder: placeholder.clone(),
         }
     } else {
         AXNode {
@@ -867,6 +869,7 @@ unsafe fn walk_element(
             enabled: control_state.enabled,
             selected: control_state.selected,
             in_web_content,
+            placeholder: placeholder.clone(),
         }
     };
 

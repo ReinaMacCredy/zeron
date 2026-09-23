@@ -2823,6 +2823,7 @@ impl CuaInner {
         append: bool,
         admission: &LaneAdmission,
     ) -> Result<ComputerBackendActionResult, ComputerError> {
+        let before = field.value.clone().unwrap_or_default();
         let mut args = Map::new();
         args.insert("element_token".into(), json!(field.token));
         args.insert("element_index".into(), num(field.index));
@@ -2845,9 +2846,12 @@ impl CuaInner {
             .await?;
         assert_desktop_operation_active()?;
         let after = self.resolve_web_field(window_id, node).await?;
-        let landed = after.and_then(|after| after.value).is_some_and(|after| {
+        // An append only lands if the field changed; an unchanged field that already ended
+        // with the text proves nothing.
+        let landed = after.is_some_and(|after| {
+            let after = after.value.unwrap_or_default();
             if append {
-                after.ends_with(value)
+                after != before && after.ends_with(value)
             } else {
                 after == value
             }

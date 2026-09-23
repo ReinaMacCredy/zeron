@@ -125,6 +125,40 @@ async fn appends_label_targeted_web_text_through_the_driver_not_the_snapshot_val
 }
 
 #[tokio::test]
+async fn an_append_that_leaves_a_field_already_ending_with_the_text_is_not_confirmed() {
+    let f = fixture_with(FixtureOptions {
+        native_revision: Some(Some(39)),
+        ..Default::default()
+    });
+    let mut field = web_field();
+    field["value"] = json!("100");
+    f.set_elements(vec![field]);
+    let target = observe(&f, "cua:10:20", 0).await;
+    f.swallow_set_value();
+    let result = f
+        .backend
+        .type_text("0", Some("cua:10:20"), Some(&target))
+        .await
+        .unwrap();
+    assert_eq!(
+        result.verified,
+        Some(ComputerDeliveryVerification::Unconfirmed)
+    );
+}
+
+#[tokio::test]
+async fn clearing_a_web_field_is_confirmed_by_an_empty_read_back() {
+    let f = fixture();
+    f.set_elements(vec![web_field()]);
+    let target = observe(&f, "cua:10:20", 0).await;
+    let result = f.backend.set_value(&target, "").await.unwrap();
+    assert_eq!(
+        result.verified,
+        Some(ComputerDeliveryVerification::Confirmed)
+    );
+}
+
+#[tokio::test]
 async fn never_sends_web_action_after_interruption_while_its_field_read_was_pending() {
     for (action, interruption) in [
         ("typeText", "timeout"),

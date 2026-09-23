@@ -860,6 +860,7 @@ pub(crate) fn build_elements_array_with_token(
                 .title
                 .clone()
                 .or_else(|| node.description.clone())
+                .or_else(|| node.placeholder.clone())
                 .or_else(|| node.value.clone())
                 .or_else(|| node.identifier.clone());
             let frame = node
@@ -895,13 +896,15 @@ pub(crate) fn build_elements_array_with_token(
             // "1"/"0") — controls whose state was previously invisible here.
             // Falls back to `value` so the field never regresses for
             // string-valued elements.
-            if let Some(value) = node
-                .value_state
-                .clone()
-                .or_else(|| node.value.clone())
-                .filter(|v| !v.is_empty())
-            {
+            if let Some(value) = node.value_state.clone().or_else(|| {
+                node.value
+                    .clone()
+                    .filter(|value| !value.is_empty() && node.placeholder.is_none())
+            }) {
                 entry["value"] = serde_json::Value::String(value);
+            }
+            if let Some(placeholder) = node.placeholder.clone() {
+                entry["placeholder"] = serde_json::Value::String(placeholder);
             }
             if let Some(desc) = node.value_description.clone() {
                 entry["value_description"] = serde_json::Value::String(desc);
@@ -1172,6 +1175,7 @@ mod tests {
             enabled: None,
             selected: None,
             in_web_content: false,
+            placeholder: None,
         }
     }
 
@@ -1462,6 +1466,25 @@ mod tests {
         nodes[0].value = Some("Search".into());
         let entry = &build_elements_array_with_token(&nodes, None)[0];
         assert_eq!(entry["value"], "Search");
+    }
+
+    #[test]
+    fn an_empty_field_reports_its_placeholder_separately_from_its_value() {
+        let mut nodes = vec![node(Some(0), "AXTextField", None, 0, None, None, vec![])];
+        nodes[0].value = Some("Search".into());
+        nodes[0].placeholder = Some("Search".into());
+        nodes[0].value_state = Some(String::new());
+        let entry = &build_elements_array_with_token(&nodes, None)[0];
+        assert_eq!(entry["value"], "");
+        assert_eq!(entry["placeholder"], "Search");
+        assert_eq!(entry["label"], "Search");
+
+        nodes[0].value_state = None;
+        let entry = &build_elements_array_with_token(&nodes, None)[0];
+        assert!(
+            entry.get("value").is_none(),
+            "a placeholder is never reported as a value"
+        );
     }
 
     #[test]
