@@ -4014,11 +4014,28 @@ impl Render for ComposerInput {
         } else {
             theme.text
         };
+        let input = cx.entity().downgrade();
         div()
             .id(("composer-input", cx.entity_id()))
             .role(self.accessibility_role)
             .aria_label(self.placeholder.clone())
             .aria_placeholder(self.placeholder.clone())
+            .when(!self.content.is_empty(), |this| {
+                this.aria_value(self.content.clone())
+            })
+            .on_a11y_action(gpui::AccessibleAction::SetValue, move |data, _, cx| {
+                let Some(gpui::accesskit::ActionData::Value(value)) = data else {
+                    return;
+                };
+                let value = value.to_string();
+                input
+                    .update(cx, |input, cx| {
+                        if !input.read_only {
+                            input.set_text(value, cx);
+                        }
+                    })
+                    .ok();
+            })
             .key_context(self.key_context)
             .track_focus(&self.focus_handle)
             .cursor(CursorStyle::IBeam)

@@ -6713,16 +6713,23 @@ impl Shell {
         out
     }
 
-    fn render_sidebar(&mut self, _cx: &mut Context<Self>) -> AnyElement {
+    fn render_sidebar(&mut self, window: &Window, _cx: &mut Context<Self>) -> AnyElement {
         // The sidebar is part of the resolved theme. A second fixed-Zeron
         // palette here made imported families look split in half and froze
         // activity/glyph personality independently of the selected variant.
-        let inner = self.sidebar_pane.clone().cached(
-            gpui::StyleRefinement::default()
-                .w(px(self.settings.sidebar_width))
-                .h_full()
-                .flex_none(),
-        );
+        let style = gpui::StyleRefinement::default()
+            .w(px(self.settings.sidebar_width))
+            .h_full()
+            .flex_none();
+        // A reused cached frame drops its accessibility nodes, so an AT client's
+        // element refs into the sidebar die on every unrelated repaint.
+        let inner = if window.is_a11y_active() {
+            let mut wrapper = div();
+            wrapper.style().refine(&style);
+            wrapper.child(self.sidebar_pane.clone()).into_any_element()
+        } else {
+            self.sidebar_pane.clone().cached(style).into_any_element()
+        };
         // Transparent — the sidebar sits directly on the frost shell; the main
         // card's own border provides the separation. The content row spans the
         // full window height (the titlebar overlays it), so the column pads
@@ -12576,7 +12583,7 @@ impl Render for Shell {
                     }
                 });
 
-                let sidebar = self.render_sidebar(cx);
+                let sidebar = self.render_sidebar(window, cx);
                 let sidebar_handle = self.resize_handle(
                     "sidebar-resize",
                     PaneResizeKind::Sidebar,
