@@ -25,7 +25,7 @@ use zeron_proto::PermissionMode;
 use zeron_proto::computer::{
     ComputerApp, ComputerAvailability, ComputerEvent, ComputerHealth, ComputerHealthStatus,
     ComputerInputModifier, ComputerInputPause, ComputerPoint, ComputerRect, ComputerScreenSize,
-    ComputerScreenshot, ComputerWindow,
+    ComputerScreenshot, ComputerWindow, CuaEffect,
 };
 
 use super::approval_gate::{ApprovalDecision, ComputerApprovalGate};
@@ -33,7 +33,7 @@ use super::audit_log::ComputerAuditLog;
 use super::backend::{
     ComputerBackend, ComputerBackendError, ComputerBackendEvent, ComputerBackendMethod,
     ComputerBackendSubscription, ComputerError, ComputerResolvedTarget, ComputerStreamFrame,
-    clamp_computer_message,
+    CuaActionError, clamp_computer_message,
 };
 use super::call_context::{
     ZERON_CUA_ACTION_SETTLE_MS, ZERON_CUA_CONDITIONAL_SETTLE, ZERON_CUA_TIMING_LOG,
@@ -1048,6 +1048,15 @@ fn activation_unsupported_error() -> ComputerError {
     ComputerBackendError::new(
         "This desktop backend cannot bring a window forward. Ask the user to click the window they want in front, or aim the action at it with window_id instead.",
     )
+    .into()
+}
+
+fn clipboard_not_restorable_error() -> ComputerError {
+    CuaActionError::new(
+        "computer_paste would overwrite the user's clipboard, which holds content that cannot be restored (an image, files, rich data or very long text). Nothing was sent. Use computer_type_text or computer_set_value instead.",
+        CuaEffect::NotDispatched,
+    )
+    .code(crate::computer::cua_backend::CLIPBOARD_NOT_RESTORABLE_CODE)
     .into()
 }
 

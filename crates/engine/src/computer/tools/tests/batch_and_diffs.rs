@@ -559,6 +559,29 @@ async fn uses_the_command_chord_on_a_macos_backend() {
 }
 
 #[tokio::test]
+async fn refuses_to_paste_over_a_clipboard_it_cannot_restore() {
+    let h = harness();
+    h.backend.fake.fail_next_with(
+        "readClipboard",
+        crate::computer::backend::CuaActionError::new(
+            "non-text clipboard",
+            zeron_proto::computer::CuaEffect::NotDispatched,
+        )
+        .code(crate::computer::cua_backend::CLIPBOARD_NOT_RESTORABLE_CODE),
+    );
+    let result = h
+        .call(
+            "computer_paste",
+            json!({ "text": "agent text", "window_id": WINDOW }),
+        )
+        .await;
+    assert!(result.is_error, "{result:?}");
+    assert!(h.backend.calls_for("writeClipboard").is_empty());
+    assert!(h.backend.calls_for("hotkey").is_empty());
+    h.dispose().await;
+}
+
+#[tokio::test]
 async fn still_restores_the_clipboard_when_the_paste_dispatch_fails() {
     let h = harness();
     h.call("computer_write_clipboard", json!({ "text": "user text" }))

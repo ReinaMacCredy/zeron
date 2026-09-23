@@ -64,6 +64,7 @@ use super::utf8_truncation::utf16_len;
 pub const CUA_SEMANTIC_TEXT_LANE_HOLD_MS: u64 = 15_000;
 pub const CUA_SEMANTIC_TEXT_LANE_GAP_MS: u64 = 100;
 pub const CUA_HOST_CALL_TIMEOUT_MS: u64 = 35_000;
+pub const CLIPBOARD_NOT_RESTORABLE_CODE: &str = "clipboard_not_restorable";
 pub const CUA_SHIELD_TIMEOUT_MS: u64 = 5_000;
 pub const CUA_BROWSER_STILL_TIMEOUT_MS: u64 = 20_000;
 pub const CUA_STILL_FRAME_INTERVAL_MS: u64 = 1_000;
@@ -3134,15 +3135,27 @@ impl CuaInner {
         let mut args = Map::new();
         args.insert("include_text".into(), Value::Bool(true));
         let data = self.call_structured("clipboard_read", args, true).await?;
+        let not_restorable = |message: &str| -> ComputerError {
+            CuaActionError::new(message, CuaEffect::NotDispatched)
+                .code(CLIPBOARD_NOT_RESTORABLE_CODE)
+                .into()
+        };
         let Some(text) = data.get("text").and_then(Value::as_str) else {
+            if data
+                .get("types")
+                .and_then(Value::as_array)
+                .is_some_and(|types| !types.is_empty())
+            {
+                return Err(not_restorable(
+                    "The clipboard holds non-text content (an image, files or rich data) that cannot be read back as text.",
+                ));
+            }
             return Err(ComputerError::Other(
                 "The clipboard does not contain readable text.".into(),
             ));
         };
         if utf16_len(text) > 16384 {
-            return Err(ComputerError::Other(
-                "Clipboard exceeds the tool's text limit.".into(),
-            ));
+            return Err(not_restorable("Clipboard exceeds the tool's text limit."));
         }
         Ok(text.to_owned())
     }

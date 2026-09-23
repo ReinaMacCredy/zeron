@@ -14,8 +14,8 @@ use super::targeting::PreparedTarget;
 use super::{
     COMPUTER_PASTE_RESTORE_MS, ComputerClickButton, ComputerClickGesture, ComputerManager,
     ComputerNotedResult, ComputerPasteResult, ComputerStateRequest, agent_thread_id,
-    click_gesture_unsupported_error, clipboard_unsupported_error, error_message,
-    menu_app_not_found_error, rects_overlap, triple_click_unsupported_error,
+    click_gesture_unsupported_error, clipboard_not_restorable_error, clipboard_unsupported_error,
+    error_message, menu_app_not_found_error, rects_overlap, triple_click_unsupported_error,
     window_not_found_error,
 };
 use crate::computer::backend::{
@@ -1268,10 +1268,20 @@ impl ComputerManager {
                 {
                     return Err(clipboard_unsupported_error());
                 }
-                let previous = timed_computer_leg("dispatch", async {
-                    self.backend.read_clipboard().await.ok()
-                })
-                .await;
+                let previous =
+                    match timed_computer_leg("dispatch", self.backend.read_clipboard()).await {
+                        Ok(text) => Some(text),
+                        // Pasting would replace content that cannot be put back.
+                        Err(error)
+                            if error.code()
+                                == Some(
+                                    crate::computer::cua_backend::CLIPBOARD_NOT_RESTORABLE_CODE,
+                                ) =>
+                        {
+                            return Err(clipboard_not_restorable_error());
+                        }
+                        Err(_) => None,
+                    };
                 timed_computer_leg("dispatch", self.backend.write_clipboard(text)).await?;
                 let keys: Vec<String> = if self.agent_dialect() == ComputerAgentDialect::Macos {
                     vec!["meta".into(), "v".into()]
