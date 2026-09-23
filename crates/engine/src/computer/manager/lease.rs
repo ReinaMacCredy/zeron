@@ -394,6 +394,7 @@ impl ComputerManager {
         for owner in evicted {
             self.clear_evicted_background_owner(&owner);
         }
+        self.sync_still_stream();
         if outcome? {
             self.publish_ownership_cached();
         }
@@ -463,6 +464,7 @@ impl ComputerManager {
             }
             changed
         };
+        self.sync_still_stream();
         if changed {
             self.publish_ownership_cached();
         }
@@ -529,6 +531,7 @@ impl ComputerManager {
         for evicted in evicted {
             self.clear_evicted_background_owner(&evicted);
         }
+        self.sync_still_stream();
         let (held, held_stale, changed) = claimed?;
         assert_desktop_operation_active()?;
         if changed {
@@ -555,6 +558,7 @@ impl ComputerManager {
             state.lease = Some(lease.clone());
             lease
         };
+        self.sync_still_stream();
         if held_stale && let Some(held) = &held {
             self.record_lease_lifecycle(
                 ComputerLeaseLifecycle::StaleReclaimed,
@@ -763,6 +767,7 @@ impl ComputerManager {
                     }
                     lease
                 };
+                self.sync_still_stream();
                 if let Some(lease) = &lease {
                     self.record_lease_lifecycle(ComputerLeaseLifecycle::Released, lease, None);
                 }

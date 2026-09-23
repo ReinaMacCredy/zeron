@@ -1,6 +1,7 @@
 //! Settings › Computer, Synara's `ComputerSettingsPanel` with its Getting started and
 //! Recent Computer actions sections.
 use std::rc::Rc;
+use std::time::Duration;
 
 use gpui::{
     AnyElement, Context, Entity, SharedString, Subscription, Task, Window, div, prelude::*, px,
@@ -25,6 +26,8 @@ use crate::settings::permission_guide::{
 use crate::settings::{SavePolicy, widgets};
 use crate::state::AppState;
 use crate::theme::Theme;
+
+const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
 const COMPUTER_PANES: [(PermissionPane, &str); 3] = [
     (
@@ -284,6 +287,7 @@ pub struct ComputerPage {
     status: Option<ComputerHostStatus>,
     status_error: Option<SharedString>,
     status_task: Option<Task<()>>,
+    status_poll: Option<Task<()>>,
     grants: Rc<dyn Fn() -> AppshotCapabilities>,
     capabilities: AppshotCapabilities,
     native: bool,
@@ -348,6 +352,7 @@ impl ComputerPage {
             status: None,
             status_error: None,
             status_task: None,
+            status_poll: None,
             capabilities: grants(),
             grants,
             native: true,
@@ -431,6 +436,27 @@ impl ComputerPage {
             state.computer_settings = Some(settings.clone())
         });
         self.settings = Some(settings);
+    }
+
+    pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        if active == self.status_poll.is_some() {
+            return;
+        }
+        self.status_poll = active.then(|| {
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(STATUS_POLL_INTERVAL).await;
+                    let polled = this.update(cx, |page, cx| {
+                        if page.status_task.is_none() {
+                            page.refresh_status(cx);
+                        }
+                    });
+                    if polled.is_err() {
+                        return;
+                    }
+                }
+            })
+        });
     }
 
     fn refresh_status(&mut self, cx: &mut Context<Self>) {
@@ -672,6 +698,11 @@ impl ComputerPage {
     }
 
     #[cfg(test)]
+    pub(crate) fn status_polling(&self) -> bool {
+        self.status_poll.is_some()
+    }
+
+    #[cfg(test)]
     pub(crate) fn settings_value(&self) -> Option<&ComputerSettings> {
         self.settings.as_ref()
     }
@@ -688,6 +719,8 @@ impl ComputerPage {
         self.status = Some(status);
         self.status_error = None;
         self.status_task = None;
+        // Counts as active so no poll replaces the injected status.
+        self.status_poll = Some(Task::ready(()));
     }
 
     pub fn fixture_history(&mut self, pages: Vec<ComputerGetAuditHistoryResult>) {
@@ -1854,6 +1887,49 @@ mod tests {
         }
         drop(page);
         runtime.block_on(core.shutdown());
+    }
+
+    #[gpui::test]
+    fn status_is_polled_only_while_the_page_is_active(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        init(cx, dir.path());
+        let (engine, calls) = scripted_engine(&runtime, |method, _| {
+            if method == methods::GET_COMPUTER_STATUS {
+                Ok(json!({ "status": { "kind": "unsupported", "message": "no host" } }))
+            } else {
+                Err("offline".into())
+            }
+        });
+        let (page, cx) = open_page(cx, engine, Rc::new(|| grants(true, true, true)));
+        let status_reads = |calls: &Calls| {
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(method, _)| method == methods::GET_COMPUTER_STATUS)
+                .count()
+        };
+        assert_eq!(status_reads(&calls), 1, "opening reads the status once");
+        cx.executor().advance_clock(STATUS_POLL_INTERVAL * 2);
+        cx.run_until_parked();
+        assert_eq!(status_reads(&calls), 1, "an inactive page never polls");
+        cx.update(|_, cx| page.update(cx, |page, cx| page.set_active(true, cx)));
+        for expected in [2, 3] {
+            cx.executor().advance_clock(STATUS_POLL_INTERVAL);
+            wait(cx, |_| status_reads(&calls) == expected);
+        }
+        cx.update(|_, cx| page.update(cx, |page, cx| page.set_active(true, cx)));
+        cx.executor().advance_clock(STATUS_POLL_INTERVAL / 2);
+        cx.run_until_parked();
+        assert_eq!(status_reads(&calls), 3, "re-activating keeps one timer");
+        cx.update(|_, cx| page.update(cx, |page, cx| page.set_active(false, cx)));
+        cx.executor().advance_clock(STATUS_POLL_INTERVAL * 3);
+        cx.run_until_parked();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        cx.run_until_parked();
+        assert_eq!(status_reads(&calls), 3, "hiding the page stops the poll");
     }
 
     #[gpui::test]

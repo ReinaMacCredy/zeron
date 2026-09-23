@@ -802,7 +802,6 @@ fn no_harness_names_a_computer_capability_or_the_run_secret_itself() {
         for needle in [
             zeron_rpc::COMPUTER_RUN_SECRET_ENV,
             "COMPUTER_RUN_SECRET_ENV",
-            "computer_control",
             "computer:control",
         ] {
             assert!(

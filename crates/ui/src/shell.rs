@@ -5101,6 +5101,7 @@ impl Shell {
                         page
                     }
                 };
+                page.update(cx, |page, cx| page.set_active(true, cx));
                 if let Some(missing) = self.pending_computer_guide.take() {
                     page.update(cx, |page, cx| page.open_setup_guide(&missing, cx));
                 }
@@ -12088,6 +12089,10 @@ impl Render for Shell {
         self.settings.accent = crate::appearance::accent(cx);
         self.settings.surface = crate::appearance::surface(cx);
         self.sync_independent_settings(cx);
+        if let Some(page) = self.computer_page.clone() {
+            let active = self.route == Route::Settings(SettingsSection::Computer);
+            page.update(cx, |page, cx| page.set_active(active, cx));
+        }
         let theme = Theme::of(cx);
         // The shell frost sits over native desktop blur on macOS and Windows.
         // Content surfaces add their own backgrounds over this shared tint.
@@ -13914,6 +13919,77 @@ mod tests {
 mod exit_regressions {
     use super::*;
     use gpui::{AppContext, TestAppContext};
+
+    #[gpui::test]
+    fn the_computer_page_polls_status_only_while_it_is_the_open_section(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        let polling = |cx: &mut TestAppContext| {
+            cx.run_until_parked();
+            window.update(cx, |_, window, _| window.refresh()).unwrap();
+            cx.run_until_parked();
+            window
+                .update(cx, |shell, _, cx| {
+                    shell
+                        .computer_page
+                        .as_ref()
+                        .map(|page| page.read(cx).status_polling())
+                })
+                .unwrap()
+        };
+        window
+            .update(cx, |shell, _, cx| {
+                let state = shell.state.clone();
+                shell.computer_page = Some(cx.new(|cx| ComputerPage::new(state, cx)));
+                shell.open_settings(SettingsSection::Computer, cx)
+            })
+            .unwrap();
+        assert_eq!(polling(cx), Some(true), "the open Computer page polls");
+        window
+            .update(cx, |shell, _, cx| {
+                shell.open_settings(SettingsSection::Appshots, cx)
+            })
+            .unwrap();
+        assert_eq!(polling(cx), Some(false), "another section stops it");
+        window
+            .update(cx, |shell, _, cx| {
+                shell.open_settings(SettingsSection::Computer, cx)
+            })
+            .unwrap();
+        assert_eq!(polling(cx), Some(true));
+        window
+            .update(cx, |shell, _, cx| shell.close_settings(cx))
+            .unwrap();
+        assert_eq!(polling(cx), Some(false), "closing Settings stops it");
+    }
 
     #[gpui::test]
     fn appshot_destinations_retain_last_session_and_use_new_canvas_defaults(

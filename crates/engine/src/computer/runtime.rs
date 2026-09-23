@@ -443,7 +443,6 @@ mod tests {
 
     use super::*;
     use crate::computer::approval_gate::{ApprovalDecision, ApprovalRequest};
-    use crate::computer::backend::ComputerStreamFrame;
     use crate::computer::fake_backend::{FakeComputerBackend, FakeComputerBackendOptions};
 
     async fn next_service(
@@ -608,22 +607,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_still_frame_is_served_only_to_the_chat_on_the_desktop() {
+    async fn a_chat_on_the_desktop_gets_stills_until_it_releases_it() {
         let dir = tempfile::tempdir().unwrap();
-        let (runtime, _fake) = faked(dir.path()).await;
+        let (runtime, fake) = faked(dir.path()).await;
         let manager = runtime.service().unwrap().manager.clone();
-        let _viewer = manager.subscribe_frames(Arc::new(|_: &ComputerStreamFrame| {}));
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while manager.latest_frame().is_none() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("the viewer's capture delivers a frame");
+        manager.flush_stream_transitions().await;
         assert!(
-            runtime.still_frame("chat-a").is_none(),
-            "no chat holds the desktop"
+            fake.calls_for("attachStream").is_empty(),
+            "nothing captures while no chat holds the desktop"
         );
+        assert!(runtime.still_frame("chat-a").is_none());
 
         let (release, released) = oneshot::channel::<()>();
         let (entered_tx, entered) = oneshot::channel::<()>();
@@ -646,7 +639,14 @@ mod tests {
             })
         };
         entered.await.unwrap();
-        assert!(runtime.still_frame("chat-a").is_some());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while runtime.still_frame("chat-a").is_none() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the chat holding the desktop reads a still with no viewer attached");
+        assert_eq!(fake.calls_for("attachStream").len(), 1);
         assert!(
             runtime.still_frame("chat-b").is_none(),
             "another chat never sees the desktop"
@@ -656,8 +656,27 @@ mod tests {
             runtime.still_frame("chat-a").is_none(),
             "Settings off with no live Computer turn"
         );
+        runtime
+            .set_settings(ComputerSettings {
+                computer_control_enabled: true,
+                ..ComputerSettings::default()
+            })
+            .unwrap();
+
         let _ = release.send(());
-        let _ = activity.await;
+        activity.await.unwrap().unwrap();
+        manager.flush_stream_transitions().await;
+        assert!(
+            runtime.still_frame("chat-a").is_none(),
+            "a released desktop serves nothing"
+        );
+        assert!(manager.latest_frame().is_none());
+        assert_eq!(
+            fake.calls_for("detachStream").len(),
+            1,
+            "releasing the desktop stops the capture"
+        );
+        assert!(runtime.still_frame("chat-b").is_none());
         runtime.shutdown().await;
     }
 

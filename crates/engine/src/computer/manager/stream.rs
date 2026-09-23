@@ -2,12 +2,69 @@ use std::sync::Arc;
 
 use futures::FutureExt;
 
-use super::{ComputerFrameSubscriber, ComputerManager, ComputerManagerSubscription, error_message};
+use super::{
+    ComputerFrameSubscriber, ComputerManager, ComputerManagerSubscription, State, error_message,
+};
 use crate::computer::backend::{
     ComputerBackendMethod, ComputerError, ComputerFrameListener, ComputerStreamFrame,
 };
 
+impl State {
+    fn desktop_owners(&self) -> Vec<String> {
+        let mut owners: Vec<String> = self
+            .lease
+            .iter()
+            .map(|lease| lease.thread_id.clone())
+            .chain(
+                self.background_leases
+                    .iter()
+                    .map(|(_, held)| held.lease.thread_id.clone()),
+            )
+            .collect();
+        owners.sort();
+        owners.dedup();
+        owners
+    }
+
+    fn desktop_held(&self) -> bool {
+        self.lease.is_some()
+            || !self.background_leases.is_empty()
+            || self
+                .active_authorities
+                .values()
+                .any(|live| !live.is_empty())
+    }
+
+    fn stream_desired(&self) -> bool {
+        !self.frame_subscribers.is_empty() || self.stream.held
+    }
+}
+
 impl ComputerManager {
+    pub(super) fn sync_still_stream(&self) {
+        {
+            let mut state = self.state();
+            if state.disposed {
+                return;
+            }
+            let held = state.desktop_held();
+            let owners = state.desktop_owners();
+            let handoff = owners != state.stream.owners;
+            if held == state.stream.held && !handoff {
+                return;
+            }
+            state.stream.held = held;
+            if handoff {
+                state.stream.owners = owners;
+                state.stream.frame_gen += 1;
+                state.latest_frame = None;
+            }
+            state.stream.desired = state.stream_desired();
+            state.stream.epoch += 1;
+        }
+        self.spawn_reconcile();
+    }
+
     pub fn subscribe_frames(
         &self,
         subscriber: ComputerFrameSubscriber,
@@ -36,7 +93,7 @@ impl ComputerManager {
             state
                 .frame_subscribers
                 .retain(|(candidate, _)| *candidate != id);
-            if state.frame_subscribers.is_empty() {
+            if !state.stream_desired() {
                 state.stream.desired = false;
                 state.stream.epoch += 1;
                 true
@@ -81,14 +138,19 @@ impl ComputerManager {
         !state.disposed
             && state.stream.desired
             && state.stream.epoch == epoch
-            && !state.frame_subscribers.is_empty()
+            && state.stream_desired()
     }
 
     fn frame_listener(&self) -> ComputerFrameListener {
+        let generation = {
+            let mut state = self.state();
+            state.stream.listener_gen = state.stream.frame_gen;
+            state.stream.frame_gen
+        };
         let manager = self.weak.clone();
         Arc::new(move |frame: ComputerStreamFrame| {
             if let Some(manager) = manager.upgrade() {
-                manager.handle_frame(frame);
+                manager.handle_frame(frame, generation);
             }
         })
     }
@@ -99,13 +161,14 @@ impl ComputerManager {
 
     async fn reconcile_stream(&self) -> Result<(), ComputerError> {
         let _transition = self.stream_transition.lock().await;
-        let (disposed, desired, attached, epoch) = {
+        let (disposed, desired, attached, epoch, stale) = {
             let state = self.state();
             (
                 state.disposed,
                 state.stream.desired,
                 state.stream.attached,
                 state.stream.epoch,
+                state.stream.listener_gen != state.stream.frame_gen,
             )
         };
         if disposed || !desired {
@@ -117,7 +180,12 @@ impl ComputerManager {
             return self.backend.detach_stream().await;
         }
         if attached {
-            return Ok(());
+            if !stale {
+                return Ok(());
+            }
+            // A new desktop holder must not inherit a capture already in flight for the old one.
+            self.state().stream.attached = false;
+            self.backend.detach_stream().await?;
         }
         self.backend.attach_stream(self.frame_listener()).await?;
         if !self.stream_wanted(epoch) {
@@ -132,7 +200,7 @@ impl ComputerManager {
     pub async fn request_keyframe(&self) -> Result<(), ComputerError> {
         let epoch = {
             let state = self.state();
-            if !state.stream.attached || state.frame_subscribers.is_empty() {
+            if !state.stream.attached || !state.stream_desired() {
                 return Ok(());
             }
             state.stream.epoch
@@ -181,10 +249,13 @@ impl ComputerManager {
         self.backend.detach_stream().await
     }
 
-    fn handle_frame(&self, frame: ComputerStreamFrame) {
+    fn handle_frame(&self, frame: ComputerStreamFrame, generation: u64) {
         let subscribers: Vec<ComputerFrameSubscriber> = {
             let mut state = self.state();
-            if state.disposed || (!state.stream.desired && !state.stream.attached) {
+            if state.disposed
+                || (!state.stream.desired && !state.stream.attached)
+                || state.stream.frame_gen != generation
+            {
                 return;
             }
             state.latest_frame = Some(frame.clone());

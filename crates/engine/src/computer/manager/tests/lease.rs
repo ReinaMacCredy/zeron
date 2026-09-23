@@ -65,6 +65,51 @@ fn lease_record(
 }
 
 #[tokio::test]
+async fn the_lease_holder_keeps_one_still_stream_through_another_chats_calls() {
+    let Built {
+        manager, backend, ..
+    } = manager(Scripted::default_fake());
+    settle().await;
+    manager.flush_stream_transitions().await;
+    assert!(backend.calls_for("attachStream").is_empty());
+    click(&manager, Some("thread-a"), 10.0, 10.0).await.unwrap();
+    settle().await;
+    manager.flush_stream_transitions().await;
+    assert_eq!(backend.calls_for("attachStream").len(), 1);
+    assert!(manager.latest_frame().is_some());
+    assert!(manager.holds_desktop("thread-a"));
+
+    let error = click(&manager, Some("thread-b"), 20.0, 20.0)
+        .await
+        .unwrap_err();
+    assert_blocked(&error);
+    manager
+        .with_agent_activity("thread-b", || async { Ok(()) }, None, None, None)
+        .await
+        .unwrap();
+    settle().await;
+    manager.flush_stream_transitions().await;
+    assert_eq!(
+        backend.calls_for("attachStream").len(),
+        1,
+        "another chat's passing call does not restart the holder's stream"
+    );
+    assert!(backend.calls_for("detachStream").is_empty());
+    assert!(manager.latest_frame().is_some());
+
+    manager
+        .release_desktop_control("thread-a", None)
+        .await
+        .unwrap();
+    settle().await;
+    manager.flush_stream_transitions().await;
+    assert!(!manager.holds_desktop("thread-a"));
+    assert_eq!(backend.calls_for("detachStream").len(), 1);
+    assert!(manager.latest_frame().is_none());
+    manager.dispose().await;
+}
+
+#[tokio::test]
 async fn gives_the_desktop_to_the_first_thread_that_drives_it_and_refuses_the_second() {
     let Built {
         manager, backend, ..

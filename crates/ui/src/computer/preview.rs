@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use futures::channel::mpsc;
-use gpui::{App, AppContext as _, Entity, Global, RenderImage, Task};
+use gpui::{App, AppContext as _, Entity, Global, Point, RenderImage, Task};
 use zeron_proto::computer::{
     ComputerEvent, ComputerHealth, ComputerHealthStatus, ComputerPreviewSize, ComputerSettings,
     ThreadComputerState,
@@ -111,6 +111,7 @@ struct ChatPreview {
     still: Option<PreviewImage>,
     failure: Option<PreviewFailure>,
     armed_by_still: bool,
+    floating: Option<Point<f32>>,
 }
 
 #[derive(Debug, Clone)]
@@ -123,6 +124,7 @@ pub struct PreviewView {
     pub status_label: Option<String>,
     pub badge: Option<StatusBadge>,
     pub wants_stills: bool,
+    pub floating: Option<Point<f32>>,
 }
 
 impl PreviewView {
@@ -452,6 +454,40 @@ impl ComputerPreviewStore {
         true
     }
 
+    pub fn set_floating(&mut self, chat_id: &str, position: Option<Point<f32>>) -> bool {
+        if position.is_none() && !self.chats.contains_key(chat_id) {
+            return false;
+        }
+        std::mem::replace(&mut self.chat(chat_id).floating, position) != position
+    }
+
+    pub fn move_floating(&mut self, chat_id: &str, position: Point<f32>) -> bool {
+        match self
+            .chats
+            .get_mut(chat_id)
+            .and_then(|chat| chat.floating.as_mut())
+        {
+            Some(held) if *held != position => {
+                *held = position;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn remove_chat(&mut self, chat_id: &str) -> bool {
+        let Some(chat) = self.chats.remove(chat_id) else {
+            return false;
+        };
+        self.evicted.extend(
+            chat.tap
+                .into_iter()
+                .chain(chat.still)
+                .map(|frame| frame.image),
+        );
+        true
+    }
+
     pub fn mark_live(&mut self, chat_id: &str) -> bool {
         let next = phase_on_viewed(self.chats.get(chat_id).and_then(|chat| chat.phase));
         self.set_phase(chat_id, next)
@@ -522,6 +558,7 @@ impl ComputerPreviewStore {
             ),
             badge: status_badge(state, active, true),
             wants_stills: wanted && source == FrameSource::Stills,
+            floating: chat.and_then(|chat| chat.floating),
             frame,
         }
     }
@@ -766,6 +803,17 @@ pub fn fetch_settings(
             })
         });
     })
+}
+
+pub fn forget_chats(chat_ids: &[String], cx: &mut App) {
+    let Some(store) = store(cx).filter(|_| !chat_ids.is_empty()) else {
+        return;
+    };
+    update_store(&store, cx, |store| {
+        chat_ids.iter().fold(false, |changed, chat_id| {
+            store.remove_chat(chat_id) | changed
+        })
+    });
 }
 
 pub async fn read_still(engine: &EngineHandle, chat_id: &str) -> Option<(u64, Vec<u8>)> {
@@ -1087,6 +1135,38 @@ pub(crate) mod tests {
                 .as_deref(),
             Some("Press a key failed: no window")
         );
+    }
+
+    #[test]
+    fn a_floating_card_moves_only_while_detached_and_survives_the_task() {
+        let mut store = ComputerPreviewStore::default();
+        driving(&mut store, "a");
+        assert!(
+            !store.move_floating("a", gpui::point(1.0, 1.0)),
+            "a docked card does not drag"
+        );
+        assert!(store.set_floating("a", Some(gpui::point(40.0, 60.0))));
+        assert!(store.move_floating("a", gpui::point(50.0, 70.0)));
+        assert!(!store.move_floating("a", gpui::point(50.0, 70.0)));
+        store.apply_event(&ComputerEvent::ThreadState {
+            state: Box::new(thread_state("a", false)),
+        });
+        driving(&mut store, "a");
+        assert_eq!(store.view("a").floating, Some(gpui::point(50.0, 70.0)));
+        assert!(store.set_floating("a", None));
+        assert!(store.view("a").floating.is_none());
+        assert!(!store.set_floating("gone", None));
+        assert!(!store.remove_chat("gone"));
+        store.accept_tap_frame("a", image(1, 4, 4));
+        store.accept_still("a", Some(image(1, 4, 4)));
+        store.take_evicted();
+        assert!(store.remove_chat("a"));
+        assert_eq!(
+            store.take_evicted().len(),
+            2,
+            "a removed chat frees its frames"
+        );
+        assert_eq!(store.view("a").phase, None);
     }
 
     #[test]

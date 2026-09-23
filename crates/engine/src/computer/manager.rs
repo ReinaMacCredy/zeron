@@ -430,6 +430,10 @@ struct StreamState {
     attached: bool,
     desired: bool,
     epoch: u64,
+    held: bool,
+    owners: Vec<String>,
+    frame_gen: u64,
+    listener_gen: u64,
 }
 
 type PendingStop = Shared<BoxFuture<'static, Result<(), ComputerError>>>;

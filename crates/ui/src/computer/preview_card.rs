@@ -1,8 +1,8 @@
 use gpui::{
-    Context, Entity, FontWeight, Hsla, ImageSource, InteractiveElement as _, IntoElement,
-    ObjectFit, ParentElement as _, Pixels, Render, SharedString, Size,
-    StatefulInteractiveElement as _, Styled as _, StyledImage as _, Subscription, Task, Window,
-    div, img, prelude::FluentBuilder as _, px,
+    Bounds, Context, Entity, FontWeight, Hsla, ImageSource, InteractiveElement as _, IntoElement,
+    MouseButton, MouseDownEvent, ObjectFit, ParentElement as _, Pixels, Point, Render,
+    SharedString, Size, StatefulInteractiveElement as _, Styled as _, StyledImage as _,
+    Subscription, Task, Window, div, img, point, prelude::FluentBuilder as _, px,
 };
 use zeron_proto::computer::{ComputerPreviewSize, ComputerSettings};
 use zeron_proto::view::Indicator;
@@ -38,6 +38,10 @@ const SLOT_BOTTOM_RESERVE: f32 = 120.0;
 const CARD_TOP: f32 = Theme::TITLEBAR_HEIGHT + 12.0;
 const CARD_RIGHT: f32 = 16.0;
 const FALLBACK_ASPECT: f32 = 16.0 / 10.0;
+const FLOAT_MARGIN: f32 = 8.0;
+const FLOAT_EXPAND_SCALE: f32 = 1.5;
+const INSET_GAP: f32 = 24.0;
+const DRAG_THRESHOLD: f32 = 4.0;
 
 pub fn budget_width(caps: CardCaps, slot_width: f32) -> f32 {
     (slot_width - 520.0 - 24.0).min(caps.max_width).max(200.0)
@@ -52,11 +56,53 @@ pub fn fit_width(caps: CardCaps, slot: Size<Pixels>, aspect: f32) -> f32 {
         .max(caps.min_width)
 }
 
+pub fn float_width(caps: CardCaps, viewport: Size<Pixels>, aspect: f32) -> f32 {
+    let margins = FLOAT_MARGIN * 2.0;
+    (caps.max_width * FLOAT_EXPAND_SCALE)
+        .min(f32::from(viewport.width) - margins)
+        .min((f32::from(viewport.height) - margins) * aspect)
+        .max(caps.min_width)
+}
+
+pub fn clamp_float(origin: Point<f32>, card: Size<f32>, viewport: Size<Pixels>) -> Point<f32> {
+    let max_x = (f32::from(viewport.width) - card.width - FLOAT_MARGIN).max(FLOAT_MARGIN);
+    let max_y = (f32::from(viewport.height) - card.height - FLOAT_MARGIN).max(FLOAT_MARGIN);
+    point(
+        origin.x.clamp(FLOAT_MARGIN, max_x),
+        origin.y.clamp(FLOAT_MARGIN, max_y),
+    )
+}
+
+fn view_aspect(view: &PreviewView) -> f32 {
+    view.frame
+        .as_ref()
+        .map(|frame| frame.width as f32 / frame.height as f32)
+        .unwrap_or(FALLBACK_ASPECT)
+}
+
+pub fn docked_inset(view: &PreviewView, size: ComputerPreviewSize, slot: Size<Pixels>) -> f32 {
+    if !view.visually_open() || view.floating.is_some() {
+        return 0.0;
+    }
+    let caps = card_caps(size);
+    fit_width(caps, slot, view_aspect(view)).min(budget_width(caps, f32::from(slot.width)))
+        + INSET_GAP
+}
+
+struct Drag {
+    offset: Point<f32>,
+    start: Point<Pixels>,
+    detached: bool,
+}
+
 pub struct ComputerPreviewCard {
     state: Entity<AppState>,
     store: Entity<ComputerPreviewStore>,
     chat_id: Option<String>,
     slot: Size<Pixels>,
+    viewport: Size<Pixels>,
+    card_bounds: Option<Bounds<Pixels>>,
+    drag: Option<Drag>,
     hovered: bool,
     still_poll: Option<(String, Task<()>)>,
     settings_fetch: Option<Task<()>>,
@@ -79,6 +125,9 @@ impl ComputerPreviewCard {
             store,
             chat_id: None,
             slot: Size::default(),
+            viewport: Size::default(),
+            card_bounds: None,
+            drag: None,
             hovered: false,
             still_poll: None,
             settings_fetch: None,
@@ -96,6 +145,7 @@ impl ComputerPreviewCard {
         if self.chat_id != chat_id || self.slot != slot {
             if self.chat_id != chat_id {
                 self.hovered = false;
+                self.drag = None;
             }
             self.chat_id = chat_id;
             self.slot = slot;
@@ -103,11 +153,85 @@ impl ComputerPreviewCard {
         }
     }
 
+    pub fn store(&self) -> &Entity<ComputerPreviewStore> {
+        &self.store
+    }
+
     pub fn hide(&mut self, cx: &mut Context<Self>) {
         let Some(chat) = self.chat_id.clone() else {
             return;
         };
         preview::update_store(&self.store, cx, |store| store.hide_for_task(&chat));
+    }
+
+    fn set_floating(&mut self, origin: Option<Point<f32>>, cx: &mut Context<Self>) {
+        let Some(chat) = self.chat_id.clone() else {
+            return;
+        };
+        preview::update_store(&self.store, cx, |store| store.set_floating(&chat, origin));
+    }
+
+    pub fn pop_out(&mut self, cx: &mut Context<Self>) {
+        let Some(bounds) = self.card_bounds else {
+            return;
+        };
+        let card = Size::new(f32::from(bounds.size.width), f32::from(bounds.size.height));
+        let origin = point(f32::from(bounds.origin.x), f32::from(bounds.origin.y));
+        self.set_floating(Some(clamp_float(origin, card, self.viewport)), cx);
+    }
+
+    pub fn dock(&mut self, cx: &mut Context<Self>) {
+        self.drag = None;
+        self.set_floating(None, cx);
+    }
+
+    fn begin_drag(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(bounds) = self.card_bounds else {
+            return;
+        };
+        let detached = self
+            .chat_id
+            .as_ref()
+            .is_some_and(|chat| self.store.read(cx).view(chat).floating.is_some());
+        self.drag = Some(Drag {
+            offset: point(
+                f32::from(event.position.x - bounds.origin.x),
+                f32::from(event.position.y - bounds.origin.y),
+            ),
+            start: event.position,
+            detached,
+        });
+        cx.notify();
+    }
+
+    fn drag_to(&mut self, position: Point<Pixels>, pressed: bool, cx: &mut Context<Self>) {
+        if !pressed {
+            self.end_drag(cx);
+            return;
+        }
+        let (Some(drag), Some(bounds)) = (self.drag.as_mut(), self.card_bounds) else {
+            return;
+        };
+        if !drag.detached {
+            let moved = position - drag.start;
+            if f32::from(moved.x).hypot(f32::from(moved.y)) < DRAG_THRESHOLD {
+                return;
+            }
+            drag.detached = true;
+        }
+        let origin = point(
+            f32::from(position.x) - drag.offset.x,
+            f32::from(position.y) - drag.offset.y,
+        );
+        let card = Size::new(f32::from(bounds.size.width), f32::from(bounds.size.height));
+        let origin = clamp_float(origin, card, self.viewport);
+        self.set_floating(Some(origin), cx);
+    }
+
+    fn end_drag(&mut self, cx: &mut Context<Self>) {
+        if self.drag.take().is_some() {
+            cx.notify();
+        }
     }
 
     fn working(&self, chat: &str, cx: &Context<Self>) -> bool {
@@ -204,8 +328,32 @@ fn badge_colors(badge: &StatusBadge, theme: &Theme) -> Hsla {
     }
 }
 
+fn control(
+    id: &'static str,
+    glyph: &'static str,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .size(px(28.0))
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .hover(|s| s.bg(gpui::white().opacity(0.2)))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(on_click)
+        .child(
+            crate::icons::icon(glyph)
+                .size(px(16.0))
+                .text_color(gpui::white()),
+        )
+}
+
 impl Render for ComputerPreviewCard {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(chat) = self.chat_id.clone() else {
             self.still_poll = None;
             return div().into_any_element();
@@ -216,15 +364,19 @@ impl Render for ComputerPreviewCard {
         };
         self.reconcile(&chat, &view, cx);
         if !view.visually_open() {
+            self.drag = None;
             return div().into_any_element();
         }
         let theme = Theme::of(cx).clone();
-        let aspect = view
-            .frame
-            .as_ref()
-            .map(|frame| frame.width as f32 / frame.height as f32)
-            .unwrap_or(FALLBACK_ASPECT);
-        let width = fit_width(card_caps(size), self.slot, aspect);
+        self.viewport = window.viewport_size();
+        let aspect = view_aspect(&view);
+        let caps = card_caps(size);
+        let floating = view.floating.map(|stored| {
+            let width = float_width(caps, self.viewport, aspect);
+            let origin = clamp_float(stored, Size::new(width, width / aspect), self.viewport);
+            (width, origin)
+        });
+        let width = floating.map_or_else(|| fit_width(caps, self.slot, aspect), |(w, _)| w);
         let height = width / aspect;
         let body = match &view.frame {
             Some(frame) => img(ImageSource::Render(frame.image.clone()))
@@ -252,12 +404,62 @@ impl Render for ComputerPreviewCard {
             .clone()
             .filter(|badge| badge.tone != BadgeTone::Active);
         let hovered = self.hovered;
-        div()
+        let dragging = self.drag.is_some();
+        let measure = cx.entity().downgrade();
+        let follow = cx.entity().downgrade();
+        let tracker = gpui::canvas(
+            move |bounds, _, cx| {
+                let _ = measure.update(cx, |this, _| this.card_bounds = Some(bounds));
+            },
+            move |_, _, window, _| {
+                if !dragging {
+                    return;
+                }
+                let on_move = follow.clone();
+                window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, _, cx| {
+                    if phase != gpui::DispatchPhase::Bubble {
+                        return;
+                    }
+                    let pressed = event.pressed_button == Some(MouseButton::Left);
+                    let _ =
+                        on_move.update(cx, |this, cx| this.drag_to(event.position, pressed, cx));
+                });
+                let on_up = follow.clone();
+                window.on_mouse_event(move |_: &gpui::MouseUpEvent, phase, _, cx| {
+                    if phase == gpui::DispatchPhase::Bubble {
+                        let _ = on_up.update(cx, |this, cx| this.end_drag(cx));
+                    }
+                });
+            },
+        )
+        // Absolute children sit inside the card's 1px border; measure the outer rect.
+        .absolute()
+        .top(px(-1.0))
+        .left(px(-1.0))
+        .right(px(-1.0))
+        .bottom(px(-1.0));
+        let detach = if floating.is_some() {
+            control(
+                "computer-preview-dock",
+                crate::icons::COLLAPSE_ARROWS,
+                cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.dock(cx);
+                }),
+            )
+        } else {
+            control(
+                "computer-preview-pop-out",
+                crate::icons::EXPAND_ARROWS,
+                cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.pop_out(cx);
+                }),
+            )
+        };
+        let card = div()
             .id("computer-preview-card")
             .debug_selector(|| "computer-preview-card".into())
-            .absolute()
-            .top(px(CARD_TOP))
-            .right(px(CARD_RIGHT))
             .w(px(width))
             .flex()
             .flex_col()
@@ -271,13 +473,22 @@ impl Render for ComputerPreviewCard {
                 this.hovered = *hovered;
                 cx.notify();
             }))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
                 div()
+                    .id("computer-preview-viewport")
+                    .debug_selector(|| "computer-preview-viewport".into())
                     .relative()
                     .w_full()
                     .h(px(height))
                     .overflow_hidden()
                     .bg(gpui::black())
+                    .when(floating.is_some(), |viewport| {
+                        viewport
+                            .cursor_grab()
+                            .when(dragging, |el| el.cursor_grabbing())
+                    })
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::begin_drag))
                     .child(body)
                     .child(
                         div()
@@ -306,7 +517,7 @@ impl Render for ComputerPreviewCard {
                                 .absolute()
                                 .top(px(8.0))
                                 .left(px(8.0))
-                                .max_w(px(width - 56.0))
+                                .max_w(px(width - 88.0))
                                 .child(pill(color, color, badge.label)),
                         )
                     })
@@ -320,48 +531,51 @@ impl Render for ComputerPreviewCard {
                                 .child(pill(gpui::white(), theme.text_muted, label)),
                         )
                     })
-                    .when(hovered, |viewport| {
+                    .when(hovered || dragging, |viewport| {
                         viewport.child(
                             div()
                                 .absolute()
                                 .top(px(8.0))
                                 .right(px(8.0))
+                                .flex()
+                                .gap(px(4.0))
                                 .p(px(4.0))
                                 .rounded_full()
                                 .border_1()
                                 .border_color(gpui::white().opacity(0.2))
                                 .bg(gpui::white().opacity(0.12))
-                                .child(
-                                    div()
-                                        .id("computer-preview-hide")
-                                        .debug_selector(|| "computer-preview-hide".into())
-                                        .size(px(28.0))
-                                        .rounded_full()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .cursor_pointer()
-                                        .hover(|s| s.bg(gpui::white().opacity(0.2)))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            cx.stop_propagation();
-                                            this.hide(cx);
-                                        }))
-                                        .child(
-                                            crate::icons::icon(crate::icons::CLOSE)
-                                                .size(px(16.0))
-                                                .text_color(gpui::white()),
-                                        ),
-                                ),
+                                .child(detach)
+                                .child(control(
+                                    "computer-preview-hide",
+                                    crate::icons::CLOSE,
+                                    cx.listener(|this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.hide(cx);
+                                    }),
+                                )),
                         )
                     }),
             )
-            .into_any_element()
+            .child(tracker);
+        match floating {
+            Some((_, origin)) => gpui::deferred(
+                gpui::anchored()
+                    .position(point(px(origin.x), px(origin.y)))
+                    .child(card),
+            )
+            .into_any_element(),
+            None => card
+                .absolute()
+                .top(px(CARD_TOP))
+                .right(px(CARD_RIGHT))
+                .into_any_element(),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use gpui::{AppContext as _, TestAppContext, VisualTestContext, size};
+    use gpui::{AppContext as _, TestAppContext, VisualTestContext, point, size};
     use zeron_proto::computer::ComputerEvent;
     use zeron_rpc::methods;
 
@@ -428,6 +642,7 @@ mod tests {
             card.set_target(Some("a".into()), size(px(1200.0), px(800.0)), cx)
         });
         let (_, cx) = cx.add_window_view(|_, _| Fixture(card.clone()));
+        cx.simulate_resize(size(px(1200.0), px(800.0)));
         (store, card, Wire(frames), cx)
     }
 
@@ -562,6 +777,194 @@ mod tests {
             Some(PreviewPhase::Live),
             "the next lease re-arms"
         );
+    }
+
+    #[test]
+    fn float_and_inset_follow_synaras_popover_logic() {
+        let compact = card_caps(ComputerPreviewSize::Compact);
+        let window = size(px(1200.0), px(800.0));
+        assert_eq!(
+            float_width(compact, window, 1.6),
+            600.0,
+            "detaching grows the card 1.5x"
+        );
+        assert_eq!(
+            float_width(compact, size(px(500.0), px(800.0)), 1.6),
+            484.0,
+            "the viewport bounds a detached card"
+        );
+        assert_eq!(
+            float_width(compact, size(px(1200.0), px(150.0)), 1.6),
+            240.0,
+            "never below the footprint floor"
+        );
+        let card = Size::new(600.0, 375.0);
+        assert_eq!(
+            clamp_float(point(-50.0, 900.0), card, window),
+            point(8.0, 417.0)
+        );
+        assert_eq!(
+            clamp_float(point(100.0, 60.0), card, window),
+            point(100.0, 60.0)
+        );
+        assert_eq!(
+            clamp_float(point(100.0, 60.0), Size::new(2000.0, 900.0), window),
+            point(8.0, 8.0)
+        );
+
+        let mut store = ComputerPreviewStore::default();
+        driving(&mut store, "a");
+        store.mark_live("a");
+        let slot = size(px(1200.0), px(800.0));
+        assert_eq!(
+            docked_inset(&store.view("a"), ComputerPreviewSize::Compact, slot),
+            0.0,
+            "no gutter before the card has content"
+        );
+        store.accept_tap_frame("a", image(1, 960, 600));
+        assert_eq!(
+            docked_inset(&store.view("a"), ComputerPreviewSize::Compact, slot),
+            424.0
+        );
+        assert_eq!(
+            docked_inset(&store.view("a"), ComputerPreviewSize::Large, slot),
+            584.0
+        );
+        assert_eq!(
+            docked_inset(
+                &store.view("a"),
+                ComputerPreviewSize::Compact,
+                size(px(700.0), px(800.0))
+            ),
+            224.0,
+            "a narrow slot caps the gutter at the budget"
+        );
+        store.set_floating("a", Some(point(10.0, 10.0)));
+        assert_eq!(
+            docked_inset(&store.view("a"), ComputerPreviewSize::Compact, slot),
+            0.0,
+            "a floating card frees the gutter"
+        );
+    }
+
+    fn live_card(
+        store: &Entity<ComputerPreviewStore>,
+        cx: &mut VisualTestContext,
+    ) -> Bounds<Pixels> {
+        change(store, cx, |store| {
+            store.set_events_live(true);
+            driving(store, "a");
+            store.accept_tap_frame("a", image(1, 960, 600))
+        });
+        cx.debug_bounds("computer-preview-card")
+            .expect("card painted")
+    }
+
+    fn reveal(cx: &mut VisualTestContext, selector: &'static str) -> Bounds<Pixels> {
+        let card = cx
+            .debug_bounds("computer-preview-card")
+            .expect("card painted");
+        cx.simulate_mouse_move(card.center(), None, gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.debug_bounds(selector).expect("control on hover")
+    }
+
+    #[gpui::test]
+    fn the_card_pops_out_into_a_floating_card_and_docks_back(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _card, mut wire, cx) = mount(cx, dir.path());
+        let docked = live_card(&store, cx);
+        wire.methods(cx);
+        assert_eq!(f32::from(docked.size.width), 400.0);
+        assert!(cx.debug_bounds("computer-preview-dock").is_none());
+        let pop = reveal(cx, "computer-preview-pop-out");
+        cx.simulate_click(pop.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        let floating = cx
+            .debug_bounds("computer-preview-card")
+            .expect("floating card painted");
+        assert_eq!(f32::from(floating.size.width), 600.0);
+        assert_eq!(
+            f32::from(floating.origin.x),
+            1200.0 - 600.0 - 8.0,
+            "the detached card starts at its docked rect, clamped on screen"
+        );
+        assert_eq!(floating.origin.y, docked.origin.y);
+        assert_eq!(phase(&store, cx), Some(PreviewPhase::Live));
+        assert!(wire.methods(cx).is_empty(), "floating is UI-only");
+
+        let grab = floating.center();
+        cx.simulate_mouse_down(grab, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(
+            grab - point(px(200.0), px(-40.0)),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            grab - point(px(200.0), px(-40.0)),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        let dragged = cx.debug_bounds("computer-preview-card").unwrap();
+        assert_eq!(
+            dragged.origin,
+            floating.origin - point(px(200.0), px(-40.0))
+        );
+        cx.simulate_mouse_move(
+            grab - point(px(400.0), px(0.0)),
+            None,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("computer-preview-card").unwrap().origin,
+            dragged.origin,
+            "a released card stays put"
+        );
+
+        let dock = reveal(cx, "computer-preview-dock");
+        cx.simulate_click(dock.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(cx.debug_bounds("computer-preview-card").unwrap(), docked);
+        assert!(cx.update(|_, cx| store.read(cx).view("a").floating.is_none()));
+    }
+
+    #[gpui::test]
+    fn dragging_the_docked_card_detaches_it(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _card, _wire, cx) = mount(cx, dir.path());
+        let docked = live_card(&store, cx);
+        let grab = docked.center();
+        cx.simulate_mouse_down(grab, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(
+            grab + point(px(2.0), px(1.0)),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        assert!(
+            cx.update(|_, cx| store.read(cx).view("a").floating.is_none()),
+            "a press that barely moves stays docked"
+        );
+        let to = grab - point(px(300.0), px(-100.0));
+        cx.simulate_mouse_move(to, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_up(to, MouseButton::Left, gpui::Modifiers::default());
+        cx.run_until_parked();
+        let floating = cx.update(|_, cx| store.read(cx).view("a").floating);
+        assert_eq!(
+            floating,
+            Some(point(
+                f32::from(docked.origin.x) - 300.0,
+                f32::from(docked.origin.y) + 100.0
+            ))
+        );
+        let card = cx.debug_bounds("computer-preview-card").unwrap();
+        assert_eq!(f32::from(card.size.width), 600.0);
     }
 
     #[gpui::test]

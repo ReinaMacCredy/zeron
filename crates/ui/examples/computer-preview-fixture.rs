@@ -1,6 +1,6 @@
 use gpui::{
-    AppContext, AsyncApp, Bounds, Modifiers, MouseMoveEvent, PlatformInput, WindowBounds,
-    WindowOptions, px, size,
+    AppContext, AsyncApp, Bounds, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, PlatformInput, Point, WindowBounds, WindowOptions, px, size,
 };
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Arc, time::Duration};
@@ -28,6 +28,44 @@ fn capture(
             .save(directory.join(format!("{name}.png")))?;
         Ok(())
     })?
+}
+
+fn pointer(
+    window: gpui::AnyWindowHandle,
+    cx: &mut AsyncApp,
+    events: Vec<PlatformInput>,
+) -> anyhow::Result<()> {
+    window.update(cx, |_, w, cx| {
+        for event in events {
+            w.dispatch_event(event, cx);
+        }
+    })
+}
+
+fn press(position: Point<Pixels>) -> Vec<PlatformInput> {
+    vec![
+        PlatformInput::MouseDown(MouseDownEvent {
+            button: MouseButton::Left,
+            position,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+            first_mouse: false,
+        }),
+        PlatformInput::MouseUp(MouseUpEvent {
+            button: MouseButton::Left,
+            position,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        }),
+    ]
+}
+
+fn hover(position: Point<Pixels>, button: Option<MouseButton>) -> PlatformInput {
+    PlatformInput::MouseMove(MouseMoveEvent {
+        position,
+        pressed_button: button,
+        modifiers: Modifiers::default(),
+    })
 }
 
 fn port() -> u16 {
@@ -124,6 +162,7 @@ fn tool(id: &str, name: &str, input: Value) -> Value {
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("warn").init();
     let output = PathBuf::from(std::env::args().nth(1).expect("output directory"));
+    let p45_output = std::env::args().nth(2).map(PathBuf::from);
     std::fs::create_dir_all(&output)?;
     let temp = tempfile::tempdir()?;
     let runtime = tokio::runtime::Runtime::new()?;
@@ -171,6 +210,15 @@ fn main() -> anyhow::Result<()> {
             "status": "streaming",
         }),
     ];
+    let mut long_transcript = transcript.clone();
+    long_transcript.push(json!({
+        "id": "a2",
+        "role": "assistant",
+        "parts": [text("t2", "Calculator is open and the keypad is ready. I clicked the 2 key, then the plus key, then the 2 key again, and the display now reads 4. The preview on the right follows the window I am driving, so you can watch each key press land without switching apps. While it stays docked the conversation keeps a gutter free for it, so none of this text runs underneath the card; pop it out when you want the full width back.")],
+        "createdAt": 1788900002000i64,
+        "deviceId": device,
+        "status": "streaming",
+    }));
     let failure = Arc::new(std::sync::Mutex::new(None));
     let result = failure.clone();
     gpui_platform::application()
@@ -381,6 +429,89 @@ fn main() -> anyhow::Result<()> {
                     });
                     pause(cx, 800).await;
                     capture(window.into(), cx, &output, "still-fallback-input-paused")?;
+
+                    if let Some(p45) = &p45_output {
+                        std::fs::create_dir_all(p45)?;
+                        state.update(cx, |s, cx| {
+                            s.computer_input_pauses.remove(CHAT);
+                            s.receive_transcript_frame(reset(long_transcript.clone()), cx).unwrap();
+                            cx.notify();
+                        });
+                        rearm(cx);
+                        pause(cx, 400).await;
+                        for seq in 300..=310u64 {
+                            taps.unbounded_send(frame(seq, 5))?;
+                            pause(cx, 66).await;
+                        }
+                        let away = gpui::point(px(300.), px(500.));
+                        pointer(window.into(), cx, vec![hover(away, None)])?;
+                        pause(cx, 800).await;
+                        capture(window.into(), cx, p45, "docked-with-inset")?;
+
+                        let width = window.update(cx, |_, w, _| w.viewport_size().width)?;
+                        let card_right = width - px(16.);
+                        let card_top = px(theme::Theme::TITLEBAR_HEIGHT + 12.);
+                        let on_card = gpui::point(card_right - px(200.), card_top + px(120.));
+                        pointer(window.into(), cx, vec![hover(on_card, None)])?;
+                        pause(cx, 300).await;
+                        capture(window.into(), cx, p45, "docked-hover-controls")?;
+                        let pop_out = gpui::point(card_right - px(59.), card_top + px(27.));
+                        pointer(window.into(), cx, vec![hover(pop_out, None)])?;
+                        pause(cx, 100).await;
+                        pointer(window.into(), cx, press(pop_out))?;
+                        pause(cx, 300).await;
+                        pointer(window.into(), cx, vec![hover(away, None)])?;
+                        pause(cx, 800).await;
+                        capture(window.into(), cx, p45, "floating-popped-out")?;
+                        let floating = cx.update(|cx| store.read(cx).view(CHAT).floating);
+                        let Some(origin) = floating else {
+                            anyhow::bail!("the pop-out button did not detach the card");
+                        };
+
+                        let grab = gpui::point(px(origin.x + 300.), px(origin.y + 200.));
+                        let drop = gpui::point(px(origin.x - 380.), px(origin.y + 260.));
+                        pointer(window.into(), cx, vec![hover(grab, None)])?;
+                        pause(cx, 100).await;
+                        pointer(window.into(), cx, vec![PlatformInput::MouseDown(MouseDownEvent {
+                            button: MouseButton::Left,
+                            position: grab,
+                            modifiers: Modifiers::default(),
+                            click_count: 1,
+                            first_mouse: false,
+                        })])?;
+                        pause(cx, 50).await;
+                        for step in 1..=10 {
+                            let t = step as f32 / 10.;
+                            let at = grab + (drop - grab) * t;
+                            pointer(window.into(), cx, vec![hover(at, Some(MouseButton::Left))])?;
+                            pause(cx, 30).await;
+                        }
+                        pointer(window.into(), cx, vec![PlatformInput::MouseUp(MouseUpEvent {
+                            button: MouseButton::Left,
+                            position: drop,
+                            modifiers: Modifiers::default(),
+                            click_count: 1,
+                        })])?;
+                        pointer(window.into(), cx, vec![hover(away, None)])?;
+                        pause(cx, 600).await;
+                        capture(window.into(), cx, p45, "floating-dragged")?;
+                        let moved = cx.update(|cx| store.read(cx).view(CHAT).floating);
+                        eprintln!("p4-5 floating origin {origin:?} -> {moved:?}");
+
+                        let dragged = moved.unwrap_or(origin);
+                        let card = gpui::point(px(dragged.x + 300.), px(dragged.y + 150.));
+                        pointer(window.into(), cx, vec![hover(card, None)])?;
+                        pause(cx, 300).await;
+                        let dock = gpui::point(px(dragged.x + 600. - 59.), px(dragged.y + 27.));
+                        pointer(window.into(), cx, vec![hover(dock, None)])?;
+                        pause(cx, 100).await;
+                        pointer(window.into(), cx, press(dock))?;
+                        pointer(window.into(), cx, vec![hover(away, None)])?;
+                        pause(cx, 800).await;
+                        capture(window.into(), cx, p45, "docked-again")?;
+                        let docked = cx.update(|cx| store.read(cx).view(CHAT).floating);
+                        eprintln!("p4-5 after dock: {docked:?}");
+                    }
                     Ok(())
                 }
                 .await;

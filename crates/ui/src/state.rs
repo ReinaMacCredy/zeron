@@ -1013,8 +1013,19 @@ impl AppState {
         true
     }
 
-    pub fn apply_chats(&mut self, mut chats: Vec<Chat>) {
+    pub fn apply_chats(&mut self, mut chats: Vec<Chat>) -> Vec<String> {
         sort_chats(&mut chats);
+        let live: std::collections::HashSet<&str> = chats
+            .iter()
+            .filter(|chat| !chat.archived)
+            .map(|chat| chat.id.as_str())
+            .collect();
+        let gone = self
+            .chats
+            .iter()
+            .filter(|chat| !chat.archived && !live.contains(chat.id.as_str()))
+            .map(|chat| chat.id.clone())
+            .collect();
         self.chats = chats;
         self.chats_synced = true;
         self.transcript_cache
@@ -1034,6 +1045,15 @@ impl AppState {
             self.queue.clear();
             self.queue_task = None;
         }
+        gone
+    }
+
+    fn apply_chats_frame(&mut self, chats: Vec<Chat>, cx: &mut Context<Self>) {
+        let gone = self.apply_chats(chats);
+        crate::computer::preview::forget_chats(&gone, cx);
+        self.apply_pending_deep_link(cx);
+        self.reconcile_change_request_watches(cx);
+        cx.notify();
     }
 
     pub fn apply_sessions(&mut self, sessions: Vec<Session>) -> bool {
@@ -2649,12 +2669,7 @@ fn spawn_chats_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<(
                         continue;
                     }
                 };
-                let alive = this.update(cx, |state, cx| {
-                    state.apply_chats(parsed);
-                    state.apply_pending_deep_link(cx);
-                    state.reconcile_change_request_watches(cx);
-                    cx.notify();
-                });
+                let alive = this.update(cx, |state, cx| state.apply_chats_frame(parsed, cx));
                 if alive.is_err() {
                     return;
                 }
@@ -4576,6 +4591,68 @@ mod tests {
         state.apply_chats(vec![archived, chat("b", 1, None)]);
         let visible: Vec<&str> = state.visible_chats().map(|c| c.id.as_str()).collect();
         assert_eq!(visible, ["b"]);
+    }
+
+    #[gpui::test]
+    fn a_removed_or_archived_chat_drops_its_computer_preview(cx: &mut gpui::TestAppContext) {
+        cx.update(crate::computer::preview::init);
+        let store = cx.update(|cx| crate::computer::preview::store(cx).unwrap());
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, cx| {
+            state.apply_chats_frame(
+                vec![chat("a", 0, None), chat("b", 1, None), chat("c", 2, None)],
+                cx,
+            )
+        });
+        store.update(cx, |store, _| {
+            for id in ["a", "b", "c"] {
+                crate::computer::preview::tests::driving(store, id);
+                store.accept_tap_frame(id, crate::computer::preview::tests::image(1, 4, 4));
+            }
+            store.set_floating("b", Some(gpui::point(20.0, 30.0)));
+        });
+        let mut archived = chat("b", 1, None);
+        archived.archived = true;
+        state.update(cx, |state, cx| {
+            state.apply_chats_frame(vec![archived, chat("c", 2, None)], cx)
+        });
+        store.update(cx, |store, _| {
+            assert_eq!(
+                store.view("a").phase,
+                None,
+                "a deleted chat's session is gone"
+            );
+            assert!(store.view("a").frame.is_none());
+            assert_eq!(
+                store.view("b").phase,
+                None,
+                "an archived chat's session is gone"
+            );
+            assert!(store.view("b").floating.is_none());
+            assert!(
+                store.view("c").frame.is_some(),
+                "a live chat keeps its preview"
+            );
+        });
+    }
+
+    #[test]
+    fn apply_chats_reports_chats_that_left_the_active_list() {
+        let mut state = AppState::new();
+        assert!(
+            state
+                .apply_chats(vec![chat("a", 0, None), chat("b", 1, None)])
+                .is_empty()
+        );
+        let mut archived = chat("a", 0, None);
+        archived.archived = true;
+        let mut gone = state.apply_chats(vec![archived.clone()]);
+        gone.sort();
+        assert_eq!(gone, ["a", "b"]);
+        assert!(
+            state.apply_chats(vec![archived]).is_empty(),
+            "an already archived chat is not reported again"
+        );
     }
 
     #[test]

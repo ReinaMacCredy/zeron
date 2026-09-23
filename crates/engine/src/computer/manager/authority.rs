@@ -274,6 +274,7 @@ impl ComputerManager {
                 None => false,
             }
         };
+        self.sync_still_stream();
         if first && let Some(owner) = &owner {
             self.publish_cached(owner);
         }
@@ -310,6 +311,7 @@ impl ComputerManager {
                 }
             }
         }
+        self.sync_still_stream();
         let Some(owner) = owner else {
             return Settled::Nothing;
         };
@@ -524,6 +526,7 @@ impl ComputerManager {
             state.authority_revocations.remove(thread_id);
             state.active_authorities.remove(thread_id);
         }
+        self.sync_still_stream();
         let _ = with_teardown_timeout(self.release_desktop_control(thread_id, None)).await;
         if let Some(browser) = self.backend.browser() {
             let _ = with_teardown_timeout(browser.end_thread(thread_id)).await;

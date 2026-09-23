@@ -3105,6 +3105,7 @@ pub struct Transcript {
     /// identity, so the virtual list must explicitly discard cached heights.
     typography_generation: u32,
     content_width: f32,
+    preview_inset: f32,
     /// Last global code-fence layout generation applied to this transcript.
     /// Each instance owns separate scroll handles and list measurements, so
     /// every one must reset itself after a global Fit-mode transition.
@@ -3410,6 +3411,7 @@ impl Transcript {
             rendered_rows: HashSet::new(),
             typography_generation: crate::typography::generation(cx),
             content_width: crate::settings::transcript_width(cx),
+            preview_inset: 0.0,
             code_fences_generation: crate::settings::code_fences_generation(cx),
             highlights: HighlightStore::default(),
             show_jump_button: false,
@@ -3840,6 +3842,26 @@ impl Transcript {
         cx.notify();
     }
 
+    fn computer_preview_slot(&self, window: &Window) -> gpui::Size<Pixels> {
+        // The list viewport shrinks to short content; the card's height budget is the window's.
+        size(
+            self.list.viewport_bounds().size.width,
+            window.viewport_size().height - px(Theme::TITLEBAR_HEIGHT),
+        )
+    }
+
+    fn computer_preview_inset(&self, window: &Window, cx: &gpui::App) -> f32 {
+        let (Some(card), Some(chat)) = (&self.computer_preview, self.quote_chat_id(cx)) else {
+            return 0.0;
+        };
+        let store = card.read(cx).store().read(cx);
+        crate::computer::preview_card::docked_inset(
+            &store.view(&chat),
+            store.preview_size(),
+            self.computer_preview_slot(window),
+        )
+    }
+
     fn render_computer_preview(
         &self,
         window: &Window,
@@ -3847,11 +3869,7 @@ impl Transcript {
     ) -> Option<AnyElement> {
         let card = self.computer_preview.clone()?;
         let chat = self.quote_chat_id(cx);
-        // The list viewport shrinks to short content; the card's height budget is the window's.
-        let slot = size(
-            self.list.viewport_bounds().size.width,
-            window.viewport_size().height - px(Theme::TITLEBAR_HEIGHT),
-        );
+        let slot = self.computer_preview_slot(window);
         card.update(cx, |card, cx| card.set_target(chat, slot, cx));
         Some(card.into_any_element())
     }
@@ -6884,7 +6902,8 @@ impl Transcript {
             .pt(px(top_gap))
             .pb(px(bottom_pad))
             // Keep side gutters as the configurable column shrinks to fit.
-            .px(px(48.0))
+            .pl(px(48.0))
+            .pr(px(48.0 + self.preview_inset))
             .child(
                 div()
                     .w_full()
@@ -9348,6 +9367,17 @@ impl Render for Transcript {
                 self.own_turn_kick = true;
             }
         }
+        let preview_inset = self.computer_preview_inset(window, cx);
+        if self.preview_inset != preview_inset {
+            self.preview_inset = preview_inset;
+            self.list.remeasure();
+            if self.pinned {
+                self.wake_spring();
+            }
+            if self.own_turn.is_some() {
+                self.own_turn_kick = true;
+            }
+        }
         let content_width = crate::settings::transcript_width(cx);
         if self.content_width != content_width {
             self.content_width = content_width;
@@ -11178,6 +11208,68 @@ mod tests {
         cx.simulate_keystrokes("escape");
         transcript.read_with(cx, |this, _| assert!(this.attachment_preview.is_none()));
         cx.update(|window, _| assert!(return_focus.is_focused(window)));
+    }
+
+    #[gpui::test]
+    fn a_docked_computer_preview_insets_the_transcript_and_a_floating_one_does_not(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::computer::preview::{self, tests::driving, tests::image};
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            preview::init(cx);
+        });
+        let store = cx.update(|cx| preview::store(cx).unwrap());
+        let state = cx.new(|_| AppState::new());
+        let transcript = cx.new(|cx| Transcript::new(state, cx));
+        transcript.update(cx, |transcript, _| transcript.chat_id = Some("chat".into()));
+        struct Fixture(Entity<Transcript>);
+        impl Render for Fixture {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+        let (_fixture, cx) = cx.add_window_view(|_, _| Fixture(transcript.clone()));
+        cx.simulate_resize(size(px(1200.0), px(800.0)));
+        let inset = |cx: &mut gpui::VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+            transcript.read_with(cx, |transcript, _| transcript.preview_inset)
+        };
+        assert_eq!(inset(cx), 0.0);
+        cx.update(|_, cx| {
+            preview::update_store(&store, cx, |store| {
+                store.set_events_live(true);
+                driving(store, "chat");
+                store.accept_tap_frame("chat", image(1, 960, 600))
+            })
+        });
+        assert_eq!(
+            inset(cx),
+            424.0,
+            "the docked card frees its width plus the gap"
+        );
+        assert!(cx.debug_bounds("computer-preview-card").is_some());
+        cx.update(|_, cx| {
+            preview::update_store(&store, cx, |store| {
+                store.set_floating("chat", Some(point(40.0, 40.0)))
+            })
+        });
+        assert_eq!(
+            inset(cx),
+            0.0,
+            "a floating card leaves the transcript full width"
+        );
+        cx.update(|_, cx| {
+            preview::update_store(&store, cx, |store| store.set_floating("chat", None))
+        });
+        assert_eq!(inset(cx), 424.0);
+        cx.update(|_, cx| preview::update_store(&store, cx, |store| store.hide_for_task("chat")));
+        assert_eq!(inset(cx), 0.0, "a hidden card reserves nothing");
     }
 
     #[gpui::test]
