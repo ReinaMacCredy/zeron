@@ -75,6 +75,17 @@ impl AxActionFailure {
         }
     }
 
+    pub fn uncertain_with_code(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code: Some(code),
+            ..Self::uncertain(message)
+        }
+    }
+
+    pub fn code(&self) -> Option<&'static str> {
+        self.code
+    }
+
     pub(crate) fn from_ax_error(action: &str, error: AXError) -> Self {
         Self {
             attempted: true,

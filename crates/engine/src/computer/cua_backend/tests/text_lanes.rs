@@ -147,6 +147,23 @@ async fn an_append_that_leaves_a_field_already_ending_with_the_text_is_not_confi
 }
 
 #[tokio::test]
+async fn a_web_select_is_confirmed_by_a_case_insensitive_read_back() {
+    let f = fixture();
+    let mut select = web_field();
+    select["role"] = json!("AXPopUpButton");
+    select["label"] = json!("Country");
+    select["value"] = json!("United States");
+    f.set_elements(vec![select]);
+    let target = observe(&f, "cua:10:20", 0).await;
+    f.swallow_set_value();
+    let result = f.backend.set_value(&target, "united states").await.unwrap();
+    assert_eq!(
+        result.verified,
+        Some(ComputerDeliveryVerification::Confirmed)
+    );
+}
+
+#[tokio::test]
 async fn clearing_a_web_field_is_confirmed_by_an_empty_read_back() {
     let f = fixture();
     f.set_elements(vec![web_field()]);

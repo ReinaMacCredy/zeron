@@ -323,6 +323,40 @@ pub unsafe fn copy_binary_attr(element: AXUIElementRef, attr_name: &str) -> Opti
     result
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CfValueKind {
+    String,
+    Number,
+    Boolean,
+    Date,
+    Other,
+}
+
+pub unsafe fn copy_value_kind(element: AXUIElementRef, attr_name: &str) -> Option<CfValueKind> {
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::date::CFDate;
+    use core_foundation::number::CFNumber;
+    let attr = CFStr::new(attr_name);
+    let mut value: CFTypeRef = std::ptr::null();
+    let err = AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value);
+    if err != kAXErrorSuccess || value.is_null() {
+        return None;
+    }
+    let type_id = core_foundation::base::CFGetTypeID(value);
+    CFRelease(value);
+    Some(if type_id == CFStr::type_id() {
+        CfValueKind::String
+    } else if type_id == CFNumber::type_id() {
+        CfValueKind::Number
+    } else if type_id == CFBoolean::type_id() {
+        CfValueKind::Boolean
+    } else if type_id == CFDate::type_id() {
+        CfValueKind::Date
+    } else {
+        CfValueKind::Other
+    })
+}
+
 /// A copied AX attribute represented for both existing string-only consumers
 /// and the wider structured control-state response.
 #[derive(Debug, PartialEq, Eq)]

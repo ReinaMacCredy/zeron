@@ -2486,6 +2486,10 @@ impl CuaInner {
             } else {
                 CuaEffect::DispatchedUnknown
             }),
+            value: data
+                .get("selected_text")
+                .and_then(Value::as_str)
+                .map(|text| js_slice(text, 16384).to_owned()),
             ..ComputerBackendActionResult::default()
         })
     }
@@ -2880,6 +2884,8 @@ impl CuaInner {
             let after = after.value.unwrap_or_default();
             if append {
                 after != before && after.ends_with(value)
+            } else if node.role == "AXPopUpButton" {
+                after.to_lowercase() == value.to_lowercase()
             } else {
                 after == value
             }

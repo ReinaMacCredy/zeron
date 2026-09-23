@@ -360,6 +360,7 @@ async fn selects_an_exact_text_range_on_a_live_element_and_trusts_only_native_re
             "delivery": { "mode": "background" },
             "effect": "confirmed",
             "evidence": [{ "kind": "value_readback" }],
+            "selected_text": "🦀ab",
         } })
     });
     let result = f.backend.select_text(&target, range(2, 4)).await.unwrap();
@@ -367,6 +368,7 @@ async fn selects_an_exact_text_range_on_a_live_element_and_trusts_only_native_re
         result.verified,
         Some(ComputerDeliveryVerification::Confirmed)
     );
+    assert_eq!(result.value.as_deref(), Some("🦀ab"));
     assert_eq!(result.effect, Some(CuaEffect::Verified));
     let args = f.first_args("select_text");
     assert_subset(

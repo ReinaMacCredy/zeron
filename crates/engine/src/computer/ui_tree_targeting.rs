@@ -489,6 +489,7 @@ pub struct ComputerActionableElement {
     pub label: String,
     pub value: Option<String>,
     pub window_id: Option<String>,
+    pub(crate) unclamped_value: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -572,6 +573,7 @@ pub fn actionable_elements(
                         .as_deref()
                         .map(|value| clamp_text_to_length(value, ELEMENT_VALUE_MAX_LENGTH)),
                     window_id: node.window_id.clone(),
+                    unclamped_value: node.value.clone(),
                 });
             } else {
                 digest.omitted += 1;
@@ -643,7 +645,7 @@ pub fn diff_actionable_elements(
         };
         let overlap = previous.len().min(current.len());
         for (old, item) in previous.iter().zip(&current) {
-            if old.value != item.value {
+            if old.unclamped_value != item.unclamped_value {
                 diff.changed.push(ComputerActionableElementChange {
                     element_ref: item.element_ref,
                     role: item.role.clone(),
@@ -1164,6 +1166,7 @@ mod tests {
             label: label.into(),
             value: value.map(str::to_owned),
             window_id: Some(window_id.into()),
+            unclamped_value: value.map(str::to_owned),
         }
     }
 
@@ -1501,6 +1504,29 @@ mod tests {
                 removed: vec![in_window("Save", "browser")],
                 ..Default::default()
             }
+        );
+    }
+
+    #[test]
+    fn reports_an_edit_past_the_clamped_prefix_of_a_long_value() {
+        let tree = |value: &str| {
+            node(Node {
+                role: "AXTextArea",
+                label: Some("Body"),
+                value: Some(value),
+                window_id: Some("editor"),
+                ..Default::default()
+            })
+        };
+        let prefix = "a".repeat(ELEMENT_VALUE_MAX_LENGTH + 10);
+        let before = digest(&tree(&format!("{prefix} one")));
+        let after = digest(&tree(&format!("{prefix} two")));
+        assert_eq!(before.items[0].value, after.items[0].value);
+        assert_eq!(
+            diff_actionable_elements(&before.items, &after.items)
+                .changed
+                .len(),
+            1
         );
     }
 
