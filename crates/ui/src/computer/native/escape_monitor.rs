@@ -178,12 +178,14 @@ impl Shared {
     }
 
     fn change(&self, update: impl FnOnce(&mut MonitorCore) -> Option<ComputerInputMonitorState>) {
-        let (changed, run_loop) = {
+        let (changed, armed_flipped, run_loop) = {
             let mut core = self.lock();
+            let armed = core.monitor.armed;
             let changed = update(&mut core.monitor);
-            (changed, core.run_loop.clone())
+            (changed, core.monitor.armed != armed, core.run_loop.clone())
         };
-        if changed.is_some() {
+        // The first arm leaves the state at `starting`, so a state diff alone never wakes the thread.
+        if changed.is_some() || armed_flipped {
             self.wake.notify_all();
             if let Some(run_loop) = run_loop {
                 run_loop.stop();
@@ -582,6 +584,18 @@ mod tests {
         assert!(settled(&ComputerInputMonitorState::failed(
             INPUT_MONITOR_IDLE
         )));
+    }
+
+    #[tokio::test]
+    async fn the_first_arm_wakes_a_listener_thread_already_asleep() {
+        let recorder = Arc::new(Recorder::default());
+        let monitor = EscapeKillSwitchMonitor::start(recorder).unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let started = Instant::now();
+        monitor.activate().await;
+        assert!(started.elapsed() < ACTIVATION_WAIT, "{:?}", monitor.state());
+        assert!(settled(&monitor.state()), "{:?}", monitor.state());
+        monitor.dispose();
     }
 
     #[derive(Default)]
