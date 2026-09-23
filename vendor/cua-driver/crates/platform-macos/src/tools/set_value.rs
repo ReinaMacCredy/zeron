@@ -57,7 +57,9 @@ fn def() -> &'static ToolDef {
              date pickers, native text fields that expose settable AXValue). \
              Unsettable numeric controls may use advertised stepping actions. \
              The route is selected before dispatch; an uncertain effect never \
-             permits another write or a fallback.\n\
+             permits another write or a fallback, except that a numeric write whose \
+             read-back does not match is set once more to the same absolute value as \
+             a string (web number inputs accept only strings).\n\
              \n\
              Optional append:true requires an exact element_token and a readable, \
              writable text target. It reads that retained element's current value \
