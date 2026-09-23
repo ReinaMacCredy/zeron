@@ -6813,6 +6813,9 @@ impl Shell {
                                             "settings-nav-{}",
                                             item.label()
                                         )))
+                                        .role(gpui::Role::Button)
+                                        .aria_label(SharedString::from(item.label()))
+                                        .aria_selected(selected)
                                         .flex()
                                         .flex_row()
                                         .items_center()
@@ -6853,6 +6856,8 @@ impl Shell {
                                                     "settings-nav-{}-{title}",
                                                     item.label()
                                                 )))
+                                                .role(gpui::Role::Button)
+                                                .aria_label(SharedString::from(title))
                                                 .rounded(px(8.0))
                                                 .pl(px(Theme::SPACE_SM + 24.0))
                                                 .pr(px(Theme::SPACE_SM))
@@ -6876,6 +6881,8 @@ impl Shell {
                 div().px(px(Theme::SPACE_SM)).pb(px(12.0)).child(
                     div()
                         .id("settings-back")
+                        .role(gpui::Role::Button)
+                        .aria_label("Back")
                         .flex()
                         .flex_row()
                         .items_center()

@@ -620,6 +620,20 @@ impl ComputerPage {
         cx.notify();
     }
 
+    fn toggle_guide(&mut self, guide_open: bool, cx: &mut Context<Self>) {
+        if guide_open {
+            self.dismiss_getting_started(cx);
+        } else {
+            self.guide_requested = true;
+            cx.notify();
+        }
+    }
+
+    fn toggle_advanced(&mut self, cx: &mut Context<Self>) {
+        self.advanced_open = !self.advanced_open;
+        cx.notify();
+    }
+
     fn toggle_history(&mut self, cx: &mut Context<Self>) {
         self.history.open = !self.history.open;
         if self.history.open && self.history.pages.is_empty() && self.history.task.is_none() {
@@ -1319,14 +1333,14 @@ impl Render for ComputerPage {
             "Hide guide",
             "Show guide",
         )
-        .on_click(cx.listener(move |this, _, _, cx| {
-            if guide_open {
-                this.dismiss_getting_started(cx);
-            } else {
-                this.guide_requested = true;
-                cx.notify();
+        .on_click(cx.listener(move |this, _, _, cx| this.toggle_guide(guide_open, cx)))
+        .on_a11y_action(gpui::AccessibleAction::Click, {
+            let page = cx.entity().downgrade();
+            move |_, _, cx| {
+                page.update(cx, |this, cx| this.toggle_guide(guide_open, cx))
+                    .ok();
             }
-        }));
+        });
         let getting_started = guide_open.then(|| {
             let steps = [
                 (
@@ -1396,7 +1410,13 @@ impl Render for ComputerPage {
             "Hide history",
             "Show history",
         )
-        .on_click(cx.listener(|this, _, _, cx| this.toggle_history(cx)));
+        .on_click(cx.listener(|this, _, _, cx| this.toggle_history(cx)))
+        .on_a11y_action(gpui::AccessibleAction::Click, {
+            let page = cx.entity().downgrade();
+            move |_, _, cx| {
+                page.update(cx, |this, cx| this.toggle_history(cx)).ok();
+            }
+        });
         let history = self.history.open.then(|| self.render_history(&theme, cx));
 
         let advanced_toggle = disclosure(
@@ -1406,10 +1426,13 @@ impl Render for ComputerPage {
             "Hide",
             "Show",
         )
-        .on_click(cx.listener(|this, _, _, cx| {
-            this.advanced_open = !this.advanced_open;
-            cx.notify();
-        }));
+        .on_click(cx.listener(|this, _, _, cx| this.toggle_advanced(cx)))
+        .on_a11y_action(gpui::AccessibleAction::Click, {
+            let page = cx.entity().downgrade();
+            move |_, _, cx| {
+                page.update(cx, |this, cx| this.toggle_advanced(cx)).ok();
+            }
+        });
         let advanced = self.advanced_open.then(|| {
             let mut column = div().flex().flex_col();
             if cfg!(target_os = "macos") {
