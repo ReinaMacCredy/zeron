@@ -814,7 +814,7 @@ pub(super) fn desktop_entries(dialect: ComputerAgentDialect) -> Vec<ComputerTool
             "computer_type_text",
             "Type text",
             format!(
-                "Insert text through an exact writable ref or label in window_id; this focus-neutral route can run in different windows concurrently. Use computer_set_value to replace the whole field. window_id alone types into the app's focused field. Semantic writes do not send keydown/keyup: verify autocomplete or submission separately. Background physical keys may refuse on multi-window apps. Key-event text refuses newlines and tabs (send Return/Tab with computer_press_key) and refuses while an input method such as Telex is active (use computer_set_value or a field ref). {KEYBOARD_TARGET_HINT} {DELIVERY_HINT}"
+                "Insert text through an exact writable ref or label in window_id; this focus-neutral route can run in different windows concurrently. Use computer_set_value to replace the whole field. window_id alone types into the app's focused field. Semantic writes do not send keydown/keyup: verify autocomplete or submission separately. Background physical keys may refuse on multi-window apps. {KEYBOARD_TARGET_HINT} {DELIVERY_HINT}"
             ),
             object_schema(type_properties, &["text"]),
             None,
@@ -823,7 +823,7 @@ pub(super) fn desktop_entries(dialect: ComputerAgentDialect) -> Vec<ComputerTool
             "computer_press_key",
             "Press key",
             format!(
-                "Press a key or chord such as \"cmd+s\". Pass the observed field ref for exact background Enter/Return. Other shortcuts can still refuse with same_pid_keyboard_ambiguity; use an advertised action instead of retrying. Letter and symbol keys use the current keyboard layout; keyboard_layout_unmapped means no key on it types that character. {} {KEYBOARD_TARGET_HINT} {DELIVERY_HINT}",
+                "Press a key or chord such as \"cmd+s\". Pass the observed field ref for exact background Enter/Return. Other shortcuts can still refuse with same_pid_keyboard_ambiguity; use an advertised action instead of retrying. {} {KEYBOARD_TARGET_HINT} {DELIVERY_HINT}",
                 hotkey_form_note(dialect)
             ),
             object_schema(key_properties, &["key"]),
