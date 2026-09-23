@@ -241,6 +241,20 @@ pub fn resolve_computer_semantic_target<'a>(
             }
         }
     };
+    let matches = if target.role.is_none() && matches.len() > 1 {
+        let controls: Vec<&ComputerUiNode> = matches
+            .iter()
+            .copied()
+            .filter(|node| !STATIC_TEXT_ROLES.contains(&node.role.as_str()))
+            .collect();
+        if controls.is_empty() {
+            matches
+        } else {
+            controls
+        }
+    } else {
+        matches
+    };
     let node = match matches.as_slice() {
         [] => return Err(no_match(target, &pool)),
         [node] => *node,
@@ -312,6 +326,9 @@ fn resolve_computer_ordinal_target<'a>(
         point: activation_point_for_node(node),
     })
 }
+
+// A form label's static text carries the same name as the control it labels.
+const STATIC_TEXT_ROLES: &[&str] = &["AXStaticText", "label", "static"];
 
 const SEMANTIC_TEXT_ROLES: &[&str] = &[
     "AXTextField",
@@ -1066,6 +1083,37 @@ mod tests {
         assert!(error.unresolved_text_control);
         let labels: Vec<&str> = error.candidates.iter().map(|c| c.label.as_str()).collect();
         assert_eq!(labels, ["Title", "Body"]);
+    }
+
+    #[test]
+    fn a_label_shared_with_its_static_caption_resolves_to_the_control() {
+        let labelled = |role, label| {
+            node(Node {
+                role,
+                label: Some(label),
+                window_id: Some("page"),
+                ..Node::default()
+            })
+        };
+        let root = node(Node {
+            role: "desktop",
+            children: vec![
+                labelled("AXStaticText", "Notes area"),
+                labelled("AXTextArea", "Notes area"),
+                labelled("AXStaticText", "Caption"),
+                labelled("AXStaticText", "Caption"),
+            ],
+            ..Node::default()
+        });
+        let target = |label: &str| ComputerTarget {
+            label: Some(label.into()),
+            window_id: Some("page".into()),
+            ..ComputerTarget::default()
+        };
+        let found = resolve_computer_semantic_target(&root, &target("Notes area"), true).unwrap();
+        assert!(std::ptr::eq(found.node, &root.children[1]));
+        let error = resolve_computer_semantic_target(&root, &target("Caption"), true).unwrap_err();
+        assert_eq!(error.code, ComputerTargetErrorCode::Ambiguous);
     }
 
     #[test]
