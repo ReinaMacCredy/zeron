@@ -901,7 +901,7 @@ unsafe fn scroll_advertised_action(
         }
         // A nested scroll area without a semantic actuator must use a wheel
         // at its own point; never replace it with an outer area's scrollbar.
-        if role.as_deref() == Some("AXScrollArea") {
+        if ascent_stops_at(role.as_deref()) {
             return Ok(false);
         }
         let Some(parent) = copy_element_attr(ptr, "AXParent") else {
@@ -911,6 +911,10 @@ unsafe fn scroll_advertised_action(
         CFRelease(parent as CFTypeRef);
     }
     Ok(false)
+}
+
+fn ascent_stops_at(role: Option<&str>) -> bool {
+    matches!(role, Some("AXScrollArea" | "AXWebArea"))
 }
 
 unsafe fn scroll_native_text_area(
@@ -1044,6 +1048,21 @@ mod tests {
         assert!(!refuses_unresolved_element(true, true));
         assert!(!refuses_unresolved_element(false, false));
         assert!(!refuses_unresolved_element(false, true));
+    }
+
+    #[test]
+    fn scroll_bar_ascent_never_leaves_web_content_for_the_outer_page() {
+        let chain = [
+            Some("AXGroup"),
+            Some("AXGroup"),
+            Some("AXWebArea"),
+            Some("AXScrollArea"),
+        ];
+        let stop = chain.iter().position(|role| ascent_stops_at(*role));
+        assert_eq!(stop, Some(2));
+        assert!(ascent_stops_at(Some("AXScrollArea")));
+        assert!(!ascent_stops_at(Some("AXGroup")));
+        assert!(!ascent_stops_at(None));
     }
 
     #[test]
