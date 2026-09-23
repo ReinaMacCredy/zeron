@@ -384,6 +384,57 @@ pub fn png_dimensions(bytes: &[u8]) -> Option<PngDimensions> {
     (width > 0 && height > 0).then_some(PngDimensions { width, height })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JpegDimensions {
+    pub width: u32,
+    pub height: u32,
+}
+
+pub fn jpeg_dimensions(bytes: &[u8]) -> Option<JpegDimensions> {
+    let standalone = |marker: u8| marker == 0x01 || (0xd0..=0xd9).contains(&marker);
+    let start_of_frame =
+        |marker: u8| matches!(marker, 0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf);
+    let u16_at = |offset: usize| u16::from_be_bytes([bytes[offset], bytes[offset + 1]]);
+    if bytes.len() < 4 || bytes[0] != 0xff || bytes[1] != 0xd8 {
+        return None;
+    }
+    let mut offset = 2;
+    while offset + 4 <= bytes.len() {
+        if bytes[offset] != 0xff {
+            return None;
+        }
+        let mut marker = bytes[offset + 1];
+        while marker == 0xff && offset + 2 < bytes.len() {
+            offset += 1;
+            marker = bytes[offset + 1];
+        }
+        if standalone(marker) {
+            offset += 2;
+            continue;
+        }
+        if offset + 4 > bytes.len() {
+            return None;
+        }
+        let length = usize::from(u16_at(offset + 2));
+        if length < 2 {
+            return None;
+        }
+        if start_of_frame(marker) {
+            if offset + 9 > bytes.len() {
+                return None;
+            }
+            let height = u32::from(u16_at(offset + 5));
+            let width = u32::from(u16_at(offset + 7));
+            return (width > 0 && height > 0).then_some(JpegDimensions { width, height });
+        }
+        if marker == 0xda {
+            return None;
+        }
+        offset += 2 + length;
+    }
+    None
+}
+
 pub fn read_png_dimensions(
     bytes: &[u8],
     source: Option<&str>,

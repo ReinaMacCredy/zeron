@@ -61,6 +61,13 @@ pub fn observed_computer_target_node(target: &ObservedComputerTarget) -> Option<
     target.observed.as_deref().map(|observed| &observed.node)
 }
 
+pub fn observed_computer_target_identity(target: &ObservedComputerTarget) -> Option<&str> {
+    target
+        .observed
+        .as_deref()
+        .map(|observed| observed.identity.as_str())
+}
+
 #[cfg(test)]
 mod tests {
     use zeron_proto::computer::ComputerRect;
