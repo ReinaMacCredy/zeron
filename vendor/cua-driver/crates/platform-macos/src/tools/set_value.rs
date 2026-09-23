@@ -57,7 +57,9 @@ fn def() -> &'static ToolDef {
              - **All other elements**: writes AXValue directly (sliders, steppers, \
              native text fields that expose settable AXValue). Date and time \
              controls are refused with date_value_unsupported; type the date into \
-             the focused field instead. \
+             the focused field instead. A whole-value replace on a web \
+             rich-text (contenteditable) editor is refused with \
+             rich_text_replace_unsupported; append or type into it instead. \
              Unsettable numeric controls may use advertised stepping actions. \
              The route is selected before dispatch; an uncertain effect never \
              permits another write or a fallback, except that a numeric write whose \
@@ -498,6 +500,15 @@ fn set_value_blocking(
             .map_err(AxActionFailure::before_dispatch)?;
     }
 
+    if !append && web_content {
+        let children = unsafe { copy_children(element) };
+        let child_count = children.len();
+        for child in children {
+            unsafe { CFRelease(child as _) };
+        }
+        refuse_rich_text_replace(&role, child_count)?;
+    }
+
     if role == "AXPopUpButton" {
         let element_title = unsafe { copy_string_attr(element, "AXTitle") }.unwrap_or_default();
         // Menu-item selection, not an AXValue write — no read-back to report.
@@ -682,6 +693,23 @@ fn set_value_blocking(
 // strings in UTF-16 code units. Only append's combined value uses this new bound;
 // ordinary replacement retains its existing contract and behavior.
 const MAX_APPENDED_TEXT_UTF16: usize = 16 * 1024;
+
+// Browsers expose <input> and <textarea> as childless leaves (not yet probed live), so a
+// web text element with children is taken to be a contenteditable editor.
+fn refuse_rich_text_replace(role: &str, child_count: usize) -> anyhow::Result<()> {
+    if child_count > 0 && matches!(role, "AXTextField" | "AXTextArea" | "AXSearchField") {
+        return Err(AxActionFailure::refused_with_code(
+            "rich_text_replace_unsupported",
+            "This web text element is a rich-text (contenteditable) editor. Replacing its \
+             whole value flattens mentions, links and formatting, and Lexical, Slate and \
+             Draft.js editors revert the write on their next render; no value was written. \
+             Add text with type_text, or select the text to change with keys and paste the \
+             replacement.",
+        )
+        .into());
+    }
+    Ok(())
+}
 
 fn validate_append_target(role: &str, subrole: Option<&str>, settable: bool) -> anyhow::Result<()> {
     if !matches!(
@@ -894,9 +922,9 @@ mod tests {
     use super::{
         apply_surface_trust, apply_verification_label, choose_value_route, classify_write,
         compose_append_value, kAXErrorSuccess, needs_stepping, needs_string_retry,
-        poll_until_moved, poll_while_unchanged, step_to_value_with, validate_append_target,
-        write_ignored, write_value_with, AxActionFailure, CfValueKind, SetValueOutcome, ValueRoute,
-        MAX_APPENDED_TEXT_UTF16,
+        poll_until_moved, poll_while_unchanged, refuse_rich_text_replace, step_to_value_with,
+        validate_append_target, write_ignored, write_value_with, AxActionFailure, CfValueKind,
+        SetValueOutcome, ValueRoute, MAX_APPENDED_TEXT_UTF16,
     };
     use std::cell::Cell;
 
@@ -982,6 +1010,19 @@ mod tests {
                 target: 7.0
             }
         );
+    }
+
+    #[test]
+    fn a_web_editor_with_children_refuses_a_whole_value_replace() {
+        for role in ["AXTextArea", "AXTextField"] {
+            let error = refuse_rich_text_replace(role, 2).unwrap_err();
+            let failure = error.downcast_ref::<AxActionFailure>().unwrap();
+            assert!(!failure.attempted);
+            assert_eq!(failure.code(), Some("rich_text_replace_unsupported"));
+            refuse_rich_text_replace(role, 0).unwrap();
+        }
+        refuse_rich_text_replace("AXPopUpButton", 3).unwrap();
+        refuse_rich_text_replace("AXSlider", 1).unwrap();
     }
 
     #[test]
