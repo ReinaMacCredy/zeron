@@ -921,8 +921,7 @@ async fn permits_advertised_axpress_for_plain_clicks_and_preserves_physical_clic
         .triple_click(at, Some("cua:10:20"), &[])
         .await
         .unwrap();
-    f.backend
-        .right_click(at, Some("cua:10:20"), &[])
+    foreground(f.backend.right_click(at, Some("cua:10:20"), &[]))
         .await
         .unwrap();
     let clicks: Vec<Value> = f.named("click").into_iter().map(|call| call.args).collect();
@@ -935,6 +934,29 @@ async fn permits_advertised_axpress_for_plain_clicks_and_preserves_physical_clic
     assert_subset(&clicks[2], json!({ "count": 2 }));
     assert_subset(&clicks[3], json!({ "count": 3 }));
     assert_subset(&clicks[4], json!({ "button": "right" }));
+}
+
+#[tokio::test]
+async fn refuses_a_background_right_click_whose_context_menu_it_could_not_observe() {
+    let f = fixture();
+    let at = point(-275.0, 30.0);
+    f.backend
+        .capture_screenshot(window_capture("cua:10:20"))
+        .await
+        .unwrap();
+    let error = f
+        .backend
+        .right_click(at, Some("cua:10:20"), &[])
+        .await
+        .unwrap_err();
+    assert_eq!(effect(&error), Some(CuaEffect::NotDispatched));
+    assert_eq!(code(&error), Some("context_menu_unobservable"));
+    assert!(f.named("click").is_empty());
+
+    foreground(f.backend.right_click(at, Some("cua:10:20"), &[]))
+        .await
+        .unwrap();
+    assert_subset(&f.first_args("click"), json!({ "button": "right" }));
 }
 
 #[tokio::test]
