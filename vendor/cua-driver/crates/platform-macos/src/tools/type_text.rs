@@ -1014,8 +1014,11 @@ fn typed_progress(before: Option<&str>, after: Option<&str>, text: &str) -> Type
         .count()
         .saturating_sub(before.chars().count())
         .min(text.chars().count());
-    if delivered == 0 {
-        TypedProgress::Unchanged
+    // The value changed, so a zero or unproven count must not invite a retype: an app that
+    // normalizes, autocorrects or echoes (terminals, Telex, NFC) changes the length, not the text.
+    let prefix: String = text.chars().take(delivered).collect();
+    if delivered == 0 || !after.contains(&prefix) {
+        TypedProgress::Unverifiable
     } else {
         TypedProgress::Partial(delivered)
     }
@@ -1772,6 +1775,23 @@ mod tests {
         assert_eq!(
             typed_progress(Some("10"), Some("101"), "1"),
             TypedProgress::Complete
+        );
+    }
+
+    #[test]
+    fn a_changed_field_without_a_proven_prefix_is_unverifiable() {
+        assert_eq!(
+            typed_progress(Some(""), Some("\u{e9}"), "e\u{301}"),
+            TypedProgress::Unverifiable,
+            "NFD input normalized to NFC must not ask to retype the accent"
+        );
+        assert_eq!(
+            typed_progress(Some("teh"), Some("the"), "x"),
+            TypedProgress::Unverifiable
+        );
+        assert_eq!(
+            typed_progress(Some(""), Some("BEGIN"), "BEGINpayload"),
+            TypedProgress::Partial(5)
         );
     }
 
