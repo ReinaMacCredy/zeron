@@ -630,7 +630,15 @@ fn evaluate_element(
                 Some(project_element(element)),
             );
         };
-        if actual != &expected {
+        let equal = match (field, actual.as_str(), expected.as_str()) {
+            ("value", Some(actual), Some(expected)) => value_matches(
+                element.get("role").and_then(Value::as_str).unwrap_or(""),
+                actual,
+                expected,
+            ),
+            _ => actual == &expected,
+        };
+        if !equal {
             return (
                 VerificationStatus::Unsatisfied,
                 None,
@@ -643,6 +651,48 @@ fn evaluate_element(
         None,
         Some(project_element(element)),
     )
+}
+
+// Only range and two-state controls get numeric equality, so text "007" never equals "7".
+fn value_matches(role: &str, actual: &str, expected: &str) -> bool {
+    if actual == expected {
+        return true;
+    }
+    let role = normalized_role(role);
+    let two_state = ["checkbox", "radio", "switch", "toggle"]
+        .iter()
+        .any(|kind| role.contains(kind));
+    let ranged = [
+        "slider",
+        "stepper",
+        "incrementor",
+        "indicator",
+        "spinbutton",
+        "progress",
+        "scrollbar",
+    ]
+    .iter()
+    .any(|kind| role.contains(kind));
+    if !two_state && !ranged {
+        return false;
+    }
+    let number = |value: &str| {
+        let value = value.trim().to_ascii_lowercase();
+        match value.as_str() {
+            "true" | "on" if two_state => Some(1.0),
+            "false" | "off" if two_state => Some(0.0),
+            _ => value
+                .parse::<f64>()
+                .ok()
+                .filter(|number| number.is_finite()),
+        }
+    };
+    match (number(actual), number(expected)) {
+        (Some(left), Some(right)) => {
+            (left - right).abs() <= 1e-9 * left.abs().max(right.abs()).max(1.0)
+        }
+        _ => false,
+    }
 }
 
 fn selector_matches(selector: &cua_driver_contract::ElementSelector, element: &Value) -> bool {
@@ -845,6 +895,52 @@ mod tests {
             },
         );
         assert_eq!(outcomes[0].status, VerificationStatus::Satisfied);
+    }
+
+    fn value_check(role: &str, value: &str, expected: &str) -> VerificationStatus {
+        let predicate = StatePredicate {
+            window: None,
+            element: Some(ElementPredicate {
+                selector: ElementSelector {
+                    role: None,
+                    label_contains: Some("Target".into()),
+                },
+                exists: Some(true),
+                value_equals: Some(expected.into()),
+                enabled: None,
+                selected: None,
+            }),
+        };
+        evaluate_predicates(
+            &[predicate],
+            &ObservationSnapshot {
+                window: Some(window()),
+                elements: Some(vec![json!({
+                    "element_index": 3,
+                    "role": role,
+                    "label": "Target",
+                    "value": value
+                })]),
+                element_source_trusted: true,
+                elements_complete: true,
+            },
+        )[0]
+        .status
+    }
+
+    #[test]
+    fn value_equals_normalizes_numbers_and_booleans_only_on_controls() {
+        use VerificationStatus::{Satisfied, Unsatisfied};
+        assert_eq!(value_check("AXSlider", "8", "8.0"), Satisfied);
+        assert_eq!(value_check("AXSlider", "8", "9"), Unsatisfied);
+        assert_eq!(value_check("AXCheckBox", "1", "true"), Satisfied);
+        assert_eq!(value_check("AXRadioButton", "0", "false"), Satisfied);
+        assert_eq!(value_check("AXCheckBox", "0", "true"), Unsatisfied);
+        assert_eq!(value_check("AXTextField", "7", "007"), Unsatisfied);
+        assert_eq!(value_check("AXTextField", "1", "true"), Unsatisfied);
+        assert_eq!(value_check("AXSlider", "on", "1"), Unsatisfied);
+        assert_eq!(value_check("AXTextField", "", ""), Satisfied);
+        assert_eq!(value_check("AXTextField", "a ", "a "), Satisfied);
     }
 
     #[test]
