@@ -1562,6 +1562,57 @@ async fn keeps_the_target_window_when_the_only_new_window_is_the_capture_indicat
     h.dispose().await;
 }
 
+async fn press_enter_while_a_window_appears(extra: ComputerWindow) -> Value {
+    let h = harness();
+    h.call(
+        "computer_press_key",
+        json!({ "key": "enter", "window_id": "fake-terminal" }),
+    )
+    .await;
+    let mut after = h.backend.fake.list_windows().await.unwrap();
+    after.push(extra);
+    h.backend.hooks().press_key = Some(Arc::new(move |fake, _| {
+        let windows = after.clone();
+        async move {
+            fake.emit_windows_changed(windows);
+            Ok(ComputerBackendActionResult::default())
+        }
+        .boxed()
+    }));
+    let pressed = h
+        .call(
+            "computer_press_key",
+            json!({ "key": "enter", "window_id": "fake-terminal" }),
+        )
+        .await;
+    assert!(!pressed.is_error, "{pressed:?}");
+    let window_id = result_json(&pressed)["screenshot"]["windowId"].clone();
+    h.dispose().await;
+    window_id
+}
+
+fn save_panel_at(bounds: ComputerRect) -> ComputerWindow {
+    ComputerWindow {
+        app_name: Some("Open and Save Panel Service".into()),
+        pid: Some(4_242),
+        stacking_index: Some(0),
+        ..window("fake-save-panel", "Save", Some(bounds))
+    }
+}
+
+#[tokio::test]
+async fn observes_a_save_panel_that_another_process_opens_over_the_target() {
+    assert_eq!(
+        press_enter_while_a_window_appears(save_panel_at(rect(100.0, 80.0, 600.0, 400.0))).await,
+        json!("fake-save-panel")
+    );
+    assert_eq!(
+        press_enter_while_a_window_appears(save_panel_at(rect(2_000.0, 2_000.0, 600.0, 400.0)))
+            .await,
+        json!("fake-terminal")
+    );
+}
+
 #[tokio::test]
 async fn says_an_unchanged_frame_is_unsettled_rather_than_asserting_the_action_missed() {
     let h = harness();

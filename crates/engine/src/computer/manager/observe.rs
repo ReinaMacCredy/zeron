@@ -18,6 +18,7 @@ use super::{
 use crate::computer::backend::{
     COMPUTER_ACTION_OBSERVATION_MAX_DIMENSION, ComputerBackendActionResult, ComputerBackendMethod,
     ComputerCaptureRequest, ComputerError, ComputerSettleOptions, ComputerStateOptions,
+    intersect_computer_rects,
 };
 use crate::computer::call_context::{
     current_computer_call, mark_computer_call, timed_computer_leg,
@@ -303,21 +304,39 @@ impl ComputerManager {
             .iter()
             .find(|window| Some(window.id.as_str()) == exclude)?
             .clone();
-        windows
+        let fresh: Vec<ComputerWindow> = windows
             .into_iter()
             .filter(|window| {
                 !baseline.contains(&window.id)
                     && Some(window.id.as_str()) != exclude
-                    && match owner.pid {
-                        Some(pid) => window.pid == Some(pid),
-                        None => owner.app_name.is_some() && window.app_name == owner.app_name,
-                    }
                     && window.bounds.as_ref().is_some_and(|bounds| {
                         bounds.width >= MIN_OPENED_WINDOW_SIDE
                             && bounds.height >= MIN_OPENED_WINDOW_SIDE
                     })
                     && window.visible
                     && !window.minimized
+            })
+            .collect();
+        let same_app = |window: &&ComputerWindow| match owner.pid {
+            Some(pid) => window.pid == Some(pid),
+            None => owner.app_name.is_some() && window.app_name == owner.app_name,
+        };
+        if let Some(opened) = fresh
+            .iter()
+            .filter(same_app)
+            .min_by_key(|window| stacking(window))
+        {
+            return Some(opened.clone());
+        }
+        // Sandboxed apps' Open/Save panels belong to a separate service process.
+        let owner_bounds = owner.bounds?;
+        fresh
+            .into_iter()
+            .filter(|window| {
+                stacking(window) < stacking(&owner)
+                    && window.bounds.is_some_and(|bounds| {
+                        intersect_computer_rects(bounds, owner_bounds).is_some()
+                    })
             })
             .min_by_key(stacking)
     }
