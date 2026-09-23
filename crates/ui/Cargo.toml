@@ -38,6 +38,14 @@ name = "computer-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
+name = "computer-settings-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "computer-preview-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
 name = "new-project-fixture"
 required-features = ["project-palette-fixture"]
 

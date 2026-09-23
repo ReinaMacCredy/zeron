@@ -73,6 +73,10 @@ impl ComputerManager {
         }
     }
 
+    pub fn driver_native_revision(&self) -> Option<u64> {
+        self.backend.driver_native_revision()
+    }
+
     pub async fn provision(&self) -> Result<ComputerProvisionResult, ComputerError> {
         self.engage_backend();
         if !self.backend.supports(ComputerBackendMethod::Provision) {

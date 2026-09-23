@@ -598,6 +598,10 @@ pub trait ComputerBackend: Send + Sync {
         None
     }
 
+    fn driver_native_revision(&self) -> Option<u64> {
+        None
+    }
+
     async fn list_windows(&self) -> Result<Vec<ComputerWindow>, ComputerError>;
 
     async fn list_spaces(&self) -> Result<ComputerSpaceInventory, ComputerError> {

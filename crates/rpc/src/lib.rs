@@ -230,7 +230,7 @@ pub mod methods {
     /// installs; the service restart is scheduled after the reply flushes).
     pub const APPLY_UPDATE: &str = "ApplyUpdate";
     // Computer use (w88). Never relay-forwarded; relay clients are refused every
-    // method here except the settings, still-frame and audit-history reads.
+    // method here except the settings, status, still-frame and audit-history reads.
     /// Register as the desktop host that owns `cua-driver`. First stream wins; a
     /// second is refused. `{bundleId}` → stream of `ComputerHostStreamItem`: first
     /// `registered {hostToken}` then `request`/`cancel` items, or a lone
@@ -246,6 +246,8 @@ pub mod methods {
     pub const SET_COMPUTER_SETTINGS: &str = "SetComputerSettings";
     /// No params → `ComputerSettings`.
     pub const GET_COMPUTER_SETTINGS: &str = "GetComputerSettings";
+    /// No params → `ComputerHostStatus`; never engages the driver.
+    pub const GET_COMPUTER_STATUS: &str = "GetComputerStatus";
     /// The run's `computer_*` tool list for `tools/list`. `{chatId, runSecret}` →
     /// `ComputerCatalog`.
     pub const GET_COMPUTER_CATALOG: &str = "GetComputerCatalog";

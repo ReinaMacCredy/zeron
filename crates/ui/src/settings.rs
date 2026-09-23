@@ -20,10 +20,12 @@ pub mod accounts;
 pub mod appearance;
 pub mod archived;
 pub mod composer;
+pub mod computer;
 pub mod devices;
 pub mod files;
 pub mod harnesses;
 pub mod notifications;
+pub mod permission_guide;
 pub mod shortcuts;
 pub mod widgets;
 
@@ -864,6 +866,8 @@ pub struct UiSettings {
     /// The one-time Appshots introduction sheet was dismissed or followed.
     #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), serde(skip))]
     pub appshot_welcome_acknowledged: bool,
+    pub computer_getting_started_acknowledged: bool,
+    pub computer_effort_hint_dismissed: bool,
     /// Whether bare Escape stops the active agent after contextual consumers
     /// decline it. Device-local and opt-in.
     pub escape_stops_active_agent: bool,
@@ -975,6 +979,8 @@ impl Default for UiSettings {
             appshot_sound_enabled: true,
             appshot_destination: crate::appshots::AppshotDestination::Automatic,
             appshot_welcome_acknowledged: false,
+            computer_getting_started_acknowledged: false,
+            computer_effort_hint_dismissed: false,
             appearance: crate::appearance::AppearanceMode::default(),
             git_history_columns: GitHistoryColumns::default(),
             git_history_column_widths: GitHistoryColumnWidths::default(),
@@ -2271,6 +2277,8 @@ mod tests {
                 crate::appshots::AppshotDestination::Automatic
             },
             appshot_welcome_acknowledged: cfg!(any(target_os = "macos", target_os = "linux")),
+            computer_getting_started_acknowledged: true,
+            computer_effort_hint_dismissed: true,
             appearance: crate::appearance::AppearanceMode::Light,
             git_history_columns: GitHistoryColumns {
                 author: false,

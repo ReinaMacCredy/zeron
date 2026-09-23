@@ -29,6 +29,7 @@ pub struct NativeHostConfig {
     pub bundle_id: String,
     pub preview: PreviewSink,
     pub on_emergency_stop: Option<Arc<dyn Fn() + Send + Sync>>,
+    pub cursor_style: Option<Box<dyn Fn() -> Option<super::host::CuaCursorStyle> + Send>>,
 }
 
 struct HostEvents {
@@ -117,6 +118,7 @@ pub fn native_host_options(
         config.bundle_id,
         Box::new(|| Box::pin(async { permissions::start_permission_setup().map(|_| ()) })),
     );
+    options.cursor_style = config.cursor_style;
     options.check_permissions = Some(Box::new({
         let events = events.clone();
         let monitor = monitor.clone();

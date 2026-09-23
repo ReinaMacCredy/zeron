@@ -161,6 +161,7 @@ pub fn run_app(config: UiConfig) {
         gpui_tokio::init_from_handle(cx, runtime_handle);
         gpui_base::init(cx);
         let data_dir = config.boot().data_dir.clone();
+        computer::preview::init(cx);
         #[cfg(target_os = "macos")]
         {
             let _ = std::thread::Builder::new()

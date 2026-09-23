@@ -3,80 +3,30 @@
 //! mirrors Synara's AppSnap panel: an intro card, a Capture card, and a guided
 //! macOS permissions card whose Grant buttons expand per-pane steps and watch
 //! for the grant to land.
-use std::cell::Cell;
-use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use super::*;
 use crate::appshots::{AppshotPlatform, CapabilityState, ChordModifier};
-use crate::motion;
+use crate::settings::permission_guide::{
+    self, PermissionGuide, PermissionGuideHost, PermissionPane, choice_chip, outline_button, row,
+    section_label,
+};
 use crate::settings::widgets;
 
-/// The open/close motion of an expanded permission guide (Synara's
-/// `DISCLOSURE_TRANSITION_MS` grid collapse: 220ms ease-out, height + fade,
-/// content drifting 4px).
-const GUIDE_MOTION: motion::MotionSpec = motion::MotionSpec::new(220, motion::EASE_OUT);
-/// Height used for the very first reveal frame, before the guide's content has
-/// been measured once.
-const GUIDE_FALLBACK_HEIGHT: f32 = 240.0;
-/// macOS fires no event when a TCC grant changes; an open guide re-reads the
-/// preflight state on this cadence until the grant shows up.
-const GUIDE_POLL_INTERVAL: Duration = Duration::from_secs(2);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PermissionPane {
-    InputMonitoring,
-    ScreenRecording,
-    Accessibility,
-}
-
-impl PermissionPane {
-    fn label(self) -> &'static str {
-        match self {
-            Self::InputMonitoring => "Input Monitoring",
-            Self::ScreenRecording => "Screen Recording",
-            Self::Accessibility => "Accessibility",
-        }
-    }
-
-    fn description(self) -> &'static str {
-        match self {
-            Self::InputMonitoring => {
-                "Lets Zeron notice the hotkey chord while another app owns the keyboard. Nothing you type is recorded."
-            }
-            Self::ScreenRecording => {
-                "Lets Zeron capture an image of the frontmost window. Only the single window you snap is captured, only at the moment you press the chord."
-            }
-            Self::Accessibility => {
-                "Optional. Lets Zeron read the captured window's visible and off-screen text so the agent gets more than pixels. Screenshots work without it."
-            }
-        }
-    }
-
-    fn state(self, capabilities: AppshotCapabilities) -> CapabilityState {
-        match self {
-            Self::InputMonitoring => capabilities.input_monitoring,
-            Self::ScreenRecording => capabilities.window_capture,
-            Self::Accessibility => capabilities.application_text,
-        }
-    }
-
-    fn settings_url(self) -> Option<&'static str> {
-        match self {
-            Self::InputMonitoring => crate::appshots::input_monitoring_settings_url(),
-            Self::ScreenRecording => crate::appshots::capture_settings_url(),
-            Self::Accessibility => crate::appshots::semantic_settings_url(),
-        }
-    }
-
-    fn request(self) {
-        match self {
-            Self::InputMonitoring => crate::appshots::request_input_monitoring_access(),
-            Self::ScreenRecording => crate::appshots::request_capture_access(),
-            Self::Accessibility => crate::appshots::request_semantic_access(),
-        }
-    }
-}
+const APPSHOT_PANES: [(PermissionPane, &str); 3] = [
+    (
+        PermissionPane::InputMonitoring,
+        "Lets Zeron notice the hotkey chord while another app owns the keyboard. Nothing you type is recorded.",
+    ),
+    (
+        PermissionPane::ScreenRecording,
+        "Lets Zeron capture an image of the frontmost window. Only the single window you snap is captured, only at the moment you press the chord.",
+    ),
+    (
+        PermissionPane::Accessibility,
+        "Optional. Lets Zeron read the captured window's visible and off-screen text so the agent gets more than pixels. Screenshots work without it.",
+    ),
+];
 
 /// Whether the active hotkey is a modifier chord, whose event tap needs Input
 /// Monitoring.
@@ -107,143 +57,27 @@ fn hotkey_description(combo: &str) -> String {
         None => "No hotkey. Choose a chord to capture from other apps.".to_string(),
     }
 }
-
-/// Page-local state: the hotkey dropdown, plus the permissions card's expanded
-/// guide, its open/close tween, and the background work that keeps it honest.
+/// Page-local state: the hotkey dropdown, plus the permissions card's shared
+/// guide and the recheck that keeps it honest.
 #[derive(Default)]
 pub(super) struct PermissionsUi {
     hotkey_menu: popover::Popup<()>,
     hotkey_menu_dismissed_at: Option<Instant>,
-    open: Option<PermissionPane>,
-    /// (pane, tween start, opening). While closing, `open` is already `None`
-    /// and the pane here is what still renders.
-    tween: Option<(PermissionPane, Instant, bool)>,
-    measured_height: Rc<Cell<f32>>,
-    poll: Option<gpui::Task<()>>,
+    pub(super) guide: PermissionGuide,
     recheck: Option<gpui::Task<()>>,
     /// Transient line under the card ("Permission granted.", "Permissions
     /// unchanged."), replaced by the next action.
     notice: Option<SharedString>,
 }
 
-fn permission_badge(theme: &Theme, state: CapabilityState, prompted: bool) -> gpui::Div {
-    let (dot, label) = match state {
-        CapabilityState::Ready | CapabilityState::UserSelection => (theme.success, "Granted"),
-        CapabilityState::PermissionRequired if prompted => (theme.danger, "Denied"),
-        CapabilityState::PermissionRequired => (theme.border, "Not requested yet"),
-        CapabilityState::SetupRequired => (theme.border, "Set up"),
-        CapabilityState::Checking => (theme.border, "Checking"),
-        CapabilityState::Unavailable => (theme.border, "Unavailable"),
-    };
-    div()
-        .flex()
-        .items_center()
-        .gap(px(6.0))
-        .text_size(crate::typography::ui_rems(11.0))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(theme.text_muted)
-        .child(div().size(px(6.0)).rounded_full().bg(dot))
-        .child(SharedString::from(label))
-}
-
-/// Synara's `Button size="xs" variant="outline"`: 24px tall, bordered, quiet
-/// hover wash. The caller adds id, label child and click.
-fn outline_button(theme: &Theme) -> gpui::Div {
-    div()
-        .flex_none()
-        .h(px(24.0))
-        .px(px(7.0))
-        .rounded(px(6.0))
-        .border_1()
-        .border_color(theme.border)
-        .flex()
-        .items_center()
-        .gap(px(4.0))
-        .text_size(crate::typography::ui_rems(11.0))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(theme.text)
-        .cursor_pointer()
-        .hover(|s| s.bg(crate::theme::ink(0.05)))
-}
-
-fn section_label(theme: &Theme, title: &'static str) -> gpui::Div {
-    div()
-        .mt(px(24.0))
-        .px(px(8.0))
-        .py(px(4.0))
-        .text_size(crate::typography::ui_rems(13.0))
-        .text_color(theme.text_muted.opacity(0.58))
-        .child(SharedString::from(title))
-}
-
-/// Synara's `SettingsRow`: title (+ optional reset glyph) and description on
-/// the left, an optional status line under them, the control on the right.
-/// `children` render full-width under the row (the expanded guide).
-fn row(
-    theme: &Theme,
-    first: bool,
-    title: &'static str,
-    description: &str,
-    status: Option<SharedString>,
-    reset: Option<gpui::AnyElement>,
-    control: gpui::AnyElement,
-    children: Option<gpui::AnyElement>,
-) -> gpui::Div {
-    let heading = div()
-        .flex()
-        .items_center()
-        .gap(px(6.0))
-        .min_h(px(20.0))
-        .child(widgets::row_title(theme, title))
-        .children(reset);
-    let mut copy = div()
-        .flex_1()
-        .min_w(px(160.0))
-        .flex()
-        .flex_col()
-        .gap(px(2.0))
-        .child(heading)
-        .child(
-            div()
-                .text_size(crate::typography::ui_rems(12.0))
-                .line_height(px(18.0))
-                .text_color(theme.text_muted)
-                .child(SharedString::from(description.to_string())),
-        );
-    if let Some(status) = status {
-        copy = copy.child(
-            div()
-                .pt(px(4.0))
-                .text_size(crate::typography::ui_rems(11.5))
-                .text_color(theme.text_muted)
-                .child(status),
-        );
+impl PermissionGuideHost for ShortcutsPage {
+    fn permission_guide(&mut self) -> &mut PermissionGuide {
+        &mut self.permissions.guide
     }
-    let mut container = div()
-        .when(!first, |el| el.border_t_1().border_color(theme.border))
-        .flex()
-        .flex_col();
-    container = container.child(
-        div()
-            .px(px(20.0))
-            .py(px(14.0))
-            .hover(|s| s.bg(crate::theme::ink(0.015)))
-            .flex()
-            .flex_row()
-            .flex_wrap()
-            .items_center()
-            .gap(px(14.0))
-            .child(copy)
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(control),
-            ),
-    );
-    container.children(children)
+
+    fn guide_opening(&mut self) {
+        self.permissions.notice = None;
+    }
 }
 
 impl ShortcutsPage {
@@ -277,59 +111,7 @@ impl ShortcutsPage {
 
     fn open_guide(&mut self, pane: PermissionPane, cx: &mut Context<Self>) {
         self.permissions.notice = None;
-        self.permissions.open = Some(pane);
-        self.permissions.tween = Some((pane, Instant::now(), true));
-        self.permissions.poll = Some(cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(GUIDE_POLL_INTERVAL).await;
-                let alive = this.update(cx, |_, cx| {
-                    crate::appshots::refresh_registration();
-                    cx.notify();
-                });
-                if alive.is_err() {
-                    break;
-                }
-            }
-        }));
-        cx.notify();
-    }
-
-    pub(crate) fn open_computer_permission_guide(
-        &mut self,
-        missing: &[zeron_proto::computer::ComputerPermission],
-        cx: &mut Context<Self>,
-    ) {
-        use zeron_proto::computer::ComputerPermission;
-        let Some(pane) = missing.first().map(|permission| match permission {
-            ComputerPermission::Accessibility => PermissionPane::Accessibility,
-            ComputerPermission::ScreenRecording => PermissionPane::ScreenRecording,
-            ComputerPermission::InputMonitoring => PermissionPane::InputMonitoring,
-        }) else {
-            return;
-        };
-        if !self.prompted(pane) {
-            self.set_prompted(pane);
-            pane.request();
-        }
-        crate::appshots::refresh_registration();
-        self.appshot_capabilities = crate::appshots::capabilities();
-        self.open_guide(pane, cx);
-    }
-
-    fn close_guide(&mut self, cx: &mut Context<Self>) {
-        if let Some(pane) = self.permissions.open.take() {
-            self.permissions.tween = Some((pane, Instant::now(), false));
-        }
-        self.permissions.poll = None;
-        cx.notify();
-    }
-
-    fn toggle_guide(&mut self, pane: PermissionPane, cx: &mut Context<Self>) {
-        if self.permissions.open == Some(pane) {
-            self.close_guide(cx);
-        } else {
-            self.open_guide(pane, cx);
-        }
+        self.permissions.guide.open(pane, cx);
     }
 
     fn set_appshots_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
@@ -349,10 +131,7 @@ impl ShortcutsPage {
                 }
             };
             if let Some(pane) = missing(self.appshot_capabilities) {
-                if !self.prompted(pane) {
-                    self.set_prompted(pane);
-                    pane.request();
-                }
+                self.permissions.guide.request_once(pane);
                 crate::appshots::refresh_registration();
                 self.appshot_capabilities = crate::appshots::capabilities();
                 if let Some(pane) = missing(self.appshot_capabilities) {
@@ -361,22 +140,6 @@ impl ShortcutsPage {
             }
         }
         cx.notify();
-    }
-
-    fn prompted(&self, pane: PermissionPane) -> bool {
-        match pane {
-            PermissionPane::InputMonitoring => self.input_access_prompted,
-            PermissionPane::ScreenRecording => self.capture_access_prompted,
-            PermissionPane::Accessibility => self.semantic_access_prompted,
-        }
-    }
-
-    fn set_prompted(&mut self, pane: PermissionPane) {
-        match pane {
-            PermissionPane::InputMonitoring => self.input_access_prompted = true,
-            PermissionPane::ScreenRecording => self.capture_access_prompted = true,
-            PermissionPane::Accessibility => self.semantic_access_prompted = true,
-        }
     }
 
     fn recheck_permissions(&mut self, cx: &mut Context<Self>) {
@@ -572,205 +335,13 @@ impl ShortcutsPage {
             .into_any_element()
     }
 
-    fn render_permission_guide(
-        &mut self,
-        pane: PermissionPane,
-        theme: &Theme,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let accent = theme.accent;
-        let app = crate::appshots::app_display_name();
-        let granted = pane.state(self.appshot_capabilities).is_ready();
-        let open_label: SharedString = format!("Open {} settings", pane.label()).into();
-        let numbered = |ix: usize, body: gpui::AnyElement| {
-            div()
-                .flex()
-                .items_start()
-                .gap(px(10.0))
-                .child(
-                    div()
-                        .flex_none()
-                        .mt(px(2.0))
-                        .size(px(20.0))
-                        .rounded_full()
-                        .border_1()
-                        .border_color(theme.border)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from((ix + 1).to_string())),
-                )
-                .child(
-                    div()
-                        .min_h(px(24.0))
-                        .flex_1()
-                        .text_size(crate::typography::ui_rems(12.5))
-                        .line_height(px(24.0))
-                        .text_color(theme.text_muted)
-                        .child(body),
-                )
-        };
-        let step_text = |copy: String| {
-            div()
-                .line_height(px(20.0))
-                .child(SharedString::from(copy))
-                .into_any_element()
-        };
-        let mut footer = div()
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .pt(px(12.0))
-            .border_t_1()
-            .border_color(theme.border);
-        if granted {
-            footer = footer.child(
-                div()
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.success)
-                    .child("Permission granted."),
-            );
-        } else {
-            footer = footer
-                .child(crate::loaders::mini_mono_spinner(
-                    format!("appshot-guide-spinner-{}", pane.label()),
-                    3.0,
-                    theme.text_muted,
-                    cx.entity_id(),
-                    cx,
-                ))
-                .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(theme.text_muted)
-                        .child("Watching for the change — this page updates automatically."),
-                );
-        }
-        let mut guide = div()
-            .flex()
-            .flex_col()
-            .gap(px(12.0))
-            .rounded(px(8.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.bg)
-            .p(px(16.0))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(10.0))
-                    .child(numbered(
-                        0,
-                        outline_button(theme)
-                            .id(("appshot-guide-open-settings", pane as usize))
-                            .role(gpui::Role::Button)
-                            .aria_label(open_label.clone())
-                            .tab_index(0)
-                            .focus_visible(move |style| style.border_2().border_color(accent))
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                if let Some(url) = pane.settings_url() {
-                                    cx.open_url(url);
-                                }
-                            }))
-                            .child(open_label)
-                            .into_any_element(),
-                    ))
-                    .child(numbered(
-                        1,
-                        step_text(format!(
-                            "If this copy of {app} is already listed, turn it on. Otherwise, use + to choose this installed copy, then turn it on."
-                        )),
-                    ))
-                    .child(numbered(
-                        2,
-                        step_text(
-                            "Complete any macOS authentication. If macOS asks you to quit and reopen, do so before checking again.".into(),
-                        ),
-                    )),
-            )
-            .child(footer)
-            .child(
-                div()
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .line_height(px(18.0))
-                    .text_color(theme.text_muted)
-                    .child(
-                        "Still denied after an update or rebuild? Remove this app from the list and add this copy again. Complete any macOS authentication, and restart if macOS asks you to quit and reopen.",
-                    ),
-            );
-        if crate::appshots::can_restart_app() {
-            let restart_label: SharedString = format!("Restart {app}").into();
-            guide = guide.child(
-                div().child(
-                    outline_button(theme)
-                        .id(("appshot-guide-restart", pane as usize))
-                        .role(gpui::Role::Button)
-                        .aria_label(restart_label.clone())
-                        .tab_index(0)
-                        .focus_visible(move |style| style.border_2().border_color(accent))
-                        .on_click(cx.listener(|_, _, _, cx| crate::appshots::restart_app(cx)))
-                        .child(restart_label),
-                ),
-            );
-        }
-
-        // Grid-collapse reveal: the wrapper clips to a tweened height while the
-        // content fades and drifts 4px, measured each frame so the target is
-        // the guide's real height rather than a guess.
-        let measured = self.permissions.measured_height.clone();
-        let target = match measured.get() {
-            height if height > 0.0 => height,
-            _ => GUIDE_FALLBACK_HEIGHT,
-        };
-        let mut progress = 1.0;
-        if let Some((_, start, opening)) = self.permissions.tween {
-            let raw = (start.elapsed().as_secs_f32()
-                / (GUIDE_MOTION.total().as_secs_f32() * motion::speed_scale()))
-            .clamp(0.0, 1.0);
-            if raw >= 1.0 || motion::reduced_motion(cx) {
-                self.permissions.tween = None;
-                progress = if opening { 1.0 } else { 0.0 };
-            } else {
-                let eased = GUIDE_MOTION.progress(raw);
-                progress = if opening { eased } else { 1.0 - eased };
-                window.request_animation_frame();
-            }
-        }
-        let content = div()
-            .on_children_prepainted({
-                let measured = measured.clone();
-                move |bounds, _, _| {
-                    if let Some(first) = bounds.first() {
-                        measured.set(f32::from(first.size.height));
-                    }
-                }
-            })
-            .px(px(20.0))
-            .pb(px(14.0))
-            .pt(px(0.0))
-            .opacity(progress)
-            .top(px(-4.0 * (1.0 - progress)))
-            .relative()
-            .child(guide);
-        div()
-            .w_full()
-            .overflow_hidden()
-            .h(px(target * progress))
-            .child(content)
-            .into_any_element()
-    }
-
     pub(super) fn render_appshots(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        #[cfg(test)]
+        self.permissions.guide.rendered.clear();
         let theme = Theme::of(cx).clone();
         let accent = theme.accent;
         let capabilities = self.appshot_capabilities;
@@ -779,18 +350,14 @@ impl ShortcutsPage {
         let combo = self.keymap.get(ShortcutId::CaptureAppshot).to_string();
         let mac = capabilities.platform == AppshotPlatform::MacOs;
 
-        // A guide whose permission just landed closes itself and reports it.
-        if let Some(pane) = self.permissions.open {
-            if pane.state(capabilities).is_ready() {
-                self.permissions.notice = Some(
-                    format!(
-                        "Permission granted. {} is ready for Appshots.",
-                        pane.label()
-                    )
-                    .into(),
-                );
-                self.close_guide(cx);
-            }
+        if let Some(pane) = self.permissions.guide.close_if_granted(capabilities, cx) {
+            self.permissions.notice = Some(
+                format!(
+                    "Permission granted. {} is ready for Appshots.",
+                    pane.label()
+                )
+                .into(),
+            );
         }
 
         let toggle = |id: &'static str, label: &'static str, enabled: bool| {
@@ -926,7 +493,7 @@ impl ShortcutsPage {
             .enumerate()
             .map(|(ix, destination)| {
                 let selected = self.appshot_destination == destination;
-                div()
+                choice_chip(&theme, selected)
                     .id(("appshot-destination", ix))
                     .role(gpui::Role::Button)
                     .aria_label(destination.label())
@@ -937,30 +504,6 @@ impl ShortcutsPage {
                     })
                     .tab_index(0)
                     .focus_visible(move |style| style.border_2().border_color(accent))
-                    .h(px(24.0))
-                    .px(px(8.0))
-                    .rounded(px(6.0))
-                    .border_1()
-                    .border_color(if selected {
-                        theme.text.opacity(0.24)
-                    } else {
-                        theme.border
-                    })
-                    .bg(if selected {
-                        crate::theme::ink(0.09)
-                    } else {
-                        gpui::transparent_black()
-                    })
-                    .flex()
-                    .items_center()
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(if selected {
-                        theme.text
-                    } else {
-                        theme.text_muted
-                    })
-                    .cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.appshot_destination = destination;
                         this.commit_appshots(cx);
@@ -1079,66 +622,21 @@ impl ShortcutsPage {
             ));
 
         let mut permissions_card = widgets::section_card(&theme).mt(px(6.0));
-        let panes: &[PermissionPane] = if capabilities.platform == AppshotPlatform::MacOs {
-            &[
-                PermissionPane::InputMonitoring,
-                PermissionPane::ScreenRecording,
-                PermissionPane::Accessibility,
-            ]
+        let panes: &[(PermissionPane, &str)] = if capabilities.platform == AppshotPlatform::MacOs {
+            &APPSHOT_PANES
         } else {
-            &[
-                PermissionPane::ScreenRecording,
-                PermissionPane::Accessibility,
-            ]
+            &APPSHOT_PANES[1..]
         };
-        for (ix, pane) in panes.iter().copied().enumerate() {
-            let state = pane.state(capabilities);
-            let prompted = self.prompted(pane);
-            let guide_open = self.permissions.open == Some(pane);
-            let showing = guide_open
-                || matches!(self.permissions.tween, Some((tween_pane, _, _)) if tween_pane == pane);
-            let mut control = div()
-                .flex()
-                .items_center()
-                .gap(px(8.0))
-                .child(permission_badge(&theme, state, prompted));
-            if !state.is_ready() && pane.settings_url().is_some() {
-                let label: &'static str = if guide_open { "Hide steps" } else { "Grant" };
-                control = control.child(
-                    outline_button(&theme)
-                        .id(("appshot-permission-grant", ix))
-                        .role(gpui::Role::Button)
-                        .aria_label(format!("{label}: {}", pane.label()))
-                        .tab_index(0)
-                        .focus_visible(move |style| style.border_2().border_color(accent))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.set_prompted(pane);
-                            // Grant asks macOS first, which registers this
-                            // build in the pane's list, then deep-links the
-                            // pane and expands the steps; Hide steps only
-                            // collapses them.
-                            if this.permissions.open != Some(pane) {
-                                pane.request();
-                                if let Some(url) = pane.settings_url() {
-                                    cx.open_url(url);
-                                }
-                            }
-                            this.toggle_guide(pane, cx);
-                        }))
-                        .child(label),
-                );
-            }
-            let guide = showing.then(|| self.render_permission_guide(pane, &theme, window, cx));
-            permissions_card = permissions_card.child(row(
-                &theme,
-                ix == 0,
-                pane.label(),
-                pane.description(),
-                None,
-                None,
-                control.into_any_element(),
-                guide,
-            ));
+        for element in permission_guide::permission_rows(
+            self,
+            "appshot",
+            panes,
+            capabilities,
+            &theme,
+            window,
+            cx,
+        ) {
+            permissions_card = permissions_card.child(element);
         }
         let rechecking = self.permissions.recheck.is_some();
         let mut recheck = outline_button(&theme)

@@ -735,6 +735,7 @@ pub struct AppState {
     /// the writes (tab opened / closed).
     pub open_sidechat_tabs: HashSet<String>,
     pub computer_input_pauses: HashMap<String, crate::computer::cards::InputPauseNotice>,
+    pub computer_settings: Option<zeron_proto::computer::ComputerSettings>,
     /// Whether each probed harness can fork or rewind a session (the
     /// `branching` half of the composer's `HarnessCompaction` probe).
     /// Unprobed harnesses are treated as able; the engine has the last word.
@@ -844,6 +845,7 @@ impl AppState {
             compacting_chat: None,
             open_sidechat_tabs: HashSet::new(),
             computer_input_pauses: HashMap::new(),
+            computer_settings: None,
             harness_branching: HashMap::new(),
             transcript_replayed: false,
             transcript_baselines: HashMap::new(),
@@ -2037,6 +2039,7 @@ impl AppState {
                 },
             ),
             spawn_local_device_probe(cx, handle.clone()),
+            spawn_computer_settings_load(cx, handle.clone()),
         ]);
         #[cfg(target_os = "macos")]
         watch_tasks.extend(crate::computer::registration::spawn_host_registration(
@@ -2050,6 +2053,8 @@ impl AppState {
             methods::WATCH_COMPUTER_EVENTS,
             AppState::apply_computer_event,
         ));
+        #[cfg(target_os = "macos")]
+        watch_tasks.extend(crate::computer::preview::watch_events(handle.clone(), cx));
         self.watch_tasks = watch_tasks;
         self.reconcile_change_request_watches(cx);
         // EngineInfo is part of the attachment boundary: views must know which
@@ -2816,6 +2821,28 @@ fn spawn_watch<T: DeserializeOwned + 'static>(
 
 /// Best-effort `LocalDevice` probe: fills `local_device_id` for the "This
 /// device" badge. Engines that don't serve the method leave it `None`.
+fn spawn_computer_settings_load(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<()> {
+    cx.spawn(async move |this, cx| {
+        let Ok(settings) = handle
+            .client()
+            .call_as::<zeron_proto::computer::ComputerSettings>(
+                methods::GET_COMPUTER_SETTINGS,
+                serde_json::json!({}),
+            )
+            .await
+        else {
+            return;
+        };
+        this.update(cx, |state, cx| {
+            #[cfg(target_os = "macos")]
+            crate::computer::registration::apply_cursor_colors(settings.agent_cursor_colors(), cx);
+            state.computer_settings = Some(settings);
+            cx.notify();
+        })
+        .ok();
+    })
+}
+
 fn spawn_local_device_probe(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<()> {
     cx.spawn(async move |this, cx| {
         let Ok(value) = handle

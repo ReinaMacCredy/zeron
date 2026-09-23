@@ -3020,6 +3020,7 @@ pub struct Transcript {
     /// only then may the working trailer render — a frozen snapshot must
     /// never spin, whatever its entries claim.
     doc_live: bool,
+    computer_preview: Option<Entity<crate::computer::preview_card::ComputerPreviewCard>>,
     /// Memory-only viewport state for primary chats visited in this window.
     /// A transcript instance is shared across tabs, so the active ListState is
     /// reset on every attach and cannot retain these positions by itself.
@@ -3364,6 +3365,10 @@ impl Transcript {
         // until streaming overflows the pane — then it follows, releases on
         // wheel-up, and resticks/jumps exactly like the main transcript.
         let pinned = follow;
+        let computer_preview = crate::computer::preview::store(cx).map(|store| {
+            let state = state.clone();
+            cx.new(|cx| crate::computer::preview_card::ComputerPreviewCard::new(state, store, cx))
+        });
         let mut this = Self {
             state,
             list,
@@ -3375,6 +3380,7 @@ impl Transcript {
             retain_on_deselect: false,
             land_end_pending: doc_override.is_some() && !follow,
             doc_live: doc_override.is_some() && follow,
+            computer_preview,
             doc_override,
             saved_viewports: SavedViewportCache::default(),
             pending_viewport: None,
@@ -3832,6 +3838,22 @@ impl Transcript {
             cx.notify();
         });
         cx.notify();
+    }
+
+    fn render_computer_preview(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let card = self.computer_preview.clone()?;
+        let chat = self.quote_chat_id(cx);
+        // The list viewport shrinks to short content; the card's height budget is the window's.
+        let slot = size(
+            self.list.viewport_bounds().size.width,
+            window.viewport_size().height - px(Theme::TITLEBAR_HEIGHT),
+        );
+        card.update(cx, |card, cx| card.set_target(chat, slot, cx));
+        Some(card.into_any_element())
     }
 
     /// The chat a selection here can be added to. Only a chat's own
@@ -9491,6 +9513,7 @@ impl Render for Transcript {
             .child(crate::markdown::render::selection_frame_reset())
             .child(content)
             .child(rail)
+            .children(self.render_computer_preview(window, cx))
             .children(self.render_add_to_chat(cx));
         // Full-size viewer for a clicked user-bubble thumbnail
         // (AttachmentPreviewDialog: bare lightbox, click closes).

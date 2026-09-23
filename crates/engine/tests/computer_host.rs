@@ -189,6 +189,43 @@ async fn a_loopback_host_registers_answers_and_frees_the_slot_on_drop() {
         .await
         .expect("a late reply for an unknown id is a no-op");
 
+    let status = async {
+        loop {
+            match client
+                .call_as::<zeron_proto::computer::ComputerHostStatus>(
+                    methods::GET_COMPUTER_STATUS,
+                    json!({}),
+                )
+                .await
+            {
+                Ok(status) => break status,
+                Err(error) if error.to_string().contains("still starting") => {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(error) => panic!("status read failed: {error}"),
+            }
+        }
+    };
+    let answer_probe = async {
+        let Some(ComputerHostStreamItem::Request(probe)) = next_item(&mut first).await else {
+            panic!("the status read probes the host");
+        };
+        assert_eq!(probe.call.method, ComputerHostMethod::Probe);
+        client
+            .call(
+                methods::RESPOND_COMPUTER_HOST_REQUEST,
+                json!({
+                    "hostToken": host_token,
+                    "correlationId": probe.call.correlation_id,
+                    "result": { "ok": true },
+                }),
+            )
+            .await
+            .expect("host answers the status probe");
+    };
+    let (status, ()) = tokio::join!(status, answer_probe);
+    assert_eq!(status.host_bundle_id.as_deref(), Some("sh.zeron.test"));
+
     drop(first);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
@@ -359,6 +396,12 @@ async fn relay_clients_are_refused_the_host_and_computer_writes() {
         .call(methods::GET_COMPUTER_AUDIT_HISTORY, json!({}))
         .await
         .expect("audit history stays relay-readable");
+    let status: zeron_proto::computer::ComputerHostStatus = relay
+        .call_as(methods::GET_COMPUTER_STATUS, json!({}))
+        .await
+        .expect("status stays relay-readable");
+    assert_eq!(status.host_bundle_id, None);
+    assert_eq!(status.driver_native_revision, None);
     let frame = relay
         .call(
             methods::GET_COMPUTER_STILL_FRAME,

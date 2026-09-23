@@ -7391,6 +7391,28 @@ impl Composer {
         }
     }
 
+    fn computer_effort_hint(&self, cx: &App) -> bool {
+        let state = self.state.read(cx);
+        if !computer_preflight_applies(
+            cfg!(target_os = "macos"),
+            self.send_host_device(cx).as_deref(),
+            state.local_device_id.as_deref(),
+        ) {
+            return false;
+        }
+        let active = state
+            .computer_settings
+            .as_ref()
+            .is_some_and(|settings| settings.computer_control_enabled)
+            || zeron_engine::computer::activation::parse_computer_invocation(
+                self.input.read(cx).text(),
+            )
+            .is_some();
+        active
+            && self.pickers.read(cx).computer_effort_hint_applies(cx)
+            && !crate::settings::current(cx).computer_effort_hint_dismissed
+    }
+
     fn send_host_device(&self, cx: &App) -> Option<String> {
         match self.bound_chat_row(cx) {
             Some(chat) => Some(chat.device_id.clone()),
@@ -8918,6 +8940,7 @@ impl Render for Composer {
         let input_pause = self
             .bound_chat_id(cx)
             .and_then(|id| self.state.read(cx).computer_input_pauses.get(&id).cloned());
+        let effort_hint = self.computer_effort_hint(cx);
         // Centered composer column (zeron `mx-auto w-full max-w-3xl`).
         let container = div()
             .w_full()
@@ -8985,6 +9008,50 @@ impl Render for Composer {
                             notice.title.into(),
                             vec![notice.body.into()],
                             Vec::new(),
+                            None,
+                            &theme,
+                        )),
+                )
+            })
+            .when(effort_hint, |el| {
+                let composer = cx.entity().downgrade();
+                let dismiss = |cx: &mut App| {
+                    crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |s| {
+                        s.computer_effort_hint_dismissed = true
+                    });
+                    cx.refresh_windows();
+                };
+                el.child(
+                    div()
+                        .mx(px(4.0))
+                        .child(crate::computer::cards::computer_card(
+                            crate::computer::cards::CardTone::Info,
+                            crate::icons::MONITOR,
+                            "Desktop actions are faster at Medium effort".into(),
+                            Vec::new(),
+                            vec![
+                                crate::computer::cards::CardAction {
+                                    id: "composer-computer-effort-apply".into(),
+                                    label: "Use Medium".into(),
+                                    primary: true,
+                                    on_click: Box::new(move |_, _, cx| {
+                                        composer
+                                            .update(cx, |composer, cx| {
+                                                composer.pickers.update(cx, |pickers, cx| {
+                                                    pickers.apply_computer_effort_hint(cx)
+                                                })
+                                            })
+                                            .ok();
+                                        dismiss(cx);
+                                    }),
+                                },
+                                crate::computer::cards::CardAction {
+                                    id: "composer-computer-effort-dismiss".into(),
+                                    label: "Dismiss tip".into(),
+                                    primary: false,
+                                    on_click: Box::new(move |_, _, cx| dismiss(cx)),
+                                },
+                            ],
                             None,
                             &theme,
                         )),

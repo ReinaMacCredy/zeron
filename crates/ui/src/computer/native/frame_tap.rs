@@ -10,6 +10,7 @@ const MAX_DEAD_TARGETS: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComputerPreviewFrame {
+    pub thread_id: String,
     pub window_id: u32,
     pub seq: u64,
     pub jpeg: Vec<u8>,
@@ -19,6 +20,7 @@ pub struct ComputerPreviewFrame {
 pub enum ComputerPreviewEvent {
     Frame(ComputerPreviewFrame),
     Failed {
+        thread_id: String,
         window_id: u32,
         code: String,
         message: String,
@@ -125,16 +127,17 @@ impl<S: FrameSource> Inner<S> {
             StreamSignal::Frame(jpeg) => {
                 let frame = {
                     let mut state = self.lock();
-                    let Some(window_id) = state
+                    let Some((thread_id, window_id)) = state
                         .active
                         .as_ref()
                         .filter(|active| active.generation == generation)
-                        .map(|active| active.key.window_id)
+                        .map(|active| (active.key.thread_id.clone(), active.key.window_id))
                     else {
                         return;
                     };
                     state.sequence += 1;
                     ComputerPreviewFrame {
+                        thread_id,
                         window_id,
                         seq: state.sequence,
                         jpeg,
@@ -143,7 +146,7 @@ impl<S: FrameSource> Inner<S> {
                 (self.sink)(ComputerPreviewEvent::Frame(frame));
             }
             StreamSignal::Failed(failure) => {
-                let (window_id, stream) = {
+                let (thread_id, window_id, stream) = {
                     let mut state = self.lock();
                     if !state
                         .active
@@ -156,14 +159,16 @@ impl<S: FrameSource> Inner<S> {
                         return;
                     };
                     let window_id = active.key.window_id;
+                    let thread_id = active.key.thread_id.clone();
                     state.remember_dead(active.key);
-                    (window_id, active.stream)
+                    (thread_id, window_id, active.stream)
                 };
                 if let Some(stream) = stream {
                     self.source.stop(stream);
                 }
                 tracing::info!(target: "desktop_cua", "computer frame tap ended: {}", failure.code);
                 (self.sink)(ComputerPreviewEvent::Failed {
+                    thread_id,
                     window_id,
                     code: failure.code.into(),
                     message: failure.message,
@@ -391,11 +396,13 @@ mod tests {
             *events.lock().unwrap(),
             vec![
                 ComputerPreviewEvent::Frame(ComputerPreviewFrame {
+                    thread_id: "a".into(),
                     window_id: 7,
                     seq: 1,
                     jpeg: vec![1],
                 }),
                 ComputerPreviewEvent::Frame(ComputerPreviewFrame {
+                    thread_id: "a".into(),
                     window_id: 8,
                     seq: 2,
                     jpeg: vec![2],
@@ -418,6 +425,7 @@ mod tests {
         assert_eq!(
             events.lock().unwrap().last(),
             Some(&ComputerPreviewEvent::Failed {
+                thread_id: "a".into(),
                 window_id: 7,
                 code: "target_unavailable".into(),
                 message: "closed".into(),

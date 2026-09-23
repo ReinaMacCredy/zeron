@@ -148,6 +148,7 @@ pub struct DesktopHost {
     driver: super::host::CuaDriverHost,
     bundle_id: String,
     engine: Arc<Mutex<Option<EngineHandle>>>,
+    cursor_style: Arc<Mutex<Option<super::host::CuaCursorStyle>>>,
     _lifecycle: Option<super::native::desktop_events::DesktopLifecycleWatch>,
     _link: super::native::NativeHostLink,
 }
@@ -165,6 +166,7 @@ pub fn install_desktop_host(cx: &mut gpui::App) {
     };
     let runtime = gpui_tokio::Tokio::handle(cx);
     let engine: Arc<Mutex<Option<EngineHandle>>> = Arc::default();
+    let cursor_style: Arc<Mutex<Option<super::host::CuaCursorStyle>>> = Arc::default();
     let on_emergency_stop: Arc<dyn Fn() + Send + Sync> = Arc::new({
         let engine = engine.clone();
         let runtime = runtime.clone();
@@ -181,8 +183,17 @@ pub fn install_desktop_host(cx: &mut gpui::App) {
     let config = super::native::NativeHostConfig {
         binary_path,
         bundle_id: bundle_id.clone(),
-        preview: Arc::new(|_| {}),
+        preview: super::preview::native_sink(cx),
         on_emergency_stop: Some(on_emergency_stop),
+        cursor_style: Some(Box::new({
+            let cursor_style = cursor_style.clone();
+            move || {
+                cursor_style
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone()
+            }
+        })),
     };
     match super::native::start_native_host(config) {
         Ok((driver, link)) => cx.set_global(DesktopHost {
@@ -190,6 +201,7 @@ pub fn install_desktop_host(cx: &mut gpui::App) {
             driver,
             bundle_id,
             engine,
+            cursor_style,
             _lifecycle: link.watch_desktop_lifecycle(runtime),
             _link: link,
         }),
@@ -213,6 +225,26 @@ pub fn spawn_host_registration(engine: EngineHandle, cx: &gpui::App) -> Option<g
     Some(cx.background_executor().spawn(async move {
         let _ = registration.await;
     }))
+}
+
+#[cfg(target_os = "macos")]
+pub fn apply_cursor_colors(
+    colors: Option<zeron_proto::computer::AgentCursorColors>,
+    cx: &gpui::App,
+) {
+    let Some(desktop) = cx.try_global::<DesktopHost>() else {
+        return;
+    };
+    let style = colors.map(|colors| super::host::CuaCursorStyle {
+        fill: colors.fill,
+        rim: colors.rim,
+        shadow: None,
+    });
+    *desktop
+        .cursor_style
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = style.clone();
+    drop(desktop.driver.set_cursor_style(style));
 }
 
 #[cfg(target_os = "macos")]

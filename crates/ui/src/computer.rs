@@ -13,6 +13,8 @@ pub mod host_socket;
 #[cfg(target_os = "macos")]
 pub mod native;
 pub mod presentation;
+pub mod preview;
+pub mod preview_card;
 pub mod registration;
 #[cfg(target_os = "macos")]
 pub mod runtime_ownership;

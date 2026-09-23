@@ -239,6 +239,16 @@ impl Default for ComputerSettings {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerHostStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_bundle_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_native_revision: Option<u64>,
+    pub status: super::contract::ComputerStatusResult,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentCursorColors {
     #[serde(default, skip_serializing_if = "Option::is_none")]

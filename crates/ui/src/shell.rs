@@ -39,6 +39,7 @@ use crate::rail;
 use crate::settings::accounts::{self as accounts, AccountsPage};
 use crate::settings::appearance::{AppearancePage, AppearanceSettingsEvent};
 use crate::settings::archived::ArchivedPage;
+use crate::settings::computer::ComputerPage;
 use crate::settings::devices::DevicesPage;
 use crate::settings::files::{FilesSettingsEvent, FilesSettingsPage};
 use crate::settings::harnesses::HarnessesPage;
@@ -422,11 +423,12 @@ pub enum SettingsSection {
     Notifications,
     Shortcuts,
     Appshots,
+    Computer,
     Archived,
 }
 
 impl SettingsSection {
-    pub const ALL: [SettingsSection; 9] = [
+    pub const ALL: [SettingsSection; 10] = [
         SettingsSection::Devices,
         SettingsSection::Harnesses,
         SettingsSection::Agents,
@@ -435,6 +437,7 @@ impl SettingsSection {
         SettingsSection::Notifications,
         SettingsSection::Shortcuts,
         SettingsSection::Appshots,
+        SettingsSection::Computer,
         SettingsSection::Archived,
     ];
 
@@ -450,6 +453,7 @@ impl SettingsSection {
             SettingsSection::Notifications => "Notifications",
             SettingsSection::Shortcuts => "Shortcuts",
             SettingsSection::Appshots => "Appshots",
+            SettingsSection::Computer => "Computer",
             SettingsSection::Archived => "Archived sessions",
         }
     }
@@ -465,6 +469,7 @@ impl SettingsSection {
             SettingsSection::Agents => &["account", "login", "usage", "provider"],
             SettingsSection::Shortcuts => &["keyboard", "keybinding"],
             SettingsSection::Appshots => &["screenshot", "capture"],
+            SettingsSection::Computer => &["computer use", "desktop", "cursor", "permission"],
             SettingsSection::Archived => &["archive", "old sessions"],
             _ => &[],
         }
@@ -519,6 +524,14 @@ impl SettingsSection {
                 ("Previous session", &["switcher"]),
                 ("Archive session", &[]),
                 ("Capture Appshot", &["screenshot"]),
+            ],
+            SettingsSection::Computer => &[
+                ("Computer control", &["computer use", "desktop"]),
+                ("Cursor colors", &["cursor", "color"]),
+                ("Preview", &["compact", "large"]),
+                ("Getting started", &[]),
+                ("Recent Computer actions", &["history", "audit"]),
+                ("Advanced", &["permission", "driver"]),
             ],
             _ => &[],
         }
@@ -1727,6 +1740,7 @@ pub struct Shell {
     files_settings_page: Option<Entity<FilesSettingsPage>>,
     notifications_page: Option<Entity<NotificationsPage>>,
     shortcuts_page: Option<Entity<ShortcutsPage>>,
+    computer_page: Option<Entity<ComputerPage>>,
     pending_computer_guide: Option<Vec<zeron_proto::computer::ComputerPermission>>,
     accounts_page: Option<Entity<AccountsPage>>,
     /// This device's agent logins + usage for the sidebar user row and its
@@ -2069,6 +2083,7 @@ impl Shell {
             Some("settings/notifications") => Route::Settings(SettingsSection::Notifications),
             Some("settings/shortcuts") => Route::Settings(SettingsSection::Shortcuts),
             Some("settings/appshots") => Route::Settings(SettingsSection::Appshots),
+            Some("settings/computer") => Route::Settings(SettingsSection::Computer),
             Some("settings/archived") => Route::Settings(SettingsSection::Archived),
             // `new` pins the new-chat canvas (suppresses boot auto-select).
             Some("new") => {
@@ -2182,6 +2197,7 @@ impl Shell {
             files_settings_page: None,
             notifications_page: None,
             shortcuts_page: None,
+            computer_page: None,
             pending_computer_guide: None,
             accounts_page: None,
             account_usage: None,
@@ -3636,7 +3652,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.pending_computer_guide = Some(missing);
-        self.open_settings(SettingsSection::Appshots, cx);
+        self.open_settings(SettingsSection::Computer, cx);
     }
 
     /// A tool chip's file badge: the Diff tab when the file has uncommitted
@@ -4648,6 +4664,9 @@ impl Shell {
         self.settings.code_font_family = current.code_font_family;
         self.settings.code_font_size = current.code_font_size;
         self.settings.transcript_width = current.transcript_width;
+        self.settings.computer_getting_started_acknowledged =
+            current.computer_getting_started_acknowledged;
+        self.settings.computer_effort_hint_dismissed = current.computer_effort_hint_dismissed;
     }
 
     fn retry_engine(&mut self, cx: &mut Context<Self>) {
@@ -4776,6 +4795,11 @@ impl Shell {
         // CLIs are installed, so installing one shows up on the next open.
         if section == SettingsSection::Harnesses {
             self.harnesses_page = None;
+        }
+        if section == SettingsSection::Computer
+            && let Some(page) = &self.computer_page
+        {
+            page.update(cx, |page, cx| page.refresh(cx));
         }
         self.route = Route::Settings(section);
         self.nav.push(NavEntry::Settings(section));
@@ -5059,17 +5083,28 @@ impl Shell {
                 }
                 match &self.shortcuts_page {
                     Some(page) => {
-                        let guide = self.pending_computer_guide.take();
-                        page.update(cx, |page, cx| {
-                            page.show_appshots(section == SettingsSection::Appshots);
-                            if let Some(missing) = guide {
-                                page.open_computer_permission_guide(&missing, cx);
-                            }
+                        page.update(cx, |page, _| {
+                            page.show_appshots(section == SettingsSection::Appshots)
                         });
                         page.clone().into_any_element()
                     }
                     None => Empty.into_any_element(),
                 }
+            }
+            SettingsSection::Computer => {
+                let page = match &self.computer_page {
+                    Some(page) => page.clone(),
+                    None => {
+                        let state = self.state.clone();
+                        let page = cx.new(|cx| ComputerPage::new(state, cx));
+                        self.computer_page = Some(page.clone());
+                        page
+                    }
+                };
+                if let Some(missing) = self.pending_computer_guide.take() {
+                    page.update(cx, |page, cx| page.open_setup_guide(&missing, cx));
+                }
+                page.into_any_element()
             }
             SettingsSection::Archived => {
                 if self.archived_page.is_none() {
@@ -6718,6 +6753,7 @@ impl Shell {
             SettingsSection::Notifications => icons::BELL,
             SettingsSection::Shortcuts => icons::KEYBOARD,
             SettingsSection::Appshots => icons::SCREEN_CAPTURE,
+            SettingsSection::Computer => icons::CURSOR,
             SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
         };
         let query = self.settings_search.read(cx).text().to_string();
@@ -15547,6 +15583,15 @@ impl Shell {
         } else {
             self.close_settings(cx);
         }
+    }
+    pub fn fixture_computer_settings(&mut self, cx: &mut Context<Self>) -> Entity<ComputerPage> {
+        self.open_settings(SettingsSection::Computer, cx);
+        self.computer_page
+            .get_or_insert_with(|| {
+                let state = self.state.clone();
+                cx.new(|cx| ComputerPage::new(state, cx))
+            })
+            .clone()
     }
     pub fn fixture_appshots_composer(&self) -> Entity<Composer> {
         self.composer.clone()

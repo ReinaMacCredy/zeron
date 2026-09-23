@@ -2816,6 +2816,17 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&result)
             }
             methods::GET_COMPUTER_SETTINGS => RpcReply::value(&self.computer()?.settings()),
+            methods::GET_COMPUTER_STATUS => {
+                let runtime = self.computer()?;
+                let service = runtime
+                    .service()
+                    .ok_or_else(|| RpcError::Failed("computer use is still starting".into()))?;
+                RpcReply::value(&zeron_proto::computer::ComputerHostStatus {
+                    host_bundle_id: runtime.host_bundle_id(),
+                    driver_native_revision: service.manager.driver_native_revision(),
+                    status: service.manager.get_status().await,
+                })
+            }
             methods::SET_COMPUTER_SETTINGS => {
                 let p: zeron_proto::computer::ComputerSettings = parse_params(params)?;
                 self.computer()?.set_settings(p).map_err(RpcError::Failed)?;

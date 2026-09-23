@@ -4324,6 +4324,10 @@ impl ComputerBackend for CuaComputerBackend {
         Some(ComputerBuildSignature::Unknown)
     }
 
+    fn driver_native_revision(&self) -> Option<u64> {
+        self.inner.native_revision()
+    }
+
     async fn list_windows(&self) -> Result<Vec<ComputerWindow>, ComputerError> {
         self.inner.refresh(false, false).await?;
         Ok(self.inner.state().windows.clone())
