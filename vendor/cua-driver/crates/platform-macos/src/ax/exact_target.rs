@@ -15,11 +15,14 @@ use cua_driver_core::background_input::{
 use super::bindings::{
     ax_get_window_id, copy_ax_windows, copy_bool_attr, copy_element_attr, copy_string_attr,
     focused_element_of_pid, AXUIElementCreateApplication, AXUIElementRef,
+    AXUIElementSetMessagingTimeout,
 };
 use crate::windows::{all_windows, resolve_window_owner, WindowOwner};
 
 /// Bounded `AXParent` ascent used when an element does not expose `AXWindow`.
 const MAX_ANCESTRY_DEPTH: usize = 40;
+
+const GATE_TIMEOUT_SECONDS: f32 = 0.15;
 
 /// Resolve the CGWindowID of the top-level AX window that owns `element`.
 ///
@@ -32,6 +35,7 @@ const MAX_ANCESTRY_DEPTH: usize = 40;
 /// `element` must be a valid `AXUIElementRef` for the duration of the call.
 pub unsafe fn element_window_id(element: AXUIElementRef) -> Option<u32> {
     if let Some(window) = copy_element_attr(element, "AXWindow") {
+        AXUIElementSetMessagingTimeout(window, GATE_TIMEOUT_SECONDS);
         let window_id = ax_get_window_id(window);
         CFRelease(window as CFTypeRef);
         if window_id.is_some() {
@@ -57,6 +61,7 @@ pub unsafe fn element_window_id(element: AXUIElementRef) -> Option<u32> {
         }
         match parent {
             Some(parent) => {
+                AXUIElementSetMessagingTimeout(parent, GATE_TIMEOUT_SECONDS);
                 current = parent;
                 owned = true;
             }
@@ -193,6 +198,7 @@ struct AxWindowRecord {
 unsafe fn ax_window_records(app: AXUIElementRef) -> Vec<AxWindowRecord> {
     let focused_window = copy_element_attr(app, "AXFocusedWindow");
     let focused_window_id = focused_window.and_then(|window| {
+        AXUIElementSetMessagingTimeout(window, GATE_TIMEOUT_SECONDS);
         let id = ax_get_window_id(window);
         CFRelease(window as CFTypeRef);
         id
@@ -200,6 +206,7 @@ unsafe fn ax_window_records(app: AXUIElementRef) -> Vec<AxWindowRecord> {
     copy_ax_windows(app)
         .into_iter()
         .filter_map(|window| {
+            AXUIElementSetMessagingTimeout(window, GATE_TIMEOUT_SECONDS);
             let record = ax_get_window_id(window).map(|window_id| AxWindowRecord {
                 window_id,
                 minimized: copy_bool_attr(window, "AXMinimized"),
@@ -300,15 +307,25 @@ pub fn gather_background_facts(
                 element_ptr.map(|_| ElementAncestry::Unproven),
             )
         } else {
+            AXUIElementSetMessagingTimeout(app, super::tree::AX_MESSAGING_TIMEOUT_SECONDS);
             // Electron/Chromium apps may need per-process-lifetime enablement
             // before their AX windows and subtrees are materialized.
             super::enablement::ensure_chromium_ax_enabled(pid, app);
+            AXUIElementSetMessagingTimeout(app, GATE_TIMEOUT_SECONDS);
             let records = ax_window_records(app);
             let app_hidden = copy_bool_attr(app, "AXHidden");
-            let element = element_ptr.map(|ptr| match element_window_id(ptr as AXUIElementRef) {
-                Some(id) if id == window_id => ElementAncestry::ProvenDescendant,
-                Some(_) => ElementAncestry::OutsideTargetWindow,
-                None => ElementAncestry::Unproven,
+            let element = element_ptr.map(|ptr| {
+                // The addressed element is the cached object a later AXPress
+                // uses, so it keeps the walk's bound instead of the gate's.
+                AXUIElementSetMessagingTimeout(
+                    ptr as AXUIElementRef,
+                    super::tree::AX_MESSAGING_TIMEOUT_SECONDS,
+                );
+                match element_window_id(ptr as AXUIElementRef) {
+                    Some(id) if id == window_id => ElementAncestry::ProvenDescendant,
+                    Some(_) => ElementAncestry::OutsideTargetWindow,
+                    None => ElementAncestry::Unproven,
+                }
             });
             CFRelease(app as CFTypeRef);
             (records, app_hidden, element)

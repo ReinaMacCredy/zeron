@@ -733,6 +733,48 @@ async fn serves_internal_target_resolution_from_a_recent_tree_instead_of_walking
     assert_eq!(f.named("get_window_state").len(), 2);
 }
 
+#[tokio::test]
+async fn a_mutating_dispatch_retires_the_recent_tree_so_a_new_sheet_label_resolves_fresh() {
+    let f = fixture();
+    f.set_elements(vec![json!({
+        "role": "AXButton",
+        "label": "Save",
+        "frame": { "x": -290, "y": 30, "width": 40, "height": 20 },
+        "element_token": "parent-save",
+    })]);
+    let parent = f
+        .backend
+        .get_state(window_state("cua:10:20"))
+        .await
+        .unwrap()
+        .root
+        .unwrap();
+    f.backend
+        .capture_screenshot(window_capture("cua:10:20"))
+        .await
+        .unwrap();
+    f.backend
+        .click(point(-275.0, 90.0), Some("cua:10:20"), &[])
+        .await
+        .unwrap();
+    f.set_elements(vec![json!({
+        "role": "AXButton",
+        "label": "Save",
+        "frame": { "x": -250, "y": 60, "width": 40, "height": 20 },
+        "element_token": "sheet-save",
+    })]);
+    let walks = f.named("get_window_state").len();
+    let resolved = f
+        .backend
+        .get_state(reuse_recent_tree("cua:10:20"))
+        .await
+        .unwrap();
+    assert_eq!(f.named("get_window_state").len(), walks + 1);
+    let sheet = &resolved.root.unwrap().children[0];
+    assert_eq!(sheet.label.as_deref(), Some("Save"));
+    assert_ne!(sheet.frame, parent.children[0].frame);
+}
+
 #[tokio::test(start_paused = true)]
 async fn scopes_the_recent_tree_to_its_window_and_re_walks_after_it_ages_out() {
     let f = fixture();

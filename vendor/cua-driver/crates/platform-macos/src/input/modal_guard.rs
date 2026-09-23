@@ -2,15 +2,21 @@
 //! Capture once per action; only actions with a modal need an extra ancestry check.
 
 use crate::ax::bindings::{
-    ax_get_window_id, copy_bool_attr, copy_element_attr, copy_string_attr,
-    AXUIElementCreateApplication, AXUIElementRef, AXUIElementSetMessagingTimeout,
+    ax_get_window_id, copy_bool_attr, copy_children, copy_element_attr, copy_string_attr,
+    kAXErrorCannotComplete, kAXErrorSuccess, AXError, AXUIElementCopyAttributeValue,
+    AXUIElementCreateApplication, AXUIElementGetTypeID, AXUIElementRef,
+    AXUIElementSetMessagingTimeout,
 };
 use crate::ax::cache::RetainedElement;
-use core_foundation::base::{CFEqual, CFRelease, CFTypeRef};
+use core_foundation::array::CFArray;
+use core_foundation::base::{CFEqual, CFGetTypeID, CFRelease, CFTypeRef, TCFType};
+use core_foundation::string::CFString;
+use std::time::{Duration, Instant};
 
 use super::target_guard::TargetRefusal;
 
 const MAX_ANCESTORS: usize = 40;
+const MODAL_TIMEOUT_SECONDS: f32 = 0.1;
 
 #[derive(Clone)]
 pub(crate) struct ModalTarget {
@@ -40,10 +46,88 @@ fn protected_bundle(bundle: Option<&str>) -> bool {
     })
 }
 
-fn modal_role(role: &str, subrole: &str, modal: Option<bool>) -> bool {
+fn modal_role(role: &str, subrole: &str, modal: Option<bool>, identifier: Option<&str>) -> bool {
     role == "AXSheet"
         || (role == "AXWindow"
-            && (modal == Some(true) || matches!(subrole, "AXDialog" | "AXSystemDialog")))
+            && (modal == Some(true)
+                || matches!(subrole, "AXDialog" | "AXSystemDialog")
+                || matches!(identifier, Some("open-panel" | "save-panel"))))
+}
+
+// A reply that spent the whole messaging timeout is a stalled app; an immediate
+// cannot-complete is an app with no AX server, which has no modal to guard.
+fn app_read_timed_out(error: AXError, elapsed: Duration) -> bool {
+    error == kAXErrorCannotComplete
+        && elapsed >= Duration::from_secs_f32(MODAL_TIMEOUT_SECONDS * 0.8)
+}
+
+unsafe fn copy_app_attr(app: AXUIElementRef, attr_name: &str) -> Result<Option<CFTypeRef>, ()> {
+    let attr = CFString::new(attr_name);
+    let mut value: CFTypeRef = std::ptr::null();
+    let started = Instant::now();
+    let error = AXUIElementCopyAttributeValue(app, attr.as_concrete_TypeRef(), &mut value);
+    if error == kAXErrorSuccess && !value.is_null() {
+        return Ok(Some(value));
+    }
+    if !value.is_null() {
+        CFRelease(value);
+    }
+    if app_read_timed_out(error, started.elapsed()) {
+        Err(())
+    } else {
+        Ok(None)
+    }
+}
+
+unsafe fn copy_app_element_attr(
+    app: AXUIElementRef,
+    attr_name: &str,
+) -> Result<Option<AXUIElementRef>, ()> {
+    Ok(copy_app_attr(app, attr_name)?.and_then(|value| {
+        if CFGetTypeID(value) == AXUIElementGetTypeID() {
+            Some(value as AXUIElementRef)
+        } else {
+            CFRelease(value);
+            None
+        }
+    }))
+}
+
+unsafe fn requested_window_sheet(
+    app: AXUIElementRef,
+    window_id: u32,
+) -> Result<Option<ModalTarget>, ()> {
+    let Some(value) = copy_app_attr(app, "AXWindows")? else {
+        return Ok(None);
+    };
+    if CFGetTypeID(value) != CFArray::<CFTypeRef>::type_id() {
+        CFRelease(value);
+        return Ok(None);
+    }
+    let windows = CFArray::<CFTypeRef>::wrap_under_create_rule(value as _);
+    for window in windows.iter() {
+        let window = *window as AXUIElementRef;
+        if CFGetTypeID(window as CFTypeRef) != AXUIElementGetTypeID() {
+            continue;
+        }
+        AXUIElementSetMessagingTimeout(window, MODAL_TIMEOUT_SECONDS);
+        if ax_get_window_id(window) != Some(window_id) {
+            continue;
+        }
+        let mut sheet = None;
+        for child in copy_children(window) {
+            AXUIElementSetMessagingTimeout(child, MODAL_TIMEOUT_SECONDS);
+            if sheet.is_none() && copy_string_attr(child, "AXRole").as_deref() == Some("AXSheet") {
+                sheet = Some(ModalTarget {
+                    element: RetainedElement::retain(child as usize),
+                    raw_window_id: ax_get_window_id(child).filter(|own| *own != window_id),
+                });
+            }
+            CFRelease(child as CFTypeRef);
+        }
+        return Ok(sheet);
+    }
+    Ok(None)
 }
 
 fn modal_target_matches(
@@ -72,17 +156,32 @@ impl ModalTarget {
         if protected_bundle(crate::apps::bundle_id_for_pid(pid).as_deref()) {
             return Err(protected());
         }
+        let unresponsive = || {
+            TargetRefusal::new(
+                "modal_state_unknown",
+                "The application did not answer whether a dialog owns its input; nothing was sent. Observe again once it responds.",
+                pid,
+                window_id,
+            )
+        };
         unsafe {
             let app = AXUIElementCreateApplication(pid);
             if app.is_null() {
                 return Ok(None);
             }
-            AXUIElementSetMessagingTimeout(app, 0.1);
-            let mut current = copy_element_attr(app, "AXFocusedUIElement")
-                .or_else(|| copy_element_attr(app, "AXFocusedWindow"));
+            let owned_app = RetainedElement::retain(app as usize);
             CFRelease(app as CFTypeRef);
+            let app_ref = owned_app.as_ptr() as AXUIElementRef;
+            AXUIElementSetMessagingTimeout(app_ref, MODAL_TIMEOUT_SECONDS);
+            let mut current = match copy_app_element_attr(app_ref, "AXFocusedUIElement") {
+                Ok(Some(element)) => Some(element),
+                Ok(None) => copy_app_element_attr(app_ref, "AXFocusedWindow")
+                    .map_err(|()| unresponsive())?,
+                Err(()) => return Err(unresponsive()),
+            };
             for _ in 0..MAX_ANCESTORS {
                 let Some(element) = current.take() else { break };
+                AXUIElementSetMessagingTimeout(element, MODAL_TIMEOUT_SECONDS);
                 let retained = RetainedElement::retain(element as usize);
                 CFRelease(element as CFTypeRef);
                 let role = copy_string_attr(element, "AXRole").unwrap_or_default();
@@ -94,15 +193,19 @@ impl ModalTarget {
                 if role == "AXSecureTextField" || subrole == "AXSecureTextField" {
                     return Err(protected());
                 }
-                let is_modal = if role == "AXWindow" {
-                    copy_bool_attr(element, "AXModal")
+                let (is_modal, identifier) = if role == "AXWindow" {
+                    (
+                        copy_bool_attr(element, "AXModal"),
+                        copy_string_attr(element, "AXIdentifier"),
+                    )
                 } else {
-                    None
+                    (None, None)
                 };
-                if modal_role(&role, &subrole, is_modal) {
+                if modal_role(&role, &subrole, is_modal, identifier.as_deref()) {
                     let own_window_id = ax_get_window_id(element);
                     let parent_window_id =
                         copy_element_attr(element, "AXParent").and_then(|parent| {
+                            AXUIElementSetMessagingTimeout(parent, MODAL_TIMEOUT_SECONDS);
                             let id = crate::ax::exact_target::element_window_id(parent);
                             CFRelease(parent as CFTypeRef);
                             id
@@ -126,7 +229,7 @@ impl ModalTarget {
             if let Some(element) = current {
                 CFRelease(element as CFTypeRef);
             }
-            Ok(None)
+            requested_window_sheet(app_ref, window_id).map_err(|()| unresponsive())
         }
     }
 
@@ -134,15 +237,11 @@ impl ModalTarget {
         &self,
         pid: i32,
         window_id: u32,
-        element: Option<usize>,
+        addressed_element: bool,
+        facts: Option<&ElementFacts>,
     ) -> Result<(), TargetRefusal> {
-        let descendant = element.is_some_and(|element| unsafe {
-            is_descendant(
-                element as AXUIElementRef,
-                self.element.as_ptr() as AXUIElementRef,
-            )
-        });
-        if modal_target_matches(element.is_some(), descendant, self.raw_window_id, window_id) {
+        let descendant = facts.is_some_and(|facts| facts.has_ancestor(&self.element));
+        if modal_target_matches(addressed_element, descendant, self.raw_window_id, window_id) {
             Ok(())
         } else {
             Err(TargetRefusal::new(
@@ -155,28 +254,55 @@ impl ModalTarget {
     }
 }
 
-unsafe fn is_descendant(element: AXUIElementRef, modal: AXUIElementRef) -> bool {
-    let mut current = Some(RetainedElement::retain(element as usize));
-    for _ in 0..MAX_ANCESTORS {
-        let Some(retained) = current.take() else {
-            break;
-        };
-        let element = retained.as_ptr() as AXUIElementRef;
-        if CFEqual(element as CFTypeRef, modal as CFTypeRef) != 0 {
-            return true;
+// Gathered before the input gate locks: AX IPC under that lock stalls every app's input.
+pub(crate) struct ElementFacts {
+    ancestors: Vec<RetainedElement>,
+    window_id: Option<u32>,
+}
+
+impl ElementFacts {
+    pub(crate) unsafe fn gather(element: usize) -> Self {
+        let element = element as AXUIElementRef;
+        AXUIElementSetMessagingTimeout(element, crate::ax::tree::AX_MESSAGING_TIMEOUT_SECONDS);
+        let window_id = crate::ax::exact_target::element_window_id(element);
+        let mut ancestors = Vec::new();
+        let mut current = Some(RetainedElement::retain(element as usize));
+        while let Some(retained) = current.take() {
+            if ancestors.len() == MAX_ANCESTORS {
+                break;
+            }
+            current =
+                copy_element_attr(retained.as_ptr() as AXUIElementRef, "AXParent").map(|parent| {
+                    AXUIElementSetMessagingTimeout(parent, MODAL_TIMEOUT_SECONDS);
+                    let parent_retained = RetainedElement::retain(parent as usize);
+                    CFRelease(parent as CFTypeRef);
+                    parent_retained
+                });
+            ancestors.push(retained);
         }
-        current = copy_element_attr(element, "AXParent").map(|parent| {
-            let retained = RetainedElement::retain(parent as usize);
-            CFRelease(parent as CFTypeRef);
-            retained
-        });
+        Self {
+            ancestors,
+            window_id,
+        }
     }
-    false
+
+    pub(crate) fn window_id(&self) -> Option<u32> {
+        self.window_id
+    }
+
+    fn has_ancestor(&self, modal: &RetainedElement) -> bool {
+        self.ancestors.iter().any(|ancestor| unsafe {
+            CFEqual(ancestor.as_ptr() as CFTypeRef, modal.as_ptr() as CFTypeRef) != 0
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ax::bindings::{
+        kAXErrorAPIDisabled, kAXErrorAttributeUnsupported, kAXErrorFailure, kAXErrorNoValue,
+    };
 
     #[test]
     fn ordinary_dialog_is_not_a_protected_authentication_surface() {
@@ -188,10 +314,55 @@ mod tests {
         assert!(protected_bundle(Some(
             "com.apple.LocalAuthentication.UIAgent"
         )));
-        assert!(modal_role("AXSheet", "", None));
-        assert!(modal_role("AXWindow", "AXDialog", None));
-        assert!(modal_role("AXWindow", "", Some(true)));
-        assert!(!modal_role("AXWindow", "AXStandardWindow", Some(false)));
+        assert!(modal_role("AXSheet", "", None, None));
+        assert!(modal_role("AXWindow", "AXDialog", None, None));
+        assert!(modal_role("AXWindow", "", Some(true), None));
+        assert!(!modal_role(
+            "AXWindow",
+            "AXStandardWindow",
+            Some(false),
+            None
+        ));
+    }
+
+    #[test]
+    fn tahoe_open_and_save_panels_are_modal_by_identifier() {
+        assert!(modal_role(
+            "AXWindow",
+            "AXStandardWindow",
+            Some(false),
+            Some("open-panel")
+        ));
+        assert!(modal_role(
+            "AXWindow",
+            "AXStandardWindow",
+            None,
+            Some("save-panel")
+        ));
+        assert!(!modal_role(
+            "AXWindow",
+            "AXStandardWindow",
+            Some(false),
+            Some("document-window")
+        ));
+    }
+
+    #[test]
+    fn only_an_app_read_that_spent_its_timeout_refuses() {
+        let timeout = Duration::from_secs_f32(MODAL_TIMEOUT_SECONDS);
+        assert!(app_read_timed_out(kAXErrorCannotComplete, timeout));
+        assert!(!app_read_timed_out(
+            kAXErrorCannotComplete,
+            Duration::from_millis(1)
+        ));
+        for error in [
+            kAXErrorNoValue,
+            kAXErrorAttributeUnsupported,
+            kAXErrorFailure,
+            kAXErrorAPIDisabled,
+        ] {
+            assert!(!app_read_timed_out(error, timeout));
+        }
     }
 
     #[test]
@@ -200,6 +371,35 @@ mod tests {
         assert!(!modal_target_matches(true, false, None, 7));
         assert!(!modal_target_matches(false, false, None, 7));
         assert!(!modal_target_matches(true, false, Some(7), 7));
+    }
+
+    fn app_element(pid: i32) -> RetainedElement {
+        unsafe {
+            let app = AXUIElementCreateApplication(pid);
+            let retained = RetainedElement::retain(app as usize);
+            CFRelease(app as CFTypeRef);
+            retained
+        }
+    }
+
+    #[test]
+    fn modal_verification_reads_only_ancestry_gathered_before_the_gate_lock() {
+        let modal = ModalTarget {
+            element: app_element(424_242),
+            raw_window_id: None,
+        };
+        let inside = ElementFacts {
+            ancestors: vec![app_element(424_241), app_element(424_242)],
+            window_id: Some(7),
+        };
+        let outside = ElementFacts {
+            ancestors: vec![app_element(424_241)],
+            window_id: Some(7),
+        };
+        assert!(modal.verify(424_242, 7, true, Some(&inside)).is_ok());
+        assert!(modal.verify(424_242, 7, true, Some(&outside)).is_err());
+        assert!(modal.verify(424_242, 7, true, None).is_err());
+        assert!(modal.verify(424_242, 7, false, None).is_err());
     }
 
     #[test]

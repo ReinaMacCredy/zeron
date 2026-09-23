@@ -445,6 +445,7 @@ struct NativeElement {
 
 struct RecentTree {
     at: Instant,
+    reusable: bool,
     root: ComputerUiNode,
     elements: Vec<Option<NativeElement>>,
 }
@@ -803,7 +804,7 @@ impl CuaInner {
                 None => std::future::pending().await,
             }
         };
-        tokio::select! {
+        let outcome = tokio::select! {
             reply = self.host.request(call) => {
                 guard.armed = false;
                 Ok(reply)
@@ -816,7 +817,13 @@ impl CuaInner {
                 message: "Computer operation cancelled. Input already dispatched may have taken effect; do not replay.".into(),
                 effect: uncertain,
             }),
+        };
+        if mutation {
+            for (_, tree) in &mut self.state().recent_trees {
+                tree.reusable = false;
+            }
         }
+        outcome
     }
 
     fn host_call(request: HostRequest) -> ComputerHostCall {
@@ -1852,7 +1859,7 @@ impl CuaInner {
                     .recent_trees
                     .iter()
                     .find(|(id, _)| *id == window_id)
-                    .filter(|(_, tree)| tree.at.elapsed() < RECENT_TREE_TTL)
+                    .filter(|(_, tree)| tree.reusable && tree.at.elapsed() < RECENT_TREE_TTL)
                     .map(|(_, tree)| tree.root.clone())
             };
             if let Some(root) = cached {
@@ -2017,6 +2024,7 @@ impl CuaInner {
             window_id.to_owned(),
             RecentTree {
                 at: Instant::now(),
+                reusable: true,
                 root,
                 elements,
             },
