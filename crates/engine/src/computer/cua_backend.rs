@@ -2797,9 +2797,16 @@ impl CuaInner {
                         .code("stale_target")
                         .into());
                     };
-                    let composed = format!("{}{value}", before.value.clone().unwrap_or_default());
                     assert_desktop_operation_active()?;
-                    this.web_set_value(&node, &window_id, before, &composed, &admission)
+                    // The snapshot value falls back to the placeholder for an empty field, so
+                    // composing from it would write the placeholder; the driver appends to the live value.
+                    if this.native_revision().unwrap_or(0) >= 37 {
+                        return this
+                            .web_set_value(&node, &window_id, before, &value, true, &admission)
+                            .await;
+                    }
+                    let composed = format!("{}{value}", before.value.clone().unwrap_or_default());
+                    this.web_set_value(&node, &window_id, before, &composed, false, &admission)
                         .await
                 })
             }),
@@ -2813,12 +2820,16 @@ impl CuaInner {
         window_id: &str,
         field: WebField,
         value: &str,
+        append: bool,
         admission: &LaneAdmission,
     ) -> Result<ComputerBackendActionResult, ComputerError> {
         let mut args = Map::new();
         args.insert("element_token".into(), json!(field.token));
         args.insert("element_index".into(), num(field.index));
         args.insert("value".into(), json!(value));
+        if append {
+            args.insert("append".into(), Value::Bool(true));
+        }
         let resolved = self.target(Some(window_id), true).await?;
         let result = self
             .input_dispatch(
@@ -2834,7 +2845,14 @@ impl CuaInner {
             .await?;
         assert_desktop_operation_active()?;
         let after = self.resolve_web_field(window_id, node).await?;
-        if after.and_then(|after| after.value).as_deref() == Some(value) {
+        let landed = after.and_then(|after| after.value).is_some_and(|after| {
+            if append {
+                after.ends_with(value)
+            } else {
+                after == value
+            }
+        });
+        if landed {
             return Ok(ComputerBackendActionResult {
                 verified: Some(ComputerDeliveryVerification::Confirmed),
                 effect: Some(CuaEffect::Verified),
@@ -3021,7 +3039,7 @@ impl CuaInner {
                                 .code("stale_target")
                                 .into());
                             };
-                            this.web_set_value(&node, &window_id, field, &value, &admission)
+                            this.web_set_value(&node, &window_id, field, &value, false, &admission)
                                 .await
                         })
                     }),

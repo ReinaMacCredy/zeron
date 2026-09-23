@@ -105,6 +105,26 @@ async fn reports_dispatched_unknown_when_a_web_set_value_does_not_land() {
 }
 
 #[tokio::test]
+async fn appends_label_targeted_web_text_through_the_driver_not_the_snapshot_value() {
+    let f = fixture_with(FixtureOptions {
+        native_revision: Some(Some(39)),
+        ..Default::default()
+    });
+    let mut field = web_field();
+    field["value"] = json!("SAVE10");
+    f.set_elements(vec![field]);
+    let target = observe(&f, "cua:10:20", 0).await;
+    f.backend
+        .type_text("save10", Some("cua:10:20"), Some(&target))
+        .await
+        .unwrap();
+    let writes = f.named("set_value");
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0].args["value"], json!("save10"));
+    assert_eq!(writes[0].args["append"], json!(true));
+}
+
+#[tokio::test]
 async fn never_sends_web_action_after_interruption_while_its_field_read_was_pending() {
     for (action, interruption) in [
         ("typeText", "timeout"),
