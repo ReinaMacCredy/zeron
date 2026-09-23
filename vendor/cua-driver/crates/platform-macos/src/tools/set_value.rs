@@ -457,6 +457,28 @@ fn needs_stepping(before: Option<f64>, after: Option<f64>, target: f64) -> bool 
     }
 }
 
+// Chromium publishes a web field's new AXValue asynchronously, so an unchanged
+// immediate read-back is not yet evidence that the write was ignored.
+fn poll_while_unchanged(
+    before: Option<&str>,
+    requested: &str,
+    mut after: Option<String>,
+    mut read: impl FnMut() -> Option<String>,
+) -> Option<String> {
+    for _ in 0..50 {
+        if !write_ignored(before, after.as_deref(), requested) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        after = read();
+    }
+    after
+}
+
+fn write_ignored(before: Option<&str>, after: Option<&str>, requested: &str) -> bool {
+    before.is_some() && after == before && after != Some(requested)
+}
+
 fn set_value_blocking(
     element_ptr: usize,
     element_index: usize,
@@ -617,7 +639,22 @@ fn set_value_blocking(
                 false
             }
         };
-        let after = read_back();
+        let mut after = read_back();
+        if web_content && route == ValueRoute::String {
+            after = poll_while_unchanged(before.as_deref(), value, after, read_back);
+            if write_ignored(before.as_deref(), after.as_deref(), value) {
+                return Err(AxActionFailure::uncertain_with_code(
+                    "ax_value_write_ignored",
+                    "The AXValue write returned success but the web field's value did not \
+                     change within 1s. WebKit (Safari, Mail, any WKWebView) ignores AXValue \
+                     writes, and a page can also reject a value. Do not repeat set_value or \
+                     type_text on this element. Observe fresh state first; if the field is \
+                     still unchanged, click it to focus it and send key events with type_text \
+                     addressed by window only.",
+                )
+                .into());
+            }
+        }
         let (verified, changed) =
             classify_write(before.as_deref(), after.as_deref(), value, numeric);
         let suffix = match (verified, changed) {
@@ -857,8 +894,9 @@ mod tests {
     use super::{
         apply_surface_trust, apply_verification_label, choose_value_route, classify_write,
         compose_append_value, kAXErrorSuccess, needs_stepping, needs_string_retry,
-        poll_until_moved, step_to_value_with, validate_append_target, write_value_with,
-        AxActionFailure, CfValueKind, SetValueOutcome, ValueRoute, MAX_APPENDED_TEXT_UTF16,
+        poll_until_moved, poll_while_unchanged, step_to_value_with, validate_append_target,
+        write_ignored, write_value_with, AxActionFailure, CfValueKind, SetValueOutcome, ValueRoute,
+        MAX_APPENDED_TEXT_UTF16,
     };
     use std::cell::Cell;
 
@@ -944,6 +982,31 @@ mod tests {
                 target: 7.0
             }
         );
+    }
+
+    #[test]
+    fn an_unchanged_web_field_is_reported_as_an_ignored_write() {
+        assert!(write_ignored(Some("old"), Some("old"), "new"));
+        assert!(!write_ignored(Some("old"), Some("new"), "new"));
+        assert!(!write_ignored(Some("same"), Some("same"), "same"));
+        assert!(!write_ignored(None, Some("old"), "new"));
+        assert!(!write_ignored(Some("old"), None, "new"));
+
+        let reads = Cell::new(0);
+        let after = poll_while_unchanged(Some("old"), "new", Some("old".into()), || {
+            reads.set(reads.get() + 1);
+            Some(if reads.get() < 3 { "old" } else { "new" }.into())
+        });
+        assert_eq!(after.as_deref(), Some("new"));
+        assert_eq!(reads.get(), 3);
+
+        let reads = Cell::new(0);
+        let after = poll_while_unchanged(Some("old"), "new", Some("old".into()), || {
+            reads.set(reads.get() + 1);
+            Some("old".into())
+        });
+        assert_eq!(after.as_deref(), Some("old"));
+        assert_eq!(reads.get(), 50);
     }
 
     #[test]
