@@ -55,6 +55,7 @@ pub struct ToolServer {
     pub command: String,
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
+    pub guidance: Option<String>,
 }
 
 impl std::fmt::Debug for ToolServer {
@@ -66,8 +67,22 @@ impl std::fmt::Debug for ToolServer {
                 "env",
                 &self.env.iter().map(|(name, _)| name).collect::<Vec<_>>(),
             )
+            .field("guidance", &self.guidance.is_some())
             .finish()
     }
+}
+
+pub(crate) fn is_zeron_computer_tool(name: &str) -> bool {
+    let name = name.trim();
+    name.strip_prefix("mcp__zeron__")
+        .or_else(|| name.strip_prefix("zeron_"))
+        .is_some_and(is_computer_tool_name)
+}
+
+pub(crate) fn is_computer_tool_name(name: &str) -> bool {
+    name.strip_prefix("computer_").is_some_and(|rest| {
+        !rest.is_empty() && rest.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+    })
 }
 
 impl ToolServer {
@@ -465,13 +480,40 @@ mod tool_server_tests {
             command: "/opt/zeron/zeron".into(),
             args: vec!["mcp".into()],
             env: vec![("ZERON_RUN_SECRET".into(), "s3cret".into())],
+            guidance: Some("## Zeron computer use".into()),
         };
         assert!(
             server
                 .mcp_config_json("zeron")
                 .contains(r#""env":{"ZERON_RUN_SECRET":"s3cret"}"#)
         );
+        assert!(!server.mcp_config_json("zeron").contains("computer use"));
         let debug = format!("{server:?}");
         assert!(debug.contains("ZERON_RUN_SECRET") && !debug.contains("s3cret"));
+    }
+
+    #[test]
+    fn only_zeron_served_computer_tools_count_as_computer_tools() {
+        use super::{is_computer_tool_name, is_zeron_computer_tool};
+        for name in [
+            "mcp__zeron__computer_click",
+            "mcp__zeron__computer_browser_navigate",
+            "mcp__zeron__computer_spaces",
+            "zeron_computer_type_text",
+        ] {
+            assert!(is_zeron_computer_tool(name), "{name}");
+        }
+        for name in [
+            "computer_click",
+            "mcp__zeron__list_threads",
+            "mcp__other__computer_click",
+            "mcp__zeron__computer_",
+            "mcp__zeron__computer_click; rm -rf /",
+            "Bash",
+        ] {
+            assert!(!is_zeron_computer_tool(name), "{name}");
+        }
+        assert!(is_computer_tool_name("computer_click"));
+        assert!(!is_computer_tool_name("list_threads"));
     }
 }

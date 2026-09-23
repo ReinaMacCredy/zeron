@@ -35,6 +35,23 @@ case "$first" in
   ;;
 
 
+*scenario:computer-on*|*scenario:computer-off*)
+  # Computer guidance rides --append-system-prompt only on a computer run.
+  guidance=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --append-system-prompt) shift; guidance="$1" ;;
+    esac
+    shift
+  done
+  case "$first" in
+    *scenario:computer-on*) case "$guidance" in "## Zeron computer use"*) ;; *) exit 1 ;; esac ;;
+    *) [ -z "$guidance" ] || exit 1 ;;
+  esac
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":["mcp__zeron__computer_click"],"cwd":"/tmp","session_id":"sess-computer"}'
+  emit '{"type":"result","subtype":"success","result":"ok","usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-computer"}'
+  ;;
+
 *scenario:mcp*)
   # A normal run with thread tools: the zeron server rides an ADDITIVE
   # --mcp-config; strict would drop the user's own servers.

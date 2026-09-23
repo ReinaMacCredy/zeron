@@ -68,7 +68,7 @@ if has "$line" '"method":"thread/resume"'; then
     emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-resumed\"}}}"
   fi
 elif has "$line" '"method":"thread/fork"'; then
-  # A branch: the source thread id plus the last turn to keep, nothing else.
+  # A branch: the source thread id plus the last turn to keep.
   has "$line" '"threadId":"resume-ok"' || exit 1
   has "$line" '"lastTurnId":"t-keep"' || exit 1
   emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-forked\",\"forkedFromId\":\"resume-ok\"}}}"
@@ -310,6 +310,25 @@ case "$turnline" in
   read -r a2 || exit 1
   { has "$a2" '"id":102' && has "$a2" '"decision":"accept"'; } ||
     { emit '{"method":"turn/failed","params":{"turn":{"id":"t-1","error":{"message":"file approval not accepted"}}}}'; exit 0; }
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1"}}}'
+  ;;
+
+*scenario:elicit*)
+  # Codex's native MCP tool approval: a Zeron computer tool on a computer run
+  # is accepted by the harness; anything else keeps today's method-not-found.
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
+  outcome=""
+  for req in '301 zeron computer_click' '302 zeron list_threads' '303 other computer_click'; do
+    set -- $req
+    emit "{\"id\":$1,\"method\":\"mcpServer/elicitation/request\",\"params\":{\"serverName\":\"$2\",\"threadId\":\"th-1\",\"turnId\":\"t-1\",\"mode\":\"form\",\"message\":\"Allow the $2 MCP server to run tool \\\"$3\\\"?\",\"requestedSchema\":{\"type\":\"object\",\"properties\":{}},\"_meta\":{\"codex_approval_kind\":\"mcp_tool_call\",\"persist\":[\"session\",\"always\"]}}}"
+    read -r answer || exit 1
+    has "$answer" "\"id\":$1" || exit 1
+    if has "$answer" '"action":"accept"'; then outcome="$outcome $1:accept"
+    elif has "$answer" '"code":-32601'; then outcome="$outcome $1:unsupported"
+    else outcome="$outcome $1:other"; fi
+  done
+  emit "{\"method\":\"item/agentMessage/delta\",\"params\":{\"itemId\":\"m1\",\"delta\":\"$outcome\"}}"
   emit '{"method":"turn/completed","params":{"turn":{"id":"t-1"}}}'
   ;;
 

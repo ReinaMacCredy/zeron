@@ -62,7 +62,7 @@ use zeron_proto::{
 
 use crate::jsonrpc::{Incoming, RpcClient};
 use crate::process::{Child, Command, Stdio};
-use crate::{Harness, HarnessError, RunControls};
+use crate::{Harness, HarnessError, RunControls, ToolServer};
 use catalog::{
     REASONING_LEVELS, approval_policy, sandbox_mode, sandbox_policy_value, static_models, to_effort,
 };
@@ -846,6 +846,101 @@ async fn send(tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>, ev: AgentEven
     tx.send(Ok(ev)).await.is_ok()
 }
 
+fn thread_params(
+    request: &RunRequest,
+    tool_server: Option<&ToolServer>,
+    title_only: bool,
+    approval_policy: &str,
+    service_tier: Option<&str>,
+) -> serde_json::Map<String, Value> {
+    let mut p = serde_json::Map::new();
+    if title_only {
+        p.insert("baseInstructions".into(), crate::TITLE_INSTRUCTIONS.into());
+        p.insert(
+            "developerInstructions".into(),
+            crate::TITLE_INSTRUCTIONS.into(),
+        );
+        p.insert("ephemeral".into(), true.into());
+        p.insert(
+            "config".into(),
+            json!({
+                "project_doc_max_bytes": 0,
+                "web_search": "disabled",
+                "features.shell_tool": false,
+                "features.apply_patch_freeform": false,
+                "features.multi_agent": false,
+                "features.apps": false,
+                "features.multi_agent_v2": false,
+                "agents.enabled": false,
+                "features.browser_use": false,
+                "features.computer_use": false,
+                "features.js_repl": false,
+                "features.image_generation": false,
+                "features.memories": false
+            }),
+        );
+    } else if let Some(server) = tool_server {
+        // The thread tools as a config-layer MCP server: dotted keys
+        // merge over the user's own `mcp_servers` table instead of
+        // replacing it. Title-only runs never get it.
+        let overrides = p
+            .entry("config")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .expect("config overrides are an object");
+        overrides.insert(
+            "mcp_servers.zeron.command".into(),
+            Value::String(server.command.clone()),
+        );
+        overrides.insert("mcp_servers.zeron.args".into(), json!(server.args));
+        if !server.env.is_empty() {
+            overrides.insert(
+                "mcp_servers.zeron.env".into(),
+                Value::Object(server.env_map()),
+            );
+        }
+        // wait_threads blocks up to 30 min; Codex's own per-call ceiling
+        // would cut it short (`tool_timeout_sec` in the 0.154.0 schema).
+        overrides.insert("mcp_servers.zeron.tool_timeout_sec".into(), json!(1800));
+        if request.computer_control {
+            // One computer surface per run: Codex's bundled plugin would compete with Zeron's.
+            overrides.insert(
+                "plugins.computer-use@openai-bundled.enabled".into(),
+                false.into(),
+            );
+        }
+        if let Some(guidance) = &server.guidance {
+            p.insert("developerInstructions".into(), guidance.clone().into());
+        }
+    }
+    p.insert("cwd".into(), Value::String(request.cwd.clone()));
+    p.insert("approvalPolicy".into(), approval_policy.into());
+    p.insert("sandbox".into(), sandbox_mode(request.sandbox).into());
+    if let Some(model) = &request.model {
+        p.insert("model".into(), Value::String(model.clone()));
+    }
+    if let Some(tier) = service_tier {
+        p.insert("serviceTier".into(), Value::String(tier.to_owned()));
+    }
+    p
+}
+
+fn fork_params(
+    start_params: &serde_json::Map<String, Value>,
+    thread_id: &str,
+    last_turn_id: &str,
+) -> serde_json::Map<String, Value> {
+    let mut p = serde_json::Map::new();
+    p.insert("threadId".into(), thread_id.into());
+    p.insert("lastTurnId".into(), last_turn_id.into());
+    for key in ["config", "developerInstructions"] {
+        if let Some(value) = start_params.get(key) {
+            p.insert(key.into(), value.clone());
+        }
+    }
+    p
+}
+
 /// `turn/start` and return the new turn id from the response.
 async fn start_turn(client: &RpcClient, params: Value) -> Result<String, HarnessError> {
     let started = client.request("turn/start", params).await?;
@@ -898,68 +993,13 @@ async fn run_session(session: Session) {
         .filter(|t| *t != "default")
         .map(str::to_owned);
 
-    let start_params = {
-        let mut p = serde_json::Map::new();
-        if title_only {
-            p.insert("baseInstructions".into(), crate::TITLE_INSTRUCTIONS.into());
-            p.insert(
-                "developerInstructions".into(),
-                crate::TITLE_INSTRUCTIONS.into(),
-            );
-            p.insert("ephemeral".into(), true.into());
-            p.insert(
-                "config".into(),
-                json!({
-                    "project_doc_max_bytes": 0,
-                    "web_search": "disabled",
-                    "features.shell_tool": false,
-                    "features.apply_patch_freeform": false,
-                    "features.multi_agent": false,
-                    "features.apps": false,
-                    "features.multi_agent_v2": false,
-                    "agents.enabled": false,
-                    "features.browser_use": false,
-                    "features.computer_use": false,
-                    "features.js_repl": false,
-                    "features.image_generation": false,
-                    "features.memories": false
-                }),
-            );
-        } else if let Some(server) = &tool_server {
-            // The thread tools as a config-layer MCP server: dotted keys
-            // merge over the user's own `mcp_servers` table instead of
-            // replacing it. Title-only runs never get it.
-            let overrides = p
-                .entry("config")
-                .or_insert_with(|| json!({}))
-                .as_object_mut()
-                .expect("config overrides are an object");
-            overrides.insert(
-                "mcp_servers.zeron.command".into(),
-                Value::String(server.command.clone()),
-            );
-            overrides.insert("mcp_servers.zeron.args".into(), json!(server.args));
-            if !server.env.is_empty() {
-                overrides.insert(
-                    "mcp_servers.zeron.env".into(),
-                    Value::Object(server.env_map()),
-                );
-            }
-            // wait_threads blocks up to 30 min; Codex's own per-call ceiling
-            // would cut it short (`tool_timeout_sec` in the 0.154.0 schema).
-            overrides.insert("mcp_servers.zeron.tool_timeout_sec".into(), json!(1800));
-        }
-        p.insert("cwd".into(), Value::String(request.cwd.clone()));
-        p.insert("approvalPolicy".into(), approval_policy.into());
-        p.insert("sandbox".into(), sandbox_mode(request.sandbox).into());
-        if let Some(model) = &request.model {
-            p.insert("model".into(), Value::String(model.clone()));
-        }
-        if let Some(tier) = &service_tier {
-            p.insert("serviceTier".into(), Value::String(tier.clone()));
-        }
-        p
-    };
+    let start_params = thread_params(
+        &request,
+        tool_server.as_ref(),
+        title_only,
+        approval_policy,
+        service_tier.as_deref(),
+    );
 
     // ---- handshake + thread + first turn (interruptible) ------------------
     let setup = async {
@@ -1004,7 +1044,7 @@ async fn run_session(session: Session) {
             client
                 .request(
                     "thread/fork",
-                    json!({ "threadId": resume, "lastTurnId": keep }),
+                    Value::Object(fork_params(&start_params, resume, keep)),
                 )
                 .await?
         } else if let Some(resume) = &request.resume {
@@ -1424,6 +1464,7 @@ async fn run_session(session: Session) {
                         &method,
                         &params,
                         request.permission_mode.auto_approve(),
+                        request.computer_control,
                         &request_input,
                     );
                 }
@@ -1786,7 +1827,15 @@ async fn compact_session(session: CompactSession) {
                 }
 
                 Some(Incoming::Request { id, method, params }) => {
-                    handle_server_request(&client, id, &method, &params, true, &request_input);
+                    handle_server_request(
+                        &client,
+                        id,
+                        &method,
+                        &params,
+                        true,
+                        false,
+                        &request_input,
+                    );
                 }
 
                 Some(Incoming::Eof) | None => {
@@ -1906,8 +1955,17 @@ fn handle_server_request(
     method: &str,
     params: &Value,
     auto_approve: bool,
+    computer_control: bool,
     request_input: &Arc<RequestInputFn>,
 ) {
+    // The engine's consent card is the only prompt a Zeron computer call gets.
+    if method == "mcpServer/elicitation/request"
+        && computer_control
+        && is_zeron_computer_tool_approval(params)
+    {
+        client.respond(&id, json!({ "action": "accept" }));
+        return;
+    }
     // A tool's user-input request (EXPERIMENTAL, codex 0.146.x) is a CONTENT
     // question, never auto-approvable — route it to the input bridge and
     // answer keyed by question id, `{ answers: { <id>: { answers: [..] } } }`.
@@ -1974,6 +2032,27 @@ fn handle_server_request(
             json!({ "decision": if accept { "accept" } else { "decline" } }),
         );
     });
+}
+
+fn is_zeron_computer_tool_approval(params: &Value) -> bool {
+    if params.get("serverName").and_then(Value::as_str) != Some("zeron")
+        || params["_meta"]["codex_approval_kind"].as_str() != Some("mcp_tool_call")
+    {
+        return false;
+    }
+    // Codex 0.154.0 omits `tool_name` and names the tool only in its generated message.
+    params["_meta"]["tool_name"]
+        .as_str()
+        .or_else(|| {
+            params
+                .get("message")
+                .and_then(Value::as_str)
+                .and_then(|message| {
+                    message.strip_prefix("Allow the zeron MCP server to run tool \"")
+                })
+                .and_then(|rest| rest.strip_suffix("\"?"))
+        })
+        .is_some_and(crate::is_computer_tool_name)
 }
 
 /// Parse `item/tool/requestUserInput` questions into (wire id, question)
@@ -2114,6 +2193,148 @@ mod tests {
             &json!({"command": ["git", "push", "--force"]}),
         );
         assert!(q.question.contains("git push --force"));
+    }
+
+    fn computer_request(computer_control: bool) -> RunRequest {
+        RunRequest {
+            prompt: String::new(),
+            harness: None,
+            model: None,
+            reasoning: None,
+            model_options: serde_json::Map::new(),
+            cwd: "/w".into(),
+            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+            permission_mode: zeron_proto::PermissionMode::Ask,
+            auto_approve: false,
+            resume: None,
+            attachments: Vec::new(),
+            worktree: None,
+            branch: None,
+            forked_at: None,
+            computer_control,
+        }
+    }
+
+    fn tool_server(guidance: Option<&str>) -> ToolServer {
+        ToolServer {
+            command: "/opt/zeron/zeron".into(),
+            args: vec!["mcp".into()],
+            env: Vec::new(),
+            guidance: guidance.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn a_computer_run_carries_guidance_and_suppresses_the_bundled_plugin() {
+        let plugin = "plugins.computer-use@openai-bundled.enabled";
+        let server = tool_server(Some("## Zeron computer use"));
+        let on = thread_params(
+            &computer_request(true),
+            Some(&server),
+            false,
+            "untrusted",
+            None,
+        );
+        assert_eq!(on["developerInstructions"], "## Zeron computer use");
+        assert_eq!(on["config"][plugin], false);
+        assert_eq!(
+            on["config"]["mcp_servers.zeron.command"],
+            "/opt/zeron/zeron"
+        );
+
+        let fork = fork_params(&on, "th-source", "t-keep");
+        assert_eq!(fork["threadId"], "th-source");
+        assert_eq!(fork["lastTurnId"], "t-keep");
+        assert_eq!(fork["developerInstructions"], "## Zeron computer use");
+        assert_eq!(fork["config"], on["config"]);
+
+        let off = thread_params(
+            &computer_request(false),
+            Some(&tool_server(None)),
+            false,
+            "untrusted",
+            None,
+        );
+        assert!(off.get("developerInstructions").is_none());
+        assert!(off["config"].get(plugin).is_none());
+        assert_eq!(
+            off["config"]["mcp_servers.zeron.command"],
+            "/opt/zeron/zeron"
+        );
+        let fork = fork_params(&off, "th-source", "t-keep");
+        assert!(fork.get("developerInstructions").is_none());
+        assert_eq!(fork["config"], off["config"]);
+
+        let bare = thread_params(&computer_request(false), None, false, "never", None);
+        assert!(bare.get("config").is_none() && bare.get("developerInstructions").is_none());
+        assert_eq!(
+            fork_params(&bare, "th", "t").keys().collect::<Vec<_>>(),
+            ["lastTurnId", "threadId"]
+        );
+
+        let title = thread_params(&computer_request(true), Some(&server), true, "never", None);
+        assert_eq!(title["developerInstructions"], crate::TITLE_INSTRUCTIONS);
+        assert!(title["config"].get(plugin).is_none());
+    }
+
+    #[test]
+    fn only_zeron_computer_tool_approvals_are_auto_accepted() {
+        let elicitation = |server: &str, message: &str, meta: Value| {
+            json!({
+                "serverName": server,
+                "threadId": "th-1",
+                "turnId": "t-1",
+                "mode": "form",
+                "message": message,
+                "requestedSchema": { "type": "object", "properties": {} },
+                "_meta": meta,
+            })
+        };
+        let native =
+            json!({ "codex_approval_kind": "mcp_tool_call", "persist": ["session", "always"] });
+        let generated = |tool: &str| format!("Allow the zeron MCP server to run tool \"{tool}\"?");
+        for tool in [
+            "computer_click",
+            "computer_browser_navigate",
+            "computer_spaces",
+        ] {
+            assert!(
+                is_zeron_computer_tool_approval(&elicitation(
+                    "zeron",
+                    &generated(tool),
+                    native.clone()
+                )),
+                "{tool}"
+            );
+        }
+        assert!(is_zeron_computer_tool_approval(&elicitation(
+            "zeron",
+            "Run it?",
+            json!({ "codex_approval_kind": "mcp_tool_call", "tool_name": "computer_type_text" }),
+        )));
+        for params in [
+            elicitation("zeron", &generated("list_threads"), native.clone()),
+            elicitation("other", &generated("computer_click"), native.clone()),
+            elicitation("zeron", &generated("computer_click"), json!({})),
+            elicitation(
+                "zeron",
+                &generated("computer_click"),
+                json!({ "codex_approval_kind": "tool_suggestion" }),
+            ),
+            elicitation("zeron", "Please approve computer_click", native.clone()),
+            elicitation(
+                "zeron",
+                "Allow the zeron MCP server to run tool \"computer_click\" and \"x\"?",
+                native.clone(),
+            ),
+            elicitation(
+                "zeron",
+                &generated("computer_click"),
+                json!({ "codex_approval_kind": "mcp_tool_call", "tool_name": "list_threads" }),
+            ),
+        ] {
+            assert!(!is_zeron_computer_tool_approval(&params), "{params}");
+        }
     }
 
     #[test]

@@ -349,7 +349,12 @@ impl Inner {
     /// The thread-tools server for one chat's run: this binary as
     /// `zeron mcp --chat <id> --port <port>`. `None` until an IPC port is
     /// recorded, so a run never gets a server it cannot dial.
-    fn tool_server_for(&self, chat_id: &str, secret: &str) -> Option<zeron_harness::ToolServer> {
+    fn tool_server_for(
+        &self,
+        chat_id: &str,
+        secret: &str,
+        computer_control: bool,
+    ) -> Option<zeron_harness::ToolServer> {
         let port = (*lock(&self.tool_server_port))?;
         let command = std::env::current_exe().ok()?.to_string_lossy().into_owned();
         Some(zeron_harness::ToolServer {
@@ -362,6 +367,8 @@ impl Inner {
                 port.to_string(),
             ],
             env: vec![(zeron_rpc::COMPUTER_RUN_SECRET_ENV.into(), secret.into())],
+            guidance: computer_control
+                .then(crate::computer::tools::guidance::computer_tool_instructions),
         })
     }
 
@@ -779,7 +786,9 @@ impl SessionsEngine {
                 steerable: harness.supports_steering(),
             },
         );
-        controls.tool_server = self.inner.tool_server_for(chat_id, &run.computer.secret);
+        controls.tool_server =
+            self.inner
+                .tool_server_for(chat_id, &run.computer.secret, request.computer_control);
         let run_computer = run.computer.clone();
         let run_id = run.run_id.clone();
         lock(&self.inner.runs).insert(chat_id.to_string(), run);

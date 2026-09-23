@@ -2299,10 +2299,28 @@ fn prompt_turn(
     text: String,
     prompt_id: Option<String>,
 ) -> BoxFuture<'static, Result<Value, HarnessError>> {
+    prompt_turn_with_context(client, session_id, None, text, prompt_id)
+}
+
+fn prompt_turn_with_context(
+    client: RpcClient,
+    session_id: String,
+    host_context: Option<&str>,
+    text: String,
+    prompt_id: Option<String>,
+) -> BoxFuture<'static, Result<Value, HarnessError>> {
+    let mut prompt = Vec::new();
+    if let Some(context) = host_context {
+        prompt.push(json!({
+            "type": "text",
+            "text": format!("<zeron_host_context>\n{context}\n</zeron_host_context>"),
+        }));
+    }
+    prompt.push(json!({ "type": "text", "text": text }));
     Box::pin(async move {
         let mut params = json!({
             "sessionId": session_id,
-            "prompt": [{ "type": "text", "text": text }],
+            "prompt": prompt,
         });
         if let Some(id) = prompt_id {
             params["_meta"] = json!({ "promptId": id, "requestId": id });
@@ -2401,6 +2419,7 @@ fn handle_server_request_live(
     method: &str,
     params: &Value,
     permission_mode: zeron_proto::PermissionMode,
+    allow_computer_calls: bool,
     request_input: &std::sync::Arc<RequestInputFn>,
 ) -> Vec<AgentEvent> {
     if method != "session/request_permission" {
@@ -2412,6 +2431,21 @@ fn handle_server_request_live(
         .cloned()
         .unwrap_or_default();
     let tool_permission = !is_user_question(&options);
+    // The engine's consent card is the only prompt a Zeron computer call gets.
+    if tool_permission
+        && allow_computer_calls
+        && is_zeron_computer_permission(params)
+        && let Some(option_id) = options
+            .iter()
+            .find(|o| o.get("kind").and_then(Value::as_str) == Some("allow_once"))
+            .and_then(|o| o.get("optionId").and_then(Value::as_str))
+    {
+        client.respond(
+            &id,
+            json!({ "outcome": { "outcome": "selected", "optionId": option_id } }),
+        );
+        return Vec::new();
+    }
     if tool_permission && permission_mode == zeron_proto::PermissionMode::Full {
         return handle_server_request(client, id, method, params);
     }
@@ -2465,6 +2499,23 @@ fn handle_server_request_live(
         }
     });
     Vec::new()
+}
+
+// Shape from Synara's ACP fixtures (`kind: "other"`, `rawInput._toolName`); not yet observed live.
+fn records_computer_permission_shape(harness: HarnessId) -> bool {
+    matches!(harness, HarnessId::Grok | HarnessId::Devin)
+}
+
+fn is_zeron_computer_permission(params: &Value) -> bool {
+    let tool_call = &params["toolCall"];
+    if tool_call["kind"].as_str() != Some("other") {
+        return false;
+    }
+    ["_toolName", "toolName", "tool_name"]
+        .iter()
+        .find_map(|key| tool_call["rawInput"][*key].as_str())
+        .or_else(|| tool_call["title"].as_str())
+        .is_some_and(crate::is_zeron_computer_tool)
 }
 
 /// `session/new`. Agents that sign in from Settings never start a browser
@@ -3086,9 +3137,12 @@ async fn run_session(session: Session) {
     let mut turn: Option<BoxFuture<'static, Result<Value, HarnessError>>> = Some({
         prompt_seq += 1;
         current_prompt_id = prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
-        prompt_turn(
+        prompt_turn_with_context(
             client.clone(),
             session_id.clone(),
+            tool_server
+                .as_ref()
+                .and_then(|server| server.guidance.as_deref()),
             prompt_transform(
                 request.reasoning,
                 &crate::skill_mentions_as_slash(&request.prompt, &skills),
@@ -3096,6 +3150,8 @@ async fn run_session(session: Session) {
             current_prompt_id.clone(),
         )
     });
+    let allow_computer_calls =
+        request.computer_control && records_computer_permission_shape(harness);
     // Steers waiting for the turn boundary (agents without the extension, or
     // extension steers that lost the turn-end race).
     let mut queued_steers: VecDeque<String> = VecDeque::new();
@@ -3231,6 +3287,7 @@ async fn run_session(session: Session) {
                                 &method,
                                 &params,
                                 request.permission_mode,
+                                allow_computer_calls,
                                 &request_input,
                             ) {
                                 if !send(&event_tx, ev).await {
@@ -3404,6 +3461,7 @@ async fn run_session(session: Session) {
                         &method,
                         &params,
                         request.permission_mode,
+                        allow_computer_calls,
                         &request_input,
                     ) {
                         if !send(&event_tx, ev).await {
@@ -3514,6 +3572,7 @@ async fn run_session(session: Session) {
                                         &method,
                                         &params,
                                         request.permission_mode,
+                                        allow_computer_calls,
                                         &request_input,
                                     ) {
                                         if !send(&event_tx, ev).await {
@@ -3925,6 +3984,38 @@ async fn run_session(session: Session) {
 mod tests {
     use super::*;
     use zeron_proto::PermissionMode;
+
+    #[test]
+    fn computer_permissions_match_only_the_recorded_shape() {
+        let permission = |tool_call: Value| json!({ "sessionId": "s", "toolCall": tool_call });
+        for tool_call in [
+            json!({ "kind": "other", "title": "Tool", "rawInput": { "_toolName": "mcp__zeron__computer_click" } }),
+            json!({ "kind": "other", "rawInput": { "toolName": "zeron_computer_get_state" } }),
+            json!({ "kind": "other", "title": "mcp__zeron__computer_browser_navigate" }),
+        ] {
+            assert!(
+                is_zeron_computer_permission(&permission(tool_call.clone())),
+                "{tool_call}"
+            );
+        }
+        for tool_call in [
+            json!({ "kind": "execute", "title": "mcp__zeron__computer_click" }),
+            json!({ "title": "mcp__zeron__computer_click" }),
+            json!({ "kind": "other", "rawInput": { "_toolName": "mcp__zeron__list_threads" } }),
+            json!({ "kind": "other", "rawInput": { "_toolName": "mcp__other__computer_click" }, "title": "mcp__zeron__computer_click" }),
+            json!({ "kind": "other", "title": "Please approve mcp__zeron__computer_click" }),
+        ] {
+            assert!(
+                !is_zeron_computer_permission(&permission(tool_call.clone())),
+                "{tool_call}"
+            );
+        }
+        assert!(records_computer_permission_shape(HarnessId::Grok));
+        assert!(records_computer_permission_shape(HarnessId::Devin));
+        for harness in [HarnessId::Hermes, HarnessId::Pi, HarnessId::Antigravity] {
+            assert!(!records_computer_permission_shape(harness), "{harness:?}");
+        }
+    }
 
     fn all_antigravity_auth_methods() -> Value {
         json!({

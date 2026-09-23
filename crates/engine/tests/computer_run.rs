@@ -32,6 +32,7 @@ struct Seen {
     computer: bool,
     resumed: bool,
     secret: Option<String>,
+    guidance: Option<String>,
     steer: bool,
 }
 
@@ -97,11 +98,16 @@ impl Harness for ComputerHarness {
                 .map(|(_, value)| value.clone())
         });
         let computer = request.computer_control;
+        let guidance = controls
+            .tool_server
+            .as_ref()
+            .and_then(|server| server.guidance.clone());
         self.0.seen.lock().unwrap().push(Seen {
             prompt: request.prompt.clone(),
             computer,
             resumed: request.resume.is_some(),
             secret,
+            guidance,
             steer: false,
         });
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -144,6 +150,7 @@ impl Harness for ComputerHarness {
                             computer,
                             resumed: false,
                             secret: None,
+                            guidance: None,
                             steer: true,
                         });
                         if probe.swallow_steers.load(std::sync::atomic::Ordering::SeqCst) {
@@ -397,7 +404,7 @@ async fn settings_off_activates_only_the_user_authored_slash_turn_and_restarts_w
     let rig = rig();
     rig.run("c1", "plain", PermissionMode::Full, None);
     let first = rig.saw(1).await;
-    assert!(!first.computer);
+    assert!(!first.computer && first.guidance.is_none());
     rig.finish_turn().await;
 
     rig.run(
@@ -409,6 +416,12 @@ async fn settings_off_activates_only_the_user_authored_slash_turn_and_restarts_w
     let second = rig.saw(2).await;
     assert_eq!(second.prompt, "open Calculator");
     assert!(second.computer && second.resumed && !second.steer);
+    assert!(
+        second
+            .guidance
+            .as_deref()
+            .is_some_and(|text| text.starts_with("## Zeron computer use\n"))
+    );
     let (old, new) = (first.secret.unwrap(), second.secret.unwrap());
     assert_ne!(old, new);
     assert_eq!(rig.core.sessions.computer_run(CHAT, &old), None);
@@ -418,7 +431,7 @@ async fn settings_off_activates_only_the_user_authored_slash_turn_and_restarts_w
 
     rig.run("c3", "plain again", PermissionMode::Full, None);
     let third = rig.saw(3).await;
-    assert!(!third.computer && third.resumed && !third.steer);
+    assert!(!third.computer && third.resumed && !third.steer && third.guidance.is_none());
     rig.finish_turn().await;
     assert_eq!(
         rig.user_texts(),

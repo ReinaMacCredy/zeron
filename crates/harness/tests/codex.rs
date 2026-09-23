@@ -395,6 +395,33 @@ async fn rejected_steer_falls_back_to_a_follow_up_turn() {
 }
 
 #[tokio::test]
+async fn codex_tool_approvals_accept_only_zeron_computer_tools_on_a_computer_run() {
+    let outcome = |computer_control: bool| async move {
+        let (controls, _steer, _token) = controls("No");
+        let mut req = request("scenario:elicit");
+        req.permission_mode = zeron_proto::PermissionMode::Ask;
+        req.auto_approve = false;
+        req.computer_control = computer_control;
+        let events = run_to_end(&harness(), req, controls).await;
+        events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::TextDelta { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<String>()
+    };
+    assert_eq!(
+        outcome(true).await.trim(),
+        "301:accept 302:unsupported 303:unsupported"
+    );
+    assert_eq!(
+        outcome(false).await.trim(),
+        "301:unsupported 302:unsupported 303:unsupported"
+    );
+}
+
+#[tokio::test]
 async fn approvals_round_trip_as_input_requests() {
     // Approvals must reach the ENGINE's input bridge (`request_input`) — and
     // the harness must NOT emit its own `InputRequested`/`InputResolved`
@@ -1341,6 +1368,7 @@ async fn thread_tools_ride_codex_config_overrides_on_a_normal_run() {
             "27654".into(),
         ],
         env: vec![("ZERON_RUN_SECRET".into(), "s3cret".into())],
+        guidance: None,
     });
     // The fixture fails the turn unless thread/start carries the zeron
     // server overrides and leaves the user's own server enabled.
