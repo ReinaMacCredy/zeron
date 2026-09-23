@@ -6,15 +6,15 @@ use zeron_proto::computer::{
 };
 
 use super::args::{
-    read_action_name, read_click_gesture, read_clipboard_text, read_delta,
-    read_drag_duration_ms, read_key_or_chord, read_menu_path_arg, read_menu_target_arg,
-    read_modifiers, read_nested_screenshot_target, read_required_text, read_screenshot_target,
+    read_action_name, read_click_gesture, read_clipboard_text, read_delta, read_drag_duration_ms,
+    read_key_or_chord, read_menu_path_arg, read_menu_target_arg, read_modifiers,
+    read_nested_screenshot_target, read_required_text, read_screenshot_target,
     read_select_text_range, read_select_text_target, read_set_value_value, read_wait_duration_ms,
     read_window_id_arg,
 };
 use super::desktop::{
-    Handled, json_of, limited_scroll, noted_json, pause, read_pid, readiness_json,
-    semantic_lookup, to_map, with_launch_guidance,
+    Handled, json_of, limited_scroll, noted_json, pause, read_pid, readiness_json, semantic_lookup,
+    to_map, with_launch_guidance,
 };
 use super::elements::{digest_scope_key, element_change_fields, listing_fields};
 use super::results::{ToolFailure, run_step_error};
@@ -78,7 +78,10 @@ impl ComputerTools {
         Ok(Some(target))
     }
 
-    async fn element_condition_present(&self, target: &ComputerTarget) -> Result<bool, ToolFailure> {
+    async fn element_condition_present(
+        &self,
+        target: &ComputerTarget,
+    ) -> Result<bool, ToolFailure> {
         let state = self
             .manager
             .get_state(ComputerStateRequest {
@@ -97,10 +100,12 @@ impl ComputerTools {
         let Some(root) = state.root.as_ref().filter(|_| !unavailable) else {
             return Ok(false);
         };
-        Ok(match resolve_computer_semantic_target(root, target, false) {
-            Ok(_) => true,
-            Err(error) => error.code == ComputerTargetErrorCode::Ambiguous,
-        })
+        Ok(
+            match resolve_computer_semantic_target(root, target, false) {
+                Ok(_) => true,
+                Err(error) => error.code == ComputerTargetErrorCode::Ambiguous,
+            },
+        )
     }
 
     fn prepare_run_step<'a>(
@@ -112,21 +117,27 @@ impl ComputerTools {
         let thread = context.chat_id.as_str();
         let who = Some(thread);
         let manager = &self.manager;
-        let action = |value: zeron_proto::computer::ComputerActionResult| Value::Object(to_map(&value));
+        let action =
+            |value: zeron_proto::computer::ComputerActionResult| Value::Object(to_map(&value));
         Ok(match step_type {
             "click" => {
                 let target = self.read_target(step, context)?;
                 let modifiers = read_modifiers(step)?;
                 let gesture = read_click_gesture(step)?;
-                async move { Ok(action(manager.click(who, target, &modifiers, gesture).await?)) }
-                    .boxed()
+                async move {
+                    Ok(action(
+                        manager.click(who, target, &modifiers, gesture).await?,
+                    ))
+                }
+                .boxed()
             }
             "move_cursor" => {
                 let target = self.read_target(step, context)?;
                 async move { Ok(action(manager.move_cursor(who, target).await?)) }.boxed()
             }
             "drag" => {
-                let from = self.resolve_target(read_nested_screenshot_target(step, "from")?, thread)?;
+                let from =
+                    self.resolve_target(read_nested_screenshot_target(step, "from")?, thread)?;
                 let to = self.resolve_target(read_nested_screenshot_target(step, "to")?, thread)?;
                 let duration = read_drag_duration_ms(step)?;
                 async move { Ok(action(manager.drag(who, from, to, Some(duration)).await?)) }
@@ -178,8 +189,16 @@ impl ComputerTools {
                     let exact = (target.target.label.is_some() || target.target.role.is_some())
                         .then_some(target);
                     Ok(action(match key.chord {
-                        None => manager.press_key(who, &key.key, window.as_deref(), exact).await?,
-                        Some(chord) => manager.hotkey(who, &chord, window.as_deref(), exact).await?,
+                        None => {
+                            manager
+                                .press_key(who, &key.key, window.as_deref(), exact)
+                                .await?
+                        }
+                        Some(chord) => {
+                            manager
+                                .hotkey(who, &chord, window.as_deref(), exact)
+                                .await?
+                        }
                     }))
                 }
                 .boxed()
@@ -192,8 +211,7 @@ impl ComputerTools {
             "perform_action" => {
                 let target = self.read_target(step, context)?;
                 let name = read_action_name(step)?;
-                async move { Ok(action(manager.perform_action(who, target, &name).await?)) }
-                    .boxed()
+                async move { Ok(action(manager.perform_action(who, target, &name).await?)) }.boxed()
             }
             "select_text" => {
                 let target = self.resolve_target(read_select_text_target(step)?, thread)?;
@@ -210,7 +228,11 @@ impl ComputerTools {
                     || raw.target.ref_ordinal.is_some();
                 if semantic {
                     let target = self.resolve_target(raw, thread)?.target;
-                    if target.label.as_deref().is_none_or(|label| label.trim().is_empty()) {
+                    if target
+                        .label
+                        .as_deref()
+                        .is_none_or(|label| label.trim().is_empty())
+                    {
                         return Err(ToolInputError::new(
                             "A \"wait\" step with an element target requires a nonempty label or a ref.",
                         )
@@ -279,7 +301,13 @@ impl ComputerTools {
                 async move {
                     self.refuse_visible_launch(context, hidden).await?;
                     let result = manager
-                        .launch_app(who, &app, &app_args, wait_ms, ComputerLaunchOptions { hidden })
+                        .launch_app(
+                            who,
+                            &app,
+                            &app_args,
+                            wait_ms,
+                            ComputerLaunchOptions { hidden },
+                        )
                         .await?;
                     Ok(with_launch_guidance(&result))
                 }
@@ -316,8 +344,12 @@ impl ComputerTools {
                     )
                     .into());
                 }
-                async move { Ok(action(manager.set_window_frame(who, &window_id, frame).await?)) }
-                    .boxed()
+                async move {
+                    Ok(action(
+                        manager.set_window_frame(who, &window_id, frame).await?,
+                    ))
+                }
+                .boxed()
             }
             "invoke_menu" => {
                 let target = read_menu_target_arg(step)?;
@@ -333,8 +365,9 @@ impl ComputerTools {
                 .boxed()
             }
             "kill_app" => {
-                let window_id = read_window_id_arg(step)?
-                    .ok_or_else(|| ToolInputError::new("Step \"kill_app\" requires \"window_id\"."))?;
+                let window_id = read_window_id_arg(step)?.ok_or_else(|| {
+                    ToolInputError::new("Step \"kill_app\" requires \"window_id\".")
+                })?;
                 async move { Ok(action(manager.kill_app(who, &window_id).await?)) }.boxed()
             }
             "set_window_minimized" => {
@@ -361,7 +394,9 @@ impl ComputerTools {
                     "Step \"set_app_visibility\" requires a positive integer \"pid\".",
                 )?;
                 let hidden = read_boolean_arg(step, "hidden")?.ok_or_else(|| {
-                    ToolInputError::new("Step \"set_app_visibility\" requires a boolean \"hidden\".")
+                    ToolInputError::new(
+                        "Step \"set_app_visibility\" requires a boolean \"hidden\".",
+                    )
                 })?;
                 async move {
                     let noted = manager.set_app_visibility(who, pid, hidden).await?;
@@ -427,7 +462,9 @@ impl ComputerTools {
                 })?;
                 let expect = match step.get("expect") {
                     Some(Value::Array(items))
-                        if !items.is_empty() && items.len() <= 8 && items.iter().all(Value::is_object) =>
+                        if !items.is_empty()
+                            && items.len() <= 8
+                            && items.iter().all(Value::is_object) =>
                     {
                         items.clone()
                     }
@@ -506,7 +543,11 @@ impl ComputerTools {
             .collect()
     }
 
-    pub(super) async fn run_batch(&self, args: &ToolArgs, context: &ComputerToolContext) -> Handled {
+    pub(super) async fn run_batch(
+        &self,
+        args: &ToolArgs,
+        context: &ComputerToolContext,
+    ) -> Handled {
         let thread = context.chat_id.as_str();
         let raw_steps = match args.get("steps") {
             Some(Value::Array(steps)) if !steps.is_empty() => steps,
@@ -587,20 +628,28 @@ impl ComputerTools {
                         return Err(DesktopOperationError::Aborted.into());
                     }
                     self.assert_turn_active(context)?;
+                    let entry = run_step_error(&error);
+                    let uncertain =
+                        entry.get("effect").and_then(Value::as_str) == Some("dispatched-unknown");
                     steps.push(json!({
                         "step": index,
                         "type": prepared_step.step_type,
                         "ok": false,
-                        "error": run_step_error(&error),
+                        "error": entry,
                     }));
-                    if !prepared_step.continue_on_error {
+                    if !prepared_step.continue_on_error || uncertain {
                         stopped = true;
+                        if prepared_step.continue_on_error {
+                            stopped_reason = Some("uncertain_effect");
+                        }
                         break;
                     }
                 }
             }
         }
-        let state_fields = self.closing_state(thread, last_window_id.as_deref()).await?;
+        let state_fields = self
+            .closing_state(thread, last_window_id.as_deref())
+            .await?;
         let skipped_count = steps
             .iter()
             .filter(|entry| entry.get("skipped") == Some(&json!(true)))
@@ -695,8 +744,9 @@ impl ComputerTools {
                 let (before, stable) = {
                     let mut tool_state = self.state();
                     let before = tool_state.elements.digest(&key);
-                    let stable = elements
-                        .map(|elements| tool_state.elements.remember_digest(thread, &key, elements));
+                    let stable = elements.map(|elements| {
+                        tool_state.elements.remember_digest(thread, &key, elements)
+                    });
                     (before, stable)
                 };
                 let mut fields = Map::new();

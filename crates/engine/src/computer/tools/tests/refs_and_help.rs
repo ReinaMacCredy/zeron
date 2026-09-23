@@ -581,6 +581,39 @@ async fn continues_past_a_failed_step_with_continue_on_error() {
 }
 
 #[tokio::test]
+async fn continue_on_error_never_continues_past_a_step_whose_effect_is_unknown() {
+    let h = harness();
+    h.call("computer_get_state", json!({})).await;
+    h.backend.fake.fail_next_with(
+        "click",
+        crate::computer::backend::CuaActionError::new(
+            "timed out after dispatch",
+            zeron_proto::computer::CuaEffect::DispatchedUnknown,
+        ),
+    );
+    let run = result_json(
+        &h.call(
+            "computer_run",
+            json!({ "steps": [
+                {
+                    "type": "click",
+                    "label": "Calculate",
+                    "window_id": "fake-calculator",
+                    "continue_on_error": true,
+                },
+                { "type": "click", "label": "Calculate", "window_id": "fake-calculator" },
+            ] }),
+        )
+        .await,
+    );
+    assert_eq!(run["steps"].as_array().map(Vec::len), Some(1), "{run}");
+    assert_eq!(run["stopped"], json!(true));
+    assert_eq!(run["stoppedReason"], json!("uncertain_effect"));
+    assert_eq!(h.backend.calls_for("click").len(), 1);
+    h.dispose().await;
+}
+
+#[tokio::test]
 async fn still_stops_the_run_on_a_failure_without_continue_on_error() {
     let h = harness();
     h.call("computer_get_state", json!({})).await;
