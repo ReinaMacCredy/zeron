@@ -228,7 +228,7 @@ impl Tool for HotkeyTool {
 
         // Use the last non-modifier key; if there are multiple, treat earlier ones as extra keys.
         let key = non_modifiers.last().unwrap().clone();
-        if let Some(refusal) = super::keyboard_layout_refusal(&key) {
+        if let Some(refusal) = super::keyboard_layout_refusal(&key, &raw_keys) {
             return refusal;
         }
         let key_display = raw_keys.join("+");

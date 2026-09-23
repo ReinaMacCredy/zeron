@@ -209,9 +209,25 @@ impl DeliveryMode {
     }
 }
 
-pub(crate) fn keyboard_layout_refusal(key: &str) -> Option<cua_driver_core::protocol::ToolResult> {
-    let error = crate::input::keyboard::key_code(key).err()?;
-    let unmapped = error.downcast_ref::<crate::input::keyboard::KeyboardLayoutUnmapped>()?;
+pub(crate) fn keyboard_layout_refusal<S: AsRef<str>>(
+    key: &str,
+    modifiers: &[S],
+) -> Option<cua_driver_core::protocol::ToolResult> {
+    let shortcut = modifiers.iter().any(|modifier| {
+        matches!(
+            modifier.as_ref().to_ascii_lowercase().as_str(),
+            "cmd" | "command" | "ctrl" | "control" | "option" | "alt"
+        )
+    });
+    let unmapped = match crate::input::keyboard::key_code(key) {
+        Err(error) => error
+            .downcast_ref::<crate::input::keyboard::KeyboardLayoutUnmapped>()?
+            .to_string(),
+        Ok(_) if !shortcut && crate::input::keyboard::digit_needs_shift_on_layout(key) => {
+            format!("the current keyboard layout types {key:?} only with Shift; use type_text for digits")
+        }
+        Ok(_) => return None,
+    };
     Some(
         cua_driver_core::protocol::ToolResult::error(format!(
             "Key {key:?} refused before dispatch: {unmapped}."
@@ -1440,11 +1456,12 @@ mod recording_start_guard_tests {
 mod keyboard_layout_refusal_tests {
     #[test]
     fn a_key_no_layout_position_types_is_refused_before_dispatch() {
-        let refusal = super::keyboard_layout_refusal("\u{e000}").expect("unmapped key must refuse");
+        let refusal = super::keyboard_layout_refusal::<&str>("\u{e000}", &[])
+            .expect("unmapped key must refuse");
         let structured = refusal.structured_content.expect("structured refusal");
         assert_eq!(structured["code"], "keyboard_layout_unmapped");
         assert_eq!(structured["effect"], "refused");
-        assert!(super::keyboard_layout_refusal("return").is_none());
-        assert!(super::keyboard_layout_refusal("not-a-key").is_none());
+        assert!(super::keyboard_layout_refusal::<&str>("return", &[]).is_none());
+        assert!(super::keyboard_layout_refusal::<&str>("not-a-key", &[]).is_none());
     }
 }

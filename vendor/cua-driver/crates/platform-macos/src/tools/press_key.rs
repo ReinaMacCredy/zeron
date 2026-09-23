@@ -321,7 +321,7 @@ impl Tool for PressKeyTool {
         } else {
             key_raw.clone()
         };
-        if let Some(refusal) = super::keyboard_layout_refusal(&key) {
+        if let Some(refusal) = super::keyboard_layout_refusal(&key, &modifiers) {
             return refusal;
         }
         let display_key = key_raw.clone();
