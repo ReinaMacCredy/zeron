@@ -22,6 +22,15 @@ impl ComputerControlState {
             .unwrap_or(0)
     }
 
+    pub fn seed(&self, chat_id: &str, generation: u64) {
+        let mut generations = self
+            .generations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let current = generations.entry(chat_id.to_owned()).or_insert(0);
+        *current = (*current).max(generation);
+    }
+
     pub fn allows(&self, chat_id: &str, generation: u64) -> bool {
         self.generation(chat_id) == generation
     }

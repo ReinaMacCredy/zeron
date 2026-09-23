@@ -51,6 +51,7 @@ fn request(prompt: &str) -> RunRequest {
         branch: None,
         resume: None,
         forked_at: None,
+        computer_control: false,
     }
 }
 
@@ -1339,6 +1340,7 @@ async fn thread_tools_ride_codex_config_overrides_on_a_normal_run() {
             "--port".into(),
             "27654".into(),
         ],
+        env: vec![("ZERON_RUN_SECRET".into(), "s3cret".into())],
     });
     // The fixture fails the turn unless thread/start carries the zeron
     // server overrides and leaves the user's own server enabled.

@@ -1129,6 +1129,33 @@ pub enum ComputerFrameDecodeErrorReason {
     InvalidComputerId,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ComputerRestoreStatus {
+    Restored,
+    RestoreMissed,
+    AlreadyFrontmost,
+    FrontmostUnobservable,
+}
+
+impl ComputerRestoreStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Restored => "restored",
+            Self::RestoreMissed => "restore-missed",
+            Self::AlreadyFrontmost => "already-frontmost",
+            Self::FrontmostUnobservable => "frontmost-unobservable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ComputerConsentScope {
+    Task,
+    Call,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all_fields = "camelCase")]
 pub enum ComputerEvent {
@@ -1164,6 +1191,16 @@ pub enum ComputerEvent {
             deserialize_with = "opt_thread_id"
         )]
         thread_id: Option<String>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "opt_window_id"
+        )]
+        restored_window_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        restore_status: Option<ComputerRestoreStatus>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        masked: bool,
     },
     #[serde(rename = "computer.frame")]
     Frame { header: ComputerFrameHeader },
@@ -1561,6 +1598,16 @@ mod tests {
             "action": "click",
             "ok": true,
             "delivery": { "path": "ax", "verified": "confirmed" },
+        }));
+        round_trips::<ComputerEvent>(&json!({
+            "type": "computer.action",
+            "windowId": "cua:1:2",
+            "action": "computer_activate_window",
+            "ok": true,
+            "threadId": "t1",
+            "restoredWindowId": "cua:1:3",
+            "restoreStatus": "restore-missed",
+            "masked": true,
         }));
         round_trips::<ComputerEvent>(&json!({
             "type": "computer.frame",

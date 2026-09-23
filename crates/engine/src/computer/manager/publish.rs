@@ -533,6 +533,9 @@ impl ComputerManager {
             ok: true,
             message: None,
             thread_id: attributed.map(str::to_owned),
+            masked: false,
+            restore_status: None,
+            restored_window_id: None,
         });
     }
 }

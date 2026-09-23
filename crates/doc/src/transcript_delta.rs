@@ -362,6 +362,8 @@ mod tests {
             status: None,
             continuation_of: None,
             from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
         }
     }
 
@@ -546,6 +548,8 @@ mod context_update_tests {
             status: Some(crate::MessageStatus::Streaming),
             continuation_of: None,
             from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
         };
         let baseline = TranscriptBaseline::capture(&[entry.clone()]);
         assert!(baseline.covers(&entry));

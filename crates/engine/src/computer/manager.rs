@@ -115,11 +115,7 @@ impl ComputerManagerEnv {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ComputerConsentScope {
-    Task,
-    Call,
-}
+pub use zeron_proto::computer::ComputerConsentScope;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComputerConsentCard {
@@ -235,24 +231,7 @@ impl ComputerManagerOptions {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ForegroundRestoreStatus {
-    Restored,
-    RestoreMissed,
-    AlreadyFrontmost,
-    FrontmostUnobservable,
-}
-
-impl ForegroundRestoreStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Restored => "restored",
-            Self::RestoreMissed => "restore-missed",
-            Self::AlreadyFrontmost => "already-frontmost",
-            Self::FrontmostUnobservable => "frontmost-unobservable",
-        }
-    }
-}
+pub use zeron_proto::computer::ComputerRestoreStatus as ForegroundRestoreStatus;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForegroundRestoreInfo {
@@ -260,22 +239,7 @@ pub struct ForegroundRestoreInfo {
     pub restore_status: ForegroundRestoreStatus,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct ComputerManagerEvent {
-    pub event: ComputerEvent,
-    pub restore: Option<ForegroundRestoreInfo>,
-    pub masked: bool,
-}
-
-impl From<ComputerEvent> for ComputerManagerEvent {
-    fn from(event: ComputerEvent) -> Self {
-        Self {
-            event,
-            restore: None,
-            masked: false,
-        }
-    }
-}
+pub type ComputerManagerEvent = ComputerEvent;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ComputerClickButton {
@@ -805,8 +769,7 @@ impl ComputerManager {
         }
     }
 
-    fn emit(&self, event: impl Into<ComputerManagerEvent>) {
-        let event = event.into();
+    fn emit(&self, event: ComputerEvent) {
         let listeners: Vec<ComputerManagerListener> = lock(&self.listeners)
             .iter()
             .map(|(_, listener)| listener.clone())

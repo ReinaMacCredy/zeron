@@ -58,6 +58,8 @@ async fn seed_local(data_dir: &std::path::Path) -> (String, String, String) {
         status: None,
         continuation_of: None,
         from_chat_id: None,
+        fork_import: false,
+        answers_request_id: None,
     })
     .expect("push message");
     let bytes = doc.export_snapshot().expect("snapshot");

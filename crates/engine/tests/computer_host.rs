@@ -313,6 +313,7 @@ async fn relay_clients_are_refused_the_host_and_computer_writes() {
                 "requestId": 1,
             }),
         ),
+        (methods::COMPUTER_EMERGENCY_STOP, json!({})),
     ];
     for (method, params) in refused {
         let error = relay
@@ -358,4 +359,80 @@ async fn relay_clients_are_refused_the_host_and_computer_writes() {
     assert_eq!(frame, json!({ "frame": null }));
     core_a.shutdown().await;
     core_b.shutdown().await;
+}
+
+async fn stop_until_the_event_arrives(
+    client: &RpcClient,
+    events: &mut mpsc::Receiver<serde_json::Value>,
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no input-stopped event"
+        );
+        let stopped = client
+            .call(methods::COMPUTER_EMERGENCY_STOP, json!({}))
+            .await
+            .expect("emergency stop");
+        assert_eq!(stopped, json!({ "stoppedChatIds": [] }));
+        while let Ok(Some(value)) =
+            tokio::time::timeout(Duration::from_millis(200), events.recv()).await
+        {
+            if value == json!({ "type": "computer.input-stopped", "stopped": true }) {
+                return;
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn computer_events_keep_flowing_across_a_host_rebuild() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let core = assemble(dir.path(), "device-mac");
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while core.computer.service().is_none() {
+        assert!(tokio::time::Instant::now() < deadline, "no boot");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let mut events = client
+        .subscribe(methods::WATCH_COMPUTER_EVENTS, json!({}))
+        .await
+        .expect("event stream");
+    stop_until_the_event_arrives(&client, &mut events).await;
+
+    let mut host = watch_host(&client).await.expect("host registers");
+    let Some(ComputerHostStreamItem::Registered { host_token }) = next_item(&mut host).await else {
+        panic!("the first item carries the host token");
+    };
+    let answering = {
+        let client = zeron_rpc::memory_client(core.rpc_service());
+        tokio::spawn(async move {
+            while let Some(ComputerHostStreamItem::Request(request)) = next_item(&mut host).await {
+                let _ = client
+                    .call(
+                        methods::RESPOND_COMPUTER_HOST_REQUEST,
+                        json!({
+                            "hostToken": host_token,
+                            "correlationId": request.call.correlation_id,
+                            "result": { "ok": true },
+                        }),
+                    )
+                    .await;
+            }
+        })
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !core
+        .computer
+        .service()
+        .is_some_and(|service| service.supported)
+    {
+        assert!(tokio::time::Instant::now() < deadline, "no rebuild");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    stop_until_the_event_arrives(&client, &mut events).await;
+    core.shutdown().await;
+    answering.abort();
 }

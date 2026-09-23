@@ -258,6 +258,7 @@ async fn rows_dark_command_delivers_over_the_peer_relay_exactly_once() {
             branch: None,
             resume: None,
             forked_at: None,
+            computer_control: false,
         },
         message_id: "msg-relay-1".into(),
     })

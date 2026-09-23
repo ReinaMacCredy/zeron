@@ -6,31 +6,41 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use futures::StreamExt;
 use futures::stream::BoxStream;
-use tokio::sync::{oneshot, watch};
+use tokio::sync::{broadcast, oneshot, watch};
 use zeron_proto::computer::{
-    ComputerHostStreamItem, ComputerSettings, ComputerStillFrame, RespondComputerHostRequestParams,
+    ComputerEvent, ComputerHostStreamItem, ComputerSettings, ComputerStillFrame,
+    RespondComputerHostRequestParams,
 };
 use zeron_rpc::ComputerHost;
 
+use super::activation::{TurnDispatch, resolve_turn_mode};
 use super::approval_gate::ComputerApprovalGate;
 use super::control_state::ComputerControlState;
 use super::engine_seams::EngineComputerSeams;
 use super::host_wire::{HostRegistration, HostSlot};
-use super::manager::ComputerManagerSeams;
+use super::manager::{ComputerManagerSeams, ComputerManagerSubscription};
 use super::service::{ComputerService, ComputerServiceOptions};
+use crate::sessions::SessionsEngine;
 
 const SETTINGS_FILE: &str = "computer-settings.json";
 const STILL_FRAME_WAIT: Duration = Duration::from_secs(2);
+const EVENT_BUFFER: usize = 256;
+
+pub const COMPUTER_ESCAPE_STOP_NOTICE: &str = "Computer use stopped: Escape was pressed";
 
 pub struct ComputerRuntime {
     data_dir: PathBuf,
     control_state: Arc<ComputerControlState>,
     approval_gate: ComputerApprovalGate,
+    engine_seams: Arc<EngineComputerSeams>,
     seams: Arc<dyn ComputerManagerSeams>,
     hosts: Arc<HostSlot>,
     service: watch::Sender<Option<Arc<ComputerService>>>,
     rebuilds: tokio::sync::Mutex<bool>,
     settings: Mutex<ComputerSettings>,
+    events: broadcast::Sender<ComputerEvent>,
+    forwarding: Mutex<Option<ComputerManagerSubscription>>,
+    chat_watch: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl ComputerRuntime {
@@ -39,18 +49,152 @@ impl ComputerRuntime {
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
+        let approval_gate = ComputerApprovalGate::default();
+        let engine_seams = Arc::new(EngineComputerSeams::new(approval_gate.clone()));
         let runtime = Arc::new(Self {
             data_dir: data_dir.to_path_buf(),
             control_state: Arc::default(),
-            approval_gate: ComputerApprovalGate::default(),
-            seams: Arc::new(EngineComputerSeams),
+            approval_gate,
+            seams: engine_seams.clone(),
+            engine_seams,
             hosts: Arc::default(),
             service: watch::channel(None).0,
             rebuilds: tokio::sync::Mutex::new(false),
             settings: Mutex::new(settings),
+            events: broadcast::channel(EVENT_BUFFER).0,
+            forwarding: Mutex::new(None),
+            chat_watch: Mutex::new(None),
         });
         tokio::spawn(runtime.clone().rebuild(None));
         runtime
+    }
+
+    pub fn attach(self: &Arc<Self>, sessions: &SessionsEngine) {
+        self.engine_seams.attach(sessions.clone());
+        sessions.set_computer(self.clone());
+        let Some(workspace) = sessions.workspace() else {
+            return;
+        };
+        let mut chats = workspace.watch_chats();
+        let weak = Arc::downgrade(self);
+        let watcher = tokio::spawn(async move {
+            let mut known: std::collections::HashMap<String, (bool, Option<String>)> = chats
+                .borrow_and_update()
+                .iter()
+                .map(|chat| (chat.id.clone(), (chat.archived, chat.title.clone())))
+                .collect();
+            while chats.changed().await.is_ok() {
+                let current: std::collections::HashMap<String, (bool, Option<String>)> = chats
+                    .borrow_and_update()
+                    .iter()
+                    .map(|chat| (chat.id.clone(), (chat.archived, chat.title.clone())))
+                    .collect();
+                let Some(runtime) = weak.upgrade() else {
+                    return;
+                };
+                for change in chat_changes(&known, &current) {
+                    runtime.apply_chat_change(change).await;
+                }
+                known = current;
+            }
+        });
+        *self
+            .chat_watch
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(watcher);
+    }
+
+    async fn apply_chat_change(&self, change: ChatChange) {
+        let Some(service) = self.service() else {
+            return;
+        };
+        let manager = &service.manager;
+        match change {
+            ChatChange::Removed(chat_id) => manager.handle_thread_removed(&chat_id).await,
+            ChatChange::Restored(chat_id) => manager.handle_thread_restored(&chat_id).await,
+            ChatChange::Titled(chat_id, title) => {
+                manager.set_thread_label(&chat_id, title.as_deref())
+            }
+        }
+    }
+
+    pub fn subscribe_events(&self) -> broadcast::Receiver<ComputerEvent> {
+        self.events.subscribe()
+    }
+
+    pub fn set_chat_label(&self, chat_id: &str, title: Option<&str>) {
+        if let Some(service) = self.service() {
+            service.manager.set_thread_label(chat_id, title);
+        }
+    }
+
+    pub fn chat_generation(&self, chat_id: &str, doc_generation: u64) -> u64 {
+        self.control_state.seed(chat_id, doc_generation);
+        self.control_state.generation(chat_id)
+    }
+
+    pub fn resolve_computer_control(
+        &self,
+        chat_id: &str,
+        doc_generation: u64,
+        text: &str,
+        user_authored: bool,
+        stamped_generation: Option<u64>,
+    ) -> bool {
+        let current = self.chat_generation(chat_id, doc_generation);
+        resolve_turn_mode(
+            TurnDispatch {
+                settings_enabled: self.settings().computer_control_enabled,
+                user_authored,
+                text,
+                stamped_generation: stamped_generation.unwrap_or(0),
+            },
+            current,
+        )
+        .enabled()
+    }
+
+    pub async fn stop_chat(&self, chat_id: &str, doc_generation: u64) {
+        self.control_state.seed(chat_id, doc_generation);
+        match self.service() {
+            Some(service) => {
+                if let Err(error) = service.manager.stop_thread(chat_id).await {
+                    tracing::warn!(chat = %chat_id, %error, "computer stop failed");
+                }
+            }
+            None => {
+                let generation = self.control_state.bump(chat_id);
+                self.seams.generation_bumped(chat_id, generation);
+            }
+        }
+    }
+
+    pub async fn emergency_stop(&self) -> Vec<String> {
+        let Some(service) = self.service() else {
+            return Vec::new();
+        };
+        let (stopped, result) = service.manager.emergency_stop().await;
+        if let Err(error) = result {
+            tracing::warn!(%error, "computer emergency stop relay failed");
+        }
+        stopped
+    }
+
+    pub fn turn_ended(&self, chat_id: &str, turn_id: &str) {
+        self.approval_gate.cancel_thread(chat_id, Some(turn_id));
+        let Some(service) = self.service() else {
+            return;
+        };
+        let (chat_id, turn_id) = (chat_id.to_owned(), turn_id.to_owned());
+        tokio::spawn(async move {
+            if let Err(error) = service
+                .manager
+                .release_desktop_control(&chat_id, Some(&turn_id))
+                .await
+            {
+                tracing::warn!(chat = %chat_id, %error, "computer turn-end release failed");
+            }
+        });
     }
 
     pub fn approval_gate(&self) -> &ComputerApprovalGate {
@@ -154,12 +298,33 @@ impl ComputerRuntime {
             ..ComputerServiceOptions::default()
         })
         .await;
+        let events = self.events.clone();
+        let forwarding = service.manager.on_event(Arc::new(move |event| {
+            let _ = events.send(event.clone());
+        }));
+        *self
+            .forwarding
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(forwarding);
         self.service.send_replace(Some(Arc::new(service)));
     }
 
     pub async fn shutdown(&self) {
         let mut shut_down = self.rebuilds.lock().await;
         *shut_down = true;
+        if let Some(watcher) = self
+            .chat_watch
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            watcher.abort();
+        }
+        self.engine_seams.detach();
+        self.forwarding
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
         if let Some(service) = self.service.send_replace(None) {
             service.dispose().await;
         }
@@ -193,6 +358,35 @@ impl ComputerRuntime {
             data: BASE64.encode(&frame.data),
         })
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ChatChange {
+    Removed(String),
+    Restored(String),
+    Titled(String, Option<String>),
+}
+
+fn chat_changes(
+    known: &std::collections::HashMap<String, (bool, Option<String>)>,
+    current: &std::collections::HashMap<String, (bool, Option<String>)>,
+) -> Vec<ChatChange> {
+    let mut changes = Vec::new();
+    for (chat_id, (archived, _)) in known {
+        if !*archived && current.get(chat_id).is_none_or(|(now, _)| *now) {
+            changes.push(ChatChange::Removed(chat_id.clone()));
+        }
+    }
+    for (chat_id, (archived, title)) in current {
+        match known.get(chat_id) {
+            Some((true, _)) if !*archived => changes.push(ChatChange::Restored(chat_id.clone())),
+            Some((_, before)) if before != title => {
+                changes.push(ChatChange::Titled(chat_id.clone(), title.clone()))
+            }
+            _ => {}
+        }
+    }
+    changes
 }
 
 #[cfg(test)]
@@ -341,5 +535,42 @@ mod tests {
         let reopened = ComputerRuntime::start(dir.path());
         assert_eq!(reopened.settings(), on);
         reopened.shutdown().await;
+    }
+
+    #[test]
+    fn chat_changes_report_removal_restore_and_retitle_only() {
+        let rows = |rows: &[(&str, bool, Option<&str>)]| {
+            rows.iter()
+                .map(|(id, archived, title)| {
+                    (id.to_string(), (*archived, title.map(str::to_owned)))
+                })
+                .collect::<std::collections::HashMap<_, _>>()
+        };
+        let known = rows(&[
+            ("archived-now", false, None),
+            ("deleted", false, None),
+            ("restored", true, None),
+            ("retitled", false, Some("old")),
+            ("gone-while-archived", true, None),
+            ("unchanged", false, Some("same")),
+        ]);
+        let current = rows(&[
+            ("archived-now", true, None),
+            ("restored", false, None),
+            ("retitled", false, Some("new")),
+            ("unchanged", false, Some("same")),
+            ("created", false, Some("fresh")),
+        ]);
+        let mut changes = chat_changes(&known, &current);
+        changes.sort_by_key(|change| format!("{change:?}"));
+        assert_eq!(
+            changes,
+            vec![
+                ChatChange::Removed("archived-now".into()),
+                ChatChange::Removed("deleted".into()),
+                ChatChange::Restored("restored".into()),
+                ChatChange::Titled("retitled".into(), Some("new".into())),
+            ]
+        );
     }
 }

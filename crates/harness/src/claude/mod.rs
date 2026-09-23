@@ -1185,6 +1185,7 @@ fn permission_question(tool_name: &str, input: &Value) -> UserInputQuestion {
         question: format!("Claude wants to use {tool_name}: {detail}"),
         options: vec!["Allow".into(), "Deny".into()],
         multi_select: false,
+        kind: None,
     }
 }
 
@@ -1223,6 +1224,7 @@ fn parse_questions(input: &Value) -> Vec<UserInputQuestion> {
                             .into(),
                     })
                     .collect(),
+                kind: None,
             }
         })
         .collect()
@@ -1387,6 +1389,7 @@ mod tests {
                 worktree: None,
                 branch: None,
                 forked_at: None,
+                computer_control: false,
             };
             if let Some(choice) = choice {
                 request
@@ -1438,6 +1441,7 @@ mod tests {
                 worktree: None,
                 branch: None,
                 forked_at: None,
+                computer_control: false,
             };
             harness
                 .build_command(&exe, &request)
@@ -1502,6 +1506,7 @@ mod tests {
                 drop: Some("uuid-prompt-2".into()),
             }),
             forked_at: None,
+            computer_control: false,
         };
         let args = |cmd: &Command| -> Vec<String> {
             cmd.as_std()
@@ -1582,6 +1587,7 @@ mod tests {
                 drop: None,
             }),
             forked_at: Some(at.into()),
+            computer_control: false,
         };
         let run = |request: &RunRequest| {
             let cmd = harness.build_command(&exe, request);

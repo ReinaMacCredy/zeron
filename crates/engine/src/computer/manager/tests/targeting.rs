@@ -751,7 +751,7 @@ async fn attributes_every_action_event_to_the_thread_that_drove_it() {
     let actions: Vec<(String, Option<String>)> = events
         .actions()
         .into_iter()
-        .map(|event| match event.event {
+        .map(|event| match event {
             ComputerEvent::Action {
                 action, thread_id, ..
             } => (action, thread_id),
@@ -1306,7 +1306,7 @@ async fn leaves_pane_input_unattributed_instead_of_borrowing_a_thread() {
 
     let actions = events.actions();
     assert!(actions.iter().all(|event| matches!(
-        &event.event,
+        event,
         ComputerEvent::Action {
             thread_id: None,
             ..

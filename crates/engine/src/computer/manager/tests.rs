@@ -803,7 +803,7 @@ impl Events {
     pub fn states(&self) -> Vec<ThreadComputerState> {
         self.all()
             .into_iter()
-            .filter_map(|event| match event.event {
+            .filter_map(|event| match event {
                 ComputerEvent::ThreadState { state } => Some(*state),
                 _ => None,
             })
@@ -820,14 +820,14 @@ impl Events {
     pub fn actions(&self) -> Vec<ComputerManagerEvent> {
         self.all()
             .into_iter()
-            .filter(|event| matches!(event.event, ComputerEvent::Action { .. }))
+            .filter(|event| matches!(event, ComputerEvent::Action { .. }))
             .collect()
     }
 
     pub fn open_pane_requests(&self) -> Vec<String> {
         self.all()
             .into_iter()
-            .filter_map(|event| match event.event {
+            .filter_map(|event| match event {
                 ComputerEvent::OpenPaneRequested { thread_id } => Some(thread_id),
                 _ => None,
             })
@@ -837,7 +837,7 @@ impl Events {
     pub fn types(&self) -> Vec<&'static str> {
         self.all()
             .iter()
-            .map(|event| match &event.event {
+            .map(|event| match event {
                 ComputerEvent::ThreadState { .. } => "computer.thread-state",
                 ComputerEvent::WindowsChanged { .. } => "computer.windows-changed",
                 ComputerEvent::Action { .. } => "computer.action",

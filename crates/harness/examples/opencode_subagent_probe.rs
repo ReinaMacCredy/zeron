@@ -64,6 +64,7 @@ async fn main() {
         worktree: None,
         branch: None,
         forked_at: None,
+        computer_control: false,
     };
     let mut stream = OpencodeHarness::new()
         .run(request, controls)

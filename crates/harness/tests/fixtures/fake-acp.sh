@@ -71,6 +71,7 @@ elif has "$line" '"method":"session/new"'; then
   if has "$line" '"name":"zeron"'; then
     has "$line" '"command":"/opt/zeron/zeron"' || exit 1
     has "$line" '"args":["mcp","--chat","chat-42","--port","27654"]' || exit 1
+    has "$line" '"env":[{"name":"ZERON_RUN_SECRET","value":"s3cret"}]' || exit 1
     ZERON_TOOLS=1
   else
     has "$line" '"mcpServers":[]' || exit 1

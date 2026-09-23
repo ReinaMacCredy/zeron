@@ -939,6 +939,12 @@ async fn run_session(session: Session) {
                 Value::String(server.command.clone()),
             );
             overrides.insert("mcp_servers.zeron.args".into(), json!(server.args));
+            if !server.env.is_empty() {
+                overrides.insert(
+                    "mcp_servers.zeron.env".into(),
+                    Value::Object(server.env_map()),
+                );
+            }
             // wait_threads blocks up to 30 min; Codex's own per-call ceiling
             // would cut it short (`tool_timeout_sec` in the 0.154.0 schema).
             overrides.insert("mcp_servers.zeron.tool_timeout_sec".into(), json!(1800));
@@ -2022,6 +2028,7 @@ fn user_input_questions(params: &Value) -> Vec<(String, UserInputQuestion)> {
                     .iter()
                     .find_map(|k| q.get(*k).and_then(Value::as_bool))
                     .unwrap_or(false),
+                kind: None,
             };
             (wire_id, question)
         })
@@ -2072,6 +2079,7 @@ fn approval_question(method: &str, params: &Value) -> UserInputQuestion {
         question,
         options: vec!["Yes".into(), "No".into()],
         multi_select: false,
+        kind: None,
     }
 }
 

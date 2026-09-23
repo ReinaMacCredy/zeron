@@ -2565,6 +2565,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                 question: format!("Allow this OpenCode request once? {}", props),
                 options: vec!["No".into(), "Yes".into()],
                 multi_select: false,
+                kind: None,
             };
             tokio::spawn(async move {
                 let server = Server {
@@ -2692,6 +2693,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                 let _ = tx
                     .send(Ok(AgentEvent::InputResolved {
                         request_id: request_id.clone(),
+                        answers: None,
                     }))
                     .await;
             });
@@ -3110,6 +3112,7 @@ fn map_questions(props: &Value) -> Vec<UserInputQuestion> {
                             })
                             .unwrap_or_default(),
                         multi_select: q.get("multiple").and_then(Value::as_bool).unwrap_or(false),
+                        kind: None,
                     })
                 })
                 .collect()

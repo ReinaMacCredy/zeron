@@ -192,6 +192,9 @@ pub struct RunRequest {
     // History before this instant is the source thread's; its background agents are not ours.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_at: Option<String>,
+    // Engine-resolved at dispatch; a value a client sends is overwritten.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub computer_control: bool,
 }
 
 /// Where a resumed harness session is cut when the run starts: history
@@ -467,6 +470,22 @@ pub struct UserInputQuestion {
     pub options: Vec<String>,
     #[serde(default)]
     pub multi_select: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<UserInputKind>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum UserInputKind {
+    Consent {
+        scope: crate::computer::ComputerConsentScope,
+    },
+}
+
+impl UserInputQuestion {
+    pub fn is_consent(&self) -> bool {
+        matches!(self.kind, Some(UserInputKind::Consent { .. }))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -578,6 +597,8 @@ pub enum AgentEvent {
     #[serde(rename_all = "camelCase")]
     InputResolved {
         request_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answers: Option<Vec<UserInputAnswer>>,
     },
     /// A confirmed new assignment. When tagged as Subagent, this reopens the
     /// same child transcript even if the provider does not echo the user text.

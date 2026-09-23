@@ -3681,6 +3681,8 @@ mod tests {
             status: None,
             continuation_of: None,
             from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
         }
     }
 
@@ -4623,6 +4625,8 @@ mod tests {
             status: None,
             continuation_of: None,
             from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
         };
         state.push_echo("c1", echo.clone());
         // Duplicate pushes dedupe.

@@ -45,6 +45,7 @@ async fn quiet_acp_prompt_stays_working_until_response() {
             expires_at: None,
             status: SessionCommandStatus::Pending,
             resolution: None,
+            computer_generation: None,
         })
         .unwrap();
     };
@@ -67,6 +68,7 @@ async fn quiet_acp_prompt_stays_working_until_response() {
                 branch: None,
                 resume: None,
                 forked_at: None,
+                computer_control: false,
             },
         },
     );

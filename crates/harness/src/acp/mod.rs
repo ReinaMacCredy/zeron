@@ -860,9 +860,18 @@ pub struct AcpHarness {
     /// opens must see account changes and newly available models.
     models_cache: tokio::sync::Mutex<Option<(Instant, Vec<Model>)>>,
     devin_models: devin_models::Catalog,
+    load_session: std::sync::Arc<std::sync::Mutex<Option<bool>>>,
 }
 
 impl AcpHarness {
+    fn note_load_session(&self, init: &Value) {
+        *self
+            .load_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(load_session_supported(init));
+    }
+
     fn with_spec(spec: AcpAgentSpec) -> Self {
         Self {
             spec,
@@ -878,6 +887,7 @@ impl AcpHarness {
             commands: tokio::sync::OnceCell::new(),
             models_cache: tokio::sync::Mutex::new(None),
             devin_models: devin_models::Catalog::default(),
+            load_session: std::sync::Arc::default(),
         }
     }
 
@@ -1269,6 +1279,7 @@ impl AcpHarness {
             let init = client
                 .request("initialize", initialize_params(self.spec.id))
                 .await?;
+            self.note_load_session(&init);
             let mut commands = scan_available_commands(&init);
             if commands.is_empty() {
                 let cwd = crate::executable::home_or_current_dir();
@@ -1330,9 +1341,10 @@ impl AcpHarness {
             }
         };
         let discovery = async {
-            client
+            let init = client
                 .request("initialize", initialize_params(self.spec.id))
                 .await?;
+            self.note_load_session(&init);
             let cwd = crate::executable::home_or_current_dir();
             let session = client
                 .request("session/new", json!({ "cwd": cwd, "mcpServers": [] }))
@@ -1638,6 +1650,12 @@ impl Harness for AcpHarness {
     fn steering_mode(&self) -> SteeringMode {
         self.spec.steering_mode
     }
+    fn resume_supported(&self) -> Option<bool> {
+        *self
+            .load_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         self.spec.reasoning_levels
     }
@@ -1777,6 +1795,7 @@ impl Harness for AcpHarness {
             kill_grace: self.kill_grace,
             handshake_timeout: self.handshake_timeout,
             stderr_tail,
+            load_session: self.load_session.clone(),
         }));
 
         Ok(futures::stream::unfold(event_rx, |mut rx| async move {
@@ -1814,6 +1833,14 @@ struct Session {
     kill_grace: Duration,
     handshake_timeout: Duration,
     stderr_tail: crate::StderrTail,
+    load_session: std::sync::Arc<std::sync::Mutex<Option<bool>>>,
+}
+
+fn load_session_supported(init: &Value) -> bool {
+    init.get("agentCapabilities")
+        .and_then(|capabilities| capabilities.get("loadSession"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 fn initialize_params(harness: HarnessId) -> Value {
@@ -2411,6 +2438,7 @@ fn handle_server_request_live(
             .to_owned(),
         options: names.clone(),
         multi_select: false,
+        kind: None,
     };
     let client = client.clone();
     let request_input = std::sync::Arc::clone(request_input);
@@ -2736,6 +2764,7 @@ async fn run_session(session: Session) {
         kill_grace,
         handshake_timeout,
         stderr_tail,
+        load_session,
     } = session;
     let RunControls {
         request_input,
@@ -2753,6 +2782,10 @@ async fn run_session(session: Session) {
             .await?;
         let steer_ext = steering_supported(&init);
         let init_commands = scan_available_commands(&init);
+        *load_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(load_session_supported(&init));
 
         // The thread tools ride ACP's own `mcpServers` list (stdio shape:
         // name, command, args, env); discovery sessions never carry them.
@@ -2763,7 +2796,11 @@ async fn run_session(session: Session) {
                     "name": "zeron",
                     "command": server.command,
                     "args": server.args,
-                    "env": [],
+                    "env": server
+                        .env
+                        .iter()
+                        .map(|(name, value)| json!({ "name": name, "value": value }))
+                        .collect::<Vec<_>>(),
                 })
             })
             .collect();

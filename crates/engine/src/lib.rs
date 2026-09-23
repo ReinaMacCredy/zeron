@@ -307,6 +307,7 @@ impl EngineCore {
         }));
         let spaces_sync = SpacesSync::start(repos.clone(), workspace.clone(), &device_id);
         let computer = computer::runtime::ComputerRuntime::start(data_dir);
+        computer.attach(&sessions);
         Ok(Self {
             sessions,
             doc_host,
@@ -582,6 +583,7 @@ fn relay_refused(method: &str) -> bool {
             | methods::SET_COMPUTER_SETTINGS
             | methods::GET_COMPUTER_CATALOG
             | methods::COMPUTER_ACTION
+            | methods::COMPUTER_EMERGENCY_STOP
     )
 }
 

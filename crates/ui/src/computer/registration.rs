@@ -121,10 +121,34 @@ async fn serve(
     Served::Lost
 }
 
+pub async fn stop_from_escape(engine: EngineHandle) {
+    super::emergency_stop_notice::notify_engine_emergency_stop(
+        || {
+            let engine = engine.clone();
+            async move {
+                engine
+                    .client()
+                    .call(methods::COMPUTER_EMERGENCY_STOP, json!({}))
+                    .await
+                    .map(drop)
+                    .map_err(|error| error.to_string())
+            }
+        },
+        |error| tracing::warn!(target: "desktop_cua", "{error}"),
+    )
+    .await;
+}
+
+#[cfg(target_os = "macos")]
+pub const DESKTOP_HOST_RETIRE_BUDGET: Duration = Duration::from_secs(5);
+
 #[cfg(target_os = "macos")]
 pub struct DesktopHost {
     host: Arc<dyn ComputerHost>,
+    driver: super::host::CuaDriverHost,
     bundle_id: String,
+    engine: Arc<Mutex<Option<EngineHandle>>>,
+    _lifecycle: Option<super::native::desktop_events::DesktopLifecycleWatch>,
     _link: super::native::NativeHostLink,
 }
 
@@ -139,16 +163,34 @@ pub fn install_desktop_host(cx: &mut gpui::App) {
     let Some(bundle_id) = super::native::permissions::running_app_bundle_identifier() else {
         return;
     };
+    let runtime = gpui_tokio::Tokio::handle(cx);
+    let engine: Arc<Mutex<Option<EngineHandle>>> = Arc::default();
+    let on_emergency_stop: Arc<dyn Fn() + Send + Sync> = Arc::new({
+        let engine = engine.clone();
+        let runtime = runtime.clone();
+        move || {
+            let current = engine
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            if let Some(current) = current {
+                runtime.spawn(stop_from_escape(current));
+            }
+        }
+    });
     let config = super::native::NativeHostConfig {
         binary_path,
         bundle_id: bundle_id.clone(),
         preview: Arc::new(|_| {}),
-        on_emergency_stop: None,
+        on_emergency_stop: Some(on_emergency_stop),
     };
     match super::native::start_native_host(config) {
-        Ok((host, link)) => cx.set_global(DesktopHost {
-            host: Arc::new(host),
+        Ok((driver, link)) => cx.set_global(DesktopHost {
+            host: Arc::new(driver.clone()),
+            driver,
             bundle_id,
+            engine,
+            _lifecycle: link.watch_desktop_lifecycle(runtime),
             _link: link,
         }),
         Err(error) => {
@@ -160,12 +202,36 @@ pub fn install_desktop_host(cx: &mut gpui::App) {
 #[cfg(target_os = "macos")]
 pub fn spawn_host_registration(engine: EngineHandle, cx: &gpui::App) -> Option<gpui::Task<()>> {
     let desktop = cx.try_global::<DesktopHost>()?;
+    *desktop
+        .engine
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = Some(engine.clone());
     let registration = gpui_tokio::Tokio::spawn(
         cx,
         run_host_registration(engine, desktop.host.clone(), desktop.bundle_id.clone()),
     );
     Some(cx.background_executor().spawn(async move {
         let _ = registration.await;
+    }))
+}
+
+#[cfg(target_os = "macos")]
+pub fn retire_desktop_host(cx: &mut gpui::App) -> Option<gpui::Task<()>> {
+    cx.try_global::<DesktopHost>()?;
+    let desktop = cx.remove_global::<DesktopHost>();
+    let disposing = desktop.driver.dispose();
+    let budget = cx.background_executor().timer(DESKTOP_HOST_RETIRE_BUDGET);
+    Some(cx.background_executor().spawn(async move {
+        match futures::future::select(disposing, Box::pin(budget)).await {
+            futures::future::Either::Left((Err(error), _)) => {
+                tracing::warn!(target: "desktop_cua", %error, "computer desktop host retirement failed");
+            }
+            futures::future::Either::Right(_) => {
+                tracing::warn!(target: "desktop_cua", "computer desktop host retirement timed out");
+            }
+            futures::future::Either::Left((Ok(()), _)) => {}
+        }
+        drop(desktop);
     }))
 }
 
@@ -324,6 +390,50 @@ mod tests {
                 other => Err(RpcError::UnknownMethod(other.into())),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn an_escape_reaches_the_engine_emergency_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("device-id"), "device-mac").unwrap();
+        let core = EngineCore::assemble(
+            dir.path(),
+            Arc::new(HarnessRegistry::new()),
+            HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        eventually("the computer service never booted", || {
+            core.computer.service().is_some()
+        })
+        .await;
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        struct Recording {
+            inner: Arc<dyn RpcService>,
+            calls: Arc<Mutex<Vec<String>>>,
+        }
+        #[async_trait]
+        impl RpcService for Recording {
+            async fn handle(
+                &self,
+                method: &str,
+                params: serde_json::Value,
+            ) -> Result<RpcReply, RpcError> {
+                self.calls.lock().unwrap().push(method.to_owned());
+                self.inner.handle(method, params).await
+            }
+        }
+        let engine =
+            EngineHandle::from_test_client(zeron_rpc::memory_client(Arc::new(Recording {
+                inner: core.rpc_service(),
+                calls: calls.clone(),
+            })));
+        stop_from_escape(engine).await;
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![methods::COMPUTER_EMERGENCY_STOP.to_owned()]
+        );
+        core.shutdown().await;
     }
 
     #[tokio::test]

@@ -48,6 +48,7 @@ case "$first" in
     shift
   done
   case "$mcp_json" in *'"zeron"'*'"mcp"'*'"--chat"'*'"chat-42"'*) ;; *) exit 1 ;; esac
+  case "$mcp_json" in *'"env":{"ZERON_RUN_SECRET":"s3cret"}'*) ;; *) exit 1 ;; esac
   [ "$strict" = false ] || exit 1
   emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":["Bash","mcp__zeron__list_threads"],"cwd":"/tmp","session_id":"sess-mcp"}'
   emit '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"tools on"}}}'

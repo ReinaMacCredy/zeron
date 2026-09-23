@@ -21,38 +21,46 @@ fn raised_ids(backend: &Scripted) -> Vec<String> {
 }
 
 fn action_name(event: &ComputerManagerEvent) -> Option<String> {
-    match &event.event {
+    match event {
         ComputerEvent::Action { action, .. } => Some(action.clone()),
         _ => None,
     }
 }
 
 fn action_window(event: &ComputerManagerEvent) -> Option<String> {
-    match &event.event {
+    match event {
         ComputerEvent::Action { window_id, .. } => window_id.clone(),
         _ => None,
     }
 }
 
 fn action_message(event: &ComputerManagerEvent) -> Option<String> {
-    match &event.event {
+    match event {
         ComputerEvent::Action { message, .. } => message.clone(),
         _ => None,
     }
 }
 
 fn restore_status(event: &ComputerManagerEvent) -> Option<&'static str> {
-    event
-        .restore
-        .as_ref()
-        .map(|restore| restore.restore_status.as_str())
+    match event {
+        ComputerEvent::Action { restore_status, .. } => {
+            restore_status.map(|status| status.as_str())
+        }
+        _ => None,
+    }
 }
 
 fn restored_window(event: &ComputerManagerEvent) -> Option<String> {
-    event
-        .restore
-        .as_ref()
-        .and_then(|restore| restore.restored_window_id.clone())
+    match event {
+        ComputerEvent::Action {
+            restored_window_id, ..
+        } => restored_window_id.clone(),
+        _ => None,
+    }
+}
+
+fn masked_action(event: &ComputerManagerEvent) -> bool {
+    matches!(event, ComputerEvent::Action { masked: true, .. })
 }
 
 fn not_dispatched(error: &ComputerError, expected: &str) {
@@ -739,7 +747,7 @@ async fn shields_the_opted_in_windows_raise_and_releases_the_mask_after_the_rest
         action_name(&actions[0]).as_deref(),
         Some("computer_activate_window")
     );
-    assert!(actions[0].masked);
+    assert!(masked_action(&actions[0]));
     assert_eq!(restore_status(&actions[0]), Some("restored"));
     manager.dispose().await;
 }
@@ -755,7 +763,7 @@ async fn masks_nothing_while_the_canary_flag_is_unset_even_with_a_shield_surface
         .await
         .unwrap();
     assert!(backend.calls_for("engageShield").is_empty());
-    assert!(!events.actions()[0].masked);
+    assert!(!masked_action(&events.actions()[0]));
     manager.dispose().await;
 }
 

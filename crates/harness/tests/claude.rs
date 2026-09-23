@@ -52,6 +52,7 @@ fn request(prompt: &str) -> RunRequest {
         branch: None,
         resume: None,
         forked_at: None,
+        computer_control: false,
     }
 }
 
@@ -107,6 +108,7 @@ async fn thread_tools_ride_an_additive_mcp_config_on_a_normal_run() {
             "--port".into(),
             "27654".into(),
         ],
+        env: vec![("ZERON_RUN_SECRET".into(), "s3cret".into())],
     });
     // The fixture exits 1 (no result frame) unless --mcp-config names the
     // zeron server with the chat and no --strict-mcp-config is present.

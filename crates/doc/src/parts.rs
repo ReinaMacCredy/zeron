@@ -6,7 +6,8 @@
 use serde::{Deserialize, Serialize};
 
 use zeron_proto::{
-    AgentEvent, HarnessId, SUBAGENT_INPUT_KEEP, ToolCall, ToolDiff, UserInputQuestion,
+    AgentEvent, HarnessId, SUBAGENT_INPUT_KEEP, ToolCall, ToolDiff, UserInputAnswer,
+    UserInputQuestion,
 };
 
 use crate::constants::MSG_INLINE_MAX;
@@ -211,6 +212,8 @@ pub enum MessagePart {
         questions: Vec<UserInputQuestion>,
         #[serde(default)]
         resolved: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answers: Option<Vec<UserInputAnswer>>,
     },
     Error {
         id: String,
@@ -402,19 +405,27 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     request_id: request_id.clone(),
                     questions: questions.clone(),
                     resolved: false,
+                    answers: None,
                 });
             }
         }
-        AgentEvent::InputResolved { request_id } => {
+        AgentEvent::InputResolved {
+            request_id,
+            answers: given,
+        } => {
             for p in out.iter_mut() {
                 if let MessagePart::Input {
                     request_id: rid,
                     resolved,
+                    answers,
                     ..
                 } = p
                     && rid == request_id
                 {
                     *resolved = true;
+                    if given.is_some() {
+                        answers.clone_from(given);
+                    }
                 }
             }
         }

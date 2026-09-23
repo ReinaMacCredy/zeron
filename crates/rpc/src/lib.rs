@@ -32,6 +32,8 @@ pub use device_room::{
 };
 pub use server::{serve_connection, serve_ws_listener};
 
+pub const COMPUTER_RUN_SECRET_ENV: &str = "ZERON_RUN_SECRET";
+
 /// RPC method names — single source of truth for both ends.
 /// Full surface: docs/research/feature-inventory.md §2.
 pub mod methods {
@@ -255,6 +257,10 @@ pub mod methods {
     /// Latest still frame of a chat's Computer task, for remote viewers. `{chatId}`
     /// → `{frame: ComputerStillFrame | null}`.
     pub const GET_COMPUTER_STILL_FRAME: &str = "GetComputerStillFrame";
+    /// Physical Escape from the desktop host. No params → `{stoppedChatIds}`.
+    pub const COMPUTER_EMERGENCY_STOP: &str = "ComputerEmergencyStop";
+    /// No params → stream of `ComputerEvent`, across desktop host changes.
+    pub const WATCH_COMPUTER_EVENTS: &str = "WatchComputerEvents";
 }
 
 #[derive(Debug, thiserror::Error)]

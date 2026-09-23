@@ -27,6 +27,8 @@ fn main() {
         status: Some(MessageStatus::Complete),
         continuation_of: None,
         from_chat_id: None,
+        fork_import: false,
+        answers_request_id: None,
     })
     .expect("push user message");
 
@@ -80,6 +82,7 @@ fn main() {
         expires_at: None,
         status: SessionCommandStatus::Pending,
         resolution: None,
+        computer_generation: None,
     })
     .expect("queue command");
     doc.set_command_status("cmd-1", SessionCommandStatus::Applied, None)

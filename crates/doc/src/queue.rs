@@ -53,6 +53,8 @@ pub struct QueuedMessage {
     /// row a person typed. Rides onto the transcript entry it becomes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_chat_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer_generation: Option<u64>,
 }
 
 /// Why a queued row is not currently eligible for automatic or explicit
@@ -101,6 +103,7 @@ impl QueuedMessage {
             issued_at: 0,
             edited_at: None,
             delivery_gate: None,
+            computer_generation: None,
         }
     }
 }
@@ -361,6 +364,9 @@ fn write_queued_map(map: &loro::LoroMap, item: &QueuedMessage) -> Result<(), Doc
     if let Some(from_chat_id) = &item.from_chat_id {
         map.insert("fromChatId", from_chat_id.as_str())?;
     }
+    if let Some(generation) = item.computer_generation {
+        map.insert("computerGeneration", generation as i64)?;
+    }
     if let Some(gate) = &item.delivery_gate {
         map.insert(
             "deliveryGate",
@@ -401,6 +407,7 @@ fn queued_from_json(v: serde_json::Value) -> Option<QueuedMessage> {
             .get("fromChatId")
             .and_then(|f| f.as_str())
             .map(str::to_string),
+        computer_generation: v.get("computerGeneration").and_then(|g| g.as_u64()),
         delivery_gate: match v.get("deliveryGate") {
             None | Some(serde_json::Value::Null) => None,
             Some(gate) => serde_json::from_value(gate.clone()).ok().or_else(|| {
@@ -436,6 +443,7 @@ mod tests {
             issued_at: 1_000,
             edited_at: None,
             delivery_gate: None,
+            computer_generation: None,
         }
     }
 

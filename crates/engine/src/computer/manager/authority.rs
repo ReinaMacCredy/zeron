@@ -452,10 +452,14 @@ impl ComputerManager {
     }
 
     pub async fn emergency_stop_input(&self) -> Result<(), ComputerError> {
+        self.emergency_stop().await.1
+    }
+
+    pub async fn emergency_stop(&self) -> (Vec<String>, Result<(), ComputerError>) {
         let bumped = {
             let state = self.state();
             if state.disposed {
-                return Ok(());
+                return (Vec::new(), Ok(()));
             }
             let mut threads: Vec<String> = state
                 .active_authorities
@@ -487,16 +491,18 @@ impl ComputerManager {
                 }
             }
         }
-        for thread_id in bumped
+        let stopped: Vec<String> = bumped
             .iter()
             .filter_map(|thread| agent_thread_id(Some(thread)))
-        {
+            .map(str::to_owned)
+            .collect();
+        for thread_id in &stopped {
             let generation = self.control_state.bump(thread_id);
             self.seams.generation_bumped(thread_id, generation);
         }
         let result = self.backend.stop_input(None).await;
         self.emit(ComputerEvent::InputStopped { stopped: false });
-        result
+        (stopped, result)
     }
 
     pub async fn handle_thread_removed(&self, thread_id: &str) {

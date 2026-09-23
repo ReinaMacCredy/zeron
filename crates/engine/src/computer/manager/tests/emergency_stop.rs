@@ -19,7 +19,7 @@ fn input_stopped(events: &Events, stopped: bool) -> usize {
         .all()
         .iter()
         .filter(|event| {
-            matches!(event.event, ComputerEvent::InputStopped { stopped: seen } if seen == stopped)
+            matches!(**event, ComputerEvent::InputStopped { stopped: seen } if seen == stopped)
         })
         .count()
 }

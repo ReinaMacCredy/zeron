@@ -94,6 +94,16 @@ fn prepare_quit(cx: &mut App) {
 }
 
 pub(crate) fn quit_after_save(cx: &mut App) {
+    // gpui gives on_app_quit futures 200 ms; the driver's retire timeline needs seconds.
+    #[cfg(target_os = "macos")]
+    if let Some(retiring) = crate::computer::registration::retire_desktop_host(cx) {
+        cx.spawn(async move |cx| {
+            retiring.await;
+            let _ = cx.update(quit_after_save);
+        })
+        .detach();
+        return;
+    }
     #[cfg(target_os = "macos")]
     native_quit::allow();
     cx.quit();

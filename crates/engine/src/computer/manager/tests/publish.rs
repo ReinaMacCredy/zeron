@@ -127,7 +127,7 @@ async fn publishes_thread_snapshots_activity_transitions_and_backend_window_even
         })
     );
     assert!(events.states().len() >= 3);
-    match &events.all().last().unwrap().event {
+    match events.all().last().unwrap() {
         ComputerEvent::ThreadState { state } => assert!(!state.agent_active),
         other => panic!("expected a thread-state event last, got {other:?}"),
     }

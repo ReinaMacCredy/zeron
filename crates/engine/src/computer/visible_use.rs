@@ -1,6 +1,8 @@
 use std::sync::LazyLock;
 
 use regex::Regex;
+use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
+use zeron_proto::UserInputQuestion;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ComputerForegroundAuthorization {
@@ -310,6 +312,70 @@ pub fn computer_foreground_authorization_for_messages(
         }
     }
     COMPUTER_FOREGROUND_NOT_AUTHORIZED
+}
+
+pub fn visible_use_entries(entries: &[SessionMessageEntry]) -> Vec<VisibleUseEntry> {
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let role = match entry.role {
+                MessageRole::User => VisibleUseRole::User,
+                MessageRole::Assistant => VisibleUseRole::Assistant,
+                MessageRole::System => return None,
+            };
+            let text = entry
+                .parts
+                .iter()
+                .filter_map(|part| match part {
+                    MessagePart::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            let inputs = entry
+                .parts
+                .iter()
+                .filter_map(|part| match part {
+                    MessagePart::Input {
+                        request_id,
+                        questions,
+                        answers,
+                        ..
+                    } if !questions.iter().any(UserInputQuestion::is_consent) => {
+                        Some(VisibleUseInput {
+                            request_id: request_id.clone(),
+                            question_titles: questions
+                                .iter()
+                                .map(|question| question.question.clone())
+                                .collect(),
+                            answers: answers.as_ref().map(|answers| {
+                                answers
+                                    .iter()
+                                    .flat_map(|answer| answer.labels.iter().cloned())
+                                    .collect()
+                            }),
+                        })
+                    }
+                    _ => None,
+                })
+                .collect();
+            Some(VisibleUseEntry {
+                role,
+                text,
+                from_chat_id: entry.from_chat_id.clone(),
+                fork_import: entry.fork_import,
+                streaming: entry.status == Some(MessageStatus::Streaming),
+                has_attachments: entry
+                    .parts
+                    .iter()
+                    .any(|part| matches!(part, MessagePart::Image { .. })),
+                has_skills: false,
+                has_mentions: false,
+                inputs,
+                answers_request_id: entry.answers_request_id.clone(),
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -800,5 +866,140 @@ mod tests {
         assert_eq!(strip_single_quoted("a 'b' 'c' d"), "a   d");
         assert_eq!(strip_single_quoted("it's 'x'y"), "it's 'x'y");
         assert_eq!(strip_single_quoted("('quoted')"), "()");
+    }
+
+    fn doc_entry(role: MessageRole, parts: Vec<MessagePart>) -> SessionMessageEntry {
+        SessionMessageEntry {
+            id: "m".into(),
+            role,
+            parts,
+            created_at: 1,
+            device_id: "dev-a".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
+        }
+    }
+
+    fn text(text: &str) -> MessagePart {
+        MessagePart::Text {
+            id: "t0".into(),
+            text: text.into(),
+        }
+    }
+
+    fn input_part(
+        request_id: &str,
+        question: &str,
+        kind: Option<zeron_proto::UserInputKind>,
+        answer: Option<&str>,
+    ) -> MessagePart {
+        MessagePart::Input {
+            id: request_id.into(),
+            request_id: request_id.into(),
+            questions: vec![UserInputQuestion {
+                id: "q1".into(),
+                header: "Q".into(),
+                question: question.into(),
+                options: vec!["Yes".into(), "No".into()],
+                multi_select: false,
+                kind,
+            }],
+            resolved: answer.is_some(),
+            answers: answer.map(|label| {
+                vec![zeron_proto::UserInputAnswer {
+                    question_id: "q1".into(),
+                    labels: vec![label.into()],
+                }]
+            }),
+        }
+    }
+
+    #[test]
+    fn builds_walk_entries_from_the_transcript() {
+        let mut copied = doc_entry(MessageRole::User, vec![text("show me the browser")]);
+        copied.fork_import = true;
+        let mut asked = doc_entry(
+            MessageRole::Assistant,
+            vec![
+                text("Working."),
+                input_part("r1", "Can I bring Safari to the front?", None, Some("Yes")),
+            ],
+        );
+        asked.status = Some(MessageStatus::Streaming);
+        let note = doc_entry(MessageRole::System, vec![text("Computer use is on")]);
+        let mut from_agent = doc_entry(MessageRole::User, vec![text("continue")]);
+        from_agent.from_chat_id = Some("lead".into());
+        let mut dead = doc_entry(
+            MessageRole::User,
+            vec![text("Answering your earlier question")],
+        );
+        dead.answers_request_id = Some("r1".into());
+
+        let walk = visible_use_entries(&[copied, asked, note, from_agent, dead]);
+        assert_eq!(walk.len(), 4);
+        assert!(walk[0].fork_import && walk[0].role == VisibleUseRole::User);
+        assert_eq!(walk[1].role, VisibleUseRole::Assistant);
+        assert_eq!(walk[1].text, "Working.");
+        assert!(walk[1].streaming);
+        assert_eq!(
+            walk[1].inputs,
+            vec![VisibleUseInput {
+                request_id: "r1".into(),
+                question_titles: vec!["Can I bring Safari to the front?".into()],
+                answers: Some(vec!["Yes".into()]),
+            }]
+        );
+        assert_eq!(walk[2].from_chat_id.as_deref(), Some("lead"));
+        assert_eq!(walk[3].answers_request_id.as_deref(), Some("r1"));
+    }
+
+    #[test]
+    fn a_consent_card_is_never_a_visible_use_question() {
+        let consent = Some(zeron_proto::UserInputKind::Consent {
+            scope: zeron_proto::computer::ComputerConsentScope::Task,
+        });
+        let walk = visible_use_entries(&[
+            doc_entry(MessageRole::User, vec![text("show me the browser")]),
+            doc_entry(
+                MessageRole::Assistant,
+                vec![input_part(
+                    "consent",
+                    "Can I bring Safari to the front?",
+                    consent,
+                    Some("Allow"),
+                )],
+            ),
+        ]);
+        assert!(walk[1].inputs.is_empty());
+        assert!(authorized(&walk));
+    }
+
+    #[test]
+    fn transcript_walks_hold_the_fork_and_dead_run_barriers() {
+        let mut parent = doc_entry(MessageRole::User, vec![text("show me the browser")]);
+        parent.fork_import = true;
+        let fork = [parent, doc_entry(MessageRole::User, vec![text("continue")])];
+        assert!(!authorized(&visible_use_entries(&fork)));
+
+        let title = "Can I bring Safari to the front?";
+        let mut answer = doc_entry(
+            MessageRole::User,
+            vec![text(&format!(
+                "Answering your earlier question: {title}\nNo"
+            ))],
+        );
+        answer.answers_request_id = Some("r1".into());
+        let dead = [
+            doc_entry(MessageRole::User, vec![text("show me the browser")]),
+            doc_entry(
+                MessageRole::Assistant,
+                vec![input_part("r1", title, None, Some("No"))],
+            ),
+            answer,
+        ];
+        assert!(!authorized(&visible_use_entries(&dead)));
     }
 }

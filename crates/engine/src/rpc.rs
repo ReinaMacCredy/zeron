@@ -2816,6 +2816,36 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&history)
             }
+            methods::COMPUTER_EMERGENCY_STOP => {
+                let stopped = self.computer()?.emergency_stop().await;
+                for chat_id in &stopped {
+                    if let Err(err) = self.doc_host.stop_for_escape(chat_id).await {
+                        tracing::warn!(chat = %chat_id, error = %err, "escape stop failed");
+                    }
+                }
+                RpcReply::value(&serde_json::json!({ "stoppedChatIds": stopped }))
+            }
+            methods::WATCH_COMPUTER_EVENTS => {
+                let events = self.computer()?.subscribe_events();
+                Ok(RpcReply::Stream(
+                    futures::stream::unfold(events, |mut events| async move {
+                        loop {
+                            match events.recv().await {
+                                Ok(event) => {
+                                    if let Ok(value) = serde_json::to_value(&event) {
+                                        return Some((value, events));
+                                    }
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                    return None;
+                                }
+                            }
+                        }
+                    })
+                    .boxed(),
+                ))
+            }
             other => Err(RpcError::UnknownMethod(other.to_string())),
         }
     }
@@ -2926,6 +2956,8 @@ mod tests {
                 status: None,
                 continuation_of: None,
                 from_chat_id: None,
+                fork_import: false,
+                answers_request_id: None,
             })
             .unwrap();
         // Hold publication blocked: the opening must not await the full mirror.
@@ -3151,6 +3183,8 @@ mod context_usage_tests {
                     status: Some(zeron_doc::MessageStatus::Streaming),
                     continuation_of: None,
                     from_chat_id: None,
+                    fork_import: false,
+                    answers_request_id: None,
                 })
                 .unwrap()
         };
@@ -3272,6 +3306,8 @@ mod context_usage_tests {
             status: Some(zeron_doc::MessageStatus::Streaming),
             continuation_of: None,
             from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
         };
         handle.doc().push_message(&entry("local-before")).unwrap();
         source.update_context_usage(Some(10), Some(100)).unwrap();

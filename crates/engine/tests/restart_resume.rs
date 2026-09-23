@@ -51,6 +51,7 @@ fn run_request(prompt: &str, cwd: &str) -> RunRequest {
         branch: None,
         resume: None,
         forked_at: None,
+        computer_control: false,
     }
 }
 
@@ -348,6 +349,8 @@ async fn kill_crash_recovers_resume_from_journal_and_stamps_aborted() {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
         })
         .unwrap();
         doc.push_message(&SessionMessageEntry {
@@ -362,6 +365,8 @@ async fn kill_crash_recovers_resume_from_journal_and_stamps_aborted() {
             status: Some(MessageStatus::Streaming),
             continuation_of: None,
             from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
         })
         .unwrap();
         store
@@ -596,6 +601,8 @@ async fn fresh_crash_auto_resumes_and_notes_the_interruption() {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
         })
         .unwrap();
         doc.push_message(&SessionMessageEntry {
@@ -610,6 +617,8 @@ async fn fresh_crash_auto_resumes_and_notes_the_interruption() {
             status: Some(MessageStatus::Streaming),
             continuation_of: None,
             from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
         })
         .unwrap();
         store
@@ -861,6 +870,7 @@ async fn real_claude_remembers_codeword_across_engine_restart() {
         branch: None,
         resume: None,
         forked_at: None,
+        computer_control: false,
     };
     let assemble_real = || {
         EngineCore::assemble(

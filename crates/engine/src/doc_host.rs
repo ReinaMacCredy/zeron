@@ -685,6 +685,32 @@ impl ChatDocHandle {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             from_chat_id: from_chat_id.map(str::to_string),
+            fork_import: false,
+            answers_request_id: None,
+        })
+    }
+
+    pub fn write_input_answer(
+        &self,
+        message_id: &str,
+        text: &str,
+        created_at: i64,
+        request_id: &str,
+    ) -> Result<(), DocError> {
+        self.doc.push_message(&SessionMessageEntry {
+            id: message_id.to_string(),
+            role: MessageRole::User,
+            parts: vec![MessagePart::Text {
+                id: "t0".into(),
+                text: text.to_string(),
+            }],
+            created_at,
+            device_id: self.device_id.clone(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            from_chat_id: None,
+            fork_import: false,
+            answers_request_id: Some(request_id.to_string()),
         })
     }
 
@@ -748,6 +774,8 @@ impl ChatDocHandle {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
         })
     }
 
@@ -2571,6 +2599,7 @@ impl DocHost {
             expires_at: Some(now + COMMAND_DEFAULT_TTL_MS),
             status: SessionCommandStatus::Pending,
             resolution: None,
+            computer_generation: is_message.then(|| handle.doc.computer_generation()),
         };
         handle.doc.queue_command(&entry)?;
         // Sending a message revives an archived chat: the user is acting in it
@@ -2638,6 +2667,7 @@ impl DocHost {
             issued_at: now_ms(),
             edited_at: None,
             delivery_gate: None,
+            computer_generation: Some(handle.doc.computer_generation()),
         })?;
         handle.publish_queue();
         // Same reasoning as a command: the user is acting in this chat again.
@@ -2689,6 +2719,7 @@ impl DocHost {
             edited_at: None,
             delivery_gate: None,
             from_chat_id: Some(from_chat_id.to_string()),
+            computer_generation: Some(handle.doc.computer_generation()),
         })?;
         handle.publish_queue();
         self.unarchive_on_send(chat_id);
@@ -3468,17 +3499,32 @@ impl DocHost {
                 .and_then(|chat| chat.title);
             prompt = thread_message_prompt(from, title.as_deref(), &prompt);
         }
+        let computer_control = self.computer_control_for(
+            &sessions,
+            handle,
+            &item.text,
+            item.from_chat_id.as_deref(),
+            item.computer_generation,
+        );
         if send == QueueSend::Steer {
             match sessions
-                .steer(
+                .steer_with(
                     chat_id,
                     &prompt,
                     &item.attachments,
                     Some(message_id.clone()),
+                    Some(computer_control),
                 )
                 .await?
             {
                 SteerOutcome::Accepted => return Ok(()),
+                SteerOutcome::NotSteerable
+                    if self.computer_flip_waits(&sessions, chat_id, computer_control) =>
+                {
+                    handle.doc.insert_queued(0, item)?;
+                    handle.publish_queue();
+                    return Ok(());
+                }
                 // The run died under us between the status read and the send;
                 // fall through and start a fresh turn with it.
                 SteerOutcome::NotSteerable => {}
@@ -3508,6 +3554,7 @@ impl DocHost {
         request.prompt = prompt;
         request.resume = None; // dispatch re-derives the harness session
         request.attachments = item.attachments.clone();
+        request.computer_control = computer_control;
         let harness = self.harness_for_request(chat_id, &request);
         self.dispatch_with_source_context(&sessions, chat_id, harness, request, Some(message_id))
             .await?;
@@ -3893,6 +3940,7 @@ impl DocHost {
                 expires_at: Some(now + COMMAND_DEFAULT_TTL_MS),
                 status: SessionCommandStatus::Pending,
                 resolution: None,
+                computer_generation: old.computer_generation,
             };
             tracing::info!(chat = %chat_id, old = %old.id, new = %reissue.id,
                 "retry re-issues a dead send attempt");
@@ -4468,6 +4516,28 @@ impl DocHost {
                 message_id,
             } => {
                 let mut request = request.clone();
+                request.computer_control = self.computer_control_for(
+                    sessions,
+                    handle,
+                    &request.prompt,
+                    None,
+                    entry.computer_generation,
+                );
+                if request.attachments.is_empty()
+                    && request.worktree.is_none()
+                    && self.computer_flip_waits(sessions, chat_id, request.computer_control)
+                {
+                    self.hold_for_turn_end(
+                        chat_id,
+                        &request.prompt,
+                        Some(message_id),
+                        entry.computer_generation,
+                    )?;
+                    return Ok((
+                        SessionCommandStatus::Applied,
+                        Some("held until the turn ends".into()),
+                    ));
+                }
                 // Queued-attachment refs (`pending://`) resolve to this
                 // host's absolute paths before anything persists or
                 // dispatches — the drain already gated on the bytes being
@@ -4560,10 +4630,16 @@ impl DocHost {
                     prompt,
                     message_id.clone(),
                     entry.issued_at,
+                    entry.computer_generation,
                 )
                 .await
             }
             SessionCommandPayload::Interrupt {} => {
+                if let Some(computer) = sessions.computer() {
+                    computer
+                        .stop_chat(chat_id, handle.doc.computer_generation())
+                        .await;
+                }
                 self.interrupt_and_pause_queue(sessions, handle).await?;
                 Ok((SessionCommandStatus::Applied, None))
             }
@@ -4603,6 +4679,17 @@ impl DocHost {
                         Some("no pending input request".into()),
                     ));
                 };
+                // Consent binds only the turn that asked; a new turn must ask again.
+                if questions.iter().any(UserInputQuestion::is_consent) {
+                    if let Err(err) = handle.doc.resolve_input(request_id, None) {
+                        tracing::warn!(chat = %chat_id, request = %request_id, error = %err,
+                            "expired consent resolve failed");
+                    }
+                    return Ok((
+                        SessionCommandStatus::Rejected,
+                        Some("the turn that asked for Computer consent has ended".into()),
+                    ));
+                }
                 // The run died under the question (engine restart, crash).
                 // The question is still open in the doc and the command is
                 // durable, so honor it anyway — stamp the part resolved and
@@ -4622,13 +4709,28 @@ impl DocHost {
                 request.prompt = respond_input_prompt(&questions, answers);
                 request.resume = None; // dispatch re-derives the harness session
                 request.attachments = Vec::new();
-                if let Err(err) = handle.doc.resolve_input(request_id) {
+                request.computer_control = self.computer_control_for(
+                    sessions,
+                    handle,
+                    &request.prompt,
+                    None,
+                    entry.computer_generation,
+                );
+                if let Err(err) = handle.doc.resolve_input(request_id, Some(answers)) {
                     tracing::warn!(chat = %chat_id, request = %request_id, error = %err,
                         "orphaned input resolve failed");
                 }
+                let answer_id = new_id();
+                handle.write_input_answer(&answer_id, &request.prompt, now_ms(), request_id)?;
                 let harness = self.harness_for_request(chat_id, &request);
-                self.dispatch_with_source_context(sessions, chat_id, harness, request, None)
-                    .await?;
+                self.dispatch_with_source_context(
+                    sessions,
+                    chat_id,
+                    harness,
+                    request,
+                    Some(answer_id),
+                )
+                .await?;
                 Ok((
                     SessionCommandStatus::Applied,
                     Some("answered as new turn".into()),
@@ -4653,12 +4755,28 @@ impl DocHost {
         prompt: &str,
         message_id: Option<String>,
         issued_at: i64,
+        computer_generation: Option<u64>,
     ) -> Result<(SessionCommandStatus, Option<String>), EngineError> {
         let chat_id = &handle.chat_id;
         // Keep upstream's queued-attachment rewrite and send-time canonical
         // history while preserving the personal cut's turn-boundary queue.
         let prompt = self.resolve_prompt_attachments(prompt);
-        if self.held_until_turn_end(sessions, chat_id, &prompt, message_id.as_deref())? {
+        let computer_control =
+            self.computer_control_for(sessions, handle, &prompt, None, computer_generation);
+        if self.held_until_turn_end(
+            sessions,
+            chat_id,
+            &prompt,
+            message_id.as_deref(),
+            computer_generation,
+        )? {
+            return Ok((
+                SessionCommandStatus::Applied,
+                Some("held until the turn ends".into()),
+            ));
+        }
+        if self.computer_flip_waits(sessions, chat_id, computer_control) {
+            self.hold_for_turn_end(chat_id, &prompt, message_id.as_deref(), computer_generation)?;
             return Ok((
                 SessionCommandStatus::Applied,
                 Some("held until the turn ends".into()),
@@ -4671,7 +4789,13 @@ impl DocHost {
             tracing::warn!(chat = %chat_id, error = %err, "canonical user-message write failed");
         }
         match sessions
-            .steer(chat_id, &prompt, &[], message_id.clone())
+            .steer_with(
+                chat_id,
+                &prompt,
+                &[],
+                message_id.clone(),
+                Some(computer_control),
+            )
             .await?
         {
             SteerOutcome::Accepted => {
@@ -4693,6 +4817,7 @@ impl DocHost {
                 // A reused config must not re-inline the PREVIOUS turn's
                 // images; this prompt's own refs (if any) ride its text.
                 request.attachments = Vec::new();
+                request.computer_control = computer_control;
                 let harness = self.harness_for_request(chat_id, &request);
                 self.dispatch_with_source_context(sessions, chat_id, harness, request, message_id)
                     .await?;
@@ -4723,6 +4848,7 @@ impl DocHost {
         chat_id: &str,
         prompt: &str,
         message_id: Option<&str>,
+        computer_generation: Option<u64>,
     ) -> Result<bool, EngineError> {
         // A persistent session parked BETWEEN turns DOES take the next prompt
         // through its mailbox (the warm-child fast path), so the question is
@@ -4735,6 +4861,17 @@ impl DocHost {
         {
             return Ok(false);
         }
+        self.hold_for_turn_end(chat_id, prompt, message_id, computer_generation)?;
+        Ok(true)
+    }
+
+    fn hold_for_turn_end(
+        &self,
+        chat_id: &str,
+        prompt: &str,
+        message_id: Option<&str>,
+        computer_generation: Option<u64>,
+    ) -> Result<(), EngineError> {
         let handle = self.open(chat_id)?;
         handle.doc.push_queued(&QueuedMessage {
             id: message_id.map(str::to_string).unwrap_or_else(new_id),
@@ -4746,9 +4883,56 @@ impl DocHost {
             issued_at: now_ms(),
             edited_at: None,
             delivery_gate: None,
+            computer_generation,
         })?;
         handle.publish_queue();
-        Ok(true)
+        Ok(())
+    }
+
+    fn computer_control_for(
+        &self,
+        sessions: &SessionsEngine,
+        handle: &ChatDocHandle,
+        text: &str,
+        from_chat_id: Option<&str>,
+        stamped_generation: Option<u64>,
+    ) -> bool {
+        sessions.computer().is_some_and(|computer| {
+            computer.resolve_computer_control(
+                &handle.chat_id,
+                handle.doc.computer_generation(),
+                text,
+                from_chat_id.is_none(),
+                stamped_generation,
+            )
+        })
+    }
+
+    /// d38: a Computer flag flip waits for the turn boundary, never interrupts.
+    fn computer_flip_waits(
+        &self,
+        sessions: &SessionsEngine,
+        chat_id: &str,
+        computer_control: bool,
+    ) -> bool {
+        sessions.turn_in_flight(chat_id)
+            && sessions
+                .live_computer_control(chat_id)
+                .is_some_and(|live| live != computer_control)
+    }
+
+    pub(crate) async fn stop_for_escape(&self, chat_id: &str) -> Result<(), EngineError> {
+        let Some(sessions) = self.sessions() else {
+            return Err(EngineError::Other("sessions engine not wired".into()));
+        };
+        let handle = self.open(chat_id)?;
+        self.interrupt_and_pause_queue(&sessions, &handle).await?;
+        sessions.write_computer_note(
+            chat_id,
+            crate::computer::runtime::COMPUTER_ESCAPE_STOP_NOTICE,
+            None,
+        );
+        Ok(())
     }
 
     async fn capture_source_context(&self, cwd: &str) -> Option<ConversationSourceContext> {
@@ -4871,6 +5055,7 @@ impl DocHost {
             worktree: None,
             branch: None,
             forked_at: None,
+            computer_control: false,
         })
     }
 
@@ -5004,6 +5189,8 @@ mod transfer_progress_tests {
                     status: None,
                     continuation_of: None,
                     from_chat_id: None,
+                    fork_import: false,
+                    answers_request_id: None,
                 })
                 .unwrap();
         }

@@ -21,6 +21,7 @@ fn run_request_attachments_survive_command_round_trip() {
         branch: None,
         resume: None,
         forked_at: None,
+        computer_control: false,
     };
     doc.queue_command(&SessionCommandEntry {
         id: "c1".into(),
@@ -34,6 +35,7 @@ fn run_request_attachments_survive_command_round_trip() {
         expires_at: None,
         status: SessionCommandStatus::Pending,
         resolution: None,
+        computer_generation: None,
     })
     .unwrap();
     match &doc.read_commands().unwrap()[0].payload {

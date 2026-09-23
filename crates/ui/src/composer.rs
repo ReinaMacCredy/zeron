@@ -668,7 +668,9 @@ pub fn pending_input_request(
                     questions,
                     resolved: false,
                     ..
-                } => Some((request_id.clone(), questions.clone())),
+                } if !questions.iter().any(UserInputQuestion::is_consent) => {
+                    Some((request_id.clone(), questions.clone()))
+                }
                 _ => None,
             })
         })
@@ -7560,6 +7562,8 @@ impl Composer {
             status: None,
             continuation_of: None,
             from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
         };
         // Background start (d23): the session is minted and run without
         // becoming the selection; the canvas moves on to a fresh draft that
@@ -7736,6 +7740,8 @@ impl Composer {
                             status: None,
                             continuation_of: None,
                             from_chat_id: None,
+                            fork_import: false,
+                            answers_request_id: None,
                         };
                         let echo_chat_id = chat_id.clone();
                         this.update(cx, |composer, cx| {
@@ -7920,6 +7926,7 @@ impl Composer {
                         worktree: run_worktree,
                         branch: None,
                         forked_at: None,
+                        computer_control: false,
                     },
                     message_id: message_id.clone(),
                 };
@@ -10969,6 +10976,7 @@ mod tests {
             question: format!("Question {id}"),
             options: options.iter().map(|s| s.to_string()).collect(),
             multi_select: multi,
+            kind: None,
         }
     }
 
@@ -11857,6 +11865,45 @@ mod tests {
     }
 
     #[test]
+    fn a_consent_card_never_becomes_the_question_wizard() {
+        let consent = UserInputQuestion {
+            kind: Some(zeron_proto::UserInputKind::Consent {
+                scope: zeron_proto::computer::ComputerConsentScope::Task,
+            }),
+            ..question("consent", &["Allow", "Decline"], false)
+        };
+        let part = |request_id: &str, question: UserInputQuestion| MessagePart::Input {
+            id: request_id.into(),
+            request_id: request_id.into(),
+            questions: vec![question],
+            resolved: false,
+            answers: None,
+        };
+        let entry = |parts: Vec<MessagePart>| SessionMessageEntry {
+            id: "m".into(),
+            role: MessageRole::Assistant,
+            parts,
+            created_at: 0,
+            device_id: "d".into(),
+            status: Some(zeron_doc::MessageStatus::Streaming),
+            continuation_of: None,
+            from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
+        };
+        assert!(pending_input_request(&[entry(vec![part("c1", consent.clone())])]).is_none());
+        assert_eq!(
+            pending_input_request(&[entry(vec![
+                part("c1", consent),
+                part("r1", question("q", &["a"], false)),
+            ])])
+            .map(|(id, _)| id)
+            .as_deref(),
+            Some("r1")
+        );
+    }
+
+    #[test]
     fn pending_input_detection() {
         use zeron_doc::MessageStatus;
         let input_part = MessagePart::Input {
@@ -11864,6 +11911,7 @@ mod tests {
             request_id: "r1".into(),
             questions: vec![question("q", &["a"], false)],
             resolved: false,
+            answers: None,
         };
         let entry = |status: Option<MessageStatus>, parts: Vec<MessagePart>| SessionMessageEntry {
             id: "m".into(),
@@ -11874,6 +11922,8 @@ mod tests {
             status,
             continuation_of: None,
             from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
         };
         // Streaming entry with unresolved input → panel.
         let t = vec![entry(
@@ -11911,6 +11961,8 @@ mod tests {
                 status: Some(MessageStatus::Complete),
                 continuation_of: None,
                 from_chat_id: None,
+                fork_import: false,
+                answers_request_id: None,
             },
         ];
         assert!(pending_input_request(&t).is_none());
@@ -11920,6 +11972,7 @@ mod tests {
             request_id: "r1".into(),
             questions: vec![],
             resolved: true,
+            answers: None,
         };
         let t = vec![entry(
             Some(MessageStatus::Streaming),
@@ -11944,6 +11997,8 @@ mod tests {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
         };
         let t = vec![
             entry(Some(MessageStatus::Streaming), vec![input_part.clone()]),

@@ -5,9 +5,8 @@ use serde_json::json;
 use zeron_proto::computer::{ComputerActionResult, ComputerEvent, ComputerWindow, CuaEffect};
 
 use super::{
-    ComputerManager, ComputerManagerEvent, ComputerNotedResult, ForegroundRestoreInfo,
-    ForegroundRestoreStatus, activation_unsupported_error, agent_thread_id, json_string,
-    window_not_found_error,
+    ComputerManager, ComputerNotedResult, ForegroundRestoreInfo, ForegroundRestoreStatus,
+    activation_unsupported_error, agent_thread_id, json_string, window_not_found_error,
 };
 use crate::computer::backend::{
     ComputerAgentDialect, ComputerBackendActionResult, ComputerBackendError, ComputerBackendMethod,
@@ -332,18 +331,17 @@ impl ComputerManager {
         if let Some(attributed) = attributed {
             self.surface_pane_for_agent(attributed);
         }
-        self.emit(ComputerManagerEvent {
-            event: ComputerEvent::Action {
-                window_id: result.window_id.clone(),
-                delivery: result.delivery.clone(),
-                action: "computer_activate_window".into(),
-                ok: true,
-                message: note.map(|note| {
-                    clamp_computer_message(note, "The foreground window could not be restored.")
-                }),
-                thread_id: attributed.map(str::to_owned),
-            },
-            restore: Some(restore),
+        self.emit(ComputerEvent::Action {
+            window_id: result.window_id.clone(),
+            delivery: result.delivery.clone(),
+            action: "computer_activate_window".into(),
+            ok: true,
+            message: note.map(|note| {
+                clamp_computer_message(note, "The foreground window could not be restored.")
+            }),
+            thread_id: attributed.map(str::to_owned),
+            restored_window_id: restore.restored_window_id,
+            restore_status: Some(restore.restore_status),
             masked,
         });
     }

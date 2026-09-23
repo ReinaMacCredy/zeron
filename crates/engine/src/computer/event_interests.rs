@@ -260,6 +260,9 @@ mod tests {
             ok: true,
             message: None,
             thread_id: thread_id.map(str::to_owned),
+            masked: false,
+            restore_status: None,
+            restored_window_id: None,
         }
     }
 

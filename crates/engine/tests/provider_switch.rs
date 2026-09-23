@@ -170,6 +170,7 @@ fn run_payload(prompt: &str, message_id: &str, cwd: &str) -> SessionCommandPaylo
             worktree: None,
             branch: None,
             forked_at: None,
+            computer_control: false,
         },
         message_id: message_id.into(),
     }

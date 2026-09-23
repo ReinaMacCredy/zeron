@@ -49,6 +49,7 @@ fn request(prompt: &str) -> RunRequest {
         branch: None,
         resume: None,
         forked_at: None,
+        computer_control: false,
     }
 }
 
@@ -111,6 +112,7 @@ async fn thread_tools_ride_the_session_new_mcp_servers_list() {
             "--port".into(),
             "27654".into(),
         ],
+        env: vec![("ZERON_RUN_SECRET".into(), "s3cret".into())],
     });
     // The fixture answers "tools on" only when session/new named the zeron
     // server with its command and args; otherwise it refuses the prompt.
