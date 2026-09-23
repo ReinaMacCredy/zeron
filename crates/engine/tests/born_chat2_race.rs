@@ -166,6 +166,7 @@ async fn transcript_survives_open_racing_create_chat() {
                         branch: None,
                         resume: None,
                         forked_at: None,
+                        computer_control: false,
                     },
                     message_id: "msg-race-1".into(),
                 },

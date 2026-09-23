@@ -90,9 +90,6 @@ pub struct ShortcutsPage {
     appshot_sound_enabled: bool,
     appshot_destination: AppshotDestination,
     appshot_capabilities: AppshotCapabilities,
-    input_access_prompted: bool,
-    capture_access_prompted: bool,
-    semantic_access_prompted: bool,
     permissions: appshots_page::PermissionsUi,
     // The page never talks RPC; state is kept for parity with sibling pages
     // (and future per-device keymaps).
@@ -136,9 +133,6 @@ impl ShortcutsPage {
             appshot_sound_enabled,
             appshot_destination,
             appshot_capabilities: crate::appshots::capabilities(),
-            input_access_prompted: false,
-            capture_access_prompted: false,
-            semantic_access_prompted: false,
             permissions: appshots_page::PermissionsUi::default(),
             _state: state,
         }
@@ -1174,7 +1168,9 @@ mod tests {
             page.show_appshots(true);
             // The permission was "asked" already: enabling must not raise the
             // native prompt from a test.
-            page.capture_access_prompted = true;
+            page.permissions
+                .guide
+                .set_prompted(crate::settings::permission_guide::PermissionPane::ScreenRecording);
             page
         });
         window
@@ -1486,5 +1482,48 @@ mod tests {
             ComposerSendBehavior::ModEnter,
             "mod-shift-enter"
         ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn appshots_lists_its_grants_through_the_shared_guide(cx: &mut gpui::TestAppContext) {
+        use crate::settings::permission_guide::PermissionPane;
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+        });
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            let mut page = ShortcutsPage::new(
+                state,
+                KeymapConfig::default(),
+                false,
+                ComposerSendBehavior::default(),
+                FollowUpBehavior::default(),
+                SwitcherWindow::default(),
+                0,
+                false,
+                true,
+                AppshotDestination::Automatic,
+                cx,
+            );
+            page.show_appshots(true);
+            page
+        });
+        cx.run_until_parked();
+        page.update(cx, |page, _| {
+            assert_eq!(
+                page.permissions.guide.rendered,
+                vec![
+                    PermissionPane::InputMonitoring,
+                    PermissionPane::ScreenRecording,
+                    PermissionPane::Accessibility,
+                ]
+            );
+        });
+        assert!(
+            cx.debug_bounds("appshot-permission-row-input-monitoring")
+                .is_some()
+        );
     }
 }

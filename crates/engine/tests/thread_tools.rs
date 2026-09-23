@@ -210,6 +210,7 @@ fn queue_human_run(core: &EngineCore, chat_id: &str, command_id: &str, message_i
                     branch: None,
                     resume: None,
                     forked_at: None,
+                    computer_control: false,
                 },
                 message_id: message_id.into(),
             },
@@ -219,6 +220,7 @@ fn queue_human_run(core: &EngineCore, chat_id: &str, command_id: &str, message_i
             expires_at: None,
             status: SessionCommandStatus::Pending,
             resolution: None,
+            computer_generation: None,
         })
         .expect("queue command");
 }
@@ -699,6 +701,8 @@ async fn summary_rpc_reads_a_bounded_preview_without_a_transcript_watch() {
             status: None,
             continuation_of: None,
             from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
         })
         .unwrap();
     let client = zeron_rpc::memory_client(rig.core.rpc_service());

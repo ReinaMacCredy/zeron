@@ -159,6 +159,7 @@ fn run_request(prompt: &str) -> RunRequest {
         branch: None,
         resume: None,
         forked_at: None,
+        computer_control: false,
     }
 }
 
@@ -196,6 +197,7 @@ fn queue_run_with(
             expires_at: None,
             status: SessionCommandStatus::Pending,
             resolution: None,
+            computer_generation: None,
         })
         .expect("queue command");
 }

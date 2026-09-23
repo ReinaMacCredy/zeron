@@ -146,6 +146,7 @@ fn main() -> anyhow::Result<()> {
             issued_at: 1788900000000,
             edited_at: None,
             delivery_gate: None,
+            computer_generation: None,
         },
         zeron_doc::QueuedMessage {
             id: "queued-text".into(),
@@ -157,6 +158,7 @@ fn main() -> anyhow::Result<()> {
             issued_at: 1788900000001,
             edited_at: None,
             delivery_gate: None,
+            computer_generation: None,
         },
     ];
     let failure = Arc::new(std::sync::Mutex::new(None));

@@ -15,6 +15,7 @@ members = [
     "crates/syntax",
     "apps/zeron",
 ]
+exclude = ["vendor/cua-driver"]
 
 [workspace.package]
 version = "0.2.79"

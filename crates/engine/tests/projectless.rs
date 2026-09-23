@@ -186,6 +186,7 @@ async fn exercise_projectless(command_first: bool) {
                         branch: None,
                         resume: None,
                         forked_at: None,
+                        computer_control: false,
                     },
                     message_id: message_id.into(),
                 },

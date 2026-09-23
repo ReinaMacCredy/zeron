@@ -62,6 +62,7 @@ fn run_request(prompt: &str) -> RunRequest {
         branch: None,
         resume: None,
         forked_at: None,
+        computer_control: false,
     }
 }
 

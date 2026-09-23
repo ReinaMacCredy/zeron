@@ -201,6 +201,7 @@ fn run_payload(prompt: &str, message_id: &str, cwd: &str) -> SessionCommandPaylo
             worktree: None,
             branch: None,
             forked_at: None,
+            computer_control: false,
         },
         message_id: message_id.into(),
     }
@@ -327,6 +328,8 @@ async fn fork_copies_through_the_reply_and_branches_the_next_run() {
         vec!["first".to_string(), "answer 1".to_string()]
     );
     assert_eq!(fork_entries[0].id, source_before[0].id);
+    assert!(fork_entries.iter().all(|entry| entry.fork_import));
+    assert!(source_before.iter().all(|entry| !entry.fork_import));
     assert_eq!(
         rig.chat(FORK).harness_session_id.as_deref(),
         Some("sess-1"),
@@ -337,6 +340,11 @@ async fn fork_copies_through_the_reply_and_branches_the_next_run() {
     assert_eq!(rig.chat(SOURCE), row_before);
 
     rig.turn(FORK, "third, on the fork", "m3").await;
+    assert!(
+        entries(&rig.core, FORK)[2..]
+            .iter()
+            .all(|entry| !entry.fork_import)
+    );
     let seen = rig.seen();
     assert_eq!(
         seen[2],

@@ -67,6 +67,7 @@ extension SessionStore {
             try map.insert(key: "text", v: text)
             try map.insert(key: "issuedBy", v: deviceId)
             try map.insert(key: "issuedAt", v: nowMs())
+            try map.insert(key: "computerGeneration", v: computerGeneration)
             if holdForTurnEnd {
                 try map.insert(key: "holdForTurnEnd", v: true)
             }

@@ -725,6 +725,9 @@ impl ClaudeHarness {
             // wait_threads blocks up to 30 min, so raise it to the cap.
             cmd.args(["--mcp-config", &server.mcp_config_json("zeron")]);
             cmd.env("MCP_TOOL_TIMEOUT", "1800000");
+            if let Some(guidance) = &server.guidance {
+                cmd.args(["--append-system-prompt", guidance]);
+            }
         }
         let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -782,6 +785,7 @@ impl ClaudeHarness {
         tokio::spawn(run_session(Session {
             title_only,
             permission_mode: request.permission_mode,
+            computer_control: request.computer_control,
             child,
             stdout_lines: BufReader::new(stdout).lines(),
             stdin_tx,
@@ -908,6 +912,7 @@ async fn stdin_writer(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<Std
 struct Session {
     title_only: bool,
     permission_mode: zeron_proto::PermissionMode,
+    computer_control: bool,
     child: Child,
     stdout_lines: tokio::io::Lines<BufReader<crate::process::ChildStdout>>,
     stdin_tx: mpsc::UnboundedSender<StdinMsg>,
@@ -928,6 +933,7 @@ async fn run_session(session: Session) {
     let Session {
         title_only,
         permission_mode,
+        computer_control,
         mut child,
         mut stdout_lines,
         stdin_tx,
@@ -977,7 +983,13 @@ async fn run_session(session: Session) {
                             }));
                             let _ = stdin_tx.send(StdinMsg::Line(line));
                         } else {
-                            handle_control_request(req, permission_mode, &request_input, &stdin_tx);
+                            handle_control_request(
+                                req,
+                                permission_mode,
+                                computer_control,
+                                &request_input,
+                                &stdin_tx,
+                            );
                         }
                         continue;
                     }
@@ -1107,6 +1119,7 @@ type RequestInputFn = Box<
 fn handle_control_request(
     req: ControlRequestFrame,
     permission_mode: zeron_proto::PermissionMode,
+    computer_control: bool,
     request_input: &Arc<RequestInputFn>,
     stdin_tx: &mpsc::UnboundedSender<StdinMsg>,
 ) {
@@ -1118,7 +1131,10 @@ fn handle_control_request(
         return;
     }
     if req.request.tool_name != "AskUserQuestion" {
-        if permission_mode == zeron_proto::PermissionMode::Full {
+        // The engine's consent card is the only prompt a Zeron computer call gets.
+        let computer_call =
+            computer_control && crate::is_zeron_computer_tool(&req.request.tool_name);
+        if computer_call || permission_mode == zeron_proto::PermissionMode::Full {
             let line = control_response_line(&req.request_id, allow_response(req.request.input));
             let _ = stdin_tx.send(StdinMsg::Line(line));
             return;
@@ -1185,6 +1201,7 @@ fn permission_question(tool_name: &str, input: &Value) -> UserInputQuestion {
         question: format!("Claude wants to use {tool_name}: {detail}"),
         options: vec!["Allow".into(), "Deny".into()],
         multi_select: false,
+        kind: None,
     }
 }
 
@@ -1223,6 +1240,7 @@ fn parse_questions(input: &Value) -> Vec<UserInputQuestion> {
                             .into(),
                     })
                     .collect(),
+                kind: None,
             }
         })
         .collect()
@@ -1387,6 +1405,7 @@ mod tests {
                 worktree: None,
                 branch: None,
                 forked_at: None,
+                computer_control: false,
             };
             if let Some(choice) = choice {
                 request
@@ -1438,6 +1457,7 @@ mod tests {
                 worktree: None,
                 branch: None,
                 forked_at: None,
+                computer_control: false,
             };
             harness
                 .build_command(&exe, &request)
@@ -1461,6 +1481,77 @@ mod tests {
         let full = args(PermissionMode::Full);
         assert_eq!(mode_of(&full).as_deref(), Some("default"));
         assert!(!full.iter().any(|a| a == "--dangerously-skip-permissions"));
+    }
+
+    #[tokio::test]
+    async fn zeron_computer_tools_skip_the_harness_prompt_in_every_mode() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use zeron_proto::PermissionMode;
+        let asked = Arc::new(AtomicUsize::new(0));
+        let request_input: Arc<RequestInputFn> = {
+            let asked = Arc::clone(&asked);
+            Arc::new(Box::new(move |_questions| {
+                asked.fetch_add(1, Ordering::SeqCst);
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let _ = tx.send(Vec::new());
+                rx
+            }))
+        };
+        let frame = |tool: &str| ControlRequestFrame {
+            request_id: "r1".into(),
+            request: wire::ControlRequestBody {
+                subtype: "can_use_tool".into(),
+                tool_name: tool.into(),
+                input: json!({ "window_id": 7 }),
+            },
+        };
+        let answer = |tool: &str, mode: PermissionMode, computer_control: bool| {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            handle_control_request(frame(tool), mode, computer_control, &request_input, &tx);
+            async move {
+                match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
+                    Ok(Some(StdinMsg::Line(line))) => line,
+                    _ => panic!("no control response"),
+                }
+            }
+        };
+        for mode in [
+            PermissionMode::Ask,
+            PermissionMode::Auto,
+            PermissionMode::Full,
+        ] {
+            for tool in [
+                "mcp__zeron__computer_click",
+                "mcp__zeron__computer_browser_navigate",
+                "mcp__zeron__computer_spaces",
+            ] {
+                let line = answer(tool, mode, true).await;
+                assert!(
+                    line.contains(r#""behavior":"allow""#),
+                    "{mode:?} {tool}: {line}"
+                );
+                assert!(line.contains(r#""window_id":7"#), "{line}");
+            }
+        }
+        assert_eq!(asked.load(Ordering::SeqCst), 0);
+        for (tool, computer_control) in [
+            ("Bash", true),
+            ("mcp__zeron__list_threads", true),
+            ("mcp__other__computer_click", true),
+            ("mcp__zeron__computer_click", false),
+        ] {
+            for mode in [PermissionMode::Ask, PermissionMode::Auto] {
+                let line = answer(tool, mode, computer_control).await;
+                assert!(
+                    line.contains(r#""behavior":"deny""#),
+                    "{mode:?} {tool}: {line}"
+                );
+            }
+        }
+        assert_eq!(asked.load(Ordering::SeqCst), 8);
+        let line = answer("Bash", PermissionMode::Full, true).await;
+        assert!(line.contains(r#""behavior":"allow""#));
+        assert_eq!(asked.load(Ordering::SeqCst), 8);
     }
 
     #[test]
@@ -1502,6 +1593,7 @@ mod tests {
                 drop: Some("uuid-prompt-2".into()),
             }),
             forked_at: None,
+            computer_control: false,
         };
         let args = |cmd: &Command| -> Vec<String> {
             cmd.as_std()
@@ -1582,6 +1674,7 @@ mod tests {
                 drop: None,
             }),
             forked_at: Some(at.into()),
+            computer_control: false,
         };
         let run = |request: &RunRequest| {
             let cmd = harness.build_command(&exe, request);

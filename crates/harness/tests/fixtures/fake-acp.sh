@@ -71,6 +71,7 @@ elif has "$line" '"method":"session/new"'; then
   if has "$line" '"name":"zeron"'; then
     has "$line" '"command":"/opt/zeron/zeron"' || exit 1
     has "$line" '"args":["mcp","--chat","chat-42","--port","27654"]' || exit 1
+    has "$line" '"env":[{"name":"ZERON_RUN_SECRET","value":"s3cret"}]' || exit 1
     ZERON_TOOLS=1
   else
     has "$line" '"mcpServers":[]' || exit 1
@@ -238,6 +239,26 @@ case "$promptline" in
   { has "$ans" '"id":88' && has "$ans" '"outcome":"selected"' && has "$ans" '"optionId":"opt-tokio"'; } ||
     { emit "{\"id\":$pid,\"result\":{\"stopReason\":\"refusal\"}}"; exit 0; }
   update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"answered"}}'
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
+  ;;
+
+*scenario:computer*)
+  # Guidance rides a host-context part ahead of the first prompt; a Zeron
+  # computer permission in the recorded shape selects allow_once, anything
+  # else still reaches the input bridge (which answers "Yes", no such option).
+  ctx=0
+  has "$promptline" '"prompt":[{"text":"<zeron_host_context>\n## Zeron computer use' && ctx=1
+  outcome="ctx=$ctx"
+  for req in '61 mcp__zeron__computer_click' '62 mcp__zeron__list_threads'; do
+    set -- $req
+    emit "{\"id\":$1,\"method\":\"session/request_permission\",\"params\":{\"sessionId\":\"$SID\",\"toolCall\":{\"toolCallId\":\"c$1\",\"title\":\"Tool\",\"kind\":\"other\",\"status\":\"pending\",\"rawInput\":{\"_toolName\":\"$2\",\"arguments\":{}}},\"options\":[{\"optionId\":\"once\",\"name\":\"Allow once\",\"kind\":\"allow_once\"},{\"optionId\":\"always\",\"name\":\"Always allow\",\"kind\":\"allow_always\"},{\"optionId\":\"no\",\"name\":\"Reject\",\"kind\":\"reject_once\"}]}}"
+    read -r ans || exit 1
+    has "$ans" "\"id\":$1" || exit 1
+    if has "$ans" '"optionId":"once"'; then outcome="$outcome $1:once"
+    elif has "$ans" '"outcome":"cancelled"'; then outcome="$outcome $1:asked"
+    else outcome="$outcome $1:other"; fi
+  done
+  update "{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"$outcome\"}}"
   emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
   ;;
 

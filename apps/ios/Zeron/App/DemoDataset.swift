@@ -15,6 +15,7 @@ final class DemoDataset {
     var chats: [Chat]
     var sessions: [String: SessionRow]
     var changeRequests: [String: ChangeRequestSummary]
+    var computerStill: ComputerStillFrameReply?
     private var stores: [String: SessionStore] = [:]
     private var streamTask: Task<Void, Never>?
 
@@ -71,6 +72,11 @@ final class DemoDataset {
                  config: claude, lastMessagePreview: "Hibernation-safe flush timer",
                  lastMessageAt: now - 86_400_000, createdAt: now - 86_400_000 * 2,
                  spaceId: edge.id, lastSeenAt: now - 86_400_000),
+            Chat(id: "chat-computer", deviceId: "dev-mac", title: "Calculator check with Computer",
+                 archived: false, cwd: zeron.path, branch: "main", checkoutId: nil,
+                 config: claude, lastMessagePreview: "Allow Computer for this task?",
+                 lastMessageAt: now - 86_400_000 - 60_000, createdAt: now - 86_400_000 * 2,
+                 spaceId: zeron.id, lastSeenAt: now - 86_400_000),
             // Archived — populate the shelf under the active list.
             Chat(id: "chat-oklch", deviceId: "dev-mac", title: "OKLCH conversion drift",
                  archived: true, cwd: zeron.path, branch: "main", checkoutId: nil,
@@ -109,6 +115,27 @@ final class DemoDataset {
         ]
         return DemoDataset(devices: [mac, vps], spaces: [zeron, edge],
                            chats: chats, sessions: sessions, changeRequests: changeRequests)
+    }
+
+    static func syntheticComputerStill() -> ComputerStillFrameReply? {
+        let size = CGSize(width: 640, height: 400)
+        let image = UIGraphicsImageRenderer(size: size).image { context in
+            UIColor(red: 0.16, green: 0.22, blue: 0.36, alpha: 1).setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+            UIColor(white: 0.12, alpha: 1).setFill()
+            UIBezierPath(roundedRect: CGRect(x: 200, y: 60, width: 240, height: 300), cornerRadius: 18).fill()
+            let digits = NSAttributedString(string: "4", attributes: [
+                .font: UIFont.systemFont(ofSize: 96, weight: .light),
+                .foregroundColor: UIColor.white,
+            ])
+            digits.draw(at: CGPoint(x: 380, y: 90))
+            UIColor.systemOrange.setFill()
+            for row in 0..<3 {
+                UIBezierPath(ovalIn: CGRect(x: 370, y: 220 + row * 44, width: 36, height: 36)).fill()
+            }
+        }
+        guard let data = image.jpegData(compressionQuality: 0.8) else { return nil }
+        return ComputerStillFrameReply(frame: .init(sequence: 1, data: data.base64EncodedString()))
     }
 
     // MARK: Fake filesystem (folder browser demo)
@@ -316,6 +343,48 @@ final class DemoDataset {
                     .tool(id: "tool3", call: RenderToolCall(tag: "editFile", fields: ["path": "crates/ui/src/shell/transcript.rs"]), isError: false, resolved: true),
                     .text(id: "t0", text: "Done — the header keeps `text_muted` even on failure; only the chip label and the summary segment (\"1 failed\") pick up `danger`. Matches the desktop fix in `1749890`."),
                 ], createdAt: now - 950_000, deviceId: "dev-mac", status: .complete, continuationOf: nil),
+            ]
+        case "chat-computer":
+            let tool = { (id: String, name: String, isError: Bool, denied: Bool) -> MessagePart in
+                .tool(id: id, call: RenderToolCall(tag: "mcp", fields: ["server": "zeron", "tool": name]),
+                      isError: isError, resolved: true, controlDenied: denied)
+            }
+            let consent = { (id: String, scope: ComputerConsentScope, question: String,
+                             answers: [UserInputAnswer]?) -> MessagePart in
+                .input(id: id, requestId: id, questions: [
+                    UserInputQuestion(id: "consent", header: "Computer", question: question,
+                                      options: [ComputerCopy.consentAllow, ComputerCopy.consentDecline],
+                                      multiSelect: false, kind: .consent(scope)),
+                ], resolved: answers != nil, answers: answers)
+            }
+            let note = { (id: String, text: String, hint: String?) -> MessageEntry in
+                MessageEntry(id: id, role: .system,
+                             parts: [.text(id: "t0", text: text)] + (hint.map { [.text(id: "t1", text: $0)] } ?? []),
+                             createdAt: now - 500_000, deviceId: "dev-mac", status: .complete, continuationOf: nil)
+            }
+            return [
+                MessageEntry(id: "m1", role: .user, parts: [
+                    .text(id: "t0", text: "/computer-use Open Calculator and work out 2 + 2"),
+                ], createdAt: now - 600_000, deviceId: "ios-demo", status: .complete, continuationOf: nil),
+                note("n1", ComputerCopy.setupNote, "Allow Accessibility for Zeron in System Settings, then continue."),
+                note("n2", ComputerCopy.unavailableNote, "OpenCode does not receive Zeron's Computer tools. Switch this chat to Claude, Codex or another agent that does to use Computer."),
+                note("n3", ComputerCopy.escapeStopNotice, nil),
+                MessageEntry(id: "m2", role: .assistant, parts: [
+                    tool("c0", "mcp__zeron__computer_click", true, true),
+                    consent("computer-consent-demo-call", .call, "Allow the agent to run computer_read_clipboard once?",
+                            [UserInputAnswer(questionId: "consent", labels: [ComputerCopy.consentAllow])]),
+                ], createdAt: now - 400_000, deviceId: "dev-mac", status: .complete, continuationOf: nil),
+                note("n4", ComputerCopy.controlOnDisclosure, nil),
+                MessageEntry(id: "m3", role: .assistant, parts: [
+                    tool("c1", "computer_launch_app", false, false),
+                    tool("c2", "computer_click", false, false),
+                    tool("c3", "computer_type_text", false, false),
+                    tool("c4", "computer_read_clipboard", false, false),
+                    .text(id: "t0", text: "Calculator shows 4. One more step needs the desktop:"),
+                    consent("computer-consent-demo-task", .task,
+                            "Allow Computer for this task? The agent wants to run computer_click and will drive this Mac's apps until the turn ends.",
+                            nil),
+                ], createdAt: now - 300_000, deviceId: "dev-mac", status: .complete, continuationOf: nil),
             ]
         case "chat-deploy":
             return [

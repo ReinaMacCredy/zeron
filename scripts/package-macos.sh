@@ -25,8 +25,12 @@ cd "$ROOT"
 cargo build --release -p zeron
 
 rm -rf "$APP" "$DMG" "$APP_TARBALL"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/cua-driver"
 install -m 755 "$ROOT/target/release/zeron" "$APP/Contents/MacOS/zeron"
+DRIVER="$APP/Contents/Resources/cua-driver/cua-driver"
+"$ROOT/scripts/build-cua-driver.sh" "$DRIVER" >/dev/null
+mkdir -p "$APP/Contents/Resources/licenses/cua-driver"
+cp "$ROOT/vendor/cua-driver/LICENSE.md" "$ROOT/vendor/cua-driver/NOTICE.md" "$APP/Contents/Resources/licenses/cua-driver/"
 sed "s/__VERSION__/$VERSION/" "$ROOT/dist/macos/Info.plist" >"$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/Resources/licenses/fonts"
 cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$APP/Contents/Resources/licenses/fonts/"
@@ -46,7 +50,9 @@ rm -rf "$ICONSET"
 
 if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
   # Hardened runtime + secure timestamp are both notarization requirements.
-  # (No --deep: Apple deprecated it; the bundle is a single Mach-O anyway.)
+  # No --deep (Apple deprecated it): the nested driver is signed first, then
+  # the bundle seals it.
+  codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" --identifier sh.zeron.cua-driver "$DRIVER"
   codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP"
 else
   # Ad-hoc signature so the app launches on Apple silicon (Gatekeeper still

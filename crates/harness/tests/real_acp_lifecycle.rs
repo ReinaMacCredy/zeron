@@ -31,6 +31,7 @@ async fn live_run(cancel: bool) {
         permission_mode: zeron_proto::PermissionMode::Full,
         attachments: Vec::new(), worktree: None, branch: None, resume: None,
         forked_at: None,
+        computer_control: false,
     };
     let mut stream = AcpHarness::pi()
         .run(request, controls)

@@ -52,6 +52,7 @@ fn request(prompt: &str) -> RunRequest {
         branch: None,
         resume: None,
         forked_at: None,
+        computer_control: false,
     }
 }
 
@@ -107,6 +108,8 @@ async fn thread_tools_ride_an_additive_mcp_config_on_a_normal_run() {
             "--port".into(),
             "27654".into(),
         ],
+        env: vec![("ZERON_RUN_SECRET".into(), "s3cret".into())],
+        guidance: None,
     });
     // The fixture exits 1 (no result frame) unless --mcp-config names the
     // zeron server with the chat and no --strict-mcp-config is present.
@@ -136,6 +139,39 @@ async fn thread_tools_ride_an_additive_mcp_config_on_a_normal_run() {
         )),
         "{events:?}"
     );
+}
+
+#[tokio::test]
+async fn computer_guidance_rides_the_appended_system_prompt_only_on_a_computer_run() {
+    let completed = |events: &[AgentEvent]| {
+        events.iter().any(|e| {
+            matches!(
+                e,
+                AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    ..
+                }
+            )
+        })
+    };
+    let run = |scenario: &'static str, guidance: Option<&'static str>| async move {
+        let (mut controls, _steer, _token) = controls("A");
+        controls.tool_server = Some(zeron_harness::ToolServer {
+            command: "/opt/zeron/zeron".into(),
+            args: vec!["mcp".into()],
+            env: Vec::new(),
+            guidance: guidance.map(str::to_owned),
+        });
+        let mut req = request(scenario);
+        req.computer_control = guidance.is_some();
+        run_to_end(&harness(), req, controls).await
+    };
+    let on = run("scenario:computer-on", Some("## Zeron computer use\nbody")).await;
+    assert!(completed(&on), "{on:?}");
+    let off = run("scenario:computer-off", None).await;
+    assert!(completed(&off), "{off:?}");
+    let missing = run("scenario:computer-on", None).await;
+    assert!(!completed(&missing), "{missing:?}");
 }
 
 #[tokio::test]

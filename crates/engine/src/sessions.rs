@@ -18,6 +18,7 @@
 //! spawn failure, stream error, engine-restart recovery).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use chrono::Utc;
@@ -30,9 +31,11 @@ use zeron_doc::{
 };
 use zeron_harness::{CancellationToken, Harness, HarnessError, RunControls, SteerMessage};
 use zeron_proto::{
-    AgentEvent, AnchorRole, Chat, Compaction, DoneStatus, HarnessId, RunRequest, Session,
-    SessionBranch, SessionStatus, ToolDiff, UserInputAnswer, UserInputQuestion,
+    AgentEvent, AnchorRole, Chat, Compaction, DoneStatus, HarnessId, PermissionMode, RunRequest,
+    Session, SessionBranch, SessionStatus, ToolDiff, UserInputAnswer, UserInputQuestion,
 };
+
+use crate::computer::runtime::ComputerRuntime;
 
 use crate::doc_host::{ChatDocHandle, DocHost};
 use crate::registry::{HarnessDescriptor, HarnessRegistry};
@@ -97,6 +100,7 @@ struct RuntimeConfig {
     auto_approve: bool,
     permission_mode: zeron_proto::PermissionMode,
     worktree: Option<zeron_proto::WorktreeSpec>,
+    computer_control: bool,
 }
 
 impl RuntimeConfig {
@@ -111,6 +115,7 @@ impl RuntimeConfig {
             auto_approve: request.auto_approve,
             permission_mode: request.permission_mode,
             worktree: request.worktree.clone(),
+            computer_control: request.computer_control,
         }
     }
 
@@ -138,6 +143,70 @@ struct RunHandle {
     /// and re-dispatches each entry as a fresh turn, so an accepted message
     /// can never silently evaporate from a transcript that shows it as sent.
     routed_steers: Arc<Mutex<std::collections::VecDeque<RoutedSteer>>>,
+    computer: Arc<RunComputer>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComputerRun {
+    pub run_id: String,
+    pub turn_id: Option<String>,
+    pub permission_mode: PermissionMode,
+    pub run_computer_control: bool,
+    pub turn_computer_control: bool,
+}
+
+#[derive(Debug, Clone)]
+struct TurnMark {
+    id: String,
+    computer_control: bool,
+}
+
+struct RunComputer {
+    secret: String,
+    revoked: AtomicBool,
+    turn: Mutex<Option<TurnMark>>,
+}
+
+impl RunComputer {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            secret: format!(
+                "{}{}",
+                uuid::Uuid::new_v4().simple(),
+                uuid::Uuid::new_v4().simple()
+            ),
+            revoked: AtomicBool::new(false),
+            turn: Mutex::new(None),
+        })
+    }
+
+    fn accepts(&self, secret: &str) -> bool {
+        !self.revoked.load(Ordering::Acquire) && secrets_match(&self.secret, secret)
+    }
+
+    fn begin_turn(&self, id: &str, computer_control: bool) {
+        *lock(&self.turn) = Some(TurnMark {
+            id: id.to_owned(),
+            computer_control,
+        });
+    }
+
+    fn end_turn(&self) -> Option<String> {
+        lock(&self.turn).take().map(|turn| turn.id)
+    }
+
+    fn turn(&self) -> Option<TurnMark> {
+        lock(&self.turn).clone()
+    }
+}
+
+fn secrets_match(expected: &str, given: &str) -> bool {
+    expected.len() == given.len()
+        && expected
+            .bytes()
+            .zip(given.bytes())
+            .fold(0u8, |diff, (a, b)| diff | (a ^ b))
+            == 0
 }
 
 enum RunMode {
@@ -195,6 +264,7 @@ impl RunSetup {
                 engine_tx,
                 pending_inputs,
                 routed_steers: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+                computer: RunComputer::new(),
             },
             controls,
             engine_rx,
@@ -209,6 +279,7 @@ struct RoutedSteer {
     prompt: String,
     message_id: String,
     attachments: Vec<String>,
+    computer_control: bool,
 }
 
 struct Inner {
@@ -259,6 +330,7 @@ struct Inner {
     /// dispatch or accepted steer) — the diff sync snapshots the checkout tree
     /// for the Changes pane's "Latest turn" scope. Absent in bare tests.
     turn_listener: OnceLock<TurnListener>,
+    computer: Mutex<Option<Arc<ComputerRuntime>>>,
 }
 
 /// Turn-start hook: called with `(chat_id, cwd)`.
@@ -277,7 +349,12 @@ impl Inner {
     /// The thread-tools server for one chat's run: this binary as
     /// `zeron mcp --chat <id> --port <port>`. `None` until an IPC port is
     /// recorded, so a run never gets a server it cannot dial.
-    fn tool_server_for(&self, chat_id: &str) -> Option<zeron_harness::ToolServer> {
+    fn tool_server_for(
+        &self,
+        chat_id: &str,
+        secret: &str,
+        computer_control: bool,
+    ) -> Option<zeron_harness::ToolServer> {
         let port = (*lock(&self.tool_server_port))?;
         let command = std::env::current_exe().ok()?.to_string_lossy().into_owned();
         Some(zeron_harness::ToolServer {
@@ -289,7 +366,20 @@ impl Inner {
                 "--port".into(),
                 port.to_string(),
             ],
+            env: vec![(zeron_rpc::COMPUTER_RUN_SECRET_ENV.into(), secret.into())],
+            guidance: computer_control
+                .then(crate::computer::tools::guidance::computer_tool_instructions),
         })
+    }
+
+    fn computer(&self) -> Option<Arc<ComputerRuntime>> {
+        lock(&self.computer).clone()
+    }
+
+    fn computer_turn_ended(&self, chat_id: &str, turn_id: Option<String>) {
+        if let (Some(computer), Some(turn_id)) = (self.computer(), turn_id) {
+            computer.turn_ended(chat_id, &turn_id);
+        }
     }
 }
 
@@ -321,6 +411,7 @@ impl SessionsEngine {
                 titles: OnceLock::new(),
                 generated_images: OnceLock::new(),
                 turn_listener: OnceLock::new(),
+                computer: Mutex::new(None),
             }),
         }
     }
@@ -346,6 +437,22 @@ impl SessionsEngine {
     /// already treats a missing doc host as "not wired".
     pub fn clear_doc_host(&self) {
         lock(&self.inner.doc_host).take();
+        lock(&self.inner.computer).take();
+    }
+
+    pub fn set_computer(&self, computer: Arc<ComputerRuntime>) {
+        let mut slot = lock(&self.inner.computer);
+        if slot.is_none() {
+            *slot = Some(computer);
+        }
+    }
+
+    pub fn computer(&self) -> Option<Arc<ComputerRuntime>> {
+        self.inner.computer()
+    }
+
+    pub(crate) fn workspace(&self) -> Option<crate::workspace_host::WorkspaceHost> {
+        self.inner.workspace()
     }
 
     /// Bind generated-image intake to the same profile store used by attachment RPCs.
@@ -546,6 +653,35 @@ impl SessionsEngine {
         request.cwd = expand_home(&request.cwd);
         // Every dispatched prompt is a turn — routed steer or fresh run alike.
         self.note_turn_start(chat_id, &request.cwd);
+        self.label_computer_chat(chat_id);
+        if request.computer_control
+            && self
+                .inner
+                .registry
+                .resolve(harness_id)
+                .is_ok_and(|harness| !harness.computer_tools_reachable())
+        {
+            self.note_computer_unreachable(chat_id, harness_id);
+            request.computer_control = false;
+        }
+        let mut turn_computer = request.computer_control;
+        let live_computer = lock(&self.inner.runs)
+            .get(chat_id)
+            .map(|h| h.runtime_config.computer_control);
+        if let Some(live) = live_computer
+            && live != request.computer_control
+            && self
+                .inner
+                .registry
+                .resolve(harness_id)
+                .is_ok_and(|harness| harness.resume_supported() == Some(false))
+        {
+            if request.computer_control {
+                self.note_computer_unavailable(chat_id, harness_id);
+            }
+            turn_computer = false;
+            request.computer_control = live;
+        }
         let routed = lock(&self.inner.runs).get(chat_id).map(|h| {
             (
                 h.run_id.clone(),
@@ -567,7 +703,7 @@ impl SessionsEngine {
                     // dying run re-dispatches) keep the typed text.
                     prompt: self
                         .inner
-                        .harness_prompt(chat_id, &request.prompt, &user_id)
+                        .harness_prompt(chat_id, &request.prompt, &user_id, turn_computer)
                         .map_or_else(|| request.prompt.clone(), |wrapped| wrapped.prompt),
                     message_id: Some(user_id.clone()),
                     attachments: request.attachments.clone(),
@@ -577,6 +713,7 @@ impl SessionsEngine {
                         prompt: request.prompt.clone(),
                         message_id: user_id.clone(),
                         attachments: request.attachments.clone(),
+                        computer_control: turn_computer,
                     });
                     true
                 } else {
@@ -659,7 +796,10 @@ impl SessionsEngine {
                 steerable: harness.supports_steering(),
             },
         );
-        controls.tool_server = self.inner.tool_server_for(chat_id);
+        controls.tool_server =
+            self.inner
+                .tool_server_for(chat_id, &run.computer.secret, request.computer_control);
+        let run_computer = run.computer.clone();
         let run_id = run.run_id.clone();
         lock(&self.inner.runs).insert(chat_id.to_string(), run);
         self.set_status(chat_id, SessionStatus::Working, true);
@@ -690,9 +830,57 @@ impl SessionsEngine {
                 user_message_id: user_id,
                 resume_injected,
                 startup_retry,
+                computer: run_computer,
+                turn_computer,
             },
         ));
         Ok(run_id)
+    }
+
+    fn label_computer_chat(&self, chat_id: &str) {
+        let Some(computer) = self.inner.computer() else {
+            return;
+        };
+        if let Some(title) = self
+            .inner
+            .workspace()
+            .and_then(|ws| ws.chat(chat_id).ok().flatten())
+            .and_then(|chat| chat.title)
+        {
+            computer.set_chat_label(chat_id, Some(&title));
+        }
+    }
+
+    fn harness_display_name(&self, harness_id: HarnessId) -> String {
+        self.inner
+            .registry
+            .resolve(harness_id)
+            .map(|harness| harness.display_name().to_owned())
+            .unwrap_or_else(|_| "This agent".into())
+    }
+
+    fn note_computer_unreachable(&self, chat_id: &str, harness_id: HarnessId) {
+        let name = self.harness_display_name(harness_id);
+        let hint = format!(
+            "{name} does not receive Zeron's Computer tools. Switch this chat to Claude, Codex or another agent that does to use Computer."
+        );
+        self.write_computer_note(
+            chat_id,
+            "Computer is unavailable for this turn",
+            Some(&hint),
+        );
+    }
+
+    fn note_computer_unavailable(&self, chat_id: &str, harness_id: HarnessId) {
+        let name = self.harness_display_name(harness_id);
+        let hint = format!(
+            "{name} cannot reload its session, so Zeron cannot restart it with the Computer tools without losing the conversation. Start a new chat to use Computer with it."
+        );
+        self.write_computer_note(
+            chat_id,
+            "Computer is unavailable for this turn",
+            Some(&hint),
+        );
     }
 
     /// Push a steer prompt into the live run's mailbox. `NotSteerable` when no live
@@ -704,28 +892,46 @@ impl SessionsEngine {
         attachments: &[String],
         message_id: Option<String>,
     ) -> Result<SteerOutcome, EngineError> {
+        self.steer_with(chat_id, prompt, attachments, message_id, None)
+            .await
+    }
+
+    /// The text-only mailbox cannot change a run's tool catalog, so a Computer flag mismatch is NotSteerable.
+    pub async fn steer_with(
+        &self,
+        chat_id: &str,
+        prompt: &str,
+        attachments: &[String],
+        message_id: Option<String>,
+        computer_control: Option<bool>,
+    ) -> Result<SteerOutcome, EngineError> {
         self.ensure_sidechat_active(chat_id)?;
         let target = lock(&self.inner.runs)
             .get(chat_id)
             .filter(|h| h.steerable)
+            .filter(|h| {
+                computer_control.is_none_or(|flag| flag == h.runtime_config.computer_control)
+            })
             .map(|h| {
                 (
                     h.run_id.clone(),
                     h.steer_tx.clone(),
                     h.routed_steers.clone(),
+                    h.runtime_config.computer_control,
                 )
             });
-        let Some((run_id, steer_tx, ledger)) = target else {
+        let Some((run_id, steer_tx, ledger, run_computer)) = target else {
             return Ok(SteerOutcome::NotSteerable);
         };
         let user_id = message_id.unwrap_or_else(new_id);
+        let turn_computer = computer_control.unwrap_or(run_computer);
         let message = SteerMessage {
             // Held-queue release and queued sends reach the harness through
             // here without ever entering `dispatch`, so a sidechat's wrap has
             // to happen on this path too.
             prompt: self
                 .inner
-                .harness_prompt(chat_id, prompt, &user_id)
+                .harness_prompt(chat_id, prompt, &user_id, turn_computer)
                 .map_or_else(|| prompt.to_string(), |wrapped| wrapped.prompt),
             message_id: Some(user_id.clone()),
             attachments: attachments.to_vec(),
@@ -741,6 +947,7 @@ impl SessionsEngine {
                 prompt: prompt.to_string(),
                 message_id: user_id.clone(),
                 attachments: attachments.to_vec(),
+                computer_control: turn_computer,
             });
         }
         let handle = self.doc_handle(chat_id)?;
@@ -777,6 +984,7 @@ impl SessionsEngine {
     /// (bounded) for that settlement so callers observe a consistent doc.
     pub async fn interrupt(&self, chat_id: &str) -> Result<bool, EngineError> {
         let target = lock(&self.inner.runs).get(chat_id).map(|h| {
+            h.computer.revoked.store(true, Ordering::Release);
             (
                 h.run_id.clone(),
                 h.interrupt_token.clone(),
@@ -1004,7 +1212,10 @@ impl SessionsEngine {
         let handle = self.doc_handle(new_chat_id)?;
         if handle.doc().read_entries()?.is_empty() {
             for entry in &entries[..end] {
-                handle.doc().push_message(entry)?;
+                handle.doc().push_message(&SessionMessageEntry {
+                    fork_import: true,
+                    ..entry.clone()
+                })?;
             }
         }
         if let Some(text) = entries[..end].iter().rev().find_map(|e| {
@@ -1210,6 +1421,7 @@ impl SessionsEngine {
                     worktree: None,
                     branch: None,
                     forked_at: None,
+                    computer_control: false,
                 }
             }
         };
@@ -1238,11 +1450,139 @@ impl SessionsEngine {
         let Some(resolver) = lock(&pending).remove(request_id) else {
             return Ok(false);
         };
-        let _ = resolver.send(answers);
+        let _ = resolver.send(answers.clone());
         let _ = engine_tx.send(AgentEvent::InputResolved {
             request_id: request_id.to_string(),
+            answers: Some(answers),
         });
         Ok(true)
+    }
+
+    pub fn raise_input(
+        &self,
+        chat_id: &str,
+        request_id: &str,
+        questions: Vec<UserInputQuestion>,
+    ) -> Result<oneshot::Receiver<Vec<UserInputAnswer>>, String> {
+        let runs = lock(&self.inner.runs);
+        let run = runs
+            .get(chat_id)
+            .ok_or_else(|| "This chat has no live run to ask in.".to_owned())?;
+        if run.computer.turn().is_none() {
+            return Err("The turn that asked has already ended.".into());
+        }
+        let (tx, rx) = oneshot::channel();
+        lock(&run.pending_inputs).insert(request_id.to_owned(), tx);
+        run.engine_tx
+            .send(AgentEvent::InputRequested {
+                request_id: request_id.to_owned(),
+                questions,
+            })
+            .map_err(|_| "The run is ending.".to_owned())?;
+        Ok(rx)
+    }
+
+    pub fn settle_input(&self, chat_id: &str, request_id: &str) -> bool {
+        let runs = lock(&self.inner.runs);
+        let Some(run) = runs.get(chat_id) else {
+            return false;
+        };
+        if lock(&run.pending_inputs).remove(request_id).is_none() {
+            return false;
+        }
+        let _ = run.engine_tx.send(AgentEvent::InputResolved {
+            request_id: request_id.to_owned(),
+            answers: None,
+        });
+        true
+    }
+
+    pub fn computer_run(&self, chat_id: &str, secret: &str) -> Option<ComputerRun> {
+        let runs = lock(&self.inner.runs);
+        let run = runs.get(chat_id).filter(|h| h.computer.accepts(secret))?;
+        let turn = run.computer.turn();
+        Some(ComputerRun {
+            run_id: run.run_id.clone(),
+            turn_id: turn.as_ref().map(|turn| turn.id.clone()),
+            permission_mode: run.runtime_config.permission_mode,
+            run_computer_control: run.runtime_config.computer_control,
+            turn_computer_control: turn.is_some_and(|turn| turn.computer_control),
+        })
+    }
+
+    pub fn computer_turn_live(&self, chat_id: &str) -> bool {
+        lock(&self.inner.runs)
+            .get(chat_id)
+            .and_then(|run| run.computer.turn())
+            .is_some_and(|turn| turn.computer_control)
+    }
+
+    pub fn computer_caller(
+        &self,
+        chat_id: &str,
+        turn_id: Option<&str>,
+    ) -> Result<Option<PermissionMode>, String> {
+        if let Some(workspace) = self.inner.workspace() {
+            match workspace.chat(chat_id) {
+                Ok(Some(chat)) if !chat.archived => {}
+                _ => return Ok(None),
+            }
+        }
+        let runs = lock(&self.inner.runs);
+        let run = runs
+            .get(chat_id)
+            .ok_or_else(|| "The turn that made this call has ended.".to_owned())?;
+        match run.computer.turn() {
+            Some(turn) if turn_id.is_none_or(|id| id == turn.id) => {
+                Ok(Some(run.runtime_config.permission_mode))
+            }
+            _ => Err("The turn that made this call has ended.".into()),
+        }
+    }
+
+    pub fn computer_visible_use_entries(
+        &self,
+        chat_id: &str,
+    ) -> Result<Vec<crate::computer::visible_use::VisibleUseEntry>, String> {
+        let entries = self
+            .doc_handle(chat_id)
+            .and_then(|handle| Ok(handle.doc().read_entries()?))
+            .map_err(|err| err.to_string())?;
+        Ok(crate::computer::visible_use::visible_use_entries(&entries))
+    }
+
+    pub fn computer_chat_label(&self, chat_id: &str) -> Option<String> {
+        self.inner
+            .workspace()?
+            .chat(chat_id)
+            .ok()
+            .flatten()
+            .and_then(|chat| chat.title)
+            .filter(|title| !title.trim().is_empty())
+    }
+
+    pub fn write_computer_note(&self, chat_id: &str, text: &str, hint: Option<&str>) {
+        let written = self
+            .doc_handle(chat_id)
+            .and_then(|handle| Ok(handle.write_system_note(&new_id(), text, hint, now_ms())?));
+        if let Err(err) = written {
+            tracing::warn!(chat = %chat_id, error = %err, "computer note write failed");
+        }
+    }
+
+    pub fn record_computer_generation(&self, chat_id: &str, generation: u64) {
+        let written = self
+            .doc_handle(chat_id)
+            .and_then(|handle| Ok(handle.doc().set_computer_generation(generation)?));
+        if let Err(err) = written {
+            tracing::warn!(chat = %chat_id, error = %err, "computer generation write failed");
+        }
+    }
+
+    pub fn live_computer_control(&self, chat_id: &str) -> Option<bool> {
+        lock(&self.inner.runs)
+            .get(chat_id)
+            .map(|h| h.runtime_config.computer_control)
     }
 
     /// Boot recovery: for every journal whose last event is not `Done` (a run died
@@ -1281,7 +1621,9 @@ impl SessionsEngine {
                     .find(|e| e.role == MessageRole::User)
                     .and_then(|e| {
                         e.parts.iter().find_map(|p| match p {
-                            MessagePart::Text { text, .. } => Some((e.id.clone(), text.clone())),
+                            MessagePart::Text { text, .. } => {
+                                Some((e.id.clone(), text.clone(), e.from_chat_id.is_none()))
+                            }
                             _ => None,
                         })
                     })
@@ -1322,7 +1664,7 @@ impl SessionsEngine {
                 continue;
             }
             let attempt = self.inner.journal.note_resume_attempt(&chat_id);
-            let (user_id, prompt_text) = prompt.expect("gated by will_resume");
+            let (user_id, prompt_text, user_authored) = prompt.expect("gated by will_resume");
             let sessions = self.clone();
             tokio::spawn(async move {
                 let Some(host) = sessions.inner.doc_host() else {
@@ -1350,12 +1692,23 @@ impl SessionsEngine {
                             worktree: None,
                             branch: None,
                             forked_at: None,
+                            computer_control: false,
                         })
                     });
                 let Some(mut request) = request else {
                     tracing::warn!(chat = %chat_id, "auto-resume skipped: no run config");
                     return;
                 };
+                request.computer_control = false;
+                if let (Some(computer), Ok(handle)) = (sessions.computer(), host.open(&chat_id)) {
+                    request.computer_control = computer.resolve_computer_control(
+                        &chat_id,
+                        handle.doc().computer_generation(),
+                        &prompt_text,
+                        user_authored,
+                        dispatched_generation(handle.doc(), &user_id),
+                    );
+                }
                 request.prompt = prompt_text;
                 request.resume = None; // dispatch re-injects the remembered session
                 request.attachments = Vec::new();
@@ -1425,6 +1778,8 @@ fn entry_text(entry: &SessionMessageEntry) -> String {
         .trim()
         .to_string()
 }
+
+const COMPUTER_USE_EMPTY_TASK: &str = "Use Zeron Computer for this task.";
 
 /// Ported verbatim from astra `sidechatProviderInput.ts:3-4`.
 const SIDECHAT_BOUNDARY_INSTRUCTION: &str = "You are in a sidechat. Treat all prior conversation as reference-only context. Do not continue any prior task automatically. Do not mutate files, git, or the workspace and do not run workspace-changing commands unless the latest user message explicitly asks you to do so after this boundary. Use this sidechat for focused explanation, safety checks, summaries, and alternatives.";
@@ -1540,7 +1895,23 @@ impl Inner {
         chat_id: &str,
         typed: &str,
         user_entry_id: &str,
+        computer: bool,
     ) -> Option<HarnessPrompt> {
+        let invoked = computer
+            .then(|| crate::computer::activation::parse_computer_invocation(typed))
+            .flatten()
+            .map(|task| {
+                if task.is_empty() {
+                    COMPUTER_USE_EMPTY_TASK.to_owned()
+                } else {
+                    task
+                }
+            });
+        let stripped = invoked.clone().map(|prompt| HarnessPrompt {
+            prompt,
+            handoff: None,
+        });
+        let typed = invoked.as_deref().unwrap_or(typed);
         if let Some(prompt) = self.sidechat_harness_prompt(chat_id, typed) {
             return Some(HarnessPrompt {
                 prompt,
@@ -1548,8 +1919,18 @@ impl Inner {
             });
         }
         if !self.session_tombstoned(chat_id) {
-            return None;
+            return stripped;
         }
+        self.provider_switch_prompt(chat_id, typed, user_entry_id)
+            .or(stripped)
+    }
+
+    fn provider_switch_prompt(
+        &self,
+        chat_id: &str,
+        typed: &str,
+        user_entry_id: &str,
+    ) -> Option<HarnessPrompt> {
         let entries = self
             .doc_host()?
             .open(chat_id)
@@ -2256,6 +2637,8 @@ fn record_compaction(
         status: Some(MessageStatus::Complete),
         continuation_of: None,
         from_chat_id: None,
+        fork_import: false,
+        answers_request_id: None,
     })?;
     doc.clear_context_usage()?;
     if let Some(post_tokens) = post_tokens {
@@ -2406,6 +2789,8 @@ impl SubagentSink {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
         };
         if let Err(err) = self.doc.push_message(&entry) {
             tracing::warn!(doc = %self.doc_id, error = %err, "subagent steer write failed");
@@ -2580,6 +2965,8 @@ struct RunResumeState {
     user_message_id: String,
     resume_injected: bool,
     startup_retry: bool,
+    computer: Arc<RunComputer>,
+    turn_computer: bool,
 }
 
 fn cursor_unstarted_history(
@@ -2657,6 +3044,9 @@ async fn drive_run(
     let harness_id = harness.id();
     let user_prompt = request.prompt.clone();
     let run_cwd = request.cwd.clone();
+    let mut last_turn_computer = resume_state.turn_computer;
+    let run_computer = resume_state.computer.clone();
+    run_computer.begin_turn(&resume_state.user_message_id, resume_state.turn_computer);
     if request.resume.is_none() {
         let _ = doc.clear_context_usage();
     }
@@ -2673,6 +3063,7 @@ async fn drive_run(
         &chat_id,
         &request.prompt,
         &resume_state.user_message_id,
+        resume_state.turn_computer,
     ) {
         Some(HarnessPrompt { prompt, handoff }) => {
             if let Some(text) = handoff {
@@ -2731,6 +3122,7 @@ async fn drive_run(
             );
             inner.remove_run(&chat_id, &run_id);
             inner.set_status(&chat_id, SessionStatus::Errored, false);
+            inner.computer_turn_ended(&chat_id, run_computer.end_turn());
             return;
         }
     };
@@ -3018,6 +3410,7 @@ async fn drive_run(
                         completed_turn,
                         !live_subagents.is_empty(),
                     );
+                    inner.computer_turn_ended(&chat_id, run_computer.end_turn());
                     continue;
                 }
             };
@@ -3352,6 +3745,7 @@ async fn drive_run(
                 // fall through — this event is the new segment's first part.
                 entry_id = new_id();
                 segment_started = now_ms();
+                run_computer.begin_turn(&current_user_id, last_turn_computer);
                 inner.set_status(&chat_id, SessionStatus::Working, true);
             } else {
                 match &event {
@@ -3524,11 +3918,17 @@ async fn drive_run(
             inner.set_status(&chat_id, SessionStatus::Working, true);
             // The boundary confirms delivery of the oldest accepted steer —
             // retire its at-least-once ledger entry.
-            if let Some(h) = lock(&inner.runs)
+            let steer = lock(&inner.runs)
                 .get(&chat_id)
                 .filter(|h| h.run_id == run_id)
-                && let Some(steer) = lock(&h.routed_steers).pop_front()
-            {
+                .and_then(|h| lock(&h.routed_steers).pop_front());
+            if let Some(steer) = steer {
+                let previous = run_computer.turn().map(|turn| turn.id);
+                run_computer.begin_turn(&steer.message_id, steer.computer_control);
+                last_turn_computer = steer.computer_control;
+                if previous.as_deref() != Some(steer.message_id.as_str()) {
+                    inner.computer_turn_ended(&chat_id, previous);
+                }
                 current_user_id = steer.message_id;
             }
             continue;
@@ -3549,13 +3949,40 @@ async fn drive_run(
             } => {
                 inner.remember_harness_session(&chat_id, session_id, &run_cwd);
             }
-            AgentEvent::InputRequested { .. } => {
+            AgentEvent::InputRequested { questions, .. } => {
                 // Known-id guaranteed: the unknown-id twin was dropped above,
                 // before the parked gate.
-                inner.set_status(&chat_id, SessionStatus::AwaitingInput, false);
+                if !questions.iter().any(UserInputQuestion::is_consent) {
+                    inner.set_status(&chat_id, SessionStatus::AwaitingInput, false);
+                }
             }
-            AgentEvent::InputResolved { .. } => {
-                inner.set_status(&chat_id, SessionStatus::Working, false);
+            AgentEvent::InputResolved { request_id, .. } => {
+                let pending = lock(&inner.runs)
+                    .get(&chat_id)
+                    .filter(|h| h.run_id == run_id)
+                    .map(|h| h.pending_inputs.clone());
+                // A closed resolver means the harness stopped waiting: the agent withdrew it.
+                let awaited = |rid: &str| {
+                    pending
+                        .as_ref()
+                        .is_some_and(|p| lock(p).get(rid).is_some_and(|tx| !tx.is_closed()))
+                };
+                let resolved_consent = folded.iter().any(|part| {
+                    matches!(part, MessagePart::Input { request_id: rid, questions, .. }
+                        if rid == request_id && questions.iter().any(UserInputQuestion::is_consent))
+                });
+                let question_open = resolved_consent && folded.iter().any(|part| {
+                    matches!(part, MessagePart::Input { request_id: rid, questions, resolved: false, .. }
+                        if rid != request_id
+                            && !questions.iter().any(UserInputQuestion::is_consent)
+                            && awaited(rid))
+                });
+                let status = if question_open {
+                    SessionStatus::AwaitingInput
+                } else {
+                    SessionStatus::Working
+                };
+                inner.set_status(&chat_id, status, false);
             }
             _ => {}
         }
@@ -3663,6 +4090,7 @@ async fn drive_run(
                     completed_turn,
                     !live_subagents.is_empty(),
                 );
+                inner.computer_turn_ended(&chat_id, run_computer.end_turn());
                 continue;
             }
             final_completed_turn = completed_turn;
@@ -3715,6 +4143,7 @@ async fn drive_run(
         .unwrap_or_default();
     inner.remove_run(&chat_id, &run_id);
     inner.set_status_with_completion(&chat_id, final_status, false, final_completed_turn, false);
+    inner.computer_turn_ended(&chat_id, run_computer.end_turn());
     if !interrupted && !orphans.is_empty() {
         // The dying run accepted these into its mailbox but never confirmed a
         // Steered boundary (idle-reaper race, a mid-turn error discarding
@@ -3735,6 +4164,7 @@ async fn drive_run(
                 request.prompt = steer.prompt.clone();
                 request.resume = None;
                 request.attachments = steer.attachments.clone();
+                request.computer_control = steer.computer_control;
                 tracing::info!(chat = %chat, "re-dispatching steer orphaned by a dying run");
                 let Some(host) = engine.inner.doc_host() else {
                     tracing::warn!(chat = %chat, "orphaned steer lost: doc host unavailable");
@@ -3759,6 +4189,22 @@ async fn drive_run(
             }
         });
     }
+}
+
+fn dispatched_generation(doc: &SessionDoc, message_id: &str) -> Option<u64> {
+    doc.read_commands()
+        .ok()?
+        .into_iter()
+        .rev()
+        .find(|command| match &command.payload {
+            zeron_doc::SessionCommandPayload::Run { message_id: id, .. } => id == message_id,
+            zeron_doc::SessionCommandPayload::Steer {
+                message_id: Some(id),
+                ..
+            } => id == message_id,
+            _ => false,
+        })?
+        .computer_generation
 }
 
 #[cfg(test)]
@@ -3788,6 +4234,8 @@ mod tests {
                 status: None,
                 continuation_of: None,
                 from_chat_id: None,
+                fork_import: false,
+                answers_request_id: None,
             })
             .unwrap();
         }
@@ -4047,6 +4495,7 @@ mod tests {
             worktree: None,
             branch: None,
             forked_at: None,
+            computer_control: false,
         }
     }
 

@@ -37,6 +37,7 @@ async fn main() {
         worktree: None,
         branch: None,
         forked_at: None,
+        computer_control: false,
     };
     let mut harness = OpencodeHarness::new();
     if let Some(exe) = exe {

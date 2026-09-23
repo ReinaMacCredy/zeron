@@ -90,6 +90,8 @@ pub struct SessionCommandEntry {
     pub status: SessionCommandStatus,
     #[serde(default)]
     pub resolution: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer_generation: Option<u64>,
 }
 
 impl SessionCommandEntry {
@@ -186,6 +188,7 @@ mod tests {
             expires_at: None,
             status: SessionCommandStatus::Pending,
             resolution: None,
+            computer_generation: None,
         }
     }
 
@@ -363,6 +366,7 @@ mod tests {
             branch: None,
             resume: None,
             forked_at: None,
+            computer_control: false,
         }
     }
 }

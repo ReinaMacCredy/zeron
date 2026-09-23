@@ -63,6 +63,8 @@ final class SessionStore {
     private(set) var lastSubmittedMessageId: String?
     /// Presentation state survives navigation with the warm session store.
     var expandedUserMessages: Set<String> = []
+    private(set) var consentSent: [String: Bool] = [:]
+    var computerUseEnableRequested = false
 
     let doc = LoroDoc()
     /// The chat2 room cursor — the last server row seq folded into `doc`.
@@ -336,6 +338,9 @@ final class SessionStore {
                 try map.insert(key: "issuedBy", v: config.deviceId)
                 try map.insert(key: "issuedAt", v: m["issuedAt"]?.i64Value ?? now)
                 try map.insert(key: "expiresAt", v: m["expiresAt"]?.i64Value ?? (now + commandDefaultTtlMs))
+                if kind == "run" || kind == "steer" {
+                    try map.insert(key: "computerGeneration", v: computerGeneration)
+                }
                 try map.insert(key: "status", v: "pending")
                 carried += 1
             } catch {}
@@ -487,8 +492,12 @@ final class SessionStore {
             }
             // isError presence IS the resolution marker (schema.rs:96).
             let isError = m["isError"]?.boolValue
-            return .tool(id: id, call: RenderToolCall(tag: tag, fields: fields),
-                         isError: isError ?? false, resolved: isError != nil)
+            let call = RenderToolCall(tag: tag, fields: fields)
+            let denied = isError == true && call.computerTool != nil
+                && ComputerCopy.isControlDenied(m["output"]?.stringValue)
+            return .tool(id: id, call: call,
+                         isError: isError ?? false, resolved: isError != nil,
+                         controlDenied: denied)
         case "input":
             var questions: [UserInputQuestion] = []
             if let list = m["questions"]?.listValue,
@@ -496,8 +505,13 @@ final class SessionStore {
                let decoded = try? JSONDecoder().decode([UserInputQuestion].self, from: data) {
                 questions = decoded
             }
+            var answers: [UserInputAnswer]?
+            if let list = m["answers"]?.listValue,
+               let data = try? JSONSerialization.data(withJSONObject: list.map(\.jsonObject)) {
+                answers = try? JSONDecoder().decode([UserInputAnswer].self, from: data)
+            }
             return .input(id: id, requestId: id, questions: questions,
-                          resolved: m["resolved"]?.boolValue ?? false)
+                          resolved: m["resolved"]?.boolValue ?? false, answers: answers)
         case "error":
             return .error(id: id, message: m["message"]?.stringValue ?? "")
         default:
@@ -535,8 +549,8 @@ final class SessionStore {
             for part in entry.parts.reversed() {
                 // An empty question list can't be answered, so it must not take
                 // the composer's place — leaving the user with no way to type.
-                if case .input(_, let requestId, let questions, let resolved) = part,
-                   !resolved, !questions.isEmpty {
+                if case .input(_, let requestId, let questions, let resolved, _) = part,
+                   !resolved, !questions.isEmpty, !questions.contains(where: \.isConsent) {
                     return (entry.id, requestId, questions)
                 }
             }
@@ -628,6 +642,17 @@ final class SessionStore {
         ])
     }
 
+    func answerConsent(requestId: String, questionId: String, allow: Bool) {
+        guard consentSent[requestId] == nil else { return }
+        consentSent[requestId] = allow
+        respondInput(requestId: requestId,
+                     answers: ComputerCopy.consentAnswers(questionId: questionId, allow: allow))
+    }
+
+    var computerGeneration: Int64 {
+        max(doc.getMap(id: "meta").get(key: "computerGeneration")?.asValue()?.i64Value ?? 0, 0)
+    }
+
     /// schema.rs queue_command, field for field.
     private func queueCommand(kind: String, payload: [String: Any]) {
         let commands = doc.getList(id: "commands")
@@ -645,6 +670,9 @@ final class SessionStore {
                 ]))
             }
             try map.insert(key: "expiresAt", v: nowMs() + commandDefaultTtlMs)
+            if kind == "run" || kind == "steer" {
+                try map.insert(key: "computerGeneration", v: computerGeneration)
+            }
             try map.insert(key: "status", v: "pending")
             doc.commit()
         } catch {}

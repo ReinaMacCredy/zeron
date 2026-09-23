@@ -35,6 +35,8 @@ sha2.workspace = true
 reqwest.workspace = true
 ignore.workspace = true
 nucleo-matcher.workspace = true
+regex = "1"
+miniz_oxide = "0.8"
 
 tempfile.workspace = true
 

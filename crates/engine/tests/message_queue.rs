@@ -107,6 +107,7 @@ impl Harness for HeldHarness {
                 question: "which one?".into(),
                 options: vec!["a".into(), "b".into()],
                 multi_select: false,
+                kind: None,
             }]);
         }
         let mut finish = self.finish.subscribe();
@@ -593,6 +594,7 @@ async fn batched_remote_steers_preserve_every_message_in_order_exactly_once() {
                 expires_at: None,
                 status: zeron_doc::SessionCommandStatus::Pending,
                 resolution: None,
+                computer_generation: None,
             })
             .unwrap();
     }

@@ -66,6 +66,7 @@ use zeron_rpc::{LinkCache, RpcError, RpcReply, RpcService, methods, parse_params
 use crate::agent_accounts::AgentAccounts;
 use crate::auth::Auth;
 use crate::change_requests::CheckoutChangeRequests;
+use crate::computer::runtime::ComputerRuntime;
 use crate::diff_sync::CheckoutDiffSync;
 use crate::doc_host::DocHost;
 use crate::registry::HarnessRegistry;
@@ -594,6 +595,7 @@ pub struct EngineRpc {
     links: Option<std::sync::Arc<LinkCache>>,
     updater: Option<zeron_update::Updater>,
     local_import: Option<crate::local_import::LocalImporter>,
+    computer: Option<std::sync::Arc<ComputerRuntime>>,
     engine_info: EngineInfo,
 }
 
@@ -636,6 +638,7 @@ impl EngineRpc {
             links: None,
             updater: None,
             local_import: None,
+            computer: None,
             engine_info,
         }
     }
@@ -667,6 +670,17 @@ impl EngineRpc {
     pub fn with_local_import(mut self, importer: crate::local_import::LocalImporter) -> Self {
         self.local_import = Some(importer);
         self
+    }
+
+    pub fn with_computer(mut self, computer: std::sync::Arc<ComputerRuntime>) -> Self {
+        self.computer = Some(computer);
+        self
+    }
+
+    fn computer(&self) -> Result<&std::sync::Arc<ComputerRuntime>, RpcError> {
+        self.computer
+            .as_ref()
+            .ok_or_else(|| RpcError::Failed("computer use unavailable".into()))
     }
 
     fn auth(&self) -> Result<&Auth, RpcError> {
@@ -2757,6 +2771,115 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "text": text }))
             }
+            methods::WATCH_COMPUTER_HOST_REQUESTS => {
+                let p: zeron_proto::computer::WatchComputerHostRequestsParams =
+                    parse_params(params)?;
+                let items = self.computer()?.register_host(p.bundle_id);
+                Ok(RpcReply::Stream(
+                    items
+                        .filter_map(|item| async move { serde_json::to_value(item).ok() })
+                        .boxed(),
+                ))
+            }
+            methods::RESPOND_COMPUTER_HOST_REQUEST => {
+                let p: zeron_proto::computer::RespondComputerHostRequestParams =
+                    parse_params(params)?;
+                self.computer()?.respond(p).map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({}))
+            }
+            methods::CANCEL_COMPUTER_ACTION => {
+                let p: zeron_proto::computer::CancelComputerActionParams = parse_params(params)?;
+                let cancelled = crate::computer::tool_calls::cancel_computer_action(
+                    self.computer()?,
+                    &self.sessions,
+                    &p,
+                )
+                .map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({ "cancelled": cancelled }))
+            }
+            methods::GET_COMPUTER_CATALOG => {
+                let p: zeron_proto::computer::GetComputerCatalogParams = parse_params(params)?;
+                let catalog = crate::computer::tool_calls::computer_catalog(
+                    self.computer()?,
+                    &self.sessions,
+                    &p,
+                )
+                .map_err(RpcError::Failed)?;
+                RpcReply::value(&catalog)
+            }
+            methods::COMPUTER_ACTION => {
+                let p: zeron_proto::computer::ComputerActionParams = parse_params(params)?;
+                let result =
+                    crate::computer::tool_calls::computer_action(self.computer()?, &self.sessions, p)
+                        .await
+                        .map_err(RpcError::Failed)?;
+                RpcReply::value(&result)
+            }
+            methods::GET_COMPUTER_SETTINGS => RpcReply::value(&self.computer()?.settings()),
+            methods::GET_COMPUTER_STATUS => {
+                let runtime = self.computer()?;
+                let service = runtime
+                    .service()
+                    .ok_or_else(|| RpcError::Failed("computer use is still starting".into()))?;
+                RpcReply::value(&zeron_proto::computer::ComputerHostStatus {
+                    host_bundle_id: runtime.host_bundle_id(),
+                    driver_native_revision: service.manager.driver_native_revision(),
+                    status: service.manager.get_status().await,
+                })
+            }
+            methods::SET_COMPUTER_SETTINGS => {
+                let p: zeron_proto::computer::ComputerSettings = parse_params(params)?;
+                self.computer()?.set_settings(p).map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({}))
+            }
+            methods::GET_COMPUTER_STILL_FRAME => {
+                let p: zeron_proto::computer::GetComputerStillFrameParams = parse_params(params)?;
+                let frame = self.computer()?.still_frame(&p.chat_id);
+                RpcReply::value(&serde_json::json!({ "frame": frame }))
+            }
+            methods::GET_COMPUTER_AUDIT_HISTORY => {
+                let p: zeron_proto::computer::ComputerGetAuditHistoryInput = parse_params(params)?;
+                let service = self
+                    .computer()?
+                    .service()
+                    .ok_or_else(|| RpcError::Failed("computer use is still starting".into()))?;
+                let history = service
+                    .manager
+                    .get_audit_history(p)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&history)
+            }
+            methods::COMPUTER_EMERGENCY_STOP => {
+                let stopped = self.computer()?.emergency_stop().await;
+                for chat_id in &stopped {
+                    if let Err(err) = self.doc_host.stop_for_escape(chat_id).await {
+                        tracing::warn!(chat = %chat_id, error = %err, "escape stop failed");
+                    }
+                }
+                RpcReply::value(&serde_json::json!({ "stoppedChatIds": stopped }))
+            }
+            methods::WATCH_COMPUTER_EVENTS => {
+                let events = self.computer()?.subscribe_events();
+                Ok(RpcReply::Stream(
+                    futures::stream::unfold(events, |mut events| async move {
+                        loop {
+                            match events.recv().await {
+                                Ok(event) => {
+                                    if let Ok(value) = serde_json::to_value(&event) {
+                                        return Some((value, events));
+                                    }
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                    return None;
+                                }
+                            }
+                        }
+                    })
+                    .boxed(),
+                ))
+            }
             other => Err(RpcError::UnknownMethod(other.to_string())),
         }
     }
@@ -2867,6 +2990,8 @@ mod tests {
                 status: None,
                 continuation_of: None,
                 from_chat_id: None,
+                fork_import: false,
+                answers_request_id: None,
             })
             .unwrap();
         // Hold publication blocked: the opening must not await the full mirror.
@@ -3092,6 +3217,8 @@ mod context_usage_tests {
                     status: Some(zeron_doc::MessageStatus::Streaming),
                     continuation_of: None,
                     from_chat_id: None,
+                    fork_import: false,
+                    answers_request_id: None,
                 })
                 .unwrap()
         };
@@ -3213,6 +3340,8 @@ mod context_usage_tests {
             status: Some(zeron_doc::MessageStatus::Streaming),
             continuation_of: None,
             from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
         };
         handle.doc().push_message(&entry("local-before")).unwrap();
         source.update_context_usage(Some(10), Some(100)).unwrap();

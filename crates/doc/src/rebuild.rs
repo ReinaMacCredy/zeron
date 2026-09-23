@@ -56,6 +56,7 @@ pub fn rebuild_thin_doc(source: &SessionDoc) -> Result<ThinRebuild, DocError> {
     if let Some(usage) = source.context_usage() {
         thin.update_context_usage(usage.tokens, usage.window)?;
     }
+    thin.set_computer_generation(source.computer_generation())?;
     let mut sidecar = Vec::new();
     let entries = source.read_entries()?;
     let entry_count = entries.len();
@@ -191,6 +192,8 @@ mod tests {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
         }
     }
 
@@ -204,6 +207,7 @@ mod tests {
             expires_at: None,
             status,
             resolution: None,
+            computer_generation: None,
         }
     }
 
@@ -270,6 +274,14 @@ mod tests {
         let commands = rebuilt.doc.read_commands().unwrap();
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].id, "c1");
+    }
+
+    #[test]
+    fn rebuild_keeps_the_computer_generation() {
+        let source = SessionDoc::init("chat-w").unwrap();
+        source.set_computer_generation(3).unwrap();
+        let rebuilt = rebuild_thin_doc(&source).unwrap();
+        assert_eq!(rebuilt.doc.computer_generation(), 3);
     }
 
     #[test]

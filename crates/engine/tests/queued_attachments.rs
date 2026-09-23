@@ -134,6 +134,7 @@ fn run_payload(message_id: &str, pending_ref: &str) -> SessionCommandPayload {
             branch: None,
             resume: None,
             forked_at: None,
+            computer_control: false,
         },
         message_id: message_id.into(),
     }

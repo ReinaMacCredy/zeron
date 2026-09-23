@@ -19,16 +19,20 @@ use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 
 mod client;
+mod computer_host;
 pub mod device_room;
 mod server;
 
 pub use client::{RpcClient, RpcSubscription, connect_ws};
+pub use computer_host::ComputerHost;
 pub use device_room::{
     DeviceFrameHeader, DeviceLink, HostRelay, HostRelayConfig, LinkCache, LinkCacheConfig,
     NudgeHandler, PeerLiveness, PeerLivenessProbe, StaticToken, TokenError, TokenSource,
     decode_device_frame, device_room_ws_url, encode_device_frame,
 };
 pub use server::{serve_connection, serve_ws_listener};
+
+pub const COMPUTER_RUN_SECRET_ENV: &str = "ZERON_RUN_SECRET";
 
 /// RPC method names — single source of truth for both ends.
 /// Full surface: docs/research/feature-inventory.md §2.
@@ -225,6 +229,41 @@ pub mod methods {
     /// Download + apply the newest release on the target device (symlink-managed
     /// installs; the service restart is scheduled after the reply flushes).
     pub const APPLY_UPDATE: &str = "ApplyUpdate";
+    // Computer use (w88). Never relay-forwarded; relay clients are refused every
+    // method here except the settings, status, still-frame and audit-history reads.
+    /// Register as the desktop host that owns `cua-driver`. First stream wins; a
+    /// second is refused. `{bundleId}` → stream of `ComputerHostStreamItem`: first
+    /// `registered {hostToken}` then `request`/`cancel` items, or a lone
+    /// `refused {retryAfterMs}` before the stream ends.
+    pub const WATCH_COMPUTER_HOST_REQUESTS: &str = "WatchComputerHostRequests";
+    /// The host's answer to one streamed request; unknown or cancelled ids are
+    /// a no-op. `{hostToken, correlationId, result: CuaReply}` → `{}`.
+    pub const RESPOND_COMPUTER_HOST_REQUEST: &str = "RespondComputerHostRequest";
+    /// `zeron mcp` relays `notifications/cancelled` for one in-flight action.
+    /// `{chatId, runSecret, requestId}` → `{cancelled}`.
+    pub const CANCEL_COMPUTER_ACTION: &str = "CancelComputerAction";
+    /// Written only by a Settings page on the engine's Mac. `ComputerSettings` → `{}`.
+    pub const SET_COMPUTER_SETTINGS: &str = "SetComputerSettings";
+    /// No params → `ComputerSettings`.
+    pub const GET_COMPUTER_SETTINGS: &str = "GetComputerSettings";
+    /// No params → `ComputerHostStatus`; never engages the driver.
+    pub const GET_COMPUTER_STATUS: &str = "GetComputerStatus";
+    /// The run's `computer_*` tool list for `tools/list`. `{chatId, runSecret}` →
+    /// `ComputerCatalog`.
+    pub const GET_COMPUTER_CATALOG: &str = "GetComputerCatalog";
+    /// One `computer_*` tool call from `zeron mcp`, authenticated by the run
+    /// secret. `{chatId, runSecret, tool, arguments, requestId}` → `McpToolResult`.
+    pub const COMPUTER_ACTION: &str = "ComputerAction";
+    /// Recent Computer mutations, newest first. `ComputerGetAuditHistoryInput`
+    /// → `ComputerGetAuditHistoryResult`.
+    pub const GET_COMPUTER_AUDIT_HISTORY: &str = "GetComputerAuditHistory";
+    /// Latest still frame of a chat's Computer task, for remote viewers. `{chatId}`
+    /// → `{frame: ComputerStillFrame | null}`.
+    pub const GET_COMPUTER_STILL_FRAME: &str = "GetComputerStillFrame";
+    /// Physical Escape from the desktop host. No params → `{stoppedChatIds}`.
+    pub const COMPUTER_EMERGENCY_STOP: &str = "ComputerEmergencyStop";
+    /// No params → stream of `ComputerEvent`, across desktop host changes.
+    pub const WATCH_COMPUTER_EVENTS: &str = "WatchComputerEvents";
 }
 
 #[derive(Debug, thiserror::Error)]

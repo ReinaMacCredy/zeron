@@ -58,6 +58,10 @@ pub struct SessionMessageEntry {
     /// for a person's own prompt. Rendered as provenance, never as text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_chat_id: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fork_import: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answers_request_id: Option<String>,
 }
 
 /// The doc-resident flat part map (`DocMessagePart` in TS). Distinct from the app-layer
@@ -93,6 +97,8 @@ struct DocPartJson {
     is_error: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     questions: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    answers: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     resolved: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -206,10 +212,12 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             request_id,
             questions,
             resolved,
+            answers,
         } => DocPartJson {
             id: request_id.clone(),
             kind: "input".into(),
             questions: Some(serde_json::to_value(questions)?),
+            answers: answers.as_ref().map(serde_json::to_value).transpose()?,
             resolved: Some(*resolved),
             ..Default::default()
         },
@@ -260,6 +268,7 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
                 .and_then(|q| serde_json::from_value(q).ok())
                 .unwrap_or_default(),
             resolved: p.resolved.unwrap_or(false),
+            answers: p.answers.and_then(|a| serde_json::from_value(a).ok()),
         },
         "error" => MessagePart::Error {
             id: p.id,
@@ -367,6 +376,24 @@ impl SessionDoc {
                 .insert("contextUsage", serde_json::to_string(&next)?)?;
             self.doc.commit();
         }
+        Ok(())
+    }
+
+    pub fn computer_generation(&self) -> u64 {
+        match self.doc.get_map("meta").get("computerGeneration") {
+            Some(loro::ValueOrContainer::Value(LoroValue::I64(value))) => value.max(0) as u64,
+            _ => 0,
+        }
+    }
+
+    pub fn set_computer_generation(&self, generation: u64) -> Result<(), DocError> {
+        if generation <= self.computer_generation() {
+            return Ok(());
+        }
+        self.doc
+            .get_map("meta")
+            .insert("computerGeneration", generation as i64)?;
+        self.doc.commit();
         Ok(())
     }
 
@@ -639,6 +666,9 @@ impl SessionDoc {
         if let Some(expires_at) = entry.expires_at {
             map.insert("expiresAt", expires_at)?;
         }
+        if let Some(generation) = entry.computer_generation {
+            map.insert("computerGeneration", generation as i64)?;
+        }
         map.insert(
             "status",
             serde_json::to_value(entry.status)?
@@ -775,7 +805,11 @@ impl SessionDoc {
     /// resolves through the entry fold; this direct write is for answers to a
     /// question whose run already died — no fold owns the entry anymore.
     /// Returns `false` when no such part exists.
-    pub fn resolve_input(&self, request_id: &str) -> Result<bool, DocError> {
+    pub fn resolve_input(
+        &self,
+        request_id: &str,
+        answers: Option<&[zeron_proto::UserInputAnswer]>,
+    ) -> Result<bool, DocError> {
         let messages = self.doc.get_list("messages");
         for i in 0..messages.len() {
             let Some(loro::ValueOrContainer::Container(loro::Container::Map(entry))) =
@@ -804,6 +838,12 @@ impl SessionDoc {
                 );
                 if is_input && id_matches {
                     part.insert("resolved", true)?;
+                    if let Some(answers) = answers {
+                        part.insert(
+                            "answers",
+                            loro_value_from_json(&serde_json::to_value(answers)?),
+                        )?;
+                    }
                     self.doc.commit();
                     return Ok(true);
                 }
@@ -913,6 +953,12 @@ fn write_entry_scalar_fields(map: &LoroMap, entry: &SessionMessageEntry) -> Resu
     if let Some(from_chat_id) = &entry.from_chat_id {
         map.insert("fromChatId", from_chat_id.as_str())?;
     }
+    if entry.fork_import {
+        map.insert("forkImport", true)?;
+    }
+    if let Some(request_id) = &entry.answers_request_id {
+        map.insert("answersRequestId", request_id.as_str())?;
+    }
     Ok(())
 }
 
@@ -967,6 +1013,9 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     if let Some(questions) = &doc_part.questions {
         map.insert("questions", loro_value_from_json(questions))?;
     }
+    if let Some(answers) = &doc_part.answers {
+        map.insert("answers", loro_value_from_json(answers))?;
+    }
     if let Some(resolved) = doc_part.resolved {
         map.insert("resolved", resolved)?;
     }
@@ -1019,6 +1068,10 @@ fn entry_from_json(v: serde_json::Value) -> Result<SessionMessageEntry, DocError
         continuation_of: Option<String>,
         #[serde(default)]
         from_chat_id: Option<String>,
+        #[serde(default)]
+        fork_import: bool,
+        #[serde(default)]
+        answers_request_id: Option<String>,
     }
     match serde_json::from_value::<RawEntry>(v.clone()) {
         Ok(raw) => Ok(SessionMessageEntry {
@@ -1030,6 +1083,8 @@ fn entry_from_json(v: serde_json::Value) -> Result<SessionMessageEntry, DocError
             status: raw.status,
             continuation_of: raw.continuation_of,
             from_chat_id: raw.from_chat_id,
+            fork_import: raw.fork_import,
+            answers_request_id: raw.answers_request_id,
         }),
         // 2026-08-10 incident rule: a missing field must cost AT MOST what
         // the field carried — never the entry, never the transcript. Rooms
@@ -1095,6 +1150,8 @@ fn salvage_entry(
             .and_then(|s| serde_json::from_value(s.clone()).ok()),
         continuation_of: str_field("continuationOf"),
         from_chat_id: str_field("fromChatId"),
+        fork_import: obj.get("forkImport").and_then(|x| x.as_bool()) == Some(true),
+        answers_request_id: str_field("answersRequestId"),
     })
 }
 
@@ -1235,6 +1292,8 @@ impl<'a> SegmentWriter<'a> {
                 status: Some(MessageStatus::Streaming),
                 continuation_of: None,
                 from_chat_id: None,
+                fork_import: false,
+                answers_request_id: None,
             },
         )?;
         map.insert_container("parts", LoroList::new())?;
@@ -1386,6 +1445,9 @@ fn update_part_fields(map: &LoroMap, part: &MessagePart) -> Result<(), DocError>
     if let Some(questions) = &doc_part.questions {
         map.insert("questions", loro_value_from_json(questions))?;
     }
+    if let Some(answers) = &doc_part.answers {
+        map.insert("answers", loro_value_from_json(answers))?;
+    }
     if let Some(resolved) = doc_part.resolved {
         map.insert("resolved", resolved)?;
     }
@@ -1504,6 +1566,8 @@ mod tests {
                 status: None,
                 continuation_of: continuation.map(str::to_owned),
                 from_chat_id: None,
+                fork_import: false,
+                answers_request_id: None,
             })
             .unwrap();
         }
@@ -1523,6 +1587,8 @@ mod tests {
             status: None,
             continuation_of: Some("missing".into()),
             from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
         })
         .unwrap();
         assert_eq!(
@@ -1549,6 +1615,8 @@ mod tests {
                 status: Some(MessageStatus::Complete),
                 continuation_of: (segment > 0).then(|| "segment-0".into()),
                 from_chat_id: None,
+                fork_import: false,
+                answers_request_id: None,
             })
             .unwrap();
         }
@@ -1626,6 +1694,8 @@ mod tests {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
         }
     }
 
@@ -1788,6 +1858,7 @@ mod tests {
                 request_id: "r1".into(),
                 questions: vec![],
                 resolved: false,
+                answers: None,
             }],
             created_at: 1,
             device_id: "dev-a".into(),
@@ -1795,10 +1866,12 @@ mod tests {
             status: Some(MessageStatus::Aborted),
             continuation_of: None,
             from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
         })
         .unwrap();
-        assert!(!doc.resolve_input("nope").unwrap());
-        assert!(doc.resolve_input("r1").unwrap());
+        assert!(!doc.resolve_input("nope", None).unwrap());
+        assert!(doc.resolve_input("r1", None).unwrap());
         let entries = doc.read_entries().unwrap();
         assert!(matches!(
             &entries[0].parts[0],
@@ -2061,6 +2134,8 @@ mod tests {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
         })
         .unwrap();
         let entries = doc.read_entries().unwrap();
@@ -2109,6 +2184,7 @@ mod tests {
             expires_at: None,
             status: SessionCommandStatus::Pending,
             resolution: None,
+            computer_generation: None,
         };
         doc.queue_command(&entry).unwrap();
         doc.set_command_status("c1", SessionCommandStatus::Applied, None)
@@ -2230,5 +2306,183 @@ mod context_usage_tests {
         assert_eq!(rebuilt.context_usage(), host.context_usage());
         rebuilt.clear_context_usage().unwrap();
         assert_eq!(rebuilt.context_usage(), None);
+    }
+}
+
+#[cfg(test)]
+mod computer_marker_tests {
+    use super::*;
+    use crate::{QueuedMessage, SessionCommandEntry, SessionCommandPayload, SessionCommandStatus};
+    use zeron_proto::{UserInputAnswer, UserInputQuestion};
+
+    fn replica(doc: &SessionDoc) -> SessionDoc {
+        let copy = SessionDoc::from_doc(LoroDoc::new());
+        copy.doc().import(&doc.export_snapshot().unwrap()).unwrap();
+        copy
+    }
+
+    fn entry(id: &str, role: MessageRole, parts: Vec<MessagePart>) -> SessionMessageEntry {
+        SessionMessageEntry {
+            id: id.into(),
+            role,
+            parts,
+            created_at: 1,
+            device_id: "dev-a".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
+        }
+    }
+
+    fn question() -> UserInputQuestion {
+        UserInputQuestion {
+            id: "q1".into(),
+            header: "Foreground".into(),
+            question: "Can I bring Safari to the front?".into(),
+            options: vec!["Yes".into(), "No".into()],
+            multi_select: false,
+            kind: None,
+        }
+    }
+
+    #[test]
+    fn fork_import_and_answer_markers_survive_the_loro_writer_and_a_replica() {
+        let doc = SessionDoc::init("fork").unwrap();
+        let mut copied = entry(
+            "u1",
+            MessageRole::User,
+            vec![MessagePart::Text {
+                id: "t0".into(),
+                text: "show me the browser".into(),
+            }],
+        );
+        copied.fork_import = true;
+        doc.push_message(&copied).unwrap();
+        let mut answer = entry(
+            "u2",
+            MessageRole::User,
+            vec![MessagePart::Text {
+                id: "t0".into(),
+                text: "Answering your earlier question:".into(),
+            }],
+        );
+        answer.answers_request_id = Some("r1".into());
+        doc.push_message(&answer).unwrap();
+        doc.push_message(&entry("u3", MessageRole::User, vec![]))
+            .unwrap();
+
+        for read in [
+            doc.read_entries().unwrap(),
+            replica(&doc).read_entries().unwrap(),
+        ] {
+            assert!(read[0].fork_import);
+            assert_eq!(read[0].answers_request_id, None);
+            assert!(!read[1].fork_import);
+            assert_eq!(read[1].answers_request_id.as_deref(), Some("r1"));
+            assert!(!read[2].fork_import);
+            assert_eq!(read[2].answers_request_id, None);
+        }
+
+        let raw = serde_json::json!({
+            "role": "user",
+            "createdAt": "not a number",
+            "forkImport": true,
+            "answersRequestId": "r9",
+        });
+        let salvaged = entry_from_json(raw).unwrap();
+        assert!(salvaged.fork_import);
+        assert_eq!(salvaged.answers_request_id.as_deref(), Some("r9"));
+    }
+
+    #[test]
+    fn input_answers_persist_through_the_live_fold_and_the_dead_run_resolve() {
+        let doc = SessionDoc::init("answers").unwrap();
+        let mut writer = SegmentWriter::begin(&doc, "a1", "dev-a", 1).unwrap();
+        let mut parts = Vec::new();
+        crate::fold_event_into_parts(
+            &mut parts,
+            &zeron_proto::AgentEvent::InputRequested {
+                request_id: "r1".into(),
+                questions: vec![question()],
+            },
+        );
+        writer.sync(&parts).unwrap();
+        let answers = vec![UserInputAnswer {
+            question_id: "q1".into(),
+            labels: vec!["No".into()],
+        }];
+        crate::fold_event_into_parts(
+            &mut parts,
+            &zeron_proto::AgentEvent::InputResolved {
+                request_id: "r1".into(),
+                answers: Some(answers.clone()),
+            },
+        );
+        writer.finish(&parts, MessageStatus::Complete).unwrap();
+        let read = replica(&doc).read_entries().unwrap();
+        assert!(matches!(
+            &read[0].parts[0],
+            MessagePart::Input { resolved: true, answers: Some(a), .. } if *a == answers
+        ));
+
+        let dead = SessionDoc::init("dead").unwrap();
+        dead.push_message(&entry(
+            "a1",
+            MessageRole::Assistant,
+            vec![MessagePart::Input {
+                id: "r2".into(),
+                request_id: "r2".into(),
+                questions: vec![question()],
+                resolved: false,
+                answers: None,
+            }],
+        ))
+        .unwrap();
+        assert!(dead.resolve_input("r2", Some(&answers)).unwrap());
+        assert!(matches!(
+            &replica(&dead).read_entries().unwrap()[0].parts[0],
+            MessagePart::Input { resolved: true, answers: Some(a), .. } if *a == answers
+        ));
+    }
+
+    #[test]
+    fn computer_generation_rides_the_chat_meta_queue_rows_and_commands() {
+        let host = SessionDoc::init("gen").unwrap();
+        assert_eq!(host.computer_generation(), 0);
+        host.set_computer_generation(2).unwrap();
+        host.set_computer_generation(1).unwrap();
+        assert_eq!(host.computer_generation(), 2);
+        assert_eq!(replica(&host).computer_generation(), 2);
+
+        let mut row = QueuedMessage::new("q1", "/computer-use open Calculator", "dev-a");
+        row.computer_generation = Some(2);
+        host.push_queued(&row).unwrap();
+        host.push_queued(&QueuedMessage::new("q2", "plain", "dev-a"))
+            .unwrap();
+        let queue = replica(&host).read_queue().unwrap();
+        assert_eq!(queue[0].computer_generation, Some(2));
+        assert_eq!(queue[1].computer_generation, None);
+
+        host.queue_command(&SessionCommandEntry {
+            id: "c1".into(),
+            payload: SessionCommandPayload::Steer {
+                prompt: "/computer-use".into(),
+                message_id: None,
+            },
+            issued_by: "dev-a".into(),
+            issued_at: 1,
+            based_on: None,
+            expires_at: None,
+            status: SessionCommandStatus::Pending,
+            resolution: None,
+            computer_generation: Some(2),
+        })
+        .unwrap();
+        assert_eq!(
+            replica(&host).read_commands().unwrap()[0].computer_generation,
+            Some(2)
+        );
     }
 }

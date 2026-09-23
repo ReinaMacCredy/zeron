@@ -20,6 +20,7 @@ pub mod auth;
 pub mod change_requests;
 pub mod chat2_host;
 mod chat_persistence;
+pub mod computer;
 pub mod diff_sync;
 pub mod doc_host;
 mod http_error;
@@ -135,6 +136,7 @@ pub struct EngineCore {
     pub spaces_sync: SpacesSync,
     pub uploads: Uploads,
     pub agent_accounts: AgentAccounts,
+    pub computer: Arc<computer::runtime::ComputerRuntime>,
     pub device_id: String,
     /// Local→synced profile import (account-scoped runtimes only).
     pub local_import: Option<local_import::LocalImporter>,
@@ -304,6 +306,8 @@ impl EngineCore {
             turn_diff.note_turn_start(chat_id, cwd);
         }));
         let spaces_sync = SpacesSync::start(repos.clone(), workspace.clone(), &device_id);
+        let computer = computer::runtime::ComputerRuntime::start(data_dir);
+        computer.attach(&sessions);
         Ok(Self {
             sessions,
             doc_host,
@@ -318,6 +322,7 @@ impl EngineCore {
             spaces_sync,
             uploads,
             agent_accounts,
+            computer,
             device_id,
             local_import,
             workspace_scope: profile.scope(),
@@ -432,7 +437,10 @@ impl EngineCore {
                 }
             }
         });
-        zeron_rpc::HostRelay::spawn(config, self.rpc_service(), on_nudge)
+        let service = Arc::new(RelayRpc {
+            inner: self.rpc_service(),
+        });
+        zeron_rpc::HostRelay::spawn(config, service, on_nudge)
     }
 
     pub fn rpc_service(&self) -> Arc<EngineRpc> {
@@ -451,7 +459,8 @@ impl EngineCore {
             self.workspace_scope,
         )
         .with_auth(self.auth())
-        .with_previews(self.previews.clone());
+        .with_previews(self.previews.clone())
+        .with_computer(self.computer.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);
         }
@@ -514,6 +523,7 @@ impl EngineCore {
         self.spaces_sync.shutdown().await;
         self.doc_host.shutdown_workers().await;
         self.doc_host.flush_all();
+        self.computer.shutdown().await;
         self.workspace.shutdown();
         // Break the sessions ⇄ doc-host retain cycle so the replaced graph can
         // actually be freed once the last handle drops.
@@ -556,6 +566,37 @@ impl RpcService for HeadlessRpc {
             let _ = stop_tx.send(());
         });
         RpcReply::value(&serde_json::json!({ "ok": true }))
+    }
+}
+
+/// Relay clients are other devices; the desktop host and the computer calls must be on this Mac.
+struct RelayRpc {
+    inner: Arc<dyn RpcService>,
+}
+
+fn relay_refused(method: &str) -> bool {
+    matches!(
+        method,
+        methods::WATCH_COMPUTER_HOST_REQUESTS
+            | methods::RESPOND_COMPUTER_HOST_REQUEST
+            | methods::CANCEL_COMPUTER_ACTION
+            | methods::SET_COMPUTER_SETTINGS
+            | methods::GET_COMPUTER_CATALOG
+            | methods::COMPUTER_ACTION
+            | methods::COMPUTER_EMERGENCY_STOP
+            | methods::WATCH_COMPUTER_EVENTS
+    )
+}
+
+#[async_trait]
+impl RpcService for RelayRpc {
+    async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        if relay_refused(method) {
+            return Err(RpcError::Failed(format!(
+                "{method} is only served to connections on this device"
+            )));
+        }
+        self.inner.handle(method, params).await
     }
 }
 

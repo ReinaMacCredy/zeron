@@ -205,6 +205,7 @@ impl TitleGenerator {
                 worktree: None,
                 branch: None,
                 forked_at: None,
+                computer_control: false,
             };
             match tokio::time::timeout(
                 std::time::Duration::from_secs(30),
@@ -374,6 +375,7 @@ mod tests {
             worktree: None,
             branch: None,
             forked_at: None,
+            computer_control: false,
         };
         let result = collect_text(&harness, request).await;
         assert!(

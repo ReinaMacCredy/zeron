@@ -50,10 +50,39 @@ pub struct SteerMessage {
 /// The MCP stdio server the engine serves to a run's agent (the thread
 /// tools): the harness injects it into the agent's own tool list. The chat
 /// identity rides in `args`, stamped by the engine, never chosen by the agent.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ToolServer {
     pub command: String,
     pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+    pub guidance: Option<String>,
+}
+
+impl std::fmt::Debug for ToolServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolServer")
+            .field("command", &self.command)
+            .field("args", &self.args)
+            .field(
+                "env",
+                &self.env.iter().map(|(name, _)| name).collect::<Vec<_>>(),
+            )
+            .field("guidance", &self.guidance.is_some())
+            .finish()
+    }
+}
+
+pub(crate) fn is_zeron_computer_tool(name: &str) -> bool {
+    let name = name.trim();
+    name.strip_prefix("mcp__zeron__")
+        .or_else(|| name.strip_prefix("zeron_"))
+        .is_some_and(is_computer_tool_name)
+}
+
+pub(crate) fn is_computer_tool_name(name: &str) -> bool {
+    name.strip_prefix("computer_").is_some_and(|rest| {
+        !rest.is_empty() && rest.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+    })
 }
 
 impl ToolServer {
@@ -61,9 +90,20 @@ impl ToolServer {
     /// `--mcp-config` takes inline.
     pub fn mcp_config_json(&self, name: &str) -> String {
         serde_json::json!({
-            "mcpServers": { name: { "command": self.command, "args": self.args } }
+            "mcpServers": { name: {
+                "command": self.command,
+                "args": self.args,
+                "env": self.env_map(),
+            } }
         })
         .to_string()
+    }
+
+    pub fn env_map(&self) -> serde_json::Map<String, serde_json::Value> {
+        self.env
+            .iter()
+            .map(|(name, value)| (name.clone(), serde_json::Value::String(value.clone())))
+            .collect()
     }
 }
 
@@ -152,6 +192,16 @@ pub trait Harness: Send + Sync {
     /// return true emit [`AgentEvent::Anchor`] for prompts and replies.
     fn branching(&self) -> bool {
         false
+    }
+
+    /// `None` until the driver has learned it (ACP reads `loadSession` at initialize).
+    fn resume_supported(&self) -> Option<bool> {
+        Some(true)
+    }
+
+    /// Whether the agent can see the Zeron MCP server's computer tools.
+    fn computer_tools_reachable(&self) -> bool {
+        true
     }
 
     /// Run one (persistent) session; the stream ends with `AgentEvent::Done`.
@@ -422,5 +472,53 @@ mod skill_mention_tests {
             skill_mentions_as_slash("dùng $frontend-design. $$frontend-design", &skills),
             "dùng /frontend-design. $$frontend-design"
         );
+    }
+}
+
+#[cfg(test)]
+mod tool_server_tests {
+    use super::ToolServer;
+
+    #[test]
+    fn the_run_secret_rides_the_config_and_never_the_debug_output() {
+        let server = ToolServer {
+            command: "/opt/zeron/zeron".into(),
+            args: vec!["mcp".into()],
+            env: vec![("ZERON_RUN_SECRET".into(), "s3cret".into())],
+            guidance: Some("## Zeron computer use".into()),
+        };
+        assert!(
+            server
+                .mcp_config_json("zeron")
+                .contains(r#""env":{"ZERON_RUN_SECRET":"s3cret"}"#)
+        );
+        assert!(!server.mcp_config_json("zeron").contains("computer use"));
+        let debug = format!("{server:?}");
+        assert!(debug.contains("ZERON_RUN_SECRET") && !debug.contains("s3cret"));
+    }
+
+    #[test]
+    fn only_zeron_served_computer_tools_count_as_computer_tools() {
+        use super::{is_computer_tool_name, is_zeron_computer_tool};
+        for name in [
+            "mcp__zeron__computer_click",
+            "mcp__zeron__computer_browser_navigate",
+            "mcp__zeron__computer_spaces",
+            "zeron_computer_type_text",
+        ] {
+            assert!(is_zeron_computer_tool(name), "{name}");
+        }
+        for name in [
+            "computer_click",
+            "mcp__zeron__list_threads",
+            "mcp__other__computer_click",
+            "mcp__zeron__computer_",
+            "mcp__zeron__computer_click; rm -rf /",
+            "Bash",
+        ] {
+            assert!(!is_zeron_computer_tool(name), "{name}");
+        }
+        assert!(is_computer_tool_name("computer_click"));
+        assert!(!is_computer_tool_name("list_threads"));
     }
 }

@@ -251,6 +251,20 @@ pub fn default_reasoning(ladder: &[ReasoningLevel]) -> Option<ReasoningLevel> {
     ladder.first().copied()
 }
 
+pub fn computer_effort_hint_applies(
+    harness: Option<HarnessId>,
+    ladder: &[ReasoningLevel],
+    effective: Option<ReasoningLevel>,
+) -> bool {
+    if harness != Some(HarnessId::ClaudeCode) || !ladder.contains(&ReasoningLevel::Medium) {
+        return false;
+    }
+    match default_reasoning(ladder) {
+        Some(default) if default != ReasoningLevel::Medium => effective == Some(default),
+        _ => false,
+    }
+}
+
 /// Clamp a picked/remembered level to what the model actually offers: keep it
 /// when the ladder lists it, else fall to the model's default (never a stale
 /// or foreign level — zeron use-run-config.ts's derived-model discipline).
@@ -2028,6 +2042,18 @@ impl Pickers {
     fn cancel_model_switch(&mut self, cx: &mut Context<Self>) {
         self.pending_model_switch = None;
         cx.notify();
+    }
+
+    pub(crate) fn computer_effort_hint_applies(&self, cx: &App) -> bool {
+        computer_effort_hint_applies(
+            self.effective_harness(cx),
+            &self.trait_ladder(cx),
+            self.effective_reasoning(cx),
+        )
+    }
+
+    pub(crate) fn apply_computer_effort_hint(&mut self, cx: &mut Context<Self>) {
+        self.pick_reasoning(ReasoningLevel::Medium, cx);
     }
 
     fn pick_reasoning(&mut self, level: ReasoningLevel, cx: &mut Context<Self>) {
@@ -7985,6 +8011,33 @@ mod tests {
         ];
         assert_eq!(default_model(&models).map(|m| &*m.id), Some("flagship"));
         assert!(default_model(&[]).is_none());
+    }
+
+    #[test]
+    fn the_computer_effort_hint_needs_claude_at_an_untouched_default_above_medium() {
+        use ReasoningLevel::*;
+        let ladder = [Low, Medium, High, XHigh, Max];
+        let claude = Some(HarnessId::ClaudeCode);
+        assert!(computer_effort_hint_applies(claude, &ladder, Some(High)));
+        for picked in [Low, Medium, XHigh, Max] {
+            assert!(!computer_effort_hint_applies(claude, &ladder, Some(picked)));
+        }
+        assert!(!computer_effort_hint_applies(
+            Some(HarnessId::Codex),
+            &ladder,
+            Some(High)
+        ));
+        assert!(!computer_effort_hint_applies(
+            claude,
+            &[Low, High],
+            Some(High)
+        ));
+        assert!(!computer_effort_hint_applies(
+            claude,
+            &[Low, Medium],
+            Some(Medium)
+        ));
+        assert!(!computer_effort_hint_applies(claude, &[], None));
     }
 
     #[test]

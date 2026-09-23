@@ -691,6 +691,7 @@ async fn titling_e2e_names_chat_and_renames_worktree_branch() {
         branch: None,
         resume: None,
         forked_at: None,
+        computer_control: false,
     };
     core.sessions
         .dispatch(chat_id, HarnessId::Mock, request, None)
@@ -739,6 +740,7 @@ async fn titling_e2e_names_chat_and_renames_worktree_branch() {
         branch: None,
         resume: None,
         forked_at: None,
+        computer_control: false,
     };
     core.sessions
         .dispatch(chat_id, HarnessId::Mock, request, None)

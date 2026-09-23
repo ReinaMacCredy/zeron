@@ -41,6 +41,7 @@ fn run_request(prompt: &str) -> RunRequest {
         branch: None,
         resume: None,
         forked_at: None,
+        computer_control: false,
     }
 }
 
@@ -242,6 +243,7 @@ fn queue_as_viewer(doc: &SessionDoc, id: &str, payload: SessionCommandPayload) {
         expires_at: None,
         status: SessionCommandStatus::Pending,
         resolution: None,
+        computer_generation: None,
     })
     .expect("queue command");
 }
@@ -876,6 +878,8 @@ async fn recover_stale_journal_stamps_aborted_on_boot() {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
         })
         .unwrap();
         let mut writer = SegmentWriter::begin(&doc, "m-assist", device_id, 2).unwrap();
@@ -1069,6 +1073,7 @@ async fn respond_input_resolves_pending_question() {
                     question: "Which one?".into(),
                     options: vec!["a".into(), "b".into()],
                     multi_select: false,
+                    kind: None,
                 }])
                 .await
                 .unwrap_or_default();
@@ -1222,6 +1227,7 @@ async fn wrong_id_respond_is_rejected_and_correct_answer_still_resumes() {
                     question: "Which one?".into(),
                     options: vec!["a".into(), "b".into()],
                     multi_select: false,
+                    kind: None,
                 }])
                 .await
                 .unwrap_or_default();
@@ -1413,6 +1419,7 @@ async fn interrupt_unblocks_a_run_awaiting_input() {
                         question: "Which one?".into(),
                         options: vec!["a".into(), "b".into()],
                         multi_select: false,
+                        kind: None,
                     }])
                     .await;
                     interrupt.cancelled().await;
@@ -1560,6 +1567,7 @@ async fn harness_emitted_input_twin_is_dropped_and_answer_resumes() {
                     question: "Which one?".into(),
                     options: vec!["a".into(), "b".into()],
                     multi_select: false,
+                    kind: None,
                 };
                 // The pre-fix Claude/Codex shape: surface the question under
                 // the harness's own id BEFORE asking through the bridge.
@@ -1926,6 +1934,7 @@ async fn real_claude_sees_uploaded_image_inline() {
         worktree: None,
         branch: None,
         forked_at: None,
+        computer_control: false,
     };
     core.doc_host
         .queue_command(

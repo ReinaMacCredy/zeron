@@ -49,6 +49,7 @@ fn request(prompt: &str) -> RunRequest {
         branch: None,
         resume: None,
         forked_at: None,
+        computer_control: false,
     }
 }
 
@@ -111,6 +112,8 @@ async fn thread_tools_ride_the_session_new_mcp_servers_list() {
             "--port".into(),
             "27654".into(),
         ],
+        env: vec![("ZERON_RUN_SECRET".into(), "s3cret".into())],
+        guidance: None,
     });
     // The fixture answers "tools on" only when session/new named the zeron
     // server with its command and args; otherwise it refuses the prompt.
@@ -284,6 +287,44 @@ async fn resumed_first_class_model_is_switched_before_prompt() {
         "{events:?}"
     );
     assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+}
+
+#[tokio::test]
+async fn computer_runs_get_host_context_and_skip_the_prompt_for_recorded_shapes() {
+    let outcome = |harness: AcpHarness, computer_control: bool| async move {
+        let (mut controls, _steer, _token) = controls();
+        controls.tool_server = Some(zeron_harness::ToolServer {
+            command: "/opt/zeron/zeron".into(),
+            args: vec![
+                "mcp".into(),
+                "--chat".into(),
+                "chat-42".into(),
+                "--port".into(),
+                "27654".into(),
+            ],
+            env: vec![("ZERON_RUN_SECRET".into(), "s3cret".into())],
+            guidance: computer_control.then(|| "## Zeron computer use\nbody".to_owned()),
+        });
+        let mut req = request("scenario:computer");
+        req.permission_mode = zeron_proto::PermissionMode::Ask;
+        req.auto_approve = false;
+        req.computer_control = computer_control;
+        let events = run_to_end(&harness, req, controls).await;
+        events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::TextDelta { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<String>()
+    };
+    let grok = || AcpHarness::grok().with_executable(fixture_path());
+    let devin = || AcpHarness::devin().with_executable(fixture_path());
+    let hermes = || AcpHarness::hermes().with_executable(fixture_path());
+    assert_eq!(outcome(grok(), true).await, "ctx=1 61:once 62:asked");
+    assert_eq!(outcome(devin(), true).await, "ctx=1 61:once 62:asked");
+    assert_eq!(outcome(grok(), false).await, "ctx=0 61:asked 62:asked");
+    assert_eq!(outcome(hermes(), true).await, "ctx=1 61:asked 62:asked");
 }
 
 #[tokio::test]

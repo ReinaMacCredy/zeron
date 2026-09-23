@@ -259,6 +259,7 @@ fn request(prompt: &str) -> RunRequest {
         worktree: None,
         branch: None,
         forked_at: None,
+        computer_control: false,
     }
 }
 

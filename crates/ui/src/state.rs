@@ -734,6 +734,8 @@ pub struct AppState {
     /// reads it to decide whether to offer its reopen pill; the shell owns
     /// the writes (tab opened / closed).
     pub open_sidechat_tabs: HashSet<String>,
+    pub computer_input_pauses: HashMap<String, crate::computer::cards::InputPauseNotice>,
+    pub computer_settings: Option<zeron_proto::computer::ComputerSettings>,
     /// Whether each probed harness can fork or rewind a session (the
     /// `branching` half of the composer's `HarnessCompaction` probe).
     /// Unprobed harnesses are treated as able; the engine has the last word.
@@ -842,6 +844,8 @@ impl AppState {
             context_usage: None,
             compacting_chat: None,
             open_sidechat_tabs: HashSet::new(),
+            computer_input_pauses: HashMap::new(),
+            computer_settings: None,
             harness_branching: HashMap::new(),
             transcript_replayed: false,
             transcript_baselines: HashMap::new(),
@@ -1009,8 +1013,19 @@ impl AppState {
         true
     }
 
-    pub fn apply_chats(&mut self, mut chats: Vec<Chat>) {
+    pub fn apply_chats(&mut self, mut chats: Vec<Chat>) -> Vec<String> {
         sort_chats(&mut chats);
+        let live: std::collections::HashSet<&str> = chats
+            .iter()
+            .filter(|chat| !chat.archived)
+            .map(|chat| chat.id.as_str())
+            .collect();
+        let gone = self
+            .chats
+            .iter()
+            .filter(|chat| !chat.archived && !live.contains(chat.id.as_str()))
+            .map(|chat| chat.id.clone())
+            .collect();
         self.chats = chats;
         self.chats_synced = true;
         self.transcript_cache
@@ -1030,6 +1045,15 @@ impl AppState {
             self.queue.clear();
             self.queue_task = None;
         }
+        gone
+    }
+
+    fn apply_chats_frame(&mut self, chats: Vec<Chat>, cx: &mut Context<Self>) {
+        let gone = self.apply_chats(chats);
+        crate::computer::preview::forget_chats(&gone, cx);
+        self.apply_pending_deep_link(cx);
+        self.reconcile_change_request_watches(cx);
+        cx.notify();
     }
 
     pub fn apply_sessions(&mut self, sessions: Vec<Session>) -> bool {
@@ -2035,7 +2059,22 @@ impl AppState {
                 },
             ),
             spawn_local_device_probe(cx, handle.clone()),
+            spawn_computer_settings_load(cx, handle.clone()),
         ]);
+        #[cfg(target_os = "macos")]
+        watch_tasks.extend(crate::computer::registration::spawn_host_registration(
+            handle.clone(),
+            cx,
+        ));
+        #[cfg(target_os = "macos")]
+        watch_tasks.push(spawn_watch(
+            cx,
+            handle.clone(),
+            methods::WATCH_COMPUTER_EVENTS,
+            AppState::apply_computer_event,
+        ));
+        #[cfg(target_os = "macos")]
+        watch_tasks.extend(crate::computer::preview::watch_events(handle.clone(), cx));
         self.watch_tasks = watch_tasks;
         self.reconcile_change_request_watches(cx);
         // EngineInfo is part of the attachment boundary: views must know which
@@ -2053,6 +2092,21 @@ impl AppState {
             }
         }
         cx.notify();
+    }
+
+    fn apply_computer_event(&mut self, event: zeron_proto::computer::ComputerEvent) -> bool {
+        let zeron_proto::computer::ComputerEvent::ThreadState { state } = event else {
+            return false;
+        };
+        let notice = crate::computer::cards::input_pause_notice(&state);
+        if self.computer_input_pauses.get(&state.thread_id) == notice.as_ref() {
+            return false;
+        }
+        match notice {
+            Some(notice) => self.computer_input_pauses.insert(state.thread_id, notice),
+            None => self.computer_input_pauses.remove(&state.thread_id),
+        };
+        true
     }
 
     fn reconcile_change_request_watches(&mut self, cx: &mut Context<Self>) {
@@ -2615,12 +2669,7 @@ fn spawn_chats_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<(
                         continue;
                     }
                 };
-                let alive = this.update(cx, |state, cx| {
-                    state.apply_chats(parsed);
-                    state.apply_pending_deep_link(cx);
-                    state.reconcile_change_request_watches(cx);
-                    cx.notify();
-                });
+                let alive = this.update(cx, |state, cx| state.apply_chats_frame(parsed, cx));
                 if alive.is_err() {
                     return;
                 }
@@ -2787,6 +2836,28 @@ fn spawn_watch<T: DeserializeOwned + 'static>(
 
 /// Best-effort `LocalDevice` probe: fills `local_device_id` for the "This
 /// device" badge. Engines that don't serve the method leave it `None`.
+fn spawn_computer_settings_load(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<()> {
+    cx.spawn(async move |this, cx| {
+        let Ok(settings) = handle
+            .client()
+            .call_as::<zeron_proto::computer::ComputerSettings>(
+                methods::GET_COMPUTER_SETTINGS,
+                serde_json::json!({}),
+            )
+            .await
+        else {
+            return;
+        };
+        this.update(cx, |state, cx| {
+            #[cfg(target_os = "macos")]
+            crate::computer::registration::apply_cursor_colors(settings.agent_cursor_colors(), cx);
+            state.computer_settings = Some(settings);
+            cx.notify();
+        })
+        .ok();
+    })
+}
+
 fn spawn_local_device_probe(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<()> {
     cx.spawn(async move |this, cx| {
         let Ok(value) = handle
@@ -3676,6 +3747,8 @@ mod tests {
             status: None,
             continuation_of: None,
             from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
         }
     }
 
@@ -4520,6 +4593,68 @@ mod tests {
         assert_eq!(visible, ["b"]);
     }
 
+    #[gpui::test]
+    fn a_removed_or_archived_chat_drops_its_computer_preview(cx: &mut gpui::TestAppContext) {
+        cx.update(crate::computer::preview::init);
+        let store = cx.update(|cx| crate::computer::preview::store(cx).unwrap());
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, cx| {
+            state.apply_chats_frame(
+                vec![chat("a", 0, None), chat("b", 1, None), chat("c", 2, None)],
+                cx,
+            )
+        });
+        store.update(cx, |store, _| {
+            for id in ["a", "b", "c"] {
+                crate::computer::preview::tests::driving(store, id);
+                store.accept_tap_frame(id, crate::computer::preview::tests::image(1, 4, 4));
+            }
+            store.set_floating("b", Some(gpui::point(20.0, 30.0)));
+        });
+        let mut archived = chat("b", 1, None);
+        archived.archived = true;
+        state.update(cx, |state, cx| {
+            state.apply_chats_frame(vec![archived, chat("c", 2, None)], cx)
+        });
+        store.update(cx, |store, _| {
+            assert_eq!(
+                store.view("a").phase,
+                None,
+                "a deleted chat's session is gone"
+            );
+            assert!(store.view("a").frame.is_none());
+            assert_eq!(
+                store.view("b").phase,
+                None,
+                "an archived chat's session is gone"
+            );
+            assert!(store.view("b").floating.is_none());
+            assert!(
+                store.view("c").frame.is_some(),
+                "a live chat keeps its preview"
+            );
+        });
+    }
+
+    #[test]
+    fn apply_chats_reports_chats_that_left_the_active_list() {
+        let mut state = AppState::new();
+        assert!(
+            state
+                .apply_chats(vec![chat("a", 0, None), chat("b", 1, None)])
+                .is_empty()
+        );
+        let mut archived = chat("a", 0, None);
+        archived.archived = true;
+        let mut gone = state.apply_chats(vec![archived.clone()]);
+        gone.sort();
+        assert_eq!(gone, ["a", "b"]);
+        assert!(
+            state.apply_chats(vec![archived]).is_empty(),
+            "an already archived chat is not reported again"
+        );
+    }
+
     #[test]
     fn unstarted_sidechat_has_no_sidebar_row_until_its_first_send() {
         let now = Utc::now();
@@ -4618,6 +4753,8 @@ mod tests {
             status: None,
             continuation_of: None,
             from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
         };
         state.push_echo("c1", echo.clone());
         // Duplicate pushes dedupe.

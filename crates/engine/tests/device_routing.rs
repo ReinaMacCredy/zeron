@@ -737,6 +737,7 @@ async fn target_device_id_routes_over_the_relay() {
             branch: None,
             resume: None,
             forked_at: None,
+            computer_control: false,
         },
         message_id: "m-a-1".into(),
     })

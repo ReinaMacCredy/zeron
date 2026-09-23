@@ -16,6 +16,9 @@ enum RowKind {
     case toolGroup(tools: [ToolItem], autoOpen: Bool)
     case inputChip(header: String, resolved: Bool)
     case errorChip(message: String)
+    case computerConsent(requestId: String, questionId: String, scope: ComputerConsentScope,
+                         question: String, outcome: ConsentOutcome?)
+    case computerNotice(notice: ComputerNotice, text: String, hint: String?)
 }
 
 struct ToolItem: Hashable {
@@ -129,9 +132,25 @@ enum TranscriptRowBuilder {
             return
         }
 
+        if entry.role == .system,
+           case .text(let partId, let text)? = entry.parts.first,
+           let notice = ComputerCopy.notice(text) {
+            let hint = entry.parts.dropFirst().compactMap { part -> String? in
+                if case .text(_, let t) = part, !t.isEmpty { return t }
+                return nil
+            }.first
+            rows.append(TranscriptRow(id: "\(entry.id)#\(partId)",
+                                      version: fnv1a(text + "\0" + (hint ?? "")),
+                                      turnStart: true,
+                                      kind: .computerNotice(notice: notice, text: text, hint: hint),
+                                      entryId: entry.id, timestamp: nil, partKey: nil))
+            return
+        }
+
         var first = true
         var pendingTools: [ToolItem] = []
         var groupIx = 0
+        var deniedTools: Set<String> = []
         let lastPartIx = entry.parts.indices.last
 
         func flushTools(lastIx: Int?) {
@@ -150,9 +169,20 @@ enum TranscriptRowBuilder {
 
         for (ix, part) in entry.parts.enumerated() {
             switch part {
-            case .tool(_, let call, let isError, let resolved):
+            case .tool(let partId, let call, let isError, let resolved, let controlDenied):
                 pendingTools.append(ToolItem(call: call, isError: isError, resolved: resolved))
-                if ix == lastPartIx { flushTools(lastIx: ix) }
+                if controlDenied, let tool = call.computerTool, deniedTools.insert(tool).inserted {
+                    flushTools(lastIx: ix)
+                    rows.append(TranscriptRow(id: "\(entry.id)#\(partId)-denied", version: 2,
+                                              turnStart: first,
+                                              kind: .computerNotice(notice: .controlDenied,
+                                                                    text: ComputerCopy.deniedTitle,
+                                                                    hint: ComputerCopy.deniedHint),
+                                              entryId: entry.id, timestamp: nil, partKey: nil))
+                    first = false
+                } else if ix == lastPartIx {
+                    flushTools(lastIx: ix)
+                }
 
             case .text(let partId, let text):
                 flushTools(lastIx: ix - 1)
@@ -190,8 +220,29 @@ enum TranscriptRowBuilder {
                                           partKey: nil))
                 first = false
 
-            case .input(let partId, _, let questions, let resolved):
+            case .input(let partId, let requestId, let questions, let resolved, let answers):
                 flushTools(lastIx: ix - 1)
+                if let question = questions.first(where: \.isConsent),
+                   let scope = question.kind?.consentScope {
+                    let outcome = ComputerCopy.consentOutcome(resolved: resolved, answers: answers)
+                    let bits: UInt64 = switch outcome {
+                    case nil: 0
+                    case .allowed?: 1
+                    case .declined?: 2
+                    case .cancelled?: 3
+                    }
+                    rows.append(TranscriptRow(id: "\(entry.id)#\(partId)",
+                                              version: (fnv1a(question.question) << 2) | bits,
+                                              turnStart: first,
+                                              kind: .computerConsent(requestId: requestId,
+                                                                     questionId: question.id,
+                                                                     scope: scope,
+                                                                     question: question.question,
+                                                                     outcome: outcome),
+                                              entryId: entry.id, timestamp: nil, partKey: nil))
+                    first = false
+                    continue
+                }
                 let header = questions.first?.header ?? "Question"
                 rows.append(TranscriptRow(id: "\(entry.id)#\(partId)",
                                           version: fnv1a(header) | (resolved ? 1 : 0),
@@ -270,6 +321,7 @@ enum TranscriptRowBuilder {
 
 extension RenderToolCall {
     var chipLabel: String {
+        if let tool = computerTool { return ComputerCopy.toolTitle(tool) }
         switch tag {
         case "exec": return "Run"
         case "readFile": return "Read"
@@ -287,6 +339,7 @@ extension RenderToolCall {
     }
 
     var chipDetail: String {
+        if computerTool != nil { return "" }
         switch tag {
         case "exec": return string("command") ?? ""
         case "readFile", "writeFile", "editFile": return shortPath(string("path") ?? "")
@@ -308,6 +361,7 @@ extension RenderToolCall {
 
     /// Preserve full paths in the expanded row and on the clipboard.
     var expandedDetail: String {
+        if computerTool != nil { return "" }
         switch tag {
         case "readFile", "writeFile", "editFile": return string("path") ?? ""
         default: return chipDetail
@@ -315,6 +369,7 @@ extension RenderToolCall {
     }
 
     var chipSymbol: String {
+        if computerTool != nil { return "cursorarrow" }
         switch tag {
         case "exec": return "terminal"
         case "readFile", "applyPatch": return "doc.text"
