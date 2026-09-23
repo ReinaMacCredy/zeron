@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
@@ -14,6 +15,7 @@ use super::backend::ComputerError;
 use super::manager::ComputerManager;
 use super::runtime::ComputerRuntime;
 use super::setup_signal::ComputerSetupSignal;
+use super::space_designation::computer_space_designation_for_messages;
 use super::tools::results::{mcp_json_error, tool_result_payload};
 use super::tools::{ComputerToolContext, ComputerToolSeams, ToolArgs};
 use super::visible_use::{
@@ -136,6 +138,19 @@ impl ComputerToolSeams for RunToolSeams {
                 known_app_names: &known,
             },
         )
+    }
+
+    async fn space_designation(&self) -> Vec<u64> {
+        self.sessions
+            .computer_visible_use_entries(&self.chat_id)
+            .map(|entries| computer_space_designation_for_messages(&entries))
+            .unwrap_or_default()
+    }
+
+    async fn workspace_root(&self) -> Option<PathBuf> {
+        self.sessions
+            .last_request(&self.chat_id)
+            .map(|request| PathBuf::from(request.cwd))
     }
 
     async fn setup_required(&self, _tool: &str, signal: &ComputerSetupSignal) {

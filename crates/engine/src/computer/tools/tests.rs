@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -8,7 +10,9 @@ use zeron_proto::PermissionMode;
 use zeron_proto::computer::McpToolResult;
 
 use super::results::tool_result_payload;
-use super::{ComputerToolContext, ComputerToolSeams, ComputerTools, ToolArgs};
+use super::{
+    ComputerToolContext, ComputerToolSeams, ComputerTools, ToolArgs, computer_tool_families,
+};
 use crate::computer::approval_gate::{ApprovalDecision, ComputerApprovalGate};
 use crate::computer::backend::{ComputerAgentDialect, ComputerError};
 use crate::computer::fake_backend::FakeComputerBackendOptions;
@@ -22,6 +26,7 @@ use crate::computer::visible_use::ComputerForegroundAuthorization;
 
 mod actions;
 mod batch_and_diffs;
+mod browser;
 mod catalog;
 mod hung_host;
 mod invariants;
@@ -29,6 +34,7 @@ mod menus_frames;
 mod perception;
 mod refs_and_help;
 mod setup_and_gates;
+mod spaces;
 mod visibility;
 
 pub(crate) const THREAD: &str = "thread-computer";
@@ -84,6 +90,10 @@ pub(crate) struct ToolSeams {
     pub authorization: Mutex<ComputerForegroundAuthorization>,
     pub authorization_reads: AtomicUsize,
     pub setup: Mutex<Vec<(String, ComputerSetupSignal)>>,
+    pub designation: Mutex<Vec<u64>>,
+    pub designation_script: Mutex<VecDeque<Vec<u64>>>,
+    pub designation_reads: AtomicUsize,
+    pub workspace_root: Mutex<Option<PathBuf>>,
 }
 
 impl Default for ToolSeams {
@@ -95,6 +105,10 @@ impl Default for ToolSeams {
             }),
             authorization_reads: AtomicUsize::new(0),
             setup: Mutex::default(),
+            designation: Mutex::default(),
+            designation_script: Mutex::default(),
+            designation_reads: AtomicUsize::new(0),
+            workspace_root: Mutex::default(),
         }
     }
 }
@@ -120,6 +134,16 @@ impl ComputerToolSeams for ToolSeams {
             .lock()
             .unwrap()
             .push((tool.to_owned(), signal.clone()));
+    }
+
+    async fn space_designation(&self) -> Vec<u64> {
+        self.designation_reads.fetch_add(1, Ordering::SeqCst);
+        let scripted = self.designation_script.lock().unwrap().pop_front();
+        scripted.unwrap_or_else(|| self.designation.lock().unwrap().clone())
+    }
+
+    async fn workspace_root(&self) -> Option<PathBuf> {
+        self.workspace_root.lock().unwrap().clone()
     }
 }
 
@@ -168,7 +192,7 @@ pub(crate) fn harness_with(options: HarnessOptions) -> Harness {
     manager_options.env = ComputerManagerEnv::default();
     let manager = ComputerManager::new(manager_options);
     Harness {
-        tools: ComputerTools::new(manager.clone(), Vec::new()),
+        tools: ComputerTools::new(manager.clone(), computer_tool_families(&manager)),
         manager,
         backend: options.backend,
         approvals,

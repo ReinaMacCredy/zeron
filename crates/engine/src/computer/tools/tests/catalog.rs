@@ -42,6 +42,7 @@ const HIDDEN: &[&str] = &[
     "computer_write_clipboard",
     "computer_perform_action",
     "computer_select_text",
+    "computer_spaces",
 ];
 
 #[tokio::test]
@@ -88,6 +89,7 @@ async fn exposes_the_batch_fast_path_with_the_specialists_hidden() {
             "computer_perform_action",
             "computer_select_text",
             "computer_run",
+            "computer_spaces",
         ]
     );
     let catalog: Vec<String> = h
@@ -209,6 +211,7 @@ async fn every_hidden_tool_dispatches_by_exact_name_and_through_its_route() {
             json!({ "label": "Display", "start": 0, "length": 1, "include_screenshot": false }),
         ),
         ("computer_kill_app", json!({ "window_id": "fake-terminal" })),
+        ("computer_spaces", json!({ "operation": "release" })),
     ];
     assert_eq!(direct.len(), HIDDEN.len());
     for (name, arguments) in direct {
@@ -244,6 +247,100 @@ async fn every_hidden_tool_dispatches_by_exact_name_and_through_its_route() {
                 "{name}: {run:?}"
             );
         }
+    }
+    h.dispose().await;
+}
+
+const SYNARA_REGISTERED: &[&str] = &[
+    "computer_spaces",
+    "computer_list_windows",
+    "computer_get_state",
+    "computer_screenshot",
+    "computer_get_screen_size",
+    "computer_wait",
+    "computer_read_clipboard",
+    "computer_launch_app",
+    "computer_list_apps",
+    "computer_verify_state",
+    "computer_zoom",
+    "computer_get_accessibility_tree",
+    "computer_get_cursor_position",
+    "computer_inspect",
+    "computer_help",
+    "computer_set_window_frame",
+    "computer_invoke_menu",
+    "computer_kill_app",
+    "computer_set_window_minimized",
+    "computer_set_app_visibility",
+    "computer_click",
+    "computer_move_cursor",
+    "computer_drag",
+    "computer_scroll",
+    "computer_type_text",
+    "computer_press_key",
+    "computer_write_clipboard",
+    "computer_paste",
+    "computer_activate_window",
+    "computer_set_value",
+    "computer_perform_action",
+    "computer_select_text",
+    "computer_run",
+    "computer_browser_state",
+    "computer_browser_prepare",
+    "computer_browser_navigate",
+    "computer_browser_click",
+    "computer_browser_type",
+    "computer_browser_dialog",
+    "computer_browser_upload",
+    "computer_browser_download",
+    "computer_browser_pointer",
+    "computer_browser_press",
+];
+
+#[tokio::test]
+async fn registers_synaras_43_tools_with_28_advertised_when_the_backend_has_a_browser() {
+    let h = super::harness_with(super::HarnessOptions {
+        backend: super::fake_with(crate::computer::fake_backend::FakeComputerBackendOptions {
+            browser: crate::computer::fake_backend::FakeComputerOptIn::BuiltIn,
+            ..Default::default()
+        }),
+        ..super::HarnessOptions::default()
+    });
+    let mut registered: Vec<String> = h
+        .tools
+        .entries()
+        .iter()
+        .map(|entry| entry.name().to_owned())
+        .collect();
+    assert_eq!(registered.len(), 43);
+    registered.sort();
+    let mut expected: Vec<&str> = SYNARA_REGISTERED.to_vec();
+    expected.sort_unstable();
+    assert_eq!(registered, expected);
+    let catalog: Vec<String> = h
+        .tools
+        .catalog()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+    let mut advertised: Vec<&str> = ADVERTISED.to_vec();
+    advertised.extend_from_slice(&crate::computer::tools::browser::COMPUTER_BROWSER_TOOL_NAMES);
+    assert_eq!(catalog.len(), 28);
+    assert_eq!(catalog, advertised);
+    let hidden: Vec<String> = h
+        .tools
+        .entries()
+        .into_iter()
+        .filter(|entry| entry.discovery_only)
+        .map(|entry| entry.definition.name)
+        .collect();
+    assert_eq!(hidden.len(), 15);
+    assert_eq!(hidden, HIDDEN);
+    for name in SYNARA_REGISTERED {
+        assert!(
+            super::super::tool_permission::canonical_zeron_computer_tool_name(name).is_some(),
+            "{name}"
+        );
     }
     h.dispose().await;
 }

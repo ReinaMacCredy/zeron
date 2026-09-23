@@ -606,3 +606,71 @@ async fn turn_end_and_stop_cancel_the_chats_in_flight_calls() {
     assert!(!calls.cancel(CHAT, &McpRequestId::Number(2)));
     assert!(calls.cancel("other", &McpRequestId::Number(1)));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_seams_bound_browser_files_to_the_run_cwd_and_read_space_designation_from_the_chat() {
+    let backend = Scripted::new(crate::computer::fake_backend::FakeComputerBackendOptions {
+        browser: crate::computer::fake_backend::FakeComputerOptIn::BuiltIn,
+        ..Default::default()
+    });
+    backend.hooks().list_spaces = Some(Arc::new(|_, ()| {
+        async {
+            Ok(zeron_proto::computer::ComputerSpaceInventory {
+                source: zeron_proto::computer::ComputerSpaceSource::MacosManagedSpaces,
+                complete: true,
+                spaces: vec![zeron_proto::computer::ComputerSpace {
+                    id: 2,
+                    uuid: Some("uuid-2".into()),
+                    display_id: "display-a".into(),
+                    kind: zeron_proto::computer::ComputerSpaceKind::Desktop,
+                    current: Some(false),
+                }],
+            })
+        }
+        .boxed()
+    }));
+    let rig = Rig::new(Some(backend.clone())).await;
+    rig.settings(true);
+    let secret = rig.run("c1", "Use Space ID 2 for this task.").await;
+    assert_eq!(rig.catalog(&secret).await.unwrap().len(), 28);
+    let outside = tempfile::tempdir().unwrap();
+    let stray = outside.path().join("stray.txt");
+    std::fs::write(&stray, "x").unwrap();
+    let inside = tempfile::tempdir_in("/tmp").unwrap();
+    let attach = inside.path().join("attach.txt");
+    std::fs::write(&attach, "x").unwrap();
+    let upload = |file: &std::path::Path| json!({ "target_id": "t", "tab_id": "tab", "ref": "p1:0", "files": [file] });
+    let refused = rig
+        .action(&secret, "computer_browser_upload", upload(&stray), 1)
+        .await
+        .unwrap();
+    assert!(refused.is_error);
+    assert!(
+        refused
+            .first_text()
+            .unwrap_or_default()
+            .contains("outside the active workspace"),
+        "{refused:?}"
+    );
+    let uploaded = rig
+        .action(&secret, "computer_browser_upload", upload(&attach), 2)
+        .await
+        .unwrap();
+    assert!(!uploaded.is_error, "{uploaded:?}");
+    assert_eq!(
+        backend.calls_for("browser.browser_set_input_files").len(),
+        1
+    );
+    let reserved = rig
+        .action(
+            &secret,
+            "computer_inspect",
+            json!({ "tool": "computer_spaces", "arguments": { "operation": "reserve", "space_id": 2 } }),
+            3,
+        )
+        .await
+        .unwrap();
+    assert!(!reserved.is_error, "{reserved:?}");
+    assert_eq!(payload(&reserved)["reservation"]["spaceId"], json!(2));
+    rig.core.shutdown().await;
+}

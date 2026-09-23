@@ -642,6 +642,47 @@ async fn refuses_a_condition_with_no_label_carrying_target() {
 }
 
 #[tokio::test]
+async fn looks_up_the_registered_browser_catalog_and_the_returned_prepare_tool_is_callable() {
+    let h = harness_with(HarnessOptions {
+        backend: fake_with(crate::computer::fake_backend::FakeComputerBackendOptions {
+            browser: crate::computer::fake_backend::FakeComputerOptIn::BuiltIn,
+            ..Default::default()
+        }),
+        ..HarnessOptions::default()
+    });
+    let help = result_json(
+        &h.call(
+            "computer_help",
+            json!({ "tool": "computer_browser_prepare" }),
+        )
+        .await,
+    );
+    let definition = h
+        .tools
+        .entry("computer_browser_prepare")
+        .unwrap()
+        .definition;
+    assert_eq!(
+        help["definition"],
+        serde_json::to_value(&definition).unwrap()
+    );
+    assert_eq!(help["advertised"], json!(true));
+    let index = result_json(&h.call("computer_help", json!({ "topic": "tools" })).await);
+    let text = index["text"].as_str().unwrap_or_default();
+    assert!(text.contains("computer_browser_prepare"), "{index}");
+    assert!(text.contains("computer_browser_navigate"), "{index}");
+    let prepared = h
+        .call(
+            "computer_browser_prepare",
+            json!({ "allow_launch": true, "profile": { "mode": "isolated_new" } }),
+        )
+        .await;
+    assert!(!prepared.is_error, "{prepared:?}");
+    assert_eq!(h.backend.calls_for("browser.browser_prepare").len(), 1);
+    h.dispose().await;
+}
+
+#[tokio::test]
 async fn does_not_invent_browser_entries_for_a_desktop_only_backend() {
     let h = harness();
     let help = h

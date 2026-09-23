@@ -1,5 +1,7 @@
 mod args;
 mod batch;
+pub mod browser;
+mod browser_effect;
 mod desktop;
 mod elements;
 pub mod guidance;
@@ -8,12 +10,14 @@ mod pipeline;
 pub mod progress_guard;
 pub mod results;
 mod schemas;
+pub mod spaces;
 pub mod tool_input;
 pub mod tool_permission;
 
 #[cfg(test)]
 mod tests;
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -220,6 +224,14 @@ pub trait ComputerToolSeams: Send + Sync {
     async fn foreground_authorization(&self) -> ComputerForegroundAuthorization;
 
     async fn setup_required(&self, _tool: &str, _signal: &ComputerSetupSignal) {}
+
+    async fn space_designation(&self) -> Vec<u64> {
+        Vec::new()
+    }
+
+    async fn workspace_root(&self) -> Option<PathBuf> {
+        None
+    }
 }
 
 #[derive(Clone)]
@@ -251,6 +263,15 @@ pub trait ComputerToolFamily: Send + Sync {
         args: ToolArgs,
         context: &ComputerToolContext,
     ) -> McpToolResult;
+}
+
+pub fn computer_tool_families(manager: &ComputerManager) -> Vec<Arc<dyn ComputerToolFamily>> {
+    let mut families: Vec<Arc<dyn ComputerToolFamily>> =
+        vec![Arc::new(self::spaces::ComputerSpaceTools::default())];
+    if manager.supports_browser() {
+        families.push(Arc::new(self::browser::ComputerBrowserTools::default()));
+    }
+    families
 }
 
 struct ToolState {
