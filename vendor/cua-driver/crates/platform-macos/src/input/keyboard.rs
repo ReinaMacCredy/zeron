@@ -194,9 +194,6 @@ pub fn press_key_in_window(
     } else {
         (key_name_to_code(key)?, modifier_flags(modifiers))
     };
-    if uses_ax_return(code, modifiers) {
-        return press_ax_return_in_window(pid, window_id, element);
-    }
     let mut pair = PreparedKey::new(
         &source()?,
         code,
@@ -209,108 +206,6 @@ pub fn press_key_in_window(
     )?;
     pair.required_focus_window = Some((window_id, element));
     pair.pulse()
-}
-
-fn uses_ax_return(key_code: u16, modifiers: &[&str]) -> bool {
-    key_code == 36 && modifiers.is_empty()
-}
-
-fn press_ax_return_in_window(
-    pid: i32,
-    window_id: u32,
-    element: Option<usize>,
-) -> anyhow::Result<()> {
-    use crate::ax::bindings::{AXUIElementCreateApplication, AXUIElementSetMessagingTimeout};
-    use core_foundation::base::{CFRelease, CFTypeRef};
-
-    let application = unsafe {
-        let raw = AXUIElementCreateApplication(pid);
-        if raw.is_null() {
-            anyhow::bail!("Could not create AX keyboard target");
-        }
-        AXUIElementSetMessagingTimeout(raw, 0.15);
-        let retained = crate::ax::cache::RetainedElement::retain(raw as usize);
-        CFRelease(raw as CFTypeRef);
-        retained
-    };
-    if !crate::ax::exact_target::keyboard_focus_matches_target(pid, window_id, element) {
-        anyhow::bail!(
-            "same_pid_keyboard_ambiguity: application keyboard focus changed before key dispatch"
-        );
-    }
-    // The documented application-scoped AX route reaches inactive Chromium
-    // without activation. Select it before dispatch; an uncertain AX result
-    // must never be replayed through a CGEvent queue.
-    pulse_ax_return_with(
-        super::cancellation::gate(),
-        element,
-        |down| unsafe {
-            AXUIElementPostKeyboardEvent(
-                application.as_ptr() as crate::ax::bindings::AXUIElementRef,
-                13,
-                36,
-                u8::from(down),
-            )
-        },
-        || key_pause(8),
-    )
-}
-
-fn pulse_ax_return_with(
-    gate: &super::cancellation::InputGate,
-    element: Option<usize>,
-    post: impl Fn(bool) -> i32,
-    pause: impl FnOnce() -> anyhow::Result<()>,
-) -> anyhow::Result<()> {
-    let down_error = std::cell::Cell::new(0);
-    // Declared first so an unwind drops HeldInput, unlocks its mutex, and only
-    // then records a release failure while the action's outer lease is alive.
-    let release = AxReturnRelease {
-        gate,
-        error: std::cell::Cell::new(0),
-    };
-    let held = gate.press_ax(
-        element,
-        || down_error.set(post(true)),
-        || {
-            release.error.set(-25204);
-            release.error.set(post(false));
-        },
-    )?;
-    let paused = if down_error.get() == 0 {
-        pause()
-    } else {
-        Ok(())
-    };
-    drop(held);
-    // HeldInput invokes release under its mutex. Mark uncertainty only after
-    // drop has unlocked it, while this action's outer lease still exists.
-    if release.error.get() != 0 {
-        anyhow::bail!(
-            "native_keyboard_release_unconfirmed: AX Return key-up failed with {}; do not replay",
-            release.error.get()
-        );
-    }
-    if down_error.get() != 0 {
-        anyhow::bail!(
-            "AX Return key-down failed with {}; effect unknown, do not replay",
-            down_error.get()
-        );
-    }
-    paused
-}
-
-struct AxReturnRelease<'a> {
-    gate: &'a super::cancellation::InputGate,
-    error: std::cell::Cell<i32>,
-}
-
-impl Drop for AxReturnRelease<'_> {
-    fn drop(&mut self) {
-        if self.error.get() != 0 {
-            self.gate.mark_unconfirmed_release();
-        }
-    }
 }
 
 pub fn hotkey(pid: i32, key: &str, modifiers: &[&str]) -> anyhow::Result<()> {
@@ -525,16 +420,6 @@ extern "C" {
         key_code: u16,
         key_down: bool,
     ) -> core_graphics::sys::CGEventRef;
-}
-
-#[link(name = "ApplicationServices", kind = "framework")]
-extern "C" {
-    fn AXUIElementPostKeyboardEvent(
-        application: crate::ax::bindings::AXUIElementRef,
-        key_char: u16,
-        virtual_key: u16,
-        key_down: u8,
-    ) -> i32;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -804,66 +689,6 @@ pub(super) fn key_name_to_code(key: &str) -> anyhow::Result<u16> {
 mod tests {
     use super::*;
     use core_graphics::event::CGEventType;
-
-    #[test]
-    fn ax_return_route_preserves_modified_key_semantics() {
-        assert!(uses_ax_return(36, &[]));
-        assert!(!uses_ax_return(36, &["shift"]));
-        assert!(!uses_ax_return(36, &["cmd"]));
-        assert!(!uses_ax_return(48, &[]));
-    }
-
-    #[test]
-    fn ax_return_releases_after_down_error_or_cancellation() {
-        for (down_error, cancel) in [(-25204, false), (0, true)] {
-            let gate = super::super::cancellation::InputGate::default();
-            let events = std::cell::RefCell::new(Vec::new());
-            let result = pulse_ax_return_with(
-                &gate,
-                None,
-                |down| {
-                    events.borrow_mut().push(down);
-                    if down {
-                        down_error
-                    } else {
-                        0
-                    }
-                },
-                || {
-                    if cancel {
-                        anyhow::bail!("native_input_cancelled")
-                    } else {
-                        Ok(())
-                    }
-                },
-            );
-            assert!(result.is_err());
-            assert_eq!(*events.borrow(), [true, false]);
-            assert!(!gate.has_unconfirmed_releases());
-        }
-    }
-
-    #[test]
-    fn ax_return_failed_release_blocks_cleanup_even_during_unwind() {
-        for panic_during_pause in [false, true] {
-            let gate = super::super::cancellation::InputGate::default();
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                pulse_ax_return_with(
-                    &gate,
-                    None,
-                    |down| if down { 0 } else { -25204 },
-                    || {
-                        if panic_during_pause {
-                            panic!("test action unwind");
-                        }
-                        Ok(())
-                    },
-                )
-            }));
-            assert!(gate.has_unconfirmed_releases());
-            assert!(gate.post(|| ()).is_err());
-        }
-    }
 
     #[test]
     fn physical_text_uses_flags_changed_for_balanced_shift_transitions() {
