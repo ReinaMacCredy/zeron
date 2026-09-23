@@ -2,8 +2,8 @@
 //!
 //! Two modes, determined by the element's AXRole:
 //!
-//! * **AXPopUpButton**: Find the child option whose AXTitle or AXValue matches
-//!   `value` (case-insensitive) and AXPress it directly.  The native macOS popup
+//! * **AXPopUpButton**: Find the option (a direct child or an item of its AXMenu
+//!   child) whose AXTitle or AXValue matches `value` (case-insensitive) and AXPress it directly.  The native macOS popup
 //!   menu is never opened. A popup without an exact AX child is refused; it
 //!   never mutates an unrelated frontmost browser document.
 //!
@@ -49,10 +49,11 @@ fn def() -> &'static ToolDef {
         description:
             "Set a value on a UI element. Two modes depending on element role:\n\
              \n\
-             - **AXPopUpButton / select dropdown**: finds the child option whose \
-             title or value matches `value` (case-insensitive) and AXPresses it \
-             directly. Requires a matching AX child in the exact target; a \
-             popup with no AX children is refused.\n\
+             - **AXPopUpButton / select dropdown**: finds the option (a direct \
+             child, or an item of the popup's AXMenu child) whose title or value \
+             matches `value` (case-insensitive), AXPresses it directly, and reads \
+             the popup back to confirm the selection. Requires a matching AX option \
+             in the exact target; a popup with no AX options is refused.\n\
              \n\
              - **All other elements**: writes AXValue directly (sliders, steppers, \
              native text fields that expose settable AXValue). Date and time \
@@ -511,14 +512,13 @@ fn set_value_blocking(
 
     if role == "AXPopUpButton" {
         let element_title = unsafe { copy_string_attr(element, "AXTitle") }.unwrap_or_default();
-        // Menu-item selection, not an AXValue write — no read-back to report.
-        select_popup_option(element, element_index, value, &element_title).map(|detail| {
-            SetValueOutcome {
+        select_popup_option(element, element_index, value, &element_title).map(
+            |(detail, verified)| SetValueOutcome {
                 detail,
-                verified: None,
+                verified,
                 changed: None,
-            }
-        })
+            },
+        )
     } else {
         let current_number = if append {
             None
@@ -869,39 +869,99 @@ fn step_to_value_with(
 
 // ── AXPopUpButton path ───────────────────────────────────────────────────────
 
+// NSPopUpButton and Chromium <select> nest their items under a single AXMenu child.
+fn flatten_popup_options<T: Copy>(
+    children: &[T],
+    mut menu_items: impl FnMut(T) -> Option<Vec<T>>,
+) -> (Vec<T>, Vec<T>) {
+    let mut options = Vec::with_capacity(children.len());
+    let mut owned = Vec::new();
+    for &child in children {
+        match menu_items(child) {
+            Some(items) => {
+                options.extend(items.iter().copied());
+                owned.extend(items);
+            }
+            None => options.push(child),
+        }
+    }
+    (options, owned)
+}
+
+fn popup_option_matches(title: &str, value: &str, requested: &str) -> bool {
+    let requested = requested.to_lowercase();
+    title.to_lowercase() == requested || value.to_lowercase() == requested
+}
+
+fn popup_shows_option(
+    title: &str,
+    mut read: impl FnMut() -> (Option<String>, Option<String>),
+) -> bool {
+    for attempt in 0..25 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let (value, shown_title) = read();
+        if [value, shown_title]
+            .iter()
+            .flatten()
+            .any(|shown| shown.trim().to_lowercase() == title.trim().to_lowercase())
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn select_popup_option(
     element: AXUIElementRef,
     element_index: usize,
     value: &str,
     element_title: &str,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<(String, Option<bool>)> {
     let children = unsafe { copy_children(element) };
-    if children.is_empty() {
-        return Err(AxActionFailure::refused(format!(
-            "AXPopUpButton [{element_index}] '{element_title}' has no exact AX child; \
-             no mutation was submitted. An untargeted browser-document fallback is forbidden."
-        ))
-        .into());
-    }
-    let value_lower = value.to_lowercase();
+    let (options, owned) = flatten_popup_options(&children, |child| {
+        (unsafe { copy_string_attr(child, "AXRole") }.as_deref() == Some("AXMenu"))
+            .then(|| unsafe { copy_children(child) })
+    });
     let mut matched = None;
-    let mut available = Vec::with_capacity(children.len());
-    for &child in &children {
-        let title = unsafe { copy_string_attr(child, "AXTitle") }.unwrap_or_default();
-        let child_value = unsafe { copy_string_attr(child, "AXValue") }.unwrap_or_default();
+    let mut available = Vec::with_capacity(options.len());
+    for &option in &options {
+        let title = unsafe { copy_string_attr(option, "AXTitle") }.unwrap_or_default();
+        let option_value = unsafe { copy_string_attr(option, "AXValue") }.unwrap_or_default();
         available.push(title.clone());
-        if title.to_lowercase() == value_lower || child_value.to_lowercase() == value_lower {
-            matched = Some((child, title));
+        if popup_option_matches(&title, &option_value, value) {
+            matched = Some((option, title));
             break;
         }
     }
     // Keep every retained child alive through the action and release it on all
     // ordinary outcomes, including a preflight refusal or an uncertain AX error.
-    let result = if let Some((child, title)) = matched {
-        crate::input::ax_actions::perform_ax_action(child as usize, "press").map(|()| {
-            format!(
-                "📨 Submitted AXPress for '{title}' in AXPopUpButton [{element_index}] \
-                 '{element_title}'; observe the selection to confirm it."
+    let result = if options.is_empty() {
+        Err(AxActionFailure::refused(format!(
+            "AXPopUpButton [{element_index}] '{element_title}' has no exact AX child; \
+             no mutation was submitted. An untargeted browser-document fallback is forbidden."
+        ))
+        .into())
+    } else if let Some((option, title)) = matched {
+        crate::input::ax_actions::perform_ax_action(option as usize, "press").map(|()| {
+            let shown = popup_shows_option(&title, || unsafe {
+                (
+                    copy_string_attr(element, "AXValue"),
+                    copy_string_attr(element, "AXTitle"),
+                )
+            });
+            let suffix = if shown {
+                ""
+            } else {
+                " The popup did not report the new selection; observe it; do not replay."
+            };
+            (
+                format!(
+                    "✅ Set AXPopUpButton [{element_index}] '{element_title}' to '{title}' \
+                     via AXPress.{suffix}"
+                ),
+                Some(shown),
             )
         })
     } else {
@@ -911,7 +971,7 @@ fn select_popup_option(
         ))
         .into())
     };
-    for child in children {
+    for child in children.into_iter().chain(owned) {
         unsafe { CFRelease(child as _) };
     }
     result
@@ -921,10 +981,11 @@ fn select_popup_option(
 mod tests {
     use super::{
         apply_surface_trust, apply_verification_label, choose_value_route, classify_write,
-        compose_append_value, kAXErrorSuccess, needs_stepping, needs_string_retry,
-        poll_until_moved, poll_while_unchanged, refuse_rich_text_replace, step_to_value_with,
-        validate_append_target, write_ignored, write_value_with, AxActionFailure, CfValueKind,
-        SetValueOutcome, ValueRoute, MAX_APPENDED_TEXT_UTF16,
+        compose_append_value, flatten_popup_options, kAXErrorSuccess, needs_stepping,
+        needs_string_retry, poll_until_moved, poll_while_unchanged, popup_option_matches,
+        popup_shows_option, refuse_rich_text_replace, step_to_value_with, validate_append_target,
+        write_ignored, write_value_with, AxActionFailure, CfValueKind, SetValueOutcome, ValueRoute,
+        MAX_APPENDED_TEXT_UTF16,
     };
     use std::cell::Cell;
 
@@ -1010,6 +1071,45 @@ mod tests {
                 target: 7.0
             }
         );
+    }
+
+    #[test]
+    fn popup_items_nested_under_a_menu_are_matched() {
+        let (options, owned) =
+            flatten_popup_options(&[1, 2], |child| (child == 2).then(|| vec![20, 21]));
+        assert_eq!(options, vec![1, 20, 21]);
+        assert_eq!(owned, vec![20, 21]);
+        let (options, owned) = flatten_popup_options(&[5], |_| None);
+        assert_eq!(options, vec![5]);
+        assert!(owned.is_empty());
+        assert!(popup_option_matches("United States", "", "united states"));
+        assert!(popup_option_matches("", "us", "US"));
+        assert!(!popup_option_matches(
+            "United Kingdom",
+            "uk",
+            "united states"
+        ));
+    }
+
+    #[test]
+    fn a_popup_selection_is_confirmed_case_insensitively_after_it_settles() {
+        let reads = Cell::new(0);
+        assert!(popup_shows_option("United States", || {
+            reads.set(reads.get() + 1);
+            if reads.get() < 3 {
+                (Some("Canada".into()), None)
+            } else {
+                (Some("united states".into()), None)
+            }
+        }));
+        assert_eq!(reads.get(), 3);
+        assert!(popup_shows_option("Dark", || (None, Some("Dark".into()))));
+        let reads = Cell::new(0);
+        assert!(!popup_shows_option("Dark", || {
+            reads.set(reads.get() + 1);
+            (Some("Light".into()), None)
+        }));
+        assert_eq!(reads.get(), 25);
     }
 
     #[test]
