@@ -86,6 +86,8 @@ struct Inner {
     timer: Option<JoinHandle<()>>,
     last: Option<Option<String>>,
     disposed: bool,
+    #[cfg(test)]
+    started: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -122,6 +124,8 @@ impl CursorActivity {
                 timer: None,
                 last: None,
                 disposed: false,
+                #[cfg(test)]
+                started: Vec::new(),
             })),
             publish: Arc::new(publish),
         }
@@ -129,6 +133,11 @@ impl CursorActivity {
 
     fn inner(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn started(&self) -> Vec<String> {
+        self.inner().started.clone()
     }
 
     pub fn set_owner(&self, owner: Option<&str>) {
@@ -170,6 +179,8 @@ impl CursorActivity {
             inner
                 .pending
                 .push((token, thread.to_owned(), text.to_owned()));
+            #[cfg(test)]
+            inner.started.push(text.to_owned());
             token
         };
         self.schedule();

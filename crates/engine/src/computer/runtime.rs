@@ -20,6 +20,7 @@ use super::engine_seams::EngineComputerSeams;
 use super::host_wire::{HostRegistration, HostSlot};
 use super::manager::{ComputerManagerSeams, ComputerManagerSubscription};
 use super::service::{ComputerService, ComputerServiceOptions};
+use super::tool_calls::ComputerCalls;
 use crate::sessions::SessionsEngine;
 
 const SETTINGS_FILE: &str = "computer-settings.json";
@@ -41,6 +42,7 @@ pub struct ComputerRuntime {
     events: broadcast::Sender<ComputerEvent>,
     forwarding: Mutex<Option<ComputerManagerSubscription>>,
     chat_watch: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    calls: Arc<ComputerCalls>,
 }
 
 impl ComputerRuntime {
@@ -64,6 +66,7 @@ impl ComputerRuntime {
             events: broadcast::channel(EVENT_BUFFER).0,
             forwarding: Mutex::new(None),
             chat_watch: Mutex::new(None),
+            calls: Arc::default(),
         });
         tokio::spawn(runtime.clone().rebuild(None));
         runtime
@@ -154,7 +157,30 @@ impl ComputerRuntime {
         .enabled()
     }
 
+    pub fn calls(&self) -> &Arc<ComputerCalls> {
+        &self.calls
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn install_backend(&self, backend: Arc<dyn super::backend::ComputerBackend>) {
+        let _rebuilding = self.rebuilds.lock().await;
+        if let Some(previous) = self.service.send_replace(None) {
+            previous.dispose().await;
+        }
+        let service = ComputerService::boot(ComputerServiceOptions {
+            backend: Some(backend),
+            control_state: self.control_state.clone(),
+            approval_gate: self.approval_gate.clone(),
+            seams: self.seams.clone(),
+            env: super::manager::ComputerManagerEnv::default(),
+            ..ComputerServiceOptions::default()
+        })
+        .await;
+        self.service.send_replace(Some(Arc::new(service)));
+    }
+
     pub async fn stop_chat(&self, chat_id: &str, doc_generation: u64) {
+        self.calls.cancel_chat(chat_id, None);
         self.control_state.seed(chat_id, doc_generation);
         match self.service() {
             Some(service) => {
@@ -181,6 +207,7 @@ impl ComputerRuntime {
     }
 
     pub fn turn_ended(&self, chat_id: &str, turn_id: &str) {
+        self.calls.cancel_chat(chat_id, Some(turn_id));
         self.approval_gate.cancel_thread(chat_id, Some(turn_id));
         let Some(service) = self.service() else {
             return;

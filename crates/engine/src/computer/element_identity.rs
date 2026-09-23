@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use zeron_proto::computer::{ComputerTarget, ComputerUiNode};
+use zeron_proto::computer::{ComputerRect, ComputerTarget, ComputerUiNode};
 
 use super::ui_tree_targeting::ComputerActionableElementRef;
 
@@ -13,6 +13,7 @@ pub struct ObservedComputerElement {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObservedComputerTarget {
     pub target: ComputerTarget,
+    pub observed_window_bounds: Option<ComputerRect>,
     observed: Option<Arc<ObservedComputerElement>>,
 }
 
@@ -20,6 +21,7 @@ impl From<ComputerTarget> for ObservedComputerTarget {
     fn from(target: ComputerTarget) -> Self {
         Self {
             target,
+            observed_window_bounds: None,
             observed: None,
         }
     }
@@ -53,6 +55,7 @@ pub fn bind_computer_target_ref(
 ) -> ObservedComputerTarget {
     ObservedComputerTarget {
         target,
+        observed_window_bounds: None,
         observed: element.observed.clone(),
     }
 }

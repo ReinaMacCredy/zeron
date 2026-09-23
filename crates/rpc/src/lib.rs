@@ -240,16 +240,17 @@ pub mod methods {
     /// a no-op. `{hostToken, correlationId, result: CuaReply}` → `{}`.
     pub const RESPOND_COMPUTER_HOST_REQUEST: &str = "RespondComputerHostRequest";
     /// `zeron mcp` relays `notifications/cancelled` for one in-flight action.
-    /// `{chatId, runSecret, requestId}` → `{}`.
+    /// `{chatId, runSecret, requestId}` → `{cancelled}`.
     pub const CANCEL_COMPUTER_ACTION: &str = "CancelComputerAction";
     /// Written only by a Settings page on the engine's Mac. `ComputerSettings` → `{}`.
     pub const SET_COMPUTER_SETTINGS: &str = "SetComputerSettings";
     /// No params → `ComputerSettings`.
     pub const GET_COMPUTER_SETTINGS: &str = "GetComputerSettings";
-    /// The run's `computer_*` tool list for `tools/list`. `{chatId, runSecret}`.
+    /// The run's `computer_*` tool list for `tools/list`. `{chatId, runSecret}` →
+    /// `ComputerCatalog`.
     pub const GET_COMPUTER_CATALOG: &str = "GetComputerCatalog";
     /// One `computer_*` tool call from `zeron mcp`, authenticated by the run
-    /// secret. `{chatId, runSecret, tool, arguments, requestId}`.
+    /// secret. `{chatId, runSecret, tool, arguments, requestId}` → `McpToolResult`.
     pub const COMPUTER_ACTION: &str = "ComputerAction";
     /// Recent Computer mutations, newest first. `ComputerGetAuditHistoryInput`
     /// → `ComputerGetAuditHistoryResult`.

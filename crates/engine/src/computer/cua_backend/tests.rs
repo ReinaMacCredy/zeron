@@ -37,17 +37,17 @@ pub(crate) type ToolHandler = Arc<dyn Fn(&Map<String, Value>) -> Value + Send + 
 #[derive(Clone)]
 pub(crate) struct Gate(Shared<BoxFuture<'static, ()>>);
 
-pub(super) struct GateOpener(Option<oneshot::Sender<()>>);
+pub(crate) struct GateOpener(Option<oneshot::Sender<()>>);
 
 impl GateOpener {
-    pub(super) fn open(mut self) {
+    pub(crate) fn open(mut self) {
         if let Some(sender) = self.0.take() {
             let _ = sender.send(());
         }
     }
 }
 
-pub(super) fn gate() -> (GateOpener, Gate) {
+pub(crate) fn gate() -> (GateOpener, Gate) {
     let (sender, receiver) = oneshot::channel::<()>();
     let wait = async move {
         let _ = receiver.await;
@@ -487,7 +487,7 @@ impl Fixture {
             .insert(name.to_owned(), Arc::new(handler));
     }
 
-    pub(super) fn gate_type_text(&self, gate: Option<Gate>) {
+    pub(crate) fn gate_type_text(&self, gate: Option<Gate>) {
         self.knobs().type_gate = gate;
     }
 

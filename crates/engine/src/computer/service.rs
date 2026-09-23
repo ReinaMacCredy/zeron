@@ -13,6 +13,7 @@ use super::manager::{
     ComputerManager, ComputerManagerEnv, ComputerManagerOptions, ComputerManagerSeams,
     DefaultComputerManagerSeams,
 };
+use super::tools::ComputerTools;
 use super::unavailable_backend::{UnavailableComputerBackend, UnavailableComputerBackendOptions};
 
 const NO_HOST_MESSAGE: &str = "No Zeron desktop host is connected to this engine. Open Zeron on this Mac so the agent can use the computer.";
@@ -52,6 +53,7 @@ pub struct ComputerService {
     pub supported: bool,
     pub availability: ComputerAvailability,
     pub manager: Arc<ComputerManager>,
+    pub tools: Arc<ComputerTools>,
 }
 
 fn unavailable_backend(platform: &str) -> UnavailableComputerBackend {
@@ -127,6 +129,7 @@ impl ComputerService {
         Self {
             supported: options.supported.unwrap_or(routable),
             availability,
+            tools: ComputerTools::new(manager.clone(), Vec::new()),
             manager,
         }
     }

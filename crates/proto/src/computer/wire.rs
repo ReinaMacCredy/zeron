@@ -122,6 +122,77 @@ pub struct GetComputerCatalogParams {
     pub run_secret: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum McpContent {
+    Text {
+        text: String,
+    },
+    Image {
+        data: String,
+        #[serde(rename = "mimeType")]
+        mime_type: String,
+    },
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpToolResult {
+    pub content: Vec<McpContent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_content: Option<Value>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_error: bool,
+}
+
+impl McpToolResult {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            content: vec![McpContent::Text { text: text.into() }],
+            ..Self::default()
+        }
+    }
+
+    pub fn error(text: impl Into<String>) -> Self {
+        Self {
+            is_error: true,
+            ..Self::text(text)
+        }
+    }
+
+    pub fn first_text(&self) -> Option<&str> {
+        self.content.iter().find_map(|part| match part {
+            McpContent::Text { text } => Some(text.as_str()),
+            McpContent::Image { .. } => None,
+        })
+    }
+
+    pub fn has_image(&self) -> bool {
+        self.content
+            .iter()
+            .any(|part| matches!(part, McpContent::Image { .. }))
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ComputerCatalog {
+    pub tools: Vec<McpToolDefinition>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetComputerStillFrameParams {
@@ -333,5 +404,63 @@ mod tests {
             ..custom
         };
         assert_eq!(unusable.agent_cursor_colors(), None);
+    }
+
+    #[test]
+    fn tool_results_carry_mcp_content_blocks() {
+        let result = McpToolResult {
+            content: vec![
+                McpContent::Text {
+                    text: "{\"ok\":true}".into(),
+                },
+                McpContent::Image {
+                    data: "iVBOR".into(),
+                    mime_type: "image/png".into(),
+                },
+            ],
+            structured_content: None,
+            is_error: true,
+        };
+        let wire = json!({
+            "content": [
+                { "type": "text", "text": "{\"ok\":true}" },
+                { "type": "image", "data": "iVBOR", "mimeType": "image/png" },
+            ],
+            "isError": true,
+        });
+        assert_eq!(serde_json::to_value(&result).unwrap(), wire);
+        assert_eq!(
+            serde_json::from_value::<McpToolResult>(wire).unwrap(),
+            result
+        );
+        let plain = McpToolResult {
+            structured_content: Some(json!({ "ok": true })),
+            ..McpToolResult::text("{\"ok\":true}")
+        };
+        assert_eq!(
+            serde_json::to_value(&plain).unwrap(),
+            json!({
+                "content": [{ "type": "text", "text": "{\"ok\":true}" }],
+                "structuredContent": { "ok": true },
+            })
+        );
+        let definition = McpToolDefinition {
+            name: "computer_click".into(),
+            description: "Click".into(),
+            input_schema: json!({ "type": "object" }),
+            annotations: Some(json!({ "title": "Click" })),
+        };
+        assert_eq!(
+            serde_json::to_value(ComputerCatalog {
+                tools: vec![definition]
+            })
+            .unwrap(),
+            json!({ "tools": [{
+                "name": "computer_click",
+                "description": "Click",
+                "inputSchema": { "type": "object" },
+                "annotations": { "title": "Click" },
+            }] })
+        );
     }
 }

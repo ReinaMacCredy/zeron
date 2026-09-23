@@ -34,6 +34,8 @@ pub mod space_designation;
 pub mod still_frame_dedupe;
 pub mod still_frame_publisher;
 pub mod task_context;
+pub mod tool_calls;
+pub mod tools;
 pub mod turn_timing;
 pub mod ui_tree_targeting;
 pub mod ui_tree_text;

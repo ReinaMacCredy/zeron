@@ -51,7 +51,7 @@ mod scroll;
 mod spaces;
 mod targeting;
 
-pub(super) type Hook<A, T> = Arc<
+pub(crate) type Hook<A, T> = Arc<
     dyn Fn(Arc<FakeComputerBackend>, A) -> BoxFuture<'static, Result<T, ComputerError>>
         + Send
         + Sync,
@@ -69,7 +69,7 @@ type ScrollArgs = (
 );
 
 #[derive(Default)]
-pub(super) struct Hooks {
+pub(crate) struct Hooks {
     pub press_key: Option<Hook<KeyArgs, ComputerBackendActionResult>>,
     pub hotkey: Option<Hook<ChordArgs, ComputerBackendActionResult>>,
     pub type_text: Option<Hook<KeyArgs, ComputerBackendActionResult>>,
@@ -91,13 +91,14 @@ pub(super) struct Hooks {
     pub provision: Option<Hook<(), String>>,
     pub list_spaces: Option<Hook<(), ComputerSpaceInventory>>,
     pub supports_action: Option<SupportsAction>,
+    pub capture_screenshot: Option<Hook<ComputerCaptureRequest, ComputerScreenshot>>,
 }
 
 type LaunchArgs = (String, Vec<String>, ComputerLaunchOptions);
 type SupportsAction = Arc<dyn Fn(&ComputerResolvedTarget, &str) -> bool + Send + Sync>;
-pub(super) type TypedTarget = (String, Option<ComputerResolvedTarget>);
+pub(crate) type TypedTarget = (String, Option<ComputerResolvedTarget>);
 
-pub(super) struct Scripted {
+pub(crate) struct Scripted {
     pub fake: Arc<FakeComputerBackend>,
     pub hooks: Mutex<Hooks>,
     pub exact_target_background_input: AtomicBool,
@@ -272,7 +273,12 @@ impl ComputerBackend for Scripted {
         &self,
         request: ComputerCaptureRequest,
     ) -> Result<ComputerScreenshot, ComputerError> {
-        self.fake.capture_screenshot(request).await
+        hooked!(
+            self,
+            capture_screenshot,
+            request.clone(),
+            self.fake.capture_screenshot(request).await
+        )
     }
 
     async fn focus_window(&self, window_id: &str) -> Result<(), ComputerError> {
@@ -671,7 +677,7 @@ impl ComputerBackend for Scripted {
 }
 
 #[derive(Default)]
-pub(super) struct Seams {
+pub(crate) struct Seams {
     pub mode: Mutex<Option<PermissionMode>>,
     pub turn_inactive: AtomicBool,
     pub consent: Mutex<Vec<(ComputerConsentCard, Option<ApprovalDecision>)>>,
@@ -729,14 +735,14 @@ impl ComputerManagerSeams for Seams {
     }
 }
 
-pub(super) struct Built {
+pub(crate) struct Built {
     pub manager: Arc<ComputerManager>,
     pub backend: Arc<Scripted>,
     pub seams: Arc<Seams>,
 }
 
 #[derive(Default)]
-pub(super) struct Setup {
+pub(crate) struct Setup {
     pub action_settle_ms: Option<u64>,
     pub now: Option<super::ManagerClock>,
     pub lease_idle_ms: Option<u64>,
@@ -746,7 +752,7 @@ pub(super) struct Setup {
     pub data_dir: Option<std::path::PathBuf>,
 }
 
-pub(super) fn build(backend: Arc<Scripted>, setup: Setup) -> Built {
+pub(crate) fn build(backend: Arc<Scripted>, setup: Setup) -> Built {
     let seams = Arc::new(Seams::default());
     let mut options = ComputerManagerOptions::new(backend.clone());
     options.seams = seams.clone();
@@ -768,11 +774,11 @@ pub(super) fn build(backend: Arc<Scripted>, setup: Setup) -> Built {
     }
 }
 
-pub(super) fn manager(backend: Arc<Scripted>) -> Built {
+pub(crate) fn manager(backend: Arc<Scripted>) -> Built {
     build(backend, Setup::default())
 }
 
-pub(super) fn settled(backend: Arc<Scripted>) -> Built {
+pub(crate) fn settled(backend: Arc<Scripted>) -> Built {
     build(
         backend,
         Setup {
@@ -782,15 +788,15 @@ pub(super) fn settled(backend: Arc<Scripted>) -> Built {
     )
 }
 
-pub(super) type Clock = Arc<Mutex<u64>>;
+pub(crate) type Clock = Arc<Mutex<u64>>;
 
-pub(super) fn clock(start: u64) -> (Clock, super::ManagerClock) {
+pub(crate) fn clock(start: u64) -> (Clock, super::ManagerClock) {
     let now = Arc::new(Mutex::new(start));
     let read = now.clone();
     (now, Arc::new(move || *read.lock().unwrap()))
 }
 
-pub(super) struct Events {
+pub(crate) struct Events {
     pub events: Arc<Mutex<Vec<ComputerManagerEvent>>>,
     _subscription: ComputerManagerSubscription,
 }
@@ -849,7 +855,7 @@ impl Events {
     }
 }
 
-pub(super) fn events(manager: &ComputerManager) -> Events {
+pub(crate) fn events(manager: &ComputerManager) -> Events {
     let events: Arc<Mutex<Vec<ComputerManagerEvent>>> = Arc::default();
     let sink = events.clone();
     let subscription = manager.on_event(Arc::new(move |event: &ComputerManagerEvent| {
@@ -861,7 +867,7 @@ pub(super) fn events(manager: &ComputerManager) -> Events {
     }
 }
 
-pub(super) struct Deferred {
+pub(crate) struct Deferred {
     sender: Mutex<Option<oneshot::Sender<()>>>,
     pub wait: Shared<BoxFuture<'static, ()>>,
 }
@@ -878,7 +884,7 @@ impl Deferred {
     }
 }
 
-pub(super) fn deferred() -> Arc<Deferred> {
+pub(crate) fn deferred() -> Arc<Deferred> {
     let (sender, receiver) = oneshot::channel::<()>();
     Arc::new(Deferred {
         sender: Mutex::new(Some(sender)),
@@ -886,13 +892,13 @@ pub(super) fn deferred() -> Arc<Deferred> {
     })
 }
 
-pub(super) async fn settle() {
+pub(crate) async fn settle() {
     for _ in 0..64 {
         tokio::task::yield_now().await;
     }
 }
 
-pub(super) fn point(x: f64, y: f64) -> ComputerTarget {
+pub(crate) fn point(x: f64, y: f64) -> ComputerTarget {
     ComputerTarget {
         x: Some(x),
         y: Some(y),
@@ -900,14 +906,14 @@ pub(super) fn point(x: f64, y: f64) -> ComputerTarget {
     }
 }
 
-pub(super) fn scoped(x: f64, y: f64, window_id: &str) -> ComputerTarget {
+pub(crate) fn scoped(x: f64, y: f64, window_id: &str) -> ComputerTarget {
     ComputerTarget {
         window_id: Some(window_id.to_owned()),
         ..point(x, y)
     }
 }
 
-pub(super) fn labelled(label: &str, role: Option<&str>) -> ComputerTarget {
+pub(crate) fn labelled(label: &str, role: Option<&str>) -> ComputerTarget {
     ComputerTarget {
         label: Some(label.to_owned()),
         role: role.map(str::to_owned),
@@ -915,7 +921,7 @@ pub(super) fn labelled(label: &str, role: Option<&str>) -> ComputerTarget {
     }
 }
 
-pub(super) fn rect(x: f64, y: f64, width: f64, height: f64) -> ComputerRect {
+pub(crate) fn rect(x: f64, y: f64, width: f64, height: f64) -> ComputerRect {
     ComputerRect {
         x,
         y,
@@ -924,7 +930,7 @@ pub(super) fn rect(x: f64, y: f64, width: f64, height: f64) -> ComputerRect {
     }
 }
 
-pub(super) fn window(id: &str, title: &str, bounds: Option<ComputerRect>) -> ComputerWindow {
+pub(crate) fn window(id: &str, title: &str, bounds: Option<ComputerRect>) -> ComputerWindow {
     ComputerWindow {
         id: id.to_owned(),
         title: title.to_owned(),
@@ -944,7 +950,7 @@ pub(super) fn window(id: &str, title: &str, bounds: Option<ComputerRect>) -> Com
     }
 }
 
-pub(super) fn app(pid: u32, name: &str, bundle_id: &str, active: bool) -> ComputerApp {
+pub(crate) fn app(pid: u32, name: &str, bundle_id: &str, active: bool) -> ComputerApp {
     ComputerApp {
         pid,
         name: name.to_owned(),
@@ -958,7 +964,7 @@ pub(super) fn app(pid: u32, name: &str, bundle_id: &str, active: bool) -> Comput
     }
 }
 
-pub(super) fn covered_calculator_windows() -> Vec<ComputerWindow> {
+pub(crate) fn covered_calculator_windows() -> Vec<ComputerWindow> {
     vec![
         ComputerWindow {
             focused: true,
@@ -1008,7 +1014,7 @@ fn ui_node(
     }
 }
 
-pub(super) fn semantic_text_root(window_ids: &[&str]) -> ComputerUiNode {
+pub(crate) fn semantic_text_root(window_ids: &[&str]) -> ComputerUiNode {
     let children = window_ids
         .iter()
         .enumerate()
@@ -1050,7 +1056,7 @@ pub(super) fn semantic_text_root(window_ids: &[&str]) -> ComputerUiNode {
     }
 }
 
-pub(super) fn background_target_backend() -> Arc<Scripted> {
+pub(crate) fn background_target_backend() -> Arc<Scripted> {
     let ids = ["editor-a", "editor-b", "editor-a-other"];
     let windows = ids
         .iter()
@@ -1075,7 +1081,7 @@ pub(super) fn background_target_backend() -> Arc<Scripted> {
     backend
 }
 
-pub(super) fn visible_use() -> Option<crate::computer::visible_use::ComputerForegroundAuthorization>
+pub(crate) fn visible_use() -> Option<crate::computer::visible_use::ComputerForegroundAuthorization>
 {
     Some(
         crate::computer::visible_use::ComputerForegroundAuthorization {
@@ -1084,6 +1090,6 @@ pub(super) fn visible_use() -> Option<crate::computer::visible_use::ComputerFore
     )
 }
 
-pub(super) fn code(error: &ComputerError) -> Option<&str> {
+pub(crate) fn code(error: &ComputerError) -> Option<&str> {
     error.code()
 }

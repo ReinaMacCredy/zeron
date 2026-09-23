@@ -1,7 +1,7 @@
 use std::future::Future;
 
 use zeron_proto::computer::{
-    ComputerActionResult, ComputerApp, ComputerPoint, ComputerTarget, ComputerWindow,
+    ComputerActionResult, ComputerApp, ComputerPoint, ComputerRect, ComputerTarget, ComputerWindow,
 };
 
 use super::{
@@ -324,7 +324,9 @@ impl ComputerManager {
         if has_coordinates(plain) && !has_label_fields(plain) {
             self.space_broker
                 .assert_target_bound(agent_thread_id(thread_id), plain.window_id.as_deref())?;
-            let point = self.resolve_coordinate_point(plain).await?;
+            let point = self
+                .resolve_coordinate_point(plain, target.observed_window_bounds.as_ref())
+                .await?;
             let Some(window_id) = plain.window_id.as_deref() else {
                 let windows = self.read_windows().await?;
                 match topmost_window_at_point(&windows, point) {
@@ -408,6 +410,7 @@ impl ComputerManager {
     async fn resolve_coordinate_point(
         &self,
         target: &ComputerTarget,
+        observed_bounds: Option<&ComputerRect>,
     ) -> Result<ComputerPoint, ComputerError> {
         if let (Some(window_id), Some(x), Some(y)) =
             (target.window_id.as_deref(), target.x, target.y)
@@ -433,6 +436,14 @@ impl ComputerManager {
                 )
                 .into());
             };
+            if observed_bounds.is_some_and(|observed| *observed != bounds) {
+                return Err(ComputerTargetError::new(
+                    ComputerTargetErrorCode::NotFound,
+                    "The exact window closed or moved since this screenshot. Observe again before acting.",
+                    Vec::new(),
+                )
+                .into());
+            }
             if x < bounds.x
                 || y < bounds.y
                 || x >= bounds.x + bounds.width

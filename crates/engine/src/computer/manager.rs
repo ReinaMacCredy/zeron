@@ -7,7 +7,7 @@ mod publish;
 mod stream;
 mod targeting;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -827,6 +827,27 @@ impl ComputerManager {
 
     pub fn build_signature(&self) -> Option<zeron_proto::computer::ComputerBuildSignature> {
         self.backend.build_signature()
+    }
+
+    pub fn native_element_identity(
+        &self,
+        node: &zeron_proto::computer::ComputerUiNode,
+    ) -> Option<String> {
+        self.backend.native_element_identity(node)
+    }
+
+    pub async fn interrupt_thread_input(
+        &self,
+        thread_id: &str,
+        turn_id: Option<&str>,
+    ) -> Result<(), ComputerError> {
+        self.backend
+            .stop_input(Some(&zeron_proto::computer::CuaComputerTask {
+                thread_id: thread_id.to_owned(),
+                turn_id: turn_id.map(str::to_owned),
+                label: None,
+            }))
+            .await
     }
 
     pub fn record_computer_audit(&self, entry: &super::audit_log::ComputerAuditEntry) {

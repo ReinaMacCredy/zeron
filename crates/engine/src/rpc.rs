@@ -2788,9 +2788,32 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&serde_json::json!({}))
             }
             methods::CANCEL_COMPUTER_ACTION => {
-                let _: zeron_proto::computer::CancelComputerActionParams = parse_params(params)?;
-                self.computer()?;
-                RpcReply::value(&serde_json::json!({}))
+                let p: zeron_proto::computer::CancelComputerActionParams = parse_params(params)?;
+                let cancelled = crate::computer::tool_calls::cancel_computer_action(
+                    self.computer()?,
+                    &self.sessions,
+                    &p,
+                )
+                .map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({ "cancelled": cancelled }))
+            }
+            methods::GET_COMPUTER_CATALOG => {
+                let p: zeron_proto::computer::GetComputerCatalogParams = parse_params(params)?;
+                let catalog = crate::computer::tool_calls::computer_catalog(
+                    self.computer()?,
+                    &self.sessions,
+                    &p,
+                )
+                .map_err(RpcError::Failed)?;
+                RpcReply::value(&catalog)
+            }
+            methods::COMPUTER_ACTION => {
+                let p: zeron_proto::computer::ComputerActionParams = parse_params(params)?;
+                let result =
+                    crate::computer::tool_calls::computer_action(self.computer()?, &self.sessions, p)
+                        .await
+                        .map_err(RpcError::Failed)?;
+                RpcReply::value(&result)
             }
             methods::GET_COMPUTER_SETTINGS => RpcReply::value(&self.computer()?.settings()),
             methods::SET_COMPUTER_SETTINGS => {

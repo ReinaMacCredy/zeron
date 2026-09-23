@@ -1498,6 +1498,27 @@ impl SessionsEngine {
         }
     }
 
+    pub fn computer_visible_use_entries(
+        &self,
+        chat_id: &str,
+    ) -> Result<Vec<crate::computer::visible_use::VisibleUseEntry>, String> {
+        let entries = self
+            .doc_handle(chat_id)
+            .and_then(|handle| Ok(handle.doc().read_entries()?))
+            .map_err(|err| err.to_string())?;
+        Ok(crate::computer::visible_use::visible_use_entries(&entries))
+    }
+
+    pub fn computer_chat_label(&self, chat_id: &str) -> Option<String> {
+        self.inner
+            .workspace()?
+            .chat(chat_id)
+            .ok()
+            .flatten()
+            .and_then(|chat| chat.title)
+            .filter(|title| !title.trim().is_empty())
+    }
+
     pub fn write_computer_note(&self, chat_id: &str, text: &str, hint: Option<&str>) {
         let written = self
             .doc_handle(chat_id)
