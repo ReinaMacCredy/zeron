@@ -59,7 +59,9 @@ fn def() -> &'static ToolDef {
              The route is selected before dispatch; an uncertain effect never \
              permits another write or a fallback, except that a numeric write whose \
              read-back does not match is set once more to the same absolute value as \
-             a string (web number inputs accept only strings).\n\
+             a string (web number inputs accept only strings), and a web range input \
+             that ignored both writes is stepped with its advertised AXIncrement or \
+             AXDecrement, reading back after every step.\n\
              \n\
              Optional append:true requires an exact element_token and a readable, \
              writable text target. It reads that retained element's current value \
@@ -398,6 +400,16 @@ fn needs_string_retry(route: &ValueRoute, after: Option<f64>) -> bool {
     }
 }
 
+// Both absolute writes were ignored (the value never moved), so stepping cannot double-apply.
+fn needs_stepping(before: Option<f64>, after: Option<f64>, target: f64) -> bool {
+    match (before, after) {
+        (Some(before), Some(after)) => {
+            numbers_match(before, after) && !numbers_match(after, target)
+        }
+        _ => false,
+    }
+}
+
 fn set_value_blocking(
     element_ptr: usize,
     element_index: usize,
@@ -494,7 +506,9 @@ fn set_value_blocking(
                         .map_err(AxActionFailure::before_dispatch)?;
                     write()?;
                     if web_content
-                        && needs_string_retry(&route, unsafe { copy_number_attr(element, "AXValue") })
+                        && needs_string_retry(&route, unsafe {
+                            copy_number_attr(element, "AXValue")
+                        })
                     {
                         let error = unsafe { set_string_attr(element, "AXValue", value) };
                         if error != kAXErrorSuccess {
@@ -503,6 +517,30 @@ fn set_value_blocking(
                                  numeric write. Observe fresh state; do not replay."
                             ))
                             .into());
+                        }
+                        // Chromium range inputs ignore AXValue writes but honor AXIncrement.
+                        let after = unsafe { copy_number_attr(element, "AXValue") };
+                        if let (ValueRoute::Number(target), Some(initial)) =
+                            (&route, current_number)
+                        {
+                            let action = if initial < *target {
+                                "AXIncrement"
+                            } else {
+                                "AXDecrement"
+                            };
+                            if needs_stepping(Some(initial), after, *target)
+                                && unsafe { copy_action_names(element) }
+                                    .iter()
+                                    .any(|advertised| advertised == action)
+                            {
+                                step_to_value_with(
+                                    initial,
+                                    *target,
+                                    || crate::input::cancellation::gate().check_target(),
+                                    |action| unsafe { perform_action(element, action) },
+                                    || unsafe { copy_number_attr(element, "AXValue") },
+                                )?;
+                            }
                         }
                     }
                 }
@@ -752,9 +790,9 @@ fn select_popup_option(
 mod tests {
     use super::{
         apply_surface_trust, apply_verification_label, choose_value_route, classify_write,
-        compose_append_value, kAXErrorSuccess, needs_string_retry, step_to_value_with,
-        validate_append_target, write_value_with, AxActionFailure, SetValueOutcome, ValueRoute,
-        MAX_APPENDED_TEXT_UTF16,
+        compose_append_value, kAXErrorSuccess, needs_stepping, needs_string_retry,
+        step_to_value_with, validate_append_target, write_value_with, AxActionFailure,
+        SetValueOutcome, ValueRoute, MAX_APPENDED_TEXT_UTF16,
     };
     use std::cell::Cell;
 
@@ -840,6 +878,15 @@ mod tests {
                 target: 7.0
             }
         );
+    }
+
+    #[test]
+    fn stepping_runs_only_when_both_writes_left_the_value_untouched() {
+        assert!(needs_stepping(Some(50.0), Some(50.0), 80.0));
+        assert!(!needs_stepping(Some(50.0), Some(60.0), 80.0));
+        assert!(!needs_stepping(Some(50.0), Some(80.0), 80.0));
+        assert!(!needs_stepping(None, Some(50.0), 80.0));
+        assert!(!needs_stepping(Some(50.0), None, 80.0));
     }
 
     #[test]
