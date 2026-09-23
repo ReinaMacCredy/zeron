@@ -814,7 +814,7 @@ pub(super) fn desktop_entries(dialect: ComputerAgentDialect) -> Vec<ComputerTool
             "computer_type_text",
             "Type text",
             format!(
-                "Insert text through an exact writable ref or label in window_id; this focus-neutral route can run in different windows concurrently. Use computer_set_value to replace the whole field. window_id alone types into the app's focused field. Semantic writes do not send keydown/keyup: verify autocomplete or submission separately. Background physical keys may refuse on multi-window apps. {KEYBOARD_TARGET_HINT} {DELIVERY_HINT}"
+                "Insert text through an exact writable ref or label in window_id; this focus-neutral route can run in different windows concurrently. Use computer_set_value to replace the whole field. window_id alone types into the app's focused field. Semantic writes do not send keydown/keyup: verify autocomplete or submission separately. Background physical keys may refuse on multi-window apps. Key-event text refuses newlines and tabs; send Return/Tab with computer_press_key. {KEYBOARD_TARGET_HINT} {DELIVERY_HINT}"
             ),
             object_schema(type_properties, &["text"]),
             None,

@@ -66,7 +66,10 @@ fn def() -> &'static ToolDef {
              character synthesis automatically when the estimated route stays \
              within the daemon transport budget. Longer synthesized routes are \
              refused before character events and return a safe chunk size; \
-             one-call AX insertion remains uncapped.\n\n\
+             one-call AX insertion remains uncapped. Key-event routes (terminals, \
+             that fallback, foreground) refuse text containing a newline, carriage \
+             return or tab with `control_characters_require_press_key`: send Return \
+             or Tab with `press_key` instead.\n\n\
              Optional `element_index` + `window_id` (from the last \
              `get_window_state` snapshot) directs the write to a specific field. \
              Without `element_index`, the write goes to the pid's currently \
@@ -447,6 +450,19 @@ impl Tool for TypeTextTool {
                 refusal,
                 ax_attempt,
             })) => return synthesis_refusal_result(path, &refusal, ax_attempt),
+            Ok(Ok(TypeTextDelivery::KeyEventTextRefused { path, code, reason })) => {
+                return ToolResult::error(format!(
+                    "type_text refused before sending any key event: {reason}"
+                ))
+                .with_structured(serde_json::json!({
+                    "code": code,
+                    "path": path,
+                    "effect": "refused",
+                    "requested_chars": char_count,
+                    "delivered_chars": 0,
+                    "retryable": false,
+                }));
+            }
             Ok(Ok(TypeTextDelivery::Typed(outcome))) => Ok(Ok(outcome)),
             Ok(Err(error)) => Ok(Err(error)),
             Err(error) => Err(error),
@@ -776,6 +792,23 @@ fn synthesis_refusal_result(
     ToolResult::error(message).with_structured(structured)
 }
 
+// A newline or tab arrives as Return or Tab: it runs a terminal command, submits
+// a form or moves focus, which the caller must choose explicitly with press_key.
+fn key_event_text_refusal(path: &'static str, text: &str) -> Option<TypeTextDelivery> {
+    if text.contains(['\n', '\r', '\t']) {
+        return Some(TypeTextDelivery::KeyEventTextRefused {
+            path,
+            code: "control_characters_require_press_key",
+            reason: "the text contains a newline, carriage return or tab, which key events \
+                     deliver as Return or Tab (running a terminal command, submitting a form or \
+                     moving focus). Type the text without them and send press_key \"return\" or \
+                     \"tab\" where intended."
+                .into(),
+        });
+    }
+    None
+}
+
 fn path_has_untrusted_web_readback(path: &str) -> bool {
     path == PATH_AX || path == PATH_KEY_EVENTS || path == PATH_KEY_EVENTS_FG
 }
@@ -859,6 +892,11 @@ enum TypeTextDelivery {
         path: &'static str,
         refusal: SynthesisRefusal,
         ax_attempt: AxAttempt,
+    },
+    KeyEventTextRefused {
+        path: &'static str,
+        code: &'static str,
+        reason: String,
     },
 }
 
@@ -1291,6 +1329,14 @@ fn type_text_blocking(
                 ax_attempt: AxAttempt::NotAttempted,
             });
         }
+        let path = if window_id.is_some() {
+            PATH_KEY_EVENTS_FG
+        } else {
+            PATH_KEY_EVENTS
+        };
+        if let Some(refused) = key_event_text_refusal(path, text) {
+            return Ok(refused);
+        }
         // Settle between front+focus and the first keystroke — see the
         // "i love u" -> "love u" first-char-drop note in cgevent_type_verified.
         // A target that was already frontmost pays only 20ms for element-focus
@@ -1386,6 +1432,9 @@ fn type_text_blocking(
                 refusal,
                 ax_attempt: AxAttempt::NotAttempted,
             });
+        }
+        if let Some(refused) = key_event_text_refusal(PATH_KEY_EVENTS, text) {
+            return Ok(refused);
         }
         tracing::debug!(
             "type_text: pid {pid} is a terminal emulator; skipping AX value-set, \
@@ -1640,6 +1689,9 @@ fn type_text_blocking(
             ax_attempt,
         });
     }
+    if let Some(refused) = key_event_text_refusal(PATH_KEY_EVENTS, text) {
+        return Ok(refused);
+    }
 
     // --- Background rung 2: CGEvent keystrokes with read-back. ---
     // Never clear here: a partial AX write is rare, and clearing would violate
@@ -1756,6 +1808,27 @@ mod tests {
         assert_eq!(refusal.requested_chars, 6_500);
         assert_eq!(refusal.estimated_duration_ms, 106_000);
         assert_eq!(refusal.max_chunk_chars, 1_437);
+    }
+
+    #[test]
+    fn key_event_text_with_a_newline_or_tab_is_refused_before_any_event() {
+        for text in ["ls\n", "a\tb", "a\r\nb"] {
+            let result = type_text_blocking(
+                -1,
+                text,
+                None,
+                0,
+                /*is_terminal_target=*/ true,
+                super::super::DeliveryMode::Background,
+                None,
+                BackgroundKeyboardPolicy::Allowed,
+                synthesis_deadline(std::time::Instant::now()),
+            );
+            let Ok(TypeTextDelivery::KeyEventTextRefused { code, .. }) = result else {
+                panic!("{text:?} must be refused before key events");
+            };
+            assert_eq!(code, "control_characters_require_press_key");
+        }
     }
 
     #[test]
