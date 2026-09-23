@@ -12,13 +12,16 @@ pub mod cursor_activity;
 pub mod denylist;
 pub mod desktop_operation_queue;
 pub mod element_identity;
+pub mod engine_seams;
 pub mod event_interests;
 #[cfg(test)]
 pub mod fake_backend;
 pub mod frame_route;
 pub mod geometry;
+pub mod host_wire;
 pub mod manager;
 pub mod model_desktop_observation;
+pub mod runtime;
 pub mod screenshot_frames;
 pub mod scroll_calibration;
 pub mod scroll_gearing_file;

@@ -169,6 +169,7 @@ pub fn run_app(config: UiConfig) {
             computer::run_probe_from_env(&data_dir);
             computer::native::run_escape_probe_from_env();
             computer::native::run_native_probe_from_env();
+            computer::registration::install_desktop_host(cx);
         }
         let draft_dir = data_dir.clone();
         let drafts = cx

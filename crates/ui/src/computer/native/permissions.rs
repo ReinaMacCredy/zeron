@@ -147,6 +147,10 @@ pub fn running_app_bundle() -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
+pub fn running_app_bundle_identifier() -> Option<String> {
+    bundle_identifier(&running_app_bundle()?)
+}
+
 fn bundle_identifier(app_path: &Path) -> Option<String> {
     let path = NSString::from_str(app_path.to_str()?);
     let bundle = NSBundle::bundleWithPath(&path)?;

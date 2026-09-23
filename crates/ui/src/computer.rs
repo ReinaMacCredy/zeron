@@ -11,6 +11,7 @@ pub mod host;
 pub mod host_socket;
 #[cfg(target_os = "macos")]
 pub mod native;
+pub mod registration;
 #[cfg(target_os = "macos")]
 pub mod runtime_ownership;
 #[cfg(target_os = "macos")]

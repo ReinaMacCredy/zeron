@@ -54,6 +54,34 @@ pub struct ComputerHostRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ComputerHostStreamItem {
+    #[serde(rename_all = "camelCase")]
+    Registered {
+        host_token: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Refused {
+        retry_after_ms: u64,
+    },
+    Request(ComputerHostRequest),
+    #[serde(rename_all = "camelCase")]
+    Cancel {
+        host_token: String,
+        correlation_id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerStillFrame {
+    pub sequence: u64,
+    pub timestamp_ms: f64,
+    pub keyframe: bool,
+    pub data: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RespondComputerHostRequestParams {
     pub host_token: String,
@@ -198,6 +226,39 @@ mod tests {
         let request: ComputerHostRequest = serde_json::from_value(stop.clone()).unwrap();
         assert_eq!(request.call.method, ComputerHostMethod::EndBrowserThread);
         assert_eq!(serde_json::to_value(&request).unwrap(), stop);
+    }
+
+    #[test]
+    fn host_stream_items_are_tagged_by_kind() {
+        let cases = [
+            json!({ "kind": "registered", "hostToken": "tok" }),
+            json!({ "kind": "refused", "retryAfterMs": 2000 }),
+            json!({
+                "kind": "request",
+                "hostToken": "tok",
+                "correlationId": "c1",
+                "method": "call",
+                "name": "click",
+                "args": { "pid": 7 },
+            }),
+            json!({ "kind": "cancel", "hostToken": "tok", "correlationId": "c1" }),
+        ];
+        for wire in cases {
+            let item: ComputerHostStreamItem = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&item).unwrap(), wire);
+        }
+        let request: ComputerHostStreamItem = serde_json::from_value(json!({
+            "kind": "request",
+            "hostToken": "tok",
+            "correlationId": "c2",
+            "method": "probe",
+        }))
+        .unwrap();
+        let ComputerHostStreamItem::Request(request) = request else {
+            panic!("expected a request item");
+        };
+        assert_eq!(request.host_token, "tok");
+        assert_eq!(request.call.method, ComputerHostMethod::Probe);
     }
 
     #[test]

@@ -2036,6 +2036,11 @@ impl AppState {
             ),
             spawn_local_device_probe(cx, handle.clone()),
         ]);
+        #[cfg(target_os = "macos")]
+        watch_tasks.extend(crate::computer::registration::spawn_host_registration(
+            handle.clone(),
+            cx,
+        ));
         self.watch_tasks = watch_tasks;
         self.reconcile_change_request_watches(cx);
         // EngineInfo is part of the attachment boundary: views must know which

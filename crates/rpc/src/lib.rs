@@ -230,7 +230,9 @@ pub mod methods {
     // Computer use (w88). Never relay-forwarded; relay clients are refused every
     // method here except the still-frame and audit-history reads.
     /// Register as the desktop host that owns `cua-driver`. First stream wins; a
-    /// second is refused. `{bundleId}` → stream of `ComputerHostRequest`.
+    /// second is refused. `{bundleId}` → stream of `ComputerHostStreamItem`: first
+    /// `registered {hostToken}` then `request`/`cancel` items, or a lone
+    /// `refused {retryAfterMs}` before the stream ends.
     pub const WATCH_COMPUTER_HOST_REQUESTS: &str = "WatchComputerHostRequests";
     /// The host's answer to one streamed request; unknown or cancelled ids are
     /// a no-op. `{hostToken, correlationId, result: CuaReply}` → `{}`.
@@ -250,7 +252,8 @@ pub mod methods {
     /// Recent Computer mutations, newest first. `ComputerGetAuditHistoryInput`
     /// → `ComputerGetAuditHistoryResult`.
     pub const GET_COMPUTER_AUDIT_HISTORY: &str = "GetComputerAuditHistory";
-    /// Latest still frame of a chat's Computer task, for remote viewers. `{chatId}`.
+    /// Latest still frame of a chat's Computer task, for remote viewers. `{chatId}`
+    /// → `{frame: ComputerStillFrame | null}`.
     pub const GET_COMPUTER_STILL_FRAME: &str = "GetComputerStillFrame";
 }
 

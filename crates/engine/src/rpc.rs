@@ -66,6 +66,7 @@ use zeron_rpc::{LinkCache, RpcError, RpcReply, RpcService, methods, parse_params
 use crate::agent_accounts::AgentAccounts;
 use crate::auth::Auth;
 use crate::change_requests::CheckoutChangeRequests;
+use crate::computer::runtime::ComputerRuntime;
 use crate::diff_sync::CheckoutDiffSync;
 use crate::doc_host::DocHost;
 use crate::registry::HarnessRegistry;
@@ -594,6 +595,7 @@ pub struct EngineRpc {
     links: Option<std::sync::Arc<LinkCache>>,
     updater: Option<zeron_update::Updater>,
     local_import: Option<crate::local_import::LocalImporter>,
+    computer: Option<std::sync::Arc<ComputerRuntime>>,
     engine_info: EngineInfo,
 }
 
@@ -636,6 +638,7 @@ impl EngineRpc {
             links: None,
             updater: None,
             local_import: None,
+            computer: None,
             engine_info,
         }
     }
@@ -667,6 +670,17 @@ impl EngineRpc {
     pub fn with_local_import(mut self, importer: crate::local_import::LocalImporter) -> Self {
         self.local_import = Some(importer);
         self
+    }
+
+    pub fn with_computer(mut self, computer: std::sync::Arc<ComputerRuntime>) -> Self {
+        self.computer = Some(computer);
+        self
+    }
+
+    fn computer(&self) -> Result<&std::sync::Arc<ComputerRuntime>, RpcError> {
+        self.computer
+            .as_ref()
+            .ok_or_else(|| RpcError::Failed("computer use unavailable".into()))
     }
 
     fn auth(&self) -> Result<&Auth, RpcError> {
@@ -2756,6 +2770,51 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "text": text }))
+            }
+            methods::WATCH_COMPUTER_HOST_REQUESTS => {
+                let p: zeron_proto::computer::WatchComputerHostRequestsParams =
+                    parse_params(params)?;
+                let items = self.computer()?.register_host(p.bundle_id);
+                Ok(RpcReply::Stream(
+                    items
+                        .filter_map(|item| async move { serde_json::to_value(item).ok() })
+                        .boxed(),
+                ))
+            }
+            methods::RESPOND_COMPUTER_HOST_REQUEST => {
+                let p: zeron_proto::computer::RespondComputerHostRequestParams =
+                    parse_params(params)?;
+                self.computer()?.respond(p).map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({}))
+            }
+            methods::CANCEL_COMPUTER_ACTION => {
+                let _: zeron_proto::computer::CancelComputerActionParams = parse_params(params)?;
+                self.computer()?;
+                RpcReply::value(&serde_json::json!({}))
+            }
+            methods::GET_COMPUTER_SETTINGS => RpcReply::value(&self.computer()?.settings()),
+            methods::SET_COMPUTER_SETTINGS => {
+                let p: zeron_proto::computer::ComputerSettings = parse_params(params)?;
+                self.computer()?.set_settings(p).map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({}))
+            }
+            methods::GET_COMPUTER_STILL_FRAME => {
+                let _: zeron_proto::computer::GetComputerStillFrameParams = parse_params(params)?;
+                let frame = self.computer()?.still_frame().await;
+                RpcReply::value(&serde_json::json!({ "frame": frame }))
+            }
+            methods::GET_COMPUTER_AUDIT_HISTORY => {
+                let p: zeron_proto::computer::ComputerGetAuditHistoryInput = parse_params(params)?;
+                let service = self
+                    .computer()?
+                    .service()
+                    .ok_or_else(|| RpcError::Failed("computer use is still starting".into()))?;
+                let history = service
+                    .manager
+                    .get_audit_history(p)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&history)
             }
             other => Err(RpcError::UnknownMethod(other.to_string())),
         }
