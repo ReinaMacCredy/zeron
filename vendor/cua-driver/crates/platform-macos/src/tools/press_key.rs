@@ -398,6 +398,31 @@ impl Tool for PressKeyTool {
             }
         }
 
+        // Chromium moves keyboard focus to an AX-focused web field without activating the app,
+        // so the focus proof below can pass for an explicitly addressed field in the background.
+        if !fg && px.is_none() && py.is_none() {
+            if let Some(guard) = pre_focus_guard.clone() {
+                let ptr = guard.as_ptr();
+                if super::type_text::target_in_web_area(pid, Some((ptr, element_index)), window_id) {
+                    let prior_front = apps::frontmost_pid();
+                    let _ = focus_guard::with_focus_suppressed(
+                        Some(pid),
+                        prior_front,
+                        "press_key.web_focus",
+                        || async move {
+                            let _ = tokio::task::spawn_blocking(move || {
+                                crate::input::ax_actions::focus_element(guard.as_ptr())
+                            })
+                            .await;
+                            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                            Ok::<(), anyhow::Error>(())
+                        },
+                    )
+                    .await;
+                }
+            }
+        }
+
         // ── Exact-target background gate (macOS background input v1) ──
         // A window-addressed background key is process-scoped transport: it
         // must prove exact delivery to the requested window (fresh AXWindows,
