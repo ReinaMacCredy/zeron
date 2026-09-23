@@ -141,15 +141,58 @@ fn choose_action(actions: &[String], final_segment: bool) -> Option<&'static str
     order.iter().copied().find(|action| supports(action))
 }
 
-unsafe fn invoke_path(pid: i32, path: &[String]) -> Result<(), String> {
+#[derive(Debug, PartialEq)]
+enum MenuFailure {
+    Refused(String),
+    Dispatched { action: &'static str, ax_error: i32 },
+}
+
+impl From<String> for MenuFailure {
+    fn from(message: String) -> Self {
+        Self::Refused(message)
+    }
+}
+
+fn hop_failure(depth: usize, final_segment: bool, action: &'static str, error: i32) -> MenuFailure {
+    if final_segment {
+        MenuFailure::Dispatched {
+            action,
+            ax_error: error,
+        }
+    } else {
+        MenuFailure::Refused(format!(
+            "invoke_menu: native action for path segment {depth} failed with AX error {error}"
+        ))
+    }
+}
+
+unsafe fn cancel_open_menu(app: AXUIElementRef, path: &[String]) {
+    let Some(menu_bar) = copy_element_attr(app, "AXMenuBar") else {
+        return;
+    };
+    set_messaging_timeout(menu_bar);
+    let top = resolve_exact_prefix(menu_bar, &path[..1]);
+    CFRelease(menu_bar as CFTypeRef);
+    if let Ok(top) = top {
+        set_messaging_timeout(top);
+        let _ = perform_action(top, "AXCancel");
+        CFRelease(top as CFTypeRef);
+    }
+}
+
+unsafe fn invoke_path(pid: i32, path: &[String]) -> Result<(), MenuFailure> {
     let app = AXUIElementCreateApplication(pid);
     if app.is_null() {
-        return Err("invoke_menu: target application is unavailable".into());
+        return Err("invoke_menu: target application is unavailable"
+            .to_owned()
+            .into());
     }
     set_messaging_timeout(app);
 
+    let mut opened_menu = false;
     let result = (|| {
         for depth in 0..path.len() {
+            let final_segment = depth + 1 == path.len();
             // Resolve from the live app root for every hop. Opening a menu can
             // replace its AX objects and reorder unrelated snapshot indices.
             let menu_bar = copy_element_attr(app, "AXMenuBar")
@@ -162,35 +205,48 @@ unsafe fn invoke_path(pid: i32, path: &[String]) -> Result<(), String> {
 
             if copy_bool_attr(target, "AXEnabled") == Some(false) {
                 CFRelease(target as CFTypeRef);
-                return Err(format!("invoke_menu: path segment {depth} is disabled"));
+                return Err(format!("invoke_menu: path segment {depth} is disabled").into());
             }
             let actions = copy_action_names(target);
-            let action = choose_action(&actions, depth + 1 == path.len()).ok_or_else(|| {
-                format!("invoke_menu: path segment {depth} has no usable native menu action")
-            });
-            let action = match action {
-                Ok(action) => action,
-                Err(error) => {
-                    CFRelease(target as CFTypeRef);
-                    return Err(error);
-                }
+            let Some(action) = choose_action(&actions, final_segment) else {
+                CFRelease(target as CFTypeRef);
+                return Err(format!(
+                    "invoke_menu: path segment {depth} has no usable native menu action"
+                )
+                .into());
             };
             let error = perform_action(target, action);
             CFRelease(target as CFTypeRef);
-            if error != kAXErrorSuccess {
-                return Err(format!(
-                    "invoke_menu: native action for path segment {depth} failed with AX error {error}"
-                ));
+            if !final_segment {
+                opened_menu = true;
             }
-            if depth + 1 != path.len() {
+            if error != kAXErrorSuccess {
+                return Err(hop_failure(depth, final_segment, action, error));
+            }
+            if !final_segment {
                 std::thread::sleep(Duration::from_millis(80));
             }
         }
         Ok(())
     })();
 
+    if opened_menu && matches!(result, Err(MenuFailure::Refused(_))) {
+        cancel_open_menu(app, path);
+    }
     CFRelease(app as CFTypeRef);
     result
+}
+
+fn failure_result(failure: MenuFailure) -> ToolResult {
+    match failure {
+        MenuFailure::Refused(message) => refusal(message),
+        MenuFailure::Dispatched { action, ax_error } => {
+            crate::input::ax_actions::action_failure_result(
+                crate::input::ax_actions::AxActionFailure::from_ax_error(action, ax_error).into(),
+                "invoke_menu",
+            )
+        }
+    }
 }
 
 /// Make one exact application window key before resolving focus-sensitive
@@ -457,6 +513,7 @@ impl Tool for InvokeMenuTool {
                     let needs_activation = prior_frontmost != Some(pid);
 
                     let result = focus_exact_window(pid, window_id)
+                        .map_err(MenuFailure::from)
                         .and_then(|()| unsafe { invoke_path(pid, &path) });
 
                     // Restore the exact prior key window when one was
@@ -507,7 +564,7 @@ impl Tool for InvokeMenuTool {
                 .build()
                 .expect("invoke_menu record is valid"),
             ),
-            Ok(Err(error)) => refusal(error),
+            Ok(Err(failure)) => failure_result(failure),
             Err(error) => refusal(format!("invoke_menu: blocking task failed: {error}")),
         }
     }
@@ -532,6 +589,23 @@ mod tests {
         assert_eq!(choose_action(&actions, false), Some("AXPress"));
         assert_eq!(choose_action(&actions, true), Some("AXPress"));
         assert_eq!(choose_action(&["AXShowMenu".into()], true), None);
+    }
+
+    #[test]
+    fn a_final_menu_action_that_errors_after_dispatch_is_unverifiable_not_refused() {
+        let result = failure_result(hop_failure(1, true, "AXPress", -25204));
+        let structured = result.structured_content.expect("structured");
+        assert_eq!(structured["effect"], "unverifiable");
+        assert_eq!(structured["code"], "ax_action_uncertain");
+        assert!(structured.get("status").is_none());
+    }
+
+    #[test]
+    fn an_intermediate_hop_error_stays_a_refusal() {
+        let result = failure_result(hop_failure(0, false, "AXPress", -25204));
+        let structured = result.structured_content.expect("structured");
+        assert_eq!(structured["status"], "refused");
+        assert!(structured.get("effect").is_none());
     }
 
     #[test]

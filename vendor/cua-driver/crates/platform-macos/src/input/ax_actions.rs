@@ -75,7 +75,7 @@ impl AxActionFailure {
         }
     }
 
-    fn from_ax_error(action: &str, error: AXError) -> Self {
+    pub(crate) fn from_ax_error(action: &str, error: AXError) -> Self {
         Self {
             attempted: true,
             code: Some("ax_action_uncertain"),

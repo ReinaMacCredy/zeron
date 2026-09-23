@@ -454,6 +454,28 @@ async fn invokes_a_menu_path_and_preserves_the_status_coded_refusal_dialect() {
 }
 
 #[tokio::test]
+async fn a_menu_action_that_errors_after_dispatch_is_not_reported_as_unsent() {
+    let f = fixture();
+    f.on_tool("invoke_menu", |_| {
+        json!({
+            "isError": true,
+            "structuredContent": {
+                "verified": false,
+                "effect": "unverifiable",
+                "code": "ax_action_uncertain",
+            },
+            "content": [{ "type": "text", "text": "invoke_menu: AX actuator returned -25204 after dispatch" }],
+        })
+    });
+    let error = f
+        .backend
+        .invoke_menu(&window_menu(), &strings(&["File", "Open…"]))
+        .await
+        .unwrap_err();
+    assert_eq!(effect(&error), Some(CuaEffect::DispatchedUnknown));
+}
+
+#[tokio::test]
 async fn invokes_the_application_level_menu_on_a_windowless_app_with_no_window_id() {
     let f = fixture();
     f.on_tool("invoke_menu", |_| {
