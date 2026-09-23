@@ -20,8 +20,9 @@ use std::sync::Arc;
 
 use crate::apps;
 use crate::ax::bindings::{
-    copy_action_names, copy_children, copy_number_attr, copy_string_attr, is_attribute_settable,
-    kAXErrorSuccess, perform_action, set_number_attr, set_string_attr, AXError, AXUIElementRef,
+    copy_action_names, copy_children, copy_number_attr, copy_string_attr, copy_value_kind,
+    is_attribute_settable, kAXErrorSuccess, perform_action, set_number_attr, set_string_attr,
+    AXError, AXUIElementRef, CfValueKind,
 };
 use crate::focus_guard;
 use crate::input::ax_actions::{action_failure_result, AxActionFailure};
@@ -54,7 +55,9 @@ fn def() -> &'static ToolDef {
              popup with no AX children is refused.\n\
              \n\
              - **All other elements**: writes AXValue directly (sliders, steppers, \
-             date pickers, native text fields that expose settable AXValue). \
+             native text fields that expose settable AXValue). Date and time \
+             controls are refused with date_value_unsupported; type the date into \
+             the focused field instead. \
              Unsettable numeric controls may use advertised stepping actions. \
              The route is selected before dispatch; an uncertain effect never \
              permits another write or a fallback, except that a numeric write whose \
@@ -314,6 +317,7 @@ enum ValueRoute {
 
 /// Choose exactly one actuator from read-only facts, never from a write error.
 fn choose_value_route(
+    kind: Option<CfValueKind>,
     role: &str,
     current_number: Option<f64>,
     settable: bool,
@@ -321,6 +325,18 @@ fn choose_value_route(
     decrement: bool,
     requested: &str,
 ) -> anyhow::Result<ValueRoute> {
+    if kind == Some(CfValueKind::Date)
+        || matches!(role, "AXDateTimeArea" | "AXDateField" | "AXTimeField")
+    {
+        return Err(AxActionFailure::refused_with_code(
+            "date_value_unsupported",
+            "Date and time controls have no AXValue write route; no value was written. \
+             Click the date field (or one of its parts) to focus it, then type the date \
+             digits with type_text addressed by window only, or step a part with the up/down \
+             arrow keys, and observe the result.",
+        )
+        .into());
+    }
     let is_text = matches!(
         role,
         "AXTextField" | "AXTextArea" | "AXSearchField" | "AXComboBox"
@@ -462,6 +478,7 @@ fn set_value_blocking(
         } else {
             let actions = unsafe { copy_action_names(element) };
             choose_value_route(
+                unsafe { copy_value_kind(element, "AXValue") },
                 &role,
                 current_number,
                 unsafe { is_attribute_settable(element, "AXValue") },
@@ -814,7 +831,7 @@ mod tests {
         apply_surface_trust, apply_verification_label, choose_value_route, classify_write,
         compose_append_value, kAXErrorSuccess, needs_stepping, needs_string_retry,
         poll_until_moved, step_to_value_with, validate_append_target, write_value_with,
-        AxActionFailure, SetValueOutcome, ValueRoute, MAX_APPENDED_TEXT_UTF16,
+        AxActionFailure, CfValueKind, SetValueOutcome, ValueRoute, MAX_APPENDED_TEXT_UTF16,
     };
     use std::cell::Cell;
 
@@ -878,28 +895,44 @@ mod tests {
     #[test]
     fn read_only_facts_select_one_typed_write_route() {
         assert_eq!(
-            choose_value_route("AXTextField", None, true, false, false, "007").unwrap(),
+            choose_value_route(None, "AXTextField", None, true, false, false, "007").unwrap(),
             ValueRoute::String
         );
         assert_eq!(
-            choose_value_route("AXTextArea", Some(5.0), true, true, true, "007").unwrap(),
+            choose_value_route(None, "AXTextArea", Some(5.0), true, true, true, "007").unwrap(),
             ValueRoute::String
         );
         assert_eq!(
-            choose_value_route("AXSlider", Some(5.0), true, true, true, "7").unwrap(),
+            choose_value_route(None, "AXSlider", Some(5.0), true, true, true, "7").unwrap(),
             ValueRoute::Number(7.0)
         );
         assert_eq!(
-            choose_value_route("AXUnknown", Some(5.0), true, false, false, "7").unwrap(),
+            choose_value_route(None, "AXUnknown", Some(5.0), true, false, false, "7").unwrap(),
             ValueRoute::Number(7.0)
         );
         assert_eq!(
-            choose_value_route("AXSlider", Some(5.0), false, true, true, "7").unwrap(),
+            choose_value_route(None, "AXSlider", Some(5.0), false, true, true, "7").unwrap(),
             ValueRoute::Steps {
                 initial: 5.0,
                 target: 7.0
             }
         );
+    }
+
+    #[test]
+    fn date_controls_are_refused_before_any_write() {
+        for (kind, role) in [
+            (Some(CfValueKind::Date), "AXUnknown"),
+            (None, "AXDateTimeArea"),
+            (Some(CfValueKind::String), "AXDateField"),
+            (None, "AXTimeField"),
+        ] {
+            let error =
+                choose_value_route(kind, role, None, true, false, false, "2026-09-24").unwrap_err();
+            let failure = error.downcast_ref::<AxActionFailure>().unwrap();
+            assert!(!failure.attempted);
+            assert_eq!(failure.code(), Some("date_value_unsupported"));
+        }
     }
 
     #[test]
@@ -933,11 +966,11 @@ mod tests {
     #[test]
     fn unknown_unsettable_or_nonfinite_numeric_routes_refuse_before_dispatch() {
         for result in [
-            choose_value_route("AXSlider", None, false, true, true, "7"),
-            choose_value_route("AXSlider", Some(5.0), false, false, true, "7"),
-            choose_value_route("AXTextField", None, false, true, true, "7"),
-            choose_value_route("AXSlider", Some(5.0), true, true, true, "NaN"),
-            choose_value_route("AXSlider", Some(5.0), true, true, true, "inf"),
+            choose_value_route(None, "AXSlider", None, false, true, true, "7"),
+            choose_value_route(None, "AXSlider", Some(5.0), false, false, true, "7"),
+            choose_value_route(None, "AXTextField", None, false, true, true, "7"),
+            choose_value_route(None, "AXSlider", Some(5.0), true, true, true, "NaN"),
+            choose_value_route(None, "AXSlider", Some(5.0), true, true, true, "inf"),
         ] {
             assert!(
                 !result
@@ -970,7 +1003,8 @@ mod tests {
     #[test]
     fn numeric_text_has_only_one_string_write_and_no_numeric_attempt() {
         let writes = Cell::new(0);
-        let route = choose_value_route("AXTextField", None, true, false, false, "007").unwrap();
+        let route =
+            choose_value_route(None, "AXTextField", None, true, false, false, "007").unwrap();
         write_value_with(
             &route,
             || Ok(()),

@@ -75,6 +75,10 @@ impl AxActionFailure {
         }
     }
 
+    pub fn code(&self) -> Option<&'static str> {
+        self.code
+    }
+
     pub(crate) fn from_ax_error(action: &str, error: AXError) -> Self {
         Self {
             attempted: true,
