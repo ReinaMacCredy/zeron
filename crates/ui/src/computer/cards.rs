@@ -181,7 +181,10 @@ pub fn input_pause_notice(state: &ThreadComputerState) -> Option<InputPauseNotic
         .unwrap_or_else(|| "the target window".into());
     Some(InputPauseNotice {
         title: format!("Input paused — return to {target}"),
-        body: "Bring the window onto this desktop, or exit the full-screen app. Continue from the current page once input is available.".into(),
+        body: Some(pause.message.trim())
+            .filter(|message| !message.is_empty())
+            .unwrap_or("Bring the window onto this desktop, or exit the full-screen app. Continue from the current page once input is available.")
+            .into(),
     })
 }
 
@@ -443,6 +446,7 @@ mod tests {
             input_pause_notice(&state).unwrap().title,
             "Input paused — return to Numbers"
         );
+        assert_eq!(input_pause_notice(&state).unwrap().body, "Screen locked");
         state.input_pause.as_mut().unwrap().window_id = Some("gone".into());
         assert_eq!(
             input_pause_notice(&state).unwrap().title,
