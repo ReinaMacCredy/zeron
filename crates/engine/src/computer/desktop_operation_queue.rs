@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use futures::FutureExt;
@@ -21,6 +21,8 @@ pub enum DesktopOperationError {
     TargetSwitch,
     #[error("The computer operation was cancelled.")]
     Aborted,
+    #[error("The computer operation has ended; no new input may be dispatched.")]
+    Ended,
 }
 
 impl DesktopOperationError {
@@ -74,6 +76,60 @@ fn combine(a: Option<OperationSignal>, b: Option<OperationSignal>) -> Option<Ope
 #[derive(Clone)]
 struct ExecutionScope {
     signal: Option<OperationSignal>,
+    active: Arc<AtomicBool>,
+}
+
+impl ExecutionScope {
+    fn new(signal: Option<OperationSignal>) -> Self {
+        Self {
+            signal,
+            active: Arc::new(AtomicBool::new(true)),
+        }
+    }
+}
+
+struct EndScope(Arc<AtomicBool>);
+
+impl Drop for EndScope {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+async fn run_in_scope<F: Future>(scope: ExecutionScope, action: F) -> F::Output {
+    let _end = EndScope(scope.active.clone());
+    EXECUTION.scope(scope, action).await
+}
+
+#[derive(Clone)]
+pub struct DesktopOperationScope {
+    execution: Option<ExecutionScope>,
+    frames: Arc<Vec<QueueFrame>>,
+    delivery: Option<ComputerDeliveryMode>,
+}
+
+pub fn current_desktop_operation() -> DesktopOperationScope {
+    DesktopOperationScope {
+        execution: EXECUTION.try_with(Clone::clone).ok(),
+        frames: current_frames(),
+        delivery: DELIVERY.try_with(|mode| *mode).ok(),
+    }
+}
+
+impl DesktopOperationScope {
+    pub async fn run<F: Future>(self, action: F) -> F::Output {
+        let framed = QUEUE_FRAMES.scope(self.frames, action);
+        match (self.execution, self.delivery) {
+            (Some(execution), Some(mode)) => {
+                EXECUTION
+                    .scope(execution, DELIVERY.scope(mode, framed))
+                    .await
+            }
+            (Some(execution), None) => EXECUTION.scope(execution, framed).await,
+            (None, Some(mode)) => DELIVERY.scope(mode, framed).await,
+            (None, None) => framed.await,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -90,7 +146,13 @@ tokio::task_local! {
 
 pub fn desktop_operation_signal() -> Option<OperationSignal> {
     EXECUTION
-        .try_with(|scope| scope.signal.clone())
+        .try_with(|scope| {
+            scope
+                .active
+                .load(Ordering::SeqCst)
+                .then(|| scope.signal.clone())
+                .flatten()
+        })
         .ok()
         .flatten()
 }
@@ -103,25 +165,21 @@ pub async fn with_desktop_operation_signal<F: Future>(
         Some(parent) => parent.any(&signal),
         None => signal,
     };
-    EXECUTION
-        .scope(
-            ExecutionScope {
-                signal: Some(signal),
-            },
-            action,
-        )
-        .await
+    run_in_scope(ExecutionScope::new(Some(signal)), action).await
 }
 
-// A detached task sees no scope, so Synara's "operation ended" admission check folds in here.
 pub fn assert_desktop_operation_active() -> Result<(), DesktopOperationError> {
+    let ended = EXECUTION
+        .try_with(|scope| !scope.active.load(Ordering::SeqCst))
+        .unwrap_or(false);
+    if ended {
+        return Err(DesktopOperationError::Ended);
+    }
     desktop_operation_signal().map_or(Ok(()), |signal| signal.check())
 }
 
 pub async fn without_desktop_cancellation<F: Future>(action: F) -> F::Output {
-    EXECUTION
-        .scope(ExecutionScope { signal: None }, action)
-        .await
+    EXECUTION.scope(ExecutionScope::new(None), action).await
 }
 
 pub fn desktop_delivery_mode() -> ComputerDeliveryMode {
@@ -509,12 +567,11 @@ impl DesktopOperationQueue {
             queue: self.id,
             key,
         });
-        EXECUTION
-            .scope(
-                ExecutionScope { signal },
-                QUEUE_FRAMES.scope(Arc::new(frames), action),
-            )
-            .await
+        run_in_scope(
+            ExecutionScope::new(signal),
+            QUEUE_FRAMES.scope(Arc::new(frames), action),
+        )
+        .await
     }
 
     pub fn close(&self) -> impl Future<Output = ()> + use<> {
@@ -1028,5 +1085,50 @@ mod tests {
         })
         .await;
         result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_captured_continuation_is_refused_once_its_operation_has_ended() {
+        let queue = DesktopOperationQueue::new();
+        let (release, held) = oneshot::channel::<()>();
+        let detached = queue
+            .run(
+                || async move {
+                    let scope = current_desktop_operation();
+                    assert!(desktop_operation_signal().is_some());
+                    Ok::<_, DesktopOperationError>(tokio::spawn(scope.run(async move {
+                        let _ = held.await;
+                        (
+                            assert_desktop_operation_active(),
+                            desktop_operation_signal().is_none(),
+                        )
+                    })))
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        release.send(()).unwrap();
+        assert_eq!(
+            detached.await.unwrap(),
+            (Err(DesktopOperationError::Ended), true)
+        );
+        assert_eq!(assert_desktop_operation_active(), Ok(()));
+        let fresh = queue
+            .run(|| async { assert_desktop_operation_active() }, None)
+            .await;
+        assert_eq!(fresh, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn a_captured_continuation_still_runs_while_its_operation_is_live() {
+        let live = with_desktop_operation_signal(CancellationToken::new().into(), async {
+            let scope = current_desktop_operation();
+            tokio::spawn(scope.run(async { assert_desktop_operation_active() }))
+                .await
+                .unwrap()
+        })
+        .await;
+        assert_eq!(live, Ok(()));
     }
 }

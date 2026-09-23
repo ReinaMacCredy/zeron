@@ -31,17 +31,18 @@ use zeron_rpc::ComputerHost;
 
 use super::backend::{
     ComputerAccessibilityTreeSnapshot, ComputerAgentDialect, ComputerBackend,
-    ComputerBackendActionResult, ComputerBackendError, ComputerBackendEvent,
-    ComputerBackendEventListener, ComputerBackendListeners, ComputerBackendMethod,
-    ComputerBackendSubscription, ComputerBrowserBackend, ComputerBrowserCall,
-    ComputerBrowserCallResult, ComputerCaptureRequest, ComputerCursorReading, ComputerError,
-    ComputerFrameListener, ComputerLaunchOptions, ComputerMenuBackendTarget,
-    ComputerResolvedTarget, ComputerSettleOptions, ComputerSettleOutcome, ComputerShieldTarget,
-    ComputerStateOptions, ComputerTextRange, CuaActionError, CuaErrorLayer, DEFAULT_COMPUTER_ID,
-    assert_computer_clipboard_write_fits, js_slice,
+    ComputerBackendActionResult, ComputerBackendEvent, ComputerBackendEventListener,
+    ComputerBackendListeners, ComputerBackendMethod, ComputerBackendSubscription,
+    ComputerBrowserBackend, ComputerBrowserCall, ComputerBrowserCallResult, ComputerCaptureRequest,
+    ComputerCursorReading, ComputerError, ComputerFrameListener, ComputerLaunchOptions,
+    ComputerMenuBackendTarget, ComputerResolvedTarget, ComputerSettleOptions,
+    ComputerSettleOutcome, ComputerShieldTarget, ComputerStateOptions, ComputerTextRange,
+    CuaActionError, CuaErrorLayer, DEFAULT_COMPUTER_ID, assert_computer_clipboard_write_fits,
+    js_slice,
 };
 use super::call_context::{
-    ComputerCallContext, current_computer_call, timed_computer_leg, with_computer_call_context,
+    ComputerCallContext, ZERON_CUA_PREVIEW_STILL_MS, cua_preview_still_ms_override,
+    current_computer_call, timed_computer_leg, with_computer_call_context,
 };
 use super::cua_space_inventory::cua_space_inventory;
 use super::desktop_operation_queue::{
@@ -53,6 +54,9 @@ use super::geometry::{jpeg_dimensions, png_dimensions};
 use super::model_desktop_observation::{
     is_model_desktop_observation_active, with_model_desktop_observation,
 };
+use super::still_frame_publisher::{
+    StillFramePublisher, StillFramePublisherOptions, resolve_still_interval_ms,
+};
 use super::task_context::{current_computer_task, with_computer_task};
 use super::ui_tree_targeting::ComputerTargetError;
 use super::utf8_truncation::utf16_len;
@@ -62,6 +66,7 @@ pub const CUA_SEMANTIC_TEXT_LANE_GAP_MS: u64 = 100;
 pub const CUA_HOST_CALL_TIMEOUT_MS: u64 = 35_000;
 pub const CUA_SHIELD_TIMEOUT_MS: u64 = 5_000;
 pub const CUA_BROWSER_STILL_TIMEOUT_MS: u64 = 20_000;
+pub const CUA_STILL_FRAME_INTERVAL_MS: u64 = 1_000;
 const RECENT_TREE_TTL: Duration = Duration::from_millis(5_000);
 const RECENT_TREE_LIMIT: usize = 8;
 const NATIVE_ELEMENT_LIMIT: usize = RECENT_TREE_LIMIT * 1_024;
@@ -495,6 +500,13 @@ struct CuaState {
 pub struct CuaComputerBackendOptions {
     pub semantic_text_lane_hold_ms: Option<u64>,
     pub semantic_text_lane_gap_ms: Option<u64>,
+    pub still_interval_ms: Option<u64>,
+}
+
+pub fn cua_still_interval_ms(option: Option<u64>, env: Option<&str>) -> u64 {
+    resolve_still_interval_ms(Some(option.unwrap_or_else(|| {
+        cua_preview_still_ms_override(env).map_or(CUA_STILL_FRAME_INTERVAL_MS, |ms| ms as u64)
+    })))
 }
 
 struct CuaInner {
@@ -508,6 +520,7 @@ struct CuaInner {
 
 pub struct CuaComputerBackend {
     inner: Arc<CuaInner>,
+    stills: StillFramePublisher,
 }
 
 #[derive(Clone)]
@@ -549,60 +562,102 @@ type LaneWrite = Box<
 
 impl CuaComputerBackend {
     pub fn new(host: Arc<dyn ComputerHost>, options: CuaComputerBackendOptions) -> Self {
-        Self {
-            inner: Arc::new(CuaInner {
-                host,
-                state: Mutex::new(CuaState {
-                    windows: Vec::new(),
-                    size: ComputerScreenSize {
-                        width: 1,
-                        height: 1,
-                        scale: None,
-                    },
-                    permissions: Vec::new(),
-                    availability: ComputerAvailability::BackendUnavailable {
-                        message: "Computer has not connected to the Zeron desktop app.".into(),
-                    },
-                    health: ComputerHealth {
-                        status: ComputerHealthStatus::Unavailable,
-                        consecutive_failures: 0,
-                        reconnects: 0,
-                        last_failure: None,
-                        capture_available: false,
-                        background_input_degraded: None,
-                    },
-                    capture_failed: false,
-                    snapshot_at: None,
-                    had_missing_permissions: false,
-                    snapshot: None,
-                    snapshot_generation: 0,
-                    selected_window: None,
-                    recent_trees: VecDeque::new(),
-                    native_elements: HashMap::new(),
-                    native_element_order: VecDeque::new(),
-                    observed_geometry: HashMap::new(),
-                    desktop_epoch: None,
-                    desktop_interruptions: None,
-                    driver_native_revision: None,
-                    host_platform: None,
-                    preview_tasks: Vec::new(),
-                    still_target: None,
-                    disposed: false,
-                }),
-                listeners: ComputerBackendListeners::default(),
-                lane_hold: Duration::from_millis(
-                    options
-                        .semantic_text_lane_hold_ms
-                        .unwrap_or(CUA_SEMANTIC_TEXT_LANE_HOLD_MS),
-                ),
-                lane_gap: Duration::from_millis(
-                    options
-                        .semantic_text_lane_gap_ms
-                        .unwrap_or(CUA_SEMANTIC_TEXT_LANE_GAP_MS),
-                ),
-                lanes: Mutex::new(HashMap::new()),
+        let inner = Arc::new(CuaInner {
+            host,
+            state: Mutex::new(CuaState {
+                windows: Vec::new(),
+                size: ComputerScreenSize {
+                    width: 1,
+                    height: 1,
+                    scale: None,
+                },
+                permissions: Vec::new(),
+                availability: ComputerAvailability::BackendUnavailable {
+                    message: "Computer has not connected to the Zeron desktop app.".into(),
+                },
+                health: ComputerHealth {
+                    status: ComputerHealthStatus::Unavailable,
+                    consecutive_failures: 0,
+                    reconnects: 0,
+                    last_failure: None,
+                    capture_available: false,
+                    background_input_degraded: None,
+                },
+                capture_failed: false,
+                snapshot_at: None,
+                had_missing_permissions: false,
+                snapshot: None,
+                snapshot_generation: 0,
+                selected_window: None,
+                recent_trees: VecDeque::new(),
+                native_elements: HashMap::new(),
+                native_element_order: VecDeque::new(),
+                observed_geometry: HashMap::new(),
+                desktop_epoch: None,
+                desktop_interruptions: None,
+                driver_native_revision: None,
+                host_platform: None,
+                preview_tasks: Vec::new(),
+                still_target: None,
+                disposed: false,
             }),
-        }
+            listeners: ComputerBackendListeners::default(),
+            lane_hold: Duration::from_millis(
+                options
+                    .semantic_text_lane_hold_ms
+                    .unwrap_or(CUA_SEMANTIC_TEXT_LANE_HOLD_MS),
+            ),
+            lane_gap: Duration::from_millis(
+                options
+                    .semantic_text_lane_gap_ms
+                    .unwrap_or(CUA_SEMANTIC_TEXT_LANE_GAP_MS),
+            ),
+            lanes: Mutex::new(HashMap::new()),
+        });
+        let capture = Arc::downgrade(&inner);
+        let prepare = Arc::downgrade(&inner);
+        let available = Arc::downgrade(&inner);
+        let stills = StillFramePublisher::new(StillFramePublisherOptions {
+            capture: Arc::new(move |_force| {
+                let inner = capture.upgrade();
+                async move {
+                    match inner {
+                        Some(inner) => inner.capture_still().await,
+                        None => Ok(None),
+                    }
+                }
+                .boxed()
+            }),
+            is_capture_available: Arc::new(move || {
+                available.upgrade().is_some_and(|inner| {
+                    let state = inner.state();
+                    !state.disposed
+                        && !state
+                            .permissions
+                            .contains(&ComputerPermission::ScreenRecording)
+                })
+            }),
+            prepare: Some(Arc::new(move || {
+                let inner = prepare.upgrade();
+                async move {
+                    if let Some(inner) = inner {
+                        inner.availability(false).await;
+                    }
+                }
+                .boxed()
+            })),
+            emit: Arc::new(|_| {}),
+            now: Arc::new(|| chrono::Utc::now().timestamp_millis() as f64),
+            interval_ms: cua_still_interval_ms(
+                options.still_interval_ms,
+                std::env::var(ZERON_CUA_PREVIEW_STILL_MS).ok().as_deref(),
+            ),
+        });
+        Self { inner, stills }
+    }
+
+    pub fn still_interval_ms(&self) -> u64 {
+        self.stills.interval_ms()
     }
 
     pub async fn capture_still(&self) -> Result<Option<Vec<u8>>, ComputerError> {
@@ -4551,14 +4606,18 @@ impl ComputerBackend for CuaComputerBackend {
         self.inner.listeners.subscribe(listener)
     }
 
-    async fn attach_stream(&self, _listener: ComputerFrameListener) -> Result<(), ComputerError> {
-        Err(ComputerBackendError::new(
-            "The Cua still-frame publisher is not wired in this build; read stills through capture_still.",
-        )
-        .into())
+    async fn attach_stream(&self, listener: ComputerFrameListener) -> Result<(), ComputerError> {
+        self.stills.attach(listener).await;
+        Ok(())
     }
 
     async fn detach_stream(&self) -> Result<(), ComputerError> {
+        self.stills.detach().await;
+        Ok(())
+    }
+
+    async fn request_keyframe(&self) -> Result<(), ComputerError> {
+        self.stills.request_keyframe().await;
         Ok(())
     }
 
@@ -4601,9 +4660,10 @@ impl ComputerBackend for CuaComputerBackend {
     }
 
     async fn dispose(&self) {
+        self.stills.detach().await;
         self.inner.dispose().await;
     }
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

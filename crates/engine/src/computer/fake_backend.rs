@@ -372,6 +372,14 @@ impl FakeComputerBackend {
         self.state().screen_size = screen_size;
     }
 
+    pub fn set_root(&self, root: ComputerUiNode) {
+        self.state().root = root;
+    }
+
+    pub fn root(&self) -> ComputerUiNode {
+        self.state().root.clone()
+    }
+
     pub fn queue_screenshots<I, S>(&self, bytes_base64: I)
     where
         I: IntoIterator<Item = S>,
@@ -536,7 +544,7 @@ impl ComputerBackend for FakeComputerBackend {
     fn supports(&self, method: ComputerBackendMethod) -> bool {
         use ComputerBackendMethod as M;
         match method {
-            M::Provision | M::ListSpaces => false,
+            M::Provision | M::ListSpaces | M::CheckInputReady => false,
             M::WaitForSettle => self.settle.is_some(),
             M::EngageShield | M::ReleaseShield | M::ReleaseAllShields => self.shield.is_some(),
             M::RaiseWindow
@@ -552,7 +560,8 @@ impl ComputerBackend for FakeComputerBackend {
             | M::KillApp
             | M::TripleClick
             | M::ReadClipboard
-            | M::WriteClipboard => true,
+            | M::WriteClipboard
+            | M::RequestKeyframe => true,
         }
     }
 

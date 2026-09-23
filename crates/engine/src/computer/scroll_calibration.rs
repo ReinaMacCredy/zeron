@@ -243,6 +243,10 @@ pub const MAX_SCROLL_GEARING: f64 = 50.0;
 pub const MIN_LEARNABLE_SCROLL_INJECTION: f64 = 30.0;
 pub const SCROLL_GEARING_SMOOTHING: f64 = 0.5;
 
+pub(crate) fn js_sign(value: f64) -> f64 {
+    if value == 0.0 { value } else { value.signum() }
+}
+
 pub(crate) fn observed_gearing(injected: f64, traveled: f64) -> Option<f64> {
     if !injected.is_finite() || !traveled.is_finite() {
         return None;
@@ -293,7 +297,7 @@ impl ScrollGearingStore {
         }
         let scaled = requested / self.get(key).or(fallback).unwrap_or(1.0);
         if scaled.abs() < 1.0 {
-            return scaled.signum();
+            return js_sign(scaled);
         }
         scaled
     }
@@ -667,6 +671,19 @@ mod tests {
         assert_eq!(store.gearing(Some("w1")), 50.0);
         assert_eq!(store.plan(Some("w1"), 10.0, None), 1.0);
         assert_eq!(store.plan(Some("w1"), -10.0, None), -1.0);
+    }
+
+    #[test]
+    fn plans_an_underflowed_request_to_zero_like_math_sign() {
+        let mut store = ScrollGearingStore::default();
+        store.learn(Some("w1"), 400.0, 400.0 * 50.0);
+        let tiny = f64::from_bits(1);
+        assert_eq!(tiny / 50.0, 0.0);
+        assert_eq!(store.plan(Some("w1"), tiny, None), 0.0);
+        assert_eq!(store.plan(Some("w1"), -tiny, None), 0.0);
+        assert_eq!(js_sign(0.0), 0.0);
+        assert!(js_sign(-0.0).is_sign_negative() && js_sign(-0.0) == 0.0);
+        assert_eq!(js_sign(-3.0), -1.0);
     }
 
     #[test]

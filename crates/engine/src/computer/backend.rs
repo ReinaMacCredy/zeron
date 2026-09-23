@@ -308,10 +308,27 @@ impl From<ComputerGeometryError> for ComputerError {
     }
 }
 
+pub const COMPUTER_CONTROLLED_BY_OTHER_THREAD_CODE: &str = "computer_controlled_by_other_thread";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "{}no input was sent. Do not retry this blocked action or switch tools to bypass the lease. Wait until that conversation's turn ends. Reading the desktop still works. Background actions on independently owned applications remain available.",
+    if *.target_only {
+        "This application or window is controlled by another conversation; "
+    } else {
+        "The shared pointer and focused keyboard are controlled by another conversation; "
+    }
+)]
+pub struct ComputerLeaseError {
+    pub target_only: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum ComputerError {
     #[error(transparent)]
     Backend(#[from] ComputerBackendError),
+    #[error(transparent)]
+    Lease(#[from] ComputerLeaseError),
     #[error(transparent)]
     Target(#[from] ComputerTargetError),
     #[error(transparent)]
@@ -350,6 +367,7 @@ impl ComputerError {
     pub fn code(&self) -> Option<&str> {
         match self {
             Self::Backend(error) => error.code(),
+            Self::Lease(_) => Some(COMPUTER_CONTROLLED_BY_OTHER_THREAD_CODE),
             Self::Target(error) => Some(error.code.as_str()),
             Self::Approval(error) => error.code(),
             Self::Denylist(error) => Some(error.code()),
@@ -411,6 +429,8 @@ pub enum ComputerBackendMethod {
     EngageShield,
     ReleaseShield,
     ReleaseAllShields,
+    CheckInputReady,
+    RequestKeyframe,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

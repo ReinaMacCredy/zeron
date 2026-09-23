@@ -26,12 +26,13 @@ mod hardening_preview_browser;
 mod host_transport;
 mod permissions_readiness;
 mod routes_keys_scroll_drag;
+mod still_cadence;
 mod text_lanes;
 
-pub(super) type ToolHandler = Arc<dyn Fn(&Map<String, Value>) -> Value + Send + Sync>;
+pub(crate) type ToolHandler = Arc<dyn Fn(&Map<String, Value>) -> Value + Send + Sync>;
 
 #[derive(Clone)]
-pub(super) struct Gate(Shared<BoxFuture<'static, ()>>);
+pub(crate) struct Gate(Shared<BoxFuture<'static, ()>>);
 
 pub(super) struct GateOpener(Option<oneshot::Sender<()>>);
 
@@ -59,7 +60,7 @@ impl Gate {
     }
 }
 
-pub(super) struct Knobs {
+pub(crate) struct Knobs {
     pub bounds: Value,
     pub live: bool,
     pub elements: Vec<Value>,
@@ -95,11 +96,12 @@ pub(super) struct Knobs {
 }
 
 #[derive(Default)]
-pub(super) struct FixtureOptions {
+pub(crate) struct FixtureOptions {
     pub lane_hold_ms: Option<u64>,
     pub lane_gap_ms: Option<u64>,
     pub host_platform: Option<&'static str>,
     pub native_revision: Option<Option<u64>>,
+    pub still_interval_ms: Option<u64>,
 }
 
 pub(super) struct ScriptedHost {
@@ -349,8 +351,8 @@ impl ComputerHost for ScriptedHost {
     }
 }
 
-pub(super) struct Fixture {
-    pub backend: CuaComputerBackend,
+pub(crate) struct Fixture {
+    pub backend: Arc<CuaComputerBackend>,
     pub knobs: Arc<Mutex<Knobs>>,
     pub calls: Arc<Mutex<Vec<ComputerHostCall>>>,
     pub cancelled: Arc<Mutex<Vec<String>>>,
@@ -360,7 +362,7 @@ pub(super) fn fixture() -> Fixture {
     fixture_with(FixtureOptions::default())
 }
 
-pub(super) fn fixture_with(options: FixtureOptions) -> Fixture {
+pub(crate) fn fixture_with(options: FixtureOptions) -> Fixture {
     let knobs = Arc::new(Mutex::new(Knobs {
         bounds: json!({ "x": -300, "y": 20, "width": 200, "height": 100 }),
         live: true,
@@ -406,13 +408,14 @@ pub(super) fn fixture_with(options: FixtureOptions) -> Fixture {
         calls: calls.clone(),
         cancelled: cancelled.clone(),
     });
-    let backend = CuaComputerBackend::new(
+    let backend = Arc::new(CuaComputerBackend::new(
         host,
         CuaComputerBackendOptions {
             semantic_text_lane_hold_ms: options.lane_hold_ms,
             semantic_text_lane_gap_ms: options.lane_gap_ms,
+            still_interval_ms: options.still_interval_ms,
         },
-    );
+    ));
     Fixture {
         backend,
         knobs,
@@ -422,11 +425,11 @@ pub(super) fn fixture_with(options: FixtureOptions) -> Fixture {
 }
 
 impl Fixture {
-    pub(super) fn knobs(&self) -> std::sync::MutexGuard<'_, Knobs> {
+    pub(crate) fn knobs(&self) -> std::sync::MutexGuard<'_, Knobs> {
         self.knobs.lock().unwrap()
     }
 
-    pub(super) fn set_elements(&self, elements: Vec<Value>) {
+    pub(crate) fn set_elements(&self, elements: Vec<Value>) {
         self.knobs().elements = elements;
     }
 
@@ -442,7 +445,7 @@ impl Fixture {
         self.knobs().bounds = bounds;
     }
 
-    pub(super) fn on_tool(
+    pub(crate) fn on_tool(
         &self,
         name: &str,
         handler: impl Fn(&Map<String, Value>) -> Value + Send + Sync + 'static,
@@ -551,7 +554,7 @@ impl Fixture {
         self.knobs().overview_failure = true;
     }
 
-    pub(super) fn calls(&self) -> Vec<ComputerHostCall> {
+    pub(crate) fn calls(&self) -> Vec<ComputerHostCall> {
         self.calls.lock().unwrap().clone()
     }
 
@@ -559,11 +562,11 @@ impl Fixture {
         self.calls.lock().unwrap().clear();
     }
 
-    pub(super) fn call_count(&self) -> usize {
+    pub(crate) fn call_count(&self) -> usize {
         self.calls.lock().unwrap().len()
     }
 
-    pub(super) fn named(&self, name: &str) -> Vec<ComputerHostCall> {
+    pub(crate) fn named(&self, name: &str) -> Vec<ComputerHostCall> {
         self.calls()
             .into_iter()
             .filter(|call| call.name.as_deref() == Some(name))
@@ -577,7 +580,7 @@ impl Fixture {
             .unwrap_or(Value::Null)
     }
 
-    pub(super) fn last_args(&self, name: &str) -> Value {
+    pub(crate) fn last_args(&self, name: &str) -> Value {
         self.named(name)
             .last()
             .map(|call| call.args.clone())
@@ -585,7 +588,7 @@ impl Fixture {
     }
 }
 
-pub(super) fn assert_subset(actual: &Value, expected: Value) {
+pub(crate) fn assert_subset(actual: &Value, expected: Value) {
     let Value::Object(expected) = expected else {
         assert_eq!(actual, &expected);
         return;
