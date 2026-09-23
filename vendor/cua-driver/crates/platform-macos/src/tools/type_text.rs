@@ -69,7 +69,9 @@ fn def() -> &'static ToolDef {
              one-call AX insertion remains uncapped. Key-event routes (terminals, \
              that fallback, foreground) refuse text containing a newline, carriage \
              return or tab with `control_characters_require_press_key`: send Return \
-             or Tab with `press_key` instead.\n\n\
+             or Tab with `press_key` instead. They also refuse any text with \
+             `input_method_active` while the current input source is an input method \
+             (Vietnamese Telex, Japanese, Chinese) rather than a keyboard layout.\n\n\
              Optional `element_index` + `window_id` (from the last \
              `get_window_state` snapshot) directs the write to a specific field. \
              Without `element_index`, the write goes to the pid's currently \
@@ -794,7 +796,12 @@ fn synthesis_refusal_result(
 
 // A newline or tab arrives as Return or Tab: it runs a terminal command, submits
 // a form or moves focus, which the caller must choose explicitly with press_key.
-fn key_event_text_refusal(path: &'static str, text: &str) -> Option<TypeTextDelivery> {
+// An input method rewrites the characters, and a shorter result invites a retype.
+fn key_event_text_refusal(
+    path: &'static str,
+    text: &str,
+    active_input_method: Option<String>,
+) -> Option<TypeTextDelivery> {
     if text.contains(['\n', '\r', '\t']) {
         return Some(TypeTextDelivery::KeyEventTextRefused {
             path,
@@ -806,7 +813,17 @@ fn key_event_text_refusal(path: &'static str, text: &str) -> Option<TypeTextDeli
                 .into(),
         });
     }
-    None
+    let id = active_input_method?;
+    Some(TypeTextDelivery::KeyEventTextRefused {
+        path,
+        code: "input_method_active",
+        reason: format!(
+            "the active input source {id} is an input method that rewrites key events (Telex \
+             turns \"add\" into \"ađ\", Japanese and Chinese compose). Use set_value, an \
+             element target whose AX route bypasses the input method, or clipboard paste; \
+             Cua Driver does not switch input sources."
+        ),
+    })
 }
 
 fn path_has_untrusted_web_readback(path: &str) -> bool {
@@ -1334,7 +1351,11 @@ fn type_text_blocking(
         } else {
             PATH_KEY_EVENTS
         };
-        if let Some(refused) = key_event_text_refusal(path, text) {
+        if let Some(refused) = key_event_text_refusal(
+            path,
+            text,
+            crate::input::input_source::active_input_method(),
+        ) {
             return Ok(refused);
         }
         // Settle between front+focus and the first keystroke — see the
@@ -1433,7 +1454,11 @@ fn type_text_blocking(
                 ax_attempt: AxAttempt::NotAttempted,
             });
         }
-        if let Some(refused) = key_event_text_refusal(PATH_KEY_EVENTS, text) {
+        if let Some(refused) = key_event_text_refusal(
+            PATH_KEY_EVENTS,
+            text,
+            crate::input::input_source::active_input_method(),
+        ) {
             return Ok(refused);
         }
         tracing::debug!(
@@ -1689,7 +1714,11 @@ fn type_text_blocking(
             ax_attempt,
         });
     }
-    if let Some(refused) = key_event_text_refusal(PATH_KEY_EVENTS, text) {
+    if let Some(refused) = key_event_text_refusal(
+        PATH_KEY_EVENTS,
+        text,
+        crate::input::input_source::active_input_method(),
+    ) {
         return Ok(refused);
     }
 
@@ -1829,6 +1858,21 @@ mod tests {
             };
             assert_eq!(code, "control_characters_require_press_key");
         }
+    }
+
+    #[test]
+    fn key_event_text_is_refused_while_an_input_method_would_rewrite_it() {
+        let refused = key_event_text_refusal(
+            PATH_KEY_EVENTS,
+            "git add .",
+            Some("com.apple.inputmethod.VietnameseIM.VietnameseTelex".into()),
+        );
+        let Some(TypeTextDelivery::KeyEventTextRefused { code, reason, .. }) = refused else {
+            panic!("an active input method must refuse key-event text");
+        };
+        assert_eq!(code, "input_method_active");
+        assert!(reason.contains("VietnameseTelex"), "{reason}");
+        assert!(key_event_text_refusal(PATH_KEY_EVENTS, "git add .", None).is_none());
     }
 
     #[test]
