@@ -903,11 +903,10 @@ fn thread_params(
         // would cut it short (`tool_timeout_sec` in the 0.154.0 schema).
         overrides.insert("mcp_servers.zeron.tool_timeout_sec".into(), json!(1800));
         if request.computer_control {
-            // One computer surface per run: Codex's bundled plugin would compete with Zeron's.
-            overrides.insert(
-                "plugins.computer-use@openai-bundled.enabled".into(),
-                false.into(),
-            );
+            // One computer surface per run: Codex's bundled plugins would compete with Zeron's.
+            for plugin in COMPETING_BUNDLED_PLUGINS {
+                overrides.insert(format!("plugins.{plugin}.enabled"), false.into());
+            }
         }
         if let Some(guidance) = &server.guidance {
             p.insert("developerInstructions".into(), guidance.clone().into());
@@ -1643,6 +1642,15 @@ struct CompactSession {
 /// after the completion signal; absent within it, `post_tokens` stays unknown.
 const COMPACT_TOKEN_GRACE: Duration = Duration::from_secs(2);
 
+// Synara disables the first three (codexProcessEnv.ts); unified-computer-use
+// ships after Synara's pin and is the same class of competing surface.
+const COMPETING_BUNDLED_PLUGINS: [&str; 4] = [
+    "computer-use@openai-bundled",
+    "unified-computer-use@openai-bundled",
+    "browser@openai-bundled",
+    "chrome@openai-bundled",
+];
+
 /// Compact one thread: resume it, ask the app server to compact, then read
 /// notifications until it says so. Deliberately NOT [`run_session`] — no turn
 /// is started, no content is streamed, and the only events that reach the
@@ -2226,7 +2234,6 @@ mod tests {
 
     #[test]
     fn a_computer_run_carries_guidance_and_suppresses_the_bundled_plugin() {
-        let plugin = "plugins.computer-use@openai-bundled.enabled";
         let server = tool_server(Some("## Zeron computer use"));
         let on = thread_params(
             &computer_request(true),
@@ -2236,7 +2243,9 @@ mod tests {
             None,
         );
         assert_eq!(on["developerInstructions"], "## Zeron computer use");
-        assert_eq!(on["config"][plugin], false);
+        for competing in COMPETING_BUNDLED_PLUGINS {
+            assert_eq!(on["config"][format!("plugins.{competing}.enabled")], false);
+        }
         assert_eq!(
             on["config"]["mcp_servers.zeron.command"],
             "/opt/zeron/zeron"
@@ -2256,7 +2265,10 @@ mod tests {
             None,
         );
         assert!(off.get("developerInstructions").is_none());
-        assert!(off["config"].get(plugin).is_none());
+        for competing in COMPETING_BUNDLED_PLUGINS {
+            let key = format!("plugins.{competing}.enabled");
+            assert!(off["config"].get(key.as_str()).is_none());
+        }
         assert_eq!(
             off["config"]["mcp_servers.zeron.command"],
             "/opt/zeron/zeron"
@@ -2274,7 +2286,10 @@ mod tests {
 
         let title = thread_params(&computer_request(true), Some(&server), true, "never", None);
         assert_eq!(title["developerInstructions"], crate::TITLE_INSTRUCTIONS);
-        assert!(title["config"].get(plugin).is_none());
+        for competing in COMPETING_BUNDLED_PLUGINS {
+            let key = format!("plugins.{competing}.enabled");
+            assert!(title["config"].get(key.as_str()).is_none());
+        }
     }
 
     #[test]
