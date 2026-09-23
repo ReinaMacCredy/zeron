@@ -398,12 +398,21 @@ impl Tool for PressKeyTool {
             }
         }
 
-        // Chromium moves keyboard focus to an AX-focused web field without activating the app,
-        // so the focus proof below can pass for an explicitly addressed field in the background.
+        // An AX-focused field takes keyboard focus without activating the app (web content, or
+        // any field in the app's focused window), so the focus proof below can then pass.
         if !fg && px.is_none() && py.is_none() {
             if let Some(guard) = pre_focus_guard.clone() {
                 let ptr = guard.as_ptr();
-                if super::type_text::target_in_web_area(pid, Some((ptr, element_index)), window_id) {
+                // Moving focus inside the app's already-focused window activates nothing.
+                let in_focused_window = window_id.is_some()
+                    && crate::ax::exact_target::keyboard_focused_window_id(pid) == window_id;
+                if in_focused_window
+                    || super::type_text::target_in_web_area(
+                        pid,
+                        Some((ptr, element_index)),
+                        window_id,
+                    )
+                {
                     let prior_front = apps::frontmost_pid();
                     let _ = focus_guard::with_focus_suppressed(
                         Some(pid),
