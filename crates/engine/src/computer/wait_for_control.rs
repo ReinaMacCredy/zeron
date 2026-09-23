@@ -93,6 +93,7 @@ where
         let Some(root) = state.root.as_ref().filter(|_| !accessibility_unavailable) else {
             return Ok(result(Status::Unavailable));
         };
+        let incomplete = root.truncated == Some(true);
         match resolve(root, target) {
             Ok(()) if !absent => return Ok(result(Status::Ready)),
             Ok(()) => {}
@@ -100,16 +101,20 @@ where
                 return Ok(result(Status::Ambiguous));
             }
             Err(ComputerTargetLookup::Ambiguous) => {}
-            Err(ComputerTargetLookup::NotFound) if absent => return Ok(result(Status::Ready)),
+            Err(ComputerTargetLookup::NotFound) if absent && !incomplete => {
+                return Ok(result(Status::Ready));
+            }
             Err(ComputerTargetLookup::NotFound) => {}
             Err(ComputerTargetLookup::Failed(error)) => return Err(error),
         }
-        if root.truncated == Some(true) {
-            return Ok(result(Status::Unavailable));
-        }
         let elapsed = started.elapsed().as_millis() as u64;
         let Some(remaining) = timeout_ms.checked_sub(elapsed).filter(|left| *left > 0) else {
-            return Ok(result(Status::Timeout));
+            // A truncated tree cannot prove the control is absent.
+            return Ok(result(if incomplete {
+                Status::Unavailable
+            } else {
+                Status::Timeout
+            }));
         };
         delay(Duration::from_millis(remaining.min(100)), signal).await?;
     }
@@ -323,23 +328,49 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn does_not_poll_unavailable_windows_or_incomplete_trees() {
+    async fn does_not_poll_unavailable_windows() {
         let mut partial = calculator_state();
         partial.accessibility = Some(ComputerAccessibilityReport {
             status: ComputerAccessibilityStatus::Partial,
             unavailable_window_ids: vec!["fake-calculator".to_owned()],
         });
-        let mut truncated = without_controls(calculator_state());
-        truncated.root.as_mut().unwrap().truncated = Some(true);
-        for unavailable in [partial, truncated] {
-            let reads = Reads::new();
-            let read = reads.sequence(vec![unavailable]);
-            assert_eq!(
-                wait(read, &target("Display"), 10_000, false).await,
-                Status::Unavailable
-            );
-            assert_eq!(reads.calls(), 1);
-        }
+        let reads = Reads::new();
+        let read = reads.sequence(vec![partial]);
+        assert_eq!(
+            wait(read, &target("Display"), 10_000, false).await,
+            Status::Unavailable
+        );
+        assert_eq!(reads.calls(), 1);
+    }
+
+    fn truncated(mut state: ComputerState) -> ComputerState {
+        state.root.as_mut().unwrap().truncated = Some(true);
+        state
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn keeps_polling_a_truncated_tree_until_the_control_appears() {
+        let reads = Reads::new();
+        let read = reads.sequence(vec![
+            truncated(without_controls(calculator_state())),
+            truncated(calculator_state()),
+        ]);
+        assert_eq!(
+            wait(read, &target("Display"), 1_000, false).await,
+            Status::Ready
+        );
+        assert_eq!(reads.calls(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_truncated_tree_that_never_shows_the_control_ends_unavailable_not_timeout() {
+        let reads = Reads::new();
+        let read = reads.sequence(vec![truncated(without_controls(calculator_state()))]);
+        assert_eq!(
+            wait(read, &target("Display"), 1_000, false).await,
+            Status::Unavailable
+        );
+        assert!(reads.calls() > 1);
     }
 
     #[tokio::test(start_paused = true)]
@@ -435,12 +466,16 @@ mod tests {
             wait(read, &target("Display"), 0, true).await,
             Status::Timeout
         );
-        let mut truncated = calculator_state();
-        truncated.root.as_mut().unwrap().truncated = Some(true);
         let reads = Reads::new();
-        let read = reads.sequence(vec![truncated]);
+        let read = reads.sequence(vec![truncated(calculator_state())]);
         assert_eq!(
             wait(read, &target("Display"), 10_000, true).await,
+            Status::Unavailable
+        );
+        let reads = Reads::new();
+        let read = reads.sequence(vec![truncated(without_controls(calculator_state()))]);
+        assert_eq!(
+            wait(read, &target("Display"), 1_000, true).await,
             Status::Unavailable
         );
     }
