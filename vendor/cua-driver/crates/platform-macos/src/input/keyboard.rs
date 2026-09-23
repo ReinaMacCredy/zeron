@@ -220,9 +220,18 @@ pub fn press_key_no_auth(pid: i32, key: &str, modifiers: &[&str]) -> anyhow::Res
     press_key_routed(pid, key, modifiers, false)
 }
 
-fn type_unicode(text: &str, inter_char_delay_ms: u64, route: KeyboardRoute) -> anyhow::Result<()> {
+fn type_unicode(
+    text: &str,
+    inter_char_delay_ms: u64,
+    route: KeyboardRoute,
+    deadline: Option<std::time::Instant>,
+) -> anyhow::Result<usize> {
     let source = source()?;
+    let mut sent = 0;
     for ch in text.chars() {
+        if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+            return Ok(sent);
+        }
         super::cancellation::gate().ensure_active()?;
         let pair = PreparedKey::new(
             &source,
@@ -235,9 +244,10 @@ fn type_unicode(text: &str, inter_char_delay_ms: u64, route: KeyboardRoute) -> a
         pair.down.set_string(&value);
         pair.up.set_string(&value);
         pair.pulse()?;
+        sent += 1;
         key_pause(inter_char_delay_ms)?;
     }
-    Ok(())
+    Ok(sent)
 }
 
 pub fn type_text(pid: i32, text: &str) -> anyhow::Result<()> {
@@ -245,6 +255,15 @@ pub fn type_text(pid: i32, text: &str) -> anyhow::Result<()> {
 }
 
 pub fn type_text_with_delay(pid: i32, text: &str, inter_char_delay_ms: u64) -> anyhow::Result<()> {
+    type_text_until(pid, text, inter_char_delay_ms, None).map(|_| ())
+}
+
+pub fn type_text_until(
+    pid: i32,
+    text: &str,
+    inter_char_delay_ms: u64,
+    deadline: Option<std::time::Instant>,
+) -> anyhow::Result<usize> {
     type_unicode(
         text,
         if inter_char_delay_ms == 0 {
@@ -256,6 +275,7 @@ pub fn type_text_with_delay(pid: i32, text: &str, inter_char_delay_ms: u64) -> a
             pid,
             authenticated: true,
         },
+        deadline,
     )
 }
 
@@ -339,7 +359,7 @@ pub(super) fn with_pid_modifier_keys<T>(
 }
 
 pub fn type_text_global(text: &str, inter_char_delay_ms: u64) -> anyhow::Result<()> {
-    type_unicode(text, inter_char_delay_ms.max(8), KeyboardRoute::Hid)
+    type_unicode(text, inter_char_delay_ms.max(8), KeyboardRoute::Hid, None).map(|_| ())
 }
 
 fn press_bare_chord(code: u16, modifiers: &[u16]) -> anyhow::Result<()> {
@@ -835,6 +855,12 @@ mod tests {
         assert!(is_screen_sharing_bundle_id("com.apple.ScreenSharing"));
         assert!(!is_screen_sharing_bundle_id("com.apple.screensharing"));
         assert!(!is_screen_sharing_bundle_id("com.microsoft.rdc.macos"));
+    }
+
+    #[test]
+    fn synthesis_past_its_deadline_sends_nothing_and_says_so() {
+        let sent = type_text_until(-1, "abc", 0, Some(std::time::Instant::now())).unwrap();
+        assert_eq!(sent, 0);
     }
 
     #[test]

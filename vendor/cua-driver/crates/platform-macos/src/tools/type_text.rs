@@ -160,6 +160,7 @@ impl Tool for TypeTextTool {
 
     async fn invoke(&self, args: Value) -> ToolResult {
         use cua_driver_core::tool_args::ArgsExt;
+        let synthesis_deadline = synthesis_deadline(std::time::Instant::now());
         if args.opt_str("scope").as_deref() == Some("desktop")
             && args.get("pid").is_none()
             && args.get("window_id").is_none()
@@ -397,6 +398,7 @@ impl Tool for TypeTextTool {
                         delivery_mode,
                         window_id,
                         blocking_policy,
+                        synthesis_deadline,
                     )
                 })
                 .await
@@ -610,16 +612,36 @@ const PATH_AX: &str = "ax";
 const PATH_KEY_EVENTS: &str = "key_events";
 const PATH_KEY_EVENTS_FG: &str = "key_events_fg";
 
-// The daemon transport has a 120-second request deadline. Character synthesis
-// is synchronous and costs at least one 8ms key-down gap plus either the
-// requested delay or an 8ms key-up gap per character. Keep the complete
-// scheduled synthesis sleeps + read-back estimate within 100 seconds, reserving
-// 20 seconds for event construction/posting, routing, focus assistance,
-// queueing, response serialization, and transport.
+// Zeron's host abandons a driver call after 30 seconds and reports it as timed
+// out, so character synthesis must finish, read-back included, well inside that
+// window or the caller is told "timed out" while characters keep arriving.
+// Character synthesis is synchronous and costs at least one 8ms key-down gap
+// plus either the requested delay or an 8ms key-up gap per character. Keep the
+// complete scheduled synthesis sleeps + read-back estimate within 25 seconds,
+// reserving 5 seconds for event construction/posting, routing, focus
+// assistance, window-change observation, response serialization, and transport.
 // Atomic AX writes are deliberately excluded: their cost does not scale per
 // character and a single write remains the preferred route for large text.
-const SYNTHESIS_BUDGET_MS: u64 = 100_000;
+const SYNTHESIS_BUDGET_MS: u64 = 25_000;
 const KEY_DOWN_GAP_MS: u64 = 8;
+
+// The estimate can undershoot a loaded machine, so synthesis also stops at the
+// budget measured from request arrival, leaving the read-back drain inside it.
+fn synthesis_deadline(started: std::time::Instant) -> std::time::Instant {
+    started + std::time::Duration::from_millis(SYNTHESIS_BUDGET_MS) - DELIVERY_DRAIN_TIMEOUT
+}
+
+fn cut_short_delivery(
+    sent: usize,
+    requested: usize,
+    readback: (bool, Option<usize>),
+) -> (bool, Option<usize>) {
+    if sent < requested {
+        (false, Some(sent))
+    } else {
+        readback
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TextDeliveryRoute {
@@ -1149,6 +1171,7 @@ fn cgevent_type_verified(
     element_ptr_and_idx: Option<(usize, Option<usize>)>,
     settle_ms: u64,
     window_id: Option<u32>,
+    deadline: std::time::Instant,
 ) -> anyhow::Result<(bool, Option<usize>)> {
     // Focus the target element so the keystrokes land in IT. Critical in
     // foreground mode: a freshly-fronted window's keyboard focus may be on the
@@ -1176,17 +1199,18 @@ fn cgevent_type_verified(
     if settle_ms > 0 {
         std::thread::sleep(std::time::Duration::from_millis(settle_ms));
     }
-    crate::input::keyboard::type_text_with_delay(pid, text, delay_ms)?;
+    let sent = crate::input::keyboard::type_text_until(pid, text, delay_ms, Some(deadline))?;
 
     // CGEvent posting is asynchronous with respect to the renderer. In
     // particular, Chromium can acknowledge the posting process while a long
     // tail remains queued. Poll the AX value until the complete payload is
     // visible instead of treating any growth as success. If the deadline
     // expires after observable growth, surface the exact partial count.
-    let deadline = std::time::Instant::now() + DELIVERY_DRAIN_TIMEOUT;
-    Ok(await_typed_delivery(before, text, deadline, || {
+    let drain_deadline = std::time::Instant::now() + DELIVERY_DRAIN_TIMEOUT;
+    let readback = await_typed_delivery(before, text, drain_deadline, || {
         read_axvalue_bound(pid, element_ptr_and_idx, window_id)
-    }))
+    });
+    Ok(cut_short_delivery(sent, text.chars().count(), readback))
 }
 
 fn await_typed_delivery(
@@ -1237,6 +1261,7 @@ fn type_text_blocking(
     delivery_mode: super::DeliveryMode,
     window_id: Option<u32>,
     keyboard_policy: BackgroundKeyboardPolicy,
+    synthesis_deadline: std::time::Instant,
 ) -> anyhow::Result<TypeTextDelivery> {
     // Original field value before any rung drives read-back verification only.
     // An unreadable value is not evidence that the field is empty — and for a
@@ -1284,6 +1309,7 @@ fn type_text_blocking(
                 element_ptr_and_idx,
                 foreground_settle_ms,
                 window_id,
+                synthesis_deadline,
             )
         };
         let ((verified, delivered_chars), fronted) = match window_id {
@@ -1373,6 +1399,7 @@ fn type_text_blocking(
             element_ptr_and_idx,
             /*settle_ms=*/ 0,
             window_id,
+            synthesis_deadline,
         )?;
         return Ok(TypeTextDelivery::Typed(TypeTextOutcome {
             detail: format!(" via CGEvent (terminal emulator, {delay_ms}ms delay)"),
@@ -1438,6 +1465,12 @@ fn type_text_blocking(
             let chars = text.chars().collect::<Vec<_>>();
             let mut result = kAXErrorSuccess;
             for (index, character) in chars.iter().enumerate() {
+                if std::time::Instant::now() >= synthesis_deadline {
+                    interruption = Some(format!(
+                        "stopped at the {SYNTHESIS_BUDGET_MS}ms per-call budget; the remaining characters were not sent"
+                    ));
+                    break;
+                }
                 let chunk = character.to_string();
                 match crate::input::cancellation::gate().post_ax(element as usize, || unsafe {
                     set_string_attr(element, "AXSelectedText", &chunk)
@@ -1619,6 +1652,7 @@ fn type_text_blocking(
         element_ptr_and_idx,
         /*settle_ms=*/ 0,
         window_id,
+        synthesis_deadline,
     )?;
     Ok(TypeTextDelivery::Typed(TypeTextOutcome {
         detail: format!(" via CGEvent ({delay_ms}ms delay)"),
@@ -1659,6 +1693,7 @@ mod tests {
             super::super::DeliveryMode::Background,
             None,
             BackgroundKeyboardPolicy::Allowed,
+            synthesis_deadline(std::time::Instant::now()),
         );
         // We don't care whether r is Ok or Err — what matters is that
         // calling it with is_terminal_target=true is safe and never
@@ -1685,6 +1720,7 @@ mod tests {
             super::super::DeliveryMode::Background,
             Some(7),
             BackgroundKeyboardPolicy::SemanticOnly(refusal.clone()),
+            synthesis_deadline(std::time::Instant::now()),
         );
         match r {
             Ok(TypeTextDelivery::Refused(returned)) => assert_eq!(returned, refusal),
@@ -1704,6 +1740,7 @@ mod tests {
             super::super::DeliveryMode::Background,
             None,
             BackgroundKeyboardPolicy::Allowed,
+            synthesis_deadline(std::time::Instant::now()),
         )
         .expect("preflight refusal must not attempt the invalid pid");
         let TypeTextDelivery::SynthesisRefused {
@@ -1718,13 +1755,39 @@ mod tests {
         assert_eq!(ax_attempt, AxAttempt::NotAttempted);
         assert_eq!(refusal.requested_chars, 6_500);
         assert_eq!(refusal.estimated_duration_ms, 106_000);
-        assert_eq!(refusal.max_chunk_chars, 6_125);
+        assert_eq!(refusal.max_chunk_chars, 1_437);
     }
 
     #[test]
     fn synthesis_preflight_accepts_the_exact_transport_safe_boundary() {
-        assert!(synthesis_preflight(TextDeliveryRoute::UnicodeSynthesis, 6_125, 0).is_none());
-        assert!(synthesis_preflight(TextDeliveryRoute::UnicodeSynthesis, 6_126, 0).is_some());
+        assert!(synthesis_preflight(TextDeliveryRoute::UnicodeSynthesis, 1_437, 0).is_none());
+        assert!(synthesis_preflight(TextDeliveryRoute::UnicodeSynthesis, 1_438, 0).is_some());
+    }
+
+    #[test]
+    fn synthesis_at_zerons_delay_fits_inside_the_host_call_timeout() {
+        assert!(synthesis_preflight(TextDeliveryRoute::UnicodeSynthesis, 1_277, 10).is_none());
+        let refusal = synthesis_preflight(TextDeliveryRoute::UnicodeSynthesis, 1_550, 10)
+            .expect("text that outlives the 30s host call must be refused before typing");
+        assert_eq!(refusal.max_chunk_chars, 1_277);
+        assert!(
+            synthesis_deadline(std::time::Instant::now())
+                < std::time::Instant::now() + std::time::Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn a_deadline_cut_reports_only_the_characters_sent() {
+        assert_eq!(cut_short_delivery(5, 12, (false, None)), (false, Some(5)));
+        assert_eq!(
+            cut_short_delivery(5, 12, (false, Some(3))),
+            (false, Some(5))
+        );
+        assert_eq!(
+            cut_short_delivery(12, 12, (true, Some(12))),
+            (true, Some(12))
+        );
+        assert_eq!(cut_short_delivery(12, 12, (false, None)), (false, None));
     }
 
     #[test]
