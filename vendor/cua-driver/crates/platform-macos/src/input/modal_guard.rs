@@ -17,6 +17,8 @@ use super::target_guard::TargetRefusal;
 
 const MAX_ANCESTORS: usize = 40;
 const MODAL_TIMEOUT_SECONDS: f32 = 0.1;
+// A busy but live app (Chromium under load) can exceed 0.1 s on its root reads.
+const APP_TIMEOUT_SECONDS: f32 = 0.5;
 
 #[derive(Clone)]
 pub(crate) struct ModalTarget {
@@ -57,8 +59,7 @@ fn modal_role(role: &str, subrole: &str, modal: Option<bool>, identifier: Option
 // A reply that spent the whole messaging timeout is a stalled app; an immediate
 // cannot-complete is an app with no AX server, which has no modal to guard.
 fn app_read_timed_out(error: AXError, elapsed: Duration) -> bool {
-    error == kAXErrorCannotComplete
-        && elapsed >= Duration::from_secs_f32(MODAL_TIMEOUT_SECONDS * 0.8)
+    error == kAXErrorCannotComplete && elapsed >= Duration::from_secs_f32(APP_TIMEOUT_SECONDS * 0.8)
 }
 
 unsafe fn copy_app_attr(app: AXUIElementRef, attr_name: &str) -> Result<Option<CFTypeRef>, ()> {
@@ -172,7 +173,7 @@ impl ModalTarget {
             let owned_app = RetainedElement::retain(app as usize);
             CFRelease(app as CFTypeRef);
             let app_ref = owned_app.as_ptr() as AXUIElementRef;
-            AXUIElementSetMessagingTimeout(app_ref, MODAL_TIMEOUT_SECONDS);
+            AXUIElementSetMessagingTimeout(app_ref, APP_TIMEOUT_SECONDS);
             let mut current = match copy_app_element_attr(app_ref, "AXFocusedUIElement") {
                 Ok(Some(element)) => Some(element),
                 Ok(None) => copy_app_element_attr(app_ref, "AXFocusedWindow")
@@ -349,7 +350,7 @@ mod tests {
 
     #[test]
     fn only_an_app_read_that_spent_its_timeout_refuses() {
-        let timeout = Duration::from_secs_f32(MODAL_TIMEOUT_SECONDS);
+        let timeout = Duration::from_secs_f32(APP_TIMEOUT_SECONDS);
         assert!(app_read_timed_out(kAXErrorCannotComplete, timeout));
         assert!(!app_read_timed_out(
             kAXErrorCannotComplete,
