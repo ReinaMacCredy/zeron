@@ -608,21 +608,20 @@ fn resolve_key_code(
             let ch = ch.to_ascii_lowercase();
             match layout_key_code(ch) {
                 Some(code) => Ok(code),
-                // AZERTY and similar layouts put digits on the shifted number row; shortcuts
-                // like Cmd+1 still use that physical key.
-                None if ch.is_ascii_digit() => key_name_to_code(key),
-                None => Err(KeyboardLayoutUnmapped(ch).into()),
+                // macOS matches shortcuts on non-Latin layouts and AZERTY's shifted digits by
+                // the US key position, so that position is the fallback.
+                None => key_name_to_code(key).map_err(|_| KeyboardLayoutUnmapped(ch).into()),
             }
         }
         _ => key_name_to_code(key),
     }
 }
 
-pub fn digit_needs_shift_on_layout(key: &str) -> bool {
+pub fn layout_lacks_key(key: &str) -> bool {
     let mut chars = key.chars();
     match (chars.next(), chars.next()) {
-        (Some(ch), None) if ch.is_ascii_digit() => {
-            super::input_source::current_layout_key_code(ch).is_none()
+        (Some(ch), None) if !ch.is_control() && !ch.is_whitespace() => {
+            super::input_source::current_layout_key_code(ch.to_ascii_lowercase()).is_none()
         }
         _ => false,
     }
@@ -921,9 +920,10 @@ mod tests {
         assert_eq!(resolve_key_code("z", azerty).unwrap(), 13);
         assert_eq!(resolve_key_code("return", azerty).unwrap(), 36);
         assert_eq!(resolve_key_code("f5", azerty).unwrap(), 96);
-        let unmapped = resolve_key_code("m", azerty).unwrap_err();
-        assert!(unmapped.downcast_ref::<KeyboardLayoutUnmapped>().is_some());
+        assert_eq!(resolve_key_code("m", azerty).unwrap(), 46);
         assert_eq!(resolve_key_code("1", azerty).unwrap(), 18);
+        let unmapped = resolve_key_code("\u{e000}", azerty).unwrap_err();
+        assert!(unmapped.downcast_ref::<KeyboardLayoutUnmapped>().is_some());
     }
 
     #[test]

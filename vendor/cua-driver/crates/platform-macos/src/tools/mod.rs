@@ -223,8 +223,8 @@ pub(crate) fn keyboard_layout_refusal<S: AsRef<str>>(
         Err(error) => error
             .downcast_ref::<crate::input::keyboard::KeyboardLayoutUnmapped>()?
             .to_string(),
-        Ok(_) if !shortcut && crate::input::keyboard::digit_needs_shift_on_layout(key) => {
-            format!("the current keyboard layout types {key:?} only with Shift; use type_text for digits")
+        Ok(_) if !shortcut && crate::input::keyboard::layout_lacks_key(key) => {
+            format!("no key on the current keyboard layout types {key:?} without Shift; use type_text for text")
         }
         Ok(_) => return None,
     };
