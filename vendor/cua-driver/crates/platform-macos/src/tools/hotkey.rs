@@ -55,7 +55,8 @@ fn def() -> &'static ToolDef {
              types (and text when applicable) before selecting or replacing editor content; \
              only then send Cmd+V.\n\n\
              Recognized modifiers: cmd/command, shift, option/alt, ctrl/control, fn. \
-             Non-modifier keys use the same vocabulary as `press_key`. Order: \
+             Non-modifier keys use the same vocabulary and keyboard-layout \
+             resolution as `press_key`. Order: \
              modifiers first, one non-modifier last."
             .into(),
         input_schema: serde_json::json!({
@@ -227,6 +228,9 @@ impl Tool for HotkeyTool {
 
         // Use the last non-modifier key; if there are multiple, treat earlier ones as extra keys.
         let key = non_modifiers.last().unwrap().clone();
+        if let Some(refusal) = super::keyboard_layout_refusal(&key) {
+            return refusal;
+        }
         let key_display = raw_keys.join("+");
         let element_token_arg = args.opt_str("element_token");
         let window_id_arg = args.opt_u64("window_id");

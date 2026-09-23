@@ -156,11 +156,11 @@ fn press_key_routed(
 ) -> anyhow::Result<()> {
     let (code, flags) = if key == "+" || key.eq_ignore_ascii_case("plus") {
         (
-            key_name_to_code("=")?,
+            key_code("=")?,
             modifier_flags(modifiers) | modifier_flags(&["shift"]),
         )
     } else {
-        (key_name_to_code(key)?, modifier_flags(modifiers))
+        (key_code(key)?, modifier_flags(modifiers))
     };
     PreparedKey::new(
         &source()?,
@@ -188,11 +188,11 @@ pub fn press_key_in_window(
 ) -> anyhow::Result<()> {
     let (code, flags) = if key == "+" || key.eq_ignore_ascii_case("plus") {
         (
-            key_name_to_code("=")?,
+            key_code("=")?,
             modifier_flags(modifiers) | modifier_flags(&["shift"]),
         )
     } else {
-        (key_name_to_code(key)?, modifier_flags(modifiers))
+        (key_code(key)?, modifier_flags(modifiers))
     };
     let mut pair = PreparedKey::new(
         &source()?,
@@ -310,7 +310,7 @@ fn with_modifier_keys<T>(
 }
 
 pub fn press_key_global(key: &str, modifiers: &[&str]) -> anyhow::Result<()> {
-    let code = key_name_to_code(key)?;
+    let code = key_code(key)?;
     with_global_modifier_keys(modifiers, |flags| {
         PreparedKey::new(&source()?, code, flags, flags, KeyboardRoute::Hid)?.pulse()
     })
@@ -402,7 +402,7 @@ pub fn type_text_physical_global(text: &str, inter_char_delay_ms: u64) -> anyhow
 }
 
 pub fn press_key_bare_global(key: &str, modifiers: &[&str]) -> anyhow::Result<()> {
-    let code = key_name_to_code(key)?;
+    let code = key_code(key)?;
     let mut codes = Vec::new();
     for modifier in modifiers {
         if let Some((code, _)) = modifier_key_code_and_flag(modifier) {
@@ -581,6 +581,39 @@ fn modifier_flags(modifiers: &[&str]) -> CGEventFlags {
         }
     }
     flags
+}
+
+#[derive(Debug)]
+pub struct KeyboardLayoutUnmapped(pub char);
+
+impl std::fmt::Display for KeyboardLayoutUnmapped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "no key on the current keyboard layout types {:?}; a US key position would send a different character",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for KeyboardLayoutUnmapped {}
+
+fn resolve_key_code(
+    key: &str,
+    layout_key_code: impl Fn(char) -> Option<u16>,
+) -> anyhow::Result<u16> {
+    let mut chars = key.chars();
+    match (chars.next(), chars.next()) {
+        (Some(ch), None) if !ch.is_control() && !ch.is_whitespace() => {
+            let ch = ch.to_ascii_lowercase();
+            layout_key_code(ch).ok_or_else(|| KeyboardLayoutUnmapped(ch).into())
+        }
+        _ => key_name_to_code(key),
+    }
+}
+
+pub fn key_code(key: &str) -> anyhow::Result<u16> {
+    resolve_key_code(key, super::input_source::current_layout_key_code)
 }
 
 pub(super) fn key_name_to_code(key: &str) -> anyhow::Result<u16> {
@@ -855,6 +888,25 @@ mod tests {
         assert!(is_screen_sharing_bundle_id("com.apple.ScreenSharing"));
         assert!(!is_screen_sharing_bundle_id("com.apple.screensharing"));
         assert!(!is_screen_sharing_bundle_id("com.microsoft.rdc.macos"));
+    }
+
+    #[test]
+    fn printable_keys_resolve_through_the_active_layout() {
+        let azerty = |ch: char| match ch {
+            'a' => Some(12),
+            'q' => Some(0),
+            'z' => Some(13),
+            'w' => Some(6),
+            _ => None,
+        };
+        assert_eq!(resolve_key_code("a", azerty).unwrap(), 12);
+        assert_eq!(resolve_key_code("A", azerty).unwrap(), 12);
+        assert_eq!(resolve_key_code("q", azerty).unwrap(), 0);
+        assert_eq!(resolve_key_code("z", azerty).unwrap(), 13);
+        assert_eq!(resolve_key_code("return", azerty).unwrap(), 36);
+        assert_eq!(resolve_key_code("f5", azerty).unwrap(), 96);
+        let unmapped = resolve_key_code("m", azerty).unwrap_err();
+        assert!(unmapped.downcast_ref::<KeyboardLayoutUnmapped>().is_some());
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use core_foundation::base::{CFRelease, CFTypeRef, TCFType};
+use core_foundation::data::{CFDataGetBytePtr, CFDataRef};
 use core_foundation::string::{CFString, CFStringRef};
 
 // HIToolbox aborts the process when two threads enter TIS/TSM at once, and
@@ -8,10 +9,28 @@ static TIS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[link(name = "Carbon", kind = "framework")]
 extern "C" {
     fn TISCopyCurrentKeyboardInputSource() -> CFTypeRef;
+    fn TISCopyCurrentKeyboardLayoutInputSource() -> CFTypeRef;
     fn TISGetInputSourceProperty(source: CFTypeRef, key: CFStringRef) -> CFTypeRef;
+    fn LMGetKbdType() -> u8;
+    fn UCKeyTranslate(
+        layout: *const u8,
+        key_code: u16,
+        key_action: u16,
+        modifier_key_state: u32,
+        keyboard_type: u32,
+        options: u32,
+        dead_key_state: *mut u32,
+        max_length: usize,
+        actual_length: *mut usize,
+        unicode_string: *mut u16,
+    ) -> i32;
     static kTISPropertyInputSourceType: CFStringRef;
     static kTISPropertyInputSourceID: CFStringRef;
+    static kTISPropertyUnicodeKeyLayoutData: CFStringRef;
 }
+
+const KEY_ACTION_DOWN: u16 = 0;
+const NO_DEAD_KEYS: u32 = 1;
 
 pub(crate) fn is_plain_keyboard_layout(source_type: &str) -> bool {
     source_type == "TISTypeKeyboardLayout"
@@ -41,6 +60,52 @@ pub(crate) fn active_input_method() -> Option<String> {
     }
 }
 
+pub(crate) fn key_code_for_char(ch: char, translate: impl Fn(u16) -> Option<char>) -> Option<u16> {
+    (0..128).find(|&code| translate(code) == Some(ch))
+}
+
+pub(crate) fn current_layout_key_code(ch: char) -> Option<u16> {
+    let _tis = TIS_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    unsafe {
+        let source = TISCopyCurrentKeyboardLayoutInputSource();
+        if source.is_null() {
+            return None;
+        }
+        let data = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData);
+        let code = (!data.is_null()).then(|| {
+            let layout = CFDataGetBytePtr(data as CFDataRef);
+            let keyboard_type = u32::from(LMGetKbdType());
+            key_code_for_char(ch, |code| {
+                let mut dead_key_state = 0;
+                let mut length = 0;
+                let mut buffer = [0u16; 4];
+                let status = UCKeyTranslate(
+                    layout,
+                    code,
+                    KEY_ACTION_DOWN,
+                    0,
+                    keyboard_type,
+                    NO_DEAD_KEYS,
+                    &mut dead_key_state,
+                    buffer.len(),
+                    &mut length,
+                    buffer.as_mut_ptr(),
+                );
+                if status != 0 {
+                    return None;
+                }
+                let mut decoded = char::decode_utf16(buffer[..length].iter().copied());
+                match (decoded.next(), decoded.next()) {
+                    (Some(Ok(ch)), None) => Some(ch),
+                    _ => None,
+                }
+            })
+        });
+        CFRelease(source);
+        code.flatten()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -58,12 +123,29 @@ mod tests {
     }
 
     #[test]
+    fn reverse_lookup_follows_the_layout_not_the_us_table() {
+        let azerty = |code: u16| match code {
+            0 => Some('q'),
+            6 => Some('w'),
+            12 => Some('a'),
+            13 => Some('z'),
+            _ => None,
+        };
+        assert_eq!(key_code_for_char('a', azerty), Some(12));
+        assert_eq!(key_code_for_char('q', azerty), Some(0));
+        assert_eq!(key_code_for_char('z', azerty), Some(13));
+        assert_eq!(key_code_for_char('w', azerty), Some(6));
+        assert_eq!(key_code_for_char('m', azerty), None);
+    }
+
+    #[test]
     fn concurrent_input_source_reads_do_not_abort_the_process() {
         let readers: Vec<_> = (0..8)
             .map(|_| {
                 std::thread::spawn(|| {
                     for _ in 0..50 {
                         let _ = active_input_method();
+                        assert_eq!(current_layout_key_code(' '), Some(49));
                     }
                 })
             })

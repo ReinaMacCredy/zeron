@@ -469,7 +469,7 @@ impl NativeInputState {
     }
 
     fn key(&self, key: &str, state: KeyState, modifiers: &[Modifier], repeat: bool) -> Result<()> {
-        let key_code = super::keyboard::key_name_to_code(key)
+        let key_code = super::keyboard::key_code(key)
             .map_err(|error| InteractiveInputError::InvalidBatch(error.to_string()))?;
         let event =
             CGEvent::new_keyboard_event(self.source.clone(), key_code, state == KeyState::Down)

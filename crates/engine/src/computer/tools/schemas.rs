@@ -823,7 +823,7 @@ pub(super) fn desktop_entries(dialect: ComputerAgentDialect) -> Vec<ComputerTool
             "computer_press_key",
             "Press key",
             format!(
-                "Press a key or chord such as \"cmd+s\". Pass the observed field ref for exact background Enter/Return. Other shortcuts can still refuse with same_pid_keyboard_ambiguity; use an advertised action instead of retrying. {} {KEYBOARD_TARGET_HINT} {DELIVERY_HINT}",
+                "Press a key or chord such as \"cmd+s\". Pass the observed field ref for exact background Enter/Return. Other shortcuts can still refuse with same_pid_keyboard_ambiguity; use an advertised action instead of retrying. Letter and symbol keys use the current keyboard layout; keyboard_layout_unmapped means no key on it types that character. {} {KEYBOARD_TARGET_HINT} {DELIVERY_HINT}",
                 hotkey_form_note(dialect)
             ),
             object_schema(key_properties, &["key"]),
