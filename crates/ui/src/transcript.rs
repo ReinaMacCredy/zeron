@@ -919,6 +919,7 @@ pub fn diff_to_file(diff: &zeron_proto::ToolDiff) -> crate::changes::FileDiff {
     use crate::changes::{DiffLine, FileDiff, FileStatus, Hunk, LineKind};
     let old = diff.old_text.as_deref().unwrap_or("");
     let text_diff = similar::TextDiff::from_lines(old, &diff.new_text);
+    let offset = diff.line_offset.unwrap_or(0) as usize;
     let mut hunks = Vec::new();
     let (mut additions, mut deletions) = (0u32, 0u32);
     let mut max_line = 0u32;
@@ -930,9 +931,9 @@ pub fn diff_to_file(diff: &zeron_proto::ToolDiff) -> crate::changes::FileDiff {
         let new_range = first.new_range().start..last.new_range().end;
         let header = format!(
             "@@ -{},{} +{},{} @@",
-            old_range.start + 1,
+            offset + old_range.start + 1,
             old_range.len(),
-            new_range.start + 1,
+            offset + new_range.start + 1,
             new_range.len(),
         );
         let mut lines = Vec::new();
@@ -949,8 +950,8 @@ pub fn diff_to_file(diff: &zeron_proto::ToolDiff) -> crate::changes::FileDiff {
                     }
                     similar::ChangeTag::Equal => LineKind::Context,
                 };
-                let old_no = change.old_index().map(|n| n as u32 + 1);
-                let new_no = change.new_index().map(|n| n as u32 + 1);
+                let old_no = change.old_index().map(|n| (offset + n) as u32 + 1);
+                let new_no = change.new_index().map(|n| (offset + n) as u32 + 1);
                 max_line = max_line.max(old_no.unwrap_or(0)).max(new_no.unwrap_or(0));
                 lines.push(DiffLine {
                     kind,
@@ -11498,6 +11499,7 @@ mod tests {
                 path: "/w/a.rs".into(),
                 old_text: Some("a\nb\n".into()),
                 new_text: "a\nc\nd\n".into(),
+                line_offset: None,
             }),
             None,
         ) else {
@@ -13639,6 +13641,25 @@ mod tests {
     }
 
     #[test]
+    fn a_windowed_tool_diff_numbers_lines_from_its_offset() {
+        let diff = zeron_proto::ToolDiff {
+            path: "/w/big.rs".into(),
+            old_text: Some("a\nb\nbeta\nc\n".into()),
+            new_text: "a\nb\ndelta\nc\n".into(),
+            line_offset: Some(3997),
+        };
+        let file = diff_to_file(&diff);
+        assert_eq!(file.hunks[0].header, "@@ -3998,4 +3998,4 @@");
+        let del = file.hunks[0]
+            .lines
+            .iter()
+            .find(|l| l.kind == crate::changes::LineKind::Del)
+            .unwrap();
+        assert_eq!(del.old_no, Some(4000));
+        assert_eq!(file.max_line, 4001);
+    }
+
+    #[test]
     fn tool_diff_builds_real_hunks_with_context_and_numbers() {
         use crate::changes::LineKind;
         let old = (1..=20).map(|i| format!("line {i}")).collect::<Vec<_>>();
@@ -13648,6 +13669,7 @@ mod tests {
             path: "/w/a.rs".into(),
             old_text: Some(old.join("\n") + "\n"),
             new_text: new.join("\n") + "\n",
+            line_offset: None,
         };
         let Some(ToolDetail::Diff {
             file,
@@ -13685,6 +13707,7 @@ mod tests {
             path: "/w/new.txt".into(),
             old_text: None,
             new_text: "only\n".into(),
+            line_offset: None,
         };
         let Some(ToolDetail::Diff {
             file,

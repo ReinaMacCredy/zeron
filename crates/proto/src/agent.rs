@@ -456,6 +456,10 @@ pub struct ToolDiff {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub old_text: Option<String>,
     pub new_text: String,
+    /// Unchanged lines cut from the top of both texts to fit the byte cap;
+    /// the texts start at line `line_offset + 1` of the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_offset: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

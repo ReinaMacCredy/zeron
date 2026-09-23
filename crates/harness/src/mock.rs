@@ -547,6 +547,7 @@ impl Harness for MockHarness {
                             path: "packages/schema/test/verdict.test.ts".into(),
                             old_text: None,
                             new_text: "import { verdict } from \"../src/verdict\";\n\ntest(\"a verdict names its finding\", () => {\n  expect(verdict(\"f1\").finding).toBe(\"f1\");\n});\n".into(),
+                            line_offset: None,
                         }),
                     },
                     AgentEvent::ToolCall {
@@ -565,6 +566,7 @@ impl Harness for MockHarness {
                             path: "packages/schema/src/verdict.ts".into(),
                             old_text: Some("export function verdict(id: string) {\n  return { id };\n}\n".into()),
                             new_text: "export function verdict(finding: string) {\n  return { finding, severity: \"info\" };\n}\n".into(),
+                            line_offset: None,
                         }),
                     },
                 ]

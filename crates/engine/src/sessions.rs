@@ -3925,6 +3925,7 @@ mod tests {
             path: "/w/a.rs".into(),
             old_text: None,
             new_text: new_text.into(),
+            line_offset: None,
         };
         let result = |id: &str, diff: Option<ToolDiff>| AgentEvent::ToolResult {
             id: id.into(),

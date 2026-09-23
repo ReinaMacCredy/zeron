@@ -37,6 +37,44 @@ pub(crate) fn cap_text(text: &str, cap: usize) -> String {
     out
 }
 
+/// A file change bounded by [`DIFF_TEXT_CAP`]. Capping the whole file kept
+/// only its first 64 KB, so an edit past that point diffed as `+0 −0`: the
+/// window around the change is kept instead.
+pub(crate) fn capped_diff(path: String, old_text: Option<&str>, new_text: &str) -> ToolDiff {
+    const CONTEXT_LINES: usize = 3;
+    let fits = new_text.len() <= DIFF_TEXT_CAP && old_text.is_none_or(|o| o.len() <= DIFF_TEXT_CAP);
+    let Some(old) = old_text.filter(|_| !fits) else {
+        return ToolDiff {
+            path,
+            old_text: old_text.map(|t| cap_text(t, DIFF_TEXT_CAP)),
+            new_text: cap_text(new_text, DIFF_TEXT_CAP),
+            line_offset: None,
+        };
+    };
+    let old_lines: Vec<&str> = old.split_inclusive('\n').collect();
+    let new_lines: Vec<&str> = new_text.split_inclusive('\n').collect();
+    let prefix = old_lines
+        .iter()
+        .zip(&new_lines)
+        .take_while(|(a, b)| a == b)
+        .count();
+    let suffix = old_lines[prefix..]
+        .iter()
+        .rev()
+        .zip(new_lines[prefix..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let start = prefix.saturating_sub(CONTEXT_LINES);
+    let cut_tail = suffix.saturating_sub(CONTEXT_LINES);
+    let window = |lines: &[&str]| lines[start..lines.len() - cut_tail].concat();
+    ToolDiff {
+        path,
+        old_text: Some(cap_text(&window(&old_lines), DIFF_TEXT_CAP)),
+        new_text: cap_text(&window(&new_lines), DIFF_TEXT_CAP),
+        line_offset: (start > 0).then_some(start as u32),
+    }
+}
+
 /// The text of a `ContentBlock` (`{type: "text", text}`); non-text blocks
 /// (image, audio, resource, resource_link) render as nothing.
 fn content_block_text(block: &Value) -> Option<&str> {
@@ -78,17 +116,11 @@ fn tool_diff(update: &Value) -> Option<ToolDiff> {
     if path.is_empty() {
         return None;
     }
-    Some(ToolDiff {
+    Some(capped_diff(
         path,
-        old_text: diff
-            .get("oldText")
-            .and_then(Value::as_str)
-            .map(|t| cap_text(t, DIFF_TEXT_CAP)),
-        new_text: cap_text(
-            diff.get("newText").and_then(Value::as_str).unwrap_or(""),
-            DIFF_TEXT_CAP,
-        ),
-    })
+        diff.get("oldText").and_then(Value::as_str),
+        diff.get("newText").and_then(Value::as_str).unwrap_or(""),
+    ))
 }
 
 /// The grok-native tool name stamped on a tool call's `_meta` (`x.ai/tool`,
@@ -601,6 +633,7 @@ mod tests {
                     path: "/w/src/main.rs".into(),
                     old_text: Some("fn old() {}".into()),
                     new_text: "fn new() {}".into(),
+                    line_offset: None,
                 }),
             }
         );

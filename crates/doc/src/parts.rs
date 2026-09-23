@@ -1059,6 +1059,7 @@ mod tests {
             path: "/w/a.rs".into(),
             old_text: Some("a\nb\nc\n".into()),
             new_text: "a\nB\nc\nd\n".into(),
+            line_offset: None,
         });
         assert_eq!(stat.path, "/w/a.rs");
         assert_eq!(stat.additions, 2); // B + d
@@ -1068,6 +1069,7 @@ mod tests {
             path: "/w/new.rs".into(),
             old_text: None,
             new_text: "one\ntwo\n".into(),
+            line_offset: None,
         });
         assert_eq!((stat.additions, stat.deletions), (2, 0));
     }
@@ -1095,6 +1097,7 @@ mod tests {
                     path: "/w/a.rs".into(),
                     old_text: Some("a\n".into()),
                     new_text: "b\n".into(),
+                    line_offset: None,
                 }),
             },
         );
@@ -1151,6 +1154,7 @@ mod tests {
                     path: "/w/a".into(),
                     old_text: None,
                     new_text: "x\n".into(),
+                    line_offset: None,
                 }),
             },
         );

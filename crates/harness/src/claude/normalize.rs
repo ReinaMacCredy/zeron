@@ -173,7 +173,6 @@ pub(crate) fn decode_tool_use(name: &str, input: &Value) -> ToolCall {
 /// error rides as a plain string, and Read's object has no `filePath` at the
 /// top level — neither is a change.
 fn file_diff(result: &Value) -> Option<ToolDiff> {
-    use super::super::acp::normalize::{DIFF_TEXT_CAP, cap_text};
     let path = opt_str_field(result, "filePath").filter(|p| !p.is_empty())?;
     let original = opt_str_field(result, "originalFile");
     let new_text = match opt_str_field(result, "content") {
@@ -189,11 +188,11 @@ fn file_diff(result: &Value) -> Option<ToolDiff> {
             }
         }
     };
-    Some(ToolDiff {
+    Some(super::super::acp::normalize::capped_diff(
         path,
-        old_text: original.map(|t| cap_text(&t, DIFF_TEXT_CAP)),
-        new_text: cap_text(&new_text, DIFF_TEXT_CAP),
-    })
+        original.as_deref(),
+        &new_text,
+    ))
 }
 
 fn new_message_id() -> String {
@@ -885,6 +884,34 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn an_edit_past_the_diff_cap_keeps_the_changed_lines() {
+        let filler: String = (0..4000)
+            .map(|n| format!("line {n:05} of filler\n"))
+            .collect();
+        assert!(filler.len() > 64 * 1024);
+        let original = format!("{filler}beta\ntail one\ntail two\n{filler}");
+        let diff = file_diff(&json!({
+            "filePath": "/w/big.rs",
+            "originalFile": original,
+            "oldString": "beta",
+            "newString": "delta",
+            "replaceAll": false,
+        }))
+        .unwrap();
+        assert_eq!(diff.line_offset, Some(3997));
+        assert_eq!(
+            diff.old_text.as_deref(),
+            Some(
+                "line 03997 of filler\nline 03998 of filler\nline 03999 of filler\nbeta\ntail one\ntail two\nline 00000 of filler\n"
+            )
+        );
+        assert_eq!(
+            diff.new_text,
+            "line 03997 of filler\nline 03998 of filler\nline 03999 of filler\ndelta\ntail one\ntail two\nline 00000 of filler\n"
+        );
+    }
+
+    #[test]
     fn decodes_typed_tools() {
         assert_eq!(
             decode_tool_use("Bash", &json!({"command": "ls -la"})),
@@ -1016,6 +1043,7 @@ mod tests {
                     path: "/w/hello.txt".into(),
                     old_text: None,
                     new_text: "hi\nthere".into(),
+                    line_offset: None,
                 }),
             }]
         );
@@ -1032,6 +1060,7 @@ mod tests {
                     path: "/w/big.txt".into(),
                     old_text: Some("one\ntwo\nthree\n".into()),
                     new_text: "one\nTWO\nthree\nfour\n".into(),
+                    line_offset: None,
                 }),
             }]
         );
@@ -1050,6 +1079,7 @@ mod tests {
                     path: "/w/notes.txt".into(),
                     old_text: Some("alpha\nbeta\ngamma\nbeta\n".into()),
                     new_text: "alpha\ndelta\ngamma\nbeta\n".into(),
+                    line_offset: None,
                 }),
             }]
         );
