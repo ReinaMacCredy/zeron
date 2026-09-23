@@ -143,7 +143,7 @@ fn current_layout_key_code_now(ch: char) -> Option<u16> {
                 if status != 0 {
                     return None;
                 }
-                let mut decoded = char::decode_utf16(buffer[..length].iter().copied());
+                let mut decoded = char::decode_utf16(buffer.get(..length)?.iter().copied());
                 match (decoded.next(), decoded.next()) {
                     (Some(Ok(ch)), None) => Some(ch),
                     _ => None,

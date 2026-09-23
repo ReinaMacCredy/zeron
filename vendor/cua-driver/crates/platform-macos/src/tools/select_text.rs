@@ -375,7 +375,8 @@ fn select_text_blocking(
 fn range_text(value: &str, start: i64, length: i64) -> anyhow::Result<String> {
     let units: Vec<u16> = value.encode_utf16().collect();
     let count = units.len() as i64;
-    if start > count || start + length > count {
+    let end = start.checked_add(length);
+    if start < 0 || length < 0 || start > count || end.is_none_or(|end| end > count) {
         return Err(AxActionFailure::refused(format!(
             "range start={start} length={length} exceeds the element's {count} \
              UTF-16 code units; the request is refused rather than clamped."
@@ -410,6 +411,8 @@ mod tests {
         assert_eq!(range_text("a🦀b", 1, 2).unwrap(), "🦀");
         assert_eq!(range_text("a🦀b", 3, 1).unwrap(), "b");
         assert_eq!(range_text("abc", 3, 0).unwrap(), "");
+        assert!(range_text("abc", 1, i64::MAX).is_err());
+        assert!(range_text("abc", -1, 1).is_err());
     }
 
     #[test]
