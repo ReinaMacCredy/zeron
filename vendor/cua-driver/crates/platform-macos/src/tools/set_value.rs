@@ -965,9 +965,11 @@ fn select_popup_option(
             )
         })
     } else {
-        Err(AxActionFailure::refused(format!(
-            "No exact AX child matching '{value}' in AXPopUpButton [{element_index}] \
-             '{element_title}'. Available: {available:?}"
+        Err(AxActionFailure::refused(popup_no_match_message(
+            value,
+            element_index,
+            &element_title,
+            &available,
         ))
         .into())
     };
@@ -977,15 +979,34 @@ fn select_popup_option(
     result
 }
 
+fn popup_no_match_message(
+    value: &str,
+    element_index: usize,
+    element_title: &str,
+    available: &[String],
+) -> String {
+    let mut message = format!(
+        "No exact AX child matching '{value}' in AXPopUpButton [{element_index}] \
+         '{element_title}'. Available: {available:?}"
+    );
+    if available.iter().all(|title| title.trim().is_empty()) {
+        message.push_str(
+            " A collapsed web <select> exposes no option titles; press_key the option's \
+             first letters on this control's ref instead, then verify the value.",
+        );
+    }
+    message
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         apply_surface_trust, apply_verification_label, choose_value_route, classify_write,
         compose_append_value, flatten_popup_options, kAXErrorSuccess, needs_stepping,
-        needs_string_retry, poll_until_moved, poll_while_unchanged, popup_option_matches,
-        popup_shows_option, refuse_rich_text_replace, step_to_value_with, validate_append_target,
-        write_ignored, write_value_with, AxActionFailure, CfValueKind, SetValueOutcome, ValueRoute,
-        MAX_APPENDED_TEXT_UTF16,
+        needs_string_retry, poll_until_moved, poll_while_unchanged, popup_no_match_message,
+        popup_option_matches, popup_shows_option, refuse_rich_text_replace, step_to_value_with,
+        validate_append_target, write_ignored, write_value_with, AxActionFailure, CfValueKind,
+        SetValueOutcome, ValueRoute, MAX_APPENDED_TEXT_UTF16,
     };
     use std::cell::Cell;
 
@@ -1518,5 +1539,12 @@ mod tests {
             outcome.detail,
             "📨 Sent (unverified) AXValue on [4] AXTextField."
         );
+    }
+
+    #[test]
+    fn a_collapsed_web_select_points_to_type_ahead() {
+        let hint = "press_key the option's";
+        assert!(popup_no_match_message("banana", 3, "Fruit", &[String::new()]).contains(hint));
+        assert!(!popup_no_match_message("kiwi", 3, "Fruit", &["Apple".into()]).contains(hint));
     }
 }
