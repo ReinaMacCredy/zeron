@@ -714,7 +714,9 @@ impl Tool for GetWindowStateTool {
             if let Some(on_current_space) = info.on_current_space {
                 structured["window_on_current_space"] = serde_json::json!(on_current_space);
             }
-            if let Some(freshness) = screenshot_frame_freshness(info.is_on_screen, info.on_current_space) {
+            if let Some(freshness) =
+                screenshot_frame_freshness(info.is_on_screen, info.on_current_space)
+            {
                 structured["screenshot_frame_freshness"] = serde_json::json!(freshness);
             }
             if let Some(current_space_id) = info.current_space_id {
