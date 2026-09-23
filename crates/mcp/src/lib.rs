@@ -8,10 +8,13 @@
 //! never a tool input. Threads are peers (d25): nothing here interrupts,
 //! cancels, or answers for another chat.
 
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use zeron_proto::view::{Indicator, effective_indicator};
@@ -37,7 +40,18 @@ pub struct ThreadTools {
     client: RpcClient,
     chat_id: String,
     sends: AtomicUsize,
+    run_secret: Option<String>,
 }
+
+const THREAD_TOOLS: [&str; 7] = [
+    "list_threads",
+    "read_thread",
+    "create_thread",
+    "send_message_to_thread",
+    "wait_threads",
+    "set_thread_title",
+    "set_thread_archived",
+];
 
 /// `ReasoningLevel`'s serde names, spelled out so the schema can list them.
 const REASONING_LEVELS: [&str; 9] = [
@@ -156,7 +170,69 @@ impl ThreadTools {
             client,
             chat_id: chat_id.into(),
             sends: AtomicUsize::new(0),
+            // The secret travels in the server env, never on argv (SPEC "Caller identity").
+            run_secret: std::env::var(zeron_rpc::COMPUTER_RUN_SECRET_ENV)
+                .ok()
+                .filter(|secret| !secret.is_empty()),
         }
+    }
+
+    pub fn with_run_secret(mut self, secret: Option<String>) -> Self {
+        self.run_secret = secret;
+        self
+    }
+
+    async fn tools(&self) -> Value {
+        let mut tools = tool_list();
+        if let Some(secret) = &self.run_secret
+            && let Ok(catalog) = self
+                .client
+                .call(
+                    methods::GET_COMPUTER_CATALOG,
+                    json!({ "chatId": self.chat_id, "runSecret": secret }),
+                )
+                .await
+            && let (Some(tools), Some(catalog)) =
+                (tools.as_array_mut(), catalog["tools"].as_array())
+        {
+            tools.extend(catalog.iter().cloned());
+        }
+        tools
+    }
+
+    async fn computer_action(
+        &self,
+        secret: &str,
+        tool: &str,
+        arguments: Value,
+        request_id: &Value,
+    ) -> Value {
+        let params = json!({
+            "chatId": self.chat_id,
+            "runSecret": secret,
+            "tool": tool,
+            "arguments": arguments,
+            "requestId": request_id,
+        });
+        match self.client.call(methods::COMPUTER_ACTION, params).await {
+            Ok(result) => result,
+            Err(e) => {
+                json!({ "content": [{ "type": "text", "text": e.to_string() }], "isError": true })
+            }
+        }
+    }
+
+    async fn cancel_computer_action(&self, request_id: &Value) {
+        let Some(secret) = &self.run_secret else {
+            return;
+        };
+        let _ = self
+            .client
+            .call(
+                methods::CANCEL_COMPUTER_ACTION,
+                json!({ "chatId": self.chat_id, "runSecret": secret, "requestId": request_id }),
+            )
+            .await;
     }
 
     pub async fn call(&self, name: &str, args: &Value) -> Result<Value, String> {
@@ -736,35 +812,53 @@ fn tool_label(part: &Value) -> String {
 }
 
 /// Serve MCP over one line-delimited JSON-RPC pair until the reader closes.
+/// EOF drops calls still in flight: closing the engine link lets it interrupt them.
 pub async fn serve<R, W>(reader: R, mut writer: W, tools: &ThreadTools) -> std::io::Result<()>
 where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
 {
     let mut lines = reader.lines();
-    while let Some(line) = lines.next_line().await? {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let response = match serde_json::from_str::<Value>(line) {
-            Ok(request) => match respond(&request, tools).await {
+    let mut in_flight: FuturesUnordered<Pin<Box<dyn Future<Output = Option<Value>> + Send + '_>>> =
+        FuturesUnordered::new();
+    loop {
+        let response = tokio::select! {
+            line = lines.next_line() => {
+                let Some(line) = line? else {
+                    return Ok(());
+                };
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<Value>(line) {
+                    Ok(request) => {
+                        in_flight.push(Box::pin(async move { respond(&request, tools).await }));
+                        continue;
+                    }
+                    Err(err) => error(Value::Null, -32700, format!("parse error: {err}")),
+                }
+            }
+            Some(response) = in_flight.next(), if !in_flight.is_empty() => match response {
                 Some(response) => response,
                 None => continue,
             },
-            Err(err) => error(Value::Null, -32700, format!("parse error: {err}")),
         };
-        writer.write_all(response.to_string().as_bytes()).await?;
-        writer.write_all(b"\n").await?;
+        let mut line = response.to_string();
+        line.push('\n');
+        writer.write_all(line.as_bytes()).await?;
         writer.flush().await?;
     }
-    Ok(())
 }
 
 /// `None` for notifications (no id), which get no reply.
 async fn respond(request: &Value, tools: &ThreadTools) -> Option<Value> {
-    let id = request.get("id").filter(|id| !id.is_null())?.clone();
     let params = &request["params"];
+    if request["method"] == "notifications/cancelled" {
+        tools.cancel_computer_action(&params["requestId"]).await;
+        return None;
+    }
+    let id = request.get("id").filter(|id| !id.is_null())?.clone();
     Some(match request["method"].as_str().unwrap_or("") {
         "initialize" => ok(
             id,
@@ -775,13 +869,19 @@ async fn respond(request: &Value, tools: &ThreadTools) -> Option<Value> {
             }),
         ),
         "ping" => ok(id, json!({})),
-        "tools/list" => ok(id, json!({ "tools": tool_list() })),
+        "tools/list" => ok(id, json!({ "tools": tools.tools().await })),
         "tools/call" => {
             let name = params["name"].as_str().unwrap_or("");
             let args = params
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
+            if let Some(secret) = tools.run_secret.as_deref()
+                && !THREAD_TOOLS.contains(&name)
+            {
+                let result = tools.computer_action(secret, name, args, &id).await;
+                return Some(ok(id, result));
+            }
             let (text, is_error) = match tools.call(name, &args).await {
                 Ok(value) => (
                     serde_json::to_string_pretty(&value).unwrap_or_default(),
@@ -843,6 +943,9 @@ mod tests {
         doc_frames: Vec<Value>,
         reads: Mutex<Vec<String>>,
         calls: Mutex<Vec<(String, Value)>>,
+        catalog: Vec<Value>,
+        actions: Vec<(&'static str, Value)>,
+        release: tokio::sync::Notify,
     }
 
     fn timed(snapshots: Vec<Value>) -> RpcReply {
@@ -925,6 +1028,37 @@ mod tests {
                         _ => json!({}),
                     }))
                 }
+                methods::GET_COMPUTER_CATALOG
+                | methods::COMPUTER_ACTION
+                | methods::CANCEL_COMPUTER_ACTION => {
+                    self.calls
+                        .lock()
+                        .unwrap()
+                        .push((method.to_string(), params.clone()));
+                    if params["runSecret"] != "live" {
+                        return Err(RpcError::Failed("computer caller refused".into()));
+                    }
+                    let tool = params["tool"].as_str().unwrap_or("");
+                    Ok(RpcReply::Value(match method {
+                        methods::GET_COMPUTER_CATALOG => json!({ "tools": self.catalog }),
+                        methods::CANCEL_COMPUTER_ACTION => {
+                            self.release.notify_one();
+                            json!({ "cancelled": true })
+                        }
+                        _ if tool == "computer_wait" => {
+                            self.release.notified().await;
+                            json!({ "content": [{ "type": "text", "text": "waited" }] })
+                        }
+                        _ => match self.actions.iter().find(|(name, _)| *name == tool) {
+                            Some((_, result)) => result.clone(),
+                            None => {
+                                return Err(RpcError::Failed(format!(
+                                    "Unknown computer tool \"{tool}\"."
+                                )));
+                            }
+                        },
+                    }))
+                }
                 other => Err(RpcError::UnknownMethod(other.into())),
             }
         }
@@ -938,7 +1072,7 @@ mod tests {
     fn rig(fake: Fake) -> Rig {
         let fake = Arc::new(fake);
         Rig {
-            tools: ThreadTools::new(memory_client(fake.clone()), "a"),
+            tools: ThreadTools::new(memory_client(fake.clone()), "a").with_run_secret(None),
             calls: fake,
         }
     }
@@ -983,6 +1117,9 @@ mod tests {
             doc_frames: vec![],
             reads: Mutex::new(Vec::new()),
             calls: Mutex::new(Vec::new()),
+            catalog: vec![],
+            actions: vec![],
+            release: tokio::sync::Notify::new(),
         }
     }
 
@@ -1012,6 +1149,7 @@ mod tests {
                 .iter()
                 .all(|n| !n.contains("cancel") && !n.contains("respond"))
         );
+        assert_eq!(names, THREAD_TOOLS);
     }
 
     #[tokio::test]
@@ -1581,6 +1719,7 @@ mod tests {
             let line = replies.next_line().await.unwrap().unwrap();
             received.push(serde_json::from_str::<Value>(&line).unwrap());
         }
+        received.sort_by_key(|reply| reply["id"].as_i64());
         let [init, list, call, unknown] = received.as_slice() else {
             panic!("expected four replies");
         };
@@ -1602,5 +1741,315 @@ mod tests {
         drop(replies);
         drop(client_write);
         server.await.unwrap().unwrap();
+    }
+    struct Pipe {
+        replies:
+            tokio::io::Lines<tokio::io::BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>>,
+        requests: tokio::io::WriteHalf<tokio::io::DuplexStream>,
+    }
+
+    impl Pipe {
+        fn open(tools: ThreadTools) -> Self {
+            let (client_side, server_side) = tokio::io::duplex(64 * 1024);
+            let (server_read, server_write) = tokio::io::split(server_side);
+            tokio::spawn(async move {
+                serve(tokio::io::BufReader::new(server_read), server_write, &tools).await
+            });
+            let (client_read, requests) = tokio::io::split(client_side);
+            Self {
+                replies: tokio::io::BufReader::new(client_read).lines(),
+                requests,
+            }
+        }
+
+        async fn send(&mut self, request: Value) {
+            self.requests
+                .write_all(format!("{request}\n").as_bytes())
+                .await
+                .unwrap();
+        }
+
+        async fn recv(&mut self) -> Value {
+            let line = tokio::time::timeout(Duration::from_secs(10), self.replies.next_line())
+                .await
+                .expect("a reply within 10 s")
+                .unwrap()
+                .unwrap();
+            serde_json::from_str(&line).unwrap()
+        }
+
+        async fn call(&mut self, id: Value, name: &str, arguments: Value) -> Value {
+            self.send(json!({
+                "jsonrpc": "2.0", "id": id, "method": "tools/call",
+                "params": { "name": name, "arguments": arguments }
+            }))
+            .await;
+            self.recv().await
+        }
+
+        async fn list(&mut self) -> Vec<Value> {
+            self.send(json!({ "jsonrpc": "2.0", "id": 0, "method": "tools/list" }))
+                .await;
+            self.recv().await["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .clone()
+        }
+    }
+
+    fn catalog_tool(name: &str) -> Value {
+        json!({
+            "name": name,
+            "description": format!("{name} description"),
+            "inputSchema": { "type": "object", "properties": { "app": { "type": "string" } } },
+            "annotations": { "readOnlyHint": true, "title": name },
+            "_meta": { "zeron/family": "desktop" },
+        })
+    }
+
+    fn screenshot_result() -> Value {
+        json!({
+            "content": [
+                { "type": "text", "text": "{\"window\":\"Finder\"}" },
+                { "type": "image", "data": "iVBORw0KGgo".repeat(400_000), "mimeType": "image/png" },
+            ],
+            "structuredContent": { "window": "Finder" },
+        })
+    }
+
+    fn refused_result() -> Value {
+        json!({
+            "content": [{ "type": "text", "text": "The browser refused: no target tab." }],
+            "structuredContent": {
+                "status": "refused",
+                "refusal": { "code": "browser_target_required", "message": "no target tab" },
+            },
+        })
+    }
+
+    fn computer_rig(secret: Option<&str>) -> Rig {
+        let mut fake = fixture();
+        fake.catalog = vec![
+            catalog_tool("computer_screenshot"),
+            catalog_tool("computer_browser_click"),
+        ];
+        fake.actions = vec![
+            ("computer_screenshot", screenshot_result()),
+            ("computer_browser_click", refused_result()),
+            (
+                "computer_spaces",
+                json!({ "content": [{ "type": "text", "text": "{\"spaces\":[]}" }] }),
+            ),
+        ];
+        let rig = rig(fake);
+        Rig {
+            tools: rig.tools.with_run_secret(secret.map(str::to_owned)),
+            calls: rig.calls,
+        }
+    }
+
+    fn logged(fake: &Fake, method: &str) -> Vec<Value> {
+        fake.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(logged, _)| logged == method)
+            .map(|(_, params)| params.clone())
+            .collect()
+    }
+
+    fn names(tools: &[Value]) -> Vec<&str> {
+        tools
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn computer_tools_are_listed_only_with_a_live_run_secret() {
+        let rig = computer_rig(None);
+        let tools = Pipe::open(rig.tools).list().await;
+        assert_eq!(names(&tools), THREAD_TOOLS);
+        assert!(logged(&rig.calls, methods::GET_COMPUTER_CATALOG).is_empty());
+
+        let rig = computer_rig(Some("live"));
+        let tools = Pipe::open(rig.tools).list().await;
+        assert_eq!(names(&tools[..7]), THREAD_TOOLS);
+        assert_eq!(
+            tools[7..],
+            [
+                catalog_tool("computer_screenshot"),
+                catalog_tool("computer_browser_click")
+            ]
+        );
+        assert_eq!(
+            logged(&rig.calls, methods::GET_COMPUTER_CATALOG),
+            [json!({ "chatId": "a", "runSecret": "live" })]
+        );
+
+        let rig = computer_rig(Some("revoked"));
+        let tools = Pipe::open(rig.tools).list().await;
+        assert_eq!(
+            names(&tools),
+            THREAD_TOOLS,
+            "a refused catalog lists thread tools only"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_discovery_only_name_dispatches_with_the_json_rpc_id() {
+        let rig = computer_rig(Some("live"));
+        let mut pipe = Pipe::open(rig.tools);
+        let reply = pipe
+            .call(json!(5), "computer_spaces", json!({ "action": "list" }))
+            .await;
+        assert_eq!(reply["id"], 5);
+        assert_eq!(
+            reply["result"],
+            json!({ "content": [{ "type": "text", "text": "{\"spaces\":[]}" }] })
+        );
+        let reply = pipe
+            .call(json!("call-7"), "computer_spaces", json!({}))
+            .await;
+        assert_eq!(reply["id"], "call-7");
+        assert_eq!(
+            logged(&rig.calls, methods::COMPUTER_ACTION),
+            [
+                json!({
+                    "chatId": "a", "runSecret": "live", "tool": "computer_spaces",
+                    "arguments": { "action": "list" }, "requestId": 5
+                }),
+                json!({
+                    "chatId": "a", "runSecret": "live", "tool": "computer_spaces",
+                    "arguments": {}, "requestId": "call-7"
+                }),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn image_blocks_and_structured_content_pass_through_verbatim() {
+        let rig = computer_rig(Some("live"));
+        let mut pipe = Pipe::open(rig.tools);
+        let reply = pipe.call(json!(1), "computer_screenshot", json!({})).await;
+        assert_eq!(reply["result"], screenshot_result());
+        assert_eq!(reply["result"]["content"][1]["type"], "image");
+        assert!(
+            reply["result"]["content"][1]["data"]
+                .as_str()
+                .unwrap()
+                .len()
+                > 4_000_000
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_browser_result_passes_through_as_a_success() {
+        let rig = computer_rig(Some("live"));
+        let reply = Pipe::open(rig.tools)
+            .call(json!(1), "computer_browser_click", json!({ "ref": "e3" }))
+            .await;
+        assert!(reply.get("error").is_none());
+        assert_eq!(reply["result"], refused_result());
+        assert!(reply["result"].get("isError").is_none());
+        assert_eq!(reply["result"]["structuredContent"]["status"], "refused");
+    }
+
+    #[tokio::test]
+    async fn an_engine_refusal_is_a_tool_error_and_no_secret_keeps_todays_error() {
+        let rig = computer_rig(Some("live"));
+        let reply = Pipe::open(rig.tools)
+            .call(json!(1), "computer_nope", json!({}))
+            .await;
+        assert_eq!(reply["result"]["isError"], true);
+        assert_eq!(
+            reply["result"]["content"][0]["text"],
+            "Unknown computer tool \"computer_nope\"."
+        );
+
+        let rig = computer_rig(None);
+        let reply = Pipe::open(rig.tools)
+            .call(json!(1), "computer_screenshot", json!({}))
+            .await;
+        assert_eq!(reply["result"]["isError"], true);
+        assert_eq!(
+            reply["result"]["content"][0]["text"],
+            "unknown tool: computer_screenshot"
+        );
+        assert!(logged(&rig.calls, methods::COMPUTER_ACTION).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_long_computer_call_does_not_block_concurrent_calls() {
+        let rig = computer_rig(Some("live"));
+        let mut pipe = Pipe::open(rig.tools);
+        for (id, name, arguments) in [
+            (1, "computer_wait", json!({ "seconds": 30 })),
+            (2, "computer_screenshot", json!({})),
+            (3, "read_thread", json!({ "threadId": "b", "limit": 1 })),
+        ] {
+            pipe.send(json!({
+                "jsonrpc": "2.0", "id": id, "method": "tools/call",
+                "params": { "name": name, "arguments": arguments }
+            }))
+            .await;
+        }
+        let mut early = vec![
+            pipe.recv().await["id"].clone(),
+            pipe.recv().await["id"].clone(),
+        ];
+        early.sort_by_key(|id| id.as_i64());
+        assert_eq!(early, [json!(2), json!(3)]);
+        rig.calls.release.notify_one();
+        let late = pipe.recv().await;
+        assert_eq!(late["id"], 1);
+        assert_eq!(late["result"]["content"][0]["text"], "waited");
+    }
+
+    #[tokio::test]
+    async fn a_cancel_notification_reaches_the_engine_while_the_call_is_outstanding() {
+        let rig = computer_rig(Some("live"));
+        let mut pipe = Pipe::open(rig.tools);
+        pipe.send(json!({
+            "jsonrpc": "2.0", "id": 9, "method": "tools/call",
+            "params": { "name": "computer_wait", "arguments": {} }
+        }))
+        .await;
+        pipe.send(json!({
+            "jsonrpc": "2.0", "method": "notifications/cancelled",
+            "params": { "requestId": 9, "reason": "user pressed stop" }
+        }))
+        .await;
+        // The fake only lets computer_wait finish once CancelComputerAction arrives.
+        let reply = pipe.recv().await;
+        assert_eq!(reply["id"], 9);
+        assert_eq!(
+            logged(&rig.calls, methods::CANCEL_COMPUTER_ACTION),
+            [json!({ "chatId": "a", "runSecret": "live", "requestId": 9 })]
+        );
+    }
+
+    #[tokio::test]
+    async fn thread_tools_and_initialize_are_unchanged_with_a_secret() {
+        let rig = computer_rig(Some("live"));
+        let mut pipe = Pipe::open(rig.tools);
+        pipe.send(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }))
+            .await;
+        let init = pipe.recv().await;
+        assert_eq!(init["result"]["capabilities"], json!({ "tools": {} }));
+        assert!(init["result"].get("instructions").is_none());
+        let reply = pipe
+            .call(
+                json!(2),
+                "read_thread",
+                json!({ "threadId": "b", "limit": 1 }),
+            )
+            .await;
+        assert_eq!(reply["result"]["isError"], false);
+        let content = reply["result"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "text");
+        assert!(content[0]["text"].as_str().unwrap().contains("line 5"));
+        assert!(logged(&rig.calls, methods::COMPUTER_ACTION).is_empty());
     }
 }
