@@ -66,7 +66,12 @@ fn def() -> &'static ToolDef {
              character synthesis automatically when the estimated route stays \
              within the daemon transport budget. Longer synthesized routes are \
              refused before character events and return a safe chunk size; \
-             one-call AX insertion remains uncapped.\n\n\
+             one-call AX insertion remains uncapped. Key-event routes (terminals, \
+             that fallback, foreground) refuse text containing a newline, carriage \
+             return or tab with `control_characters_require_press_key`: send Return \
+             or Tab with `press_key` instead. They also refuse any text with \
+             `input_method_active` while the current input source is an input method \
+             (Vietnamese Telex, Japanese, Chinese) rather than a keyboard layout.\n\n\
              Optional `element_index` + `window_id` (from the last \
              `get_window_state` snapshot) directs the write to a specific field. \
              Without `element_index`, the write goes to the pid's currently \
@@ -160,6 +165,7 @@ impl Tool for TypeTextTool {
 
     async fn invoke(&self, args: Value) -> ToolResult {
         use cua_driver_core::tool_args::ArgsExt;
+        let synthesis_deadline = synthesis_deadline(std::time::Instant::now());
         if args.opt_str("scope").as_deref() == Some("desktop")
             && args.get("pid").is_none()
             && args.get("window_id").is_none()
@@ -397,6 +403,7 @@ impl Tool for TypeTextTool {
                         delivery_mode,
                         window_id,
                         blocking_policy,
+                        synthesis_deadline,
                     )
                 })
                 .await
@@ -445,6 +452,19 @@ impl Tool for TypeTextTool {
                 refusal,
                 ax_attempt,
             })) => return synthesis_refusal_result(path, &refusal, ax_attempt),
+            Ok(Ok(TypeTextDelivery::KeyEventTextRefused { path, code, reason })) => {
+                return ToolResult::error(format!(
+                    "type_text refused before sending any key event: {reason}"
+                ))
+                .with_structured(serde_json::json!({
+                    "code": code,
+                    "path": path,
+                    "effect": "refused",
+                    "requested_chars": char_count,
+                    "delivered_chars": 0,
+                    "retryable": false,
+                }));
+            }
             Ok(Ok(TypeTextDelivery::Typed(outcome))) => Ok(Ok(outcome)),
             Ok(Err(error)) => Ok(Err(error)),
             Err(error) => Err(error),
@@ -610,16 +630,36 @@ const PATH_AX: &str = "ax";
 const PATH_KEY_EVENTS: &str = "key_events";
 const PATH_KEY_EVENTS_FG: &str = "key_events_fg";
 
-// The daemon transport has a 120-second request deadline. Character synthesis
-// is synchronous and costs at least one 8ms key-down gap plus either the
-// requested delay or an 8ms key-up gap per character. Keep the complete
-// scheduled synthesis sleeps + read-back estimate within 100 seconds, reserving
-// 20 seconds for event construction/posting, routing, focus assistance,
-// queueing, response serialization, and transport.
+// Zeron's host abandons a driver call after 30 seconds and reports it as timed
+// out, so character synthesis must finish, read-back included, well inside that
+// window or the caller is told "timed out" while characters keep arriving.
+// Character synthesis is synchronous and costs at least one 8ms key-down gap
+// plus either the requested delay or an 8ms key-up gap per character. Keep the
+// complete scheduled synthesis sleeps + read-back estimate within 25 seconds,
+// reserving 5 seconds for event construction/posting, routing, focus
+// assistance, window-change observation, response serialization, and transport.
 // Atomic AX writes are deliberately excluded: their cost does not scale per
 // character and a single write remains the preferred route for large text.
-const SYNTHESIS_BUDGET_MS: u64 = 100_000;
+const SYNTHESIS_BUDGET_MS: u64 = 25_000;
 const KEY_DOWN_GAP_MS: u64 = 8;
+
+// The estimate can undershoot a loaded machine, so synthesis also stops at the
+// budget measured from request arrival, leaving the read-back drain inside it.
+fn synthesis_deadline(started: std::time::Instant) -> std::time::Instant {
+    started + std::time::Duration::from_millis(SYNTHESIS_BUDGET_MS) - DELIVERY_DRAIN_TIMEOUT
+}
+
+fn cut_short_delivery(
+    sent: usize,
+    requested: usize,
+    readback: (bool, Option<usize>),
+) -> (bool, Option<usize>) {
+    if sent < requested {
+        (false, Some(sent))
+    } else {
+        readback
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TextDeliveryRoute {
@@ -754,6 +794,38 @@ fn synthesis_refusal_result(
     ToolResult::error(message).with_structured(structured)
 }
 
+// A newline or tab arrives as Return or Tab: it runs a terminal command, submits
+// a form or moves focus, which the caller must choose explicitly with press_key.
+// An input method rewrites the characters, and a shorter result invites a retype.
+fn key_event_text_refusal(
+    path: &'static str,
+    text: &str,
+    active_input_method: Option<String>,
+) -> Option<TypeTextDelivery> {
+    if text.contains(['\n', '\r', '\t']) {
+        return Some(TypeTextDelivery::KeyEventTextRefused {
+            path,
+            code: "control_characters_require_press_key",
+            reason: "the text contains a newline, carriage return or tab, which key events \
+                     deliver as Return or Tab (running a terminal command, submitting a form or \
+                     moving focus). Type the text without them and send press_key \"return\" or \
+                     \"tab\" where intended."
+                .into(),
+        });
+    }
+    let id = active_input_method?;
+    Some(TypeTextDelivery::KeyEventTextRefused {
+        path,
+        code: "input_method_active",
+        reason: format!(
+            "the active input source {id} is an input method that rewrites key events (Telex \
+             turns \"add\" into \"ađ\", Japanese and Chinese compose). Use set_value, an \
+             element target whose AX route bypasses the input method, or clipboard paste; \
+             Cua Driver does not switch input sources."
+        ),
+    })
+}
+
 fn path_has_untrusted_web_readback(path: &str) -> bool {
     path == PATH_AX || path == PATH_KEY_EVENTS || path == PATH_KEY_EVENTS_FG
 }
@@ -837,6 +909,11 @@ enum TypeTextDelivery {
         path: &'static str,
         refusal: SynthesisRefusal,
         ax_attempt: AxAttempt,
+    },
+    KeyEventTextRefused {
+        path: &'static str,
+        code: &'static str,
+        reason: String,
     },
 }
 
@@ -1149,6 +1226,7 @@ fn cgevent_type_verified(
     element_ptr_and_idx: Option<(usize, Option<usize>)>,
     settle_ms: u64,
     window_id: Option<u32>,
+    deadline: std::time::Instant,
 ) -> anyhow::Result<(bool, Option<usize>)> {
     // Focus the target element so the keystrokes land in IT. Critical in
     // foreground mode: a freshly-fronted window's keyboard focus may be on the
@@ -1176,17 +1254,18 @@ fn cgevent_type_verified(
     if settle_ms > 0 {
         std::thread::sleep(std::time::Duration::from_millis(settle_ms));
     }
-    crate::input::keyboard::type_text_with_delay(pid, text, delay_ms)?;
+    let sent = crate::input::keyboard::type_text_until(pid, text, delay_ms, Some(deadline))?;
 
     // CGEvent posting is asynchronous with respect to the renderer. In
     // particular, Chromium can acknowledge the posting process while a long
     // tail remains queued. Poll the AX value until the complete payload is
     // visible instead of treating any growth as success. If the deadline
     // expires after observable growth, surface the exact partial count.
-    let deadline = std::time::Instant::now() + DELIVERY_DRAIN_TIMEOUT;
-    Ok(await_typed_delivery(before, text, deadline, || {
+    let drain_deadline = std::time::Instant::now() + DELIVERY_DRAIN_TIMEOUT;
+    let readback = await_typed_delivery(before, text, drain_deadline, || {
         read_axvalue_bound(pid, element_ptr_and_idx, window_id)
-    }))
+    });
+    Ok(cut_short_delivery(sent, text.chars().count(), readback))
 }
 
 fn await_typed_delivery(
@@ -1237,6 +1316,7 @@ fn type_text_blocking(
     delivery_mode: super::DeliveryMode,
     window_id: Option<u32>,
     keyboard_policy: BackgroundKeyboardPolicy,
+    synthesis_deadline: std::time::Instant,
 ) -> anyhow::Result<TypeTextDelivery> {
     // Original field value before any rung drives read-back verification only.
     // An unreadable value is not evidence that the field is empty — and for a
@@ -1266,6 +1346,18 @@ fn type_text_blocking(
                 ax_attempt: AxAttempt::NotAttempted,
             });
         }
+        let path = if window_id.is_some() {
+            PATH_KEY_EVENTS_FG
+        } else {
+            PATH_KEY_EVENTS
+        };
+        if let Some(refused) = key_event_text_refusal(
+            path,
+            text,
+            crate::input::input_source::active_input_method(),
+        ) {
+            return Ok(refused);
+        }
         // Settle between front+focus and the first keystroke — see the
         // "i love u" -> "love u" first-char-drop note in cgevent_type_verified.
         // A target that was already frontmost pays only 20ms for element-focus
@@ -1284,6 +1376,7 @@ fn type_text_blocking(
                 element_ptr_and_idx,
                 foreground_settle_ms,
                 window_id,
+                synthesis_deadline,
             )
         };
         let ((verified, delivered_chars), fronted) = match window_id {
@@ -1361,6 +1454,13 @@ fn type_text_blocking(
                 ax_attempt: AxAttempt::NotAttempted,
             });
         }
+        if let Some(refused) = key_event_text_refusal(
+            PATH_KEY_EVENTS,
+            text,
+            crate::input::input_source::active_input_method(),
+        ) {
+            return Ok(refused);
+        }
         tracing::debug!(
             "type_text: pid {pid} is a terminal emulator; skipping AX value-set, \
              using CGEvent key-event synthesis"
@@ -1373,6 +1473,7 @@ fn type_text_blocking(
             element_ptr_and_idx,
             /*settle_ms=*/ 0,
             window_id,
+            synthesis_deadline,
         )?;
         return Ok(TypeTextDelivery::Typed(TypeTextOutcome {
             detail: format!(" via CGEvent (terminal emulator, {delay_ms}ms delay)"),
@@ -1438,6 +1539,12 @@ fn type_text_blocking(
             let chars = text.chars().collect::<Vec<_>>();
             let mut result = kAXErrorSuccess;
             for (index, character) in chars.iter().enumerate() {
+                if std::time::Instant::now() >= synthesis_deadline {
+                    interruption = Some(format!(
+                        "stopped at the {SYNTHESIS_BUDGET_MS}ms per-call budget; the remaining characters were not sent"
+                    ));
+                    break;
+                }
                 let chunk = character.to_string();
                 match crate::input::cancellation::gate().post_ax(element as usize, || unsafe {
                     set_string_attr(element, "AXSelectedText", &chunk)
@@ -1607,6 +1714,13 @@ fn type_text_blocking(
             ax_attempt,
         });
     }
+    if let Some(refused) = key_event_text_refusal(
+        PATH_KEY_EVENTS,
+        text,
+        crate::input::input_source::active_input_method(),
+    ) {
+        return Ok(refused);
+    }
 
     // --- Background rung 2: CGEvent keystrokes with read-back. ---
     // Never clear here: a partial AX write is rare, and clearing would violate
@@ -1619,6 +1733,7 @@ fn type_text_blocking(
         element_ptr_and_idx,
         /*settle_ms=*/ 0,
         window_id,
+        synthesis_deadline,
     )?;
     Ok(TypeTextDelivery::Typed(TypeTextOutcome {
         detail: format!(" via CGEvent ({delay_ms}ms delay)"),
@@ -1659,6 +1774,7 @@ mod tests {
             super::super::DeliveryMode::Background,
             None,
             BackgroundKeyboardPolicy::Allowed,
+            synthesis_deadline(std::time::Instant::now()),
         );
         // We don't care whether r is Ok or Err — what matters is that
         // calling it with is_terminal_target=true is safe and never
@@ -1685,6 +1801,7 @@ mod tests {
             super::super::DeliveryMode::Background,
             Some(7),
             BackgroundKeyboardPolicy::SemanticOnly(refusal.clone()),
+            synthesis_deadline(std::time::Instant::now()),
         );
         match r {
             Ok(TypeTextDelivery::Refused(returned)) => assert_eq!(returned, refusal),
@@ -1704,6 +1821,7 @@ mod tests {
             super::super::DeliveryMode::Background,
             None,
             BackgroundKeyboardPolicy::Allowed,
+            synthesis_deadline(std::time::Instant::now()),
         )
         .expect("preflight refusal must not attempt the invalid pid");
         let TypeTextDelivery::SynthesisRefused {
@@ -1718,13 +1836,75 @@ mod tests {
         assert_eq!(ax_attempt, AxAttempt::NotAttempted);
         assert_eq!(refusal.requested_chars, 6_500);
         assert_eq!(refusal.estimated_duration_ms, 106_000);
-        assert_eq!(refusal.max_chunk_chars, 6_125);
+        assert_eq!(refusal.max_chunk_chars, 1_437);
+    }
+
+    #[test]
+    fn key_event_text_with_a_newline_or_tab_is_refused_before_any_event() {
+        for text in ["ls\n", "a\tb", "a\r\nb"] {
+            let result = type_text_blocking(
+                -1,
+                text,
+                None,
+                0,
+                /*is_terminal_target=*/ true,
+                super::super::DeliveryMode::Background,
+                None,
+                BackgroundKeyboardPolicy::Allowed,
+                synthesis_deadline(std::time::Instant::now()),
+            );
+            let Ok(TypeTextDelivery::KeyEventTextRefused { code, .. }) = result else {
+                panic!("{text:?} must be refused before key events");
+            };
+            assert_eq!(code, "control_characters_require_press_key");
+        }
+    }
+
+    #[test]
+    fn key_event_text_is_refused_while_an_input_method_would_rewrite_it() {
+        let refused = key_event_text_refusal(
+            PATH_KEY_EVENTS,
+            "git add .",
+            Some("com.apple.inputmethod.VietnameseIM.VietnameseTelex".into()),
+        );
+        let Some(TypeTextDelivery::KeyEventTextRefused { code, reason, .. }) = refused else {
+            panic!("an active input method must refuse key-event text");
+        };
+        assert_eq!(code, "input_method_active");
+        assert!(reason.contains("VietnameseTelex"), "{reason}");
+        assert!(key_event_text_refusal(PATH_KEY_EVENTS, "git add .", None).is_none());
     }
 
     #[test]
     fn synthesis_preflight_accepts_the_exact_transport_safe_boundary() {
-        assert!(synthesis_preflight(TextDeliveryRoute::UnicodeSynthesis, 6_125, 0).is_none());
-        assert!(synthesis_preflight(TextDeliveryRoute::UnicodeSynthesis, 6_126, 0).is_some());
+        assert!(synthesis_preflight(TextDeliveryRoute::UnicodeSynthesis, 1_437, 0).is_none());
+        assert!(synthesis_preflight(TextDeliveryRoute::UnicodeSynthesis, 1_438, 0).is_some());
+    }
+
+    #[test]
+    fn synthesis_at_zerons_delay_fits_inside_the_host_call_timeout() {
+        assert!(synthesis_preflight(TextDeliveryRoute::UnicodeSynthesis, 1_277, 10).is_none());
+        let refusal = synthesis_preflight(TextDeliveryRoute::UnicodeSynthesis, 1_550, 10)
+            .expect("text that outlives the 30s host call must be refused before typing");
+        assert_eq!(refusal.max_chunk_chars, 1_277);
+        assert!(
+            synthesis_deadline(std::time::Instant::now())
+                < std::time::Instant::now() + std::time::Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn a_deadline_cut_reports_only_the_characters_sent() {
+        assert_eq!(cut_short_delivery(5, 12, (false, None)), (false, Some(5)));
+        assert_eq!(
+            cut_short_delivery(5, 12, (false, Some(3))),
+            (false, Some(5))
+        );
+        assert_eq!(
+            cut_short_delivery(12, 12, (true, Some(12))),
+            (true, Some(12))
+        );
+        assert_eq!(cut_short_delivery(12, 12, (false, None)), (false, None));
     }
 
     #[test]

@@ -209,6 +209,9 @@ fn def() -> &'static ToolDef {
             home, end, pageup, pagedown, f1-f20, help, menu, and ANSI keypad keys \
             (kp_0-kp_9, kp_decimal, kp_enter, kp_add, kp_subtract, kp_multiply, \
             kp_divide, kp_equals, kp_clear), plus any letter or digit. \
+            A single-character key is sent on the key that types it on the current keyboard \
+            layout; when no key there types it, the press is refused with \
+            `keyboard_layout_unmapped` before any event. \
             Modifiers array: cmd, shift, option/alt, ctrl, fn.".into(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -318,6 +321,9 @@ impl Tool for PressKeyTool {
         } else {
             key_raw.clone()
         };
+        if let Some(refusal) = super::keyboard_layout_refusal(&key) {
+            return refusal;
+        }
         let display_key = key_raw.clone();
         // delivery_mode gates the raise: background (default) never fronts the
         // window (auth-envelope post, even with window_id); foreground is the

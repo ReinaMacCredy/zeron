@@ -11,6 +11,7 @@
 pub mod ax_actions;
 pub mod cancellation;
 pub(crate) mod focus_restore_policy;
+pub(crate) mod input_source;
 pub mod interactive;
 pub mod keyboard;
 pub mod mouse;

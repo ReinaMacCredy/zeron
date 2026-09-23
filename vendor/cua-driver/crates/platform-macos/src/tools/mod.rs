@@ -209,6 +209,21 @@ impl DeliveryMode {
     }
 }
 
+pub(crate) fn keyboard_layout_refusal(key: &str) -> Option<cua_driver_core::protocol::ToolResult> {
+    let error = crate::input::keyboard::key_code(key).err()?;
+    let unmapped = error.downcast_ref::<crate::input::keyboard::KeyboardLayoutUnmapped>()?;
+    Some(
+        cua_driver_core::protocol::ToolResult::error(format!(
+            "Key {key:?} refused before dispatch: {unmapped}."
+        ))
+        .with_structured(serde_json::json!({
+            "code": "keyboard_layout_unmapped",
+            "effect": "refused",
+            "key": key,
+        })),
+    )
+}
+
 /// Convert a pure background-input refusal into the structured refusal result
 /// shape shared by exact-target tools: `code`, `effect: "refused"`, the
 /// requested target, and the safe next route when one exists. No actuator ran.
@@ -1418,5 +1433,18 @@ mod recording_start_guard_tests {
         assert!(ok.is_ok(), "anonymous start must never be gated");
         assert!(rec.current_state().enabled);
         let _ = rec.stop_owner(None);
+    }
+}
+
+#[cfg(test)]
+mod keyboard_layout_refusal_tests {
+    #[test]
+    fn a_key_no_layout_position_types_is_refused_before_dispatch() {
+        let refusal = super::keyboard_layout_refusal("\u{e000}").expect("unmapped key must refuse");
+        let structured = refusal.structured_content.expect("structured refusal");
+        assert_eq!(structured["code"], "keyboard_layout_unmapped");
+        assert_eq!(structured["effect"], "refused");
+        assert!(super::keyboard_layout_refusal("return").is_none());
+        assert!(super::keyboard_layout_refusal("not-a-key").is_none());
     }
 }
