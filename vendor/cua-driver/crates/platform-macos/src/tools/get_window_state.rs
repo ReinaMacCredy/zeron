@@ -8,14 +8,16 @@ use std::sync::Arc;
 
 use super::ToolState;
 
-fn screenshot_frame_freshness(on_current_space: Option<bool>) -> Option<&'static str> {
-    on_current_space.map(|on_current_space| {
-        if on_current_space {
-            "captured_current_space"
-        } else {
-            "unverified_off_space"
-        }
-    })
+fn screenshot_frame_freshness(
+    on_screen: bool,
+    on_current_space: Option<bool>,
+) -> Option<&'static str> {
+    match on_current_space {
+        Some(false) => Some("unverified_off_space"),
+        _ if !on_screen => Some("unverified_not_on_screen"),
+        Some(true) => Some("captured_current_space"),
+        None => None,
+    }
 }
 
 pub struct GetWindowStateTool {
@@ -82,7 +84,8 @@ fn def() -> &'static ToolDef {
             `screenshot_frame_freshness`: \
             `captured_current_space` is usable visual grounding, while \
             `unverified_off_space` means the pixels may be retained and must not \
-            ground a pointer or keyboard action. Do not switch Spaces implicitly; \
+            ground a pointer or keyboard action; `unverified_not_on_screen` (a \
+            minimized window or a hidden app) means the same. Do not switch Spaces implicitly; \
             only a retained exact element token may remain eligible for \
             `type_text` with `semantic_only:true`. `px_frame_mismatch` or \
             `px_capture_unavailable` omits an unprovable screenshot/pixel frame \
@@ -711,7 +714,7 @@ impl Tool for GetWindowStateTool {
             if let Some(on_current_space) = info.on_current_space {
                 structured["window_on_current_space"] = serde_json::json!(on_current_space);
             }
-            if let Some(freshness) = screenshot_frame_freshness(info.on_current_space) {
+            if let Some(freshness) = screenshot_frame_freshness(info.is_on_screen, info.on_current_space) {
                 structured["screenshot_frame_freshness"] = serde_json::json!(freshness);
             }
             if let Some(current_space_id) = info.current_space_id {
@@ -1136,14 +1139,26 @@ mod tests {
     #[test]
     fn off_space_capture_is_never_described_as_fresh() {
         assert_eq!(
-            screenshot_frame_freshness(Some(true)),
+            screenshot_frame_freshness(true, Some(true)),
             Some("captured_current_space")
         );
         assert_eq!(
-            screenshot_frame_freshness(Some(false)),
+            screenshot_frame_freshness(false, Some(false)),
             Some("unverified_off_space")
         );
-        assert_eq!(screenshot_frame_freshness(None), None);
+        assert_eq!(screenshot_frame_freshness(true, None), None);
+    }
+
+    #[test]
+    fn a_minimized_or_hidden_window_capture_is_never_described_as_fresh() {
+        assert_eq!(
+            screenshot_frame_freshness(false, Some(true)),
+            Some("unverified_not_on_screen")
+        );
+        assert_eq!(
+            screenshot_frame_freshness(false, None),
+            Some("unverified_not_on_screen")
+        );
     }
 
     fn node(

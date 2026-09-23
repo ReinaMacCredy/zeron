@@ -1616,17 +1616,24 @@ impl CuaInner {
         fallback: Option<ComputerRect>,
     ) -> Result<ComputerScreenshot, ComputerError> {
         let data = result.structured_content.clone().unwrap_or_default();
-        if data
-            .get("screenshot_frame_freshness")
-            .and_then(Value::as_str)
-            == Some("unverified_off_space")
-        {
-            return Err(CuaActionError::new(
-                "The exact window is on another macOS Space. Cua returned pixels, but their freshness cannot be proven without switching Spaces, so Zeron will not present them as a live observation.",
-                CuaEffect::NotDispatched,
-            )
-            .code("off_space_capture_unverified")
-            .into());
+        match data.get("screenshot_frame_freshness").and_then(Value::as_str) {
+            Some("unverified_off_space") => {
+                return Err(CuaActionError::new(
+                    "The exact window is on another macOS Space. Cua returned pixels, but their freshness cannot be proven without switching Spaces, so Zeron will not present them as a live observation.",
+                    CuaEffect::NotDispatched,
+                )
+                .code("off_space_capture_unverified")
+                .into());
+            }
+            Some("unverified_not_on_screen") => {
+                return Err(CuaActionError::new(
+                    "The exact window is minimized or its app is hidden, so macOS returns retained pixels that are not a live observation. Read it through get_state's accessibility tree, or ask before restoring the window.",
+                    CuaEffect::NotDispatched,
+                )
+                .code("hidden_capture_unverified")
+                .into());
+            }
+            _ => {}
         }
         let image = result
             .content
@@ -1782,7 +1789,7 @@ impl CuaInner {
         }
         .await;
         if let Err(error) = &outcome
-            && error.code() != Some("off_space_capture_unverified")
+            && !is_retained_capture(error)
         {
             self.mark_capture_failed(error);
         }
@@ -2070,6 +2077,7 @@ impl CuaInner {
             }
             Err(error) => match error.code() {
                 Some("off_space_capture_unverified") => Ok(Err("This window is on another macOS Space. Its preview is paused because frame freshness cannot be proven without switching Spaces; exact retained semantic text may still continue.".into())),
+                Some("hidden_capture_unverified") => Ok(Err("This window is minimized or its app is hidden. Its preview is paused because macOS only returns retained pixels; the accessibility tree is still live.".into())),
                 Some("capture_unavailable") => {
                     self.mark_capture_failed(&error);
                     Ok(Err("The preview for this window failed; input is unaffected. Reselect the window to resume.".into()))
@@ -3663,7 +3671,7 @@ impl CuaInner {
         let state = match state {
             Ok(state) => state,
             Err(error) => {
-                if error.code() != Some("off_space_capture_unverified") {
+                if !is_retained_capture(&error) {
                     self.mark_capture_failed(&error);
                 }
                 return Err(error);
@@ -4702,6 +4710,13 @@ impl ComputerBackend for CuaComputerBackend {
         self.stills.detach().await;
         self.inner.dispose().await;
     }
+}
+
+fn is_retained_capture(error: &ComputerError) -> bool {
+    matches!(
+        error.code(),
+        Some("off_space_capture_unverified" | "hidden_capture_unverified")
+    )
 }
 
 #[cfg(test)]

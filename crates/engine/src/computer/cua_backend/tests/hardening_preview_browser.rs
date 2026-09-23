@@ -229,6 +229,29 @@ async fn pauses_off_space_pixels_instead_of_presenting_freshness_unverified_capt
 }
 
 #[tokio::test]
+async fn pauses_retained_pixels_of_a_minimized_or_hidden_window() {
+    let f = fixture();
+    f.mark_hidden_capture_unverified();
+    let state = f
+        .backend
+        .get_state(with_pixels(Some("cua:10:20"), true))
+        .await
+        .unwrap();
+    assert!(state.screenshot.is_none());
+    assert!(state.preview_note.as_deref().unwrap().contains("minimized"));
+    let error = f
+        .backend
+        .capture_screenshot(window_capture("cua:10:20"))
+        .await
+        .unwrap_err();
+    assert_eq!(code(&error), Some("hidden_capture_unverified"));
+    assert_eq!(effect(&error), Some(CuaEffect::NotDispatched));
+    let health = f.backend.health();
+    assert_eq!(health.status, ComputerHealthStatus::Connected);
+    assert!(health.capture_available);
+}
+
+#[tokio::test]
 async fn clears_window_grounding_when_the_owning_task_ends() {
     let f = fixture();
     let owner = task("thread", Some("turn"));

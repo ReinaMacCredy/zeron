@@ -533,6 +533,10 @@ impl Fixture {
         self.knobs().capture_frame_valid = false;
     }
 
+    pub(super) fn mark_hidden_capture_unverified(&self) {
+        self.knobs().capture_frame_freshness = "unverified_not_on_screen".into();
+    }
+
     pub(super) fn mark_off_space_capture_unverified(&self) {
         self.knobs().capture_frame_freshness = "unverified_off_space".into();
     }
