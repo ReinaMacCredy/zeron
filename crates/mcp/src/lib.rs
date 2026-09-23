@@ -8,7 +8,9 @@
 //! never a tool input. Threads are peers (d25): nothing here interrupts,
 //! cancels, or answers for another chat.
 
+use std::collections::HashSet;
 use std::pin::Pin;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -17,6 +19,7 @@ use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
+use zeron_proto::computer::ZERON_COMPUTER_TOOL_NAMES;
 use zeron_proto::view::{Indicator, effective_indicator};
 use zeron_proto::{Chat, Session};
 use zeron_rpc::{RpcClient, methods};
@@ -41,17 +44,8 @@ pub struct ThreadTools {
     chat_id: String,
     sends: AtomicUsize,
     run_secret: Option<String>,
+    computer_calls: Mutex<HashSet<String>>,
 }
-
-const THREAD_TOOLS: [&str; 7] = [
-    "list_threads",
-    "read_thread",
-    "create_thread",
-    "send_message_to_thread",
-    "wait_threads",
-    "set_thread_title",
-    "set_thread_archived",
-];
 
 /// `ReasoningLevel`'s serde names, spelled out so the schema can list them.
 const REASONING_LEVELS: [&str; 9] = [
@@ -170,10 +164,12 @@ impl ThreadTools {
             client,
             chat_id: chat_id.into(),
             sends: AtomicUsize::new(0),
-            // The secret travels in the server env, never on argv (SPEC "Caller identity").
+            // The secret reaches this process in its env, not its argv; Claude's inline
+            // `--mcp-config` does put it on the claude argv (SPEC d43: identity, not a sandbox).
             run_secret: std::env::var(zeron_rpc::COMPUTER_RUN_SECRET_ENV)
                 .ok()
                 .filter(|secret| !secret.is_empty()),
+            computer_calls: Mutex::new(HashSet::new()),
         }
     }
 
@@ -214,18 +210,30 @@ impl ThreadTools {
             "arguments": arguments,
             "requestId": request_id,
         });
-        match self.client.call(methods::COMPUTER_ACTION, params).await {
+        let key = request_id.to_string();
+        self.computer_calls.lock().unwrap().insert(key.clone());
+        let result = match self.client.call(methods::COMPUTER_ACTION, params).await {
             Ok(result) => result,
             Err(e) => {
                 json!({ "content": [{ "type": "text", "text": e.to_string() }], "isError": true })
             }
-        }
+        };
+        self.computer_calls.lock().unwrap().remove(&key);
+        result
     }
 
     async fn cancel_computer_action(&self, request_id: &Value) {
         let Some(secret) = &self.run_secret else {
             return;
         };
+        if !self
+            .computer_calls
+            .lock()
+            .unwrap()
+            .contains(&request_id.to_string())
+        {
+            return;
+        }
         let _ = self
             .client
             .call(
@@ -877,7 +885,7 @@ async fn respond(request: &Value, tools: &ThreadTools) -> Option<Value> {
                 .cloned()
                 .unwrap_or_else(|| json!({}));
             if let Some(secret) = tools.run_secret.as_deref()
-                && !THREAD_TOOLS.contains(&name)
+                && ZERON_COMPUTER_TOOL_NAMES.contains(&name)
             {
                 let result = tools.computer_action(secret, name, args, &id).await;
                 return Some(ok(id, result));
@@ -915,6 +923,16 @@ mod tests {
     use zeron_rpc::{RpcError, RpcReply, RpcService, memory_client};
 
     use super::*;
+
+    const THREAD_TOOLS: [&str; 7] = [
+        "list_threads",
+        "read_thread",
+        "create_thread",
+        "send_message_to_thread",
+        "wait_threads",
+        "set_thread_title",
+        "set_thread_archived",
+    ];
 
     fn chat(id: &str, space: Option<&str>, archived: bool, created_by: Option<&str>) -> Value {
         json!({
@@ -1959,12 +1977,12 @@ mod tests {
     async fn an_engine_refusal_is_a_tool_error_and_no_secret_keeps_todays_error() {
         let rig = computer_rig(Some("live"));
         let reply = Pipe::open(rig.tools)
-            .call(json!(1), "computer_nope", json!({}))
+            .call(json!(1), "computer_zoom", json!({}))
             .await;
         assert_eq!(reply["result"]["isError"], true);
         assert_eq!(
             reply["result"]["content"][0]["text"],
-            "Unknown computer tool \"computer_nope\"."
+            "Unknown computer tool \"computer_zoom\"."
         );
 
         let rig = computer_rig(None);
@@ -1977,6 +1995,50 @@ mod tests {
             "unknown tool: computer_screenshot"
         );
         assert!(logged(&rig.calls, methods::COMPUTER_ACTION).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_name_outside_the_computer_catalog_keeps_the_unknown_tool_error_with_a_secret() {
+        let rig = computer_rig(Some("live"));
+        let mut pipe = Pipe::open(rig.tools);
+        for (id, name) in [
+            (1, "computer_nope"),
+            (2, "bogus"),
+            (3, "mcp__zeron__computer_click"),
+        ] {
+            let reply = pipe.call(json!(id), name, json!({})).await;
+            assert_eq!(reply["result"]["isError"], true, "{name}");
+            assert_eq!(
+                reply["result"]["content"][0]["text"],
+                format!("unknown tool: {name}")
+            );
+        }
+        assert!(logged(&rig.calls, methods::COMPUTER_ACTION).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_cancel_for_a_call_that_is_not_an_in_flight_computer_call_stays_local() {
+        let rig = computer_rig(Some("live"));
+        let mut pipe = Pipe::open(rig.tools);
+        pipe.call(
+            json!(4),
+            "read_thread",
+            json!({ "threadId": "b", "limit": 1 }),
+        )
+        .await;
+        pipe.call(json!(5), "computer_screenshot", json!({})).await;
+        for id in [4, 5, 6] {
+            pipe.send(json!({
+                "jsonrpc": "2.0", "method": "notifications/cancelled",
+                "params": { "requestId": id }
+            }))
+            .await;
+        }
+        pipe.send(json!({ "jsonrpc": "2.0", "id": 7, "method": "ping" }))
+            .await;
+        assert_eq!(pipe.recv().await["id"], 7);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(logged(&rig.calls, methods::CANCEL_COMPUTER_ACTION).is_empty());
     }
 
     #[tokio::test]

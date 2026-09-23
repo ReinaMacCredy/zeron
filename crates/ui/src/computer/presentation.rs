@@ -78,26 +78,40 @@ pub fn computer_tool_name(candidate: &str) -> Option<&'static str> {
         })
 }
 
+fn zeron_computer_tool_name(candidate: &str) -> Option<&'static str> {
+    let tool = computer_tool_name(candidate)?;
+    let normalized = candidate
+        .trim()
+        .to_lowercase()
+        .replace(|ch: char| !ch.is_ascii_alphanumeric(), "_");
+    let head = normalized.strip_suffix(tool)?.trim_end_matches('_');
+    (head == "zeron" || head.ends_with("_zeron")).then_some(tool)
+}
+
 pub struct ComputerCall<'a> {
     pub tool: &'static str,
     pub args: Option<&'a Map<String, Value>>,
 }
 
 pub fn computer_call(call: &ToolCall) -> Option<ComputerCall<'_>> {
-    let (name, input) = match call {
-        ToolCall::Mcp { tool, input, .. } => (tool.as_str(), input.as_ref()),
-        ToolCall::Unknown { name, input } => (name.as_str(), input.as_ref()),
+    let (tool, input) = match call {
+        ToolCall::Mcp {
+            server,
+            tool,
+            input,
+        } if server == "zeron" => (computer_tool_name(tool), input.as_ref()),
+        ToolCall::Unknown { name, input } => (zeron_computer_tool_name(name), input.as_ref()),
         _ => return None,
     };
     let raw = input.and_then(Value::as_object);
-    if let Some(tool) = computer_tool_name(name) {
+    if let Some(tool) = tool {
         return Some(ComputerCall { tool, args: raw });
     }
     let raw = raw?;
     let tool = ["tool", "toolName", "tool_name", "name", "_toolName"]
         .iter()
         .filter_map(|key| raw.get(*key).and_then(Value::as_str))
-        .find_map(computer_tool_name)?;
+        .find_map(zeron_computer_tool_name)?;
     let args = ["arguments", "args", "input"]
         .iter()
         .find_map(|key| raw.get(*key).and_then(Value::as_object))
@@ -679,7 +693,7 @@ mod tests {
         let acp_raw = ToolCall::Unknown {
             name: "Calling MCP tool".into(),
             input: Some(
-                json!({ "tool": "computer_launch_app", "arguments": { "app": "com.apple.Safari" } }),
+                json!({ "_toolName": "mcp__zeron__computer_launch_app", "arguments": { "app": "com.apple.Safari" } }),
             ),
         };
         assert_eq!(describe(&acp_raw), "Open Safari");
@@ -691,6 +705,38 @@ mod tests {
             })
             .is_none()
         );
+    }
+
+    #[test]
+    fn only_zerons_own_server_is_recognized() {
+        let unknown = |name: &str| ToolCall::Unknown {
+            name: name.into(),
+            input: Some(json!({})),
+        };
+        for name in ["mcp__zeron__computer_click", "zeron_computer_click"] {
+            assert_eq!(
+                computer_call(&unknown(name)).unwrap().tool,
+                "computer_click"
+            );
+        }
+        let other_server = ToolCall::Mcp {
+            server: "other".into(),
+            tool: "computer_click".into(),
+            input: Some(json!({ "x": 1, "y": 2 })),
+        };
+        assert!(computer_call(&other_server).is_none());
+        for name in [
+            "computer_click",
+            "mcp__other__computer_click",
+            "notzeron_computer_click",
+        ] {
+            assert!(computer_call(&unknown(name)).is_none(), "{name}");
+        }
+        let bare_raw = ToolCall::Unknown {
+            name: "Calling MCP tool".into(),
+            input: Some(json!({ "tool": "computer_launch_app" })),
+        };
+        assert!(computer_call(&bare_raw).is_none());
     }
 
     #[test]

@@ -158,6 +158,15 @@ enum ComputerCopy {
         }
     }
 
+    static func zeronToolName(_ candidate: String) -> String? {
+        guard let tool = toolName(candidate) else { return nil }
+        let normalized = String(candidate.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            .map { $0.isASCII && ($0.isLetter || $0.isNumber) ? $0 : "_" })
+        guard normalized.hasSuffix(tool) else { return nil }
+        let head = normalized.dropLast(tool.count).replacingOccurrences(of: "_+$", with: "", options: .regularExpression)
+        return head == "zeron" || head.hasSuffix("_zeron") ? tool : nil
+    }
+
     static func toolTitle(_ tool: String) -> String {
         toolTitles.first { $0.0 == tool }?.1 ?? "Computer"
     }
@@ -166,8 +175,8 @@ enum ComputerCopy {
 extension RenderToolCall {
     var computerTool: String? {
         switch tag {
-        case "mcp": return string("tool").flatMap(ComputerCopy.toolName)
-        case "unknown": return string("name").flatMap(ComputerCopy.toolName)
+        case "mcp": return string("server") == "zeron" ? string("tool").flatMap(ComputerCopy.toolName) : nil
+        case "unknown": return string("name").flatMap(ComputerCopy.zeronToolName)
         default: return nil
         }
     }

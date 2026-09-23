@@ -6,9 +6,18 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$ROOT/vendor/cua-driver"
 TOOLCHAIN="1.97.1"
-TARGET="aarch64-apple-darwin"
+case "$(uname -m)" in
+  arm64) TARGET="aarch64-apple-darwin" ;;
+  x86_64) TARGET="x86_64-apple-darwin" ;;
+  *) echo "cua-driver: unsupported architecture $(uname -m)" >&2; exit 1 ;;
+esac
 OUT="${1:-$ROOT/target/cua-driver/cua-driver}"
 TARGET_DIR="${CUA_DRIVER_TARGET_DIR:-$ROOT/target/cua-driver-build}"
+
+# `rustup run` never auto-installs; `toolchain install` always hits the network.
+if ! rustup target list --installed --toolchain "$TOOLCHAIN" 2>/dev/null | grep -qx "$TARGET"; then
+  rustup toolchain install "$TOOLCHAIN" --profile minimal --target "$TARGET" >&2
+fi
 
 # Homebrew cargo shadows the rustup proxy on some machines; go through rustup
 # explicitly and assert the compiler, or the pin is silently ignored.

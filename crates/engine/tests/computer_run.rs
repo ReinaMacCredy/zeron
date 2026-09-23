@@ -122,6 +122,8 @@ impl Harness for ComputerHarness {
         let ctl = Arc::new(RunCtl::default());
         self.0.runs.lock().unwrap().push(ctl.clone());
         let ask_empty = request.prompt == "ask-empty";
+        let ask_withdrawn = request.prompt == "ask-withdrawn";
+        let ask_kept = request.prompt == "ask-kept";
         tokio::spawn(async move {
             let _ = tx.send(Ok(AgentEvent::SessionStarted {
                 harness: HarnessId::Mock,
@@ -135,6 +137,11 @@ impl Harness for ComputerHarness {
                 text: "working".into(),
             }));
             let _asked = ask_empty.then(|| (controls.request_input)(Vec::new()));
+            let _open = ask_kept.then(|| (controls.request_input)(vec![plain_question("open")]));
+            let _kept = ask_withdrawn.then(|| {
+                drop((controls.request_input)(vec![plain_question("withdrawn")]));
+                (controls.request_input)(vec![plain_question("kept")])
+            });
             loop {
                 tokio::select! {
                     _ = controls.interrupt.cancelled() => {
@@ -176,6 +183,17 @@ impl Harness for ComputerHarness {
             futures::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|e| (e, rx)) })
                 .boxed(),
         )
+    }
+}
+
+fn plain_question(id: &str) -> UserInputQuestion {
+    UserInputQuestion {
+        id: id.into(),
+        header: "Question".into(),
+        question: format!("{id}?"),
+        options: vec!["Yes".into(), "No".into()],
+        multi_select: false,
+        kind: None,
     }
 }
 
@@ -528,7 +546,7 @@ async fn a_stop_fences_a_queued_slash_row_and_the_next_message_does_not_revive_i
     assert!(!unrelated.computer);
     rig.finish();
     let replayed = rig.saw(3).await;
-    assert_eq!(replayed.prompt, "open Calculator");
+    assert_eq!(replayed.prompt, "/computer-use open Calculator");
     assert!(replayed.steer && !replayed.computer);
     assert!(rig.seen().iter().all(|seen| !seen.computer));
     rig.finish_turn().await;
@@ -578,7 +596,7 @@ async fn a_stop_before_any_dispatch_in_this_engine_lifetime_still_fences() {
         Some(3),
     );
     let stale = rig.saw(1).await;
-    assert_eq!(stale.prompt, "open Calculator");
+    assert_eq!(stale.prompt, "/computer-use open Calculator");
     assert!(!stale.computer, "a row stamped before the Stop runs off");
     rig.finish_turn().await;
 
@@ -649,6 +667,7 @@ async fn an_agent_that_cannot_reload_its_session_refuses_the_flip_visibly() {
     );
     let steered = rig.saw(2).await;
     assert!(steered.steer && !steered.computer);
+    assert_eq!(steered.prompt, "/computer-use open Calculator");
     assert!(
         rig.system_notes()
             .iter()
@@ -671,6 +690,7 @@ async fn an_agent_that_cannot_see_the_computer_tools_refuses_computer_visibly() 
     );
     let seen = rig.saw(1).await;
     assert!(!seen.computer, "no catalog for an agent that cannot see it");
+    assert_eq!(seen.prompt, "/computer-use open Calculator");
     assert!(
         seen.guidance.is_none(),
         "no guidance for tools it cannot see"
@@ -1185,7 +1205,7 @@ async fn a_restart_resumes_a_slash_turn_with_the_generation_it_was_dispatched_wi
     let seen = rig.seen();
     let fenced = seen
         .iter()
-        .find(|seen| seen.prompt == "open Calculator")
+        .find(|seen| seen.prompt == "/computer-use open Calculator")
         .expect("the fenced turn resumed");
     assert!(!fenced.computer, "a turn the Stop fenced off resumes off");
     let current = seen
@@ -1472,5 +1492,75 @@ async fn an_input_request_with_no_questions_still_parks_the_composer() {
         "AwaitingInput",
     )
     .await;
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn answering_a_consent_card_keeps_an_open_question_awaiting_input() {
+    let rig = rig();
+    rig.run("c1", "ask-kept", PermissionMode::Ask, None);
+    rig.saw(1).await;
+    let awaiting =
+        || rig.core.sessions.session_status(CHAT).unwrap().status == SessionStatus::AwaitingInput;
+    wait_for(awaiting, "the open question parks the composer").await;
+    let manager = manager(&rig).await;
+    let caller = caller(&rig).await;
+    let click = authorize(&manager, "computer_click", &caller);
+    wait_for(|| rig.consent_cards().len() == 1, "the task card").await;
+    let card = rig.consent_cards()[0].0.clone();
+    answer(&rig, "allow", &card, "Allow");
+    assert!(click.await.unwrap());
+    wait_for(|| card_resolved(&rig, &card), "the card to settle").await;
+    assert!(awaiting(), "the ordinary question is still open");
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_question_the_agent_withdrew_does_not_hold_awaiting_input() {
+    let rig = rig();
+    rig.run("c1", "ask-withdrawn", PermissionMode::Full, None);
+    rig.saw(1).await;
+    let kept = || {
+        rig.entries(CHAT)
+            .iter()
+            .flat_map(|entry| entry.parts.clone())
+            .find_map(|part| match part {
+                MessagePart::Input {
+                    request_id,
+                    questions,
+                    ..
+                } if questions[0].id == "kept" => Some(request_id),
+                _ => None,
+            })
+    };
+    wait_for(|| kept().is_some(), "the kept question in the doc").await;
+    assert_eq!(
+        rig.core.sessions.session_status(CHAT).unwrap().status,
+        SessionStatus::AwaitingInput
+    );
+    let answered = rig
+        .core
+        .sessions
+        .respond_input(
+            CHAT,
+            &kept().unwrap(),
+            vec![UserInputAnswer {
+                question_id: "kept".into(),
+                labels: vec!["Yes".into()],
+            }],
+        )
+        .unwrap();
+    assert!(answered);
+    wait_for(
+        || {
+            rig.core
+                .sessions
+                .session_status(CHAT)
+                .is_some_and(|session| session.status == SessionStatus::Working)
+        },
+        "Working once the only live question is answered",
+    )
+    .await;
+    rig.finish_turn().await;
     rig.core.shutdown().await;
 }

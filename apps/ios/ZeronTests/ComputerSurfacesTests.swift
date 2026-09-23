@@ -202,6 +202,17 @@ final class ComputerSurfacesTests: XCTestCase {
         XCTAssertEqual(ComputerCopy.toolTitles.count, 43)
     }
 
+    func testOnlyZeronsOwnServerIsRecognized() {
+        for name in ["mcp__zeron__computer_click", "zeron_computer_click"] {
+            XCTAssertEqual(RenderToolCall(tag: "unknown", fields: ["name": name]).computerTool, "computer_click")
+        }
+        XCTAssertNil(RenderToolCall(tag: "mcp", fields: ["server": "other", "tool": "computer_click"]).computerTool)
+        XCTAssertNil(RenderToolCall(tag: "mcp", fields: ["tool": "computer_click"]).computerTool)
+        for name in ["computer_click", "mcp__other__computer_click", "notzeron_computer_click"] {
+            XCTAssertNil(RenderToolCall(tag: "unknown", fields: ["name": name]).computerTool, name)
+        }
+    }
+
     func testCapabilityDenialAddsOneCardPerToolAfterItsChip() throws {
         func tool(_ id: String, _ name: String, output: String?) -> MessagePart? {
             var fields: [String: Any] = ["id": id, "kind": "tool", "isError": true,

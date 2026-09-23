@@ -703,7 +703,7 @@ impl SessionsEngine {
                     // dying run re-dispatches) keep the typed text.
                     prompt: self
                         .inner
-                        .harness_prompt(chat_id, &request.prompt, &user_id)
+                        .harness_prompt(chat_id, &request.prompt, &user_id, turn_computer)
                         .map_or_else(|| request.prompt.clone(), |wrapped| wrapped.prompt),
                     message_id: Some(user_id.clone()),
                     attachments: request.attachments.clone(),
@@ -924,13 +924,14 @@ impl SessionsEngine {
             return Ok(SteerOutcome::NotSteerable);
         };
         let user_id = message_id.unwrap_or_else(new_id);
+        let turn_computer = computer_control.unwrap_or(run_computer);
         let message = SteerMessage {
             // Held-queue release and queued sends reach the harness through
             // here without ever entering `dispatch`, so a sidechat's wrap has
             // to happen on this path too.
             prompt: self
                 .inner
-                .harness_prompt(chat_id, prompt, &user_id)
+                .harness_prompt(chat_id, prompt, &user_id, turn_computer)
                 .map_or_else(|| prompt.to_string(), |wrapped| wrapped.prompt),
             message_id: Some(user_id.clone()),
             attachments: attachments.to_vec(),
@@ -946,7 +947,7 @@ impl SessionsEngine {
                 prompt: prompt.to_string(),
                 message_id: user_id.clone(),
                 attachments: attachments.to_vec(),
-                computer_control: computer_control.unwrap_or(run_computer),
+                computer_control: turn_computer,
             });
         }
         let handle = self.doc_handle(chat_id)?;
@@ -1894,14 +1895,18 @@ impl Inner {
         chat_id: &str,
         typed: &str,
         user_entry_id: &str,
+        computer: bool,
     ) -> Option<HarnessPrompt> {
-        let invoked = crate::computer::activation::parse_computer_invocation(typed).map(|task| {
-            if task.is_empty() {
-                COMPUTER_USE_EMPTY_TASK.to_owned()
-            } else {
-                task
-            }
-        });
+        let invoked = computer
+            .then(|| crate::computer::activation::parse_computer_invocation(typed))
+            .flatten()
+            .map(|task| {
+                if task.is_empty() {
+                    COMPUTER_USE_EMPTY_TASK.to_owned()
+                } else {
+                    task
+                }
+            });
         let stripped = invoked.clone().map(|prompt| HarnessPrompt {
             prompt,
             handoff: None,
@@ -3058,6 +3063,7 @@ async fn drive_run(
         &chat_id,
         &request.prompt,
         &resume_state.user_message_id,
+        resume_state.turn_computer,
     ) {
         Some(HarnessPrompt { prompt, handoff }) => {
             if let Some(text) = handoff {
@@ -3931,9 +3937,25 @@ async fn drive_run(
                 }
             }
             AgentEvent::InputResolved { request_id, .. } => {
-                let question_open = folded.iter().any(|part| {
+                let pending = lock(&inner.runs)
+                    .get(&chat_id)
+                    .filter(|h| h.run_id == run_id)
+                    .map(|h| h.pending_inputs.clone());
+                // A closed resolver means the harness stopped waiting: the agent withdrew it.
+                let awaited = |rid: &str| {
+                    pending
+                        .as_ref()
+                        .is_some_and(|p| lock(p).get(rid).is_some_and(|tx| !tx.is_closed()))
+                };
+                let resolved_consent = folded.iter().any(|part| {
+                    matches!(part, MessagePart::Input { request_id: rid, questions, .. }
+                        if rid == request_id && questions.iter().any(UserInputQuestion::is_consent))
+                });
+                let question_open = resolved_consent && folded.iter().any(|part| {
                     matches!(part, MessagePart::Input { request_id: rid, questions, resolved: false, .. }
-                        if rid != request_id && !questions.iter().any(UserInputQuestion::is_consent))
+                        if rid != request_id
+                            && !questions.iter().any(UserInputQuestion::is_consent)
+                            && awaited(rid))
                 });
                 let status = if question_open {
                     SessionStatus::AwaitingInput

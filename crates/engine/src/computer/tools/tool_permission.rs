@@ -1,51 +1,7 @@
 use serde_json::Value;
 use zeron_proto::PermissionMode;
 
-pub const ZERON_COMPUTER_TOOL_NAMES: &[&str] = &[
-    "computer_activate_window",
-    "computer_click",
-    "computer_drag",
-    "computer_get_accessibility_tree",
-    "computer_get_cursor_position",
-    "computer_get_screen_size",
-    "computer_get_state",
-    "computer_help",
-    "computer_inspect",
-    "computer_spaces",
-    "computer_invoke_menu",
-    "computer_kill_app",
-    "computer_launch_app",
-    "computer_list_apps",
-    "computer_list_windows",
-    "computer_move_cursor",
-    "computer_paste",
-    "computer_perform_action",
-    "computer_press_key",
-    "computer_read_clipboard",
-    "computer_run",
-    "computer_screenshot",
-    "computer_scroll",
-    "computer_select_text",
-    "computer_set_app_visibility",
-    "computer_set_value",
-    "computer_set_window_frame",
-    "computer_set_window_minimized",
-    "computer_type_text",
-    "computer_verify_state",
-    "computer_wait",
-    "computer_write_clipboard",
-    "computer_zoom",
-    "computer_browser_state",
-    "computer_browser_prepare",
-    "computer_browser_navigate",
-    "computer_browser_click",
-    "computer_browser_type",
-    "computer_browser_dialog",
-    "computer_browser_upload",
-    "computer_browser_download",
-    "computer_browser_pointer",
-    "computer_browser_press",
-];
+pub use zeron_proto::computer::ZERON_COMPUTER_TOOL_NAMES;
 
 const MCP_PREFIX: &str = "mcp__zeron__";
 const TOOL_PREFIX: &str = "zeron_";
