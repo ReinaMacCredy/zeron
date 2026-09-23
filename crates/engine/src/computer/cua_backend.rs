@@ -2861,6 +2861,8 @@ impl CuaInner {
             let after = after.value.unwrap_or_default();
             if append {
                 after != before && after.ends_with(value)
+            } else if node.role == "AXPopUpButton" {
+                after.to_lowercase() == value.to_lowercase()
             } else {
                 after == value
             }
