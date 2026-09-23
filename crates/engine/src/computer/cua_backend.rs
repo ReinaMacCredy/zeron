@@ -2672,6 +2672,8 @@ impl CuaInner {
                 );
                 args.insert("amount".into(), num(ticks_y));
                 args.insert("by".into(), json!("line"));
+                args.insert("delta_x".into(), num(0.0));
+                args.insert("delta_y".into(), num(wheel_sign * dy.signum() * ticks_y));
                 args.insert("element_token".into(), json!(token));
             }
             _ => {
