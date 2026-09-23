@@ -1,0 +1,176 @@
+pub mod desktop_events;
+pub mod escape_classifier;
+pub mod escape_monitor;
+pub mod frame_tap;
+pub mod permissions;
+mod probe;
+pub mod release_held_input;
+pub mod shield;
+pub mod window_frame_stream;
+mod window_info;
+
+pub use probe::{run_escape_probe_from_env, run_native_probe_from_env};
+
+use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
+
+use desktop_events::DesktopLifecycleWatch;
+use escape_monitor::{EscapeKillSwitchMonitor, EscapeMonitorSink, INPUT_MONITORING_REQUIRED};
+use frame_tap::{ComputerFrameTap, PreviewSink};
+use shield::{AppKitShieldSurface, ComputerShield};
+use window_frame_stream::ScreenCaptureFrames;
+
+use super::host::{
+    ComputerInputMonitorState, CuaDriverHost, CuaDriverHostOptions, PhysicalComputerInput,
+};
+
+pub struct NativeHostConfig {
+    pub binary_path: PathBuf,
+    pub bundle_id: String,
+    pub preview: PreviewSink,
+    pub on_emergency_stop: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+struct HostEvents {
+    host: OnceLock<CuaDriverHost>,
+    on_emergency_stop: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl EscapeMonitorSink for HostEvents {
+    fn escape(&self) {
+        let Some(host) = self.host.get() else {
+            return;
+        };
+        let stopped = host.emergency_stop_input();
+        if let Some(notice) = self.on_emergency_stop.clone() {
+            let _ = std::thread::Builder::new()
+                .name("zeron-cua-escape-notice".into())
+                .spawn(move || {
+                    if futures::executor::block_on(stopped) {
+                        notice();
+                    }
+                });
+        }
+    }
+
+    fn physical_input(&self, input: PhysicalComputerInput) {
+        if let Some(host) = self.host.get() {
+            drop(host.physical_input(input));
+        }
+    }
+
+    fn state_changed(&self, state: ComputerInputMonitorState) {
+        if let Some(host) = self.host.get() {
+            host.input_monitor_state_changed(state);
+        }
+    }
+
+    fn error(&self, message: &str) {
+        tracing::warn!(target: "desktop_cua", "Escape monitor: {message}");
+    }
+}
+
+#[derive(Clone)]
+pub struct NativeHostLink {
+    events: Arc<HostEvents>,
+    monitor: Arc<EscapeKillSwitchMonitor>,
+}
+
+impl NativeHostLink {
+    pub fn attach(&self, host: CuaDriverHost) {
+        let _ = self.events.host.set(host);
+    }
+
+    pub fn monitor(&self) -> &Arc<EscapeKillSwitchMonitor> {
+        &self.monitor
+    }
+
+    pub fn watch_desktop_lifecycle(
+        &self,
+        runtime: tokio::runtime::Handle,
+    ) -> Option<DesktopLifecycleWatch> {
+        let host = self.events.host.get()?.clone();
+        Some(DesktopLifecycleWatch::start(
+            Arc::new(host),
+            runtime,
+            Arc::new(|error| {
+                tracing::warn!(target: "desktop_cua", "computer input pause failed: {error}");
+            }),
+        ))
+    }
+}
+
+pub fn native_host_options(
+    config: NativeHostConfig,
+) -> std::io::Result<(CuaDriverHostOptions, NativeHostLink)> {
+    let events = Arc::new(HostEvents {
+        host: OnceLock::new(),
+        on_emergency_stop: config.on_emergency_stop,
+    });
+    let monitor = Arc::new(EscapeKillSwitchMonitor::start(events.clone())?);
+    let link = NativeHostLink {
+        events: events.clone(),
+        monitor: monitor.clone(),
+    };
+    let mut options = CuaDriverHostOptions::new(
+        config.binary_path,
+        config.bundle_id,
+        Box::new(|| Box::pin(async { permissions::start_permission_setup().map(|_| ()) })),
+    );
+    options.check_permissions = Some(Box::new({
+        let events = events.clone();
+        let monitor = monitor.clone();
+        move |_force| {
+            let events = events.clone();
+            let monitor = monitor.clone();
+            Box::pin(async move {
+                let permissions = permissions::preflight_permissions();
+                if permissions.input_monitoring == Some(true)
+                    && monitor.state().error.as_deref() == Some(INPUT_MONITORING_REQUIRED)
+                    && let Some(host) = events.host.get()
+                    && host.is_input_monitor_requested().await
+                {
+                    monitor.refresh_denied_listener();
+                    monitor.activate().await;
+                }
+                Ok(permissions)
+            })
+        }
+    }));
+    options.release_held_input = Some(Box::new(|| {
+        Box::pin(async { release_held_input::release_held_input() })
+    }));
+    options.activate_input_monitor = Some(Box::new({
+        let monitor = monitor.clone();
+        move || {
+            let monitor = monitor.clone();
+            Box::pin(async move {
+                monitor.activate().await;
+                Ok(())
+            })
+        }
+    }));
+    options.input_monitor_state = Some(Box::new({
+        let monitor = monitor.clone();
+        move || monitor.state()
+    }));
+    options.on_input_monitor_armed_change = Some(Box::new({
+        let monitor = monitor.clone();
+        move |armed| monitor.set_armed(armed)
+    }));
+    options.frame_tap = Some(Arc::new(ComputerFrameTap::new(
+        ScreenCaptureFrames,
+        config.preview,
+    )));
+    options.shield = Some(Arc::new(ComputerShield::new(Arc::new(AppKitShieldSurface))));
+    Ok((options, link))
+}
+
+pub fn start_native_host(
+    config: NativeHostConfig,
+) -> std::io::Result<(CuaDriverHost, NativeHostLink)> {
+    let (options, link) = native_host_options(config)?;
+    let host = CuaDriverHost::new(options)?;
+    link.attach(host.clone());
+    Ok((host, link))
+}

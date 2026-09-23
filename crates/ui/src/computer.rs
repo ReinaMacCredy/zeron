@@ -10,6 +10,8 @@ pub mod host;
 #[cfg(target_os = "macos")]
 pub mod host_socket;
 #[cfg(target_os = "macos")]
+pub mod native;
+#[cfg(target_os = "macos")]
 pub mod runtime_ownership;
 #[cfg(target_os = "macos")]
 pub mod stop_native_helper;

@@ -162,7 +162,14 @@ pub fn run_app(config: UiConfig) {
         gpui_base::init(cx);
         let data_dir = config.boot().data_dir.clone();
         #[cfg(target_os = "macos")]
-        computer::run_probe_from_env(&data_dir);
+        {
+            let _ = std::thread::Builder::new()
+                .name("zeron-cua-sweep".into())
+                .spawn(computer::host::sweep_orphaned_cua_drivers);
+            computer::run_probe_from_env(&data_dir);
+            computer::native::run_escape_probe_from_env();
+            computer::native::run_native_probe_from_env();
+        }
         let draft_dir = data_dir.clone();
         let drafts = cx
             .background_executor()
