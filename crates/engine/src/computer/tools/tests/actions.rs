@@ -1562,7 +1562,7 @@ async fn keeps_the_target_window_when_the_only_new_window_is_the_capture_indicat
     h.dispose().await;
 }
 
-async fn press_enter_while_a_window_appears(extra: ComputerWindow) -> Value {
+async fn press_enter_while_windows_appear(extra: Vec<ComputerWindow>) -> Value {
     let h = harness();
     h.call(
         "computer_press_key",
@@ -1570,7 +1570,7 @@ async fn press_enter_while_a_window_appears(extra: ComputerWindow) -> Value {
     )
     .await;
     let mut after = h.backend.fake.list_windows().await.unwrap();
-    after.push(extra);
+    after.extend(extra);
     h.backend.hooks().press_key = Some(Arc::new(move |fake, _| {
         let windows = after.clone();
         async move {
@@ -1603,13 +1603,32 @@ fn save_panel_at(bounds: ComputerRect) -> ComputerWindow {
 #[tokio::test]
 async fn observes_a_save_panel_that_another_process_opens_over_the_target() {
     assert_eq!(
-        press_enter_while_a_window_appears(save_panel_at(rect(100.0, 80.0, 600.0, 400.0))).await,
+        press_enter_while_windows_appear(vec![save_panel_at(rect(100.0, 80.0, 600.0, 400.0))])
+            .await,
         json!("fake-save-panel")
     );
     assert_eq!(
-        press_enter_while_a_window_appears(save_panel_at(rect(2_000.0, 2_000.0, 600.0, 400.0)))
+        press_enter_while_windows_appear(vec![save_panel_at(rect(2_000.0, 2_000.0, 600.0, 400.0))])
             .await,
         json!("fake-terminal")
+    );
+    let same_app_behind = ComputerWindow {
+        app_name: Some("org.kde.konsole".into()),
+        pid: Some(1_001),
+        stacking_index: Some(5),
+        ..window(
+            "fake-terminal-2",
+            "Other",
+            Some(rect(60.0, 60.0, 400.0, 300.0)),
+        )
+    };
+    assert_eq!(
+        press_enter_while_windows_appear(vec![
+            same_app_behind,
+            save_panel_at(rect(100.0, 80.0, 600.0, 400.0)),
+        ])
+        .await,
+        json!("fake-save-panel")
     );
 }
 

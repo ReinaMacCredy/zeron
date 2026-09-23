@@ -317,27 +317,23 @@ impl ComputerManager {
                     && !window.minimized
             })
             .collect();
-        let same_app = |window: &&ComputerWindow| match owner.pid {
+        let same_app = |window: &ComputerWindow| match owner.pid {
             Some(pid) => window.pid == Some(pid),
             None => owner.app_name.is_some() && window.app_name == owner.app_name,
         };
-        if let Some(opened) = fresh
-            .iter()
-            .filter(same_app)
-            .min_by_key(|window| stacking(window))
-        {
-            return Some(opened.clone());
-        }
         // Sandboxed apps' Open/Save panels belong to a separate service process.
-        let owner_bounds = owner.bounds?;
-        fresh
-            .into_iter()
-            .filter(|window| {
-                stacking(window) < stacking(&owner)
-                    && window.bounds.is_some_and(|bounds| {
+        let panel_over_owner = |window: &ComputerWindow| {
+            stacking(window) < stacking(&owner)
+                && window
+                    .bounds
+                    .zip(owner.bounds)
+                    .is_some_and(|(bounds, owner_bounds)| {
                         intersect_computer_rects(bounds, owner_bounds).is_some()
                     })
-            })
+        };
+        fresh
+            .into_iter()
+            .filter(|window| same_app(window) || panel_over_owner(window))
             .min_by_key(stacking)
     }
 
