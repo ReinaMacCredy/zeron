@@ -323,7 +323,9 @@ impl ComputerManager {
         };
         // Sandboxed apps' Open/Save panels belong to a separate service process.
         let panel_over_owner = |window: &ComputerWindow| {
-            stacking(window) < stacking(&owner)
+            window.app_name.as_deref().is_some_and(|name| {
+                name == "Open and Save Panel Service" || name.contains("openAndSavePanelService")
+            }) && stacking(window) < stacking(&owner)
                 && window
                     .bounds
                     .zip(owner.bounds)
