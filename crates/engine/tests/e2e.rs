@@ -2498,6 +2498,120 @@ async fn live_subagent_holds_a_parked_session_working() {
     core.shutdown().await;
 }
 
+/// The 30-minute idle reaper killed the whole child, background subagents
+/// included, counting from the parent's Done (2026-09-23: four agents cut at
+/// exactly +30:00). A live subagent holds the reaper off; the clock restarts
+/// at its settle. The harness mailbox closing is the reap.
+#[tokio::test(start_paused = true)]
+async fn idle_reaper_waits_for_live_subagents_and_restarts_at_their_settle() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(ControlledHarness(std::sync::Mutex::new(Some(rx)))),
+    );
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-reaper-hold",
+        SessionCommandPayload::Run {
+            request: run_request("spawn"),
+            message_id: "user-spawn".into(),
+        },
+    );
+    let status = || core.sessions.session_status(CHAT).map(|s| s.status);
+    let sub = |event: AgentEvent| AgentEvent::Subagent {
+        parent_tool_use_id: "agent-1".into(),
+        event: Box::new(event),
+    };
+    let minutes = |m: u64| tokio::time::sleep(Duration::from_secs(m * 60));
+
+    tx.send(AgentEvent::TextDelta {
+        text: "spawning".into(),
+    })
+    .unwrap();
+    tx.send(sub(AgentEvent::TextDelta {
+        text: "building".into(),
+    }))
+    .unwrap();
+    tx.send(done(DoneStatus::Completed)).unwrap();
+    wait_for(
+        || {
+            core.sessions
+                .session_status(CHAT)
+                .is_some_and(|s| s.last_completed_turn.is_some())
+        },
+        "parent turn parks",
+    )
+    .await;
+
+    minutes(45).await;
+    assert!(!tx.is_closed(), "a live subagent holds the reaper off");
+    assert_eq!(status(), Some(SessionStatus::Working));
+
+    tx.send(sub(done(DoneStatus::Completed))).unwrap();
+    wait_for(|| status() == Some(SessionStatus::Idle), "subagent settles").await;
+    minutes(29).await;
+    assert!(
+        !tx.is_closed(),
+        "the idle clock restarts at the settle, not the parent's Done"
+    );
+    minutes(2).await;
+    wait_for(|| tx.is_closed(), "reaped 30 minutes after the settle").await;
+    core.shutdown().await;
+}
+
+/// A subagent cut off by its run ending says why, instead of just stopping.
+#[tokio::test]
+async fn a_subagent_cut_off_by_the_run_ending_says_why() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(ControlledHarness(std::sync::Mutex::new(Some(rx)))),
+    );
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-cut-off",
+        SessionCommandPayload::Run {
+            request: run_request("spawn"),
+            message_id: "user-spawn".into(),
+        },
+    );
+    tx.send(AgentEvent::Subagent {
+        parent_tool_use_id: "agent-1".into(),
+        event: Box::new(AgentEvent::TextDelta {
+            text: "building".into(),
+        }),
+    })
+    .unwrap();
+    tx.send(done(DoneStatus::Completed)).unwrap();
+    wait_for(
+        || {
+            core.sessions
+                .session_status(CHAT)
+                .is_some_and(|s| s.last_completed_turn.is_some())
+        },
+        "parent turn parks",
+    )
+    .await;
+    drop(tx);
+    let sub_doc = format!("{CHAT}--sub--agent-1");
+    wait_for(
+        || {
+            entries_for(&core, &sub_doc).iter().any(|e| {
+                e.parts.iter().any(|p| {
+                    matches!(p, MessagePart::Error { message, .. } if message.starts_with("Stopped:"))
+                })
+            })
+        },
+        "the cut-off subagent records why it stopped",
+    )
+    .await;
+    core.shutdown().await;
+}
+
 #[tokio::test]
 async fn a_compaction_after_a_stray_done_reopens_working_and_writes_its_note() {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();

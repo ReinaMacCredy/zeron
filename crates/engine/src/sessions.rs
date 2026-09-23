@@ -2440,9 +2440,9 @@ impl SubagentSink {
     }
 }
 
-/// What a parked turn settles to: Working while any subagent sink is still
+/// What a parked turn settles to: Working while any subagent is still
 /// live (a background agent is still running for this chat), else Idle.
-fn parked_status(subagents: &std::collections::HashMap<String, SubagentSink>) -> SessionStatus {
+fn parked_status(subagents: &std::collections::HashSet<String>) -> SessionStatus {
     if subagents.is_empty() {
         SessionStatus::Idle
     } else {
@@ -2852,6 +2852,10 @@ async fn drive_run(
     // Live subagent sinks, parent tool-use id → transcript doc state.
     let mut subagents: std::collections::HashMap<String, SubagentSink> =
         std::collections::HashMap::new();
+    // Spawns that have streamed and not yet settled, independent of whether
+    // a sink could open (headless or open failure). They hold the parked
+    // session: the idle reaper would kill the child they run in.
+    let mut live_subagents: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     let mut final_completed_turn = None;
     let final_status = loop {
@@ -2885,7 +2889,7 @@ async fn drive_run(
                 // was finalized at Done, so this end is clean — no aborted stamp.
                 _ = tokio::time::sleep_until(
                     idle_since.map(|at| at + SESSION_IDLE).unwrap_or_else(tokio::time::Instant::now)
-                ), if idle_since.is_some() => {
+                ), if idle_since.is_some() && live_subagents.is_empty() => {
                     tracing::info!(chat = %chat_id, "reaping idle persistent session");
                     if let Some(token) = lock(&inner.runs)
                         .get(&chat_id)
@@ -3009,10 +3013,10 @@ async fn drive_run(
                     self_continued_turn = false;
                     inner.set_status_with_completion(
                         &chat_id,
-                        parked_status(&subagents),
+                        parked_status(&live_subagents),
                         false,
                         completed_turn,
-                        !subagents.is_empty(),
+                        !live_subagents.is_empty(),
                     );
                     continue;
                 }
@@ -3137,6 +3141,16 @@ async fn drive_run(
             let done = matches!(sub_event.as_ref(), AgentEvent::Done { .. });
             if done {
                 settled_subagents.insert(parent_tool_use_id.clone());
+                // The idle clock restarts at the last settle, not the parent's
+                // Done hours ago, so the wake turn that reports it can stream.
+                if live_subagents.remove(parent_tool_use_id)
+                    && live_subagents.is_empty()
+                    && idle_since.is_some()
+                {
+                    idle_since = Some(tokio::time::Instant::now());
+                }
+            } else if !matches!(sub_event.as_ref(), AgentEvent::ContextUsage { .. }) {
+                live_subagents.insert(parent_tool_use_id.clone());
             }
             if let Some(sink) = subagents.get_mut(parent_tool_use_id) {
                 if let AgentEvent::UserMessage { text } = sub_event.as_ref() {
@@ -3192,16 +3206,16 @@ async fn drive_run(
             }
             // A parked session with a live subagent is still working: the
             // sidebar dot follows the sinks, not the parent turn. Held until
-            // the last tagged Done (or the idle reaper).
+            // the last tagged Done (or the run ending).
             if idle_since.is_some() {
-                let want = parked_status(&subagents);
+                let want = parked_status(&live_subagents);
                 if lock(&inner.statuses).get(&chat_id).map(|s| s.status) != Some(want) {
                     inner.set_status_with_completion(
                         &chat_id,
                         want,
                         false,
                         None,
-                        !subagents.is_empty(),
+                        !live_subagents.is_empty(),
                     );
                 }
             }
@@ -3638,10 +3652,10 @@ async fn drive_run(
                 self_continued_turn = false;
                 inner.set_status_with_completion(
                     &chat_id,
-                    parked_status(&subagents),
+                    parked_status(&live_subagents),
                     false,
                     completed_turn,
-                    !subagents.is_empty(),
+                    !live_subagents.is_empty(),
                 );
                 continue;
             }
@@ -3661,7 +3675,14 @@ async fn drive_run(
 
     // Any subagent still streaming when the run ends freezes as-is: the
     // parent process is gone, so nothing more can arrive on this stream.
-    for (parent_id, sink) in subagents.drain() {
+    for (parent_id, mut sink) in subagents.drain() {
+        zeron_doc::fold_event_into_parts(
+            &mut sink.folded,
+            &AgentEvent::Error {
+                message: "Stopped: the chat's agent process ended before this subagent finished."
+                    .into(),
+            },
+        );
         let doc_id = sink.doc_id.clone();
         let _ = doc_ref.update_subagent_chip(&parent_id, None, Some("failed"), None);
         if let Some(json) = sink.finish(&device_id, MessageStatus::Aborted)
