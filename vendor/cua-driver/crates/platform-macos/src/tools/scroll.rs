@@ -449,23 +449,33 @@ impl Tool for ScrollTool {
             let target_guard = pre_focus_guard.clone();
             let target_task = tokio::task::spawn_blocking(move || {
                 let _target_guard = target_guard;
+                let bounds = wid.and_then(crate::windows::window_bounds_by_id);
+                let mut center = unsafe { element_screen_center(element_ptr as AXUIElementRef) };
+                let reveal = needs_reveal(
+                    center,
+                    bounds.as_ref().map(|b| (b.x, b.y, b.width, b.height)),
+                );
                 // Web content can be present in AX while its frame is below
                 // the outer page viewport. Ask the accessibility hierarchy to
                 // reveal the target before taking the screen-space center;
                 // otherwise the wheel is posted outside the rendered window
                 // and nested overflow regions never receive it.
-                after_exact_target_gate(semantic_gate, || unsafe {
-                    crate::ax::bindings::perform_action(
-                        element_ptr as AXUIElementRef,
-                        "AXScrollToVisible",
-                    )
+                after_exact_target_gate(semantic_gate, || {
+                    if reveal {
+                        unsafe {
+                            crate::ax::bindings::perform_action(
+                                element_ptr as AXUIElementRef,
+                                "AXScrollToVisible",
+                            );
+                        }
+                    }
                 })?;
-                std::thread::sleep(std::time::Duration::from_millis(40));
-                let center = unsafe { element_screen_center(element_ptr as AXUIElementRef) };
+                if reveal {
+                    std::thread::sleep(std::time::Duration::from_millis(40));
+                    center = unsafe { element_screen_center(element_ptr as AXUIElementRef) };
+                }
                 Ok(center.map(|(cx, cy)| {
-                    let win_local = wid
-                        .and_then(crate::windows::window_bounds_by_id)
-                        .map(|b| (cx - b.x, cy - b.y));
+                    let win_local = bounds.as_ref().map(|b| (cx - b.x, cy - b.y));
                     WheelTarget {
                         screen_x: cx,
                         screen_y: cy,
@@ -771,6 +781,15 @@ impl Tool for ScrollTool {
     }
 }
 
+fn needs_reveal(center: Option<(f64, f64)>, frame: Option<(f64, f64, f64, f64)>) -> bool {
+    match (center, frame) {
+        (Some((cx, cy)), Some((x, y, width, height))) => {
+            cx < x || cy < y || cx > x + width || cy > y + height
+        }
+        _ => true,
+    }
+}
+
 fn semantic_scroll_axis<'a>(
     direction: &'a str,
     amount: usize,
@@ -990,6 +1009,16 @@ mod tests {
         );
         assert_eq!(semantic_scroll_axis("up", 3, Some(1), Some(2), false), None);
         assert_eq!(semantic_scroll_axis("up", 3, None, Some(2), true), None);
+    }
+
+    #[test]
+    fn reveals_only_a_target_whose_center_is_not_inside_the_window() {
+        let frame = Some((100.0, 50.0, 800.0, 600.0));
+        assert!(!needs_reveal(Some((500.0, 300.0)), frame));
+        assert!(needs_reveal(Some((500.0, 900.0)), frame));
+        assert!(needs_reveal(Some((50.0, 300.0)), frame));
+        assert!(needs_reveal(None, frame));
+        assert!(needs_reveal(Some((500.0, 300.0)), None));
     }
 
     #[test]
