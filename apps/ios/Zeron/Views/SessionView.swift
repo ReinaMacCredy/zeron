@@ -117,6 +117,11 @@ struct SessionView: View {
                     }
                 }
                 .motionAnimation(Motion.fadeQuick, value: store.entries.isEmpty)
+                .overlay(alignment: .topTrailing) {
+                    if model.demo == nil {
+                        ComputerStillPreview(store: store, chatId: chat.id, working: status == .working)
+                    }
+                }
             VStack(spacing: 0) {
                 if verticalSizeClass != .compact || status == .working || status == .errored
                     || model.sendState(for: chat) != nil {

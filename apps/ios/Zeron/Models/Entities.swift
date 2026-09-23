@@ -244,6 +244,43 @@ struct UserInputQuestion: Hashable, Codable {
     /// options to show and an unresolved request crashed the app.
     var options: [String]
     var multiSelect: Bool?
+    var kind: UserInputKind? = nil
+
+    var isConsent: Bool { kind?.consentScope != nil }
+}
+
+extension UserInputQuestion {
+    enum CodingKeys: String, CodingKey {
+        case id, header, question, options, multiSelect, kind
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        header = try c.decode(String.self, forKey: .header)
+        question = try c.decode(String.self, forKey: .question)
+        options = try c.decode([String].self, forKey: .options)
+        multiSelect = try c.decodeIfPresent(Bool.self, forKey: .multiSelect)
+        kind = try? c.decodeIfPresent(UserInputKind.self, forKey: .kind)
+    }
+}
+
+enum ComputerConsentScope: String, Codable, Hashable {
+    case task, call
+}
+
+struct UserInputKind: Codable, Hashable {
+    var type: String
+    var scope: String?
+
+    static func consent(_ scope: ComputerConsentScope) -> UserInputKind {
+        UserInputKind(type: "consent", scope: scope.rawValue)
+    }
+
+    var consentScope: ComputerConsentScope? {
+        guard type == "consent" else { return nil }
+        return scope.flatMap(ComputerConsentScope.init(rawValue:)) ?? .task
+    }
 }
 
 struct UserInputAnswer: Hashable, Codable {
@@ -277,13 +314,15 @@ struct GeneratedImageReference: Hashable {
 enum MessagePart: Hashable, Identifiable {
     case image(id: String, reference: GeneratedImageReference)
     case text(id: String, text: String)
-    case tool(id: String, call: RenderToolCall, isError: Bool, resolved: Bool)
-    case input(id: String, requestId: String, questions: [UserInputQuestion], resolved: Bool)
+    case tool(id: String, call: RenderToolCall, isError: Bool, resolved: Bool,
+              controlDenied: Bool = false)
+    case input(id: String, requestId: String, questions: [UserInputQuestion], resolved: Bool,
+               answers: [UserInputAnswer]? = nil)
     case error(id: String, message: String)
 
     var id: String {
         switch self {
-        case .text(let id, _), .image(let id, _), .tool(let id, _, _, _), .input(let id, _, _, _), .error(let id, _):
+        case .text(let id, _), .image(let id, _), .tool(let id, _, _, _, _), .input(let id, _, _, _, _), .error(let id, _):
             return id
         }
     }

@@ -90,6 +90,14 @@ struct TranscriptView: View {
                 InputChipView(header: header, resolved: resolved)
             case .errorChip(let message):
                 ErrorChipView(message: message)
+            case .computerConsent(let requestId, let questionId, let scope, let question, let outcome):
+                ComputerConsentCard(store: store, requestId: requestId, questionId: questionId,
+                                    scope: scope, question: question, outcome: outcome)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { _ in
+                        scroll.refreshLayout?()
+                    }
+            case .computerNotice(let notice, let text, let hint):
+                ComputerNoticeCard(notice: notice, text: text, hint: hint)
             }
         }
         .padding(.top, row.topGap)
