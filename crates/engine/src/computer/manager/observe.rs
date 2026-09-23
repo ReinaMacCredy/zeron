@@ -439,6 +439,13 @@ impl ComputerManager {
             } else {
                 None
             };
+            let column_center = match (&before, &resolved) {
+                (Some(before), Some(resolved)) => before.screenshot.region.and_then(|region| {
+                    let fraction = (resolved.point.x - region.x) / region.width;
+                    (0.0..=1.0).contains(&fraction).then_some(fraction)
+                }),
+                _ => None,
+            };
             let observed_window = match &observed_window_id {
                 Some(id) => self
                     .read_windows()
@@ -523,6 +530,7 @@ impl ComputerManager {
                         probe_injected,
                         window_key(probe_route).as_deref(),
                         durable_key(probe_route).as_deref(),
+                        column_center,
                     )
                     .await;
                 after = probe_leg.0;
@@ -555,6 +563,7 @@ impl ComputerManager {
                                 leg_injected_y,
                                 window_key(remainder_route).as_deref(),
                                 durable_key(remainder_route).as_deref(),
+                                column_center,
                             )
                             .await;
                         after = remainder_leg.0.or(after);
@@ -592,6 +601,7 @@ impl ComputerManager {
                             injected_y,
                             window_key(actual_route).as_deref(),
                             durable_key(actual_route).as_deref(),
+                            column_center,
                         )
                         .await;
                     after = leg.0;
@@ -762,6 +772,7 @@ impl ComputerManager {
         injected_y: f64,
         window_key: Option<&str>,
         app_key: Option<&str>,
+        column_center: Option<f64>,
     ) -> (Option<ComputerCapturedWindow>, Option<f64>) {
         if self.action_settle_ms > 0 && injected_y != 0.0 && self.env.conditional_settle {
             let predicted = {
@@ -776,7 +787,12 @@ impl ComputerManager {
                 let expected = injected_y * predicted;
                 if let Some(early) = self.capture_for_measurement(window_id).await {
                     let traveled = self
-                        .measure_leg_travel(&from.screenshot, &early.screenshot, injected_y)
+                        .measure_leg_travel(
+                            &from.screenshot,
+                            &early.screenshot,
+                            injected_y,
+                            column_center,
+                        )
                         .await;
                     if let Some(traveled) = traveled
                         && (traveled - expected).abs()
@@ -802,7 +818,12 @@ impl ComputerManager {
             return (None, None);
         };
         let traveled = self
-            .measure_leg_travel(&from.screenshot, &capture.screenshot, injected_y)
+            .measure_leg_travel(
+                &from.screenshot,
+                &capture.screenshot,
+                injected_y,
+                column_center,
+            )
             .await;
         self.learn_leg_travel(window_key.or(window_id), app_key, injected_y, traveled);
         (Some(capture), traveled)
@@ -813,8 +834,9 @@ impl ComputerManager {
         from: &ComputerScreenshot,
         to: &ComputerScreenshot,
         injected_y: f64,
+        column_center: Option<f64>,
     ) -> Option<f64> {
-        let measured = self.measure_travel(from, to).await;
+        let measured = self.measure_travel(from, to, column_center).await;
         match measured {
             Some(measured)
                 if measured != 0.0
@@ -875,6 +897,7 @@ impl ComputerManager {
         &self,
         before: &ComputerScreenshot,
         after: &ComputerScreenshot,
+        column_center: Option<f64>,
     ) -> Option<f64> {
         if before.bytes_base64 == after.bytes_base64 {
             return Some(0.0);
@@ -888,7 +911,8 @@ impl ComputerManager {
                 .decode(&screenshot.bytes_base64)
                 .unwrap_or_else(|_| screenshot.bytes_base64.as_bytes().to_vec())
         };
-        let traveled = (self.measure_scroll_travel)(decode(before), decode(after)).await?;
+        let traveled =
+            (self.measure_scroll_travel)(decode(before), decode(after), column_center).await?;
         Some(traveled / scale)
     }
 }

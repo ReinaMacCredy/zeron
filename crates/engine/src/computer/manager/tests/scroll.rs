@@ -36,7 +36,7 @@ fn scripted_fixture(
         Setup {
             action_settle_ms: Some(action_settle_ms),
             env,
-            measure_scroll_travel: Some(Arc::new(move |_before, _after| {
+            measure_scroll_travel: Some(Arc::new(move |_before, _after, _column| {
                 let index = measured.fetch_add(1, Ordering::SeqCst);
                 let travel = travels.get(index).copied().flatten();
                 async move { travel }.boxed()
@@ -250,6 +250,51 @@ async fn converts_measured_travel_out_of_capture_pixels_before_reporting_or_lear
 }
 
 #[tokio::test]
+async fn measures_travel_around_the_scroll_point_column() {
+    let backend = Scripted::new(FakeComputerBackendOptions {
+        windows: Some(vec![ComputerWindow {
+            focused: true,
+            stacking_index: Some(0),
+            ..window(
+                "fake-browser",
+                "Browser",
+                Some(rect(0.0, 0.0, 1_920.0, 1_080.0)),
+            )
+        }]),
+        ..FakeComputerBackendOptions::default()
+    });
+    let columns = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = columns.clone();
+    let Built { manager, .. } = build(
+        backend.clone(),
+        Setup {
+            action_settle_ms: Some(0),
+            measure_scroll_travel: Some(Arc::new(move |_before, _after, column| {
+                seen.lock().unwrap().push(column);
+                async { None }.boxed()
+            })),
+            ..Setup::default()
+        },
+    );
+    backend
+        .fake
+        .queue_screenshots((0..4).map(|index| format!("capture-{index}")));
+
+    scroll_at(&manager, 192.0, 500.0, 40.0, true).await;
+
+    let columns = columns.lock().unwrap().clone();
+    assert!(!columns.is_empty());
+    assert!(
+        columns
+            .iter()
+            .all(|column| column.is_some_and(|column| close(column, 0.1))),
+        "{columns:?}"
+    );
+
+    manager.dispose().await;
+}
+
+#[tokio::test]
 async fn suppresses_a_wrong_way_measurement_instead_of_reporting_or_learning_it() {
     let Fixture {
         manager, backend, ..
@@ -272,7 +317,7 @@ async fn reads_byte_identical_captures_as_no_movement_and_learns_nothing_from_it
         Scripted::default_fake(),
         Setup {
             action_settle_ms: Some(0),
-            measure_scroll_travel: Some(Arc::new(move |_before, _after| {
+            measure_scroll_travel: Some(Arc::new(move |_before, _after, _column| {
                 measured.fetch_add(1, Ordering::SeqCst);
                 async { None }.boxed()
             })),
