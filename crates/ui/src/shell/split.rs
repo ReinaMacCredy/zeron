@@ -127,6 +127,12 @@ pub(super) struct SplitPane {
     _composer_events: Subscription,
 }
 
+impl SplitPane {
+    pub(super) fn composer_for(&self, transcript: &Entity<Transcript>) -> Option<Entity<Composer>> {
+        (&self.transcript == transcript).then(|| self.composer.clone())
+    }
+}
+
 /// A sidebar row being dragged. Distinct from the strip's
 /// [`tabs::TabDragPayload`] on purpose: the strip's drag-move/drop
 /// listeners read a tab index and would reorder on a row drag.
@@ -360,6 +366,9 @@ impl Shell {
                 | ComposerEvent::NewThreadTransitionStarted
                 | ComposerEvent::BackgroundStarted => {}
                 ComposerEvent::UnsentChanged => cx.notify(),
+                ComposerEvent::OpenComputerSetup { missing } => {
+                    _this.open_computer_permission_guide(missing.clone(), cx)
+                }
             }
         });
         self.split = Some(SplitPane {

@@ -676,6 +676,28 @@ pub fn pending_input_request(
         })
 }
 
+pub(crate) async fn respond_input(
+    engine: &crate::state::EngineHandle,
+    chat_id: &str,
+    request_id: &str,
+    answers: Vec<UserInputAnswer>,
+) -> Result<(), String> {
+    let command = SessionCommandPayload::RespondInput {
+        request_id: request_id.to_owned(),
+        answers,
+    };
+    let command = serde_json::to_value(&command).map_err(|err| err.to_string())?;
+    engine
+        .client()
+        .call(
+            methods::QUEUE_COMMAND,
+            serde_json::json!({ "chatId": chat_id, "command": command }),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|err| err.to_string())
+}
+
 /// Whether the transcript shows `request_id` explicitly resolved (here or on
 /// another device) — the wizard latch's release condition.
 pub fn input_request_resolved(transcript: &[SessionMessageEntry], request_id: &str) -> bool {
@@ -4124,6 +4146,9 @@ pub enum ComposerEvent {
     /// A draft was started in the background and the canvas now shows the
     /// next draft (d23); the shell refreshes its row snapshot and focus.
     BackgroundStarted,
+    OpenComputerSetup {
+        missing: Vec<zeron_proto::computer::ComputerPermission>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4279,6 +4304,60 @@ fn with_compact_entry(mut commands: Vec<SlashCommand>) -> Vec<SlashCommand> {
         },
     );
     commands
+}
+
+const COMPUTER_USE_COMMAND: &str = zeron_engine::computer::activation::COMPUTER_USE_SLASH_COMMAND;
+
+/// Mirrors `Harness::computer_tools_reachable`: no Opencode, Cursor, Pi or Antigravity.
+fn offers_computer_use(harness: HarnessId) -> bool {
+    matches!(
+        harness,
+        HarnessId::ClaudeCode
+            | HarnessId::Codex
+            | HarnessId::Devin
+            | HarnessId::Grok
+            | HarnessId::Hermes
+    )
+}
+
+/// Zeron owns `/computer-use` even where the harness advertises a native one.
+fn with_computer_use_entry(
+    harness: HarnessId,
+    mut commands: Vec<SlashCommand>,
+) -> Vec<SlashCommand> {
+    if !offers_computer_use(harness) {
+        return commands;
+    }
+    commands.retain(|c| c.name != COMPUTER_USE_COMMAND);
+    commands.insert(
+        0,
+        SlashCommand {
+            name: COMPUTER_USE_COMMAND.into(),
+            description: "Use Zeron Computer for this request only".into(),
+            input_hint: Some("request".into()),
+            kind: SlashCommandKind::BuiltIn,
+        },
+    );
+    commands
+}
+
+/// Remote hosts own their grants, so only a macOS UI on the chat's host checks them.
+fn computer_preflight_applies(
+    macos: bool,
+    host_device: Option<&str>,
+    local_device: Option<&str>,
+) -> bool {
+    macos && host_device.is_some() && host_device == local_device
+}
+
+fn computer_send_blockers(
+    settings_enabled: bool,
+    capabilities: crate::appshots::AppshotCapabilities,
+) -> Vec<zeron_proto::computer::ComputerPermission> {
+    if settings_enabled {
+        return Vec::new();
+    }
+    crate::computer::cards::missing_computer_permissions(capabilities)
 }
 
 /// Same ride as `/compact`: zeron's `/sidechat` joins every harness's list
@@ -4577,6 +4656,7 @@ pub struct Composer {
     /// `sending` stuck true forever (2026-08-19 incident, "press Stop while
     /// a send grinds" shape).
     action_task: Option<Task<()>>,
+    computer_preflight: Option<Task<()>>,
     /// Chats whose durable Interrupt command has been accepted or is still
     /// being queued. Kept independently so stopping one chat cannot replace
     /// another chat's request when the user navigates quickly.
@@ -4793,6 +4873,7 @@ impl Composer {
             answered_requests: HashSet::new(),
             failure_key: None,
             action_task: None,
+            computer_preflight: None,
             advance_task: None,
             send_task: None,
             interrupting: HashSet::new(),
@@ -6351,9 +6432,12 @@ impl Composer {
                 match result {
                     Ok(value) => match serde_json::from_value::<Vec<SlashCommand>>(value) {
                         Ok(commands) => {
-                            composer
-                                .slash_cache
-                                .insert(harness, with_sidechat_entry(with_compact_entry(commands)));
+                            composer.slash_cache.insert(
+                                harness,
+                                with_sidechat_entry(with_compact_entry(with_computer_use_entry(
+                                    harness, commands,
+                                ))),
+                            );
                         }
                         Err(err) => tracing::warn!(%err, "slash command decode failed"),
                     },
@@ -7279,12 +7363,112 @@ impl Composer {
             && crate::settings::current(cx).composer_send_behavior == ComposerSendBehavior::Enter
     }
 
+    fn send(
+        &mut self,
+        text: String,
+        queue: bool,
+        background: bool,
+        steer: bool,
+        cx: &mut Context<Self>,
+    ) {
+        match zeron_engine::computer::activation::parse_computer_invocation(&text) {
+            Some(prompt) if prompt.is_empty() => {
+                self.failure = Some("Add a request after /computer-use.".into());
+                self.failure_key = self.bound_chat_id(cx);
+                cx.notify();
+            }
+            Some(_) if self.computer_preflight.is_some() => {}
+            Some(_)
+                if computer_preflight_applies(
+                    cfg!(target_os = "macos"),
+                    self.send_host_device(cx).as_deref(),
+                    self.state.read(cx).local_device_id.as_deref(),
+                ) =>
+            {
+                self.preflight_computer_send(text, queue, background, steer, cx)
+            }
+            _ => self.send_now(text, queue, background, steer, cx),
+        }
+    }
+
+    fn send_host_device(&self, cx: &App) -> Option<String> {
+        match self.bound_chat_row(cx) {
+            Some(chat) => Some(chat.device_id.clone()),
+            None => {
+                let state = self.state.read(cx);
+                state
+                    .effective_device_id()
+                    .or_else(|| state.local_device_id.clone())
+            }
+        }
+    }
+
+    /// Granting never sends: a missing grant opens the guide and keeps the draft.
+    fn preflight_computer_send(
+        &mut self,
+        text: String,
+        queue: bool,
+        background: bool,
+        steer: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return self.send_now(text, queue, background, steer, cx);
+        };
+        let draft = self.input.read(cx).text().to_string();
+        let chat = self.bound_chat_id(cx);
+        self.computer_preflight = Some(cx.spawn(async move |this, cx| {
+            let call = engine
+                .client()
+                .call(methods::GET_COMPUTER_SETTINGS, serde_json::json!({}));
+            let deadline = cx.background_executor().timer(Duration::from_secs(5));
+            futures::pin_mut!(call);
+            let settings = match futures::future::select(call, deadline).await {
+                futures::future::Either::Left((reply, _)) => reply.ok(),
+                futures::future::Either::Right(_) => None,
+            };
+            let settings_enabled = settings
+                .and_then(|value| {
+                    serde_json::from_value::<zeron_proto::computer::ComputerSettings>(value).ok()
+                })
+                .is_some_and(|settings| settings.computer_control_enabled);
+            this.update(cx, |composer, cx| {
+                composer.computer_preflight = None;
+                if composer.input.read(cx).text() != draft || composer.bound_chat_id(cx) != chat {
+                    return;
+                }
+                let missing =
+                    computer_send_blockers(settings_enabled, crate::appshots::capabilities());
+                if missing.is_empty() {
+                    composer.send_now(text, queue, background, steer, cx);
+                } else {
+                    cx.emit(ComposerEvent::OpenComputerSetup { missing });
+                }
+            })
+            .ok();
+        }));
+    }
+
+    pub(crate) fn enable_computer_use(&mut self, cx: &mut Context<Self>) {
+        let draft = self.input.read(cx).text().to_string();
+        if zeron_engine::computer::activation::parse_computer_invocation(&draft).is_none() {
+            let next = if draft.trim().is_empty() {
+                format!("/{COMPUTER_USE_COMMAND} ")
+            } else {
+                format!("/{COMPUTER_USE_COMMAND} {draft}")
+            };
+            self.input.update(cx, |input, cx| input.set_text(next, cx));
+            self.sync_draft(cx);
+        }
+        cx.notify();
+    }
+
     /// Queue a Run doc command with an optimistic echo — or, with the agent
     /// busy, park the message on the chat's pending queue instead. New chats
     /// thread the picked config in: worktree creation (when the isolated toggle
     /// is on), `Mutate createChat` with the `ChatConfig` + cwd, and the model /
     /// reasoning / options on the Run request itself (§1.7).
-    fn send(
+    fn send_now(
         &mut self,
         text: String,
         queue: bool,
@@ -8157,18 +8341,10 @@ impl Composer {
             return;
         };
         let request_id = wizard.request_id.clone();
-        let command = SessionCommandPayload::RespondInput {
-            request_id: request_id.clone(),
-            answers,
-        };
         let failure_chat = chat_id.clone();
-        let params = match serde_json::to_value(&command) {
-            Ok(value) => serde_json::json!({ "chatId": chat_id, "command": value }),
-            Err(_) => return,
-        };
         // `action_task`, NOT `send_task` — see `interrupt`.
         self.action_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine.client().call(methods::QUEUE_COMMAND, params).await;
+            let result = respond_input(&engine, &chat_id, &request_id, answers).await;
             if let Err(err) = result {
                 this.update(cx, |composer, cx| {
                     composer.failure = Some(format!("Answer failed: {err}").into());
@@ -8739,6 +8915,9 @@ impl Render for Composer {
                 (text, offline)
             })
         };
+        let input_pause = self
+            .bound_chat_id(cx)
+            .and_then(|id| self.state.read(cx).computer_input_pauses.get(&id).cloned());
         // Centered composer column (zeron `mx-auto w-full max-w-3xl`).
         let container = div()
             .w_full()
@@ -8794,6 +8973,21 @@ impl Render for Composer {
                             cx,
                         ))
                         .child("Compacting context…"),
+                )
+            })
+            .when_some(input_pause, |el, notice| {
+                el.child(
+                    div()
+                        .mx(px(4.0))
+                        .child(crate::computer::cards::computer_card(
+                            crate::computer::cards::CardTone::Warning,
+                            crate::icons::CURSOR,
+                            notice.title.into(),
+                            vec![notice.body.into()],
+                            Vec::new(),
+                            None,
+                            &theme,
+                        )),
                 )
             })
             .when_some(queue_notice, |el, (notice, offline)| {
@@ -12097,5 +12291,222 @@ impl Composer {
     pub fn fixture_clear_appshots(&mut self, cx: &mut Context<Self>) {
         self.appshots.clear();
         cx.notify();
+    }
+    pub fn fixture_type(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| input.set_text(text, cx));
+        self.focus_pending = true;
+        self.on_input_edited(cx);
+        cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod computer_use_tests {
+    use super::*;
+    use gpui::TestAppContext;
+    use zeron_proto::computer::ComputerPermission;
+
+    fn command(name: &str) -> SlashCommand {
+        SlashCommand {
+            name: name.into(),
+            description: "native".into(),
+            input_hint: None,
+            kind: SlashCommandKind::BuiltIn,
+        }
+    }
+
+    #[test]
+    fn computer_use_is_offered_where_the_catalog_exists_and_wins_a_native_collision() {
+        let merged = with_computer_use_entry(
+            HarnessId::Codex,
+            vec![command("computer-use"), command("clear")],
+        );
+        let names: Vec<&str> = merged.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["computer-use", "clear"]);
+        assert_eq!(
+            merged[0].description,
+            "Use Zeron Computer for this request only"
+        );
+        for harness in [
+            HarnessId::Opencode,
+            HarnessId::Cursor,
+            HarnessId::Pi,
+            HarnessId::Antigravity,
+        ] {
+            assert!(
+                with_computer_use_entry(harness, vec![command("clear")])
+                    .iter()
+                    .all(|c| c.name != "computer-use")
+            );
+        }
+        let all = with_sidechat_entry(with_compact_entry(with_computer_use_entry(
+            HarnessId::ClaudeCode,
+            Vec::new(),
+        )));
+        let names: Vec<&str> = all.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["sidechat", "compact", "computer-use"]);
+    }
+
+    #[test]
+    fn the_preflight_runs_only_in_a_mac_ui_on_the_chats_host() {
+        assert!(computer_preflight_applies(true, Some("mac"), Some("mac")));
+        assert!(!computer_preflight_applies(false, Some("mac"), Some("mac")));
+        assert!(!computer_preflight_applies(
+            true,
+            Some("other"),
+            Some("mac")
+        ));
+        assert!(!computer_preflight_applies(true, Some("mac"), None));
+        assert!(!computer_preflight_applies(true, None, None));
+    }
+
+    #[test]
+    fn settings_on_sends_skip_the_grant_check() {
+        use crate::appshots::{
+            AppshotCapabilities, AppshotPlatform, CapabilityState, CaptureTarget,
+        };
+        let none_granted = AppshotCapabilities {
+            platform: AppshotPlatform::MacOs,
+            global_shortcut: CapabilityState::Ready,
+            window_capture: CapabilityState::PermissionRequired,
+            application_text: CapabilityState::PermissionRequired,
+            input_monitoring: CapabilityState::Ready,
+            target: CaptureTarget::ActiveWindow,
+        };
+        assert!(computer_send_blockers(true, none_granted).is_empty());
+        assert_eq!(
+            computer_send_blockers(false, none_granted),
+            vec![
+                ComputerPermission::Accessibility,
+                ComputerPermission::ScreenRecording
+            ]
+        );
+    }
+
+    fn chat(device: &str) -> zeron_proto::Chat {
+        serde_json::from_value(serde_json::json!({
+            "id": "c",
+            "deviceId": device,
+            "archived": false,
+            "createdAt": "2026-09-23T00:00:00Z"
+        }))
+        .expect("chat row")
+    }
+
+    struct Wire {
+        frames: tokio::sync::mpsc::Receiver<String>,
+    }
+
+    impl Wire {
+        fn methods(&mut self, cx: &mut TestAppContext) -> Vec<String> {
+            cx.run_until_parked();
+            let mut methods = Vec::new();
+            while let Ok(frame) = self.frames.try_recv() {
+                let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+                methods.push(frame["method"].as_str().unwrap_or_default().to_owned());
+            }
+            methods
+        }
+    }
+
+    fn composer_on(cx: &mut TestAppContext, host: &str) -> (Entity<Composer>, Wire) {
+        let (out, frames) = tokio::sync::mpsc::channel::<String>(16);
+        let (replies, inbound) = tokio::sync::mpsc::channel::<String>(16);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(
+                zeron_rpc::RpcClient::new(out, inbound),
+            ));
+            state.chats = vec![chat(host)];
+            state.selected_chat = Some("c".into());
+            state.local_device_id = Some("mac".into());
+        });
+        // A closed inbound fails pending calls from a tokio thread.
+        std::mem::forget(replies);
+        let wire = Wire { frames };
+        (cx.new(|cx| Composer::new(state, cx)), wire)
+    }
+
+    #[gpui::test]
+    fn an_empty_computer_use_stays_in_the_composer(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (composer, mut wire) = composer_on(cx, "mac");
+        composer.update(cx, |composer, cx| {
+            composer
+                .input
+                .update(cx, |input, cx| input.set_text("/computer-use", cx));
+            composer.send("/computer-use".into(), false, false, false, cx);
+            assert_eq!(
+                composer.failure.as_deref(),
+                Some("Add a request after /computer-use.")
+            );
+            assert_eq!(composer.input.read(cx).text(), "/computer-use");
+        });
+        assert!(wire.methods(cx).is_empty());
+    }
+
+    #[gpui::test]
+    fn a_local_computer_use_send_waits_on_the_settings_read(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (composer, mut wire) = composer_on(cx, "mac");
+        let text = "/computer-use open Calculator";
+        composer.update(cx, |composer, cx| {
+            composer
+                .input
+                .update(cx, |input, cx| input.set_text(text, cx));
+            composer.send(text.into(), false, false, false, cx);
+            composer.send(text.into(), false, false, false, cx);
+        });
+        let methods = wire.methods(cx);
+        if cfg!(target_os = "macos") {
+            assert_eq!(methods, vec![methods::GET_COMPUTER_SETTINGS.to_string()]);
+            composer.update(cx, |composer, cx| {
+                assert_eq!(composer.input.read(cx).text(), text, "the draft waits");
+            });
+        } else {
+            assert!(methods.contains(&methods::QUEUE_COMMAND.to_string()));
+        }
+    }
+
+    #[gpui::test]
+    fn a_remote_chat_sends_without_the_preflight(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (composer, mut wire) = composer_on(cx, "other-mac");
+        let text = "/computer-use open Calculator";
+        composer.update(cx, |composer, cx| {
+            composer
+                .input
+                .update(cx, |input, cx| input.set_text(text, cx));
+            composer.send(text.into(), false, false, false, cx);
+        });
+        let methods = wire.methods(cx);
+        assert!(!methods.contains(&methods::GET_COMPUTER_SETTINGS.to_string()));
+        assert!(methods.contains(&methods::QUEUE_COMMAND.to_string()));
+    }
+
+    #[gpui::test]
+    fn enable_prefixes_the_draft_once(cx: &mut TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        let composer = cx.new(|cx| Composer::new(state, cx));
+        composer.update(cx, |composer, cx| {
+            composer.enable_computer_use(cx);
+            assert_eq!(composer.input.read(cx).text(), "/computer-use ");
+            composer
+                .input
+                .update(cx, |input, cx| input.set_text("open Calculator", cx));
+            composer.enable_computer_use(cx);
+            assert_eq!(
+                composer.input.read(cx).text(),
+                "/computer-use open Calculator"
+            );
+            composer.enable_computer_use(cx);
+            assert_eq!(
+                composer.input.read(cx).text(),
+                "/computer-use open Calculator"
+            );
+        });
     }
 }

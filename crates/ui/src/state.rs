@@ -734,6 +734,7 @@ pub struct AppState {
     /// reads it to decide whether to offer its reopen pill; the shell owns
     /// the writes (tab opened / closed).
     pub open_sidechat_tabs: HashSet<String>,
+    pub computer_input_pauses: HashMap<String, crate::computer::cards::InputPauseNotice>,
     /// Whether each probed harness can fork or rewind a session (the
     /// `branching` half of the composer's `HarnessCompaction` probe).
     /// Unprobed harnesses are treated as able; the engine has the last word.
@@ -842,6 +843,7 @@ impl AppState {
             context_usage: None,
             compacting_chat: None,
             open_sidechat_tabs: HashSet::new(),
+            computer_input_pauses: HashMap::new(),
             harness_branching: HashMap::new(),
             transcript_replayed: false,
             transcript_baselines: HashMap::new(),
@@ -2041,6 +2043,13 @@ impl AppState {
             handle.clone(),
             cx,
         ));
+        #[cfg(target_os = "macos")]
+        watch_tasks.push(spawn_watch(
+            cx,
+            handle.clone(),
+            methods::WATCH_COMPUTER_EVENTS,
+            AppState::apply_computer_event,
+        ));
         self.watch_tasks = watch_tasks;
         self.reconcile_change_request_watches(cx);
         // EngineInfo is part of the attachment boundary: views must know which
@@ -2058,6 +2067,21 @@ impl AppState {
             }
         }
         cx.notify();
+    }
+
+    fn apply_computer_event(&mut self, event: zeron_proto::computer::ComputerEvent) -> bool {
+        let zeron_proto::computer::ComputerEvent::ThreadState { state } = event else {
+            return false;
+        };
+        let notice = crate::computer::cards::input_pause_notice(&state);
+        if self.computer_input_pauses.get(&state.thread_id) == notice.as_ref() {
+            return false;
+        }
+        match notice {
+            Some(notice) => self.computer_input_pauses.insert(state.thread_id, notice),
+            None => self.computer_input_pauses.remove(&state.thread_id),
+        };
+        true
     }
 
     fn reconcile_change_request_watches(&mut self, cx: &mut Context<Self>) {

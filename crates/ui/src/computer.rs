@@ -1,5 +1,6 @@
 //! Computer use: the desktop host that owns `cua-driver`.
 
+pub mod cards;
 pub mod cursor_preference;
 pub mod desktop_lifecycle;
 #[cfg(target_os = "macos")]
@@ -11,6 +12,7 @@ pub mod host;
 pub mod host_socket;
 #[cfg(target_os = "macos")]
 pub mod native;
+pub mod presentation;
 pub mod registration;
 #[cfg(target_os = "macos")]
 pub mod runtime_ownership;

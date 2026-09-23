@@ -294,6 +294,28 @@ impl ShortcutsPage {
         cx.notify();
     }
 
+    pub(crate) fn open_computer_permission_guide(
+        &mut self,
+        missing: &[zeron_proto::computer::ComputerPermission],
+        cx: &mut Context<Self>,
+    ) {
+        use zeron_proto::computer::ComputerPermission;
+        let Some(pane) = missing.first().map(|permission| match permission {
+            ComputerPermission::Accessibility => PermissionPane::Accessibility,
+            ComputerPermission::ScreenRecording => PermissionPane::ScreenRecording,
+            ComputerPermission::InputMonitoring => PermissionPane::InputMonitoring,
+        }) else {
+            return;
+        };
+        if !self.prompted(pane) {
+            self.set_prompted(pane);
+            pane.request();
+        }
+        crate::appshots::refresh_registration();
+        self.appshot_capabilities = crate::appshots::capabilities();
+        self.open_guide(pane, cx);
+    }
+
     fn close_guide(&mut self, cx: &mut Context<Self>) {
         if let Some(pane) = self.permissions.open.take() {
             self.permissions.tween = Some((pane, Instant::now(), false));

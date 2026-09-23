@@ -29,6 +29,7 @@ use zeron_rpc::methods;
 
 use crate::changes::{Changes, ChangesEvent};
 use crate::composer::{Composer, ComposerEvent, ComposerInput, ComposerInputEvent};
+use crate::computer::cards::ComputerRequest;
 use crate::files::{FilesCloseDisposition, FilesEvent, FilesSurface, WorkspacePathDrag};
 use crate::icons::{self, icon};
 use crate::loaders;
@@ -1726,6 +1727,7 @@ pub struct Shell {
     files_settings_page: Option<Entity<FilesSettingsPage>>,
     notifications_page: Option<Entity<NotificationsPage>>,
     shortcuts_page: Option<Entity<ShortcutsPage>>,
+    pending_computer_guide: Option<Vec<zeron_proto::computer::ComputerPermission>>,
     accounts_page: Option<Entity<AccountsPage>>,
     /// This device's agent logins + usage for the sidebar user row and its
     /// menu's Usage section; loaded once the engine is Ready and re-probed
@@ -1992,6 +1994,9 @@ impl Shell {
                     _this.focus_composer(cx);
                     cx.notify();
                 }
+                ComposerEvent::OpenComputerSetup { missing } => {
+                    _this.open_computer_permission_guide(missing.clone(), cx)
+                }
             }
         });
         // Spawn chips open their subagent's transcript as a right-pane tab.
@@ -2177,6 +2182,7 @@ impl Shell {
             files_settings_page: None,
             notifications_page: None,
             shortcuts_page: None,
+            pending_computer_guide: None,
             accounts_page: None,
             account_usage: None,
             account_usage_task: None,
@@ -3555,7 +3561,7 @@ impl Shell {
     /// transcripts (nested spawns open their own tabs).
     fn on_transcript_event(
         &mut self,
-        _: Entity<Transcript>,
+        emitter: Entity<Transcript>,
         event: &TranscriptEvent,
         cx: &mut Context<Self>,
     ) {
@@ -3596,7 +3602,41 @@ impl Shell {
             }
             TranscriptEvent::OpenFile { chat_id, path } => self.open_tool_file(chat_id, path, cx),
             TranscriptEvent::OpenChat { chat_id } => self.open_chat(chat_id.clone(), cx),
+            TranscriptEvent::Computer {
+                request: ComputerRequest::EnableControl,
+            } => {
+                let composer = self.composer_for_transcript(&emitter);
+                composer.update(cx, |composer, cx| composer.enable_computer_use(cx));
+                if composer == self.composer {
+                    self.focus_composer(cx);
+                }
+            }
+            TranscriptEvent::Computer {
+                request: ComputerRequest::OpenSetup(missing),
+            } => self.open_computer_permission_guide(missing.clone(), cx),
         }
+    }
+
+    fn composer_for_transcript(&self, transcript: &Entity<Transcript>) -> Entity<Composer> {
+        self.sidechat_tabs
+            .values()
+            .find(|tab| &tab.transcript == transcript)
+            .map(|tab| tab.composer.clone())
+            .or_else(|| {
+                self.split
+                    .as_ref()
+                    .and_then(|split| split.composer_for(transcript))
+            })
+            .unwrap_or_else(|| self.composer.clone())
+    }
+
+    pub(super) fn open_computer_permission_guide(
+        &mut self,
+        missing: Vec<zeron_proto::computer::ComputerPermission>,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_computer_guide = Some(missing);
+        self.open_settings(SettingsSection::Appshots, cx);
     }
 
     /// A tool chip's file badge: the Diff tab when the file has uncommitted
@@ -4012,6 +4052,9 @@ impl Shell {
                 | ComposerEvent::NewThreadTransitionStarted
                 | ComposerEvent::BackgroundStarted => {}
                 ComposerEvent::UnsentChanged => cx.notify(),
+                ComposerEvent::OpenComputerSetup { missing } => {
+                    _this.open_computer_permission_guide(missing.clone(), cx)
+                }
             }
         });
         let source_title = chat
@@ -5016,8 +5059,12 @@ impl Shell {
                 }
                 match &self.shortcuts_page {
                     Some(page) => {
-                        page.update(cx, |page, _| {
-                            page.show_appshots(section == SettingsSection::Appshots)
+                        let guide = self.pending_computer_guide.take();
+                        page.update(cx, |page, cx| {
+                            page.show_appshots(section == SettingsSection::Appshots);
+                            if let Some(missing) = guide {
+                                page.open_computer_permission_guide(&missing, cx);
+                            }
                         });
                         page.clone().into_any_element()
                     }
