@@ -16,11 +16,17 @@ struct ComputerStillFrameReply: Decodable {
 }
 
 struct ComputerStillPreview: View {
-    let store: SessionStore
-    let chatId: String
     let working: Bool
+    let hostOnline: () -> Bool
+    let fetch: () async -> ComputerStillFrameReply?
 
     static let pollInterval: Duration = .seconds(1)
+
+    static func poll(hostOnline: () -> Bool,
+                     fetch: () async -> ComputerStillFrameReply?) async -> ComputerStillFrameReply? {
+        guard hostOnline() else { return nil }
+        return await fetch()
+    }
 
     @State private var still: (sequence: UInt64, image: UIImage)?
     @State private var hidden = false
@@ -65,8 +71,7 @@ struct ComputerStillPreview: View {
                 return
             }
             while !Task.isCancelled {
-                let reply: ComputerStillFrameReply? = try? await store.hostRelayClient()?.call(
-                    method: "GetComputerStillFrame", params: ["chatId": chatId])
+                let reply = await Self.poll(hostOnline: hostOnline, fetch: fetch)
                 guard !Task.isCancelled else { return }
                 if let next = reply?.image {
                     if next.sequence != still?.sequence { still = next }

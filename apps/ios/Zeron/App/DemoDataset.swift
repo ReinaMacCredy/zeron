@@ -15,6 +15,7 @@ final class DemoDataset {
     var chats: [Chat]
     var sessions: [String: SessionRow]
     var changeRequests: [String: ChangeRequestSummary]
+    var computerStill: ComputerStillFrameReply?
     private var stores: [String: SessionStore] = [:]
     private var streamTask: Task<Void, Never>?
 
@@ -114,6 +115,27 @@ final class DemoDataset {
         ]
         return DemoDataset(devices: [mac, vps], spaces: [zeron, edge],
                            chats: chats, sessions: sessions, changeRequests: changeRequests)
+    }
+
+    static func syntheticComputerStill() -> ComputerStillFrameReply? {
+        let size = CGSize(width: 640, height: 400)
+        let image = UIGraphicsImageRenderer(size: size).image { context in
+            UIColor(red: 0.16, green: 0.22, blue: 0.36, alpha: 1).setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+            UIColor(white: 0.12, alpha: 1).setFill()
+            UIBezierPath(roundedRect: CGRect(x: 200, y: 60, width: 240, height: 300), cornerRadius: 18).fill()
+            let digits = NSAttributedString(string: "4", attributes: [
+                .font: UIFont.systemFont(ofSize: 96, weight: .light),
+                .foregroundColor: UIColor.white,
+            ])
+            digits.draw(at: CGPoint(x: 380, y: 90))
+            UIColor.systemOrange.setFill()
+            for row in 0..<3 {
+                UIBezierPath(ovalIn: CGRect(x: 370, y: 220 + row * 44, width: 36, height: 36)).fill()
+            }
+        }
+        guard let data = image.jpegData(compressionQuality: 0.8) else { return nil }
+        return ComputerStillFrameReply(frame: .init(sequence: 1, data: data.base64EncodedString()))
     }
 
     // MARK: Fake filesystem (folder browser demo)

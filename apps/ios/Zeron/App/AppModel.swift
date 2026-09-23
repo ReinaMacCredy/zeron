@@ -136,6 +136,12 @@ final class AppModel {
                             store.demoResponder?("Show me the streamed reply path.")
                         }
                     }
+                    if args.contains("-still"), let demo {
+                        let now = nowMs()
+                        demo.sessions[chatId] = SessionRow(chatId: chatId, deviceId: "dev-mac", status: .working,
+                                                           startedAt: now, updatedAt: now + 3_600_000)
+                        demo.computerStill = DemoDataset.syntheticComputerStill()
+                    }
                 } else if spec.hasPrefix("space:") {
                     launchRoute = .space(String(spec.dropFirst("space:".count)))
                 }

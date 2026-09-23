@@ -118,9 +118,9 @@ struct SessionView: View {
                 }
                 .motionAnimation(Motion.fadeQuick, value: store.entries.isEmpty)
                 .overlay(alignment: .topTrailing) {
-                    if model.demo == nil {
-                        ComputerStillPreview(store: store, chatId: chat.id, working: status == .working)
-                    }
+                    ComputerStillPreview(working: status == .working,
+                                         hostOnline: { model.deviceOnline(chat.deviceId) },
+                                         fetch: stillFetch(chat: chat, store: store))
                 }
             VStack(spacing: 0) {
                 if verticalSizeClass != .compact || status == .working || status == .errored
@@ -174,6 +174,16 @@ struct SessionView: View {
             .accessibilityHidden(true)
         }
         .motionAnimation(Motion.fadeQuick, value: store.openInputRequest?.requestId)
+    }
+
+    private func stillFetch(chat: Chat, store: SessionStore) -> () async -> ComputerStillFrameReply? {
+        if let demo = model.demo {
+            return { demo.computerStill }
+        }
+        return {
+            try? await store.hostRelayClient()?.call(method: "GetComputerStillFrame",
+                                                     params: ["chatId": chat.id])
+        }
     }
 
     private func liveStatus(chat: Chat) -> SessionStatus? {

@@ -391,6 +391,11 @@ struct ComposerView: View {
             guard !items.isEmpty else { return }
             stage(items)
         }
+        .onChange(of: store.computerUseEnableRequested, initial: true) { _, requested in
+            guard requested else { return }
+            store.computerUseEnableRequested = false
+            text = ComputerCopy.enablingComputerUse(text)
+        }
         .sheet(isPresented: $showModelPicker) {
             ModelPickerSheet(
                 harness: .constant(harness),

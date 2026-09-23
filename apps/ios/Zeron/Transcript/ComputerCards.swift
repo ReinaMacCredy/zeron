@@ -133,6 +133,7 @@ struct ComputerNoticeCard: View {
     let notice: ComputerNotice
     let text: String
     let hint: String?
+    var onEnable: (() -> Void)?
 
     var body: some View {
         switch notice {
@@ -140,9 +141,16 @@ struct ComputerNoticeCard: View {
             ComputerCard(tone: .info, symbol: "cursorarrow", title: text)
         case .escapeStop:
             ComputerCard(tone: .warning, symbol: "stop.circle", title: text)
-        case .setupRequired, .unavailable, .controlDenied:
+        case .setupRequired, .unavailable:
             ComputerCard(tone: .warning, symbol: "desktopcomputer", title: text,
                          lines: hint.map { [$0] } ?? [])
+        case .controlDenied:
+            ComputerCard(tone: .warning, symbol: "desktopcomputer", title: text,
+                         lines: hint.map { [$0] } ?? [],
+                         actions: onEnable.map {
+                             [ComputerCardAction(id: "computer-denied-enable", label: ComputerCopy.deniedEnable,
+                                                 primary: false, action: $0)]
+                         } ?? [])
         }
     }
 }

@@ -97,7 +97,8 @@ struct TranscriptView: View {
                         scroll.refreshLayout?()
                     }
             case .computerNotice(let notice, let text, let hint):
-                ComputerNoticeCard(notice: notice, text: text, hint: hint)
+                ComputerNoticeCard(notice: notice, text: text, hint: hint,
+                                   onEnable: { store.computerUseEnableRequested = true })
             }
         }
         .padding(.top, row.topGap)

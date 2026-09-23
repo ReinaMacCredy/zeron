@@ -64,6 +64,7 @@ final class SessionStore {
     /// Presentation state survives navigation with the warm session store.
     var expandedUserMessages: Set<String> = []
     private(set) var consentSent: [String: Bool] = [:]
+    var computerUseEnableRequested = false
 
     let doc = LoroDoc()
     /// The chat2 room cursor — the last server row seq folded into `doc`.

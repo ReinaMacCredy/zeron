@@ -250,4 +250,29 @@ final class ComputerSurfacesTests: XCTestCase {
         let none = try JSONDecoder().decode(ComputerStillFrameReply.self, from: Data(#"{"frame":null}"#.utf8))
         XCTAssertNil(none.image)
     }
+
+    func testEnablePrefixesTheDraftOnceLikeTheMac() {
+        XCTAssertEqual(ComputerCopy.enablingComputerUse(""), "/computer-use ")
+        XCTAssertEqual(ComputerCopy.enablingComputerUse("  \n"), "/computer-use ")
+        XCTAssertEqual(ComputerCopy.enablingComputerUse("open Calculator"), "/computer-use open Calculator")
+        XCTAssertEqual(ComputerCopy.enablingComputerUse("/computer-use open Calculator"),
+                       "/computer-use open Calculator")
+        XCTAssertEqual(ComputerCopy.enablingComputerUse("/computer-use "), "/computer-use ")
+        XCTAssertEqual(ComputerCopy.enablingComputerUse("/COMPUTER-USE x"), "/COMPUTER-USE x")
+        XCTAssertEqual(ComputerCopy.enablingComputerUse("   /computer-use"), "   /computer-use")
+        XCTAssertEqual(ComputerCopy.enablingComputerUse("/computer-use\nline two"), "/computer-use\nline two")
+        XCTAssertEqual(ComputerCopy.enablingComputerUse("    /computer-use"), "/computer-use     /computer-use")
+        XCTAssertEqual(ComputerCopy.enablingComputerUse("/computer-used"), "/computer-use /computer-used")
+    }
+
+    func testStillPollNeverCallsAnOfflineHost() async {
+        var calls = 0
+        let frame = ComputerStillFrameReply(frame: .init(sequence: 7, data: ""))
+        let offline = await ComputerStillPreview.poll(hostOnline: { false }, fetch: { calls += 1; return frame })
+        XCTAssertNil(offline)
+        XCTAssertEqual(calls, 0)
+        let online = await ComputerStillPreview.poll(hostOnline: { true }, fetch: { calls += 1; return frame })
+        XCTAssertEqual(online?.frame?.sequence, 7)
+        XCTAssertEqual(calls, 1)
+    }
 }

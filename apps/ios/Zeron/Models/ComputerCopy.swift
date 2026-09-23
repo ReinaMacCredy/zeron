@@ -18,7 +18,21 @@ enum ComputerCopy {
     static let unavailableNote = "Computer is unavailable for this turn"
     static let deniedTitle = "Computer control is off"
     static let deniedHint = "Turn it on in Settings to let the agent use the desktop."
+    static let deniedEnable = "Enable"
     private static let capabilityDeniedCode = "capability_denied"
+    private static let computerUseCommand = "/computer-use"
+    private static let invocation = try! NSRegularExpression(
+        pattern: #"\A {0,3}/computer-use(?:[ \t\r\n]+(?s:.*))?\z"#, options: [.caseInsensitive])
+
+    static func isComputerInvocation(_ text: String) -> Bool {
+        invocation.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
+    }
+
+    static func enablingComputerUse(_ draft: String) -> String {
+        if isComputerInvocation(draft) { return draft }
+        if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return computerUseCommand + " " }
+        return computerUseCommand + " " + draft
+    }
 
     static func notice(_ note: String) -> ComputerNotice? {
         switch note {
