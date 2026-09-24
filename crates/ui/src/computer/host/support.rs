@@ -409,6 +409,19 @@ pub(super) fn browser_self_target_reply() -> CuaReply {
     )
 }
 
+pub(super) fn self_protected_surface_reply() -> CuaReply {
+    let message = "Zeron is showing an approval, a question, or its Computer settings or permission controls, so agent input to Zeron's own windows is refused while that is on screen. Only the user may answer approvals or change these settings. Ask the user to answer or leave that page; once they have, read fresh state and retry.";
+    refusal(
+        message,
+        json!({
+            "effect": "refused",
+            "code": "self_protected_surface",
+            "layer": "driver-host",
+            "message": message,
+        }),
+    )
+}
+
 pub(super) fn desktop_pause_reply(desktop_paused: bool) -> CuaReply {
     let message = if desktop_paused {
         "Computer input is paused because the desktop is locked, asleep or inactive. Return to the desktop, then read fresh state before continuing."

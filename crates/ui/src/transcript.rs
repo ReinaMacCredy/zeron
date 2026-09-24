@@ -3454,6 +3454,9 @@ impl Transcript {
             _observe: observe,
             _text_changes: text_changes,
         };
+        let view = cx.entity_id();
+        cx.on_release(move |_, _| crate::computer::protected_surfaces::publish(view, false))
+            .detach();
         this.sync(cx);
         this
     }
@@ -9333,8 +9336,39 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
     fnv1a(&acc)
 }
 
+fn shows_protected_surface(
+    rows: &[Row],
+    answered: &HashMap<SharedString, bool>,
+    setup_missing: impl Fn() -> bool,
+) -> bool {
+    rows.iter().any(|row| match &row.kind {
+        RowKind::ComputerConsent {
+            request_id,
+            outcome: None,
+            ..
+        } => !answered.contains_key(request_id),
+        RowKind::InputChip {
+            resolved: false, ..
+        } => true,
+        RowKind::ComputerNotice {
+            notice: ComputerNotice::SetupRequired,
+            ..
+        } => setup_missing(),
+        _ => false,
+    })
+}
+
+fn computer_setup_missing() -> bool {
+    cfg!(target_os = "macos")
+        && !missing_computer_permissions(crate::appshots::capabilities()).is_empty()
+}
+
 impl Render for Transcript {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::computer::protected_surfaces::publish(
+            cx.entity_id(),
+            shows_protected_surface(&self.rows, &self.consent_sent, computer_setup_missing),
+        );
         if record_view_frame("transcript") {
             tracing::warn!(
                 distance = self.distance_from_bottom(),
@@ -15092,6 +15126,65 @@ mod computer_tests {
             }
         ));
         assert_ne!(rows[0].version, allowed[0].version);
+    }
+
+    #[test]
+    fn pending_answer_surfaces_and_the_setup_button_count_as_protected() {
+        let rows = |parts: Vec<MessagePart>| {
+            rows_for_entry(&entry(MessageRole::Assistant, parts), false, &mut parse)
+        };
+        let none = HashMap::new();
+        let pending = rows(vec![consent_part(false, None)]);
+        assert!(shows_protected_surface(&pending, &none, || false));
+        let sent = HashMap::from([(SharedString::from("computer-consent-1"), true)]);
+        assert!(!shows_protected_surface(&pending, &sent, || false));
+        let answered = rows(vec![consent_part(
+            true,
+            Some(vec![UserInputAnswer {
+                question_id: "consent".into(),
+                labels: vec!["Allow".into()],
+            }]),
+        )]);
+        assert!(!shows_protected_surface(&answered, &none, || false));
+        let question = |resolved: bool| MessagePart::Input {
+            id: "q1".into(),
+            request_id: "approval-1".into(),
+            questions: vec![UserInputQuestion {
+                id: "q".into(),
+                header: "Run command?".into(),
+                question: "Allow once?".into(),
+                options: vec!["Allow once".into(), "Deny".into()],
+                multi_select: false,
+                kind: None,
+            }],
+            resolved,
+            answers: None,
+        };
+        assert!(shows_protected_surface(
+            &rows(vec![question(false)]),
+            &none,
+            || false
+        ));
+        assert!(!shows_protected_surface(
+            &rows(vec![question(true)]),
+            &none,
+            || false
+        ));
+        let setup = rows_for_entry(
+            &entry(
+                MessageRole::System,
+                vec![text("t0", "Computer control needs setup")],
+            ),
+            false,
+            &mut parse,
+        );
+        assert!(shows_protected_surface(&setup, &none, || true));
+        assert!(!shows_protected_surface(&setup, &none, || false));
+        assert!(!shows_protected_surface(
+            &rows(vec![text("t0", "hi")]),
+            &none,
+            || true
+        ));
     }
 
     #[test]

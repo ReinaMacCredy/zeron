@@ -2124,6 +2124,9 @@ impl Shell {
             shell: shell.downgrade(),
             _observation: cx.observe(&shell, |_, _, cx| cx.notify()),
         });
+        let view = cx.entity_id();
+        cx.on_release(move |_, _| crate::computer::protected_surfaces::publish(view, false))
+            .detach();
         Self {
             state,
             sidebar_pane,
@@ -12103,6 +12106,10 @@ impl Render for Shell {
         self.settings.accent = crate::appearance::accent(cx);
         self.settings.surface = crate::appearance::surface(cx);
         self.sync_independent_settings(cx);
+        crate::computer::protected_surfaces::publish(
+            cx.entity_id(),
+            self.route == Route::Settings(SettingsSection::Computer),
+        );
         if let Some(page) = self.computer_page.clone() {
             let active = self.route == Route::Settings(SettingsSection::Computer);
             page.update(cx, |page, cx| page.set_active(active, cx));

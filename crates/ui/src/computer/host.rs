@@ -824,6 +824,12 @@ impl Host {
                 state.frame_tap_task = Some(task.clone());
             }
         }
+        if self.targets_protected_self(&name, &request.input) {
+            log(&format!(
+                "refused {name}: a protected surface is showing in this app"
+            ));
+            return Ok(self_protected_surface_reply());
+        }
         let input = request.input.clone();
         let model_observation = request.model_observation;
         let reply = self.clone().call(request).await;
@@ -2540,6 +2546,18 @@ impl Host {
             Some(pids) => pids(),
             None => HashSet::from([std::process::id()]),
         }
+    }
+
+    fn targets_protected_self(&self, name: &str, input: &Value) -> bool {
+        CUA_ACTION_TOOLS.contains(&name)
+            && js_safe_integer(input.as_object().and_then(|args| args.get("pid")))
+                .and_then(|pid| u32::try_from(pid).ok())
+                .is_some_and(|pid| self.own_pids().contains(&pid))
+            && self
+                .options
+                .protected_surface
+                .as_ref()
+                .is_some_and(|showing| showing())
     }
 
     async fn stop_task_input(

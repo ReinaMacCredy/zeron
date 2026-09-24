@@ -109,6 +109,7 @@ pub struct CuaDriverHostOptions {
     pub shield: Option<Arc<dyn ComputerShieldHost>>,
     pub native_revision: Option<u64>,
     pub own_pids: Option<Box<dyn Fn() -> HashSet<u32> + Send>>,
+    pub protected_surface: Option<Box<dyn Fn() -> bool + Send>>,
     pub cursor_style: Option<Box<dyn Fn() -> Option<CuaCursorStyle> + Send>>,
     pub warm_on_first_touch: bool,
 }
@@ -134,6 +135,7 @@ impl CuaDriverHostOptions {
             shield: None,
             native_revision: Some(zeron_proto::computer::CUA_NATIVE_REVISION),
             own_pids: None,
+            protected_surface: None,
             cursor_style: None,
             warm_on_first_touch: warm_on_first_touch_from_env(),
         }

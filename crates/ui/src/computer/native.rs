@@ -119,6 +119,7 @@ pub fn native_host_options(
         Box::new(|| Box::pin(async { permissions::start_permission_setup().map(|_| ()) })),
     );
     options.cursor_style = config.cursor_style;
+    options.protected_surface = Some(Box::new(super::protected_surfaces::any_showing));
     options.check_permissions = Some(Box::new({
         let events = events.clone();
         let monitor = monitor.clone();

@@ -458,6 +458,7 @@ mod escape;
 mod frame_tap;
 mod retirement;
 mod risk;
+mod self_guard;
 mod shield;
 mod task_stop;
 mod warm;
