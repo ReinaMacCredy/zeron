@@ -10026,7 +10026,7 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
 
 fn shows_protected_surface(
     rows: &[Row],
-    answered: &HashMap<SharedString, bool>,
+    answered: &HashMap<SharedString, ConsentOutcome>,
     setup_missing: impl Fn() -> bool,
 ) -> bool {
     rows.iter().any(|row| match &row.kind {
@@ -16277,12 +16277,20 @@ mod computer_tests {
     #[test]
     fn pending_answer_surfaces_and_the_setup_button_count_as_protected() {
         let rows = |parts: Vec<MessagePart>| {
-            rows_for_entry(&entry(MessageRole::Assistant, parts), false, &mut parse)
+            rows_for_entry(
+                &entry(MessageRole::Assistant, parts),
+                false,
+                false,
+                &mut parse,
+            )
         };
         let none = HashMap::new();
         let pending = rows(vec![consent_part(false, None)]);
         assert!(shows_protected_surface(&pending, &none, || false));
-        let sent = HashMap::from([(SharedString::from("computer-consent-1"), true)]);
+        let sent = HashMap::from([(
+            SharedString::from("computer-consent-1"),
+            ConsentOutcome::Allowed,
+        )]);
         assert!(!shows_protected_surface(&pending, &sent, || false));
         let answered = rows(vec![consent_part(
             true,
@@ -16321,6 +16329,7 @@ mod computer_tests {
                 MessageRole::System,
                 vec![text("t0", "Computer control needs setup")],
             ),
+            false,
             false,
             &mut parse,
         );
