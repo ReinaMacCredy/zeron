@@ -15026,6 +15026,7 @@ mod computer_tests {
                 multi_select: false,
                 kind: Some(UserInputKind::Consent {
                     scope: ComputerConsentScope::Task,
+                    app: None,
                 }),
             }],
             resolved,

@@ -55,8 +55,8 @@ pub fn consent_question(questions: &[UserInputQuestion]) -> Option<&UserInputQue
 }
 
 pub fn consent_scope(question: &UserInputQuestion) -> ComputerConsentScope {
-    match question.kind {
-        Some(zeron_proto::UserInputKind::Consent { scope }) => scope,
+    match &question.kind {
+        Some(zeron_proto::UserInputKind::Consent { scope, .. }) => *scope,
         None => ComputerConsentScope::Task,
     }
 }

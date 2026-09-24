@@ -64,7 +64,10 @@ pub fn consent_question(card: &ComputerConsentCard) -> UserInputQuestion {
             COMPUTER_CONSENT_DECLINE.into(),
         ],
         multi_select: false,
-        kind: Some(UserInputKind::Consent { scope: card.scope }),
+        kind: Some(UserInputKind::Consent {
+            scope: card.scope,
+            app: None,
+        }),
     }
 }
 

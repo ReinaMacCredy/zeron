@@ -12147,6 +12147,7 @@ mod tests {
         let consent = UserInputQuestion {
             kind: Some(zeron_proto::UserInputKind::Consent {
                 scope: zeron_proto::computer::ComputerConsentScope::Task,
+                app: None,
             }),
             ..question("consent", &["Allow", "Decline"], false)
         };

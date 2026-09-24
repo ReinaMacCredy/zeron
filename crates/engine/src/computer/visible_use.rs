@@ -960,6 +960,7 @@ mod tests {
     fn a_consent_card_is_never_a_visible_use_question() {
         let consent = Some(zeron_proto::UserInputKind::Consent {
             scope: zeron_proto::computer::ComputerConsentScope::Task,
+            app: None,
         });
         let walk = visible_use_entries(&[
             doc_entry(MessageRole::User, vec![text("show me the browser")]),
