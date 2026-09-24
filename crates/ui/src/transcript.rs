@@ -6819,7 +6819,9 @@ impl Transcript {
                 self.state
                     .read(cx)
                     .sub_transcript(doc_id)
-                    .last()
+                    .iter()
+                    .rev()
+                    .find(|e| e.role == MessageRole::Assistant)
                     .map(|e| e.id.clone())
             } else {
                 self.state
