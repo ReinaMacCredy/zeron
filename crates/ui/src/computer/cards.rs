@@ -1,10 +1,15 @@
 use gpui::{
     AnyElement, App, ClickEvent, FontWeight, Hsla, SharedString, Window, div, prelude::*, px,
 };
-use zeron_engine::computer::engine_seams::{COMPUTER_CONSENT_ALLOW, COMPUTER_CONSENT_DECLINE};
+use zeron_engine::computer::engine_seams::{
+    COMPUTER_CONSENT_ALLOW, COMPUTER_CONSENT_ALWAYS_PREFIX, COMPUTER_CONSENT_DECLINE,
+    consent_always_label, consent_app_title,
+};
 use zeron_engine::computer::manager::COMPUTER_CONTROL_ON_DISCLOSURE;
 use zeron_engine::computer::runtime::COMPUTER_ESCAPE_STOP_NOTICE;
-use zeron_proto::computer::{ComputerConsentScope, ComputerPermission, ThreadComputerState};
+use zeron_proto::computer::{
+    ComputerConsentApp, ComputerConsentScope, ComputerPermission, ThreadComputerState,
+};
 use zeron_proto::{UserInputAnswer, UserInputQuestion};
 
 use crate::appshots::{AppshotCapabilities, CapabilityState};
@@ -46,12 +51,45 @@ pub enum ComputerRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConsentOutcome {
     Allowed,
+    AlwaysAllowed,
     Declined,
     Cancelled,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConsentChoice {
+    Allow,
+    AlwaysAllow(String),
+    Decline,
+}
+
+impl ConsentChoice {
+    fn answer_label(&self) -> &str {
+        match self {
+            Self::Allow => COMPUTER_CONSENT_ALLOW,
+            Self::AlwaysAllow(label) => label,
+            Self::Decline => COMPUTER_CONSENT_DECLINE,
+        }
+    }
+
+    pub fn outcome(&self) -> ConsentOutcome {
+        match self {
+            Self::Allow => ConsentOutcome::Allowed,
+            Self::AlwaysAllow(_) => ConsentOutcome::AlwaysAllowed,
+            Self::Decline => ConsentOutcome::Declined,
+        }
+    }
+}
+
 pub fn consent_question(questions: &[UserInputQuestion]) -> Option<&UserInputQuestion> {
     questions.iter().find(|question| question.is_consent())
+}
+
+pub fn consent_app(question: &UserInputQuestion) -> Option<ComputerConsentApp> {
+    match &question.kind {
+        Some(zeron_proto::UserInputKind::Consent { app, .. }) => app.clone(),
+        None => None,
+    }
 }
 
 pub fn consent_scope(question: &UserInputQuestion) -> ComputerConsentScope {
@@ -72,6 +110,11 @@ pub fn consent_outcome(
         .collect();
     if labels.contains(&COMPUTER_CONSENT_ALLOW) {
         Some(ConsentOutcome::Allowed)
+    } else if labels
+        .iter()
+        .any(|label| label.starts_with(COMPUTER_CONSENT_ALWAYS_PREFIX))
+    {
+        Some(ConsentOutcome::AlwaysAllowed)
     } else if !labels.is_empty() {
         Some(ConsentOutcome::Declined)
     } else if resolved {
@@ -81,24 +124,23 @@ pub fn consent_outcome(
     }
 }
 
-pub fn consent_answers(question_id: &str, allow: bool) -> Vec<UserInputAnswer> {
-    let label = if allow {
-        COMPUTER_CONSENT_ALLOW
-    } else {
-        COMPUTER_CONSENT_DECLINE
-    };
+pub fn consent_answers(question_id: &str, choice: &ConsentChoice) -> Vec<UserInputAnswer> {
     vec![UserInputAnswer {
         question_id: question_id.to_owned(),
-        labels: vec![label.to_owned()],
+        labels: vec![choice.answer_label().to_owned()],
     }]
 }
 
 /// The engine's task question opens with the card's own title; drop it.
-pub fn consent_detail(scope: ComputerConsentScope, question: &str) -> String {
+pub fn consent_detail(
+    scope: ComputerConsentScope,
+    app: Option<&ComputerConsentApp>,
+    question: &str,
+) -> String {
     let question = question.trim();
     match scope {
         ComputerConsentScope::Task => question
-            .strip_prefix(consent_title(scope))
+            .strip_prefix(consent_card_title(scope, app).as_str())
             .map_or(question, str::trim_start)
             .to_owned(),
         ComputerConsentScope::Call => question.to_owned(),
@@ -112,25 +154,59 @@ pub fn consent_title(scope: ComputerConsentScope) -> &'static str {
     }
 }
 
-pub fn consent_allow_label(scope: ComputerConsentScope) -> &'static str {
-    match scope {
-        ComputerConsentScope::Task => "Allow Computer for this task",
-        ComputerConsentScope::Call => "Approve once",
+pub fn consent_card_title(scope: ComputerConsentScope, app: Option<&ComputerConsentApp>) -> String {
+    match (scope, app) {
+        (ComputerConsentScope::Task, Some(app)) => consent_app_title(app),
+        _ => consent_title(scope).to_owned(),
     }
 }
 
-pub fn consent_allow_description(scope: ComputerConsentScope) -> &'static str {
-    match scope {
-        ComputerConsentScope::Task => {
-            "Continue routine desktop actions until this response ends. Stop cancels access. Clipboard reads still ask separately."
-        }
-        ComputerConsentScope::Call => "Allow just this request",
+pub fn consent_allow_label(
+    scope: ComputerConsentScope,
+    app: Option<&ComputerConsentApp>,
+) -> &'static str {
+    match (scope, app) {
+        (ComputerConsentScope::Task, Some(_)) => "Allow for this task",
+        (ComputerConsentScope::Task, None) => "Allow Computer for this task",
+        (ComputerConsentScope::Call, _) => "Approve once",
     }
+}
+
+pub fn consent_allow_description(
+    scope: ComputerConsentScope,
+    app: Option<&ComputerConsentApp>,
+) -> String {
+    match (scope, app) {
+        (ComputerConsentScope::Task, Some(app)) => format!(
+            "Continue actions in {} until this response ends. Other apps still ask. Stop cancels access.",
+            app.name
+        ),
+        (ComputerConsentScope::Task, None) => "Continue routine desktop actions until this response ends. Stop cancels access. Clipboard reads still ask separately.".to_owned(),
+        (ComputerConsentScope::Call, _) => "Allow just this request".to_owned(),
+    }
+}
+
+pub fn consent_choices(
+    scope: ComputerConsentScope,
+    app: Option<&ComputerConsentApp>,
+) -> Vec<(ConsentChoice, String)> {
+    let mut choices = vec![(
+        ConsentChoice::Allow,
+        consent_allow_label(scope, app).to_owned(),
+    )];
+    if scope == ComputerConsentScope::Task
+        && let Some(label) = app.and_then(consent_always_label)
+    {
+        choices.push((ConsentChoice::AlwaysAllow(label.clone()), label));
+    }
+    choices.push((ConsentChoice::Decline, COMPUTER_CONSENT_DECLINE.to_owned()));
+    choices
 }
 
 pub fn consent_outcome_label(outcome: ConsentOutcome) -> &'static str {
     match outcome {
         ConsentOutcome::Allowed => "Allowed",
+        ConsentOutcome::AlwaysAllowed => "Always allowed",
         ConsentOutcome::Declined => "Declined",
         ConsentOutcome::Cancelled => "Cancelled",
     }
@@ -377,20 +453,75 @@ mod tests {
 
     #[test]
     fn consent_answers_use_the_engine_labels() {
-        assert_eq!(consent_answers("consent", true), answer(&["Allow"]));
-        assert_eq!(consent_answers("consent", false), answer(&["Decline"]));
-        let decision = |allow| {
-            zeron_engine::computer::engine_seams::consent_decision(&consent_answers(
-                "consent", allow,
-            ))
-        };
+        use zeron_engine::computer::approval_gate::ApprovalDecision;
+        let always = ConsentChoice::AlwaysAllow("Always allow Safari".into());
         assert_eq!(
-            decision(true),
-            zeron_engine::computer::approval_gate::ApprovalDecision::Accept
+            consent_answers("consent", &ConsentChoice::Allow),
+            answer(&["Allow"])
         );
         assert_eq!(
-            decision(false),
-            zeron_engine::computer::approval_gate::ApprovalDecision::Decline
+            consent_answers("consent", &ConsentChoice::Decline),
+            answer(&["Decline"])
+        );
+        assert_eq!(
+            consent_answers("consent", &always),
+            answer(&["Always allow Safari"])
+        );
+        let decision = |choice: &ConsentChoice| {
+            zeron_engine::computer::engine_seams::consent_decision(&consent_answers(
+                "consent", choice,
+            ))
+        };
+        assert_eq!(decision(&ConsentChoice::Allow), ApprovalDecision::Accept);
+        assert_eq!(decision(&ConsentChoice::Decline), ApprovalDecision::Decline);
+        assert_eq!(decision(&always), ApprovalDecision::AcceptForSession);
+        assert_eq!(
+            consent_outcome(true, Some(&answer(&["Always allow Safari"]))),
+            Some(ConsentOutcome::AlwaysAllowed)
+        );
+    }
+
+    fn safari(bundle_id: Option<&str>) -> ComputerConsentApp {
+        ComputerConsentApp {
+            name: "Safari".into(),
+            bundle_id: bundle_id.map(str::to_owned),
+            pid: Some(42),
+        }
+    }
+
+    #[test]
+    fn an_app_card_names_the_app_and_offers_always_only_when_verified() {
+        let verified = safari(Some("com.apple.Safari"));
+        let task = ComputerConsentScope::Task;
+        assert_eq!(
+            consent_card_title(task, Some(&verified)),
+            "Allow Computer to use Safari (com.apple.Safari)?"
+        );
+        assert_eq!(
+            consent_choices(task, Some(&verified))
+                .into_iter()
+                .map(|(_, label)| label)
+                .collect::<Vec<_>>(),
+            ["Allow for this task", "Always allow Safari", "Decline"]
+        );
+        let unverified = safari(None);
+        assert_eq!(
+            consent_card_title(task, Some(&unverified)),
+            "Allow Computer to use Safari (unverified app)?"
+        );
+        assert_eq!(
+            consent_choices(task, Some(&unverified))
+                .into_iter()
+                .map(|(choice, _)| choice)
+                .collect::<Vec<_>>(),
+            [ConsentChoice::Allow, ConsentChoice::Decline]
+        );
+        assert_eq!(
+            consent_choices(task, None)
+                .into_iter()
+                .map(|(_, label)| label)
+                .collect::<Vec<_>>(),
+            ["Allow Computer for this task", "Decline"]
         );
     }
 
@@ -399,12 +530,25 @@ mod tests {
         assert_eq!(
             consent_detail(
                 ComputerConsentScope::Task,
+                None,
                 "Allow Computer for this task? The agent wants to run computer_click."
             ),
             "The agent wants to run computer_click."
         );
         assert_eq!(
-            consent_detail(ComputerConsentScope::Call, "Allow the agent to run x once?"),
+            consent_detail(
+                ComputerConsentScope::Task,
+                Some(&safari(Some("com.apple.Safari"))),
+                "Allow Computer to use Safari (com.apple.Safari)? The agent wants to run computer_click."
+            ),
+            "The agent wants to run computer_click."
+        );
+        assert_eq!(
+            consent_detail(
+                ComputerConsentScope::Call,
+                None,
+                "Allow the agent to run x once?"
+            ),
             "Allow the agent to run x once?"
         );
     }

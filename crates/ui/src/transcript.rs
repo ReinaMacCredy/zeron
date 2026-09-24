@@ -43,10 +43,10 @@ use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, Su
 use zeron_proto::ToolCall;
 
 use crate::computer::cards::{
-    CardAction, CardTone, ComputerNotice, ComputerRequest, ConsentOutcome, computer_card,
-    computer_notice, consent_allow_description, consent_allow_label, consent_answers,
-    consent_detail, consent_outcome, consent_outcome_label, consent_question, consent_scope,
-    consent_title, is_control_denied, missing_computer_permissions,
+    CardAction, CardTone, ComputerNotice, ComputerRequest, ConsentChoice, ConsentOutcome,
+    computer_card, computer_notice, consent_allow_description, consent_answers, consent_app,
+    consent_card_title, consent_choices, consent_detail, consent_outcome, consent_outcome_label,
+    consent_question, consent_scope, is_control_denied, missing_computer_permissions,
 };
 use crate::computer::presentation::{
     ComputerCall, computer_call, computer_call_rows, computer_output_hidden, describe_computer_call,
@@ -1063,6 +1063,7 @@ pub enum RowKind {
         request_id: SharedString,
         question_id: SharedString,
         scope: zeron_proto::computer::ComputerConsentScope,
+        app: Option<zeron_proto::computer::ComputerConsentApp>,
         question: SharedString,
         outcome: Option<ConsentOutcome>,
     },
@@ -1677,15 +1678,17 @@ pub fn rows_for_entry(
                             Some(ConsentOutcome::Allowed) => 1,
                             Some(ConsentOutcome::Declined) => 2,
                             Some(ConsentOutcome::Cancelled) => 3,
+                            Some(ConsentOutcome::AlwaysAllowed) => 4,
                         };
                         rows.push(Row {
                             id: format!("{}#{}", entry.id, part_id).into(),
-                            version: fnv1a(question.question.as_bytes()) << 2 | outcome_bits,
+                            version: fnv1a(question.question.as_bytes()) << 3 | outcome_bits,
                             turn_start: false,
                             kind: RowKind::ComputerConsent {
                                 request_id: request_id.clone().into(),
                                 question_id: question.id.clone().into(),
                                 scope: consent_scope(question),
+                                app: consent_app(question),
                                 question: question.question.clone().into(),
                                 outcome,
                             },
@@ -3179,7 +3182,7 @@ pub struct Transcript {
     /// Entry whose hover action is showing transient copied-check feedback.
     copied_message: Option<SharedString>,
     copied_message_clear: Option<Task<()>>,
-    consent_sent: HashMap<SharedString, bool>,
+    consent_sent: HashMap<SharedString, ConsentOutcome>,
     consent_failures: HashMap<SharedString, SharedString>,
     /// Transcript attachment being viewed full-size (click a user thumbnail).
     attachment_preview: Option<crate::attachments::PreviewImage>,
@@ -6763,12 +6766,14 @@ impl Transcript {
                 request_id,
                 question_id,
                 scope,
+                app,
                 question,
                 outcome,
             } => self.render_computer_consent(
                 request_id.clone(),
                 question_id.clone(),
                 *scope,
+                app.as_ref(),
                 question,
                 *outcome,
                 &theme,
@@ -8044,7 +8049,7 @@ impl Transcript {
         &mut self,
         request_id: SharedString,
         question_id: SharedString,
-        allow: bool,
+        choice: ConsentChoice,
         cx: &mut Context<Self>,
     ) {
         if self.consent_sent.contains_key(&request_id) {
@@ -8056,10 +8061,11 @@ impl Transcript {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        self.consent_sent.insert(request_id.clone(), allow);
+        self.consent_sent
+            .insert(request_id.clone(), choice.outcome());
         self.consent_failures.remove(&request_id);
         cx.notify();
-        let answers = consent_answers(&question_id, allow);
+        let answers = consent_answers(&question_id, &choice);
         cx.spawn(async move |this, cx| {
             let sent =
                 crate::composer::respond_input(&engine, &chat_id, &request_id, answers).await;
@@ -8083,28 +8089,24 @@ impl Transcript {
         request_id: SharedString,
         question_id: SharedString,
         scope: zeron_proto::computer::ComputerConsentScope,
+        app: Option<&zeron_proto::computer::ComputerConsentApp>,
         question: &str,
         outcome: Option<ConsentOutcome>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let settled = outcome.or_else(|| {
-            self.consent_sent.get(&request_id).map(|allow| {
-                if *allow {
-                    ConsentOutcome::Allowed
-                } else {
-                    ConsentOutcome::Declined
-                }
-            })
-        });
+        let settled = outcome.or_else(|| self.consent_sent.get(&request_id).copied());
         let mut lines: Vec<SharedString> = Vec::new();
-        let detail = consent_detail(scope, question);
+        let detail = consent_detail(scope, app, question);
         if !detail.is_empty() {
             lines.push(detail.into());
         }
         let (tone, status, actions) = match settled {
             Some(outcome) => (
-                if outcome == ConsentOutcome::Allowed {
+                if matches!(
+                    outcome,
+                    ConsentOutcome::Allowed | ConsentOutcome::AlwaysAllowed
+                ) {
                     CardTone::Success
                 } else {
                     CardTone::Info
@@ -8113,32 +8115,37 @@ impl Transcript {
                 Vec::new(),
             ),
             None => {
-                lines.push(consent_allow_description(scope).into());
-                let action = |allow: bool, label: &'static str| {
-                    let (request_id, question_id) = (request_id.clone(), question_id.clone());
-                    CardAction {
-                        id: format!("computer-consent-{}-{}", request_id, label).into(),
-                        label: label.into(),
-                        primary: allow,
-                        on_click: Box::new(cx.listener(move |this, _, _, cx| {
-                            this.answer_consent(request_id.clone(), question_id.clone(), allow, cx)
-                        })),
-                    }
-                };
+                lines.push(consent_allow_description(scope, app).into());
+                let actions = consent_choices(scope, app)
+                    .into_iter()
+                    .map(|(choice, label)| {
+                        let (request_id, question_id) = (request_id.clone(), question_id.clone());
+                        CardAction {
+                            id: format!("computer-consent-{}-{}", request_id, label).into(),
+                            label: label.into(),
+                            primary: choice == ConsentChoice::Allow,
+                            on_click: Box::new(cx.listener(move |this, _, _, cx| {
+                                this.answer_consent(
+                                    request_id.clone(),
+                                    question_id.clone(),
+                                    choice.clone(),
+                                    cx,
+                                )
+                            })),
+                        }
+                    })
+                    .collect();
                 (
                     CardTone::Warning,
                     self.consent_failures.get(&request_id).cloned(),
-                    vec![
-                        action(true, consent_allow_label(scope)),
-                        action(false, "Decline"),
-                    ],
+                    actions,
                 )
             }
         };
         computer_card(
             tone,
             crate::icons::MONITOR,
-            consent_title(scope).into(),
+            consent_card_title(scope, app).into(),
             lines,
             actions,
             status,
@@ -15289,6 +15296,7 @@ mod computer_tests {
                         "computer-consent-1".into(),
                         "consent".into(),
                         ComputerConsentScope::Task,
+                        None,
                         "Allow Computer for this task? The agent wants to run computer_click.",
                         None,
                         &theme,
@@ -15331,6 +15339,79 @@ mod computer_tests {
             cx.debug_bounds("computer-consent-computer-consent-1-Decline")
                 .is_none(),
             "an answered card settles instead of offering the choice again"
+        );
+    }
+
+    #[gpui::test]
+    fn clicking_always_allow_on_an_app_card_answers_with_the_always_label(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let (out, mut frames) = tokio::sync::mpsc::channel::<String>(16);
+        let (replies, inbound) = tokio::sync::mpsc::channel::<String>(16);
+        std::mem::forget(replies);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(
+                zeron_rpc::RpcClient::new(out, inbound),
+            ))
+        });
+        let transcript = cx.new(|cx| Transcript::new(state, cx));
+        transcript.update(cx, |transcript, _| transcript.chat_id = Some("chat".into()));
+        struct Fixture(Entity<Transcript>);
+        impl Render for Fixture {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let theme = Theme::of(cx).clone();
+                let app = zeron_proto::computer::ComputerConsentApp {
+                    name: "Safari".into(),
+                    bundle_id: Some("com.apple.Safari".into()),
+                    pid: Some(42),
+                };
+                let card = self.0.update(cx, |this, cx| {
+                    this.render_computer_consent(
+                        "computer-consent-1".into(),
+                        "consent".into(),
+                        ComputerConsentScope::Task,
+                        Some(&app),
+                        "Allow Computer to use Safari (com.apple.Safari)? The agent wants to run computer_click.",
+                        None,
+                        &theme,
+                        cx,
+                    )
+                });
+                div().w(px(520.0)).child(card)
+            }
+        }
+        let (_fixture, cx) = cx.add_window_view(|_, _| Fixture(transcript.clone()));
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("computer-consent-computer-consent-1-Allow for this task")
+                .is_some()
+        );
+        let always = cx
+            .debug_bounds("computer-consent-computer-consent-1-Always allow Safari")
+            .expect("Always allow painted");
+        cx.simulate_click(always.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        let frame: serde_json::Value = serde_json::from_str(&frames.try_recv().unwrap()).unwrap();
+        let command: zeron_doc::SessionCommandPayload =
+            serde_json::from_value(frame["params"]["command"].clone()).unwrap();
+        assert_eq!(
+            command,
+            zeron_doc::SessionCommandPayload::RespondInput {
+                request_id: "computer-consent-1".into(),
+                answers: vec![UserInputAnswer {
+                    question_id: "consent".into(),
+                    labels: vec!["Always allow Safari".into()],
+                }],
+            }
         );
     }
 
