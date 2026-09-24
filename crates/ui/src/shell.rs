@@ -7287,9 +7287,11 @@ impl Shell {
                                     .tab_stop(selected)
                                     .on_key_down(cx.listener(
                                         move |this, event: &gpui::KeyDownEvent, window, cx| {
+                                            let query =
+                                                this.settings_search.read(cx).text().to_string();
                                             let items: Vec<_> = SettingsSection::ALL
                                                 .into_iter()
-                                                .filter(|s| s.visible_in_nav())
+                                                .filter(|s| s.visible_in_nav() && s.matches(&query))
                                                 .collect();
                                             let current =
                                                 items.iter().position(|s| *s == item).unwrap_or(0);
