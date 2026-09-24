@@ -919,6 +919,42 @@ fn select_popup_option(
     value: &str,
     element_title: &str,
 ) -> anyhow::Result<(String, Option<bool>)> {
+    select_popup_option_in(element, element_index, value, element_title, false)
+}
+
+fn popup_menu_open(element: AXUIElementRef) -> bool {
+    let children = unsafe { copy_children(element) };
+    let open = children
+        .iter()
+        .any(|&child| unsafe { copy_string_attr(child, "AXRole") }.as_deref() == Some("AXMenu"));
+    for child in children {
+        unsafe { CFRelease(child as _) };
+    }
+    open
+}
+
+// Chromium names <select> options by AXValue and leaves AXTitle empty.
+fn popup_option_label(title: &str, value: &str) -> String {
+    if title.trim().is_empty() {
+        value
+    } else {
+        title
+    }
+    .to_owned()
+}
+
+// A collapsed Chromium <select> exposes only its current option, with no AXMenu.
+fn popup_needs_opening(opened: bool, matched: bool, has_menu: bool) -> bool {
+    !opened && !matched && !has_menu
+}
+
+fn select_popup_option_in(
+    element: AXUIElementRef,
+    element_index: usize,
+    value: &str,
+    element_title: &str,
+    opened: bool,
+) -> anyhow::Result<(String, Option<bool>)> {
     let children = unsafe { copy_children(element) };
     let (options, owned) = flatten_popup_options(&children, |child| {
         (unsafe { copy_string_attr(child, "AXRole") }.as_deref() == Some("AXMenu"))
@@ -929,9 +965,10 @@ fn select_popup_option(
     for &option in &options {
         let title = unsafe { copy_string_attr(option, "AXTitle") }.unwrap_or_default();
         let option_value = unsafe { copy_string_attr(option, "AXValue") }.unwrap_or_default();
-        available.push(title.clone());
+        let shown = popup_option_label(&title, &option_value);
+        available.push(shown.clone());
         if popup_option_matches(&title, &option_value, value) {
-            matched = Some((option, title));
+            matched = Some((option, shown));
             break;
         }
     }
@@ -964,7 +1001,12 @@ fn select_popup_option(
                 Some(shown),
             )
         })
+    } else if popup_needs_opening(opened, false, !owned.is_empty()) {
+        Ok((String::new(), None))
     } else {
+        if opened {
+            let _ = crate::input::ax_actions::perform_ax_action(element as usize, "cancel");
+        }
         Err(AxActionFailure::refused(popup_no_match_message(
             value,
             element_index,
@@ -975,6 +1017,17 @@ fn select_popup_option(
     };
     for child in children.into_iter().chain(owned) {
         unsafe { CFRelease(child as _) };
+    }
+    if matches!(&result, Ok((message, None)) if message.is_empty()) {
+        // A collapsed web <select> lists its options only while its menu is open.
+        crate::input::ax_actions::perform_ax_action(element as usize, "press")?;
+        for _ in 0..12 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            if popup_menu_open(element) {
+                break;
+            }
+        }
+        return select_popup_option_in(element, element_index, value, element_title, true);
     }
     result
 }
@@ -991,8 +1044,8 @@ fn popup_no_match_message(
     );
     if available.iter().all(|title| title.trim().is_empty()) {
         message.push_str(
-            " A collapsed web <select> exposes no option titles; press_key the option's \
-             first letters on this control's ref instead, then verify the value.",
+            " Its options are untitled; press_key the option's first letters on this \
+             control's ref instead, then verify the value.",
         );
     }
     message
@@ -1003,10 +1056,11 @@ mod tests {
     use super::{
         apply_surface_trust, apply_verification_label, choose_value_route, classify_write,
         compose_append_value, flatten_popup_options, kAXErrorSuccess, needs_stepping,
-        needs_string_retry, poll_until_moved, poll_while_unchanged, popup_no_match_message,
-        popup_option_matches, popup_shows_option, refuse_rich_text_replace, step_to_value_with,
-        validate_append_target, write_ignored, write_value_with, AxActionFailure, CfValueKind,
-        SetValueOutcome, ValueRoute, MAX_APPENDED_TEXT_UTF16,
+        needs_string_retry, poll_until_moved, poll_while_unchanged, popup_needs_opening,
+        popup_no_match_message, popup_option_label, popup_option_matches, popup_shows_option,
+        refuse_rich_text_replace, step_to_value_with, validate_append_target, write_ignored,
+        write_value_with, AxActionFailure, CfValueKind, SetValueOutcome, ValueRoute,
+        MAX_APPENDED_TEXT_UTF16,
     };
     use std::cell::Cell;
 
@@ -1546,5 +1600,15 @@ mod tests {
         let hint = "press_key the option's";
         assert!(popup_no_match_message("banana", 3, "Fruit", &[String::new()]).contains(hint));
         assert!(!popup_no_match_message("kiwi", 3, "Fruit", &["Apple".into()]).contains(hint));
+    }
+
+    #[test]
+    fn only_a_collapsed_popup_with_untitled_options_is_opened_once() {
+        assert!(popup_needs_opening(false, false, false));
+        assert!(!popup_needs_opening(true, false, false));
+        assert!(!popup_needs_opening(false, true, false));
+        assert!(!popup_needs_opening(false, false, true));
+        assert_eq!(popup_option_label("", "Cherry"), "Cherry");
+        assert_eq!(popup_option_label("Large", "L"), "Large");
     }
 }
