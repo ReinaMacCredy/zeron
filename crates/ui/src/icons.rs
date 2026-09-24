@@ -50,6 +50,8 @@ macro_rules! icon_assets {
 icon_assets![
     (PROJECT_DEFAULT, "project-default"),
     (REMOTE_SERVER, "remote-server"),
+    // Service-tier bolt, drawn in the toolbar family's linear weight.
+    (FAST_TIER, "fast-tier"),
     // Solar Icons (Linear), CC BY 4.0 — 480 Design.
     (MONITOR, "monitor"),
     (CURSOR, "cursor"),
@@ -63,6 +65,7 @@ icon_assets![
     (LAPTOP, "laptop"),
     (PEN_NEW_SQUARE, "pen-new-square"),
     (SORT, "sort"),
+    (MORE_HORIZONTAL, "more-horizontal"),
     (SORT_VERTICAL, "sort-vertical"),
     // Compact six-dot grip used to reorder queued prompts.
     (DRAG_HANDLE, "drag-handle"),
@@ -79,6 +82,8 @@ icon_assets![
     (CALENDAR, "calendar"),
     (LIST, "list"),
     (FOLDER_WITH_FILES, "folder-with-files"),
+    // Original tree glyph with compact nodes for the independent Files panel.
+    (FILE_TREE, "file-tree"),
     (FOLDER, "folder"),
     // Hand-drawn floppy disk in the Solar Linear style. Workspace editor save.
     (FLOPPY_DISK, "floppy-disk"),
@@ -146,6 +151,7 @@ icon_assets![
     (ARCHIVE_MINIMALISTIC, "archive-minimalistic"),
     (TRASH_BIN_MINIMALISTIC, "trash-bin-minimalistic"),
     // Shared settings glyph: user-supplied horizontal sliders.
+    (SETTINGS, "settings"),
     (SETTINGS_MINIMALISTIC, "settings-minimalistic"),
     (LOGOUT_2, "logout-2"),
     (MAGNIFER, "magnifer"),
@@ -163,6 +169,7 @@ icon_assets![
     (GLOBAL, "global"),
     (CHECKLIST, "checklist"),
     (WIDGET, "widget"),
+    (MAGIC_STICK_3, "magic-stick-3"),
     (WIFI_OFF, "wifi-off"),
     (CLOSE_CIRCLE, "close-circle"),
     // Hand-drawn info glyph in the Solar Linear style (like the terminal/
@@ -197,6 +204,13 @@ icon_assets![
     (STOP, "stop"),
     (CHECK, "check"),
     (COPY, "copy"),
+    // Project Action icon family (Solar Linear-compatible strokes).
+    (ACTION_PLAY, "action-play"),
+    (ACTION_TEST, "action-test"),
+    (ACTION_LINT, "action-lint"),
+    (ACTION_CONFIGURE, "action-configure"),
+    (ACTION_BUILD, "action-build"),
+    (ACTION_DEBUG, "action-debug"),
     // Hand-drawn star pair in the Solar Linear style (like the terminal/
     // plus/return ports) — outline for the favorite affordance, bold for the
     // favorited state and the picker's favorites rail tab.

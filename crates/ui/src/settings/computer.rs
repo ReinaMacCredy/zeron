@@ -783,7 +783,6 @@ fn disclosure(
     hidden: &'static str,
 ) -> gpui::Stateful<gpui::Div> {
     let accent = theme.accent;
-    let hover_theme = theme.clone();
     widgets::ghost_action(theme)
         .id(id)
         .debug_selector(move || id.to_string())
@@ -793,7 +792,6 @@ fn disclosure(
         .tab_index(0)
         .focus_visible(move |style| style.border_2().border_color(accent))
         .py(px(4.0))
-        .hover(move |s| widgets::ghost_hover(&hover_theme, s))
         .child(
             crate::icons::icon(if open {
                 icons::ALT_ARROW_DOWN
@@ -1076,7 +1074,11 @@ impl Render for ComputerPage {
             || view.kind == ViewKind::Blocked
             || (view.kind == ViewKind::Checking && (setup || reconnecting));
 
-        let toggle = widgets::toggle_switch(&theme, settings.computer_control_enabled)
+        let toggle = widgets::toggle_switch(
+            &theme,
+            settings.computer_control_enabled,
+            "computer-control-toggle",
+        )
             .id("computer-control-toggle")
             .debug_selector(|| "computer-control-toggle".into())
             .role(gpui::Role::Switch)
@@ -1256,7 +1258,11 @@ impl Render for ComputerPage {
             .items_center()
             .gap(px(12.0))
             .child(
-                widgets::toggle_switch(&theme, settings.auto_open_computer_pane)
+                widgets::toggle_switch(
+                    &theme,
+                    settings.auto_open_computer_pane,
+                    "computer-preview-auto",
+                )
                     .id("computer-preview-auto")
                     .debug_selector(|| "computer-preview-auto".into())
                     .role(gpui::Role::Switch)

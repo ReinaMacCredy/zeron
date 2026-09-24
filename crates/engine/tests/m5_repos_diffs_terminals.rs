@@ -13,7 +13,10 @@ use zeron_engine::{
     capture_diff_against, capture_turn_diff, merge_base, read_diff_file_text, snapshot_tree,
     working_diff_base,
 };
-use zeron_proto::{GitHistoryRefKind, TerminalEvent};
+use zeron_proto::{
+    CreateWorktreeOutcome, GitHistoryRefKind, ProjectActionDraft, ProjectActionIcon,
+    ProjectActionRun, TerminalEvent,
+};
 use zeron_rpc::methods;
 
 // ---------------------------------------------------------------------------
@@ -569,6 +572,251 @@ async fn diff_capture_tracked_untracked_and_checksum() {
 }
 
 #[tokio::test]
+async fn git_status_preserves_index_changes_even_when_head_diff_is_empty() {
+    use zeron_proto::GitFileState::*;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    init_repo(&root).await;
+    let repos = test_repos(&tmp.path().join("data"));
+    let original = std::fs::read(root.join("a.txt")).unwrap();
+    std::fs::write(root.join("a.txt"), "staged\n").unwrap();
+    git(&root, &["add", "a.txt"]).await;
+    std::fs::write(root.join("a.txt"), original).unwrap();
+    let capture = capture_diff(&repos, &root).await.unwrap();
+    assert!(capture.patch.is_empty());
+    let (files, complete) = capture.git_status.unwrap();
+    assert!(complete);
+    assert_eq!((files[0].index, files[0].worktree), (Modified, Modified));
+    git(&root, &["reset", "--hard", "HEAD"]).await;
+    assert!(
+        capture_diff(&repos, &root)
+            .await
+            .unwrap()
+            .git_status
+            .unwrap()
+            .0
+            .is_empty()
+    );
+
+    std::fs::create_dir_all(root.join("new/nested")).unwrap();
+    std::fs::write(root.join("new/nested/ leading name.txt"), "new\n").unwrap();
+    std::fs::write(root.join(".gitignore"), "ignored/\n").unwrap();
+    std::fs::create_dir(root.join("ignored")).unwrap();
+    std::fs::write(root.join("ignored/private"), "ignored\n").unwrap();
+    let (files, complete) = capture_diff(&repos, &root)
+        .await
+        .unwrap()
+        .git_status
+        .unwrap();
+    assert!(complete);
+    assert!(
+        files
+            .iter()
+            .any(|f| f.path == "new/nested/ leading name.txt" && f.index == Untracked)
+    );
+    assert!(!files.iter().any(|f| f.path.starts_with("ignored/")));
+    git(&root, &["mv", "a.txt", "renamed file.txt"]).await;
+    let (files, _) = capture_diff(&repos, &root)
+        .await
+        .unwrap()
+        .git_status
+        .unwrap();
+    assert!(files.iter().any(|f| f.path == "renamed file.txt"
+        && f.old_path.as_deref() == Some("a.txt")
+        && f.index == Renamed));
+    git(&root, &["add", "."]).await;
+    git(&root, &["commit", "-m", "changes"]).await;
+    assert!(
+        capture_diff(&repos, &root)
+            .await
+            .unwrap()
+            .git_status
+            .unwrap()
+            .0
+            .is_empty()
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn git_status_enumerates_untracked_symlinks_without_reading_their_targets() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    init_repo(&root).await;
+    std::fs::create_dir(root.join("new")).unwrap();
+    let outside = tmp.path().join("outside");
+    std::fs::write(&outside, "PRIVATE OUTSIDE CONTENT\n").unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("new/link")).unwrap();
+    let snapshot = capture_diff(&test_repos(&tmp.path().join("data")), &root)
+        .await
+        .unwrap();
+    assert!(!snapshot.patch.contains("PRIVATE OUTSIDE CONTENT"));
+    assert!(
+        snapshot
+            .git_status
+            .unwrap()
+            .0
+            .iter()
+            .any(|f| f.path == "new/link")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn git_status_stream_is_scoped_deduplicated_and_resets_after_commit() {
+    use zeron_proto::CheckoutGitStatus;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    let other = tmp.path().join("other");
+    init_repo(&root).await;
+    init_repo(&other).await;
+    std::fs::write(root.join("a.txt"), "first edit\n").unwrap();
+    std::fs::write(other.join("private.txt"), "another checkout\n").unwrap();
+    let core = assemble(&tmp.path().join("data"));
+    for (space, chat, path) in [
+        ("space", "chat", &root),
+        ("other-space", "other-chat", &other),
+    ] {
+        core.workspace
+            .create_space(space, &core.device_id, &path.to_string_lossy(), None, true)
+            .unwrap();
+        core.workspace
+            .create_chat(chat, Some(space), None, None, None)
+            .unwrap();
+    }
+    core.diff_sync.reconcile_now().await;
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let params = serde_json::json!({"chatId": "chat"});
+    let mut stream = client
+        .subscribe_checked(methods::WATCH_WORKSPACE_GIT_STATUS, params.clone())
+        .await
+        .unwrap();
+    async fn next(stream: &mut zeron_rpc::RpcSubscription) -> CheckoutGitStatus {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let value = stream.recv().await.expect("stream alive");
+                assert!(value.get("patch").is_none());
+                if let Some(status) =
+                    serde_json::from_value::<zeron_proto::WorkspaceGitStatusFrame>(value)
+                        .unwrap()
+                        .status
+                {
+                    return status;
+                }
+            }
+        })
+        .await
+        .expect("status before timeout")
+    }
+    let first = next(&mut stream).await;
+    assert!(first.complete);
+    assert_eq!(first.device_id, core.device_id);
+    assert_eq!(first.files.len(), 1);
+    assert_eq!(first.files[0].path, "a.txt");
+    let mut second = client
+        .subscribe_checked(methods::WATCH_WORKSPACE_GIT_STATUS, params.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        next(&mut second).await,
+        first,
+        "new subscribers receive the cached snapshot"
+    );
+
+    // Content changed, but neither Git status column changed: no metadata frame.
+    let mut diffs = core.diff_sync.watch_diffs();
+    let old = diffs
+        .borrow_and_update()
+        .iter()
+        .find(|d| d.checkout_id == first.checkout_id)
+        .unwrap()
+        .checksum
+        .clone();
+    std::fs::write(root.join("a.txt"), "another edit\n").unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            diffs.changed().await.unwrap();
+            if diffs
+                .borrow()
+                .iter()
+                .any(|d| d.checkout_id == first.checkout_id && d.checksum != old)
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), stream.recv())
+            .await
+            .is_err()
+    );
+
+    git(&root, &["add", "a.txt"]).await;
+    let staged = next(&mut stream).await;
+    assert_eq!(staged.files[0].index, zeron_proto::GitFileState::Modified);
+    assert_eq!(
+        staged.files[0].worktree,
+        zeron_proto::GitFileState::Unchanged
+    );
+    git(&root, &["commit", "-m", "done"]).await;
+    let clean = next(&mut stream).await;
+    assert!(clean.complete && clean.files.is_empty());
+    drop(stream);
+    let mut reconnected = client
+        .subscribe_checked(methods::WATCH_WORKSPACE_GIT_STATUS, params)
+        .await
+        .unwrap();
+    assert_eq!(next(&mut reconnected).await, clean);
+    let plain = tmp.path().join("plain");
+    std::fs::create_dir(&plain).unwrap();
+    core.workspace
+        .create_space(
+            "plain",
+            &core.device_id,
+            &plain.to_string_lossy(),
+            None,
+            false,
+        )
+        .unwrap();
+    let mut unavailable = client
+        .subscribe_checked(
+            methods::WATCH_WORKSPACE_GIT_STATUS,
+            serde_json::json!({"spaceId": "plain"}),
+        )
+        .await
+        .unwrap();
+    let frame = tokio::time::timeout(Duration::from_secs(2), unavailable.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        frame,
+        serde_json::json!({"status": null}),
+        "unknown is an explicit frame, not a missing RPC item"
+    );
+    assert!(
+        client
+            .subscribe_checked(
+                methods::WATCH_WORKSPACE_GIT_STATUS,
+                serde_json::json!({"chatId": "missing"})
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        client
+            .subscribe_checked(
+                methods::WATCH_WORKSPACE_GIT_STATUS,
+                serde_json::json!({"chatId": "chat", "targetDeviceId": "offline-remote"})
+            )
+            .await
+            .is_err()
+    );
+    core.shutdown().await;
+}
+
+#[tokio::test]
 async fn diff_capture_against_merge_base_shows_branch_changes() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let repo_dir = tmp.path().join("repo");
@@ -736,6 +984,10 @@ async fn diff_capture_truncates_at_patch_cap() {
     assert!(snapshot.truncated, "patch cap hit");
     assert!(snapshot.patch.len() <= 3 * 1024 * 1024 + 64);
     assert!(snapshot.patch.contains("# Zeron diff truncated"));
+    let (statuses, complete) = snapshot.git_status.unwrap();
+    assert!(complete, "patch truncation must not truncate Git status");
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].path, "a.txt");
 }
 
 // ---------------------------------------------------------------------------
@@ -1135,6 +1387,300 @@ async fn terminal_guards_input_size_and_cwd() {
     terminals.close(&session.id).expect("close");
 }
 
+#[tokio::test]
+async fn project_actions_crud_preserves_saved_actions_with_invalid_imports() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    let core = assemble(&tmp.path().join("data"));
+    core.workspace
+        .create_space(
+            "space-actions",
+            &core.device_id,
+            &project.to_string_lossy(),
+            None,
+            true,
+        )
+        .unwrap();
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let path = project.join("zeron.json");
+    // Directories must be reported as an import issue without preventing CRUD.
+    std::fs::create_dir(&path).unwrap();
+    let listed = client
+        .call(
+            methods::LIST_PROJECT_ACTIONS,
+            serde_json::json!({"spaceId": "space-actions"}),
+        )
+        .await
+        .unwrap();
+    assert!(listed["projectFileIssue"].is_string());
+    assert!(listed["importableActions"].as_array().unwrap().is_empty());
+    let saved = client
+        .call(
+            methods::UPSERT_PROJECT_ACTION,
+            serde_json::json!({
+                "spaceId": "space-actions",
+                "action": {"name": "Test", "command": "echo test", "icon": "test"}
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(saved["projectFileIssue"].is_string());
+    assert_eq!(saved["actions"].as_array().unwrap().len(), 1);
+    let listed = client
+        .call(
+            methods::LIST_PROJECT_ACTIONS,
+            serde_json::json!({"spaceId": "space-actions"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(listed["actions"], saved["actions"]);
+    let deleted = client
+        .call(
+            methods::DELETE_PROJECT_ACTION,
+            serde_json::json!({
+                "spaceId": "space-actions", "actionId": saved["actions"][0]["id"]
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(deleted["projectFileIssue"].is_string());
+    assert!(deleted["actions"].as_array().unwrap().is_empty());
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::write(
+        &path,
+        r#"{"actions":[{"name":"Suggestion","command":"echo suggestion","icon":"play"}]}"#,
+    )
+    .unwrap();
+    let recovered = client
+        .call(
+            methods::LIST_PROJECT_ACTIONS,
+            serde_json::json!({"spaceId": "space-actions"}),
+        )
+        .await
+        .unwrap();
+    assert!(recovered["projectFileIssue"].is_null());
+    assert_eq!(recovered["importableActions"].as_array().unwrap().len(), 1);
+    assert!(recovered["actions"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_actions_run_in_fresh_host_resolved_terminals() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().join("repo");
+    let worktree = tmp.path().join("worktree");
+    init_repo(&repo).await;
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "actions-test",
+            worktree.to_str().expect("utf8 worktree path"),
+        ],
+    )
+    .await;
+    let canonical_repo = std::fs::canonicalize(&repo).expect("canonical repo");
+    let canonical_worktree = std::fs::canonicalize(&worktree).expect("canonical worktree");
+
+    let core = assemble(&tmp.path().join("data"));
+    core.workspace
+        .create_space(
+            "space-actions",
+            &core.device_id,
+            &repo.to_string_lossy(),
+            None,
+            true,
+        )
+        .expect("space");
+    core.workspace
+        .create_chat("chat-main", Some("space-actions"), None, None, None)
+        .expect("main chat");
+    core.workspace
+        .create_chat(
+            "chat-worktree",
+            Some("space-actions"),
+            None,
+            None,
+            Some(worktree.to_string_lossy().into_owned()),
+        )
+        .expect("worktree chat");
+    let snapshot = core
+        .project_actions
+        .upsert(
+            "space-actions",
+            &repo,
+            None,
+            ProjectActionDraft {
+                name: "Environment".into(),
+                command: concat!(
+                    "printf 'ROOT=%s|WT=%s|CWD=%s\\n' ",
+                    "\"$ZERON_PROJECT_ROOT\" ",
+                    "\"${ZERON_WORKTREE_PATH-unset}\" ",
+                    "\"$PWD\""
+                )
+                .into(),
+                icon: ProjectActionIcon::Debug,
+                run_on_worktree_create: false,
+            },
+        )
+        .expect("save Action");
+    let action_id = snapshot.actions[0].id.clone();
+    let client = zeron_rpc::memory_client(core.rpc_service());
+
+    let run = client
+        .call_as::<ProjectActionRun>(
+            methods::RUN_PROJECT_ACTION,
+            serde_json::json!({
+                "spaceId": "space-actions",
+                "chatId": "chat-main",
+                "actionId": action_id,
+                "cols": 80,
+                "rows": 24,
+            }),
+        )
+        .await
+        .expect("run in main checkout");
+    let mut main_rx = core
+        .terminals
+        .subscribe(&run.terminal.id, None)
+        .expect("main replay");
+    let mut main_events = Vec::new();
+    drain_until(&mut main_rx, &mut main_events, |events| {
+        decoded(events).contains("|WT=unset|")
+    })
+    .await;
+    let main_output = decoded(&main_events);
+    assert!(main_output.contains(&format!("ROOT={}", canonical_repo.display())));
+    assert!(main_output.contains(&format!("CWD={}", canonical_repo.display())));
+
+    let second = client
+        .call_as::<ProjectActionRun>(
+            methods::RUN_PROJECT_ACTION,
+            serde_json::json!({
+                "spaceId": "space-actions",
+                "chatId": "chat-main",
+                "actionId": action_id,
+                "cols": 80,
+                "rows": 24,
+            }),
+        )
+        .await
+        .expect("second run");
+    assert_ne!(run.terminal.id, second.terminal.id);
+
+    let worktree_run = client
+        .call_as::<ProjectActionRun>(
+            methods::RUN_PROJECT_ACTION,
+            serde_json::json!({
+                "spaceId": "space-actions",
+                "chatId": "chat-worktree",
+                "actionId": action_id,
+                "cols": 80,
+                "rows": 24,
+            }),
+        )
+        .await
+        .expect("run in worktree");
+    let mut worktree_rx = core
+        .terminals
+        .subscribe(&worktree_run.terminal.id, None)
+        .expect("worktree replay");
+    let mut worktree_events = Vec::new();
+    drain_until(&mut worktree_rx, &mut worktree_events, |events| {
+        decoded(events).contains(&format!("WT={}", canonical_worktree.display()))
+    })
+    .await;
+    let worktree_output = decoded(&worktree_events);
+    assert!(worktree_output.contains(&format!("ROOT={}", canonical_repo.display())));
+    assert!(worktree_output.contains(&format!("CWD={}", canonical_worktree.display())));
+
+    core.workspace
+        .create_space(
+            "space-other",
+            &core.device_id,
+            &tmp.path().to_string_lossy(),
+            None,
+            false,
+        )
+        .expect("other space");
+    core.workspace
+        .create_chat("chat-other", Some("space-other"), None, None, None)
+        .expect("other chat");
+    assert!(
+        client
+            .call(
+                methods::RUN_PROJECT_ACTION,
+                serde_json::json!({
+                    "spaceId": "space-actions",
+                    "chatId": "chat-other",
+                    "actionId": action_id,
+                    "cols": 80,
+                    "rows": 24,
+                }),
+            )
+            .await
+            .expect_err("cross-space chat rejected")
+            .to_string()
+            .contains("another space")
+    );
+    let outside = tmp.path().join("outside-actions");
+    std::fs::create_dir(&outside).expect("outside Action cwd");
+    core.workspace
+        .create_chat(
+            "chat-invalid-cwd",
+            Some("space-actions"),
+            None,
+            None,
+            Some(outside.to_string_lossy().into_owned()),
+        )
+        .expect("invalid cwd chat");
+    assert!(
+        client
+            .call(
+                methods::RUN_PROJECT_ACTION,
+                serde_json::json!({
+                    "spaceId": "space-actions",
+                    "chatId": "chat-invalid-cwd",
+                    "actionId": action_id,
+                    "cols": 80,
+                    "rows": 24,
+                }),
+            )
+            .await
+            .expect_err("outside checkout rejected")
+            .to_string()
+            .contains("checkout is unavailable")
+    );
+    assert!(
+        client
+            .call(
+                methods::RUN_PROJECT_ACTION,
+                serde_json::json!({
+                    "spaceId": "space-actions",
+                    "chatId": "chat-main",
+                    "actionId": "missing",
+                    "cols": 80,
+                    "rows": 24,
+                }),
+            )
+            .await
+            .expect_err("missing Action rejected")
+            .to_string()
+            .contains("not found")
+    );
+
+    for terminal_id in [
+        &run.terminal.id,
+        &second.terminal.id,
+        &worktree_run.terminal.id,
+    ] {
+        core.terminals.close(terminal_id).expect("close Action PTY");
+    }
+    core.shutdown().await;
+}
+
 // ---------------------------------------------------------------------------
 // RPC dispatch over the in-memory transport
 // ---------------------------------------------------------------------------
@@ -1258,6 +1804,28 @@ async fn rpc_dispatch_for_m5_methods() {
         Some(&*tmp.path().to_string_lossy())
     );
 
+    // A legacy CreateWorktree caller does not trigger setup, even when one is
+    // configured for the project.
+    core.project_actions
+        .upsert(
+            "space-term",
+            &repo_dir,
+            None,
+            ProjectActionDraft {
+                name: "Setup".into(),
+                command: concat!(
+                    "sleep 2; ",
+                    "printf 'ROOT=%s\\nWT=%s\\nCWD=%s\\n' ",
+                    "\"$ZERON_PROJECT_ROOT\" \"$ZERON_WORKTREE_PATH\" \"$PWD\" ",
+                    "| tee .zeron-setup-env"
+                )
+                .into(),
+                icon: ProjectActionIcon::Configure,
+                run_on_worktree_create: true,
+            },
+        )
+        .expect("save setup Action");
+
     // CreateWorktree / DeleteWorktree.
     let worktree = client
         .call(
@@ -1277,6 +1845,12 @@ async fn rpc_dispatch_for_m5_methods() {
             .starts_with("zeron/")
     );
     assert!(worktree["checkoutId"].is_string());
+    assert!(worktree.get("setupAction").is_none());
+    assert!(
+        !PathBuf::from(&worktree_path)
+            .join(".zeron-setup-env")
+            .exists()
+    );
     let deleted = client
         .call(
             methods::DELETE_WORKTREE,
@@ -1286,6 +1860,82 @@ async fn rpc_dispatch_for_m5_methods() {
         .expect("DeleteWorktree");
     assert_eq!(deleted["ok"], true);
     assert!(!PathBuf::from(&worktree_path).exists());
+
+    core.workspace
+        .create_space(
+            "space-wrong-root",
+            &core.device_id,
+            &tmp.path().to_string_lossy(),
+            None,
+            false,
+        )
+        .expect("mismatched space");
+    assert!(
+        client
+            .call(
+                methods::CREATE_WORKTREE,
+                serde_json::json!({
+                    "repoPath": repo_path,
+                    "branch": "main",
+                    "spaceId": "space-wrong-root",
+                }),
+            )
+            .await
+            .expect_err("mismatched space rejected")
+            .to_string()
+            .contains("does not match")
+    );
+
+    // A space-aware caller gets the already-open setup terminal without
+    // waiting for the command to finish.
+    let started = tokio::time::Instant::now();
+    let outcome = client
+        .call_as::<CreateWorktreeOutcome>(
+            methods::CREATE_WORKTREE,
+            serde_json::json!({
+                "repoPath": repo_path,
+                "branch": "main",
+                "spaceId": "space-term",
+            }),
+        )
+        .await
+        .expect("CreateWorktree with setup");
+    assert!(
+        started.elapsed() < Duration::from_millis(1500),
+        "CreateWorktree waited for the setup command"
+    );
+    assert!(outcome.setup_error.is_none());
+    let setup = outcome.setup_action.expect("setup terminal");
+    let mut setup_rx = core
+        .terminals
+        .subscribe(&setup.terminal.id, None)
+        .expect("setup replay");
+    let mut setup_events = Vec::new();
+    let canonical_repo = std::fs::canonicalize(&repo_dir).expect("canonical setup repo");
+    let canonical_worktree =
+        std::fs::canonicalize(&outcome.worktree.path).expect("canonical setup worktree");
+    drain_until(&mut setup_rx, &mut setup_events, |events| {
+        decoded(events).contains(&format!("ROOT={}", canonical_repo.display()))
+    })
+    .await;
+    let setup_output = decoded(&setup_events);
+    assert!(setup_output.contains(&format!("ROOT={}", canonical_repo.display())));
+    assert!(setup_output.contains(&format!("WT={}", canonical_worktree.display())));
+    assert!(setup_output.contains(&format!("CWD={}", canonical_worktree.display())));
+    assert!(canonical_worktree.join(".zeron-setup-env").exists());
+    core.terminals
+        .close(&setup.terminal.id)
+        .expect("close setup terminal");
+    client
+        .call(
+            methods::DELETE_WORKTREE,
+            serde_json::json!({
+                "repoPath": repo_path,
+                "worktreePath": outcome.worktree.path,
+            }),
+        )
+        .await
+        .expect("delete setup worktree");
 
     // WatchCheckoutDiffs: streams the current (empty) diff set immediately.
     let mut diffs_stream = client
@@ -1332,6 +1982,48 @@ async fn rpc_dispatch_for_m5_methods() {
         .expect("OpenTerminal");
     let terminal_id = session["id"].as_str().expect("terminal id").to_string();
     assert_eq!(session["cwd"], repo_path);
+
+    // New-chat canvas: no chat row. The space id in chatId is enough even
+    // when the UI still sends `~` (spaces watch not landed) or omits cwd.
+    let canvas = client
+        .call(
+            methods::OPEN_TERMINAL,
+            serde_json::json!({
+                "chatId": "space-canvas:space-term",
+                "cols": 80,
+                "rows": 24,
+                "cwd": "~",
+            }),
+        )
+        .await
+        .expect("OpenTerminal on canvas");
+    assert_eq!(canvas["cwd"], repo_path);
+    client
+        .call(
+            methods::CLOSE_TERMINAL,
+            serde_json::json!({ "terminalId": canvas["id"] }),
+        )
+        .await
+        .expect("CloseTerminal canvas");
+    let inferred = client
+        .call(
+            methods::OPEN_TERMINAL,
+            serde_json::json!({
+                "chatId": "space-canvas:space-term",
+                "cols": 80,
+                "rows": 24,
+            }),
+        )
+        .await
+        .expect("OpenTerminal on canvas without cwd");
+    assert_eq!(inferred["cwd"], repo_path);
+    client
+        .call(
+            methods::CLOSE_TERMINAL,
+            serde_json::json!({ "terminalId": inferred["id"] }),
+        )
+        .await
+        .expect("CloseTerminal inferred canvas");
 
     let mut stream = client
         .subscribe(

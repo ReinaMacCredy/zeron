@@ -33,10 +33,11 @@ mod devin_models;
 pub(crate) mod normalize;
 mod subagent;
 mod subagent_devin;
+mod system_message;
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -53,7 +54,10 @@ use zeron_proto::{
 };
 
 use crate::jsonrpc::{Incoming, RpcClient};
-use crate::process::{Child, Command, Stdio};
+use crate::process::{Command, Stdio};
+use crate::scratch::ScratchDir;
+use child::Child;
+pub(crate) mod child;
 use crate::{Harness, HarnessError, RunControls, Signal, send_signal, shutdown_child};
 use normalize::{map_update, parse_commands, preferred_allow_option};
 use subagent::SubagentTracker;
@@ -61,6 +65,9 @@ use subagent_devin::DevinTracker;
 
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(120);
 const DEFAULT_MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
+// The one-file server unpacks on launch. A local cold probe took 1.903s, but
+// slower disks need substantially more headroom than the generic 10s budget.
+const ANTIGRAVITY_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(90);
 /// Per-agent configuration: which binary to spawn and what to tell the picker.
 struct AcpAgentSpec {
     id: HarnessId,
@@ -515,11 +522,29 @@ fn antigravity_archive() -> Option<crate::archive_install::ArchivePin> {
     })
 }
 
-/// the user-global skill folders the server loads (`resolve_skills_paths`).
-/// its project-level `.gemini/skills` and `.agents/skills` depend on a session
-/// cwd the command listing doesn't have, so those still reach the agent when
-/// typed but aren't listed.
-fn antigravity_skill_dirs() -> Vec<PathBuf> {
+/// Whether the listing device has a pinned, explicitly installable archive.
+pub fn can_install(harness: HarnessId) -> bool {
+    harness == HarnessId::Antigravity && antigravity_archive().is_some()
+}
+
+/// Only an explicit Settings action may call this installer.
+pub async fn install_harness(harness: HarnessId) -> Result<(), HarnessError> {
+    let pin = (harness == HarnessId::Antigravity)
+        .then(antigravity_archive)
+        .flatten()
+        .ok_or_else(|| {
+            HarnessError::NotInstalled(
+                "Set ANTIGRAVITY_ACP_EXECUTABLE to an installed ACP server".into(),
+            )
+        })?;
+    crate::archive_install::ensure_installed(pin, "Antigravity").await?;
+    Ok(())
+}
+
+/// User-global skill folders the server loads (`resolve_skills_paths`).
+/// Shared discovery adds project `.gemini/skills` and `.agents/skills` using
+/// the selected session's cwd.
+pub(crate) fn antigravity_skill_dirs() -> Vec<PathBuf> {
     antigravity_paths::home()
         .map(|home| {
             vec![
@@ -590,6 +615,22 @@ fn configured_auth_method_in(path: &Path) -> Result<Option<ConfiguredAuthMethod>
         .and_then(|auth| auth.method)
         .filter(|method| !method.is_empty())
         .map(ConfiguredAuthMethod::new))
+}
+
+/// Antigravity's `GEMINI_HOME`, resolved exactly as a launch resolves it —
+/// the directory whose `antigravity-acp/` holds its settings and tokens.
+pub fn antigravity_home() -> Result<PathBuf, HarnessError> {
+    antigravity_paths::home()
+}
+
+/// The auth method Antigravity's server saved in `settings.json` (it records
+/// every successful `authenticate`), canonicalized the way sign-in reads it.
+/// `None` when nothing is saved or the file can't be read.
+pub fn antigravity_saved_auth_method(home: &Path) -> Option<String> {
+    configured_auth_method_in(&home.join("antigravity-acp").join("settings.json"))
+        .ok()
+        .flatten()
+        .map(|method| method.canonical)
 }
 
 fn sign_in_auth_method(
@@ -712,9 +753,7 @@ fn antigravity_spec() -> AcpAgentSpec {
         extra_paths: Vec::new,
         cli_executable: "agy_acp_server",
         cli_extra_paths: Vec::new,
-        install_hint: "agy_acp_server (zeron downloads Google's pinned Antigravity ACP \
-             server 1.1.1 on first use, but this platform has no published build; set \
-             ANTIGRAVITY_ACP_EXECUTABLE to a server binary to override)",
+        install_hint: "Install Antigravity to enable, or set ANTIGRAVITY_ACP_EXECUTABLE to its ACP server",
         models: || {
             use ReasoningLevel::{High, Low, Medium};
             vec![
@@ -747,9 +786,7 @@ fn antigravity_spec() -> AcpAgentSpec {
         // preserves any method already selected in antigravity's settings.
         auth_method: Some("oauth-personal"),
         skill_dirs: antigravity_skill_dirs,
-        // signing out belongs to the Settings toggle, which keeps enablement
-        // and the stored login in step
-        hidden_commands: &["logout"],
+        hidden_commands: &[],
     }
 }
 
@@ -764,7 +801,6 @@ const SIGN_OUT_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SignInProgress {
     /// the server is being downloaded before sign-in can start.
-    Installing,
     /// the agent is waiting on the user at this sign-in url.
     OpenBrowser(String),
 }
@@ -785,8 +821,7 @@ fn sign_in_url(line: &str) -> Option<String> {
 /// on this device, so a first chat never pays (or trips over) an npm run.
 /// Skips agents whose adapter is already resolvable; failures are logged and
 /// retried on the next daemon start or blocking launch. A no-op outside a
-/// tokio runtime. Archive-distributed servers install when their sign-in
-/// runs instead.
+/// tokio runtime. Archive-distributed servers require explicit installation.
 pub fn prewarm_managed_adapters() {
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         return;
@@ -856,9 +891,9 @@ pub struct AcpHarness {
     model_discovery_timeout: Duration,
     /// Discovery result cache: the advertised commands survive across calls.
     commands: tokio::sync::OnceCell<Vec<SlashCommand>>,
-    /// Share successful catalogs only with overlapping requests. Later picker
-    /// opens must see account changes and newly available models.
-    models_cache: tokio::sync::Mutex<Option<(Instant, Vec<Model>)>>,
+    /// Retain successful catalogs per credential/binary context through outages.
+    models_cache: crate::catalog::Catalog,
+    workspace_commands: crate::skills::CommandDiscovery,
     devin_models: devin_models::Catalog,
     load_session: std::sync::Arc<std::sync::Mutex<Option<bool>>>,
 }
@@ -885,7 +920,8 @@ impl AcpHarness {
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             model_discovery_timeout: DEFAULT_MODEL_DISCOVERY_TIMEOUT,
             commands: tokio::sync::OnceCell::new(),
-            models_cache: tokio::sync::Mutex::new(None),
+            models_cache: crate::catalog::Catalog::default(),
+            workspace_commands: crate::skills::CommandDiscovery::default(),
             devin_models: devin_models::Catalog::default(),
             load_session: std::sync::Arc::default(),
         }
@@ -909,23 +945,24 @@ impl AcpHarness {
     /// The pi coding agent over ACP — the community `pi-acp` adapter wrapping
     /// pi's RPC mode.
     pub fn pi() -> Self {
-        Self::with_spec(pi_spec())
+        Self::with_spec(pi_spec()).with_model_discovery_timeout(Duration::from_secs(60))
     }
 
     /// google antigravity over its acp server (`agy_acp_server`).
     pub fn antigravity() -> Self {
         Self::with_spec(antigravity_spec())
+            .with_model_discovery_timeout(ANTIGRAVITY_DISCOVERY_TIMEOUT)
     }
 
     /// sign the agent out with acp `logout`, clearing the credentials its
     /// sign-in stored.
     pub async fn sign_out(&self) -> Result<(), HarnessError> {
         let home = std::env::var("HOME").ok();
-        let (mut child, _stderr) = self.spawn_agent(home.as_deref(), false, &[]).await?;
+        let (_scratch, mut child, _stderr) = self.spawn_agent(home.as_deref(), false, &[]).await?;
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
             _ => {
-                shutdown_child(&mut child, self.kill_grace).await;
+                child.shutdown(self.kill_grace).await;
                 return Err(HarnessError::Protocol("agent child has no stdio".into()));
             }
         };
@@ -936,7 +973,7 @@ impl AcpHarness {
             request_draining(&client, &mut incoming, "logout", json!({})).await
         };
         let result = tokio::time::timeout(SIGN_OUT_TIMEOUT, flow).await;
-        shutdown_child(&mut child, self.kill_grace).await;
+        child.shutdown(self.kill_grace).await;
         match result {
             Ok(outcome) => outcome.map(|_| ()),
             Err(_) => Err(HarnessError::Protocol(format!(
@@ -962,6 +999,7 @@ impl AcpHarness {
                 "{display_name} has no sign-in flow"
             )));
         };
+        let (exe, args) = self.resolve_program(false).await?;
         let gemini_home = (self.spec.id == HarnessId::Antigravity)
             .then(antigravity_paths::home)
             .transpose()?;
@@ -972,15 +1010,10 @@ impl AcpHarness {
             })
             .transpose()?
             .flatten();
-        if let Launch::Archive { pin, .. } = self.resolve_launch()?
-            && crate::archive_install::installed_entry(&pin).is_none()
-        {
-            on_progress(SignInProgress::Installing);
-        }
-        let (exe, args) = self.resolve_program(true).await?;
         let mut cmd = Command::new(&exe);
         cmd.args(args);
         crate::compose_child_path(&mut cmd, &exe);
+        self.configure_adapter_environment(&mut cmd, &exe);
         if let Some(home) = std::env::var_os("HOME") {
             cmd.current_dir(home);
         }
@@ -990,34 +1023,50 @@ impl AcpHarness {
         if let Some(browser) = browser {
             cmd.env("BROWSER", browser);
         }
+        let scratch = self.adapter_scratch()?;
+        if let Some(dir) = &scratch {
+            dir.apply(&mut cmd);
+        }
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                HarnessError::NotInstalled(exe.display().to_string())
+                HarnessError::NotInstalled(crate::executable::binary_hint(&exe))
             } else {
                 HarnessError::Io(e)
             }
         })?;
         let on_progress = std::sync::Arc::new(on_progress);
+        let announced = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         if let Some(stderr) = child.stderr.take() {
             let on_progress = on_progress.clone();
+            let announced = announced.clone();
             tokio::spawn(async move {
                 let mut lines = tokio::io::BufReader::new(stderr).lines();
-                let mut announced = false;
                 while let Ok(Some(line)) = lines.next_line().await {
                     tracing::debug!(target: "zeron_harness::acp", "sign-in stderr: {line}");
-                    if !announced && let Some(url) = sign_in_url(&line) {
-                        announced = true;
+                    if let Some(url) = sign_in_url(&line)
+                        && !announced.swap(true, std::sync::atomic::Ordering::AcqRel)
+                    {
                         on_progress(SignInProgress::OpenBrowser(url));
                     }
                 }
             });
         }
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
-            (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
+            (Some(stdin), Some(stdout)) => RpcClient::with_stdout_observer(
+                stdin,
+                stdout,
+                Some(Box::new(move |line| {
+                    if let Some(url) = sign_in_url(line)
+                        && !announced.swap(true, std::sync::atomic::Ordering::AcqRel)
+                    {
+                        on_progress(SignInProgress::OpenBrowser(url));
+                    }
+                })),
+            ),
             _ => {
                 shutdown_child(&mut child, self.kill_grace).await;
                 return Err(HarnessError::Protocol("agent child has no stdio".into()));
@@ -1105,6 +1154,18 @@ impl AcpHarness {
     /// Resolve what to spawn: an explicit/installed adapter binary, or the
     /// managed install of the spec's pinned npm package. `NotInstalled` only
     /// when neither the binary nor the machinery to install it (npm) exists.
+    fn find_server(&self) -> Option<PathBuf> {
+        find_on_paths(self.spec.executable, (self.spec.extra_paths)()).or_else(|| {
+            if self.spec.id == HarnessId::Antigravity {
+                ["agy_acp_server.par", "agy_acp_server.exe"]
+                    .into_iter()
+                    .find_map(|name| find_on_paths(name, (self.spec.cli_extra_paths)()))
+            } else {
+                None
+            }
+        })
+    }
+
     fn resolve_launch(&self) -> Result<Launch, HarnessError> {
         let spec_args: Vec<String> = self.spec.args.iter().map(|a| a.to_string()).collect();
         if let Some(p) = &self.executable {
@@ -1117,7 +1178,7 @@ impl AcpHarness {
             return crate::executable::validate_native_override(&PathBuf::from(p))
                 .map(|program| Launch::Program(program, spec_args));
         }
-        if let Some(found) = find_on_paths(self.spec.executable, (self.spec.extra_paths)()) {
+        if let Some(found) = self.find_server() {
             return Ok(Launch::Program(found, spec_args));
         }
         if let Some(pkg) = self.spec.npm_package {
@@ -1133,6 +1194,9 @@ impl AcpHarness {
             }
         }
         if let Some(pin) = self.spec.archive {
+            if crate::archive_install::installed_entry(&pin).is_none() {
+                return Err(HarnessError::NotInstalled(self.spec.install_hint.into()));
+            }
             return Ok(Launch::Archive {
                 pin,
                 args: spec_args,
@@ -1146,7 +1210,9 @@ impl AcpHarness {
     /// never waits on npm: it kicks the install in the background and errors
     /// out, so a picker open falls back to the static catalog instead of
     /// stalling for however long a 500MB dependency tree takes to land.
-    async fn resolve_program(
+    /// Resolve the server, optionally waiting for its managed installation.
+    #[doc(hidden)]
+    pub async fn resolve_program(
         &self,
         block_on_install: bool,
     ) -> Result<(PathBuf, Vec<String>), HarnessError> {
@@ -1194,29 +1260,29 @@ impl AcpHarness {
                 Ok((program, node_args))
             }
             Launch::Archive { pin, args } => {
-                if let Some(entry) = crate::archive_install::installed_entry(&pin) {
-                    return Ok((entry, args));
-                }
-                let display_name = self.spec.display_name;
-                if block_on_install {
-                    let entry = crate::archive_install::ensure_installed(pin, display_name).await?;
-                    return Ok((entry, args));
-                }
-                tokio::spawn(async move {
-                    if let Err(e) =
-                        crate::archive_install::ensure_installed(pin, display_name).await
-                    {
-                        tracing::warn!(
-                            target: "zeron_harness::adapter_install",
-                            "background ACP server install failed: {e}"
-                        );
-                    }
-                });
-                Err(HarnessError::Protocol(format!(
-                    "{display_name} ACP server is installing in the background"
-                )))
+                let entry = crate::archive_install::installed_entry(&pin)
+                    .ok_or_else(|| HarnessError::NotInstalled(self.spec.install_hint.into()))?;
+                Ok((entry, args))
             }
         }
+    }
+
+    fn configure_adapter_environment(&self, cmd: &mut Command, executable: &Path) {
+        if self.spec.id == HarnessId::Antigravity
+            && let Some(parent) = executable.parent()
+        {
+            let sibling = parent.join("localharness_external");
+            if sibling.is_file() {
+                cmd.env("ANTIGRAVITY_HARNESS_PATH", sibling);
+                cmd.env("PYTHONUNBUFFERED", "1");
+            }
+        }
+    }
+
+    fn adapter_scratch(&self) -> Result<Option<ScratchDir>, HarnessError> {
+        Ok(matches!(self.resolve_launch()?, Launch::Archive { .. })
+            .then(|| ScratchDir::new(self.spec.executable))
+            .transpose()?)
     }
 
     async fn spawn_agent(
@@ -1224,29 +1290,39 @@ impl AcpHarness {
         cwd: Option<&str>,
         block_on_install: bool,
         extra_args: &[String],
-    ) -> Result<(Child, crate::StderrTail), HarnessError> {
+    ) -> Result<(Option<ScratchDir>, Child, crate::StderrTail), HarnessError> {
         let (exe, args) = self.resolve_program(block_on_install).await?;
         let mut cmd = Command::new(&exe);
         cmd.args(args);
         cmd.args(extra_args);
+        child::configure(&mut cmd);
         crate::compose_child_path(&mut cmd, &exe);
+        self.configure_adapter_environment(&mut cmd, &exe);
         if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
             cmd.current_dir(cwd);
         }
         if self.spec.id == HarnessId::Antigravity {
             cmd.env("GEMINI_HOME", antigravity_paths::home()?);
+            // Python webbrowser accepts an executable template; never launch a browser here.
+            #[cfg(unix)]
+            cmd.env("BROWSER", "/usr/bin/true %s");
+        }
+        let scratch = self.adapter_scratch()?;
+        if let Some(dir) = &scratch {
+            dir.apply(&mut cmd);
         }
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let mut child = cmd.spawn().map_err(|e| {
+        let child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                HarnessError::NotInstalled(exe.display().to_string())
+                HarnessError::NotInstalled(crate::executable::binary_hint(&exe))
             } else {
                 HarnessError::Io(e)
             }
         })?;
+        let mut child = Child::new(child);
         let stderr_tail = crate::StderrTail::default();
         if let Some(stderr) = child.stderr.take() {
             let tail = stderr_tail.clone();
@@ -1256,9 +1332,10 @@ impl AcpHarness {
                     tracing::debug!(target: "zeron_harness::acp", "stderr: {line}");
                     tail.push(&line);
                 }
+                tail.close();
             });
         }
-        Ok((child, stderr_tail))
+        Ok((scratch, child, stderr_tail))
     }
 
     /// Short-lived discovery run for [`Harness::commands`]: initialize, scan
@@ -1266,12 +1343,17 @@ impl AcpHarness {
     /// briefly for `available_commands_update`. Best-effort — an agent that
     /// refuses sessions before login still surfaces whatever the handshake
     /// advertised.
-    async fn discover_commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
-        let (mut child, _stderr) = self.spawn_agent(None, false, &[]).await?;
+    async fn discover_commands(
+        &self,
+        cwd: Option<&std::path::Path>,
+    ) -> Result<Vec<SlashCommand>, HarnessError> {
+        let (_scratch, mut child, _stderr) = self
+            .spawn_agent(cwd.and_then(|p| p.to_str()), false, &[])
+            .await?;
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
             _ => {
-                shutdown_child(&mut child, self.kill_grace).await;
+                child.shutdown(self.kill_grace).await;
                 return Err(HarnessError::Protocol("agent child has no stdio".into()));
             }
         };
@@ -1281,8 +1363,10 @@ impl AcpHarness {
                 .await?;
             self.note_load_session(&init);
             let mut commands = scan_available_commands(&init);
-            if commands.is_empty() {
-                let cwd = crate::executable::home_or_current_dir();
+            {
+                let cwd = cwd
+                    .map(std::path::Path::to_path_buf)
+                    .unwrap_or_else(crate::executable::home_or_current_dir);
                 let session = client
                     .request("session/new", json!({ "cwd": cwd, "mcpServers": [] }))
                     .await;
@@ -1318,8 +1402,8 @@ impl AcpHarness {
             }
             Ok::<Vec<SlashCommand>, HarnessError>(commands)
         };
-        let result = tokio::time::timeout(Duration::from_secs(10), discovery).await;
-        shutdown_child(&mut child, self.kill_grace).await;
+        let result = tokio::time::timeout(self.model_discovery_timeout, discovery).await;
+        child.shutdown(self.kill_grace).await;
         match result {
             Ok(inner) => inner,
             Err(_) => Err(HarnessError::Protocol("command discovery timed out".into())),
@@ -1332,11 +1416,11 @@ impl AcpHarness {
     /// wire is the source of truth — the spec's static catalog only enriches
     /// matching entries and names the pick when the agent advertises nothing.
     async fn discover_models(&self) -> Result<Vec<Model>, HarnessError> {
-        let (mut child, stderr_tail) = self.spawn_agent(None, false, &[]).await?;
+        let (_scratch, mut child, stderr_tail) = self.spawn_agent(None, false, &[]).await?;
         let (client, _incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
             _ => {
-                shutdown_child(&mut child, self.kill_grace).await;
+                child.shutdown(self.kill_grace).await;
                 return Err(HarnessError::Protocol("agent child has no stdio".into()));
             }
         };
@@ -1367,7 +1451,7 @@ impl AcpHarness {
             Ok::<Vec<Model>, HarnessError>(models)
         };
         let result = tokio::time::timeout(self.model_discovery_timeout, discovery).await;
-        shutdown_child(&mut child, self.kill_grace).await;
+        child.shutdown(self.kill_grace).await;
         match result {
             Ok(inner) => inner,
             Err(_) => {
@@ -1440,7 +1524,7 @@ fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model
     // Family-alias catalog row: the claude adapter advertises bare aliases
     // (`opus`, `sonnet`, `haiku`) meaning "the current generation" — match
     // them to the first (flagship-ordered) catalog row of that family so
-    // the picker shows the curated label/ladder ("Opus 5") instead of the
+    // the picker shows the curated label/ladder ("Opus 5.5") instead of the
     // terse alias. Alphabetic-only ids ONLY: versioned ids
     // (`gpt-5.2-codex`) must never fuzzy-match a foreign row.
     let alias = |id: &str| {
@@ -1694,54 +1778,127 @@ impl Harness for AcpHarness {
         {
             return crate::executable::validate_native_override(&PathBuf::from(p)).is_ok();
         }
-        // a published server build is enough: signing in installs it
-        if self.spec.archive.is_some() {
+        if self
+            .spec
+            .archive
+            .as_ref()
+            .is_some_and(|pin| crate::archive_install::installed_entry(pin).is_some())
+        {
             return true;
         }
-        find_on_paths(self.spec.cli_executable, (self.spec.cli_extra_paths)()).is_some()
+        if self.spec.id == HarnessId::Antigravity {
+            self.find_server().is_some()
+        } else {
+            find_on_paths(self.spec.cli_executable, (self.spec.cli_extra_paths)()).is_some()
+        }
     }
 
     /// Devin refreshes through its native catalog command on each request.
     /// Other ACP agents use a fresh session probe, with the spec's static
     /// catalog as fallback when they advertise nothing or probing fails.
+    fn model_context(&self) -> Result<Option<crate::ModelContext>, HarnessError> {
+        let binary = match self.resolve_launch()? {
+            Launch::Program(path, _) => path,
+            Launch::Managed { pin, bin_name, .. } => {
+                crate::adapter_install::installed_entry(&pin, bin_name)
+                    .unwrap_or_else(|| PathBuf::from(format!("{}@{}", pin.name, pin.version)))
+            }
+            Launch::Archive { pin, .. } => crate::archive_install::installed_entry(&pin)
+                .unwrap_or_else(|| PathBuf::from(format!("{}@{}", pin.name, pin.version))),
+        };
+        let extra = if self.id() == HarnessId::Antigravity {
+            let root = antigravity_paths::home()?.join("antigravity-acp");
+            vec![
+                root.join("settings.json"),
+                root.join("oauth_creds.json"),
+                root.join("google_accounts.json"),
+                root.join("credentials.json"),
+                root.join("auth.json"),
+            ]
+        } else {
+            vec![]
+        };
+        crate::model_context::context(self.id(), &binary, &extra).map(Some)
+    }
+    fn fallback_models(&self) -> Vec<Model> {
+        (self.spec.models)()
+    }
+    async fn model_catalog(&self, force: bool) -> Result<crate::ModelCatalog, HarnessError> {
+        self.model_context()?.unwrap().log();
+        self.models_cache
+            .get_with_timeout(
+                force,
+                self.model_discovery_timeout * 3 + Duration::from_secs(1),
+                || self.model_context().map(|c| c.unwrap().key()),
+                || async {
+                    if self.id() == HarnessId::Devin {
+                        let (exe, _) = self.resolve_program(false).await?;
+                        self.devin_models
+                            .refresh(&exe, self.model_discovery_timeout)
+                            .await
+                    } else {
+                        self.discover_models().await
+                    }
+                },
+            )
+            .await
+    }
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         self.resolve_launch()?;
-        if self.spec.id == HarnessId::Devin {
-            let (exe, _) = self.resolve_program(false).await?;
-            return self
-                .devin_models
-                .refresh(&exe, self.model_discovery_timeout)
-                .await;
-        }
-        let requested_at = Instant::now();
-        let mut latest = self.models_cache.lock().await;
-        if let Some((completed_at, models)) = &*latest
-            && *completed_at >= requested_at
-        {
-            return Ok(models.clone());
-        }
-        match self.discover_models().await {
-            Ok(models) if !models.is_empty() => {
-                *latest = Some((Instant::now(), models.clone()));
-                Ok(models)
+        match self.model_catalog(true).await {
+            Ok(catalog) => Ok(catalog.models),
+            Err(error)
+                if self.id() == HarnessId::Devin
+                    || !crate::CatalogFailure::classify(&error).allows_stale() =>
+            {
+                Err(error)
             }
-            Ok(_) => Ok((self.spec.models)()),
             Err(error) => {
-                tracing::warn!(harness = %self.spec.display_name, %error, "Model discovery failed; using fallback");
-                Ok((self.spec.models)())
+                tracing::warn!(%error, source = "static", "Model discovery failed");
+                Ok(self.fallback_models())
             }
         }
     }
 
-    /// the agent's advertised commands minus the spec's hidden ones, then its
-    /// skills. Skills are read fresh on every call so a newly added one shows
-    /// up, and they still list when discovery fails (a signed-out agent).
+    async fn skills(
+        &self,
+        cwd: &std::path::Path,
+    ) -> Result<Option<Vec<zeron_proto::invocation::Skill>>, HarnessError> {
+        let (mut skills, commands) = tokio::try_join!(
+            crate::skills::discover(self.id(), cwd),
+            self.workspace_commands
+                .get(cwd, self.discover_commands(Some(cwd))),
+        )?;
+        crate::skills::attach_advertised_commands(self.id(), &mut skills, &commands);
+        Ok(Some(skills))
+    }
+
     async fn commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
         let discovered = self
             .commands
-            .get_or_try_init(|| self.discover_commands())
+            .get_or_try_init(|| self.discover_commands(None))
             .await
             .cloned();
+        let skills = skill_commands(&(self.spec.skill_dirs)());
+        let mut commands = match discovered {
+            Ok(commands) => commands,
+            Err(_) if !skills.is_empty() => Vec::new(),
+            Err(error) => return Err(error),
+        };
+        commands.retain(|command| !self.spec.hidden_commands.contains(&command.name.as_str()));
+        for skill in skills {
+            if !commands.iter().any(|command| command.name == skill.name) {
+                commands.push(skill);
+            }
+        }
+        Ok(commands)
+    }
+
+    async fn commands_for(&self, cwd: &std::path::Path) -> Result<Vec<SlashCommand>, HarnessError> {
+        let discovered = self
+            .workspace_commands
+            .get(cwd, self.discover_commands(Some(cwd)))
+            .await;
         let skills = skill_commands(&(self.spec.skill_dirs)());
         let mut commands = match discovered {
             Ok(commands) => commands,
@@ -1762,7 +1919,8 @@ impl Harness for AcpHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        let (mut child, stderr_tail) = self.spawn_agent(Some(&request.cwd), true, &[]).await?;
+        let (scratch, mut child, stderr_tail) =
+            self.spawn_agent(Some(&request.cwd), true, &[]).await?;
         let stdin = child
             .stdin
             .take()
@@ -1779,6 +1937,7 @@ impl Harness for AcpHarness {
             .collect();
         tokio::spawn(run_session(Session {
             child,
+            scratch,
             client,
             incoming,
             event_tx,
@@ -1802,10 +1961,15 @@ impl Harness for AcpHarness {
             load_session: self.load_session.clone(),
         }));
 
-        Ok(futures::stream::unfold(event_rx, |mut rx| async move {
+        let events = futures::stream::unfold(event_rx, |mut rx| async move {
             rx.recv().await.map(|ev| (ev, rx))
         })
-        .boxed())
+        .boxed();
+        Ok(if self.spec.id == HarnessId::Antigravity {
+            system_message::strip_system_message_echoes(events)
+        } else {
+            events
+        })
     }
 }
 
@@ -1815,6 +1979,7 @@ impl Harness for AcpHarness {
 
 struct Session {
     child: Child,
+    scratch: Option<ScratchDir>,
     client: RpcClient,
     incoming: mpsc::Receiver<Incoming>,
     event_tx: mpsc::Sender<Result<AgentEvent, HarnessError>>,
@@ -2281,6 +2446,10 @@ fn stop_outcome(
     match res {
         Ok(resp) => match resp.get("stopReason").and_then(Value::as_str) {
             Some("cancelled") => (DoneStatus::Interrupted, None),
+            Some("error") => (
+                DoneStatus::Errored,
+                Some("The agent failed to complete the turn.".to_owned()),
+            ),
             Some("refusal") => (
                 DoneStatus::Errored,
                 Some("The agent refused to continue.".to_owned()),
@@ -2425,7 +2594,16 @@ fn handle_server_request_live(
     permission_mode: zeron_proto::PermissionMode,
     allow_computer_calls: bool,
     request_input: &std::sync::Arc<RequestInputFn>,
+    session_id: &str,
 ) -> Vec<AgentEvent> {
+    if params
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .is_some_and(|id| id != session_id)
+    {
+        client.respond(&id, json!({"outcome": {"outcome": "cancelled"}}));
+        return Vec::new();
+    }
     if method != "session/request_permission" {
         return handle_server_request(client, id, method, params);
     }
@@ -2522,6 +2700,14 @@ fn is_zeron_computer_permission(params: &Value) -> bool {
         .is_some_and(crate::is_zeron_computer_tool)
 }
 
+/// Where an agent that signs in from settings sends a signed-out run: the
+/// provider's Accounts section, whose connect flow is the same for every agent.
+fn not_signed_in(agent_name: &str) -> String {
+    format!(
+        "{agent_name} isn't signed in. Open Settings → Providers → {agent_name} and connect an account."
+    )
+}
+
 /// `session/new`. Agents that sign in from Settings never start a browser
 /// sign-in mid-chat; an auth_required answer points the user there instead.
 async fn new_session(
@@ -2533,9 +2719,7 @@ async fn new_session(
 ) -> Result<Value, HarnessError> {
     match request_draining(client, incoming, "session/new", params).await {
         Err(error) if signs_in_from_settings && is_auth_required(&error) => {
-            Err(HarnessError::Protocol(format!(
-                "{agent_name} isn't signed in. Turn it on again in Settings → Agents to sign in."
-            )))
+            Err(HarnessError::Protocol(not_signed_in(agent_name)))
         }
         other => other,
     }
@@ -2704,21 +2888,33 @@ async fn request_draining(
         .get("sessionId")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    let mut config_updates = std::collections::HashMap::new();
+    let mut metadata = VecDeque::new();
     let mut handle_incoming = |inc| match inc {
         Incoming::Request { id, method, params } => {
-            handle_server_request(client, id, &method, &params);
+            if method == "session/request_permission"
+                && params.get("sessionId").and_then(Value::as_str) != requested_session.as_deref()
+            {
+                client.respond(&id, json!({"outcome": {"outcome": "cancelled"}}));
+            } else {
+                handle_server_request(client, id, &method, &params);
+            }
         }
         Incoming::Notification { method, params }
             if loading_session
                 && method == "session/update"
-                && params["update"]["sessionUpdate"] == "config_option_update" =>
+                && matches!(
+                    params["update"]["sessionUpdate"].as_str(),
+                    Some(
+                        "config_option_update"
+                            | "available_commands_update"
+                            | "current_mode_update"
+                    )
+                ) =>
         {
-            if let Some(id) = params.get("sessionId").and_then(Value::as_str)
-                && params["update"]["configOptions"].is_array()
-            {
-                config_updates.insert(id.to_owned(), params["update"]["configOptions"].clone());
+            if metadata.len() == 32 {
+                metadata.pop_front();
             }
+            metadata.push_back(params);
         }
         _ => {}
     };
@@ -2750,8 +2946,27 @@ async fn request_draining(
             .get("sessionId")
             .and_then(Value::as_str)
             .or(requested_session.as_deref());
-        if let Some(options) = id.and_then(|id| config_updates.remove(id)) {
-            response["configOptions"] = options;
+        let id = id.map(str::to_owned);
+        for params in metadata {
+            if params["sessionId"].as_str() != id.as_deref() {
+                continue;
+            }
+            let update = &params["update"];
+            match update["sessionUpdate"].as_str() {
+                Some("config_option_update") if update["configOptions"].is_array() => {
+                    response["configOptions"] = update["configOptions"].clone();
+                }
+                Some("available_commands_update") if update["availableCommands"].is_array() => {
+                    response["availableCommands"] = update["availableCommands"].clone();
+                }
+                Some("current_mode_update") if update["currentModeId"].is_string() => {
+                    if !response["modes"].is_object() {
+                        response["modes"] = json!({});
+                    }
+                    response["modes"]["currentModeId"] = update["currentModeId"].clone();
+                }
+                _ => {}
+            }
         }
         response
     })
@@ -2798,6 +3013,8 @@ fn steering_call_future(
 /// turn, the steering mailbox, the interrupt token, and consumer liveness.
 async fn run_session(session: Session) {
     let Session {
+        // Locals drop in reverse binding order: reap the child before cleanup.
+        scratch: _scratch,
         mut child,
         client,
         mut incoming,
@@ -2865,12 +3082,18 @@ async fn run_session(session: Session) {
             load["sessionId"] = Value::String(resume.clone());
             match request_draining(&client, &mut incoming, "session/load", load).await {
                 Ok(resp) => (resume.clone(), resp),
+                Err(e) if auth_method.is_some() && is_auth_required(&e) => {
+                    return Err(HarnessError::Protocol(not_signed_in(agent_name)));
+                }
                 // A missing/foreign session falls back to a fresh one.
                 Err(e) => {
                     tracing::debug!(
                         target: "zeron_harness::acp",
                         "session/load failed (starting fresh): {e}"
                     );
+                    let _ = send(&event_tx, AgentEvent::Error {
+                        message: format!("{agent_name} could not restore session {resume}; starting a new session without the previous context: {e}"),
+                    }).await;
                     let new = new_session(
                         &client,
                         &mut incoming,
@@ -2924,8 +3147,8 @@ async fn run_session(session: Session) {
         }
         // ACP has had two model-selection surfaces. Newer config-option agents
         // use category=model below; Grok Build currently advertises only the
-        // first-class `models` state and requires `session/set_model`. Paseo
-        // follows the same split. Unlike the best-effort auxiliary options,
+        // first-class `models` state and requires `session/set_model`. Other
+        // ACP clients follow the same split. Unlike the best-effort auxiliary options,
         // an explicit model switch is strict: prompting with a different
         // model than the picker shows is worse than surfacing the RPC error.
         let requested_model: Option<String> = match request.model.as_deref() {
@@ -2965,6 +3188,12 @@ async fn run_session(session: Session) {
         // traits: a rejected auxiliary set is logged and the agent default
         // runs.
         let efforts = effort_values(request.reasoning, request.model.as_deref());
+        let session_commands = scan_available_commands(&session_response);
+        let init_commands = if session_commands.is_empty() {
+            init_commands
+        } else {
+            session_commands
+        };
         let options_snapshot = session_response;
         for (config_id, payload) in config_option_sets(
             &options_snapshot,
@@ -3057,7 +3286,7 @@ async fn run_session(session: Session) {
                             session_id: None,
                         }))
                         .await;
-                    shutdown_child(&mut child, kill_grace).await;
+                    child.shutdown(kill_grace).await;
                     return;
                 }
             }
@@ -3071,7 +3300,7 @@ async fn run_session(session: Session) {
                     session_id: None,
                 }))
                 .await;
-            shutdown_child(&mut child, kill_grace).await;
+            child.shutdown(kill_grace).await;
             return;
         }
     };
@@ -3090,7 +3319,7 @@ async fn run_session(session: Session) {
     )
     .await
     {
-        shutdown_child(&mut child, kill_grace).await;
+        child.shutdown(kill_grace).await;
         return;
     }
     if !init_commands.is_empty()
@@ -3102,7 +3331,7 @@ async fn run_session(session: Session) {
         )
         .await
     {
-        shutdown_child(&mut child, kill_grace).await;
+        child.shutdown(kill_grace).await;
         return;
     }
 
@@ -3124,8 +3353,8 @@ async fn run_session(session: Session) {
     // one prompt is outstanding at a time, identified by `current_prompt_id`;
     // settled ids are remembered so a STALE `prompt_complete` (a late replay
     // of an already-settled prompt) can never settle a newer turn.
-    let mut prompt_seq: u64 = 0;
-    let mut current_prompt_id: Option<String> = None;
+    let mut prompt_seq: u64 = 1;
+    let mut current_prompt_id = prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
     let mut completed_prompts: VecDeque<String> = VecDeque::new();
     // `ZERON_ACP_PROMPT_STALL_MS` overrides the spec's bound; 0 disables.
     let prompt_stall: Option<Duration> = match std::env::var("ZERON_ACP_PROMPT_STALL_MS")
@@ -3139,8 +3368,6 @@ async fn run_session(session: Session) {
     let mut prompt_stall_deadline: Option<tokio::time::Instant> =
         prompt_stall.map(|d| tokio::time::Instant::now() + d);
     let mut turn: Option<BoxFuture<'static, Result<Value, HarnessError>>> = Some({
-        prompt_seq += 1;
-        current_prompt_id = prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
         prompt_turn_with_context(
             client.clone(),
             session_id.clone(),
@@ -3172,7 +3399,9 @@ async fn run_session(session: Session) {
     let mut interrupt_sent = false;
     let mut done_current = false;
     let mut done_after_interrupt = false;
-    let mut escalation: Option<tokio::task::JoinHandle<()>> = None;
+    let mut escalation_target = None;
+    let mut escalation_deadline = None;
+    let mut escalation_signal = Signal::Term;
     // Starved-turn recovery (2026-08-12 stuck-Working incident): a
     // `session/prompt` sent while the agent runs a SELF-CONTINUED turn (a
     // background-task re-invocation no prompt started) starves —
@@ -3206,10 +3435,26 @@ async fn run_session(session: Session) {
     const CANCEL_FLUSH: Duration = Duration::from_secs(2);
     let mut cancel_flush_deadline: Option<tokio::time::Instant> = None;
 
+    let mut child_exit = None;
+    let mut exit_drain_deadline = None;
     'main: loop {
         tokio::select! {
+            status = child.wait(), if child_exit.is_none() => {
+                escalation_deadline = None;
+                child_exit = Some(status.ok());
+                child.request_group_shutdown();
+                // Descendants can hold stdout open after an adapter crash.
+                // Drain already-written frames, but never wait on them forever.
+                exit_drain_deadline = Some(tokio::time::Instant::now() + Duration::from_millis(200));
+            },
+            _ = tokio::time::sleep_until(exit_drain_deadline.unwrap_or_else(tokio::time::Instant::now)),
+                if exit_drain_deadline.is_some() => break 'main,
+
             res = async { turn.as_mut().expect("guarded by if").await }, if turn.is_some() => {
                 turn = None;
+                if res.is_err() && client.is_closed() {
+                    break 'main;
+                }
                 starve_deadline = None;
                 prompt_stall_deadline = None;
                 if let Some(id) = current_prompt_id.take() {
@@ -3293,6 +3538,7 @@ async fn run_session(session: Session) {
                                 request.permission_mode,
                                 allow_computer_calls,
                                 &request_input,
+                                &session_id,
                             ) {
                                 if !send(&event_tx, ev).await {
                                     consumer_gone = true;
@@ -3325,7 +3571,10 @@ async fn run_session(session: Session) {
                 {
                     break 'main;
                 }
-                let (status, error) = stop_outcome(&res, interrupted);
+                let (status, mut error) = stop_outcome(&res, interrupted);
+                if !interrupted && auth_method.is_some() && res.as_ref().is_err_and(is_auth_required) {
+                    error = Some(not_signed_in(agent_name));
+                }
                 done_current = true;
                 if interrupted {
                     done_after_interrupt = true;
@@ -3383,6 +3632,9 @@ async fn run_session(session: Session) {
 
             inc = incoming.recv() => match inc {
                 Some(Incoming::Notification { method, params }) => {
+                    if params.get("sessionId").and_then(Value::as_str).is_some_and(|id| id != session_id) {
+                        continue;
+                    }
                     last_update_at = tokio::time::Instant::now();
                     // Wire traffic is a sign of life for the prompt-stall
                     // watchdog — EXCEPT session boilerplate: opencode emits
@@ -3467,6 +3719,7 @@ async fn run_session(session: Session) {
                         request.permission_mode,
                         allow_computer_calls,
                         &request_input,
+                        &session_id,
                     ) {
                         if !send(&event_tx, ev).await {
                             break 'main;
@@ -3578,6 +3831,7 @@ async fn run_session(session: Session) {
                                         request.permission_mode,
                                         allow_computer_calls,
                                         &request_input,
+                                &session_id,
                                     ) {
                                         if !send(&event_tx, ev).await {
                                             consumer_gone = true;
@@ -3880,12 +4134,8 @@ async fn run_session(session: Session) {
                     // Escalate if the agent doesn't wind down (stopReason
                     // "cancelled") within the grace periods.
                     if let Some(pid) = crate::process::signal_target(&child) {
-                        escalation = Some(tokio::spawn(async move {
-                            tokio::time::sleep(interrupt_grace).await;
-                            send_signal(&pid, Signal::Term);
-                            tokio::time::sleep(kill_grace).await;
-                            send_signal(&pid, Signal::Kill);
-                        }));
+                        escalation_target = Some(pid);
+                        escalation_deadline = Some(tokio::time::Instant::now() + interrupt_grace);
                     }
                 } else {
                     // Idle between turns: nothing to cancel — the terminal
@@ -3903,7 +4153,6 @@ async fn run_session(session: Session) {
             _ = tokio::time::sleep_until(
                 prompt_stall_deadline.unwrap_or_else(tokio::time::Instant::now),
             ), if prompt_stall_deadline.is_some() && turn.is_some() && !interrupted => {
-                prompt_stall_deadline = None;
                 let _ = send(
                     &event_tx,
                     AgentEvent::Error {
@@ -3930,6 +4179,25 @@ async fn run_session(session: Session) {
                 )
                 .await;
                 break 'main;
+            },
+
+            // Keep escalation in the owner task: it cannot outlive child.wait()
+            // or signal a pid after the child has been reaped.
+            _ = tokio::time::sleep_until(escalation_deadline.unwrap_or_else(tokio::time::Instant::now)),
+                if escalation_deadline.is_some() => {
+                // Once signal escalation starts, a late prompt response no longer
+                // owns this turn (including any usage attached to that response).
+                turn = None;
+                if let Some(target) = &escalation_target {
+                    send_signal(target, escalation_signal);
+                }
+                escalation_deadline = match escalation_signal {
+                    Signal::Term => {
+                        escalation_signal = Signal::Kill;
+                        Some(tokio::time::Instant::now() + kill_grace)
+                    }
+                    Signal::Kill => None,
+                };
             },
 
             _ = event_tx.closed() => break 'main,
@@ -3963,7 +4231,15 @@ async fn run_session(session: Session) {
                 .await;
         } else if !interrupted && !done_current {
             // A child killed mid-turn must not read as a silent success.
-            let status = child.try_wait().ok().flatten();
+            let status = match child_exit {
+                Some(status) => status,
+                None => tokio::time::timeout(Duration::from_millis(200), child.wait())
+                    .await
+                    .ok()
+                    .and_then(Result::ok),
+            };
+            child.request_group_shutdown();
+            stderr_tail.wait_closed().await;
             let _ = event_tx
                 .send(Ok(AgentEvent::Done {
                     status: DoneStatus::Errored,
@@ -3975,13 +4251,7 @@ async fn run_session(session: Session) {
         }
     }
 
-    // Escalation dies BEFORE the child is reaped: after `shutdown_child`
-    // waits the pid, a still-armed SIGTERM/SIGKILL timer would fire at a
-    // freed (reusable) pid.
-    if let Some(handle) = escalation {
-        handle.abort();
-    }
-    shutdown_child(&mut child, kill_grace).await;
+    child.shutdown(kill_grace).await;
 }
 
 #[cfg(test)]
@@ -4019,6 +4289,25 @@ mod tests {
         for harness in [HarnessId::Hermes, HarnessId::Pi, HarnessId::Antigravity] {
             assert!(!records_computer_permission_shape(harness), "{harness:?}");
         }
+    }
+
+    #[test]
+    fn pi_discovery_allows_cold_extension_startup() {
+        let pi = AcpHarness::pi();
+        assert_eq!(pi.model_discovery_timeout, Duration::from_secs(60));
+        assert_eq!(pi.handshake_timeout, Duration::from_secs(120));
+        assert!(pi.spec.prompt_stall.is_none());
+    }
+
+    #[test]
+    fn antigravity_discovery_budget_covers_cold_start_without_changing_handshake() {
+        let harness = AcpHarness::antigravity();
+        assert_eq!(harness.model_discovery_timeout, Duration::from_secs(90));
+        assert_eq!(harness.handshake_timeout, Duration::from_secs(120));
+        assert_eq!(
+            AcpHarness::grok().model_discovery_timeout,
+            Duration::from_secs(10)
+        );
     }
 
     fn all_antigravity_auth_methods() -> Value {
@@ -5030,4 +5319,39 @@ mod tests {
         assert_eq!(commands[0].name, "compact");
         assert!(scan_available_commands(&json!({ "protocolVersion": 1 })).is_empty());
     }
+}
+
+#[cfg(all(test, unix))]
+#[tokio::test]
+async fn setup_retains_bounded_session_metadata_before_response() {
+    let mut child = Command::new(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-robust-acp.py"),
+    )
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .kill_on_drop(true)
+    .spawn()
+    .unwrap();
+    let (client, mut incoming) =
+        RpcClient::new(child.stdin.take().unwrap(), child.stdout.take().unwrap());
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        request_draining(&client, &mut incoming, "session/new", json!({})),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(result["availableCommands"][0]["name"], "early");
+    assert_eq!(result["configOptions"], json!([]));
+    assert_eq!(result["modes"]["currentModeId"], "plan");
+    child.kill().await.unwrap();
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn explicit_program_launches_do_not_get_archive_scratch_roots() {
+    let harness = AcpHarness::antigravity().with_executable(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-antigravity-acp.sh"),
+    );
+    assert!(harness.adapter_scratch().unwrap().is_none());
 }

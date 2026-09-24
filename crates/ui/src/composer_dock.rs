@@ -58,6 +58,8 @@ pub(crate) struct DockFrame {
     pub amount: f32,
     pub docked: bool,
     pub active: bool,
+    /// Panel handoffs replace geometry while hidden; reduced motion also snaps.
+    snap_reflow: bool,
     visuals: Visuals,
 }
 
@@ -67,6 +69,7 @@ impl DockFrame {
             amount: if docked { 1.0 } else { 0.0 },
             docked,
             active: false,
+            snap_reflow: false,
             visuals: Visuals::settled(docked),
         }
     }
@@ -82,6 +85,92 @@ impl DockFrame {
     }
     pub fn dissolve(self) -> f32 {
         self.visuals.dissolve
+    }
+}
+
+/// Layout endpoints can change while the route clock is moving: text wraps,
+/// the input changes mode, or attachments gain a row. Keep that discrete change
+/// out of the painted geometry without filtering the route animation itself.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DockLayout {
+    pub hero_height: f32,
+    pub thread_height: f32,
+    pub extra_height: f32,
+    pub compact: bool,
+}
+
+impl DockLayout {
+    pub fn height(self, amount: f32) -> f32 {
+        crate::motion::lerp(self.hero_height, self.thread_height, amount) + self.extra_height
+    }
+
+    fn compact_amount(self, amount: f32) -> f32 {
+        if self.compact { amount } else { 0.0 }
+    }
+}
+
+pub(crate) struct DockReflow {
+    previous: Option<(DockLayout, DockFrame)>,
+    height_offset: Glide,
+    compact_offset: Glide,
+    last_sample: Option<Instant>,
+}
+
+impl Default for DockReflow {
+    fn default() -> Self {
+        Self {
+            previous: None,
+            height_offset: Glide::new(0.0),
+            compact_offset: Glide::new(0.0),
+            last_sample: None,
+        }
+    }
+}
+
+impl DockReflow {
+    pub fn active(&self) -> bool {
+        self.height_offset.active() || self.compact_offset.active()
+    }
+
+    /// Return a height correction and compact-control position on the dock's
+    /// timeline. Outside a route/reflow, local typing morphs retain ownership.
+    pub fn sample(
+        &mut self,
+        layout: DockLayout,
+        frame: DockFrame,
+        reduced: bool,
+        now: Instant,
+    ) -> (f32, f32) {
+        let previous = self.previous.replace((layout, frame));
+        let last_sample = self.last_sample.replace(now);
+        let owns_layout = frame.active
+            || self.active()
+            || previous.is_some_and(|(_, previous)| previous.amount != frame.amount);
+        if reduced || frame.snap_reflow || !owns_layout || previous.is_none() {
+            self.height_offset = Glide::new(0.0);
+            self.compact_offset = Glide::new(0.0);
+        } else if let Some((previous_layout, previous_frame)) = previous {
+            // Do not consume idle time or lose velocity on route reversal.
+            let dt = if frame.docked != previous_frame.docked {
+                0.0
+            } else {
+                last_sample.map_or(0.0, |last| {
+                    now.saturating_duration_since(last).as_secs_f32()
+                })
+            };
+            self.height_offset.advance(0.0, dt, duration(frame.docked));
+            self.compact_offset.advance(0.0, dt, duration(frame.docked));
+            // Evaluate both layouts at THIS route phase. Only the reflow is
+            // compensated; normal hero/thread travel keeps its original curve.
+            self.height_offset.value +=
+                previous_layout.height(frame.amount) - layout.height(frame.amount);
+            self.compact_offset.value +=
+                previous_layout.compact_amount(frame.amount) - layout.compact_amount(frame.amount);
+        }
+        (
+            self.height_offset.value,
+            (layout.compact_amount(frame.amount) + self.compact_offset.value).clamp(0.0, 1.0),
+        )
     }
 }
 
@@ -110,8 +199,11 @@ impl Visuals {
         if docked {
             Self {
                 transcript: blend(self.transcript, target.transcript, 0.20, 0.65),
-                selectors: blend(self.selectors, target.selectors, 0.55, 0.78),
-                footer: blend(self.footer, target.footer, 0.78, 1.0),
+                // The spring has covered 80% of its travel at a quarter of
+                // the clock, and 99% by 0.55. Release the departing chips
+                // during travel and finish the footer with that arrival.
+                selectors: blend(self.selectors, target.selectors, 0.0, 0.25),
+                footer: blend(self.footer, target.footer, 0.25, 0.55),
                 dissolve: blend(self.dissolve, target.dissolve, 0.06, 0.88),
             }
         } else {
@@ -123,6 +215,23 @@ impl Visuals {
                 footer: blend(self.footer, target.footer, 0.0, 0.18),
                 dissolve: blend(self.dissolve, target.dissolve, 0.08, 0.85),
             }
+        }
+    }
+
+    fn enter_with_panel(self, time: f32) -> Self {
+        // The whole composer fades through zero. Keep its source controls
+        // until the hidden geometry switch, then reveal only the destination
+        // controls with the surface; a second fade would revive old chips.
+        let controls = if time < panel_handoff::GEOMETRY_SWITCH {
+            self
+        } else {
+            Self::settled(true)
+        };
+        Self {
+            transcript: crate::motion::lerp(self.transcript, 1.0, stage(time, 0.26, 1.0)),
+            selectors: controls.selectors,
+            footer: controls.footer,
+            dissolve: crate::motion::lerp(self.dissolve, 1.0, stage(time, 0.0, 0.18)),
         }
     }
 
@@ -202,7 +311,7 @@ impl DockState {
             target,
             enabled,
             now,
-            0.320 * crate::motion::speed_scale(),
+            panel_handoff::DURATION * crate::motion::speed_scale(),
         )
     }
 
@@ -222,7 +331,7 @@ impl DockState {
         let width = self.width.get_or_insert(Glide::new(target));
         if let Some(progress) = self.pane.progress {
             // Change horizontal geometry only inside the invisible interval.
-            if progress >= 0.22 {
+            if progress >= panel_handoff::GEOMETRY_SWITCH {
                 *width = Glide::new(target);
             }
         } else if reduced || (!self.frame.active && !self.moving) {
@@ -260,8 +369,8 @@ impl DockState {
         }
         self.last_frame = Some(now);
         let visuals = if let Some((started, from)) = self.choreography {
-            let total = if self.panel_return {
-                0.320 * crate::motion::speed_scale()
+            let total = if self.panel_return || self.panel_departure {
+                panel_handoff::DURATION * crate::motion::speed_scale()
             } else {
                 duration(docked)
             };
@@ -269,26 +378,25 @@ impl DockState {
             if time >= 1.0 {
                 self.choreography = None;
             }
-            let mut visuals = if self.panel_return {
+            if self.panel_return {
                 from.return_from_panel(time)
+            } else if self.panel_departure {
+                from.enter_with_panel(time)
             } else {
                 from.advance(docked, time)
-            };
-            if self.panel_departure {
-                let panel_time = now.saturating_duration_since(started).as_secs_f32()
-                    / (0.320 * crate::motion::speed_scale());
-                visuals.dissolve =
-                    crate::motion::lerp(from.dissolve, 1.0, stage(panel_time, 0.0, 0.18));
             }
-            visuals
         } else {
             Visuals::settled(docked)
         };
-        if self.panel_return {
-            let amount = if self.pane.progress.is_some_and(|p| p < 0.22) {
+        if self.panel_return || self.panel_departure {
+            let amount = if self
+                .pane
+                .progress
+                .is_some_and(|p| p < panel_handoff::GEOMETRY_SWITCH)
+            {
                 self.frame.amount
             } else {
-                0.0
+                target
             };
             // Keep the retargetable state aligned with what was painted so a
             // reversal cannot revive the old, longer height animation.
@@ -298,6 +406,7 @@ impl DockState {
             amount: self.phase.value.clamp(0.0, 1.0),
             docked,
             active: self.phase.active() || self.choreography.is_some(),
+            snap_reflow: reduced || self.pane.progress.is_some(),
             visuals,
         };
         self.frame
@@ -386,11 +495,13 @@ impl Element for DockedComposer {
         let handoff = state.pane.progress;
         let position = state.position.get_or_insert((Glide::new(x), Glide::new(y)));
         if let Some(progress) = handoff {
-            if progress >= 0.22 {
+            if progress >= panel_handoff::GEOMETRY_SWITCH {
                 let travel = if docked { 12.0 } else { 8.0 };
                 *position = (
                     Glide::new(x),
-                    Glide::new(y + travel * (1.0 - stage(progress, 0.22, 1.0))),
+                    Glide::new(
+                        y + travel * (1.0 - stage(progress, panel_handoff::GEOMETRY_SWITCH, 1.0)),
+                    ),
                 );
             }
         } else if self.reduced || !moving {
@@ -441,6 +552,123 @@ mod tests {
     use super::*;
     use gpui::{Context, Render, canvas, div, prelude::*};
 
+    fn attachment_layout(outer_width: f32) -> DockLayout {
+        DockLayout {
+            hero_height: crate::composer::COMPOSER_MIN_HEIGHT,
+            thread_height: crate::composer::COMPACT_TOTAL_HEIGHT,
+            extra_height: crate::composer::attachment_strip_height(10, outer_width - 34.0),
+            compact: true,
+        }
+    }
+
+    #[test]
+    fn reflow_keeps_route_height_continuous_across_attachment_rows_and_reversal() {
+        for docked in [true, false] {
+            let mut reflow = DockReflow::default();
+            let mut now = Instant::now();
+            let (before, after) = if docked {
+                (698.0, 697.0)
+            } else {
+                (697.0, 698.0)
+            };
+            let source = attachment_layout(before);
+            let target = attachment_layout(after);
+            assert_eq!((source.extra_height - target.extra_height).abs(), 64.0);
+            let mut frame = DockFrame::settled(docked);
+            frame.active = true;
+            frame.amount = 0.4;
+            reflow.sample(source, frame, false, now);
+            let (offset, compact) = reflow.sample(target, frame, false, now);
+            assert_eq!(
+                target.height(frame.amount) + offset,
+                source.height(frame.amount)
+            );
+            assert_eq!(compact, frame.amount);
+            assert!(reflow.active());
+
+            now += std::time::Duration::from_millis(16);
+            let (offset, _) = reflow.sample(target, frame, false, now);
+            let painted = target.height(frame.amount) + offset;
+            assert!((painted - source.height(frame.amount)).abs() < 5.0);
+            // Reverse both route and wrapping before the correction has settled.
+            frame.docked = !docked;
+            let (offset, _) = reflow.sample(source, frame, false, now);
+            assert!((source.height(frame.amount) + offset - painted).abs() < 0.001);
+            frame.amount = if frame.docked { 1.0 } else { 0.0 };
+            frame.active = false;
+            for _ in 0..120 {
+                now += std::time::Duration::from_millis(16);
+                reflow.sample(source, frame, false, now);
+            }
+            assert!(!reflow.active());
+            assert_eq!(reflow.sample(source, frame, false, now).0, 0.0);
+        }
+    }
+
+    #[test]
+    fn reflow_coordinates_wrapped_text_height_and_compact_controls() {
+        let mut reflow = DockReflow::default();
+        let mut now = Instant::now();
+        let short = DockLayout {
+            extra_height: 0.0,
+            ..attachment_layout(768.0)
+        };
+        let multiline = DockLayout {
+            hero_height: 150.0,
+            thread_height: 134.0,
+            compact: false,
+            ..short
+        };
+        let mut frame = DockFrame::settled(true);
+        frame.amount = 0.7;
+        frame.active = true;
+        reflow.sample(short, frame, false, now);
+        let (offset, compact) = reflow.sample(multiline, frame, false, now);
+        assert!(
+            (multiline.height(frame.amount) + offset - short.height(frame.amount)).abs() < 0.001
+        );
+        assert_eq!(
+            compact, 0.7,
+            "the selector must not jump to the left when mode changes"
+        );
+        frame.amount = 1.0;
+        frame.active = false;
+        for _ in 0..120 {
+            now += std::time::Duration::from_millis(16);
+            reflow.sample(multiline, frame, false, now);
+        }
+        assert_eq!(reflow.sample(multiline, frame, false, now), (0.0, 0.0));
+        assert!(!reflow.active());
+    }
+
+    #[test]
+    fn reflow_snaps_for_hidden_panels_and_reduced_motion_and_leaves_idle_resizes_alone() {
+        let source = attachment_layout(768.0);
+        let target = attachment_layout(592.0);
+        let now = Instant::now();
+        for (active, hidden, reduced) in [
+            (false, false, false),
+            (true, false, true),
+            (true, true, false),
+        ] {
+            let mut reflow = DockReflow::default();
+            let mut frame = DockFrame::settled(true);
+            frame.active = active;
+            reflow.sample(source, frame, false, now);
+            frame.snap_reflow = hidden;
+            assert_eq!(reflow.sample(target, frame, reduced, now).0, 0.0);
+            assert!(!reflow.active());
+        }
+        let mut reflow = DockReflow::default();
+        let mut frame = DockFrame::settled(true);
+        frame.active = true;
+        reflow.sample(source, frame, false, now);
+        reflow.sample(target, frame, false, now);
+        assert!(reflow.active());
+        assert_eq!(reflow.sample(target, frame, true, now).0, 0.0);
+        assert!(!reflow.active());
+    }
+
     #[test]
     fn panel_handoff_hides_background_during_geometry_switch_in_both_sidebar_states() {
         for sidebar in [0.0, 224.0] {
@@ -457,7 +685,7 @@ mod tests {
                 for progress in [0.19, 0.22, 0.25] {
                     let at = now
                         + std::time::Duration::from_secs_f32(
-                            progress * 0.320 * crate::motion::speed_scale(),
+                            progress * panel_handoff::DURATION * crate::motion::speed_scale(),
                         );
                     state.observe_pane(docked, target_pane, true, at);
                     assert_eq!(state.tick(docked, false, at).dissolve(), 1.0);
@@ -469,6 +697,59 @@ mod tests {
                     state.tick(docked, false, at).dissolve(),
                     if docked { 1.0 } else { 0.0 }
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn conversation_width_transitions_settle_and_panel_handoffs_resize_while_hidden() {
+        for thread_width in [592.0, 768.0, 1232.0] {
+            for reduced in [false, true] {
+                let mut state = DockState::default();
+                let mut now = Instant::now();
+                state.tick(false, reduced, now);
+                assert_eq!(state.layout_width(768.0, reduced, now), 768.0);
+                state.position = Some((Glide::new(0.0), Glide::new(300.0)));
+                let mut source = 768.0;
+                for (docked, target) in [(true, thread_width), (false, 768.0)] {
+                    now += std::time::Duration::from_secs(30);
+                    state.tick(docked, reduced, now);
+                    assert_eq!(
+                        state.layout_width(target, reduced, now),
+                        if reduced { target } else { source },
+                        "a route change starts at the painted width unless motion is reduced"
+                    );
+                    for _ in 0..90 {
+                        now += std::time::Duration::from_millis(16);
+                        state.tick(docked, reduced, now);
+                        let width = state.layout_width(target, reduced, now);
+                        assert!(width >= source.min(target) && width <= source.max(target));
+                    }
+                    assert_eq!(state.layout_width(target, reduced, now), target);
+                    source = target;
+                }
+            }
+
+            for (docked, source, target) in
+                [(true, 768.0, thread_width), (false, thread_width, 768.0)]
+            {
+                let mut state = DockState::default();
+                let now = Instant::now();
+                let source_pane = if docked { 0.0 } else { 480.0 };
+                let target_pane = if docked { 480.0 } else { 0.0 };
+                state.observe_pane(!docked, source_pane, true, now);
+                state.tick(!docked, false, now);
+                state.layout_width(source, false, now);
+                state.position = Some((Glide::new(0.0), Glide::new(300.0)));
+                state.observe_pane(docked, target_pane, true, now);
+                state.tick(docked, false, now);
+                assert_eq!(state.layout_width(target, false, now), source);
+                let hidden =
+                    now + std::time::Duration::from_secs_f32(0.075 * crate::motion::speed_scale());
+                state.observe_pane(docked, target_pane, true, hidden);
+                state.tick(docked, false, hidden);
+                assert_eq!(state.opacity(), 0.0);
+                assert_eq!(state.layout_width(target, false, hidden), target);
             }
         }
     }
@@ -552,11 +833,11 @@ mod tests {
         }
         let measured = Rc::new(std::cell::Cell::new(None));
         let now = Instant::now();
-        let handle = cx.add_window(|_, _| Fixture {
+        let handle = cx.open_window(gpui::size(px(1600.0), px(900.0)), |_, _| Fixture {
             state: Default::default(),
             now,
             docked: false,
-            width: 400.0,
+            width: 768.0,
             measured: measured.clone(),
         });
         let draw = |cx: &mut gpui::TestAppContext| {
@@ -571,6 +852,7 @@ mod tests {
             .update(cx, |fixture, _, cx| {
                 fixture.now = now + std::time::Duration::from_secs(30);
                 fixture.docked = true;
+                fixture.width = 1232.0;
                 cx.notify();
             })
             .unwrap();
@@ -586,7 +868,7 @@ mod tests {
         handle
             .update(cx, |fixture, _, cx| {
                 fixture.docked = false;
-                fixture.width = 300.0;
+                fixture.width = 768.0;
                 cx.notify();
             })
             .unwrap();
@@ -606,7 +888,112 @@ mod tests {
         }
         let settled = draw(cx);
         assert!((f32::from(settled.top() - origin.top())).abs() < 0.1);
-        assert!((f32::from(settled.size.width) - 300.0).abs() < 0.1);
+        assert!((f32::from(settled.size.width) - 768.0).abs() < 0.1);
+    }
+
+    #[gpui::test]
+    fn measured_panel_geometry_changes_only_inside_fade_through(cx: &mut gpui::TestAppContext) {
+        struct Fixture {
+            state: SharedDock,
+            now: Instant,
+            docked: bool,
+            sidebar: f32,
+            measured: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
+        }
+        impl Render for Fixture {
+            fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let pane = if self.docked { 320.0 } else { 0.0 };
+                let frame = {
+                    let mut state = self.state.borrow_mut();
+                    state.observe_pane(self.docked, pane, true, self.now);
+                    state.tick(self.docked, false, self.now)
+                };
+                let width = self
+                    .state
+                    .borrow_mut()
+                    .layout_width(640.0 - pane, false, self.now);
+                let measured = self.measured.clone();
+                div()
+                    .size_full()
+                    .pl(px(self.sidebar))
+                    .flex()
+                    .flex_col()
+                    .child(div().flex_1())
+                    .child(docked_composer(
+                        div()
+                            .relative()
+                            .w(px(width))
+                            .h(px(crate::motion::lerp(124.0, 49.0, frame.amount)))
+                            .mx_auto()
+                            .child(
+                                canvas(
+                                    move |bounds, _, _| measured.set(Some(bounds)),
+                                    |_, _, _, _| {},
+                                )
+                                .absolute()
+                                .inset_0(),
+                            ),
+                        self.state.clone(),
+                        f32::from(window.viewport_size().height),
+                        false,
+                        self.now,
+                    ))
+            }
+        }
+        for sidebar in [0.0, 224.0] {
+            for docked in [false, true] {
+                let now = Instant::now();
+                let measured = Rc::new(std::cell::Cell::new(None));
+                let state: SharedDock = Default::default();
+                let handle = cx.add_window(|_, _| Fixture {
+                    state: state.clone(),
+                    now,
+                    docked: !docked,
+                    sidebar,
+                    measured: measured.clone(),
+                });
+                let draw = |cx: &mut gpui::TestAppContext| {
+                    cx.update_window(handle.into(), |_, window, cx| {
+                        window.draw(cx).clear();
+                    })
+                    .unwrap();
+                    measured.get().unwrap()
+                };
+                let source = draw(cx);
+                let start = now + std::time::Duration::from_secs(30);
+                for progress in [0.0, 0.10, 0.19, 0.23, 0.27, 0.60, 1.01] {
+                    handle
+                        .update(cx, |fixture, _, cx| {
+                            fixture.docked = docked;
+                            fixture.now = start
+                                + std::time::Duration::from_secs_f32(
+                                    progress
+                                        * panel_handoff::DURATION
+                                        * crate::motion::speed_scale(),
+                                );
+                            cx.notify();
+                        })
+                        .unwrap();
+                    let bounds = draw(cx);
+                    if progress < 0.22 {
+                        assert_eq!(bounds, source, "source geometry must hold through fade-out");
+                    } else {
+                        assert_eq!(
+                            f32::from(bounds.size.width),
+                            if docked { 320.0 } else { 640.0 }
+                        );
+                        assert_eq!(
+                            f32::from(bounds.size.height),
+                            if docked { 49.0 } else { 124.0 }
+                        );
+                    }
+                    if (0.18..=0.26).contains(&progress) {
+                        assert_eq!(state.borrow().opacity(), 0.0);
+                    }
+                }
+                assert_eq!(state.borrow().frame, DockFrame::settled(docked));
+            }
+        }
     }
 
     #[test]
@@ -625,12 +1012,146 @@ mod tests {
     }
 
     #[test]
+    fn entry_chips_leave_during_travel_and_footer_arrives_with_composer() {
+        let mut state = DockState::default();
+        let now = Instant::now();
+        state.tick(false, false, now);
+        state.position = Some((Glide::new(0.0), Glide::new(300.0)));
+        state.tick(true, false, now);
+        let frame = state.tick(
+            true,
+            false,
+            now + std::time::Duration::from_secs_f32(duration(true) * 0.25),
+        );
+        assert!(frame.amount > 0.79 && frame.amount < 0.81);
+        assert!(
+            frame.selectors() < 0.01,
+            "departing chips must leave during travel"
+        );
+        let frame = state.tick(
+            true,
+            false,
+            now + std::time::Duration::from_secs_f32(duration(true) * 0.55),
+        );
+        assert!(frame.amount > 0.98);
+        assert!(
+            frame.footer() > 0.99,
+            "footer must arrive with the composer"
+        );
+    }
+
+    #[test]
+    fn panel_entry_switches_chips_and_height_while_hidden() {
+        let now = Instant::now();
+        let mut state = DockState::default();
+        state.observe_pane(false, 0.0, true, now);
+        state.tick(false, false, now);
+        state.position = Some((Glide::new(100.0), Glide::new(300.0)));
+        state.observe_pane(true, 480.0, true, now);
+        state.tick(true, false, now);
+        for step in 0..=100 {
+            let progress = step as f32 / 100.0;
+            let at = now
+                + std::time::Duration::from_secs_f32(
+                    progress * panel_handoff::DURATION * crate::motion::speed_scale(),
+                );
+            state.observe_pane(true, 480.0, true, at);
+            let frame = state.tick(true, false, at);
+            if progress < 0.18 {
+                assert_eq!(frame.amount, 0.0, "hold departing geometry until hidden");
+                assert_eq!(frame.selectors(), 1.0);
+                assert_eq!(frame.footer(), 0.0);
+            } else if progress > 0.26 {
+                assert_eq!(frame.amount, 1.0, "finish resizing before reappearance");
+                assert_eq!(frame.selectors(), 0.0, "old chips must never reappear");
+                assert_eq!(frame.footer(), 1.0);
+            }
+        }
+        assert!(
+            !state.frame.active,
+            "no second timeline after the panel handoff"
+        );
+    }
+
+    #[test]
+    fn interrupted_routes_preserve_chrome_and_settle_in_both_directions() {
+        for panel_width in [0.0, 480.0, 960.0] {
+            for docked in [false, true] {
+                for hz in [30, 60, 120] {
+                    for interruption in [0.05, 0.23, 0.60, 0.90] {
+                        let mut state = DockState::default();
+                        let now = Instant::now();
+                        let pane = |docked| if docked { panel_width } else { 0.0 };
+                        state.observe_pane(!docked, pane(!docked), true, now);
+                        state.tick(!docked, false, now);
+                        state.position = Some((Glide::new(0.0), Glide::new(300.0)));
+                        state.observe_pane(docked, pane(docked), true, now);
+                        state.tick(docked, false, now);
+                        let span = if panel_width > 0.0 {
+                            panel_handoff::DURATION * crate::motion::speed_scale()
+                        } else {
+                            duration(docked)
+                        };
+                        let reverse_at =
+                            now + std::time::Duration::from_secs_f32(span * interruption);
+                        state.observe_pane(docked, pane(docked), true, reverse_at);
+                        let before = state.tick(docked, false, reverse_at);
+                        let opacity = state.opacity();
+                        state.observe_pane(!docked, pane(!docked), true, reverse_at);
+                        let reversed = state.tick(!docked, false, reverse_at);
+                        assert!((reversed.amount - before.amount).abs() < 0.00001);
+                        assert_eq!(reversed.visuals, before.visuals);
+                        assert_eq!(state.opacity(), opacity);
+                        for frame in 1..=hz {
+                            let at = reverse_at
+                                + std::time::Duration::from_secs_f32(
+                                    frame as f32 / hz as f32 * crate::motion::speed_scale(),
+                                );
+                            state.observe_pane(!docked, pane(!docked), true, at);
+                            let frame = state.tick(!docked, false, at);
+                            assert!(frame.selectors() == 0.0 || frame.footer() == 0.0);
+                            for alpha in [frame.selectors(), frame.footer(), state.opacity()] {
+                                assert!((0.0..=1.0).contains(&alpha));
+                            }
+                        }
+                        assert_eq!(state.frame, DockFrame::settled(!docked));
+                        assert_eq!(state.opacity(), 1.0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reduced_motion_cancels_panel_geometry_and_chrome_together() {
+        for docked in [false, true] {
+            let mut state = DockState::default();
+            let now = Instant::now();
+            let pane = |docked| if docked { 480.0 } else { 0.0 };
+            state.observe_pane(!docked, pane(!docked), true, now);
+            state.tick(!docked, false, now);
+            state.position = Some((Glide::new(0.0), Glide::new(300.0)));
+            state.observe_pane(docked, pane(docked), true, now);
+            state.tick(docked, false, now);
+            let at = now + std::time::Duration::from_millis(100);
+            state.observe_pane(docked, pane(docked), false, at);
+            // Reduced motion snaps the reflow too (#453), so the settled frame
+            // carries the snap flag.
+            let mut settled = DockFrame::settled(docked);
+            settled.snap_reflow = true;
+            assert_eq!(state.tick(docked, true, at), settled);
+            assert_eq!(state.opacity(), 1.0);
+            assert_eq!(state.layout_width(400.0, true, at), 400.0);
+        }
+    }
+
+    #[test]
     fn choreography_is_direction_specific_and_selectors_never_duplicate() {
         let new = Visuals::settled(false);
         let thread = Visuals::settled(true);
         assert_eq!(new.advance(true, 0.19).transcript, 0.0);
         assert_eq!(new.advance(true, 0.65).transcript, 1.0);
-        assert_eq!(new.advance(true, 0.55).selectors, 1.0);
+        assert_eq!(new.advance(true, 0.25).selectors, 0.0);
         assert_eq!(thread.advance(false, 0.25).transcript, 0.0);
         assert_eq!(thread.advance(false, 0.49).selectors, 0.0);
         for step in 0..=100 {

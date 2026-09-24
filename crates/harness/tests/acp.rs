@@ -10,7 +10,9 @@ use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 
 use zeron_harness::acp::SignInProgress;
-use zeron_harness::{AcpHarness, CancellationToken, Harness, RunControls, SteerMessage};
+use zeron_harness::{
+    AcpHarness, CancellationToken, Harness, HarnessError, RunControls, SteerMessage,
+};
 use zeron_proto::{
     AgentEvent, Compaction, DoneStatus, HarnessId, ReasoningLevel, RunRequest, SandboxLevel,
     SteeringMode, TodoItem, ToolCall, UserInputAnswer,
@@ -770,11 +772,11 @@ async fn antigravity_sign_in_reports_the_browser_url_and_authenticates() {
 }
 
 #[tokio::test]
-async fn antigravity_commands_hide_logout_but_keep_the_servers_own() {
+async fn antigravity_commands_include_logout() {
     let commands = antigravity_harness().commands().await.expect("commands");
     let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
     assert!(names.contains(&"plan"), "{names:?}");
-    assert!(!names.contains(&"logout"), "{names:?}");
+    assert!(names.contains(&"logout"), "{names:?}");
 }
 
 #[tokio::test]
@@ -797,7 +799,10 @@ async fn antigravity_run_without_sign_in_points_to_settings_instead_of_a_browser
     assert_eq!(dones.len(), 1, "{events:?}");
     assert_eq!(dones[0].0, DoneStatus::Errored);
     let error = dones[0].1.as_deref().unwrap_or_default();
-    assert!(error.contains("Settings → Agents"), "{error}");
+    assert!(
+        error.contains("Settings → Providers → Antigravity and connect an account"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -1213,28 +1218,14 @@ async fn devin_models_refresh_between_calls_and_coalesce_overlapping_probes() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn devin_discovery_errors_and_timeouts_retry_without_stale_success() {
+async fn devin_discovery_errors_and_timeouts_retain_last_good_then_recover() {
     let (dir, harness) = devin_fixture();
     let harness = harness.with_model_discovery_timeout(Duration::from_millis(500));
     assert_eq!(harness.models().await.unwrap()[0].id, "gpt-old");
     std::fs::write(dir.path().join("state"), "error").unwrap();
-    assert!(
-        harness
-            .models()
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("account unavailable")
-    );
+    assert_eq!(harness.models().await.unwrap()[0].id, "gpt-old");
     std::fs::write(dir.path().join("state"), "hang").unwrap();
-    assert!(
-        harness
-            .models()
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("timed out")
-    );
+    assert_eq!(harness.models().await.unwrap()[0].id, "gpt-old");
     std::fs::write(dir.path().join("state"), "gpt-new").unwrap();
     assert_eq!(harness.models().await.unwrap()[0].id, "gpt-new");
 }
@@ -1396,4 +1387,753 @@ async fn antigravity_auth_path_subprocess() {
     .await
     .expect("sign-in timed out")
     .expect("configured business sign-in");
+}
+
+#[tokio::test]
+async fn antigravity_wedge_emits_one_interrupted_done() {
+    let (controls, _steer, token) = controls();
+    let harness = AcpHarness::antigravity().with_executable(fixture_path());
+    let stream = harness
+        .run(request("scenario:wedge"), controls)
+        .await
+        .expect("run starts");
+    let events = tokio::time::timeout(Duration::from_secs(6), async move {
+        let mut events = Vec::new();
+        let mut stream = stream;
+        while let Some(ev) = stream.next().await {
+            let ev = ev.expect("stream event");
+            if matches!(ev, AgentEvent::TextDelta { ref text } if text == "working") {
+                token.cancel();
+            }
+            events.push(ev);
+        }
+        events
+    })
+    .await
+    .expect("escalation reaped the child in time");
+    let dones = dones(&events);
+    assert_eq!(dones.len(), 1, "{events:?}");
+    assert_eq!(dones[0].0, DoneStatus::Interrupted);
+}
+
+#[tokio::test]
+async fn antigravity_load_and_prompt_auth_expiry_point_to_sign_in() {
+    for resume in [false, true] {
+        let workspace = tempfile::Builder::new()
+            .prefix("prompt-auth")
+            .tempdir()
+            .unwrap();
+        let mut req = request("hi");
+        req.model = None;
+        req.cwd = workspace.path().display().to_string();
+        req.resume = resume.then(|| "expired-session".into());
+        let (controls, _, _) = controls();
+        let events = run_to_end(&antigravity_harness(), req, controls).await;
+        let done = dones(&events);
+        assert_eq!(done.len(), 1, "{events:?}");
+        assert_eq!(done[0].0, DoneStatus::Errored);
+        assert!(
+            done[0]
+                .1
+                .as_deref()
+                .unwrap()
+                .contains("Settings → Providers → Antigravity and connect an account"),
+            "{events:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn antigravity_empty_reply_completes_once() {
+    let workspace = tempfile::Builder::new()
+        .prefix("empty-reply")
+        .tempdir()
+        .unwrap();
+    let mut req = request("hi");
+    req.model = None;
+    req.cwd = workspace.path().display().to_string();
+    let (controls, _, _) = controls();
+    let events = run_to_end(&antigravity_harness(), req, controls).await;
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+}
+
+#[tokio::test]
+async fn antigravity_unknown_saved_model_fails_clearly() {
+    let events = antigravity_config_sets("unknown-saved-model", None).await;
+    let done = dones(&events);
+    assert_eq!(done.len(), 1);
+    assert_eq!(done[0].0, DoneStatus::Errored);
+    assert!(
+        done[0]
+            .1
+            .as_deref()
+            .unwrap()
+            .contains("unknown-saved-model")
+    );
+}
+
+#[tokio::test]
+async fn antigravity_spawn_failure_returns_an_error_for_the_engine_to_surface() {
+    let workspace = tempfile::tempdir().unwrap();
+    let missing = workspace.path().join("missing-acp-server");
+    let harness = AcpHarness::antigravity().with_executable(&missing);
+    let (controls, _, _) = controls();
+    let result = harness.run(request("hi"), controls).await;
+    let Err(error) = result else {
+        panic!("spawn failure must reach the engine");
+    };
+    assert!(error.to_string().contains("missing-acp-server"), "{error}");
+}
+
+fn pi_fixture() -> AcpHarness {
+    AcpHarness::pi()
+        .with_executable(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-pi-acp.sh"),
+        )
+        .with_graces(Duration::from_millis(100), Duration::from_millis(150))
+}
+
+#[tokio::test]
+async fn pi_crash_reports_status_and_stderr_once() {
+    for (prompt, status, tail) in [
+        ("crash", "exit code 23", "last stderr context"),
+        ("signal-crash", "signal 9", "signal context"),
+        (
+            "inherited-pipe-crash",
+            "exit code 25",
+            "inherited pipe context",
+        ),
+    ] {
+        let (controls, _steer, _) = controls();
+        let events = run_to_end(&pi_fixture(), request(prompt), controls).await;
+        let done = dones(&events);
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].0, DoneStatus::Errored);
+        let error = done[0].1.as_deref().unwrap();
+        assert!(error.contains(status) && error.contains(tail), "{error}");
+    }
+}
+
+#[tokio::test]
+async fn pi_idle_crash_then_load_preserves_session() {
+    let (ctl, _steer, _) = controls();
+    let events = run_to_end(&pi_fixture(), request("idle-crash"), ctl).await;
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+    let session = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::Done { session_id, .. } => session_id.clone(),
+            _ => None,
+        })
+        .unwrap();
+    let (ctl, steer, _) = controls();
+    drop(steer);
+    let mut req = request("resumed");
+    req.resume = Some(session);
+    let events = run_to_end(&pi_fixture(), req, ctl).await;
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+    assert!(events.contains(&AgentEvent::TextDelta {
+        text: "reply:resumed".into()
+    }));
+}
+
+#[tokio::test]
+async fn pi_failed_load_announces_lost_context() {
+    let (ctl, steer, _) = controls();
+    drop(steer);
+    let mut req = request("fresh");
+    req.resume = Some("missing".into());
+    let events = run_to_end(&pi_fixture(), req, ctl).await;
+    assert!(events.iter().any(|e| matches!(e, AgentEvent::Error { message } if message.contains("without the previous context"))));
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+}
+
+#[tokio::test]
+async fn pi_frames_and_model_effort_round_trip() {
+    let (ctl, steer, _) = controls();
+    drop(steer);
+    let mut req = request("frames");
+    req.model = Some("mock/model".into());
+    req.reasoning = Some(ReasoningLevel::Max);
+    let events = run_to_end(&pi_fixture(), req, ctl).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TextDelta { text } if text.len() == 1024 * 1024 + 17))
+    );
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+    assert_eq!(pi_fixture().models().await.unwrap()[0].id, "mock/model");
+}
+
+#[tokio::test]
+async fn pi_error_stop_reason_is_failed() {
+    let (ctl, steer, _) = controls();
+    drop(steer);
+    let events = run_to_end(&pi_fixture(), request("error"), ctl).await;
+    assert_eq!(dones(&events)[0].0, DoneStatus::Errored);
+}
+
+#[tokio::test]
+async fn pi_interrupt_error_and_duplicate_terminal_settle_once() {
+    let (ctl, _steer, token) = controls();
+    let mut stream = pi_fixture()
+        .run(request("interrupt-error"), ctl)
+        .await
+        .unwrap();
+    let events = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            let event = event.unwrap();
+            if matches!(&event, AgentEvent::TextDelta { text } if text == "working") {
+                token.cancel();
+            }
+            events.push(event);
+        }
+        events
+    })
+    .await
+    .unwrap();
+    assert_eq!(dones(&events), vec![(DoneStatus::Interrupted, None)]);
+}
+
+#[tokio::test]
+async fn pi_interrupt_kills_tool_process_group() {
+    let (ctl, _steer, token) = controls();
+    let mut stream = pi_fixture().run(request("tree"), ctl).await.unwrap();
+    let mut tree_pids = Vec::new();
+    let events = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            let event = event.unwrap();
+            if let AgentEvent::TextDelta { text } = &event
+                && let Some(pid) = text.strip_prefix("tree:")
+            {
+                tree_pids.push(pid.parse::<i32>().unwrap());
+                token.cancel();
+            }
+            events.push(event);
+        }
+        events
+    })
+    .await
+    .unwrap();
+    assert_eq!(dones(&events), vec![(DoneStatus::Interrupted, None)]);
+    assert_eq!(tree_pids.len(), 2);
+    for pid in tree_pids {
+        // A zombie awaiting the host reaper is dead; no tool may remain running.
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        assert!(
+            stat.is_empty() || stat.split_whitespace().nth(2) == Some("Z"),
+            "{stat}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn pi_rejected_model_config_keeps_default_and_runs_prompt() {
+    let (ctl, steer, _) = controls();
+    drop(steer);
+    let mut req = request("config-rejected");
+    req.model = Some("mock/reject".into());
+    let events = run_to_end(&pi_fixture(), req, ctl).await;
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+    assert!(!events.iter().any(|e| matches!(e, AgentEvent::Error { .. })));
+}
+
+#[tokio::test]
+async fn pi_dropping_stream_terminates_tool_tree() {
+    let (ctl, _steer, _) = controls();
+    let mut stream = pi_fixture().run(request("tree"), ctl).await.unwrap();
+    let mut pids = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while pids.len() < 2 {
+            if let AgentEvent::TextDelta { text } = stream.next().await.unwrap().unwrap()
+                && let Some(pid) = text.strip_prefix("tree:")
+            {
+                pids.push(pid.parse::<i32>().unwrap());
+            }
+        }
+    })
+    .await
+    .unwrap();
+    drop(stream);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if pids.iter().all(|pid| {
+                let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+                stat.is_empty() || stat.split_whitespace().nth(2) == Some("Z")
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("consumer shutdown must terminate the tool tree");
+}
+
+#[tokio::test]
+async fn antigravity_strips_echoed_background_task_wakeups_from_the_reply() {
+    let workspace = tempfile::tempdir().unwrap();
+    let mut req = request("echo-wakeup");
+    req.model = None;
+    req.cwd = workspace.path().display().to_string();
+    let (controls, _steer, _token) = controls();
+    let events = run_to_end(&antigravity_harness(), req, controls).await;
+
+    let reply: String = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reply, "Waiting for the build.\n\n\n\nThe build finished.");
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+}
+
+fn robust_harness() -> AcpHarness {
+    AcpHarness::grok().with_executable(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-robust-acp.py"),
+    )
+}
+
+#[tokio::test]
+async fn noise_and_large_crlf_frame_preserve_the_complete_turn() {
+    let (ctl, steer, _) = controls();
+    drop(steer);
+    let mut req = request("frames");
+    req.model = None;
+    req.cwd = std::env::temp_dir().display().to_string();
+    let events = run_to_end(&robust_harness(), req, ctl).await;
+    let text: String = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "x".repeat(2 * 1024 * 1024));
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+}
+
+#[tokio::test]
+async fn queued_updates_are_drained_before_completion_under_backpressure() {
+    let (ctl, steer, _) = controls();
+    drop(steer);
+    let mut req = request("burst");
+    req.model = None;
+    req.cwd = std::env::temp_dir().display().to_string();
+    let mut stream = robust_harness().run(req, ctl).await.unwrap();
+    // Fill both bounded queues before allowing the consumer to progress.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut text = String::new();
+    let mut completed = false;
+    let mut done = 0;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(event) = stream.next().await {
+            match event.unwrap() {
+                AgentEvent::TextDelta { text: chunk } => {
+                    assert!(!completed);
+                    text.push_str(&chunk);
+                }
+                AgentEvent::AssistantMessageCompleted { .. } => completed = true,
+                AgentEvent::Done { status, .. } => {
+                    assert_eq!(status, DoneStatus::Completed);
+                    assert_eq!(text, (0..300).map(|i| format!("{i},")).collect::<String>());
+                    done += 1;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(completed);
+    assert_eq!(done, 1);
+}
+
+#[tokio::test]
+async fn foreign_notifications_and_permissions_cannot_affect_parent_turn() {
+    let (ctl, steer, _) = controls();
+    drop(steer);
+    let mut req = request("foreign");
+    req.model = None;
+    req.cwd = std::env::temp_dir().display().to_string();
+    let events = run_to_end(&robust_harness(), req, ctl).await;
+    let text: String = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "foreign permission rejected");
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+}
+
+#[tokio::test]
+async fn cancel_watchdog_ignores_late_settlement_for_all_acp_specs() {
+    for adapter in [
+        AcpHarness::grok(),
+        AcpHarness::pi(),
+        AcpHarness::antigravity(),
+    ] {
+        let adapter = adapter
+            .with_executable(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-robust-acp.py"),
+            )
+            .with_graces(Duration::from_millis(50), Duration::from_millis(50));
+        for scenario in ["wedge", "late-settle"] {
+            let (ctl, _steer, token) = controls();
+            let mut req = request(scenario);
+            req.model = None;
+            req.cwd = std::env::temp_dir().display().to_string();
+            let mut stream = adapter.run(req, ctl).await.unwrap();
+            let mut events = Vec::new();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while let Some(event) = stream.next().await {
+                    let event = event.unwrap();
+                    if matches!(&event, AgentEvent::TextDelta { text } if text == "ready") {
+                        token.cancel();
+                    }
+                    assert!(
+                        !matches!(event, AgentEvent::Usage { .. }),
+                        "late usage in {scenario}"
+                    );
+                    events.push(event);
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                dones(&events),
+                vec![(DoneStatus::Interrupted, None)],
+                "{scenario}"
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn dropping_idle_stream_reaps_warm_adapter() {
+    let (ctl, _steer, _) = controls();
+    let mut req = request("idle-pid");
+    req.model = None;
+    req.cwd = std::env::temp_dir().display().to_string();
+    let adapter =
+        robust_harness().with_graces(Duration::from_millis(50), Duration::from_millis(50));
+    let mut stream = adapter.run(req, ctl).await.unwrap();
+    let mut pid = None;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(event) = stream.next().await {
+            match event.unwrap() {
+                AgentEvent::TextDelta { text } => pid = Some(text.parse::<u32>().unwrap()),
+                AgentEvent::Done { .. } => break,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let path = PathBuf::from(format!("/proc/{}", pid.unwrap()));
+    assert!(path.exists(), "mailbox keeps the idle adapter warm");
+    drop(stream);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while path.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("dropped consumer reaps the idle child");
+}
+
+#[tokio::test]
+async fn antigravity_stdout_sign_in_and_sibling_environment_on_every_spawn() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let server = dir.path().join("server");
+    let sibling = dir.path().join("localharness_external");
+    std::fs::write(&sibling, "fixture").unwrap();
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-antigravity-acp.sh");
+    let original = std::fs::read_to_string(fixture).unwrap();
+    let modified = original.replace(
+        "printf 'Sign in here: https://accounts.google.com/o/oauth2/auth?client_id=fake\\n' >&2",
+        "printf 'Open the following link to authenticate the ACP server: https://accounts.google.com/o/oauth2/auth?client_id=fake\\n'",
+    );
+    assert_ne!(original, modified);
+    let checks = format!(
+        "[ \"$ANTIGRAVITY_HARNESS_PATH\" = '{}' ] || exit 3\n[ \"$PYTHONUNBUFFERED\" = 1 ] || exit 4\n",
+        sibling.display(),
+    );
+    std::fs::write(
+        &server,
+        modified.replacen("#!/bin/sh\n", &format!("#!/bin/sh\n{checks}"), 1),
+    )
+    .unwrap();
+    std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let harness = AcpHarness::antigravity().with_executable(&server);
+    let seen: std::sync::Arc<std::sync::Mutex<Vec<SignInProgress>>> = Default::default();
+    let recorder = seen.clone();
+    harness
+        .sign_in(None, move |p| recorder.lock().unwrap().push(p))
+        .await
+        .unwrap();
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![SignInProgress::OpenBrowser(
+            "https://accounts.google.com/o/oauth2/auth?client_id=fake".into(),
+        )]
+    );
+    harness.sign_out().await.unwrap();
+    assert!(!harness.models().await.unwrap().is_empty());
+    assert!(!harness.commands().await.unwrap().is_empty());
+    let (ctl, _steer, _) = controls();
+    let mut req = request("hello");
+    req.model = None;
+    req.cwd = dir.path().display().to_string();
+    assert_eq!(
+        dones(&run_to_end(&harness, req, ctl).await),
+        vec![(DoneStatus::Completed, None)]
+    );
+}
+
+async fn pi_boundary_steer(scenario: &str, trigger_on_done: bool) {
+    let adapter = AcpHarness::pi().with_executable(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-robust-acp.py"),
+    );
+    let (ctl, steer, _) = controls();
+    let mut steer = Some(steer);
+    let mut req = request(scenario);
+    req.model = None;
+    req.cwd = std::env::temp_dir().display().to_string();
+    let mut stream = adapter.run(req, ctl).await.unwrap();
+    let mut events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(event) = stream.next().await {
+            let event = event.unwrap();
+            let trigger = if trigger_on_done {
+                matches!(event, AgentEvent::Done { .. })
+            } else {
+                matches!(&event, AgentEvent::TextDelta { text } if text == "first")
+            };
+            if trigger && let Some(sender) = steer.take() {
+                sender
+                    .send(zeron_harness::SteerMessage {
+                        prompt: "second".into(),
+                        message_id: None,
+                        attachments: Vec::new(),
+                    })
+                    .await
+                    .unwrap();
+            }
+            events.push(event);
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None); 2]);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::TextDelta { text } if text == "second"))
+            .count(),
+        1
+    );
+    let first_done = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::Done { .. }))
+        .unwrap();
+    let second_text = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::TextDelta { text } if text == "second"))
+        .unwrap();
+    assert!(first_done < second_text);
+}
+
+#[tokio::test]
+async fn pi_without_steering_extension_queues_live_steer_once() {
+    pi_boundary_steer("steer-live", false).await;
+}
+
+#[tokio::test]
+async fn pi_without_steering_extension_dispatches_idle_steer_immediately() {
+    pi_boundary_steer("steer-idle", true).await;
+}
+
+#[test]
+fn antigravity_detection_and_missing_server_never_install() {
+    use std::os::unix::fs::PermissionsExt;
+    for scenario in [
+        "cli-only",
+        "partial",
+        "server",
+        "par",
+        "exe",
+        "override",
+        "invalid-override",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let name = match scenario {
+            "server" => "agy_acp_server",
+            "par" => "agy_acp_server.par",
+            "exe" => "agy_acp_server.exe",
+            "override" => "custom-server",
+            _ => "agy",
+        };
+        let exe = bin.join(name);
+        std::fs::write(&exe, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let adapters = dir.path().join("adapters");
+        if scenario == "partial" {
+            let partial = adapters.join("antigravity-acp/1.1.1");
+            std::fs::create_dir_all(&partial).unwrap();
+            std::fs::write(partial.join("agy_acp_server.par"), "incomplete").unwrap();
+        }
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args(["--exact", "antigravity_detection_subprocess", "--nocapture"])
+            .env("HOME", dir.path())
+            .env("PATH", &bin)
+            .env("SHELL", "/nonexistent-shell")
+            .env("ZERON_ADAPTERS_DIR", &adapters)
+            .env("ZERON_TEST_DETECTION", scenario)
+            .env_remove("ANTIGRAVITY_ACP_EXECUTABLE");
+        if scenario == "override" {
+            child.env("ANTIGRAVITY_ACP_EXECUTABLE", &exe);
+        }
+        if scenario == "invalid-override" {
+            child.env("ANTIGRAVITY_ACP_EXECUTABLE", bin.join("missing"));
+        }
+        let output = child.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{scenario}: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!adapters.join(".tmp-antigravity-acp-1.1.1").exists());
+    }
+}
+
+#[tokio::test]
+async fn antigravity_detection_subprocess() {
+    let Ok(scenario) = std::env::var("ZERON_TEST_DETECTION") else {
+        return;
+    };
+    let harness = AcpHarness::antigravity();
+    let installed = matches!(scenario.as_str(), "server" | "par" | "exe" | "override");
+    assert_eq!(harness.installed(), installed);
+    if installed {
+        assert!(harness.resolve_program(false).await.is_ok());
+        return;
+    }
+    for block in [false, true] {
+        assert!(matches!(
+            harness.resolve_program(block).await,
+            Err(HarnessError::NotInstalled(_))
+        ));
+    }
+    assert!(matches!(
+        harness.models().await,
+        Err(HarnessError::NotInstalled(_))
+    ));
+    assert!(matches!(
+        harness.commands().await,
+        Err(HarnessError::NotInstalled(_))
+    ));
+    assert!(matches!(
+        harness
+            .sign_in(None, |_| panic!("no sign-in progress when missing"))
+            .await,
+        Err(HarnessError::NotInstalled(_))
+    ));
+    let (ctl, _, _) = controls();
+    assert!(matches!(
+        harness.run(request("hello"), ctl).await,
+        Err(HarnessError::NotInstalled(_))
+    ));
+    let adapters = PathBuf::from(std::env::var_os("ZERON_ADAPTERS_DIR").unwrap());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        std::fs::read_dir(adapters)
+            .map(|entries| entries
+                .map(Result::unwrap)
+                .all(|entry| entry.file_name() == "antigravity-acp"))
+            .unwrap_or(true)
+    );
+}
+
+#[tokio::test]
+async fn all_acp_harnesses_use_project_scoped_session_command_updates() {
+    for h in [
+        AcpHarness::devin(),
+        AcpHarness::grok(),
+        AcpHarness::hermes(),
+        AcpHarness::pi(),
+        AcpHarness::antigravity(),
+    ] {
+        let h = h.with_executable(fixture_path());
+        for name in ["project-a", "project-b"] {
+            let cwd = tempfile::tempdir().unwrap();
+            std::fs::write(cwd.path().join(".command-fixture"), name).unwrap();
+            let commands = h
+                .commands_for(&cwd.path().canonicalize().unwrap())
+                .await
+                .unwrap();
+            assert_eq!(commands.len(), 1, "{:?}", h.id());
+            assert_eq!(commands[0].name, name, "{:?}", h.id());
+        }
+    }
+}
+
+#[tokio::test]
+async fn shared_acp_skills_require_explicit_native_command_classification() {
+    use zeron_proto::invocation::{Invocation, harness_prompt};
+    for h in [
+        AcpHarness::devin(),
+        AcpHarness::grok(),
+        AcpHarness::hermes(),
+        AcpHarness::pi(),
+        AcpHarness::antigravity(),
+    ] {
+        let h = h.with_executable(fixture_path());
+        let cwd = tempfile::tempdir().unwrap();
+        let skill_dir = cwd.path().join(".agents/skills/zeron-fixture-review");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "---\nname: zeron-fixture-review\ndescription: Review changes\n---\nReview the changes.").unwrap();
+        let command_name = if h.id() == HarnessId::Pi {
+            "skill:zeron-fixture-review"
+        } else {
+            "zeron-fixture-review"
+        };
+        std::fs::write(cwd.path().join(".command-fixture"), command_name).unwrap();
+        let skills = h
+            .skills(&cwd.path().canonicalize().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        let skill = skills
+            .into_iter()
+            .find(|s| s.name == "zeron-fixture-review")
+            .unwrap();
+        assert_eq!(skill.command.is_some(), h.id() == HarnessId::Pi);
+        let invocation = Invocation::Skill {
+            name: skill.name,
+            path: skill.path,
+            command: skill.command,
+        };
+        assert_eq!(
+            harness_prompt(&format!("{} inspect tests", invocation.link()), h.id()),
+            if h.id() == HarnessId::Pi {
+                format!("/{command_name} inspect tests")
+            } else {
+                format!("Use the skill {} inspect tests", invocation.prompt_text())
+            }
+        );
+    }
 }

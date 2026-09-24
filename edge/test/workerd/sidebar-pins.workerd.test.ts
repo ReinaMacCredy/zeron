@@ -44,3 +44,27 @@ describe("per-pin storage on real SQLite", () => {
     expect((await rows(stub))[0].fields).toEqual({ pinned: false, orderKey: "c" });
   });
 });
+
+describe("synced sidebar sections on real SQLite", () => {
+  it("stores metadata and resolves placement without replacing session data", async () => {
+    const stub = room();
+    const section = (set: NonNullable<Op["set"]>, tick: number): Op =>
+      ({ ...op("focus", set, tick), kind: "sidebarSections" });
+    const placement = (location: string, tick: number): Op =>
+      ({ ...op("session", { location }, tick), kind: "sidebarLocations" });
+    await push(stub, [
+      section({ name: "Focus", collapsed: false, deleted: false, createdAt: "1" }, 1),
+      { ...op("session", { title: "Keep me" }), kind: "chats" },
+      placement("focus", 1),
+    ]);
+    await push(stub, [section({ name: "Today" }, 3), section({ collapsed: true }, 2)]);
+    await push(stub, [placement("pinned", 3), placement("focus", 2)]);
+    let current = await rows(stub);
+    expect(current.find(r => r.kind === "sidebarSections")?.fields).toMatchObject({ name: "Today", collapsed: true });
+    expect(current.find(r => r.kind === "sidebarLocations")?.fields).toEqual({ location: "pinned" });
+    await push(stub, [section({ deleted: true }, 4)]);
+    current = await rows(stub);
+    expect(current.find(r => r.kind === "sidebarSections")?.fields.deleted).toBe(true);
+    expect(current.find(r => r.kind === "chats")?.fields).toEqual({ title: "Keep me" });
+  });
+});

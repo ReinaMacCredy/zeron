@@ -1721,6 +1721,8 @@ pub enum ChangesEvent {
     /// Answer to [`Changes::locate_file`]: whether the working-tree diff
     /// carries the file. When it does, the pane has scrolled to it.
     FileLocated { path: String, changed: bool },
+    /// Open the post-change path in the workspace file browser.
+    OpenFile(String),
 }
 
 impl gpui::EventEmitter<ChangesEvent> for Changes {}
@@ -3683,6 +3685,32 @@ impl Changes {
                         .child(SharedString::from(format!("−{dels}"))),
                 )
             })
+            .child(
+                div()
+                    .id(("diff-open-file", ix))
+                    .flex_none()
+                    .size(px(crate::surface_chrome::CONTROL_SIZE))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(crate::surface_chrome::CONTROL_RADIUS))
+                    .hover(|s| s.bg(theme.ink(0.08)))
+                    .on_mouse_down(gpui::MouseButton::Left, |_, window, cx| {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    })
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.stop_propagation();
+                        cx.emit(ChangesEvent::OpenFile(path.clone()));
+                    }))
+                    .tooltip(|_, cx| cx.new(|_| DiffHeaderTooltip("Open in file browser")).into())
+                    .tooltip_show_delay(Duration::from_millis(350))
+                    .child(
+                        crate::icons::icon(crate::icons::DOCUMENT)
+                            .size(px(crate::surface_chrome::ICON_SIZE))
+                            .text_color(theme.text_muted),
+                    ),
+            )
             .into_any_element()
     }
 

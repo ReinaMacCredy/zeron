@@ -355,7 +355,15 @@ async fn rejected_steer_falls_back_to_a_follow_up_turn() {
     let (controls, steer, _token) = controls("Yes");
     steer
         .send(SteerMessage {
-            prompt: "redirect please".into(),
+            prompt: format!(
+                "redirect please {}",
+                zeron_proto::invocation::Invocation::Skill {
+                    command: None,
+                    name: "review".into(),
+                    path: "/repo/followup/SKILL.md".into(),
+                }
+                .link()
+            ),
             message_id: None,
             attachments: Vec::new(),
         })
@@ -686,8 +694,13 @@ async fn models_discovers_visible_catalog_with_pagination() {
     assert_eq!(tier.choices.len(), 2, "priority and fast dedupe");
 
     // A failed probe stays useful and includes the new model in the fallback.
+    let failed_probe = tempfile::tempdir().unwrap();
+    let failed_exe = failed_probe.path().join("failed-codex");
+    std::fs::write(&failed_exe, "#!/bin/sh\nexit 1\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&failed_exe, std::fs::Permissions::from_mode(0o755)).unwrap();
     let fallback = CodexHarness::new()
-        .with_executable("/bin/false")
+        .with_executable(failed_exe)
         .models()
         .await
         .expect("fallback models");
@@ -1200,25 +1213,37 @@ async fn live_real_app_server_single_turn() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn commands_come_from_skills_list() {
+async fn skills_are_not_advertised_as_commands() {
     let h = harness();
-    let commands = h.commands().await.expect("discovery succeeds");
     assert_eq!(
-        commands.len(),
-        2,
-        "same-name skills across cwd groups dedupe: {commands:?}"
+        h.commands()
+            .await
+            .unwrap()
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["compact", "review"]
     );
-    assert_eq!(commands[0].name, "imagegen");
+    let cwd = tempfile::tempdir().unwrap();
+    let skills = h
+        .skills(cwd.path())
+        .await
+        .unwrap()
+        .expect("skills supported");
+    assert_eq!(skills.len(), 2, "identical skill paths deduplicate");
+    assert_eq!(skills[0].name, "imagegen");
+    assert_eq!(skills[0].path, "/skills/imagegen/SKILL.md");
+    assert_eq!(skills[0].description, "Generate or edit images");
+    assert_eq!(skills[1].description, "No interface block");
     assert_eq!(
-        commands[0].description, "Generate or edit images",
-        "interface.shortDescription wins over the model-facing paragraph"
+        h.commands()
+            .await
+            .unwrap()
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["compact", "review"]
     );
-    assert_eq!(commands[1].name, "bare");
-    assert_eq!(
-        commands[1].description, "No interface block",
-        "top-level description is the fallback"
-    );
-    assert_eq!(h.commands().await.expect("cache hit"), commands);
 }
 
 #[tokio::test]
@@ -1326,13 +1351,17 @@ async fn compact_that_never_answers_settles_through_the_interrupt() {
 }
 
 /// Live smoke against the real CLI: `cargo test -p zeron-harness --test
-/// codex -- --ignored live_commands`.
+/// codex -- --ignored live_skills`.
 #[tokio::test]
 #[ignore]
-async fn live_commands_discovery() {
+async fn live_skills_discovery() {
     let h = CodexHarness::new();
-    let commands = h.commands().await.expect("live discovery");
-    eprintln!("{} commands, first: {:?}", commands.len(), commands.first());
+    let skills = h
+        .skills(&std::env::current_dir().unwrap())
+        .await
+        .expect("live discovery")
+        .unwrap();
+    eprintln!("{} skills, first: {:?}", skills.len(), skills.first());
 }
 
 async fn collect_until_done(
@@ -1531,4 +1560,206 @@ async fn real_image_generation_smoke() {
     assert!(std::path::Path::new(path).is_absolute());
     assert!(std::path::Path::new(path).is_file());
     assert!(serde_json::to_vec(&events).unwrap().len() < 64 * 1024);
+}
+
+#[tokio::test]
+async fn native_commands_use_rpc_operations_and_render_results() {
+    let selected_review = zeron_proto::invocation::Invocation::Command {
+        name: "review".into(),
+    }
+    .link();
+    for (prompt, resume, expected) in [
+        ("/compact", true, "Context compacted."),
+        ("/review", true, "Review fixture result"),
+        (
+            "/review check error handling",
+            true,
+            "Review fixture result",
+        ),
+        (
+            format!("  {selected_review} inspect errors").as_str(),
+            false,
+            "Review fixture result",
+        ),
+    ] {
+        let (controls, steer, _) = controls("Yes");
+        drop(steer);
+        let mut req = request(prompt);
+        req.resume = resume.then(|| "existing-thread".into());
+        let events = run_to_end(&harness(), req, controls).await;
+        let mut text = String::new();
+        let mut completions = 0;
+        for event in events {
+            match event {
+                AgentEvent::TextDelta { text: delta } => text.push_str(&delta),
+                AgentEvent::Done { status, error, .. } => {
+                    assert_eq!(status, DoneStatus::Completed, "{prompt}: {error:?}");
+                    completions += 1;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(completions, 1, "{prompt}");
+        assert_eq!(text, expected, "{prompt}");
+    }
+}
+
+#[tokio::test]
+async fn compact_requires_existing_session_and_commands_reject_attachments() {
+    let selected_compact = zeron_proto::invocation::Invocation::Command {
+        name: "compact".into(),
+    }
+    .link();
+    for prompt in ["/compact", &selected_compact] {
+        let (ctl, _, _) = controls("Yes");
+        assert!(
+            harness().run(request(prompt), ctl).await.is_err(),
+            "{prompt}"
+        );
+    }
+    let (ctl, _, _) = controls("Yes");
+    let mut req = request("/review");
+    req.attachments.push("/tmp/image.png".into());
+    assert!(harness().run(req, ctl).await.is_err());
+}
+
+#[tokio::test]
+async fn native_command_during_a_turn_waits_for_its_boundary() {
+    let (controls, steer, _token) = controls("Yes");
+    let mut stream = harness()
+        .run(request("scenario:native-queue"), controls)
+        .await
+        .unwrap();
+    let mut steer = Some(steer);
+    let mut completions = 0;
+    let mut output = String::new();
+    while let Some(event) = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .unwrap()
+    {
+        match event.unwrap() {
+            AgentEvent::TextDelta { text } => {
+                if text == "working" {
+                    steer
+                        .take()
+                        .unwrap()
+                        .send(SteerMessage {
+                            prompt: "/review".into(),
+                            message_id: None,
+                            attachments: Vec::new(),
+                        })
+                        .await
+                        .unwrap();
+                }
+                output.push_str(&text);
+            }
+            AgentEvent::Done { status, error, .. } => {
+                assert_eq!(status, DoneStatus::Completed, "{error:?}");
+                completions += 1;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(completions, 2);
+    assert!(output.contains("Queued review result"));
+}
+
+#[tokio::test]
+async fn native_skill_and_file_references_survive_initial_and_steered_turns() {
+    use zeron_proto::invocation::{Invocation, harness_prompt};
+    let initial = Invocation::Skill {
+        command: None,
+        name: "review".into(),
+        path: "/repo/a b/SKILL.md".into(),
+    };
+    let followup = Invocation::Skill {
+        command: None,
+        name: "review".into(),
+        path: "/repo/other/SKILL.md".into(),
+    };
+    let (controls, steer, _) = controls("Yes");
+    steer
+        .send(SteerMessage {
+            prompt: harness_prompt(&format!("Also {}", followup.link()), HarnessId::Codex),
+            message_id: Some("skill-steer".into()),
+            attachments: Vec::new(),
+        })
+        .await
+        .unwrap();
+    drop(steer);
+    let raw = format!(
+        "scenario:native-skills {} {}",
+        initial.link(),
+        zeron_proto::file_mentions::local_file_link("src/lib.rs", false)
+    );
+    let events = run_to_end(
+        &harness(),
+        request(&harness_prompt(&raw, HarnessId::Codex)),
+        controls,
+    )
+    .await;
+    assert!(events.iter().any(
+        |event| matches!(event, AgentEvent::TextDelta { text } if text == "native skills accepted")
+    ));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
+async fn ordinary_followup_cannot_overtake_a_queued_native_command() {
+    let (controls, steer, _token) = controls("Yes");
+    let mut stream = harness()
+        .run(request("scenario:native-queue-order"), controls)
+        .await
+        .unwrap();
+    let mut sender = Some(steer);
+    let mut events = Vec::new();
+    while let Some(event) = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .unwrap()
+    {
+        match event.unwrap() {
+            AgentEvent::TextDelta { text } => {
+                if text == "working" {
+                    let sender = sender.take().unwrap();
+                    for prompt in ["/review", "Follow up after review"] {
+                        sender
+                            .send(SteerMessage {
+                                prompt: prompt.into(),
+                                message_id: None,
+                                attachments: Vec::new(),
+                            })
+                            .await
+                            .unwrap();
+                    }
+                }
+                events.push(text);
+            }
+            AgentEvent::Steered { .. } => events.push("steered".into()),
+            AgentEvent::Done { status, error, .. } => {
+                assert_eq!(status, DoneStatus::Completed, "{error:?}");
+                events.push("done".into());
+            }
+            AgentEvent::Error { message } => panic!("{message}"),
+            _ => {}
+        }
+    }
+    assert_eq!(
+        events,
+        [
+            "working",
+            "done",
+            "steered",
+            "Queued review result",
+            "done",
+            "steered",
+            "followup",
+            "done"
+        ]
+    );
 }

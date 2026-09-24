@@ -911,6 +911,7 @@ async fn a_consent_card_left_open_by_a_dead_run_is_never_answered_as_a_new_turn(
                 from_chat_id: None,
                 fork_import: false,
                 answers_request_id: None,
+                duration_ms: None,
             })
             .unwrap();
     }
@@ -1163,6 +1164,7 @@ fn crashed_slash_turn(root: &std::path::Path, chat: &str, text: &str, stamp: Opt
         from_chat_id: None,
         fork_import: false,
         answers_request_id: None,
+        duration_ms: None,
     })
     .unwrap();
     doc.queue_command(&SessionCommandEntry {
@@ -1335,6 +1337,7 @@ fn push_open_question(rig: &Rig, request_id: &str) {
             from_chat_id: None,
             fork_import: false,
             answers_request_id: None,
+            duration_ms: None,
         })
         .unwrap();
 }

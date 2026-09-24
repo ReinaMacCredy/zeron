@@ -35,6 +35,8 @@ struct FakeOpencode {
     /// Recorded `(path, body)` of every POST.
     posts: Arc<Mutex<Vec<(String, Value)>>>,
     providers: Arc<Mutex<Value>>,
+    statuses: Arc<Mutex<serde_json::Map<String, Value>>>,
+    commands: Arc<Mutex<Value>>,
     /// Whether an SSE subscriber existed when the FIRST prompt_async landed
     /// (the no-replay bus makes prompting before the subscription a real
     /// event-loss race — observed live on fast-failing turns).
@@ -42,8 +44,6 @@ struct FakeOpencode {
     /// Leading 500s to answer `POST /session` with (the opencode
     /// lazy-migration crash class: first access 500s, retry succeeds).
     fail_session_creates: Arc<Mutex<u32>>,
-    /// `GET /session/status` body — a session id key means mid-turn.
-    running: Arc<Mutex<Value>>,
 }
 
 impl FakeOpencode {
@@ -57,9 +57,12 @@ impl FakeOpencode {
             backlog: Arc::new(Mutex::new(Vec::new())),
             posts: Arc::new(Mutex::new(Vec::new())),
             providers: Arc::new(Mutex::new(json!({ "all": [], "default": {} }))),
+            statuses: Arc::default(),
+            commands: Arc::new(Mutex::new(
+                json!([{ "name": "init", "description": "Create AGENTS.md" }]),
+            )),
             first_prompt_had_subscriber: Arc::new(Mutex::new(None)),
             fail_session_creates: Arc::new(Mutex::new(0)),
-            running: Arc::new(Mutex::new(json!({}))),
         };
         let accept = fake.clone();
         tokio::spawn(async move {
@@ -77,6 +80,14 @@ impl FakeOpencode {
     /// Push one bus event (the driver accepts both the bare and the
     /// `/global/event` envelope; the fake uses the enveloped form).
     fn emit(&self, payload: Value) {
+        if payload["type"] == "session.status"
+            && let Some(id) = payload["properties"]["sessionID"].as_str()
+        {
+            self.statuses
+                .lock()
+                .unwrap()
+                .insert(id.to_owned(), payload["properties"]["status"].clone());
+        }
         let framed = format!(
             "data: {}\n\n",
             json!({ "directory": "/", "payload": payload })
@@ -203,10 +214,7 @@ impl FakeOpencode {
         match (method, path) {
             ("GET", "/global/health") => ("200 OK", json!({ "healthy": true })),
             ("GET", "/provider") => ("200 OK", self.providers.lock().unwrap().clone()),
-            ("GET", "/command") => (
-                "200 OK",
-                json!([{ "name": "init", "description": "Create AGENTS.md" }]),
-            ),
+            ("GET", "/command") => ("200 OK", self.commands.lock().unwrap().clone()),
             ("POST", "/session") => {
                 let mut fails = self.fail_session_creates.lock().unwrap();
                 if *fails > 0 {
@@ -225,8 +233,11 @@ impl FakeOpencode {
                     ("200 OK", json!({ "id": "ses_test" }))
                 }
             }
+            ("GET", "/session/status") => (
+                "200 OK",
+                Value::Object(self.statuses.lock().unwrap().clone()),
+            ),
             ("GET", "/session/ses_resume") => ("200 OK", json!({ "id": "ses_resume" })),
-            ("GET", "/session/status") => ("200 OK", self.running.lock().unwrap().clone()),
             ("GET", p) if p.starts_with("/session/") => ("404 Not Found", json!({})),
             ("POST", p) if p.ends_with("/summarize") => ("200 OK", json!(true)),
             ("POST", p) if p.ends_with("/prompt_async") => ("204 No Content", json!({})),
@@ -944,13 +955,14 @@ async fn models_discover_from_the_provider_catalog() {
     let models = harness.models().await.expect("models");
     assert_eq!(models.len(), 1);
     assert_eq!(models[0].id, "opencode/big-pickle");
+    assert!(models[0].options.is_empty(), "v1 must not advertise agents");
     // Commands were primed off the same probe.
     let commands = harness.commands().await.expect("commands");
     assert_eq!(commands[0].name, "init");
 }
 
 #[tokio::test]
-async fn models_refresh_large_provider_catalogs_and_recover_after_disconnect() {
+async fn models_keep_large_catalog_on_empty_response_and_recover() {
     let fake = FakeOpencode::start().await;
     let harness = harness(&fake);
     let models: serde_json::Map<String, Value> = (0..512)
@@ -964,9 +976,14 @@ async fn models_refresh_large_provider_catalogs_and_recover_after_disconnect() {
     assert_eq!(harness.models().await.unwrap().len(), 512);
 
     fake.set_providers(json!({"all": [], "connected": []}));
+    // An empty response without a credential-context change is a failed probe,
+    // so the last successful catalog remains available.
+    let retained = harness.models().await.unwrap();
+    assert_eq!(retained.len(), 512);
     assert!(
-        harness.models().await.is_err(),
-        "must not return the old account's catalog"
+        retained
+            .iter()
+            .all(|model| model.id.starts_with("provider/"))
     );
 
     fake.set_providers(json!({
@@ -1058,7 +1075,10 @@ async fn compact_summarizes_the_resumed_session_and_reports_a_boundary() {
 #[tokio::test]
 async fn compact_is_refused_while_the_session_is_mid_turn() {
     let fake = FakeOpencode::start().await;
-    *fake.running.lock().unwrap() = json!({ "ses_resume": { "type": "busy" } });
+    fake.statuses
+        .lock()
+        .unwrap()
+        .insert("ses_resume".into(), json!({ "type": "busy" }));
     let (controls, _, _) = controls();
     let mut req = request("");
     req.resume = Some("ses_resume".into());
@@ -1089,4 +1109,62 @@ async fn compact_without_a_session_or_a_model_is_refused() {
         harness(&fake).compact(req, no_model).await,
         Err(HarnessError::Protocol(m)) if m.contains("provider/model")
     ));
+}
+
+#[tokio::test]
+async fn slash_command_rejects_attachments_instead_of_dropping_them() {
+    let fake = FakeOpencode::start().await;
+    let (controls, _steer, _token) = controls();
+    let mut req = request("/init the repo");
+    req.attachments.push("/tmp/image.png".into());
+    let mut stream = harness(&fake).run(req, controls).await.unwrap();
+    let events = drain_to_done(&mut stream).await;
+    assert!(events.iter().any(|event| matches!(event,
+        AgentEvent::Done { status: DoneStatus::Errored, error: Some(message), .. }
+        if message.contains("attachments")
+    )));
+    assert!(fake.posts_to("/session/ses_test/command").is_empty());
+    assert!(fake.posts_to("/session/ses_test/prompt_async").is_empty());
+}
+
+#[tokio::test]
+async fn dollar_selected_skill_uses_opencode_native_command_with_arguments() {
+    use zeron_proto::{
+        HarnessId,
+        invocation::{Invocation, harness_prompt},
+    };
+    let fake = FakeOpencode::start().await;
+    *fake.commands.lock().unwrap() = json!([
+        {"name":"review","description":"Native skill","source":"skill"},
+        {"name":"init","source":"command"}
+    ]);
+    let cwd = tempfile::tempdir().unwrap();
+    std::fs::create_dir(cwd.path().join(".git")).unwrap();
+    let h = harness(&fake);
+    let skills = h.skills(cwd.path()).await.unwrap().unwrap();
+    let skill = skills
+        .into_iter()
+        .find(|skill| skill.name == "review")
+        .unwrap();
+    let invocation = Invocation::Skill {
+        name: skill.name,
+        path: skill.path,
+        command: skill.command,
+    };
+    let prompt = harness_prompt(
+        &format!("\n  {} inspect tests", invocation.link()),
+        HarnessId::Opencode,
+    );
+    assert_eq!(prompt, "\n  /review inspect tests");
+    let (controls, _steer, _) = controls();
+    let mut stream = h.run(request(&prompt), controls).await.unwrap();
+    let _ = next_event(&mut stream).await;
+    let _ = next_event(&mut stream).await;
+    let commands = wait_posts(&fake, "/session/ses_test/command", 1).await;
+    assert_eq!(commands[0]["command"], "review");
+    assert_eq!(commands[0]["arguments"], "inspect tests");
+    assert!(fake.posts_to("/session/ses_test/prompt_async").is_empty());
+    assistant_message(&fake, "ses_test", "msg_1");
+    idle(&fake, "ses_test");
+    drain_to_done(&mut stream).await;
 }

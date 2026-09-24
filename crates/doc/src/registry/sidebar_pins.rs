@@ -12,7 +12,7 @@ impl RegistryDoc {
             .overlay_rows(KIND_SIDEBAR_PINS)
             .into_iter()
             .filter_map(|row| {
-                if row.fields.get("pinned")?.as_bool()? != true {
+                if !self.sidebar_location_is_pinned(&row.id, &row) {
                     return None;
                 }
                 let key = row.fields.get("orderKey")?.as_str()?;
@@ -36,6 +36,9 @@ impl RegistryDoc {
     }
 
     pub fn change_sidebar_pin(&mut self, change: &SidebarPinChange) -> Result<(), DocError> {
+        if let SidebarPinChange::Section { change } = change {
+            return self.change_sidebar_section(change);
+        }
         let id = change.session_id();
         if id.is_empty()
             || id.len() > 256
@@ -61,6 +64,7 @@ impl RegistryDoc {
             return Err(DocError::Schema("Session no longer exists".into()));
         }
         self.initialize_sidebar_pins();
+        self.observe_sidebar_row("sidebarLocations", id);
         // Observe this pin's field clocks before a causally subsequent edit,
         // including clocks from a device whose wall clock runs ahead of ours.
         if let Some(row) = self.overlay_row(KIND_SIDEBAR_PINS, id) {
@@ -78,6 +82,9 @@ impl RegistryDoc {
             }
         }
         if matches!(change, SidebarPinChange::Unpin { .. }) {
+            if current.iter().any(|v| v == id) {
+                self.write_sidebar_location(id, "");
+            }
             self.write(
                 KIND_SIDEBAR_PINS,
                 id,
@@ -109,6 +116,7 @@ impl RegistryDoc {
         let mut set = fields([("orderKey", json!(key))]);
         if matches!(change, SidebarPinChange::Pin { .. }) {
             set.insert("pinned".into(), json!(true));
+            self.write_sidebar_location(id, "pinned");
         }
         self.enqueue_ops(vec![RowOp {
             kind: KIND_SIDEBAR_PINS.into(),

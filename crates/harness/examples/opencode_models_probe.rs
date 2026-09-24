@@ -21,6 +21,7 @@ async fn main() {
                     m.description.as_deref().unwrap_or(""),
                     m.reasoning_levels
                 );
+                eprintln!("  options: {:?}", m.options);
             }
             eprintln!("--- {} models in {:?}", models.len(), start.elapsed());
         }

@@ -34,6 +34,8 @@ pub enum HarnessError {
     /// the cause is diagnosable from the chat error alone.
     #[error("adapter install failed: {0}")]
     Install(String),
+    #[error(transparent)]
+    Discovery(#[from] CatalogFailure),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -124,6 +126,20 @@ pub struct RunControls {
     pub tool_server: Option<ToolServer>,
 }
 
+/// Catalog provenance stays internal; RPC clients retain the Vec<Model> shape.
+#[derive(Clone, Debug)]
+pub struct ModelCatalog {
+    pub models: Vec<Model>,
+    pub source: &'static str,
+}
+
+#[derive(Clone, Debug)]
+pub struct ModelContext {
+    pub hash: String,
+    pub binary_path: std::path::PathBuf,
+    pub binary_version: Option<String>,
+}
+
 #[async_trait]
 pub trait Harness: Send + Sync {
     fn id(&self) -> HarnessId;
@@ -132,7 +148,7 @@ pub trait Harness: Send + Sync {
     fn steering_mode(&self) -> SteeringMode;
     fn reasoning_levels(&self) -> &[ReasoningLevel];
     /// Whether the agent's own CLI is present on this device — the settings
-    /// gate for enabling the harness. A filesystem probe, never a spawn.
+    /// gate for enabling the harness. Version probes are cached by executable identity.
     /// Defaults to true for harnesses without a CLI to check (mock).
     fn installed(&self) -> bool {
         true
@@ -152,10 +168,39 @@ pub trait Harness: Send + Sync {
         self.deterministic_turn_end()
     }
     async fn models(&self) -> Result<Vec<Model>, HarnessError>;
+    fn model_context(&self) -> Result<Option<ModelContext>, HarnessError> {
+        Ok(None)
+    }
+    fn fallback_models(&self) -> Vec<Model> {
+        Vec::new()
+    }
+    async fn model_catalog(&self, _force: bool) -> Result<ModelCatalog, HarnessError> {
+        self.models().await.map(|models| ModelCatalog {
+            models,
+            source: "live",
+        })
+    }
     /// Slash commands the agent advertises (ACP `availableCommands`); empty
     /// for harnesses without them. May spawn a short-lived discovery process.
     async fn commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
         Ok(Vec::new())
+    }
+    /// Discover commands in the same directory as the eventual session.
+    async fn commands_for(
+        &self,
+        _cwd: &std::path::Path,
+    ) -> Result<Vec<SlashCommand>, HarnessError> {
+        self.commands().await
+    }
+    /// Project-scoped skills; None means this provider does not advertise skills.
+    async fn skills(
+        &self,
+        cwd: &std::path::Path,
+    ) -> Result<Option<Vec<zeron_proto::invocation::Skill>>, HarnessError> {
+        if self.id() == HarnessId::Mock {
+            return Ok(None);
+        }
+        skills::discover(self.id(), cwd).await.map(Some)
     }
     /// Run an isolated title request. Drivers must opt in with title-specific
     /// instructions and restrictions; never fall back to an ordinary coding run.
@@ -214,16 +259,23 @@ pub trait Harness: Send + Sync {
 
 pub mod acp;
 pub(crate) mod adapter_install;
-pub(crate) mod archive_install;
+pub mod archive_install;
+mod catalog;
+mod catalog_failure;
+pub use catalog_failure::{CatalogFailure, CatalogFailureCode};
 pub mod claude;
 pub mod codex;
 pub mod cursor;
 pub(crate) mod executable;
+pub mod install;
 pub(crate) mod jsonrpc;
 pub mod mock;
+mod model_context;
 pub mod opencode;
 pub mod process;
+mod scratch;
 pub mod shell_env;
+pub(crate) mod skills;
 #[cfg(windows)]
 pub mod windows_process;
 
@@ -272,9 +324,21 @@ fn compose_path<'a>(
 /// unexpectedly (<status>): <last stderr lines>" instead of a bare shrug —
 /// the proper background-crash message old zeron showed (user requirement).
 #[derive(Clone, Default)]
-pub(crate) struct StderrTail(std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>);
+pub(crate) struct StderrTail(
+    std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
+    std::sync::Arc<tokio::sync::Notify>,
+);
 
 impl StderrTail {
+    pub(crate) fn close(&self) {
+        self.1.notify_one();
+    }
+
+    pub(crate) async fn wait_closed(&self) {
+        let _ =
+            tokio::time::timeout(std::time::Duration::from_millis(200), self.1.notified()).await;
+    }
+
     const KEEP_LINES: usize = 6;
     const KEEP_BYTES: usize = 700;
 
@@ -303,7 +367,11 @@ impl StderrTail {
             return None;
         }
         let mut joined = tail.iter().cloned().collect::<Vec<_>>().join("\n");
-        joined.truncate(Self::KEEP_BYTES * 2);
+        let mut start = joined.len().saturating_sub(Self::KEEP_BYTES * 2);
+        while !joined.is_char_boundary(start) {
+            start += 1;
+        }
+        joined.drain(..start);
         Some(joined)
     }
 }
@@ -327,6 +395,68 @@ pub(crate) fn describe_exit(status: Option<std::process::ExitStatus>) -> String 
     "unknown exit".into()
 }
 
+/// Remove recognizable credentials at the boundary where diagnostics become UI text.
+fn redact_secrets(text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let markers = ["bearer ", "basic ", "sk-", "ghp_", "xox", "api_key="];
+    let mut result = String::new();
+    let mut offset = 0;
+    while let Some((start, marker)) = markers
+        .iter()
+        .filter_map(|marker| {
+            lower[offset..]
+                .find(marker)
+                .map(|at| (offset + at, *marker))
+        })
+        .min_by_key(|(at, _)| *at)
+    {
+        let credential = if marker.ends_with(' ') || marker.ends_with('=') {
+            start + marker.len()
+        } else {
+            start
+        };
+        let credential = credential + text[credential..].len()
+            - text[credential..]
+                .trim_start_matches(|c: char| c.is_whitespace() || c == '\"' || c == '\'')
+                .len();
+        let end = text[credential..]
+            .find(|c: char| {
+                c.is_whitespace() || matches!(c, '\"' | '\'' | ',' | ';' | '&' | '<' | '>')
+            })
+            .map_or(text.len(), |at| credential + at);
+        result.push_str(&text[offset..credential]);
+        result.push_str("[REDACTED]");
+        // Empty credentials still advance past the marker.
+        offset = end.max(start + marker.len());
+    }
+    result.push_str(&text[offset..]);
+    result
+}
+
+#[cfg(test)]
+#[test]
+fn crash_diagnostics_redact_credentials_but_keep_context() {
+    let raw = "request failed: Bearer secret-one Basic secret-two sk-private ghp-private ghp_private xoxp-private api_key=private&code=401 café";
+    let clean = redact_secrets(raw);
+    assert_eq!(
+        clean,
+        "request failed: Bearer [REDACTED] Basic [REDACTED] [REDACTED] ghp-private [REDACTED] [REDACTED] api_key=[REDACTED]&code=401 café"
+    );
+    assert_eq!(
+        redact_secrets("Authorization: bEaReR token"),
+        "Authorization: bEaReR [REDACTED]"
+    );
+    assert_eq!(
+        redact_secrets("Bearer   hidden api_key=\"secret\""),
+        "Bearer   [REDACTED] api_key=\"[REDACTED]\""
+    );
+    let tail = StderrTail::default();
+    tail.push(raw);
+    let message = crash_message("agent", None, &tail);
+    assert!(message.ends_with(&clean));
+    assert!(!message.contains("secret-one"));
+}
+
 /// The full crash message: status plus the stderr tail when there is one.
 pub(crate) fn crash_message(
     name: &str,
@@ -335,7 +465,10 @@ pub(crate) fn crash_message(
 ) -> String {
     let status = describe_exit(status);
     match stderr.snapshot() {
-        Some(tail) => format!("{name} exited unexpectedly ({status}): {tail}"),
+        Some(tail) => format!(
+            "{name} exited unexpectedly ({status}): {}",
+            redact_secrets(&tail)
+        ),
         None => format!("{name} exited unexpectedly ({status})"),
     }
 }
@@ -362,14 +495,24 @@ pub(crate) async fn shutdown_child(child: &mut process::Child, kill_grace: std::
     }
     #[cfg(not(windows))]
     {
+        let target = process::signal_target(child);
         if matches!(child.try_wait(), Ok(Some(_))) {
+            if let Some(group) = target.filter(|pid| *pid < 0) {
+                send_signal(&group, Signal::Kill);
+            }
             return;
         }
-        if let Some(pid) = child.id() {
+        if let Some(pid) = target {
             send_signal(&pid, Signal::Term);
             if tokio::time::timeout(kill_grace, child.wait()).await.is_ok() {
+                if pid < 0 {
+                    send_signal(&pid, Signal::Kill);
+                }
                 return;
             }
+        }
+        if let Some(pid) = target {
+            send_signal(&pid, Signal::Kill);
         }
         let _ = child.start_kill();
         let _ = child.wait().await;
@@ -383,14 +526,15 @@ pub(crate) enum Signal {
 }
 
 #[cfg(unix)]
-pub(crate) fn send_signal(pid: &u32, signal: Signal) {
+pub(crate) fn send_signal(pid: &i32, signal: Signal) {
     let sig = match signal {
         Signal::Term => libc::SIGTERM,
         Signal::Kill => libc::SIGKILL,
     };
-    // SAFETY: plain kill(2) on a pid we spawned and have not yet reaped.
+    // SAFETY: kill(2) targets an owned child or its private process group.
+    // Negative targets include descendants after the group leader exits.
     unsafe {
-        libc::kill(*pid as libc::pid_t, sig);
+        libc::kill(*pid, sig);
     }
 }
 
@@ -520,5 +664,19 @@ mod tool_server_tests {
         }
         assert!(is_computer_tool_name("computer_click"));
         assert!(!is_computer_tool_name("list_threads"));
+    }
+}
+
+#[cfg(test)]
+mod stderr_tests {
+    #[test]
+    fn stderr_tail_truncates_at_utf8_boundaries() {
+        let tail = super::StderrTail::default();
+        tail.push(&"界".repeat(700));
+        tail.push(&"界".repeat(700));
+        tail.push("last stderr line");
+        let snapshot = tail.snapshot().unwrap();
+        assert!(snapshot.len() <= 1400);
+        assert!(snapshot.ends_with("last stderr line"));
     }
 }

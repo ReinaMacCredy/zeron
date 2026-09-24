@@ -76,7 +76,7 @@
   (initialize → `session/new`, the `discover_commands` pattern) and reads
   the `model` config option's choices FIRST, falling back to the legacy
   first-class `models` state (SessionModelState) only when no model config
-  option is advertised. The original paseo order (legacy state first) put
+  option is advertised. The original order (legacy state first) put
   one row per model × effort in the picker: codex-acp enumerates
   `gpt-5.6-sol[low]`…`[ultra]` on the deprecated surface while its
   `configOptions` carry base ids with effort as a separate `thought_level`

@@ -234,7 +234,7 @@ extension SessionStore {
             }
             return true
         } catch {
-            roomLog.warning("queue action \(action.method, privacy: .public) failed for \(id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            roomLog.warning("queue action \(action.method, privacy: .public) failed for \(id, privacy: .public): \(describeTransportError(error), privacy: .public)")
             queueActionError = "Couldn't complete \(action.label.lowercased()). Check the connection to the chat host and the queue before retrying."
             kickRoom()
             return false

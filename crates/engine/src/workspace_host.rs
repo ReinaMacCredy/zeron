@@ -285,6 +285,10 @@ impl WorkspaceHost {
             revision: 0,
             synced: false,
             initialized: preferences.is_some(),
+            sections: preferences
+                .as_ref()
+                .map(|p| p.sections.clone())
+                .unwrap_or_default(),
             pinned_session_ids: preferences
                 .map(|preferences| preferences.pinned_session_ids)
                 .unwrap_or_default(),
@@ -659,7 +663,17 @@ impl WorkspaceHost {
                 return Err(EngineError::Other("Pins are still syncing".into()));
             }
             Ok(doc.change_sidebar_pin(change)?)
-        })
+        })?;
+        if matches!(
+            change,
+            zeron_proto::SidebarPinChange::Section {
+                change: zeron_proto::SidebarSectionChange::Import { .. }
+            }
+        ) {
+            // The UI removes its legacy copy only after this acknowledgement.
+            self.inner.persist_snapshot()?;
+        }
+        Ok(())
     }
 
     // ── watches (WatchChats / WatchDevices / merged WatchSessions) ──────────
@@ -1331,6 +1345,10 @@ impl WorkspaceHostInner {
     fn publish_sidebar_preferences(&self, doc: &RegistryDoc, synced: bool) {
         let preferences = doc.sidebar_preferences();
         let initialized = preferences.is_some();
+        let sections = preferences
+            .as_ref()
+            .map(|p| p.sections.clone())
+            .unwrap_or_default();
         let pins = preferences
             .map(|p| p.pinned_session_ids)
             .unwrap_or_default();
@@ -1341,6 +1359,7 @@ impl WorkspaceHostInner {
             if current.synced == synced
                 && current.initialized == initialized
                 && current.pinned_session_ids == pins
+                && current.sections == sections
             {
                 return false;
             }
@@ -1349,6 +1368,7 @@ impl WorkspaceHostInner {
                 synced,
                 initialized,
                 pinned_session_ids: pins,
+                sections,
             };
             true
         });
@@ -1923,6 +1943,28 @@ mod tests {
         let acknowledgement = host.sidebar_preferences_snapshot();
         assert!(acknowledgement.revision > first_revision);
         assert_eq!(*preferences.borrow(), acknowledgement);
+        host.change_sidebar_pin(&zeron_proto::SidebarPinChange::Section {
+            change: zeron_proto::SidebarSectionChange::Create {
+                id: "focus".into(),
+                name: "Focus".into(),
+            },
+        })
+        .unwrap();
+        let sections = host.sidebar_preferences_snapshot();
+        assert!(sections.revision > acknowledgement.revision);
+        assert_eq!(sections.sections[0].name, "Focus");
+        assert_eq!(*preferences.borrow(), sections);
+        host.change_sidebar_pin(&zeron_proto::SidebarPinChange::Section {
+            change: zeron_proto::SidebarSectionChange::Collapse {
+                id: "focus".into(),
+                collapsed: true,
+            },
+        })
+        .unwrap();
+        let collapsed = host.sidebar_preferences_snapshot();
+        assert!(collapsed.revision > sections.revision);
+        assert!(collapsed.sections[0].collapsed);
+        assert_eq!(*preferences.borrow(), collapsed);
     }
 
     #[test]

@@ -8,6 +8,9 @@ fn fixture(dir: &Path) -> std::path::PathBuf {
     let script = dir.join("agent.py");
     std::fs::write(&script, r#"#!/usr/bin/env python3
 import json, pathlib, sys, time
+if sys.argv[1:] == ['--version']:
+    print('agent 1.0.0')
+    sys.exit(0)
 root = pathlib.Path(__file__).parent
 with (root / 'calls').open('a') as f: f.write('probe\n')
 time.sleep(0.15)
@@ -52,7 +55,8 @@ async fn check_refresh(harness: &dyn Harness, dir: &Path) {
     assert_eq!(harness.models().await.unwrap()[255].id, "second-255");
     std::fs::write(&state, r#"{"id":"broken-","broken":true}"#).unwrap();
     let fallback = harness.models().await.unwrap();
-    assert!(!fallback.iter().any(|m| m.id.starts_with("second-")));
+    assert_eq!(fallback.len(), 256);
+    assert_eq!(fallback[255].id, "second-255");
     std::fs::write(&state, r#"{"id":"recovered-"}"#).unwrap();
     assert_eq!(harness.models().await.unwrap()[255].id, "recovered-255");
 }

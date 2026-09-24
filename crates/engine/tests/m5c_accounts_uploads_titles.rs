@@ -36,6 +36,10 @@ fn test_accounts(root: &Path) -> (AgentAccounts, AgentAccountsConfig) {
         claude_config_file: root.join("claude.json"),
         codex_home: root.join("codex"),
         cursor_sdk_auth_file: root.join("cursor-sdk").join("auth.json"),
+        // File-only: a temp config must never reach the real Keychain login.
+        claude_keychain_service: None,
+        antigravity_home: Some(root.join("gemini")),
+        antigravity_keychain: false,
     };
     (AgentAccounts::new(config.clone()), config)
 }
@@ -486,29 +490,30 @@ fn snapshot_wire_shape() {
 }
 
 #[tokio::test]
-async fn claude_login_flow_is_pkce_paste_code() {
+async fn claude_login_flow_is_the_clis_loopback_pkce() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (accounts, _) = test_accounts(tmp.path());
     let start = accounts
         .start_login(HarnessId::ClaudeCode)
         .await
         .expect("start");
+    // Claude Code's own automatic login: claude.ai authorize, PKCE, and a
+    // redirect to the loopback port the start reply names.
+    let port = start.callback_port.expect("a loopback callback port");
     assert!(
         start
             .url
-            .starts_with("https://claude.ai/oauth/authorize?code=true")
+            .starts_with("https://claude.com/cai/oauth/authorize?code=true")
     );
     assert!(start.url.contains("code_challenge_method=S256"));
-    assert!(
-        start
-            .url
-            .contains("redirect_uri=https%3A%2F%2Fconsole.anthropic.com")
-    );
+    assert!(start.url.contains(&format!(
+        "redirect_uri=http%3A%2F%2Flocalhost%3A{port}%2Fcallback"
+    )));
     let mode = serde_json::to_value(start.mode).expect("mode");
-    assert_eq!(mode, serde_json::json!("paste-code"));
+    assert_eq!(mode, serde_json::json!("browser"));
 
-    // Claude flows poll as pending (paste-code completes them); cancel drops the
-    // flow so the next poll reports it expired.
+    // Pending until the browser lands; cancel drops the flow (and closes its
+    // listener) so the next poll reports it expired.
     let poll = accounts.poll_login(&start.login_id).await.expect("poll");
     assert_eq!(
         serde_json::to_value(poll.status).expect("status"),
@@ -524,6 +529,13 @@ async fn claude_login_flow_is_pkce_paste_code() {
             .complete_login(&start.login_id, "code#state")
             .await
             .is_err()
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_err(),
+        "a cancelled login stops listening"
     );
 }
 
@@ -882,7 +894,8 @@ async fn rpc_dispatch_for_m5c_methods() {
     assert!(snapshot["accounts"].is_array());
     assert!(snapshot["warnings"].is_array());
 
-    // Login lifecycle: start (paste-code) → poll pending → cancel → gone.
+    // Login lifecycle: start (loopback browser flow, like the CLI's own
+    // automatic login) → poll pending → cancel → gone.
     let start = client
         .call(
             methods::START_AGENT_LOGIN,
@@ -890,12 +903,13 @@ async fn rpc_dispatch_for_m5c_methods() {
         )
         .await
         .expect("StartAgentLogin");
-    assert_eq!(start["mode"], "paste-code");
+    assert_eq!(start["mode"], "browser");
+    assert!(start["callbackPort"].as_u64().is_some());
     assert!(
         start["url"]
             .as_str()
             .expect("url")
-            .contains("claude.ai/oauth/authorize")
+            .contains("claude.com/cai/oauth/authorize")
     );
     let login_id = start["loginId"].as_str().expect("loginId").to_string();
     let poll = client

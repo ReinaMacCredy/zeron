@@ -419,6 +419,64 @@ async fn ask_user_question_round_trips_through_the_control_channel() {
 }
 
 #[tokio::test]
+async fn ultrathink_preserves_selected_commands_on_initial_and_steered_sends() {
+    use zeron_proto::ReasoningLevel;
+    use zeron_proto::invocation::{Invocation, SkillCommand, harness_prompt};
+
+    let invocations = [
+        Invocation::Command {
+            name: "review".into(),
+        },
+        Invocation::Skill {
+            name: "review".into(),
+            path: "/repo/.claude/skills/review/SKILL.md".into(),
+            command: Some(SkillCommand {
+                name: "review".into(),
+                harness: HarnessId::ClaudeCode,
+            }),
+        },
+    ];
+    for invocation in invocations {
+        for prefix in ["", " ", "   ", "\n", "\r\n  "] {
+            let prompt = harness_prompt(
+                &format!("{prefix}{} scenario:command-echo", invocation.link()),
+                HarnessId::ClaudeCode,
+            );
+            let expected = format!("{prefix}/review scenario:command-echo");
+            let (initial_controls, _steer, _token) = controls("A");
+            let mut initial = request(&prompt);
+            initial.reasoning = Some(ReasoningLevel::Ultrathink);
+            let events = run_to_end(&harness(), initial, initial_controls).await;
+            assert!(
+                events.contains(&AgentEvent::TextDelta {
+                    text: expected.clone()
+                }),
+                "{events:?}"
+            );
+
+            let (steer_controls, steer, _token) = controls("A");
+            steer
+                .send(SteerMessage {
+                    prompt,
+                    message_id: None,
+                    attachments: Vec::new(),
+                })
+                .await
+                .unwrap();
+            let mut initial = request("scenario:steer");
+            initial.reasoning = Some(ReasoningLevel::Ultrathink);
+            let events = run_to_end(&harness(), initial, steer_controls).await;
+            assert!(
+                events.contains(&AgentEvent::TextDelta {
+                    text: format!("steered:{expected}")
+                }),
+                "{events:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn steering_lines_are_written_to_stdin_mid_run() {
     let (controls, steer, _token) = controls("A");
     steer
@@ -846,5 +904,94 @@ async fn title_run_disables_tools_and_denies_unexpected_permissions() {
             }
         )),
         "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn command_discovery_tracks_project_changes() {
+    let h = harness();
+    for name in ["project-a", "project-b"] {
+        let cwd = tempfile::tempdir().unwrap();
+        std::fs::write(cwd.path().join(".command-fixture"), name).unwrap();
+        let commands = h
+            .commands_for(&cwd.path().canonicalize().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].name, name);
+    }
+}
+
+#[tokio::test]
+async fn shared_skill_colliding_with_builtin_keeps_file_delivery() {
+    use zeron_proto::invocation::{Invocation, harness_prompt};
+    let cwd = tempfile::tempdir().unwrap();
+    std::fs::create_dir(cwd.path().join(".git")).unwrap();
+    let directory = cwd.path().join(".agents/skills/compact");
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("SKILL.md");
+    std::fs::write(&path, "---\nname: compact\n---\nCompact JSON fixtures.").unwrap();
+
+    let harness = harness();
+    let commands = harness.commands_for(cwd.path()).await.unwrap();
+    assert!(commands.iter().any(|command| command.name == "compact"));
+    let skill = harness
+        .skills(cwd.path())
+        .await
+        .unwrap()
+        .unwrap()
+        .into_iter()
+        .find(|skill| skill.path == path.to_string_lossy())
+        .unwrap();
+    assert!(skill.command.is_none());
+    let invocation = Invocation::Skill {
+        name: skill.name,
+        path: skill.path,
+        command: skill.command,
+    };
+    assert_eq!(
+        harness_prompt(
+            &format!("{} data.json", invocation.link()),
+            HarnessId::ClaudeCode
+        ),
+        format!("Use the skill {} data.json", invocation.prompt_text())
+    );
+}
+
+#[tokio::test]
+async fn claude_skills_follow_native_availability_and_dollar_selection_keeps_arguments() {
+    use zeron_proto::{
+        HarnessId,
+        invocation::{Invocation, harness_prompt},
+    };
+    let cwd = tempfile::tempdir().unwrap();
+    std::fs::create_dir(cwd.path().join(".git")).unwrap();
+    for name in ["review", "disabled-plugin"] {
+        let directory = cwd.path().join(".claude/skills").join(name);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: Test\n---\nInstructions"),
+        )
+        .unwrap();
+    }
+    let skills = harness().skills(cwd.path()).await.unwrap().unwrap();
+    assert!(!skills.iter().any(|skill| skill.name == "disabled-plugin"));
+    let skill = skills
+        .into_iter()
+        .find(|skill| skill.name == "review")
+        .unwrap();
+    assert_eq!(
+        skill.command.as_ref().unwrap().harness,
+        HarnessId::ClaudeCode
+    );
+    let invocation = Invocation::Skill {
+        name: skill.name,
+        path: skill.path,
+        command: skill.command,
+    };
+    assert_eq!(
+        harness_prompt(&format!("{} 123", invocation.link()), HarnessId::ClaudeCode),
+        "/review 123"
     );
 }

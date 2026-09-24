@@ -9,23 +9,38 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[tokio::main]
 async fn main() {
-    let server = std::env::var_os("ANTIGRAVITY_ACP_EXECUTABLE")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            zeron_harness::AcpHarness::antigravity()
-                .launch_program()
-                .expect("installed antigravity acp server")
-        });
+    use zeron_harness::Harness;
+    let harness = zeron_harness::AcpHarness::antigravity();
+    println!("installed: {}", harness.installed());
+    if std::env::args().any(|arg| arg == "--detect-only") {
+        return;
+    }
+    if std::env::args().any(|arg| arg == "--managed") {
+        match harness.models().await {
+            Ok(models) => println!("managed discovery: {models:?}"),
+            Err(error) => {
+                eprintln!("managed discovery refused: {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    let (server, args) = zeron_harness::AcpHarness::antigravity()
+        .resolve_program(true)
+        .await
+        .expect("install or resolve server");
     let workspace = std::env::temp_dir().join("antigravity-acp-probe");
     std::fs::create_dir_all(&workspace).unwrap();
     let mut command = tokio::process::Command::new(&server);
-    #[cfg(target_os = "linux")]
-    command.arg("--uid=");
+    command.args(args);
+    #[cfg(unix)]
+    command.env("BROWSER", "/usr/bin/true %s");
+    let started = std::time::Instant::now();
     let mut child = command
         .current_dir(&workspace)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::inherit())
         .kill_on_drop(true)
         .spawn()
         .expect("spawn server");
@@ -72,13 +87,20 @@ async fn main() {
         "clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": false },
     }))
     .await;
+    println!("initialize elapsed: {:?}", started.elapsed());
     println!(
         "initialize agentCapabilities: {}",
         init.pointer("/result/agentCapabilities")
             .unwrap_or(&Value::Null)
     );
 
+    let session_started = std::time::Instant::now();
     let session = call("session/new", json!({ "cwd": workspace, "mcpServers": [] })).await;
+    println!(
+        "session/new elapsed: {:?}; total: {:?}",
+        session_started.elapsed(),
+        started.elapsed()
+    );
     if let Some(error) = session.get("error") {
         println!("session/new error: {error}");
         return;

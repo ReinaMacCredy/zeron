@@ -2,12 +2,10 @@
 //! `packages/harness/src/claude.ts` (which itself mirrors Claude Code's own
 //! picker via t3code's catalog).
 //!
-//! The TS harness discovers models at runtime through the SDK's
-//! `supportedModels()` control request and then OVERLAYS these static effort
-//! ladders / option sets (the SDK under-reports both). Until we grow a
-//! short-lived control-channel discovery session, [`static_models`] returns the
-//! curated list directly; `ClaudeHarness::models` is the single seam where
-//! dynamic discovery can later be spliced in.
+//! Runtime initialize discovery appends concrete model ids to this curated list.
+//! Curated rows retain their labels, effort ladders, and option sets because the
+//! CLI can under-report supported modes. The shared initialize probe also supplies
+//! slash commands and is cached by credential and binary context.
 
 use zeron_proto::{Model, ModelOption, ModelOptionChoice, ReasoningLevel};
 
@@ -17,7 +15,9 @@ use zeron_proto::{Model, ModelOption, ModelOptionChoice, ReasoningLevel};
 pub(crate) const ULTRATHINK_PREFIX: &str = "Ultrathink:\n";
 
 pub(crate) fn apply_ultrathink(reasoning: Option<ReasoningLevel>, text: &str) -> String {
-    if reasoning == Some(ReasoningLevel::Ultrathink) {
+    if reasoning == Some(ReasoningLevel::Ultrathink)
+        && zeron_proto::invocation::leading_command(text).is_none()
+    {
         format!("{ULTRATHINK_PREFIX}{text}")
     } else {
         text.to_owned()
@@ -160,7 +160,171 @@ fn model(
 ///
 /// `pub`: besides the discovery-side enrichment here, the UI's display-side
 /// normalization borrows these labels so alias rows served by older engines
-/// still read with their version numbers ("Opus 5", not "Opus").
+/// still read with their version numbers ("Opus 5.5", not "Opus").
+pub(crate) fn configured_models() -> Vec<Model> {
+    let root = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| crate::executable::home_or_current_dir().join(".claude"));
+    models_with_settings(&root.join("settings.json"))
+}
+
+fn models_with_settings(path: &std::path::Path) -> Vec<Model> {
+    let mut models = static_models();
+    let settings = std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .unwrap_or_default();
+    let ids = std::iter::once(settings.get("model")).chain(
+        [
+            "ANTHROPIC_MODEL",
+            "ANTHROPIC_SMALL_FAST_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        ]
+        .into_iter()
+        .map(|key| settings.get("env").and_then(|env| env.get(key))),
+    );
+    for id in ids
+        .flatten()
+        .filter_map(|v| v.as_str())
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        if !models.iter().any(|m| m.id == id) {
+            models.push(Model {
+                id: id.into(),
+                label: id.into(),
+                description: None,
+                reasoning_levels: FULL_LADDER.to_vec(),
+                options: vec![],
+            });
+        }
+    }
+    models
+}
+
+#[cfg(test)]
+#[test]
+fn settings_models_keep_manifest_and_full_ladder() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    std::fs::write(
+        &path,
+        serde_json::json!({"model":"gateway/model", "env": {
+            "ANTHROPIC_MODEL":"gateway/model", "ANTHROPIC_SMALL_FAST_MODEL":"fast",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL":"opus", "ANTHROPIC_DEFAULT_SONNET_MODEL":"sonnet",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL":"haiku"
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    let models = models_with_settings(&path);
+    assert_eq!(&models[..static_models().len()], static_models());
+    assert_eq!(models.len(), static_models().len() + 5);
+    for model in &models[static_models().len()..] {
+        assert_eq!(model.label, model.id);
+        assert_eq!(model.reasoning_levels, FULL_LADDER);
+    }
+    std::fs::write(&path, "invalid").unwrap();
+    assert_eq!(models_with_settings(&path), static_models());
+}
+
+/// Overlay only new concrete model IDs; curated metadata remains authoritative.
+pub(super) fn with_discovered_models(
+    mut models: Vec<Model>,
+    response: &serde_json::Value,
+) -> Result<Vec<Model>, crate::HarnessError> {
+    let entries = response
+        .get("response")
+        .and_then(|v| v.get("models"))
+        .and_then(serde_json::Value::as_array)
+        .filter(|entries| !entries.is_empty())
+        .ok_or_else(|| {
+            crate::HarnessError::Protocol("Claude returned an empty model catalog".into())
+        })?;
+    let mut default = None;
+    let mut valid = false;
+    for entry in entries {
+        let text = |key: &str| {
+            entry
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+        };
+        let Some(id) = text("resolvedModel").or_else(|| text("value")) else {
+            continue;
+        };
+        // Bare aliases cannot become persisted selections. Prefer resolvedModel.
+        if matches!(
+            id.strip_suffix("[1m]").unwrap_or(id),
+            "default" | "opus" | "sonnet" | "haiku" | "fable"
+        ) {
+            continue;
+        }
+        valid = true;
+        if text("value") == Some("default") {
+            default = Some(id.to_owned());
+        }
+        if models.iter().any(|model| model.id == id) {
+            continue;
+        }
+        let mut ladder = Vec::new();
+        for effort in entry
+            .get("supportedEffortLevels")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+        {
+            let level = match effort {
+                "low" => ReasoningLevel::Low,
+                "medium" => ReasoningLevel::Medium,
+                "high" => ReasoningLevel::High,
+                "xhigh" => ReasoningLevel::XHigh,
+                "max" => ReasoningLevel::Max,
+                _ => continue,
+            };
+            if !ladder.contains(&level) {
+                ladder.push(level);
+            }
+        }
+        if ladder.contains(&ReasoningLevel::XHigh) {
+            ladder.extend([ReasoningLevel::Ultracode, ReasoningLevel::Ultrathink]);
+        }
+        models.push(Model {
+            id: id.into(),
+            label: text("displayName").unwrap_or(id).into(),
+            description: text("description").map(str::to_owned),
+            reasoning_levels: ladder,
+            options: vec![],
+        });
+    }
+    if !valid {
+        return Err(crate::HarnessError::Protocol(
+            "Claude returned an empty model catalog".into(),
+        ));
+    }
+    if let Some(default) = default {
+        // The picker folds long-context duplicates into their curated base.
+        // Put that base immediately behind the concrete default so folding
+        // keeps the CLI's default family first without changing curated rows.
+        if let Some(base) = default.strip_suffix("[1m]")
+            && let Some(index) = models.iter().position(|m| m.id == base)
+        {
+            let model = models.remove(index);
+            models.insert(0, model);
+        }
+        if let Some(index) = models.iter().position(|m| m.id == default) {
+            let model = models.remove(index);
+            models.insert(0, model);
+        }
+    }
+    Ok(models)
+}
+
 pub fn static_models() -> Vec<Model> {
     vec![
         model(
@@ -181,13 +345,6 @@ pub fn static_models() -> Vec<Model> {
             "claude-opus-5-5",
             "Opus 5.5",
             "Best for everyday, complex tasks",
-            FULL_LADDER,
-            vec![context_window(), toggle("fastMode", "Fast Mode")],
-        ),
-        model(
-            "claude-opus-5",
-            "Opus 5",
-            "Powerful model for complex work",
             FULL_LADDER,
             vec![context_window(), toggle("fastMode", "Fast Mode")],
         ),
@@ -266,10 +423,35 @@ mod tests {
         assert!(supports_xhigh("claude-fable-5"));
         assert!(supports_xhigh("claude-fable-5-1"));
         assert!(supports_xhigh("claude-opus-5"));
-        assert!(supports_xhigh("claude-opus-5[1m]"));
+        assert!(supports_xhigh("claude-opus-5-5"));
+        assert!(supports_xhigh("claude-opus-5-5[1m]"));
         assert!(supports_xhigh("claude-opus-4-7-20260101"));
         assert!(!supports_xhigh("claude-opus-4-5"));
         assert!(!supports_xhigh("claude-sonnet-4-5"));
+    }
+
+    #[test]
+    fn ultrathink_preserves_leading_commands_and_arguments() {
+        for command in ["/compact", "/review focus on tests"] {
+            for prefix in ["", " ", "   ", "\n", "\r\n  "] {
+                let text = format!("{prefix}{command}");
+                assert_eq!(
+                    apply_ultrathink(Some(ReasoningLevel::Ultrathink), &text),
+                    text
+                );
+            }
+        }
+        for literal in [
+            "    /compact",
+            "\t/compact",
+            "\n    /compact",
+            "\u{a0}/compact",
+        ] {
+            assert_eq!(
+                apply_ultrathink(Some(ReasoningLevel::Ultrathink), literal),
+                format!("{ULTRATHINK_PREFIX}{literal}")
+            );
+        }
     }
 
     #[test]

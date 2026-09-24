@@ -963,3 +963,15 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[test]
+fn empty_assistant_delta_does_not_open_a_segment() {
+    assert!(
+        map_update(&serde_json::json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": ""},
+        }))
+        .is_empty()
+    );
+}

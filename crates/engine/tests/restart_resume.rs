@@ -351,6 +351,7 @@ async fn kill_crash_recovers_resume_from_journal_and_stamps_aborted() {
             from_chat_id: None,
             fork_import: false,
             answers_request_id: None,
+            duration_ms: None,
         })
         .unwrap();
         doc.push_message(&SessionMessageEntry {
@@ -367,6 +368,7 @@ async fn kill_crash_recovers_resume_from_journal_and_stamps_aborted() {
             from_chat_id: None,
             fork_import: false,
             answers_request_id: None,
+            duration_ms: None,
         })
         .unwrap();
         store
@@ -603,6 +605,7 @@ async fn fresh_crash_auto_resumes_and_notes_the_interruption() {
             from_chat_id: None,
             fork_import: false,
             answers_request_id: None,
+            duration_ms: None,
         })
         .unwrap();
         doc.push_message(&SessionMessageEntry {
@@ -619,6 +622,7 @@ async fn fresh_crash_auto_resumes_and_notes_the_interruption() {
             from_chat_id: None,
             fork_import: false,
             answers_request_id: None,
+            duration_ms: None,
         })
         .unwrap();
         store

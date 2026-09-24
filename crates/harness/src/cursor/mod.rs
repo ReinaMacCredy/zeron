@@ -57,7 +57,7 @@ use crate::{Harness, HarnessError, RunControls, Signal, send_signal, shutdown_ch
 
 /// The pinned SDK (public beta 1.0.x line; inspected against 1.0.31's
 /// typings). Bump deliberately — see the module header.
-const CURSOR_SDK_PIN: &str = "@cursor/sdk@1.0.31";
+const CURSOR_SDK_PIN: &str = "@cursor/sdk@1.0.32";
 const SHIM_NAME: &str = "zeron-cursor-shim.mjs";
 const SHIM_SOURCE: &str = include_str!("shim.mjs");
 
@@ -94,7 +94,7 @@ pub struct CursorHarness {
     interrupt_grace: Duration,
     kill_grace: Duration,
     /// Credential-scoped successful catalog, with bounded refresh and backoff.
-    models_cache: catalog::Catalog,
+    pub(crate) models_cache: catalog::Catalog,
 }
 
 impl Default for CursorHarness {
@@ -253,10 +253,39 @@ impl Harness for CursorHarness {
 
     /// Keep a successful catalog during transient outages. A cold failure
     /// is an error, never a fabricated two-model success.
-    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+    fn model_context(&self) -> Result<Option<crate::ModelContext>, HarnessError> {
+        use sha2::{Digest, Sha256};
+        let binary = self
+            .executable
+            .clone()
+            .or_else(|| std::env::var_os("CURSOR_SDK_SHIM_EXECUTABLE").map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from(CURSOR_SDK_PIN));
+        let binary = binary.canonicalize().unwrap_or(binary);
+        let mut hash = Sha256::new();
+        hash.update(catalog::credential_context()?);
+        hash.update(binary.as_os_str().as_encoded_bytes());
+        hash.update(Self::sdk_version().as_bytes());
+        if let Ok(metadata) = binary.metadata() {
+            hash.update(format!("{:?}:{}", metadata.modified().ok(), metadata.len()));
+        }
+        Ok(Some(crate::ModelContext {
+            hash: format!("{:x}", hash.finalize()),
+            binary_path: binary,
+            binary_version: Some(Self::sdk_version().into()),
+        }))
+    }
+    async fn model_catalog(&self, force: bool) -> Result<crate::ModelCatalog, HarnessError> {
+        self.model_context()?.unwrap().log();
         self.models_cache
-            .get(catalog::credential_context, || self.discover_models())
+            .get_with(
+                force,
+                || self.model_context().map(|c| c.unwrap().key()),
+                || self.discover_models(),
+            )
             .await
+    }
+    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+        self.model_catalog(false).await.map(|c| c.models)
     }
 
     // No `commands()` override: @cursor/sdk 1.0.28 exposes no slash-command

@@ -650,7 +650,11 @@ impl SessionsEngine {
         self.ensure_sidechat_active(chat_id)?;
         // Project-less chats store cwd `~` (the creating device can't know the
         // host's home); expand it here, on the host, where the run spawns.
-        request.cwd = expand_home(&request.cwd);
+        request.cwd = crate::repos::expand_home(&request.cwd);
+        // Native-only catalog entries have no portable file fallback. Reject
+        // cross-harness delivery before recording or routing the user turn.
+        zeron_proto::invocation::validate_harness_invocations(&request.prompt, harness_id)
+            .map_err(EngineError::Other)?;
         // Every dispatched prompt is a turn — routed steer or fresh run alike.
         self.note_turn_start(chat_id, &request.cwd);
         self.label_computer_chat(chat_id);
@@ -700,11 +704,20 @@ impl SessionsEngine {
                 let message = SteerMessage {
                     // The mailbox is the harness's ear: a sidechat's prompt is
                     // wrapped here, while the doc entry and the ledger (which a
-                    // dying run re-dispatches) keep the typed text.
-                    prompt: self
-                        .inner
-                        .harness_prompt(chat_id, &request.prompt, &user_id, turn_computer)
-                        .map_or_else(|| request.prompt.clone(), |wrapped| wrapped.prompt),
+                    // dying run re-dispatches) keep the typed text. OpenCode
+                    // must see the canonical selection before it decodes the
+                    // provider command.
+                    prompt: {
+                        let wrapped = self
+                            .inner
+                            .harness_prompt(chat_id, &request.prompt, &user_id, turn_computer)
+                            .map_or_else(|| request.prompt.clone(), |wrapped| wrapped.prompt);
+                        if harness_id == HarnessId::Opencode {
+                            wrapped
+                        } else {
+                            zeron_proto::invocation::harness_prompt(&wrapped, harness_id)
+                        }
+                    },
                     message_id: Some(user_id.clone()),
                     attachments: request.attachments.clone(),
                 };
@@ -915,24 +928,34 @@ impl SessionsEngine {
             .map(|h| {
                 (
                     h.run_id.clone(),
+                    h.runtime_config.harness_id,
                     h.steer_tx.clone(),
                     h.routed_steers.clone(),
                     h.runtime_config.computer_control,
                 )
             });
-        let Some((run_id, steer_tx, ledger, run_computer)) = target else {
+        let Some((run_id, harness_id, steer_tx, ledger, run_computer)) = target else {
             return Ok(SteerOutcome::NotSteerable);
         };
+        zeron_proto::invocation::validate_harness_invocations(prompt, harness_id)
+            .map_err(EngineError::Other)?;
         let user_id = message_id.unwrap_or_else(new_id);
         let turn_computer = computer_control.unwrap_or(run_computer);
         let message = SteerMessage {
             // Held-queue release and queued sends reach the harness through
             // here without ever entering `dispatch`, so a sidechat's wrap has
             // to happen on this path too.
-            prompt: self
-                .inner
-                .harness_prompt(chat_id, prompt, &user_id, turn_computer)
-                .map_or_else(|| prompt.to_string(), |wrapped| wrapped.prompt),
+            prompt: {
+                let wrapped = self
+                    .inner
+                    .harness_prompt(chat_id, prompt, &user_id, turn_computer)
+                    .map_or_else(|| prompt.to_string(), |wrapped| wrapped.prompt);
+                if harness_id == HarnessId::Opencode {
+                    wrapped
+                } else {
+                    zeron_proto::invocation::harness_prompt(&wrapped, harness_id)
+                }
+            },
             message_id: Some(user_id.clone()),
             attachments: attachments.to_vec(),
         };
@@ -1367,8 +1390,8 @@ impl SessionsEngine {
             .workspace()
             .and_then(|ws| ws.chat(chat_id).ok().flatten())
             .and_then(|chat| chat.cwd)
-            .map(|cwd| expand_home(&cwd))
-            .unwrap_or_else(|| expand_home("~"))
+            .map(|cwd| crate::repos::expand_home(&cwd))
+            .unwrap_or_else(|| crate::repos::expand_home("~"))
     }
 
     fn branching_harness(
@@ -1412,7 +1435,7 @@ impl SessionsEngine {
                     model: config.model,
                     reasoning: config.reasoning,
                     model_options: config.model_options,
-                    cwd: expand_home(&cwd),
+                    cwd: crate::repos::expand_home(&cwd),
                     sandbox: config.sandbox,
                     permission_mode: config.permission_mode,
                     auto_approve: false,
@@ -2639,6 +2662,7 @@ fn record_compaction(
         from_chat_id: None,
         fork_import: false,
         answers_request_id: None,
+        duration_ms: None,
     })?;
     doc.clear_context_usage()?;
     if let Some(post_tokens) = post_tokens {
@@ -2791,6 +2815,7 @@ impl SubagentSink {
             from_chat_id: None,
             fork_import: false,
             answers_request_id: None,
+            duration_ms: None,
         };
         if let Err(err) = self.doc.push_message(&entry) {
             tracing::warn!(doc = %self.doc_id, error = %err, "subagent steer write failed");
@@ -2944,18 +2969,6 @@ fn finish_segment<'a>(
     }
 }
 
-/// `~` / `~/…` → this host's home directory. Anything else passes through.
-fn expand_home(cwd: &str) -> String {
-    match cwd.strip_prefix("~") {
-        Some("") => crate::repos::home_dir().to_string_lossy().into_owned(),
-        Some(rest) if rest.starts_with('/') => crate::repos::home_dir()
-            .join(&rest[1..])
-            .to_string_lossy()
-            .into_owned(),
-        _ => cwd.to_string(),
-    }
-}
-
 /// Resume bookkeeping for one run task: which user entry the run answers (so
 /// the startup-crash retry re-dispatches idempotently against the same doc
 /// entry), whether `dispatch` injected the resume id itself (only
@@ -2975,6 +2988,10 @@ fn cursor_unstarted_history(
     prompt: &str,
     has_session: bool,
 ) -> Result<String, DocError> {
+    // Convert each message before JSON encoding. Rewriting canonical chips in
+    // the encoded envelope can introduce unescaped quotes or newlines and can
+    // cause Cursor's current message to be converted twice.
+    let prompt = zeron_proto::invocation::harness_prompt(prompt, HarnessId::Cursor);
     let entries = doc.read_entries()?;
     let preceding: Vec<_> = entries
         .iter()
@@ -3016,9 +3033,10 @@ fn cursor_unstarted_history(
                 .join("\n")
         })
         .filter(|text| !text.is_empty())
+        .map(|text| zeron_proto::invocation::harness_prompt(&text, HarnessId::Cursor))
         .collect();
     if previous.is_empty() {
-        return Ok(prompt.to_owned());
+        return Ok(prompt);
     }
     Ok(format!(
         "The preceding user messages may not have reached a Cursor checkpoint before startup stopped. Retain this JSON as conversation history; do not rerun prior tools or side effects. Respond to the current message.\n{}",
@@ -3098,7 +3116,14 @@ async fn drive_run(
         Ok(())
     };
     let started = match prepared {
-        Ok(()) => harness.run(request, controls).await,
+        Ok(()) => {
+            let mut wire_request = request;
+            if !matches!(harness_id, HarnessId::Cursor | HarnessId::Opencode) {
+                wire_request.prompt =
+                    zeron_proto::invocation::harness_prompt(&wire_request.prompt, harness_id);
+            }
+            harness.run(wire_request, controls).await
+        }
         Err(error) => Err(error),
     };
     let mut stream = match started {
@@ -4210,6 +4235,47 @@ fn dispatched_generation(doc: &SessionDoc, message_id: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn cursor_recovery_converts_rich_messages_before_json_encoding() {
+        let doc = zeron_doc::SessionDoc::init("cursor-rich-recovery").unwrap();
+        let skill = zeron_proto::invocation::Invocation::Skill {
+            name: "review \"quoted\"".into(),
+            path: "/repo/quoted \"path\"/SKILL.md".into(),
+            command: None,
+        }
+        .link();
+        let previous = format!("Previous {skill}\nSecond line with \\ and \"quotes\"");
+        doc.push_message(&zeron_doc::SessionMessageEntry {
+            id: "u1".into(),
+            role: zeron_doc::MessageRole::User,
+            parts: vec![zeron_doc::MessagePart::Text {
+                id: "u1-text".into(),
+                text: previous.clone(),
+            }],
+            created_at: 0,
+            device_id: "test".into(),
+            status: None,
+            continuation_of: None,
+            from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
+            duration_ms: None,
+        })
+        .unwrap();
+        let current = format!("Current {skill}\nKeep **Markdown**");
+        let delivered = super::cursor_unstarted_history(&doc, "u2", &current, false).unwrap();
+        let (_, json) = delivered.split_once('\n').unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            parsed["currentUserMessage"],
+            zeron_proto::invocation::harness_prompt(&current, zeron_proto::HarnessId::Cursor)
+        );
+        assert_eq!(
+            parsed["previousUserMessages"][0],
+            zeron_proto::invocation::harness_prompt(&previous, zeron_proto::HarnessId::Cursor)
+        );
+    }
+
+    #[test]
     fn cursor_without_a_session_id_retains_only_preceding_user_messages() {
         let doc = zeron_doc::SessionDoc::init("cursor-unstarted").unwrap();
         for (id, role, text) in [
@@ -4236,6 +4302,7 @@ mod tests {
                 from_chat_id: None,
                 fork_import: false,
                 answers_request_id: None,
+                duration_ms: None,
             })
             .unwrap();
         }

@@ -164,27 +164,31 @@ fn main() -> anyhow::Result<()> {
     {
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
-        // `zeron mcp` owns stdout as its wire; a log line there would corrupt
-        // a JSON-RPC frame.
-        let logs_to_stderr = matches!(cli.command, Some(Command::Mcp { .. }));
-        let registry = tracing_subscriber::registry().with(filter).with(
-            tracing_subscriber::fmt::layer().with_writer(move || -> Box<dyn std::io::Write> {
-                if logs_to_stderr {
-                    Box::new(std::io::stderr())
-                } else {
-                    Box::new(std::io::stdout())
-                }
-            }),
-        );
-        match log_file {
-            Some(file) => registry
+        // `zeron mcp` owns stdout for the protocol: a single log line on it
+        // would corrupt the JSON-RPC stream, so its diagnostics go to stderr.
+        if matches!(&cli.command, Some(Command::Mcp { .. })) {
+            tracing_subscriber::registry()
+                .with(filter)
                 .with(
                     tracing_subscriber::fmt::layer()
                         .with_ansi(false)
-                        .with_writer(std::sync::Arc::new(file)),
+                        .with_writer(std::io::stderr),
                 )
-                .init(),
-            None => registry.init(),
+                .init();
+        } else {
+            let registry = tracing_subscriber::registry()
+                .with(filter)
+                .with(tracing_subscriber::fmt::layer());
+            match log_file {
+                Some(file) => registry
+                    .with(
+                        tracing_subscriber::fmt::layer()
+                            .with_ansi(false)
+                            .with_writer(std::sync::Arc::new(file)),
+                    )
+                    .init(),
+                None => registry.init(),
+            }
         }
     }
 

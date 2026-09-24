@@ -364,7 +364,9 @@ impl Shell {
                 }),
                 ComposerEvent::OpenSidechat { .. }
                 | ComposerEvent::NewThreadTransitionStarted
-                | ComposerEvent::BackgroundStarted => {}
+                | ComposerEvent::BackgroundStarted
+                | ComposerEvent::WorkspaceCommand(_)
+                | ComposerEvent::WorktreeSetup { .. } => {}
                 ComposerEvent::UnsentChanged => cx.notify(),
                 ComposerEvent::OpenComputerSetup { missing } => {
                     _this.open_computer_permission_guide(missing.clone(), cx)
