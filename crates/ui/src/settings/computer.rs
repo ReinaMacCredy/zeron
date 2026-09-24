@@ -4,7 +4,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, Context, Entity, SharedString, Subscription, Task, Window, div, prelude::*, px,
+    AnyElement, Context, Entity, ObjectFit, SharedString, Subscription, Task, Window, div, img,
+    prelude::*, px,
 };
 use zeron_proto::computer::{
     AgentCursorColorMode, COMPUTER_AUDIT_HISTORY_MAX_LIMIT, CUA_NATIVE_REVISION,
@@ -441,6 +442,9 @@ impl ComputerPage {
     pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
         if active == self.status_poll.is_some() {
             return;
+        }
+        if active && self.settings.is_some() && self.load.is_none() {
+            self.load_settings(cx);
         }
         self.status_poll = active.then(|| {
             cx.spawn(async move |this, cx| {
@@ -983,6 +987,117 @@ impl ComputerPage {
         out
     }
 
+    fn render_allowed_apps(
+        &self,
+        theme: &Theme,
+        settings: &ComputerSettings,
+        editable: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if settings.always_allowed_apps.is_empty() {
+            return muted_line(
+                theme,
+                "No apps yet. Choose Always allow on a Computer consent card to skip that app's card in future tasks.",
+            )
+            .debug_selector(|| "computer-allowed-apps-empty".into())
+            .into_any_element();
+        }
+        let accent = theme.accent;
+        let rows = settings
+            .always_allowed_apps
+            .iter()
+            .enumerate()
+            .map(|(ix, app)| {
+                let title = app
+                    .name
+                    .clone()
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or_else(|| app.bundle_id.clone());
+                let icon =
+                    crate::appshots::presentation_icon(&crate::appshots::AppshotPresentation {
+                        app_name: title.clone(),
+                        window_title: None,
+                        bundle_identifier: Some(app.bundle_id.clone()),
+                    });
+                let bundle_id = app.bundle_id.clone();
+                let remove_id = format!("computer-allowed-app-remove-{}", app.bundle_id);
+                widgets::card_row(theme, ix == 0)
+                    .debug_selector(move || format!("computer-allowed-app-{ix}"))
+                    .child(match icon {
+                        Some(icon) => img(icon)
+                            .size(px(20.0))
+                            .flex_none()
+                            .object_fit(ObjectFit::Contain)
+                            .into_any_element(),
+                        None => crate::icons::icon(icons::MONITOR)
+                            .size(px(16.0))
+                            .flex_none()
+                            .text_color(theme.text_muted)
+                            .into_any_element(),
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(widgets::row_title(theme, title.clone()))
+                            .when(app.name.is_some(), |column| {
+                                column.child(
+                                    div()
+                                        .truncate()
+                                        .text_size(crate::typography::ui_rems(12.0))
+                                        .text_color(theme.text_muted)
+                                        .child(SharedString::from(app.bundle_id.clone())),
+                                )
+                            }),
+                    )
+                    .child(
+                        widgets::ghost_action(theme)
+                            .id(SharedString::from(remove_id.clone()))
+                            .debug_selector(move || remove_id.clone())
+                            .role(gpui::Role::Button)
+                            .aria_label(format!("Remove {title} from always-allowed apps"))
+                            .tab_index(0)
+                            .focus_visible(move |style| style.border_2().border_color(accent))
+                            .flex_none()
+                            .size(px(24.0))
+                            .p(px(0.0))
+                            .rounded(px(6.0))
+                            .justify_center()
+                            .when(!editable, |el| el.opacity(0.4))
+                            .when(editable, |el| {
+                                el.cursor_pointer()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.remove_allowed_app(&bundle_id, cx)
+                                    }))
+                            })
+                            .child(
+                                crate::icons::icon(icons::TRASH_BIN_MINIMALISTIC)
+                                    .size(px(14.0))
+                                    .text_color(theme.text_muted),
+                            ),
+                    )
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
+        widgets::section_card(theme)
+            .id("computer-allowed-apps")
+            .mt(px(8.0))
+            .role(gpui::Role::List)
+            .aria_label("Always-allowed apps")
+            .children(rows)
+            .into_any_element()
+    }
+
+    fn remove_allowed_app(&mut self, bundle_id: &str, cx: &mut Context<Self>) {
+        self.write_settings(cx, |settings| {
+            settings
+                .always_allowed_apps
+                .retain(|app| app.bundle_id != bundle_id)
+        });
+    }
+
     fn render_cursor_fields(&self, theme: &Theme, settings: &ComputerSettings) -> AnyElement {
         let field = |label: &'static str, value: &str, input: &Entity<ComposerInput>| {
             let swatch = normalize_cursor_hex_color(value);
@@ -1424,6 +1539,7 @@ impl Render for ComputerPage {
             }
         });
         let history = self.history.open.then(|| self.render_history(&theme, cx));
+        let allowed_apps = self.render_allowed_apps(&theme, &settings, editable, cx);
 
         let advanced_toggle = disclosure(
             &theme,
@@ -1568,6 +1684,12 @@ impl Render for ComputerPage {
                                     .map(|error| widgets::error_strip(&theme, error)),
                             )
                             .child(card)
+                            .child(section_header(&theme, "Always-allowed apps", None))
+                            .child(muted_line(
+                                &theme,
+                                "In Ask mode these apps skip the per-app consent card. Other apps still ask.",
+                            ))
+                            .child(allowed_apps)
                             .child(section_header(
                                 &theme,
                                 "Getting started",
@@ -1913,6 +2035,70 @@ mod tests {
         } else {
             click(cx, "computer-control-toggle");
             assert!(!core.computer.settings().computer_control_enabled);
+        }
+        drop(page);
+        runtime.block_on(core.shutdown());
+    }
+
+    #[gpui::test]
+    fn always_allowed_apps_list_and_remove_through_the_engine(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        init(cx, dir.path());
+        std::fs::create_dir_all(dir.path().join("engine")).unwrap();
+        std::fs::write(
+            dir.path().join("engine/computer-settings.json"),
+            json!({
+                "alwaysAllowedApps": [
+                    { "bundleId": "com.apple.Safari", "name": "Safari" },
+                    { "bundleId": "sh.paseo.desktop" },
+                ],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let core = runtime
+            .block_on(async {
+                zeron_engine::EngineCore::assemble(
+                    &dir.path().join("engine"),
+                    Arc::new(zeron_engine::HarnessRegistry::new()),
+                    zeron_proto::HarnessId::Mock,
+                    None,
+                )
+            })
+            .unwrap();
+        let engine = crate::state::EngineHandle::from_test_client(zeron_rpc::memory_client(
+            core.rpc_service(),
+        ));
+        let (page, cx) = open_page(cx, engine, Rc::new(|| grants(true, true, true)));
+        wait(cx, |cx| {
+            page.read_with(cx, |page, _| page.settings_value().is_some())
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("computer-allowed-app-0").is_some());
+        assert!(cx.debug_bounds("computer-allowed-app-1").is_some());
+        assert!(cx.debug_bounds("computer-allowed-apps-empty").is_none());
+        if cfg!(target_os = "macos") {
+            click(cx, "computer-allowed-app-remove-com.apple.Safari");
+            wait(cx, |_| {
+                core.computer.settings().always_allowed_apps.len() == 1
+            });
+            assert_eq!(
+                core.computer.settings().always_allowed_apps[0].bundle_id,
+                "sh.paseo.desktop"
+            );
+            let stored: ComputerSettings = serde_json::from_str(
+                &std::fs::read_to_string(dir.path().join("engine/computer-settings.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(stored.always_allowed_apps.len(), 1);
+            click(cx, "computer-allowed-app-remove-sh.paseo.desktop");
+            wait(cx, |_| {
+                core.computer.settings().always_allowed_apps.is_empty()
+            });
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("computer-allowed-apps-empty").is_some());
         }
         drop(page);
         runtime.block_on(core.shutdown());

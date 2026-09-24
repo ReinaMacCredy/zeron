@@ -2,6 +2,7 @@ mod args;
 mod batch;
 pub mod browser;
 mod browser_effect;
+pub mod consent;
 mod desktop;
 mod elements;
 pub mod guidance;

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
-use zeron_proto::computer::ComputerConsentScope;
+use zeron_proto::computer::{ComputerConsentApp, ComputerConsentScope};
 use zeron_proto::{PermissionMode, UserInputAnswer, UserInputKind, UserInputQuestion};
 
 use super::approval_gate::{ApprovalDecision, ComputerApprovalGate};
@@ -11,7 +11,8 @@ use super::manager::{COMPUTER_CONTROL_ON_DISCLOSURE, ComputerConsentCard, Comput
 use crate::sessions::SessionsEngine;
 
 pub const COMPUTER_CONSENT_ALLOW: &str = "Allow";
-pub const COMPUTER_CONSENT_DECLINE: &str = "Decline";
+pub const COMPUTER_CONSENT_DECLINE: &str = "Deny";
+pub const COMPUTER_CONSENT_ALWAYS_PREFIX: &str = "Always allow ";
 
 pub struct EngineComputerSeams {
     sessions: Mutex<Option<SessionsEngine>>,
@@ -45,26 +46,64 @@ impl EngineComputerSeams {
     }
 }
 
+pub fn consent_app_title(app: &ComputerConsentApp) -> String {
+    match &app.bundle_id {
+        Some(bundle_id) => format!("Allow Computer to use {} ({bundle_id})?", app.name),
+        None => format!("Allow Computer to use {} (unverified app)?", app.name),
+    }
+}
+
+pub fn consent_always_label(app: &ComputerConsentApp) -> Option<String> {
+    app.verified()
+        .then(|| format!("{COMPUTER_CONSENT_ALWAYS_PREFIX}{}", app.name))
+}
+
 pub fn consent_question(card: &ComputerConsentCard) -> UserInputQuestion {
-    let question = match card.scope {
-        ComputerConsentScope::Task => format!(
+    let always = card
+        .app
+        .as_ref()
+        .filter(|_| card.scope == ComputerConsentScope::Task)
+        .and_then(consent_always_label);
+    let question = match (&card.app, card.scope) {
+        (Some(app), ComputerConsentScope::Task) if app.verified() => format!(
+            "{} The agent wants to run {} and will drive {} until the turn ends.",
+            consent_app_title(app),
+            card.tool_name,
+            app.name
+        ),
+        (Some(app), ComputerConsentScope::Task) => format!(
+            "{} Zeron could not verify this app's bundle id{}, so this grant lasts for this turn only and cannot be saved. The agent wants to run {}.",
+            consent_app_title(app),
+            app.pid
+                .map(|pid| format!(" (process {pid})"))
+                .unwrap_or_default(),
+            card.tool_name
+        ),
+        (_, ComputerConsentScope::Task) => format!(
             "Allow Computer for this task? The agent wants to run {} and will drive this Mac's apps until the turn ends.",
             card.tool_name
         ),
-        ComputerConsentScope::Call => {
-            format!("Allow the agent to run {} once?", card.tool_name)
-        }
+        (app, ComputerConsentScope::Call) => format!(
+            "Allow the agent to run {} once{}?",
+            card.tool_name,
+            app.as_ref()
+                .map(|app| format!(" in {}", app.name))
+                .unwrap_or_default()
+        ),
     };
+    let mut options = vec![COMPUTER_CONSENT_ALLOW.to_owned()];
+    options.extend(always);
+    options.push(COMPUTER_CONSENT_DECLINE.into());
     UserInputQuestion {
         id: "consent".into(),
         header: "Computer".into(),
         question,
-        options: vec![
-            COMPUTER_CONSENT_ALLOW.into(),
-            COMPUTER_CONSENT_DECLINE.into(),
-        ],
+        options,
         multi_select: false,
-        kind: Some(UserInputKind::Consent { scope: card.scope }),
+        kind: Some(UserInputKind::Consent {
+            scope: card.scope,
+            app: card.app.clone(),
+        }),
     }
 }
 
@@ -75,6 +114,11 @@ pub fn consent_decision(answers: &[UserInputAnswer]) -> ApprovalDecision {
         .collect();
     if labels.contains(&COMPUTER_CONSENT_ALLOW) {
         ApprovalDecision::Accept
+    } else if labels
+        .iter()
+        .any(|label| label.starts_with(COMPUTER_CONSENT_ALWAYS_PREFIX))
+    {
+        ApprovalDecision::AcceptForSession
     } else if labels.is_empty() {
         ApprovalDecision::Cancel
     } else {

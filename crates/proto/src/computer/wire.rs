@@ -224,6 +224,16 @@ pub struct ComputerSettings {
     pub agent_cursor_color_mode: AgentCursorColorMode,
     pub agent_cursor_fill_color: String,
     pub agent_cursor_rim_color: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub always_allowed_apps: Vec<ComputerAllowedApp>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerAllowedApp {
+    pub bundle_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 impl Default for ComputerSettings {
@@ -235,6 +245,7 @@ impl Default for ComputerSettings {
             agent_cursor_color_mode: AgentCursorColorMode::Stock,
             agent_cursor_fill_color: String::new(),
             agent_cursor_rim_color: String::new(),
+            always_allowed_apps: Vec::new(),
         }
     }
 }
@@ -387,6 +398,40 @@ mod tests {
                 "agentCursorRimColor": "",
             })
         );
+    }
+
+    #[test]
+    fn always_allowed_apps_round_trip_and_old_files_load_without_them() {
+        let old: ComputerSettings =
+            serde_json::from_value(json!({ "computerControlEnabled": true })).unwrap();
+        assert!(old.always_allowed_apps.is_empty());
+        let wire = json!({
+            "computerControlEnabled": true,
+            "autoOpenComputerPane": true,
+            "computerPreviewSize": "compact",
+            "agentCursorColorMode": "stock",
+            "agentCursorFillColor": "",
+            "agentCursorRimColor": "",
+            "alwaysAllowedApps": [
+                { "bundleId": "com.apple.Safari", "name": "Safari" },
+                { "bundleId": "sh.paseo.desktop" },
+            ],
+        });
+        let settings: ComputerSettings = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(
+            settings.always_allowed_apps,
+            vec![
+                ComputerAllowedApp {
+                    bundle_id: "com.apple.Safari".into(),
+                    name: Some("Safari".into()),
+                },
+                ComputerAllowedApp {
+                    bundle_id: "sh.paseo.desktop".into(),
+                    name: None,
+                },
+            ]
+        );
+        assert_eq!(serde_json::to_value(&settings).unwrap(), wire);
     }
 
     #[test]

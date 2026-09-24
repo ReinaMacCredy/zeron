@@ -25,6 +25,7 @@ use crate::computer::setup_signal::ComputerSetupSignal;
 use crate::computer::visible_use::ComputerForegroundAuthorization;
 
 mod actions;
+mod app_consent;
 mod batch_and_diffs;
 mod browser;
 mod catalog;
@@ -314,14 +315,14 @@ async fn a_first_mutation_carries_the_disclosure_once_per_turn() {
 async fn a_denied_approval_dispatches_nothing() {
     let h = harness();
     h.decide(ApprovalDecision::Decline);
-    let result = h.call("computer_click", json!({ "label": "Calculate" })).await;
+    let result = h
+        .call(
+            "computer_click",
+            json!({ "label": "Calculate", "window_id": "fake-calculator" }),
+        )
+        .await;
     assert!(result.is_error);
-    assert!(
-        result
-            .first_text()
-            .unwrap()
-            .ends_with("\nComputer action was denied or cancelled; no input was sent.")
-    );
+    assert_eq!(result_json(&result)["error"]["code"], "app_consent_denied");
     assert!(h.backend.calls_for("click").is_empty());
     assert_eq!(h.approvals.cards.lock().unwrap().len(), 1);
     h.dispose().await;

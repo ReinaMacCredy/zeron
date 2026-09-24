@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -8,6 +8,7 @@ use futures::future::{BoxFuture, Shared};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use zeron_proto::PermissionMode;
+use zeron_proto::computer::ComputerAllowedApp;
 
 pub const COMPUTER_APPROVAL_QUEUE_FULL_CODE: &str = "approval_queue_full";
 pub const COMPUTER_APPROVAL_QUEUE_GLOBAL_LIMIT: usize = 128;
@@ -61,6 +62,14 @@ pub type ApprovalPublish = Arc<
         + Sync,
 >;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppGrant {
+    pub key: String,
+    pub always: Option<ComputerAllowedApp>,
+}
+
+pub type AlwaysAllowHook = Arc<dyn Fn(ComputerAllowedApp) + Send + Sync>;
+
 #[derive(Clone)]
 pub struct ApprovalRequest {
     pub chat_id: String,
@@ -68,6 +77,7 @@ pub struct ApprovalRequest {
     pub mode: PermissionMode,
     pub signal: CancellationToken,
     pub publish: ApprovalPublish,
+    pub app: Option<AppGrant>,
 }
 
 type SharedApproval = Shared<BoxFuture<'static, Result<bool, ComputerApprovalError>>>;
@@ -75,21 +85,28 @@ type SharedApproval = Shared<BoxFuture<'static, Result<bool, ComputerApprovalErr
 struct PendingApproval {
     chat_id: String,
     turn_id: Option<String>,
+    always: Option<ComputerAllowedApp>,
     settle: oneshot::Sender<ApprovalDecision>,
 }
 
 struct TaskApproval {
     id: u64,
-    turn_id: Option<String>,
     granted: Option<bool>,
     pending: Option<SharedApproval>,
+}
+
+struct TurnApprovals {
+    turn_id: Option<String>,
+    grants: HashMap<Option<String>, TaskApproval>,
 }
 
 #[derive(Default)]
 struct GateState {
     pending: HashMap<String, PendingApproval>,
-    tasks: HashMap<String, TaskApproval>,
+    tasks: HashMap<String, TurnApprovals>,
     next_task: u64,
+    always: HashSet<String>,
+    on_always: Option<AlwaysAllowHook>,
 }
 
 impl GateState {
@@ -117,8 +134,17 @@ impl GateState {
         }
     }
 
-    fn task_is(&self, chat_id: &str, id: u64) -> bool {
-        self.tasks.get(chat_id).is_some_and(|task| task.id == id)
+    fn task_is(&self, chat_id: &str, key: &Option<String>, id: u64) -> bool {
+        self.tasks
+            .get(chat_id)
+            .and_then(|turn| turn.grants.get(key))
+            .is_some_and(|task| task.id == id)
+    }
+
+    fn task(&mut self, chat_id: &str, key: &Option<String>) -> Option<&mut TaskApproval> {
+        self.tasks
+            .get_mut(chat_id)
+            .and_then(|turn| turn.grants.get_mut(key))
     }
 }
 
@@ -180,11 +206,41 @@ impl ComputerApprovalGate {
     }
 
     pub fn revoke_task_grants(&self) {
-        for task in self.state().tasks.values_mut() {
+        for task in self
+            .state()
+            .tasks
+            .values_mut()
+            .flat_map(|turn| turn.grants.values_mut())
+        {
             if task.granted == Some(true) {
                 task.granted = None;
             }
         }
+    }
+
+    pub fn app_granted(
+        &self,
+        chat_id: &str,
+        turn_id: Option<&str>,
+        key: &str,
+        bundle_id: Option<&str>,
+    ) -> bool {
+        let state = self.state();
+        bundle_id.is_some_and(|bundle_id| state.always.contains(bundle_id))
+            || state
+                .tasks
+                .get(chat_id)
+                .filter(|turn| turn.turn_id.as_deref() == turn_id)
+                .and_then(|turn| turn.grants.get(&Some(key.to_owned())))
+                .is_some_and(|task| task.granted == Some(true))
+    }
+
+    pub fn set_always_allowed<'a>(&self, bundle_ids: impl IntoIterator<Item = &'a str>) {
+        self.state().always = bundle_ids.into_iter().map(str::to_owned).collect();
+    }
+
+    pub fn on_always_allowed(&self, hook: AlwaysAllowHook) {
+        self.state().on_always = Some(hook);
     }
 
     pub fn respond(&self, chat_id: &str, request_id: &str, decision: ApprovalDecision) -> bool {
@@ -197,10 +253,19 @@ impl ComputerApprovalGate {
             return false;
         }
         let pending = state.pending.remove(request_id).expect("checked above");
-        let effective = match decision {
-            ApprovalDecision::AcceptForSession => ApprovalDecision::Decline,
-            decision => decision,
+        let (effective, remembered) = match (decision, pending.always) {
+            (ApprovalDecision::AcceptForSession, Some(app)) => {
+                state.always.insert(app.bundle_id.clone());
+                (ApprovalDecision::Accept, Some(app))
+            }
+            (ApprovalDecision::AcceptForSession, None) => (ApprovalDecision::Decline, None),
+            (decision, _) => (decision, None),
         };
+        let hook = remembered.and_then(|app| Some((state.on_always.clone()?, app)));
+        drop(state);
+        if let Some((hook, app)) = hook {
+            hook(app);
+        }
         let _ = pending.settle.send(effective);
         true
     }
@@ -217,27 +282,42 @@ impl ComputerApprovalGate {
         }
         let chat_id = request.chat_id.clone();
         let signal = request.signal.clone();
+        let key = request.app.as_ref().map(|app| app.key.clone());
         let (task_id, pending) = {
             let mut state = self.state();
             if state
                 .tasks
                 .get(&chat_id)
-                .is_none_or(|task| task.turn_id != request.turn_id)
+                .is_none_or(|turn| turn.turn_id != request.turn_id)
             {
                 state.cancel_thread(&chat_id, None);
-                let id = state.next_task;
-                state.next_task += 1;
                 state.tasks.insert(
                     chat_id.clone(),
-                    TaskApproval {
-                        id,
+                    TurnApprovals {
                         turn_id: request.turn_id.clone(),
-                        granted: None,
-                        pending: None,
+                        grants: HashMap::new(),
                     },
                 );
             }
-            let task = state.tasks.get_mut(&chat_id).expect("inserted above");
+            let always = request
+                .app
+                .as_ref()
+                .and_then(|app| app.always.as_ref())
+                .is_some_and(|app| state.always.contains(&app.bundle_id));
+            let id = state.next_task;
+            state.next_task += 1;
+            let turn = state.tasks.get_mut(&chat_id).expect("inserted above");
+            if key.is_none() && turn.grants.values().any(|task| task.granted == Some(true)) {
+                return Ok(true);
+            }
+            let task = turn.grants.entry(key.clone()).or_insert(TaskApproval {
+                id,
+                granted: None,
+                pending: None,
+            });
+            if always {
+                task.granted = Some(true);
+            }
             if let Some(granted) = task.granted {
                 return Ok(granted);
             }
@@ -245,7 +325,7 @@ impl ComputerApprovalGate {
             let pending = match &task.pending {
                 Some(pending) => pending.clone(),
                 None => {
-                    let pending = self.spawn_task_request(id, request);
+                    let pending = self.spawn_task_request(id, key.clone(), request);
                     task.pending = Some(pending.clone());
                     pending
                 }
@@ -260,21 +340,23 @@ impl ComputerApprovalGate {
         if signal.is_cancelled() {
             return Err(ComputerApprovalError::Aborted);
         }
-        Ok(accepted && self.state().task_is(&chat_id, task_id))
+        Ok(accepted && self.state().task_is(&chat_id, &key, task_id))
     }
 
     // Spawned so the shared prompt keeps running while only a follower polls it.
-    fn spawn_task_request(&self, task_id: u64, request: ApprovalRequest) -> SharedApproval {
+    fn spawn_task_request(
+        &self,
+        task_id: u64,
+        key: Option<String>,
+        request: ApprovalRequest,
+    ) -> SharedApproval {
         let gate = self.clone();
         let chat_id = request.chat_id.clone();
         let signal = request.signal.clone();
         let handle = tokio::spawn(async move {
             let result = gate.request(request).await;
             let mut state = gate.state();
-            let current = state
-                .tasks
-                .get_mut(&chat_id)
-                .filter(|task| task.id == task_id);
+            let current = state.task(&chat_id, &key).filter(|task| task.id == task_id);
             let outcome = match result {
                 Ok(accepted) => match current {
                     Some(task) if !signal.is_cancelled() => {
@@ -285,11 +367,7 @@ impl ComputerApprovalGate {
                 },
                 Err(error) => Err(error),
             };
-            if let Some(task) = state
-                .tasks
-                .get_mut(&chat_id)
-                .filter(|task| task.id == task_id)
-            {
+            if let Some(task) = state.task(&chat_id, &key).filter(|task| task.id == task_id) {
                 task.pending = None;
             }
             outcome
@@ -327,6 +405,7 @@ impl ComputerApprovalGate {
                 PendingApproval {
                     chat_id: request.chat_id.clone(),
                     turn_id: request.turn_id.clone(),
+                    always: request.app.as_ref().and_then(|app| app.always.clone()),
                     settle,
                 },
             );
@@ -400,6 +479,7 @@ mod tests {
             mode: PermissionMode::Ask,
             signal: CancellationToken::new(),
             publish,
+            app: None,
         }
     }
 
@@ -842,6 +922,186 @@ mod tests {
         assert!(computer_consent_card_required(PermissionMode::Ask));
         assert!(!computer_consent_card_required(PermissionMode::Auto));
         assert!(!computer_consent_card_required(PermissionMode::Full));
+    }
+
+    fn for_app(
+        turn: &str,
+        key: &str,
+        always: Option<&str>,
+        publish: ApprovalPublish,
+    ) -> ApprovalRequest {
+        ApprovalRequest {
+            app: Some(AppGrant {
+                key: key.to_owned(),
+                always: always.map(|bundle_id| ComputerAllowedApp {
+                    bundle_id: bundle_id.to_owned(),
+                    name: None,
+                }),
+            }),
+            ..ask("a", Some(turn), publish)
+        }
+    }
+
+    fn answering(
+        gate: &ComputerApprovalGate,
+        log: &Log,
+        decision: ApprovalDecision,
+    ) -> ApprovalPublish {
+        let gate = gate.clone();
+        let log = log.clone();
+        Arc::new(move |id, resolved| {
+            if resolved.is_none() {
+                log.lock().unwrap().push((id.clone(), None));
+                gate.respond("a", &id, decision);
+            }
+            async { Ok(()) }.boxed()
+        })
+    }
+
+    #[tokio::test]
+    async fn an_app_grant_covers_only_that_app_and_satisfies_the_turn_grant() {
+        let gate = ComputerApprovalGate::default();
+        let log = Log::default();
+        let accept = answering(&gate, &log, ApprovalDecision::Accept);
+        let safari = for_app(
+            "turn",
+            "bundle:com.apple.Safari",
+            Some("com.apple.Safari"),
+            accept.clone(),
+        );
+        let notes = for_app(
+            "turn",
+            "bundle:com.apple.Notes",
+            Some("com.apple.Notes"),
+            accept.clone(),
+        );
+        assert_eq!(gate.request_task(safari.clone()).await, Ok(true));
+        assert_eq!(opened(&log).len(), 1);
+        assert_eq!(gate.request_task(notes.clone()).await, Ok(true));
+        assert_eq!(opened(&log).len(), 2, "a second app raises its own card");
+        assert_eq!(gate.request_task(safari).await, Ok(true));
+        assert_eq!(
+            gate.request_task(ask("a", Some("turn"), accept.clone()))
+                .await,
+            Ok(true)
+        );
+        assert_eq!(opened(&log).len(), 2, "the app grant covers app-less calls");
+        let declined = Log::default();
+        let decline = answering(&gate, &declined, ApprovalDecision::Decline);
+        let calc = for_app("turn", "pid:77", None, decline);
+        assert_eq!(gate.request_task(calc.clone()).await, Ok(false));
+        assert_eq!(gate.request_task(calc).await, Ok(false));
+        assert_eq!(opened(&declined).len(), 1, "a denial sticks for the turn");
+        let next = for_app(
+            "turn-2",
+            "bundle:com.apple.Safari",
+            Some("com.apple.Safari"),
+            accept,
+        );
+        assert_eq!(gate.request_task(next).await, Ok(true));
+        assert_eq!(opened(&log).len(), 3, "a new turn asks again");
+    }
+
+    #[tokio::test]
+    async fn an_app_less_decline_is_lifted_by_a_later_app_grant_in_the_turn() {
+        let gate = ComputerApprovalGate::default();
+        let declined = Log::default();
+        let decline = answering(&gate, &declined, ApprovalDecision::Decline);
+        assert_eq!(
+            gate.request_task(ask("a", Some("turn"), decline)).await,
+            Ok(false)
+        );
+        let log = Log::default();
+        let accept = answering(&gate, &log, ApprovalDecision::Accept);
+        assert_eq!(
+            gate.request_task(for_app("turn", "pid:9", None, accept.clone()))
+                .await,
+            Ok(true)
+        );
+        assert_eq!(
+            gate.request_task(ask("a", Some("turn"), accept)).await,
+            Ok(true)
+        );
+        assert_eq!(opened(&log).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn always_allow_persists_a_verified_app_until_the_list_drops_it() {
+        let gate = ComputerApprovalGate::default();
+        let saved: Arc<Mutex<Vec<ComputerAllowedApp>>> = Arc::default();
+        let sink = saved.clone();
+        gate.on_always_allowed(Arc::new(move |app| sink.lock().unwrap().push(app)));
+        let log = Log::default();
+        let always = answering(&gate, &log, ApprovalDecision::AcceptForSession);
+        let safari = |turn: &str, publish| {
+            for_app(
+                turn,
+                "bundle:com.apple.Safari",
+                Some("com.apple.Safari"),
+                publish,
+            )
+        };
+        assert_eq!(
+            gate.request_task(safari("turn-1", always.clone())).await,
+            Ok(true)
+        );
+        assert_eq!(
+            saved
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|app| app.bundle_id.as_str())
+                .collect::<Vec<_>>(),
+            ["com.apple.Safari"]
+        );
+        assert_eq!(
+            gate.request_task(safari("turn-2", always.clone())).await,
+            Ok(true)
+        );
+        assert_eq!(
+            gate.request_task(ask("a", Some("turn-2"), always.clone()))
+                .await,
+            Ok(true)
+        );
+        assert_eq!(
+            opened(&log).len(),
+            1,
+            "an always-allowed app raises no card"
+        );
+        gate.revoke_task_grants();
+        gate.cancel_thread("a", None);
+        assert_eq!(
+            gate.request_task(safari("turn-3", always.clone())).await,
+            Ok(true)
+        );
+        assert_eq!(
+            opened(&log).len(),
+            1,
+            "stop and host loss keep the always list"
+        );
+        gate.set_always_allowed([]);
+        assert_eq!(gate.request_task(safari("turn-4", always)).await, Ok(true));
+        assert_eq!(
+            opened(&log).len(),
+            2,
+            "removing the app brings the card back"
+        );
+    }
+
+    #[tokio::test]
+    async fn always_allow_for_an_unverified_app_is_refused_and_not_saved() {
+        let gate = ComputerApprovalGate::default();
+        let saved: Arc<Mutex<Vec<ComputerAllowedApp>>> = Arc::default();
+        let sink = saved.clone();
+        gate.on_always_allowed(Arc::new(move |app| sink.lock().unwrap().push(app)));
+        let log = Log::default();
+        let always = answering(&gate, &log, ApprovalDecision::AcceptForSession);
+        assert_eq!(
+            gate.request_task(for_app("turn", "pid:4242", None, always))
+                .await,
+            Ok(false)
+        );
+        assert!(saved.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

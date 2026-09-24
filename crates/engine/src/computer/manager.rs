@@ -1,5 +1,6 @@
 mod actions;
 mod authority;
+mod consent_app;
 mod foreground;
 mod lease;
 mod observe;
@@ -115,7 +116,11 @@ impl ComputerManagerEnv {
     }
 }
 
-pub use zeron_proto::computer::ComputerConsentScope;
+pub use consent_app::{
+    COMPUTER_APP_CONSENT_REQUIRED_CODE, COMPUTER_APP_WINDOW_REQUIRED_CODE,
+    COMPUTER_APP_WINDOW_REQUIRED_MESSAGE,
+};
+pub use zeron_proto::computer::{ComputerConsentApp, ComputerConsentScope};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComputerConsentCard {
@@ -125,6 +130,22 @@ pub struct ComputerConsentCard {
     pub tool_name: String,
     pub params_display: String,
     pub scope: ComputerConsentScope,
+    pub app: Option<ComputerConsentApp>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComputerConsentTarget {
+    Window(String),
+    Pid(u32),
+    App(String),
+    Unscoped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComputerConsent {
+    Granted,
+    Denied(Option<ComputerConsentApp>),
+    Unscoped,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -466,6 +487,7 @@ struct State {
     physical_read: Option<Shared<BoxFuture<'static, ()>>>,
     physical_failure: Option<String>,
     denied_apps_cache: Option<(u64, Vec<ComputerApp>)>,
+    consent_pid_misses: HashMap<u32, u64>,
     publish_all_depth: usize,
     windows_publish_pending: bool,
     windows_publish_timer: Option<JoinHandle<()>>,
@@ -647,6 +669,7 @@ impl ComputerManager {
                     physical_read: None,
                     physical_failure: None,
                     denied_apps_cache: None,
+                    consent_pid_misses: HashMap::new(),
                     publish_all_depth: 0,
                     windows_publish_pending: false,
                     windows_publish_timer: None,

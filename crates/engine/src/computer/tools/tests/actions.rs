@@ -497,7 +497,8 @@ async fn does_not_mistake_an_uncertain_first_batch_step_for_a_pre_dispatch_refus
 async fn refuses_the_repeat_before_the_approval_prompt_and_before_dispatch() {
     let h = harness();
     h.decide(ApprovalDecision::Accept);
-    let arguments = json!({ "key": "enter", "include_screenshot": false });
+    let arguments =
+        json!({ "key": "enter", "window_id": "fake-terminal", "include_screenshot": false });
     assert!(
         !h.call("computer_press_key", arguments.clone())
             .await

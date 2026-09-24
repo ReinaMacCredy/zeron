@@ -402,8 +402,10 @@ impl Rig {
                     questions,
                     resolved,
                     ..
-                } => match questions.first().and_then(|q| q.kind) {
-                    Some(UserInputKind::Consent { scope }) => Some((request_id, scope, resolved)),
+                } => match questions.first().and_then(|q| q.kind.clone()) {
+                    Some(UserInputKind::Consent { scope, .. }) => {
+                        Some((request_id, scope, resolved))
+                    }
                     None => None,
                 },
                 _ => None,
@@ -881,6 +883,7 @@ async fn a_consent_card_left_open_by_a_dead_run_is_never_answered_as_a_new_turn(
         multi_select: false,
         kind: Some(UserInputKind::Consent {
             scope: ComputerConsentScope::Task,
+            app: None,
         }),
     };
     let visible = UserInputQuestion {

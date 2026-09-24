@@ -9,8 +9,8 @@ use futures::stream::BoxStream;
 use futures::{FutureExt, StreamExt};
 use tokio::sync::{broadcast, watch};
 use zeron_proto::computer::{
-    ComputerEvent, ComputerHostStreamItem, ComputerSettings, ComputerStillFrame,
-    RespondComputerHostRequestParams,
+    ComputerAllowedApp, ComputerEvent, ComputerHostStreamItem, ComputerSettings,
+    ComputerStillFrame, RespondComputerHostRequestParams,
 };
 use zeron_rpc::ComputerHost;
 
@@ -54,6 +54,7 @@ impl ComputerRuntime {
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
         let approval_gate = ComputerApprovalGate::default();
+        approval_gate.set_always_allowed(always_allowed_ids(&settings));
         let engine_seams = Arc::new(EngineComputerSeams::new(approval_gate.clone()));
         let runtime = Arc::new(Self {
             data_dir: data_dir.to_path_buf(),
@@ -71,6 +72,16 @@ impl ComputerRuntime {
             chat_watch: Mutex::new(None),
             calls: Arc::default(),
         });
+        let weak = Arc::downgrade(&runtime);
+        runtime
+            .approval_gate
+            .on_always_allowed(Arc::new(move |app| {
+                if let Some(runtime) = weak.upgrade()
+                    && let Err(error) = runtime.remember_always_allowed(app)
+                {
+                    tracing::warn!(%error, "computer always-allowed app not saved");
+                }
+            }));
         tokio::spawn(runtime.clone().rebuild(None));
         runtime
     }
@@ -259,13 +270,37 @@ impl ComputerRuntime {
     }
 
     pub fn set_settings(&self, settings: ComputerSettings) -> Result<(), String> {
+        let mut current = self.settings.lock().unwrap_or_else(PoisonError::into_inner);
+        self.write_settings(&mut current, settings)
+    }
+
+    fn remember_always_allowed(&self, app: ComputerAllowedApp) -> Result<(), String> {
+        let mut current = self.settings.lock().unwrap_or_else(PoisonError::into_inner);
+        if current
+            .always_allowed_apps
+            .iter()
+            .any(|saved| saved.bundle_id == app.bundle_id)
+        {
+            return Ok(());
+        }
+        let mut next = current.clone();
+        next.always_allowed_apps.push(app);
+        self.write_settings(&mut current, next)
+    }
+
+    fn write_settings(
+        &self,
+        current: &mut ComputerSettings,
+        settings: ComputerSettings,
+    ) -> Result<(), String> {
         let json = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
         let path = self.data_dir.join(SETTINGS_FILE);
         let tmp = path.with_extension("json.tmp");
-        let mut current = self.settings.lock().unwrap_or_else(PoisonError::into_inner);
         std::fs::write(&tmp, json)
             .and_then(|()| std::fs::rename(&tmp, &path))
             .map_err(|e| format!("computer settings save failed: {e}"))?;
+        self.approval_gate
+            .set_always_allowed(always_allowed_ids(&settings));
         *current = settings;
         Ok(())
     }
@@ -402,6 +437,13 @@ impl ComputerRuntime {
     }
 }
 
+fn always_allowed_ids(settings: &ComputerSettings) -> impl Iterator<Item = &str> {
+    settings
+        .always_allowed_apps
+        .iter()
+        .map(|app| app.bundle_id.as_str())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ChatChange {
     Removed(String),
@@ -442,7 +484,7 @@ mod tests {
     use zeron_proto::computer::{ComputerHostMethod, CuaReply};
 
     use super::*;
-    use crate::computer::approval_gate::{ApprovalDecision, ApprovalRequest};
+    use crate::computer::approval_gate::{AppGrant, ApprovalDecision, ApprovalRequest};
     use crate::computer::fake_backend::{FakeComputerBackend, FakeComputerBackendOptions};
 
     async fn next_service(
@@ -495,6 +537,7 @@ mod tests {
                 }
                 async { Ok(()) }.boxed()
             }),
+            app: None,
         }
     }
 
@@ -560,6 +603,86 @@ mod tests {
             Some(ComputerHostStreamItem::Registered { .. })
         ));
         runtime.shutdown().await;
+    }
+
+    fn safari_consent(
+        gate: &ComputerApprovalGate,
+        published: &Arc<AtomicUsize>,
+        turn: &str,
+        decision: ApprovalDecision,
+    ) -> ApprovalRequest {
+        let answering = gate.clone();
+        let counter = published.clone();
+        ApprovalRequest {
+            turn_id: Some(turn.into()),
+            publish: Arc::new(move |request_id, resolved| {
+                if resolved.is_none() {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    answering.respond("chat", &request_id, decision);
+                }
+                async { Ok(()) }.boxed()
+            }),
+            app: Some(AppGrant {
+                key: "bundle:com.apple.Safari".into(),
+                always: Some(ComputerAllowedApp {
+                    bundle_id: "com.apple.Safari".into(),
+                    name: Some("Safari".into()),
+                }),
+            }),
+            ..consent(gate, published)
+        }
+    }
+
+    #[tokio::test]
+    async fn always_allow_is_saved_in_settings_and_removing_it_asks_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = ComputerRuntime::start(dir.path());
+        let gate = runtime.approval_gate().clone();
+        let published = Arc::new(AtomicUsize::new(0));
+        let always = ApprovalDecision::AcceptForSession;
+        assert_eq!(
+            gate.request_task(safari_consent(&gate, &published, "turn-1", always))
+                .await,
+            Ok(true)
+        );
+        let saved = vec![ComputerAllowedApp {
+            bundle_id: "com.apple.Safari".into(),
+            name: Some("Safari".into()),
+        }];
+        assert_eq!(runtime.settings().always_allowed_apps, saved);
+        runtime.shutdown().await;
+
+        let reopened = ComputerRuntime::start(dir.path());
+        assert_eq!(reopened.settings().always_allowed_apps, saved);
+        let gate = reopened.approval_gate().clone();
+        let accept = ApprovalDecision::Accept;
+        assert_eq!(
+            gate.request_task(safari_consent(&gate, &published, "turn-2", accept))
+                .await,
+            Ok(true)
+        );
+        assert_eq!(
+            published.load(Ordering::SeqCst),
+            1,
+            "no card for a saved app"
+        );
+        reopened
+            .set_settings(ComputerSettings {
+                always_allowed_apps: Vec::new(),
+                ..reopened.settings()
+            })
+            .unwrap();
+        assert_eq!(
+            gate.request_task(safari_consent(&gate, &published, "turn-3", accept))
+                .await,
+            Ok(true)
+        );
+        assert_eq!(
+            published.load(Ordering::SeqCst),
+            2,
+            "removal brings the card back"
+        );
+        reopened.shutdown().await;
     }
 
     #[tokio::test]

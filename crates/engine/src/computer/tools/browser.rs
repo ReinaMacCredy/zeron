@@ -9,6 +9,10 @@ use zeron_proto::computer::{
 };
 
 use super::browser_effect::{computer_browser_effect, computer_browser_field_readback};
+use super::consent::{
+    COMPUTER_APP_CONSENT_DENIED_CODE, ConsentRefusal, app_consent_refusal_result,
+    app_window_required_result,
+};
 use super::results::{
     AuditOutcome, ToolFailure, computer_audit_error_outcome, cua_action_error_payload,
     mcp_json_error,
@@ -22,6 +26,7 @@ use crate::computer::audit_log::{
 };
 use crate::computer::backend::{ComputerBrowserCallResult, ComputerError, CuaActionError};
 use crate::computer::desktop_operation_queue::OperationSignal;
+use crate::computer::manager::ComputerConsentTarget;
 use crate::computer::model_desktop_observation::with_model_desktop_observation;
 use crate::computer::visible_use::COMPUTER_FOREGROUND_NOT_REQUESTED_CODE;
 
@@ -347,6 +352,7 @@ enum TabResolution {
 pub struct ComputerBrowserTools {
     entries: Vec<ComputerToolEntry>,
     known_targets: Mutex<KnownTargets>,
+    target_pids: Mutex<Vec<(String, String, u32)>>,
 }
 
 impl Default for ComputerBrowserTools {
@@ -354,6 +360,7 @@ impl Default for ComputerBrowserTools {
         Self {
             entries: browser_entries(),
             known_targets: Mutex::default(),
+            target_pids: Mutex::default(),
         }
     }
 }
@@ -389,6 +396,60 @@ impl ComputerBrowserTools {
         while known.len() > KNOWN_THREADS_MAX {
             known.remove(0);
         }
+    }
+
+    fn remember_target_pid(
+        &self,
+        thread_id: &str,
+        args: &ToolArgs,
+        structured: Option<&Map<String, Value>>,
+    ) {
+        let Some(target_id) = structured
+            .and_then(|map| map.get("target_id"))
+            .and_then(Value::as_str)
+        else {
+            return;
+        };
+        let Some(pid) = structured
+            .and_then(|map| map.get("pid"))
+            .or_else(|| args.get("pid"))
+            .and_then(is_safe_integer)
+            .and_then(|pid| u32::try_from(pid).ok())
+            .filter(|pid| *pid > 0)
+        else {
+            return;
+        };
+        let mut known = lock(&self.target_pids);
+        known.retain(|(thread, target, _)| !(thread == thread_id && target == target_id));
+        known.push((thread_id.to_owned(), target_id.to_owned(), pid));
+        while known.len() > KNOWN_THREADS_MAX * KNOWN_TARGETS_PER_THREAD {
+            known.remove(0);
+        }
+    }
+
+    fn consent_targets(
+        &self,
+        thread_id: &str,
+        args: &ToolArgs,
+    ) -> Vec<(Option<usize>, ComputerConsentTarget)> {
+        let pid = args
+            .get("target_id")
+            .and_then(Value::as_str)
+            .and_then(|target_id| {
+                lock(&self.target_pids)
+                    .iter()
+                    .find(|(thread, target, _)| thread == thread_id && target == target_id)
+                    .map(|(_, _, pid)| *pid)
+            })
+            .or_else(|| {
+                args.get("pid")
+                    .and_then(is_safe_integer)
+                    .and_then(|pid| u32::try_from(pid).ok())
+                    .filter(|pid| *pid > 0)
+            });
+        pid.map(|pid| (None, ComputerConsentTarget::Pid(pid)))
+            .into_iter()
+            .collect()
     }
 
     fn known_tabs(&self, thread_id: &str, target_id: &str) -> Vec<BrowserTab> {
@@ -551,26 +612,40 @@ impl ComputerBrowserTools {
             self.assert_visible_browser_allowed(context).await?;
         }
         if computer_browser_tool_requires_approval(name, effective) {
-            let approved = tools
-                .manager()
-                .authorize_action(
-                    name,
-                    effective,
-                    &tools.caller(context),
-                    context.signal.clone(),
-                )
-                .await?;
-            if !approved {
-                self.audit(
-                    tools,
-                    name,
-                    effective,
-                    context,
-                    AuditOutcome::new(ComputerAuditEffect::Refused, Some("approval_denied")),
-                );
-                return Ok(McpToolResult::error(
-                    "Computer browser action was denied or cancelled; no input was sent.",
-                ));
+            let targets = self.consent_targets(&context.chat_id, effective);
+            match tools
+                .authorize_consent_targets(name, effective, context, targets)
+                .await?
+            {
+                None => {}
+                Some(ConsentRefusal::Task) => {
+                    self.audit(
+                        tools,
+                        name,
+                        effective,
+                        context,
+                        AuditOutcome::new(ComputerAuditEffect::Refused, Some("approval_denied")),
+                    );
+                    return Ok(McpToolResult::error(
+                        "Computer browser action was denied or cancelled; no input was sent.",
+                    ));
+                }
+                Some(ConsentRefusal::Unscoped { step }) => {
+                    return Ok(app_window_required_result(step));
+                }
+                Some(ConsentRefusal::App { app, step }) => {
+                    self.audit(
+                        tools,
+                        name,
+                        effective,
+                        context,
+                        AuditOutcome::new(
+                            ComputerAuditEffect::Refused,
+                            Some(COMPUTER_APP_CONSENT_DENIED_CODE),
+                        ),
+                    );
+                    return Ok(app_consent_refusal_result(&app, step));
+                }
             }
         }
         tools.assert_turn_active(context)?;
@@ -593,6 +668,11 @@ impl ComputerBrowserTools {
             dispatch.await
         }?;
         self.remember_target_tabs(&context.chat_id, result.structured_content.as_ref());
+        self.remember_target_pid(
+            &context.chat_id,
+            effective,
+            result.structured_content.as_ref(),
+        );
         if audited {
             self.audit(
                 tools,

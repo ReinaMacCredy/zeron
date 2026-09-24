@@ -482,11 +482,13 @@ pub struct UserInputQuestion {
     pub kind: Option<UserInputKind>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum UserInputKind {
     Consent {
         scope: crate::computer::ComputerConsentScope,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        app: Option<crate::computer::ComputerConsentApp>,
     },
 }
 
@@ -677,6 +679,31 @@ pub enum AgentEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_persisted_consent_card_without_an_app_still_loads_and_keeps_its_shape() {
+        let old = serde_json::json!({ "type": "consent", "scope": "task" });
+        let kind: UserInputKind = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(
+            kind,
+            UserInputKind::Consent {
+                scope: crate::computer::ComputerConsentScope::Task,
+                app: None,
+            }
+        );
+        assert_eq!(serde_json::to_value(&kind).unwrap(), old);
+        let with_app = serde_json::json!({
+            "type": "consent",
+            "scope": "task",
+            "app": { "name": "Safari", "bundleId": "com.apple.Safari", "pid": 42 },
+        });
+        let kind: UserInputKind = serde_json::from_value(with_app.clone()).unwrap();
+        let UserInputKind::Consent { app: Some(app), .. } = &kind else {
+            panic!("the app identity survives");
+        };
+        assert!(app.verified());
+        assert_eq!(serde_json::to_value(&kind).unwrap(), with_app);
+    }
 
     #[test]
     fn compaction_capability_keeps_the_existing_wire_shape() {
