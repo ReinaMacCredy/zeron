@@ -16,4 +16,5 @@ futures.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
+zeron-doc.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
