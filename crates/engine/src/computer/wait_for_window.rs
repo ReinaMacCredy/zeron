@@ -84,6 +84,17 @@ where
     }
 }
 
+// macOS draws a small screen-sharing pill window over a captured window.
+pub(crate) const MIN_USABLE_WINDOW_SIDE: f64 = 28.0;
+
+fn is_capture_indicator(window: &ComputerWindow) -> bool {
+    window.bounds.is_some_and(|bounds| {
+        bounds.width > 0.0
+            && bounds.height > 0.0
+            && (bounds.width < MIN_USABLE_WINDOW_SIDE || bounds.height < MIN_USABLE_WINDOW_SIDE)
+    })
+}
+
 fn app_match_name(app: &str) -> String {
     let last = app.rsplit(['/', '\\']).next().unwrap_or_default();
     let stem = if last.len() >= 4
@@ -116,12 +127,14 @@ where
         let windows = read().await.map_err(|_| ProbeFailed)?;
         let mut matches: Vec<ComputerWindow> = windows
             .into_iter()
-            .filter(|window| match pid {
-                Some(pid) => window.pid == Some(pid),
-                None => window
-                    .app_name
-                    .as_ref()
-                    .is_some_and(|app_name| app_name.to_lowercase() == name),
+            .filter(|window| {
+                (match pid {
+                    Some(pid) => window.pid == Some(pid),
+                    None => window
+                        .app_name
+                        .as_ref()
+                        .is_some_and(|app_name| app_name.to_lowercase() == name),
+                }) && !is_capture_indicator(window)
             })
             .collect();
         signal.check()?;
@@ -283,6 +296,20 @@ mod tests {
         .unwrap();
         assert_eq!(result, ready(helium()));
         assert_eq!(reads.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ignores_the_screen_sharing_pill_beside_the_real_window() {
+        let pill = ComputerWindow {
+            id: "pill".to_owned(),
+            title: "Window".to_owned(),
+            bounds: rect(66.0, 20.0),
+            ..helium()
+        };
+        assert_eq!(
+            wait(vec![pill, helium()], "Helium", 500).await,
+            ready(helium())
+        );
     }
 
     #[tokio::test(start_paused = true)]
