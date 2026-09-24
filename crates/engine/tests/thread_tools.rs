@@ -238,6 +238,8 @@ async fn create_thread_opens_a_peer_whose_first_turn_is_a_message_from_its_creat
             None,
             None,
             None,
+            None,
+            None,
         )
         .await
         .expect("create thread");
@@ -316,6 +318,8 @@ async fn create_thread_picks_the_peers_run_settings_and_copies_the_creators_othe
             Some(HarnessId::Mock),
             Some(" rec-2 "),
             Some(ReasoningLevel::Low),
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -332,7 +336,7 @@ async fn create_thread_picks_the_peers_run_settings_and_copies_the_creators_othe
     let copied = rig
         .core
         .doc_host
-        .create_thread("picky", "task", None, None, None, None)
+        .create_thread("picky", "task", None, None, None, None, None, None)
         .await
         .unwrap();
     assert_eq!(config_of(&copied), Some(creators.clone()));
@@ -342,7 +346,16 @@ async fn create_thread_picks_the_peers_run_settings_and_copies_the_creators_othe
     let switched = rig
         .core
         .doc_host
-        .create_thread("picky", "task", None, Some(HarnessId::Codex), None, None)
+        .create_thread(
+            "picky",
+            "task",
+            None,
+            Some(HarnessId::Codex),
+            None,
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -363,6 +376,8 @@ async fn create_thread_picks_the_peers_run_settings_and_copies_the_creators_othe
             Some(HarnessId::Codex),
             Some("gpt-5.6-luna"),
             None,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -376,13 +391,86 @@ async fn create_thread_picks_the_peers_run_settings_and_copies_the_creators_othe
     let from_bare = rig
         .core
         .doc_host
-        .create_thread("lead", "task", None, None, Some("rec-3"), None)
+        .create_thread("lead", "task", None, None, Some("rec-3"), None, None, None)
         .await
         .unwrap();
     let config = config_of(&from_bare).expect("a config row");
     assert_eq!(config.harness, HarnessId::Mock);
     assert_eq!(config.model.as_deref(), Some("rec-3"));
     assert_eq!(config.reasoning, None);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn create_thread_can_open_in_another_project_on_the_device_or_an_existing_folder() {
+    let rig = rig(Duration::from_millis(1));
+    let other = tempfile::tempdir().unwrap();
+    let other_path = other.path().to_str().unwrap().to_string();
+    rig.core
+        .workspace
+        .create_space("space-other", "dev-a", &other_path, None, false)
+        .unwrap();
+    rig.core
+        .workspace
+        .create_space("space-far", "dev-b", "/tmp", None, false)
+        .unwrap();
+    let row = |chat_id: &str| rig.core.workspace.chat(chat_id).unwrap().unwrap();
+
+    let moved = rig
+        .core
+        .doc_host
+        .create_thread(
+            "lead",
+            "task",
+            None,
+            None,
+            None,
+            None,
+            Some("space-other"),
+            None,
+        )
+        .await
+        .unwrap();
+    let moved = row(&moved);
+    assert_eq!(moved.space_id.as_deref(), Some("space-other"));
+    assert_eq!(moved.cwd.as_deref(), Some(other_path.as_str()));
+    assert_eq!(moved.device_id, "dev-a");
+
+    let nested = other.path().join("wt");
+    std::fs::create_dir(&nested).unwrap();
+    let pinned = rig
+        .core
+        .doc_host
+        .create_thread(
+            "lead",
+            "task",
+            None,
+            None,
+            None,
+            None,
+            None,
+            nested.to_str(),
+        )
+        .await
+        .unwrap();
+    let pinned = row(&pinned);
+    assert_eq!(pinned.space_id.as_deref(), Some("space-tt"));
+    assert_eq!(pinned.cwd.as_deref(), nested.to_str());
+    assert_eq!(pinned.config, None, "no pick, no config row");
+
+    for (space, cwd, expected) in [
+        (Some("space-far"), None, "same device"),
+        (Some("nope"), None, "no such project: nope"),
+        (None, Some("/definitely/not/here"), "is not a directory"),
+    ] {
+        let err = rig
+            .core
+            .doc_host
+            .create_thread("lead", "task", None, None, None, None, space, cwd)
+            .await
+            .expect_err(expected);
+        assert!(err.to_string().contains(expected), "{err}");
+    }
     rig.core.shutdown().await;
 }
 
@@ -452,7 +540,7 @@ async fn a_message_to_a_working_peer_steers_its_turn_when_the_agent_takes_mid_tu
     let peer = rig
         .core
         .doc_host
-        .create_thread("lead", "first task", None, None, None, None)
+        .create_thread("lead", "first task", None, None, None, None, None, None)
         .await
         .unwrap();
     wait_for(
@@ -507,7 +595,7 @@ async fn a_message_to_a_working_peer_waits_and_take_moves_it_into_the_transcript
     let peer = rig
         .core
         .doc_host
-        .create_thread("lead", "first task", None, None, None, None)
+        .create_thread("lead", "first task", None, None, None, None, None, None)
         .await
         .unwrap();
     wait_for(
@@ -660,14 +748,23 @@ async fn the_creation_budget_refuses_the_ninth_open_thread() {
     for n in 0..8 {
         rig.core
             .doc_host
-            .create_thread("lead", &format!("task {n}"), None, None, None, None)
+            .create_thread(
+                "lead",
+                &format!("task {n}"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap_or_else(|e| panic!("thread {n}: {e}"));
     }
     let err = rig
         .core
         .doc_host
-        .create_thread("lead", "one too many", None, None, None, None)
+        .create_thread("lead", "one too many", None, None, None, None, None, None)
         .await
         .expect_err("ninth");
     assert!(err.to_string().contains("8 open threads"), "{err}");

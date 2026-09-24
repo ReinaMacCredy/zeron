@@ -2788,8 +2788,11 @@ impl DocHost {
 
     /// Thread tools: open a peer chat in the creator's project (its cwd and
     /// run configuration, with any of harness/model/reasoning overridden if
-    /// asked) stamped `createdByChatId`, and hand it `prompt` as a message
-    /// from the creator.
+    /// asked) or in another project on the creator's device
+    /// (that project's folder), stamped `createdByChatId`, and hand it
+    /// `prompt` as a message from the creator. `cwd` overrides the folder
+    /// with an existing directory.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_thread(
         &self,
         from_chat_id: &str,
@@ -2798,6 +2801,8 @@ impl DocHost {
         harness: Option<zeron_proto::HarnessId>,
         model: Option<&str>,
         reasoning: Option<zeron_proto::ReasoningLevel>,
+        space_id: Option<&str>,
+        cwd: Option<&str>,
     ) -> Result<String, EngineError> {
         let workspace = self
             .workspace()
@@ -2805,6 +2810,22 @@ impl DocHost {
         let from = workspace
             .chat(from_chat_id)?
             .ok_or_else(|| EngineError::Other(format!("no such chat: {from_chat_id}")))?;
+        if let Some(space_id) = space_id {
+            let space = workspace
+                .space(space_id)?
+                .ok_or_else(|| EngineError::Other(format!("no such project: {space_id}")))?;
+            if space.device_id != from.device_id {
+                return Err(EngineError::Other(
+                    "threads can only be created in projects on the same device".into(),
+                ));
+            }
+        }
+        let cwd = cwd.map(str::trim).filter(|cwd| !cwd.is_empty());
+        if let Some(cwd) = cwd
+            && !Path::new(cwd).is_dir()
+        {
+            return Err(EngineError::Other(format!("cwd {cwd} is not a directory")));
+        }
         let live = workspace
             .read_chats()?
             .iter()
@@ -2845,12 +2866,17 @@ impl DocHost {
             }
         }
         let chat_id = new_id();
+        let (space_id, cwd) = match (space_id, cwd) {
+            (_, Some(cwd)) => (space_id.or(from.space_id.as_deref()), Some(cwd.to_string())),
+            (Some(space_id), None) => (Some(space_id), None),
+            (None, None) => (from.space_id.as_deref(), from.cwd.clone()),
+        };
         workspace.create_chat_from(
             &chat_id,
-            from.space_id.as_deref(),
+            space_id,
             Some(&from.device_id),
             config,
-            from.cwd.clone(),
+            cwd,
             Some(from_chat_id),
         )?;
         if let Some(title) = title.map(str::trim).filter(|title| !title.is_empty()) {

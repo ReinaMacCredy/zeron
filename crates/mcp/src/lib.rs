@@ -5,8 +5,10 @@
 //! calls these like any other tool. Newline-delimited JSON-RPC 2.0 on
 //! stdin/stdout (the MCP stdio transport). Every tool is a thin call over
 //! the engine's own RPC (d28); the caller's identity is the spawn argument,
-//! never a tool input. Threads are peers (d25): nothing here interrupts,
-//! cancels, or answers for another chat.
+//! never a tool input. Threads are peers (d25): nothing here cancels or
+//! archive-cascades another chat. Two tools act on another chat's turn by
+//! owner ruling (d49, 2026-09-25): interrupt_thread stops it and
+//! respond_to_input answers its pending question.
 
 use std::collections::HashSet;
 use std::pin::Pin;
@@ -21,7 +23,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use zeron_proto::computer::ZERON_COMPUTER_TOOL_NAMES;
 use zeron_proto::view::{Indicator, effective_indicator};
-use zeron_proto::{Chat, Session};
+use zeron_proto::{Chat, Session, Space, UserInputAnswer};
 use zeron_rpc::{RpcClient, methods};
 
 /// The MCP revision this server was written against; a client's own value
@@ -63,10 +65,12 @@ const REASONING_LEVELS: [&str; 9] = [
 /// The tool catalog as `tools/list` reports it.
 pub fn tool_list() -> Value {
     let thread_id = json!({ "type": "string" });
+    let wait = json!({ "type": "boolean", "description": "Block until the thread's turn ends and add its outcome as `turn`." });
+    let timeout = json!({ "type": "integer", "minimum": 0, "maximum": 1800 });
     json!([
         {
             "name": "list_threads",
-            "description": "List the chats (threads) in the sidebar of this device, every project included (`spaceId` names each thread's project; null is a project-less chat), with their live status and the role and first 120 prose characters of their newest transcript entry. `lastRole` identifies the author only; neither an assistant entry nor idle status proves the task is complete or safe to archive. Use status for runtime state and read_thread for context. Results are ordered by id, default 50 and max 200 per page; pass nextCursor as cursor for the next page. Archived threads are left out unless `includeArchived` is true. Threads are peers, not workers: every one is a real sidebar chat the human can open, and none can stop another.",
+            "description": "List the chats (threads) in the sidebar of this device, every project included (`spaceId` names each thread's project; null is a project-less chat), with their live status and the role and first 120 prose characters of their newest transcript entry. `lastRole` identifies the author only; neither an assistant entry nor idle status proves the task is complete or safe to archive. Use status for runtime state and read_thread for context. Results are ordered by id, default 50 and max 200 per page; pass nextCursor as cursor for the next page. Archived threads are left out unless `includeArchived` is true. Threads are peers, not workers: every one is a real sidebar chat the human can open.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -80,13 +84,15 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "read_thread",
-            "description": "Read the tail of a thread's transcript. Returns the newest `limit` entries (default 30, max 200) and a `before` cursor for older ones.",
+            "description": "Read the tail of a thread's transcript. Returns the newest `limit` entries (default 30, max 200) and a `before` cursor for older ones. Thinking is left out unless `includeReasoning` is true; each tool call is one line unless `includeTools` is false. `pendingInput` is the question or permission request the thread is blocked on (answer it with respond_to_input), or null.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "threadId": thread_id,
                     "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
-                    "before": { "type": "string", "description": "An entry id from a previous page; returns entries older than it." }
+                    "before": { "type": "string", "description": "An entry id from a previous page; returns entries older than it." },
+                    "includeReasoning": { "type": "boolean" },
+                    "includeTools": { "type": "boolean" }
                 },
                 "required": ["threadId"],
                 "additionalProperties": false
@@ -94,15 +100,19 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "create_thread",
-            "description": "Open a new peer thread in this chat's project and give it `prompt` as its first message. It runs this chat's harness, model and reasoning level unless `harness`, `model` or `reasoning` pick others; picking a different harness without a `model` uses that harness's default model, and an unknown harness or reasoning level is an error. Returns the new thread's row as list_threads reports it. Counts against this turn's send budget.",
+            "description": "Open a new peer thread and give it `prompt` as its first message. It opens in this chat's project and folder unless `project` names another project on this device (it then runs in that project's folder) or `cwd` names an existing directory. It runs this chat's harness, model and reasoning level unless `harness`, `model` or `reasoning` pick others; picking a different harness without a `model` uses that harness's default model, and an unknown harness, model or reasoning level is an error. Returns the new thread's row as list_threads reports it; with `wait`, also `turn` once its first turn ends (see send_message_to_thread). Counts against this turn's send budget.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "prompt": { "type": "string" },
                     "title": { "type": "string" },
+                    "project": { "type": "string", "description": "Project id, path or name from list_projects; default: this chat's." },
+                    "cwd": { "type": "string", "description": "Existing directory to run in; default: the project's folder." },
                     "harness": { "type": "string", "description": "Harness id such as claude-code or codex; default: this chat's." },
-                    "model": { "type": "string", "description": "Model id as the chosen harness names it; default: this chat's." },
-                    "reasoning": { "type": "string", "enum": REASONING_LEVELS, "description": "Reasoning level; default: this chat's." }
+                    "model": { "type": "string", "description": "Model id as the chosen harness names it (list_models); default: this chat's." },
+                    "reasoning": { "type": "string", "enum": REASONING_LEVELS, "description": "Reasoning level; default: this chat's." },
+                    "wait": wait,
+                    "timeoutSeconds": timeout
                 },
                 "required": ["prompt"],
                 "additionalProperties": false
@@ -110,10 +120,15 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "send_message_to_thread",
-            "description": "Send a message to another thread on this device, in any project. An idle thread starts a turn with it; a working thread receives it inside its current turn at the next step (a wait_threads call there returns with it), or at turn end if its agent takes no mid-turn input. Never to this chat itself. Counts against this turn's send budget.",
+            "description": "Send a message to another thread on this device, in any project. An idle thread starts a turn with it; a working thread receives it inside its current turn at the next step (a wait_threads call there returns with it), or at turn end if its agent takes no mid-turn input. With `wait`, blocks until the turn that read the message ends (timeoutSeconds default 600, max 1800) and adds `turn`: `status`, `timedOut`, the assistant `replies` written after the message, and `pendingInput`. Never to this chat itself. Counts against this turn's send budget.",
             "inputSchema": {
                 "type": "object",
-                "properties": { "threadId": thread_id, "text": { "type": "string" } },
+                "properties": {
+                    "threadId": thread_id,
+                    "text": { "type": "string" },
+                    "wait": wait,
+                    "timeoutSeconds": timeout
+                },
                 "required": ["threadId", "text"],
                 "additionalProperties": false
             }
@@ -152,6 +167,61 @@ pub fn tool_list() -> Value {
                     "archived": { "type": "boolean" }
                 },
                 "required": ["archived"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "interrupt_thread",
+            "description": "Stop another thread's running turn on this device, as its stop button does. Never this chat itself. Counts against this turn's send budget.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "threadId": thread_id },
+                "required": ["threadId"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "respond_to_input",
+            "description": "Answer the question or permission request another thread is blocked on (read_thread's `pendingInput`). `requestId` defaults to its current one. Each answer names a question id and the chosen option labels, or free text for an open question. Computer-use consent is the person's to give and is refused. Never this chat itself. Counts against this turn's send budget.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "threadId": thread_id,
+                    "requestId": { "type": "string" },
+                    "answers": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "questionId": { "type": "string" },
+                                "labels": { "type": "array", "items": { "type": "string" } }
+                            },
+                            "required": ["questionId", "labels"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["threadId", "answers"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "list_projects",
+            "description": "List the projects on this device: id, name, folder path, and whether it is a git repository. Pass one as create_thread's `project`.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        },
+        {
+            "name": "list_harnesses",
+            "description": "List the agent harnesses on this device: whether each is installed and available (installed and switched on), whether it takes a message mid-turn (`steersMidTurn`; otherwise a message to its working thread waits for turn end), and its reasoning levels.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        },
+        {
+            "name": "list_models",
+            "description": "List the models a harness offers on this device: id, label and reasoning levels. Pass an id as create_thread's `model` with that `harness`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "harness": { "type": "string", "description": "Harness id from list_harnesses." } },
+                "required": ["harness"],
                 "additionalProperties": false
             }
         }
@@ -252,6 +322,11 @@ impl ThreadTools {
             "wait_threads" => self.wait_threads(args).await,
             "set_thread_title" => self.set_thread_title(args).await,
             "set_thread_archived" => self.set_thread_archived(args).await,
+            "interrupt_thread" => self.interrupt_thread(args).await,
+            "respond_to_input" => self.respond_to_input(args).await,
+            "list_projects" => self.list_projects().await,
+            "list_harnesses" => self.list_harnesses().await,
+            "list_models" => self.list_models(args).await,
             other => Err(format!("unknown tool: {other}")),
         }
     }
@@ -428,11 +503,91 @@ impl ThreadTools {
             None => entries.len(),
         };
         let start = end.saturating_sub(limit);
+        let reasoning = args["includeReasoning"].as_bool().unwrap_or(false);
+        let tools = args["includeTools"].as_bool().unwrap_or(true);
         Ok(json!({
             "threadId": thread_id,
-            "entries": entries[start..end].iter().map(render_entry).collect::<Vec<_>>(),
+            "entries": entries[start..end]
+                .iter()
+                .map(|entry| render_entry(entry, reasoning, tools))
+                .collect::<Vec<_>>(),
             "before": (start > 0).then(|| entries[start]["id"].clone()),
+            "pendingInput": pending_input(&entries, None),
         }))
+    }
+
+    async fn projects(&self, caller: &Chat) -> Result<Vec<Space>, String> {
+        let spaces: Vec<Space> = self.snapshot(methods::WATCH_SPACES, json!({})).await?;
+        Ok(spaces
+            .into_iter()
+            .filter(|space| space.device_id == caller.device_id)
+            .collect())
+    }
+
+    pub async fn list_projects(&self) -> Result<Value, String> {
+        let (caller, _) = self.peers().await?;
+        let projects: Vec<Value> = self
+            .projects(&caller)
+            .await?
+            .iter()
+            .map(|space| {
+                json!({
+                    "id": space.id,
+                    "name": space.display_name(),
+                    "path": space.path,
+                    "git": space.git_detected,
+                })
+            })
+            .collect();
+        Ok(json!({ "projects": projects }))
+    }
+
+    pub async fn list_harnesses(&self) -> Result<Value, String> {
+        let listed = self.call_engine(methods::LIST_HARNESSES, json!({})).await?;
+        let harnesses: Vec<Value> = listed
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|harness| {
+                json!({
+                    "id": harness["id"],
+                    "name": harness["name"],
+                    "installed": harness["installed"],
+                    "available": harness["installed"] != false && harness["enabled"] != false,
+                    "steersMidTurn": harness["supportsSteering"] == true
+                        && harness["steeringMode"] == "step-boundary",
+                    "reasoningLevels": harness["reasoningLevels"],
+                })
+            })
+            .collect();
+        Ok(json!({ "harnesses": harnesses }))
+    }
+
+    async fn models_of(&self, harness: &str) -> Result<Vec<Value>, String> {
+        let catalog = self
+            .call_engine(methods::LIST_MODELS, json!({ "harness": harness }))
+            .await?;
+        Ok(catalog["models"].as_array().cloned().unwrap_or_default())
+    }
+
+    pub async fn list_models(&self, args: &Value) -> Result<Value, String> {
+        let harness = args["harness"]
+            .as_str()
+            .filter(|h| !h.is_empty())
+            .ok_or("harness is required")?;
+        let models: Vec<Value> = self
+            .models_of(harness)
+            .await?
+            .iter()
+            .map(|model| {
+                json!({
+                    "id": model["id"],
+                    "label": model["label"],
+                    "reasoningLevels": model["reasoningLevels"],
+                })
+            })
+            .collect();
+        Ok(json!({ "harness": harness, "models": models }))
     }
 
     pub async fn create_thread(&self, args: &Value) -> Result<Value, String> {
@@ -440,6 +595,35 @@ impl ThreadTools {
             .as_str()
             .filter(|p| !p.trim().is_empty())
             .ok_or("prompt is required")?;
+        let (caller, _) = self.peers().await?;
+        let space_id = match args["project"].as_str() {
+            Some(key) => Some(project_of(&self.projects(&caller).await?, key)?.id.clone()),
+            None => None,
+        };
+        let harness = match args["harness"].as_str() {
+            Some(harness) => Some(harness.to_string()),
+            None => caller
+                .config
+                .as_ref()
+                .and_then(|c| serde_json::to_value(c.harness).ok())
+                .and_then(|h| h.as_str().map(str::to_owned)),
+        };
+        if let (Some(model), Some(harness)) = (
+            args["model"]
+                .as_str()
+                .map(str::trim)
+                .filter(|m| !m.is_empty()),
+            harness,
+        ) && let Ok(models) = self.models_of(&harness).await
+            && !models.is_empty()
+            && !models.iter().any(|m| m["id"] == model)
+        {
+            let ids: Vec<&str> = models.iter().filter_map(|m| m["id"].as_str()).collect();
+            return Err(format!(
+                "model {model} is not offered by {harness}; available: {}",
+                ids.join(", ")
+            ));
+        }
         self.spend_send()?;
         let created = self
             .call_engine(
@@ -451,6 +635,8 @@ impl ThreadTools {
                     "harness": args["harness"].as_str(),
                     "model": args["model"].as_str(),
                     "reasoning": args["reasoning"].as_str(),
+                    "spaceId": space_id,
+                    "cwd": args["cwd"].as_str(),
                 }),
             )
             .await?;
@@ -461,6 +647,9 @@ impl ThreadTools {
         let sessions: Vec<Session> = self.snapshot(methods::WATCH_SESSIONS, json!({})).await?;
         let mut row = self.row_of(&chat, &sessions, Utc::now()).await?;
         row["threadId"] = json!(thread_id);
+        if args["wait"].as_bool() == Some(true) {
+            row["turn"] = self.await_turn(thread_id, None, wait_timeout(args)).await?;
+        }
         Ok(row)
     }
 
@@ -481,7 +670,130 @@ impl ThreadTools {
                 json!({ "chatId": thread_id, "fromChatId": self.chat_id, "text": text }),
             )
             .await?;
-        Ok(json!({ "threadId": thread_id, "messageId": queued["id"] }))
+        let mut sent = json!({ "threadId": thread_id, "messageId": queued["id"] });
+        if args["wait"].as_bool() == Some(true) {
+            let message_id = queued["id"].as_str().ok_or("engine returned no id")?;
+            sent["turn"] = self
+                .await_turn(thread_id, Some(message_id), wait_timeout(args))
+                .await?;
+        }
+        Ok(sent)
+    }
+
+    /// Wait for the turn that read `anchor` (every turn of a new thread when
+    /// `None`) to end. The queued row keeps its id as the transcript entry,
+    /// so a message held for turn end is not mistaken for read when the turn
+    /// before it ends.
+    async fn await_turn(
+        &self,
+        thread_id: &str,
+        anchor: Option<&str>,
+        timeout: Duration,
+    ) -> Result<Value, String> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut sessions = self
+            .client
+            .subscribe(methods::WATCH_SESSIONS, json!({}))
+            .await
+            .map_err(|e| format!("WatchSessions: {e}"))?;
+        let mut latest: Option<Vec<Session>> = None;
+        loop {
+            if let Some(rows) = &latest {
+                let status = status_of(rows, thread_id, Utc::now());
+                if status != "working" {
+                    let entries = self.entries_of(thread_id).await?;
+                    if let Some(replies) = replies_after(&entries, anchor)
+                        && (!replies.is_empty() || status != "idle")
+                    {
+                        return Ok(turn_of(status, false, &entries, &replies));
+                    }
+                }
+            }
+            tokio::select! {
+                item = sessions.recv() => match item {
+                    Some(item) => {
+                        latest = Some(
+                            serde_json::from_value(item).map_err(|e| format!("WatchSessions: {e}"))?,
+                        );
+                    }
+                    None => return Err("WatchSessions ended".into()),
+                },
+                _ = tokio::time::sleep_until(deadline) => {
+                    let status = status_of(latest.as_deref().unwrap_or_default(), thread_id, Utc::now());
+                    let entries = self.entries_of(thread_id).await?;
+                    let replies = replies_after(&entries, anchor).unwrap_or_default();
+                    return Ok(turn_of(status, true, &entries, &replies));
+                }
+                _ = tokio::time::sleep(STALE_RECHECK) => {}
+            }
+        }
+    }
+
+    pub async fn interrupt_thread(&self, args: &Value) -> Result<Value, String> {
+        let thread_id = Self::thread_id(args)?;
+        if thread_id == self.chat_id {
+            return Err("a thread cannot interrupt itself".into());
+        }
+        self.peer(thread_id).await?;
+        self.spend_send()?;
+        let queued = self
+            .call_engine(
+                methods::QUEUE_COMMAND,
+                json!({ "chatId": thread_id, "command": { "kind": "interrupt" } }),
+            )
+            .await?;
+        Ok(json!({ "threadId": thread_id, "commandId": queued["commandId"] }))
+    }
+
+    pub async fn respond_to_input(&self, args: &Value) -> Result<Value, String> {
+        let thread_id = Self::thread_id(args)?;
+        if thread_id == self.chat_id {
+            return Err("a thread cannot answer its own question".into());
+        }
+        let answers: Vec<UserInputAnswer> = serde_json::from_value(args["answers"].clone())
+            .ok()
+            .filter(|answers: &Vec<UserInputAnswer>| !answers.is_empty())
+            .ok_or("answers must be a nonempty list of {questionId, labels}")?;
+        self.peer(thread_id).await?;
+        let request_id = args["requestId"].as_str();
+        let entries = self.entries_of(thread_id).await?;
+        let pending = pending_input(&entries, request_id).ok_or_else(|| match request_id {
+            Some(id) => format!("thread {thread_id} has no pending request {id}"),
+            None => format!("thread {thread_id} has no pending question"),
+        })?;
+        let questions = pending["questions"].as_array().cloned().unwrap_or_default();
+        if questions.iter().any(|q| q["kind"]["type"] == "consent") {
+            return Err(
+                "that is a computer-use consent request; only the person can answer it".into(),
+            );
+        }
+        if let Some(answer) = answers
+            .iter()
+            .find(|a| !questions.iter().any(|q| q["id"] == a.question_id))
+        {
+            let ids: Vec<&str> = questions.iter().filter_map(|q| q["id"].as_str()).collect();
+            return Err(format!(
+                "no question {} in that request; its questions are {}",
+                answer.question_id,
+                ids.join(", ")
+            ));
+        }
+        self.spend_send()?;
+        let request_id = pending["requestId"].clone();
+        let queued = self
+            .call_engine(
+                methods::QUEUE_COMMAND,
+                json!({
+                    "chatId": thread_id,
+                    "command": { "kind": "respondInput", "requestId": request_id, "answers": answers },
+                }),
+            )
+            .await?;
+        Ok(json!({
+            "threadId": thread_id,
+            "requestId": request_id,
+            "commandId": queued["commandId"],
+        }))
     }
 
     pub async fn set_thread_title(&self, args: &Value) -> Result<Value, String> {
@@ -574,13 +886,7 @@ impl ThreadTools {
                 return Err(format!("no thread {id} on this device"));
             }
         }
-        let timeout = Duration::from_secs(
-            args["timeoutSeconds"]
-                .as_u64()
-                .unwrap_or(DEFAULT_WAIT_SECS)
-                .min(MAX_WAIT_SECS),
-        );
-        let deadline = tokio::time::Instant::now() + timeout;
+        let deadline = tokio::time::Instant::now() + wait_timeout(args);
         let mut sessions = self
             .client
             .subscribe(methods::WATCH_SESSIONS, json!({}))
@@ -711,10 +1017,97 @@ fn new_peer_entries(
                 .is_some_and(|id| seen.insert(id.to_string()))
         })
         .map(|e| {
-            let rendered = render_entry(e);
+            let rendered = render_entry(e, false, true);
             json!({ "id": rendered["id"], "fromChatId": rendered["fromChatId"], "text": rendered["text"] })
         })
         .collect()
+}
+
+fn wait_timeout(args: &Value) -> Duration {
+    Duration::from_secs(
+        args["timeoutSeconds"]
+            .as_u64()
+            .unwrap_or(DEFAULT_WAIT_SECS)
+            .min(MAX_WAIT_SECS),
+    )
+}
+
+fn project_of<'a>(projects: &'a [Space], key: &str) -> Result<&'a Space, String> {
+    let path = key.trim_end_matches('/');
+    if let Some(space) = projects
+        .iter()
+        .find(|space| space.id == key || space.path.trim_end_matches('/') == path)
+    {
+        return Ok(space);
+    }
+    let named: Vec<&Space> = projects
+        .iter()
+        .filter(|space| space.display_name().eq_ignore_ascii_case(key))
+        .collect();
+    match named.as_slice() {
+        [one] => Ok(one),
+        [] => Err(format!(
+            "no project {key} on this device; list_projects names them"
+        )),
+        many => Err(format!(
+            "{} projects are named {key}; pass an id: {}",
+            many.len(),
+            many.iter()
+                .map(|space| space.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+fn pending_input(entries: &[Value], request_id: Option<&str>) -> Option<Value> {
+    entries
+        .iter()
+        .rev()
+        .flat_map(|entry| entry["parts"].as_array().into_iter().flatten().rev())
+        .find(|part| {
+            part["kind"] == "input"
+                && part["resolved"] != true
+                && request_id.is_none_or(|id| part["requestId"] == id)
+        })
+        .map(|part| json!({ "requestId": part["requestId"], "questions": part["questions"] }))
+}
+
+fn replies_after<'a>(entries: &'a [Value], anchor: Option<&str>) -> Option<Vec<&'a Value>> {
+    let start = match anchor {
+        Some(id) => entries.iter().position(|entry| entry["id"] == id)? + 1,
+        None => 0,
+    };
+    Some(
+        entries[start..]
+            .iter()
+            .filter(|entry| entry["role"] == "assistant")
+            .collect(),
+    )
+}
+
+fn turn_of(status: &str, timed_out: bool, entries: &[Value], replies: &[&Value]) -> Value {
+    let texts: Vec<Value> = replies
+        .iter()
+        .map(|entry| {
+            entry["parts"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|part| part["kind"] == "text")
+                .filter_map(|part| part["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .filter(|text| !text.is_empty())
+        .map(Value::from)
+        .collect();
+    json!({
+        "status": status,
+        "timedOut": timed_out,
+        "replies": texts,
+        "pendingInput": pending_input(entries, None),
+    })
 }
 
 fn status_of(sessions: &[Session], chat_id: &str, now: DateTime<Utc>) -> &'static str {
@@ -731,19 +1124,27 @@ fn stamp(at: DateTime<Utc>) -> String {
     at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-/// One transcript entry as the agent reads it: prose kept, thinking dropped,
-/// every other part named. Tool inputs stay render-only in the doc, so they
-/// never reach a peer through here either.
-fn render_entry(entry: &Value) -> Value {
+/// One transcript entry as the agent reads it: prose kept, thinking dropped
+/// unless `reasoning` asks for it (as its own field), every other part named,
+/// tool lines only with `tools`. Tool inputs stay render-only in the doc, so
+/// they never reach a peer through here either.
+fn render_entry(entry: &Value, reasoning: bool, tools: bool) -> Value {
     let mut lines: Vec<(String, usize)> = Vec::new();
+    let mut thinking: Vec<&str> = Vec::new();
     for part in entry["parts"].as_array().into_iter().flatten() {
         let line = match part["kind"].as_str().unwrap_or("") {
             "text" => match part["text"].as_str() {
                 Some(text) => text.to_string(),
                 None => continue,
             },
-            "reasoning" => continue,
+            "reasoning" => {
+                if reasoning && let Some(text) = part["text"].as_str() {
+                    thinking.push(text);
+                }
+                continue;
+            }
             "image" => format!("[image {}]", part["name"].as_str().unwrap_or("attachment")),
+            "tool" if !tools => continue,
             "tool" => format!("[tool {}]", tool_label(part)),
             kind => match part["name"].as_str() {
                 Some(name) => format!("[{kind} {name}]"),
@@ -772,6 +1173,9 @@ fn render_entry(entry: &Value) -> Value {
             .map(stamp),
         "text": text,
     });
+    if !thinking.is_empty() {
+        out["reasoning"] = json!(thinking.join("\n\n"));
+    }
     if entry["fromChatId"].is_string() {
         out["fromChatId"] = entry["fromChatId"].clone();
     }
@@ -924,7 +1328,7 @@ mod tests {
 
     use super::*;
 
-    const THREAD_TOOLS: [&str; 7] = [
+    const THREAD_TOOLS: [&str; 12] = [
         "list_threads",
         "read_thread",
         "create_thread",
@@ -932,6 +1336,11 @@ mod tests {
         "wait_threads",
         "set_thread_title",
         "set_thread_archived",
+        "interrupt_thread",
+        "respond_to_input",
+        "list_projects",
+        "list_harnesses",
+        "list_models",
     ];
 
     fn chat(id: &str, space: Option<&str>, archived: bool, created_by: Option<&str>) -> Value {
@@ -955,6 +1364,7 @@ mod tests {
     /// sequences, doc messages once) plus a log of every unary call.
     struct Fake {
         chats: Vec<Value>,
+        spaces: Vec<Value>,
         session_snapshots: Vec<Vec<Value>>,
         queue_snapshots: Vec<Vec<Value>>,
         entries: Vec<Value>,
@@ -985,6 +1395,38 @@ mod tests {
                 methods::WATCH_CHATS => Ok(RpcReply::Stream(
                     futures::stream::iter(vec![Value::Array(self.chats.clone())]).boxed(),
                 )),
+                methods::WATCH_SPACES => Ok(RpcReply::Stream(
+                    futures::stream::iter(vec![Value::Array(self.spaces.clone())]).boxed(),
+                )),
+                methods::LIST_HARNESSES => Ok(RpcReply::Value(json!([
+                    {
+                        "id": "claude-code", "name": "Claude Code", "supportsSteering": true,
+                        "steeringMode": "step-boundary", "reasoningLevels": ["low", "high"],
+                        "installed": true, "canInstall": false, "enabled": true
+                    },
+                    {
+                        "id": "codex", "name": "Codex", "supportsSteering": true,
+                        "steeringMode": "turn-boundary", "reasoningLevels": ["xhigh"],
+                        "installed": true, "canInstall": false, "enabled": false
+                    },
+                    {
+                        "id": "opencode", "name": "opencode", "supportsSteering": false,
+                        "steeringMode": "turn-boundary", "reasoningLevels": [],
+                        "installed": false, "canInstall": true, "enabled": true
+                    }
+                ]))),
+                methods::LIST_MODELS => {
+                    let models = match params["harness"].as_str() {
+                        Some("codex") => json!([
+                            { "id": "gpt-5", "label": "GPT-5", "reasoningLevels": ["high"], "options": [] },
+                            { "id": "gpt-5.6-luna", "label": "Luna", "reasoningLevels": [], "options": [] }
+                        ]),
+                        _ => json!([]),
+                    };
+                    Ok(RpcReply::Value(
+                        json!({ "models": models, "newIds": [], "announceIds": [] }),
+                    ))
+                }
                 methods::WATCH_SESSIONS => Ok(timed(
                     self.session_snapshots
                         .iter()
@@ -1032,6 +1474,7 @@ mod tests {
                 methods::CREATE_THREAD
                 | methods::SEND_THREAD_MESSAGE
                 | methods::TAKE_THREAD_MESSAGES
+                | methods::QUEUE_COMMAND
                 | methods::MUTATE => {
                     self.calls
                         .lock()
@@ -1040,6 +1483,7 @@ mod tests {
                     Ok(RpcReply::Value(match method {
                         methods::CREATE_THREAD => json!({ "chatId": "new-1" }),
                         methods::SEND_THREAD_MESSAGE => json!({ "id": "q-1" }),
+                        methods::QUEUE_COMMAND => json!({ "commandId": "cmd-1" }),
                         methods::TAKE_THREAD_MESSAGES => json!({
                             "messages": [{ "id": "q-9", "fromChatId": "b", "text": "done, 4 tests" }]
                         }),
@@ -1112,6 +1556,11 @@ mod tests {
                 far,
                 chat("new-1", Some("s1"), false, Some("a")),
             ],
+            spaces: vec![
+                json!({ "id": "s1", "deviceId": "dev-a", "path": "/Users/r/app", "gitDetected": true, "createdAt": "2026-09-18T10:00:00Z" }),
+                json!({ "id": "s2", "deviceId": "dev-a", "path": "/Users/r/notes", "name": "Docs", "createdAt": "2026-09-18T10:00:00Z" }),
+                json!({ "id": "s3", "deviceId": "dev-b", "path": "/Users/r/far", "name": "Far", "createdAt": "2026-09-18T10:00:00Z" }),
+            ],
             session_snapshots: vec![vec![
                 session("b", "working", 0),
                 session("e", "working", 120),
@@ -1150,24 +1599,17 @@ mod tests {
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
             .collect();
-        assert_eq!(
-            names,
-            [
-                "list_threads",
-                "read_thread",
-                "create_thread",
-                "send_message_to_thread",
-                "wait_threads",
-                "set_thread_title",
-                "set_thread_archived",
-            ]
-        );
-        assert!(
-            names
-                .iter()
-                .all(|n| !n.contains("cancel") && !n.contains("respond"))
-        );
         assert_eq!(names, THREAD_TOOLS);
+        // d49 lifts d25 for exactly interrupt and respond; nothing cancels.
+        assert!(names.iter().all(|n| !n.contains("cancel")));
+        assert!(names.contains(&"interrupt_thread") && names.contains(&"respond_to_input"));
+        for tool in list.as_array().unwrap() {
+            assert_eq!(
+                tool["inputSchema"]["additionalProperties"], false,
+                "{}",
+                tool["name"]
+            );
+        }
     }
 
     #[tokio::test]
@@ -1744,7 +2186,10 @@ mod tests {
         assert_eq!(init["id"], 1);
         assert_eq!(init["result"]["protocolVersion"], "2025-03-26");
         assert_eq!(list["id"], 2);
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 7);
+        assert_eq!(
+            list["result"]["tools"].as_array().unwrap().len(),
+            THREAD_TOOLS.len()
+        );
         assert_eq!(call["id"], 3);
         assert_eq!(call["result"]["isError"], false);
         assert!(
@@ -1892,9 +2337,9 @@ mod tests {
 
         let rig = computer_rig(Some("live"));
         let tools = Pipe::open(rig.tools).list().await;
-        assert_eq!(names(&tools[..7]), THREAD_TOOLS);
+        assert_eq!(names(&tools[..THREAD_TOOLS.len()]), THREAD_TOOLS);
         assert_eq!(
-            tools[7..],
+            tools[THREAD_TOOLS.len()..],
             [
                 catalog_tool("computer_screenshot"),
                 catalog_tool("computer_browser_click")
@@ -2113,5 +2558,484 @@ mod tests {
         assert_eq!(content[0]["type"], "text");
         assert!(content[0]["text"].as_str().unwrap().contains("line 5"));
         assert!(logged(&rig.calls, methods::COMPUTER_ACTION).is_empty());
+    }
+
+    fn text(id: &str, text: &str) -> Value {
+        json!({ "kind": "text", "id": id, "text": text })
+    }
+
+    fn input_part(request_id: &str, resolved: bool, kind: Option<Value>) -> Value {
+        let mut question = json!({
+            "id": "q1", "header": "Deploy", "question": "Ship it?",
+            "options": ["Yes", "No"], "multiSelect": false
+        });
+        if let Some(kind) = kind {
+            question["kind"] = kind;
+        }
+        json!({
+            "kind": "input", "id": format!("i-{request_id}"), "requestId": request_id,
+            "questions": [question], "resolved": resolved
+        })
+    }
+
+    /// The fixture transcript plus this chat's message `q-1` and what came after it.
+    fn after_message(then: Vec<Value>) -> Vec<Value> {
+        let mut entries = fixture().entries;
+        let mut sent = entry("q-1", "user", vec![text("t", "cover the refresh race")]);
+        sent["fromChatId"] = json!("a");
+        entries.push(sent);
+        entries.extend(then);
+        entries
+    }
+
+    #[tokio::test]
+    async fn list_projects_names_this_devices_projects_only() {
+        let out = rig(fixture()).tools.list_projects().await.unwrap();
+        assert_eq!(
+            out["projects"],
+            json!([
+                { "id": "s1", "name": "app", "path": "/Users/r/app", "git": true },
+                { "id": "s2", "name": "Docs", "path": "/Users/r/notes", "git": false },
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn list_harnesses_reports_availability_and_mid_turn_steering() {
+        let out = rig(fixture()).tools.list_harnesses().await.unwrap();
+        let rows: Vec<(&str, bool, bool, bool)> = out["harnesses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| {
+                (
+                    h["id"].as_str().unwrap(),
+                    h["installed"].as_bool().unwrap(),
+                    h["available"].as_bool().unwrap(),
+                    h["steersMidTurn"].as_bool().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("claude-code", true, true, true),
+                ("codex", true, false, false),
+                ("opencode", false, false, false),
+            ]
+        );
+        assert_eq!(
+            out["harnesses"][0]["reasoningLevels"],
+            json!(["low", "high"])
+        );
+    }
+
+    #[tokio::test]
+    async fn list_models_reads_the_catalogs_models() {
+        let rig = rig(fixture());
+        let out = rig
+            .tools
+            .list_models(&json!({ "harness": "codex" }))
+            .await
+            .unwrap();
+        assert_eq!(
+            out,
+            json!({
+                "harness": "codex",
+                "models": [
+                    { "id": "gpt-5", "label": "GPT-5", "reasoningLevels": ["high"] },
+                    { "id": "gpt-5.6-luna", "label": "Luna", "reasoningLevels": [] },
+                ]
+            })
+        );
+        assert_eq!(
+            rig.tools.list_models(&json!({})).await.unwrap_err(),
+            "harness is required"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_thread_resolves_a_project_on_this_device_and_passes_cwd() {
+        let rig = rig(fixture());
+        for (project, space) in [("DOCS", "s2"), ("/Users/r/app/", "s1"), ("s2", "s2")] {
+            rig.tools
+                .create_thread(&json!({
+                    "prompt": "go", "project": project, "cwd": "/tmp/wt"
+                }))
+                .await
+                .unwrap();
+            let created = logged(&rig.calls, methods::CREATE_THREAD);
+            let params = created.last().unwrap();
+            assert_eq!(params["spaceId"], space, "{project}");
+            assert_eq!(params["cwd"], "/tmp/wt");
+        }
+        rig.tools
+            .create_thread(&json!({ "prompt": "go" }))
+            .await
+            .unwrap();
+        let created = logged(&rig.calls, methods::CREATE_THREAD);
+        assert!(
+            created[3]["spaceId"].is_null(),
+            "default: the caller's project"
+        );
+        assert!(created[3]["cwd"].is_null());
+
+        for project in ["Far", "s3", "nowhere"] {
+            let err = rig
+                .tools
+                .create_thread(&json!({ "prompt": "go", "project": project }))
+                .await
+                .unwrap_err();
+            assert!(
+                err.starts_with(&format!("no project {project} on this device")),
+                "{err}"
+            );
+        }
+        assert_eq!(logged(&rig.calls, methods::CREATE_THREAD).len(), 4);
+        assert_eq!(
+            rig.tools.sends.load(Ordering::SeqCst),
+            4,
+            "refusals spend nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_thread_refuses_a_model_the_harness_does_not_offer() {
+        let rig = rig(fixture());
+        let err = rig
+            .tools
+            .create_thread(&json!({ "prompt": "go", "harness": "codex", "model": "gpt-9" }))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "model gpt-9 is not offered by codex; available: gpt-5, gpt-5.6-luna"
+        );
+        assert!(logged(&rig.calls, methods::CREATE_THREAD).is_empty());
+        rig.tools
+            .create_thread(&json!({ "prompt": "go", "harness": "codex", "model": "gpt-5.6-luna" }))
+            .await
+            .unwrap();
+        // An empty listing proves nothing, so the pick goes through.
+        rig.tools
+            .create_thread(&json!({ "prompt": "go", "harness": "claude-code", "model": "opus" }))
+            .await
+            .unwrap();
+        assert_eq!(logged(&rig.calls, methods::CREATE_THREAD).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_waited_send_returns_the_replies_written_after_the_message() {
+        let mut fake = fixture();
+        fake.session_snapshots = vec![
+            vec![session("b", "working", 0)],
+            vec![session("b", "idle", 0)],
+        ];
+        fake.entries = after_message(vec![entry(
+            "r1",
+            "assistant",
+            vec![
+                json!({ "kind": "tool", "id": "k", "name": "Bash" }),
+                text("t", "done, 4 tests"),
+            ],
+        )]);
+        let out = rig(fake)
+            .tools
+            .send_message_to_thread(
+                &json!({ "threadId": "b", "text": "cover the refresh race", "wait": true }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["messageId"], "q-1");
+        assert_eq!(
+            out["turn"],
+            json!({ "status": "idle", "timedOut": false, "replies": ["done, 4 tests"], "pendingInput": null })
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_waited_send_does_not_count_the_turn_before_a_held_message() {
+        let mut fake = fixture();
+        fake.session_snapshots = vec![
+            vec![session("b", "working", 0)],
+            vec![session("b", "idle", 0)],
+        ];
+        let out = rig(fake)
+            .tools
+            .send_message_to_thread(&json!({
+                "threadId": "b", "text": "cover the refresh race", "wait": true, "timeoutSeconds": 30
+            }))
+            .await
+            .unwrap();
+        assert_eq!(out["turn"]["timedOut"], true);
+        assert_eq!(out["turn"]["status"], "idle");
+        assert_eq!(out["turn"]["replies"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn a_waited_send_returns_when_the_thread_asks_a_question() {
+        let mut fake = fixture();
+        fake.session_snapshots = vec![vec![session("b", "awaitingInput", 0)]];
+        fake.entries = after_message(vec![entry(
+            "r1",
+            "assistant",
+            vec![input_part("req-1", false, None)],
+        )]);
+        let out = rig(fake)
+            .tools
+            .send_message_to_thread(&json!({ "threadId": "b", "text": "go", "wait": true }))
+            .await
+            .unwrap();
+        assert_eq!(out["turn"]["status"], "awaiting_input");
+        assert_eq!(out["turn"]["replies"], json!([]));
+        assert_eq!(out["turn"]["pendingInput"]["requestId"], "req-1");
+    }
+
+    #[tokio::test]
+    async fn a_waited_create_returns_its_first_turns_replies() {
+        let mut fake = fixture();
+        fake.session_snapshots = vec![
+            vec![session("new-1", "working", 0)],
+            vec![session("new-1", "idle", 0)],
+        ];
+        let out = rig(fake)
+            .tools
+            .create_thread(&json!({ "prompt": "go", "wait": true }))
+            .await
+            .unwrap();
+        assert_eq!(out["threadId"], "new-1");
+        assert_eq!(out["turn"]["status"], "idle");
+        assert_eq!(out["turn"]["replies"], json!(["line 2", "line 4"]));
+    }
+
+    #[tokio::test]
+    async fn read_thread_toggles_reasoning_and_tools_and_reports_the_pending_question() {
+        let rig = rig(fixture());
+        let page = rig
+            .tools
+            .read_thread(&json!({ "threadId": "b", "limit": 1, "includeReasoning": true, "includeTools": false }))
+            .await
+            .unwrap();
+        assert_eq!(page["entries"][0]["text"], "line 5");
+        assert_eq!(page["entries"][0]["reasoning"], "hidden");
+        assert!(page["pendingInput"].is_null());
+
+        let mut fake = fixture();
+        fake.entries.push(entry(
+            "m6",
+            "assistant",
+            vec![
+                input_part("req-1", false, None),
+                input_part("req-0", true, None),
+            ],
+        ));
+        let page = self::tests::rig(fake)
+            .tools
+            .read_thread(&json!({ "threadId": "b" }))
+            .await
+            .unwrap();
+        assert_eq!(page["pendingInput"]["requestId"], "req-1");
+        assert_eq!(page["pendingInput"]["questions"][0]["id"], "q1");
+        assert!(page["entries"][5].get("reasoning").is_none());
+    }
+
+    fn queued_commands(fake: &Fake) -> Vec<Value> {
+        logged(fake, methods::QUEUE_COMMAND)
+    }
+
+    #[tokio::test]
+    async fn interrupt_thread_queues_a_stop_on_a_peer_only() {
+        let rig = rig(fixture());
+        let out = rig
+            .tools
+            .interrupt_thread(&json!({ "threadId": "b" }))
+            .await
+            .unwrap();
+        assert_eq!(out, json!({ "threadId": "b", "commandId": "cmd-1" }));
+        let commands = queued_commands(&rig.calls);
+        assert_eq!(
+            commands,
+            [json!({ "chatId": "b", "command": { "kind": "interrupt" } })]
+        );
+        assert_eq!(
+            serde_json::from_value::<zeron_doc::SessionCommandPayload>(
+                commands[0]["command"].clone()
+            )
+            .unwrap(),
+            zeron_doc::SessionCommandPayload::Interrupt {}
+        );
+        assert_eq!(
+            rig.tools
+                .interrupt_thread(&json!({ "threadId": "a" }))
+                .await
+                .unwrap_err(),
+            "a thread cannot interrupt itself"
+        );
+        assert_eq!(
+            rig.tools
+                .interrupt_thread(&json!({ "threadId": "far" }))
+                .await
+                .unwrap_err(),
+            "no thread far on this device"
+        );
+        assert_eq!(queued_commands(&rig.calls).len(), 1);
+        assert_eq!(rig.tools.sends.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn interrupt_and_respond_count_against_the_send_budget() {
+        let mut fake = fixture();
+        fake.entries.push(entry(
+            "m6",
+            "assistant",
+            vec![input_part("req-1", false, None)],
+        ));
+        let rig = rig(fake);
+        for _ in 0..SEND_BUDGET - 1 {
+            rig.tools
+                .interrupt_thread(&json!({ "threadId": "b" }))
+                .await
+                .unwrap();
+        }
+        let answers = json!([{ "questionId": "q1", "labels": ["Yes"] }]);
+        rig.tools
+            .respond_to_input(&json!({ "threadId": "b", "answers": answers }))
+            .await
+            .unwrap();
+        let err = rig
+            .tools
+            .interrupt_thread(&json!({ "threadId": "b" }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("budget"), "{err}");
+        assert_eq!(queued_commands(&rig.calls).len(), SEND_BUDGET);
+    }
+
+    #[tokio::test]
+    async fn respond_to_input_answers_the_pending_question() {
+        let mut fake = fixture();
+        fake.entries.push(entry(
+            "m6",
+            "assistant",
+            vec![
+                input_part("req-0", false, None),
+                input_part("req-1", false, None),
+            ],
+        ));
+        let rig = rig(fake);
+        let answers = json!([{ "questionId": "q1", "labels": ["Yes"] }]);
+        let out = rig
+            .tools
+            .respond_to_input(&json!({ "threadId": "b", "answers": answers }))
+            .await
+            .unwrap();
+        assert_eq!(
+            out,
+            json!({ "threadId": "b", "requestId": "req-1", "commandId": "cmd-1" })
+        );
+        rig.tools
+            .respond_to_input(&json!({ "threadId": "b", "requestId": "req-0", "answers": answers }))
+            .await
+            .unwrap();
+        let commands = queued_commands(&rig.calls);
+        assert_eq!(
+            commands[0],
+            json!({
+                "chatId": "b",
+                "command": { "kind": "respondInput", "requestId": "req-1", "answers": answers }
+            })
+        );
+        assert_eq!(commands[1]["command"]["requestId"], "req-0");
+        assert_eq!(
+            serde_json::from_value::<zeron_doc::SessionCommandPayload>(
+                commands[0]["command"].clone()
+            )
+            .unwrap(),
+            zeron_doc::SessionCommandPayload::RespondInput {
+                request_id: "req-1".into(),
+                answers: vec![UserInputAnswer {
+                    question_id: "q1".into(),
+                    labels: vec!["Yes".into()]
+                }],
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn respond_to_input_refuses_without_an_answerable_question() {
+        let answers = json!([{ "questionId": "q1", "labels": ["Yes"] }]);
+        let refused = |fake: Fake, args: Value| async move {
+            let rig = rig(fake);
+            let err = rig.tools.respond_to_input(&args).await.unwrap_err();
+            assert!(queued_commands(&rig.calls).is_empty(), "{err}");
+            assert_eq!(rig.tools.sends.load(Ordering::SeqCst), 0, "{err}");
+            err
+        };
+        assert_eq!(
+            refused(fixture(), json!({ "threadId": "b", "answers": answers })).await,
+            "thread b has no pending question"
+        );
+        assert_eq!(
+            refused(fixture(), json!({ "threadId": "a", "answers": answers })).await,
+            "a thread cannot answer its own question"
+        );
+        assert_eq!(
+            refused(fixture(), json!({ "threadId": "far", "answers": answers })).await,
+            "no thread far on this device"
+        );
+
+        let pending = |kind: Option<Value>| {
+            let mut fake = fixture();
+            fake.entries.push(entry(
+                "m6",
+                "assistant",
+                vec![input_part("req-1", false, kind)],
+            ));
+            fake
+        };
+        assert_eq!(
+            refused(
+                pending(None),
+                json!({ "threadId": "b", "requestId": "req-9", "answers": answers })
+            )
+            .await,
+            "thread b has no pending request req-9"
+        );
+        assert_eq!(
+            refused(
+                pending(None),
+                json!({ "threadId": "b", "answers": [{ "questionId": "q7", "labels": ["Yes"] }] })
+            )
+            .await,
+            "no question q7 in that request; its questions are q1"
+        );
+        for answers in [json!([]), json!([{ "questionId": "q1" }]), json!("Yes")] {
+            assert_eq!(
+                refused(
+                    pending(None),
+                    json!({ "threadId": "b", "answers": answers })
+                )
+                .await,
+                "answers must be a nonempty list of {questionId, labels}"
+            );
+        }
+        let consent = json!({ "type": "consent", "scope": "task" });
+        let err = refused(
+            pending(Some(consent)),
+            json!({ "threadId": "b", "answers": answers }),
+        )
+        .await;
+        assert!(err.contains("consent"), "{err}");
+
+        let mut resolved = fixture();
+        resolved.entries.push(entry(
+            "m6",
+            "assistant",
+            vec![input_part("req-1", true, None)],
+        ));
+        assert_eq!(
+            refused(resolved, json!({ "threadId": "b", "answers": answers })).await,
+            "thread b has no pending question"
+        );
     }
 }
