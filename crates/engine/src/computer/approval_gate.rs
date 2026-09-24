@@ -218,6 +218,23 @@ impl ComputerApprovalGate {
         }
     }
 
+    pub fn app_granted(
+        &self,
+        chat_id: &str,
+        turn_id: Option<&str>,
+        key: &str,
+        bundle_id: Option<&str>,
+    ) -> bool {
+        let state = self.state();
+        bundle_id.is_some_and(|bundle_id| state.always.contains(bundle_id))
+            || state
+                .tasks
+                .get(chat_id)
+                .filter(|turn| turn.turn_id.as_deref() == turn_id)
+                .and_then(|turn| turn.grants.get(&Some(key.to_owned())))
+                .is_some_and(|task| task.granted == Some(true))
+    }
+
     pub fn set_always_allowed<'a>(&self, bundle_ids: impl IntoIterator<Item = &'a str>) {
         self.state().always = bundle_ids.into_iter().map(str::to_owned).collect();
     }

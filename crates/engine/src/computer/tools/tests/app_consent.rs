@@ -8,7 +8,9 @@ use crate::computer::approval_gate::ApprovalDecision;
 use crate::computer::engine_seams::{consent_decision, consent_question};
 use crate::computer::fake_backend::FakeComputerBackendOptions;
 use crate::computer::manager::ComputerConsentCard;
-use crate::computer::tools::consent::COMPUTER_APP_CONSENT_DENIED_CODE;
+use crate::computer::tools::consent::{
+    COMPUTER_APP_CONSENT_DENIED_CODE, COMPUTER_APP_WINDOW_REQUIRED_CODE,
+};
 use crate::computer::tools::tests::Harness;
 use zeron_proto::UserInputAnswer;
 
@@ -241,4 +243,227 @@ fn the_always_label_maps_to_an_always_decision() {
     for denied in ["Deny", "Decline"] {
         assert_eq!(consent_decision(&answer(denied)), ApprovalDecision::Decline);
     }
+}
+
+struct DisplayFrame {
+    id: Value,
+    region: Value,
+    scale: f64,
+}
+
+impl DisplayFrame {
+    fn at(&self, x: f64, y: f64) -> Value {
+        let pixel = |desktop: f64, origin: &str| {
+            ((desktop - self.region[origin].as_f64().unwrap()) * self.scale).round()
+        };
+        json!({ "x": pixel(x, "x"), "y": pixel(y, "y"), "screenshot_id": self.id })
+    }
+}
+
+async fn display_frame(h: &Harness) -> DisplayFrame {
+    h.see().await;
+    let shot = h
+        .call(
+            "computer_screenshot",
+            json!({ "x": 0, "y": 0, "width": 1920, "height": 1080 }),
+        )
+        .await;
+    assert!(!shot.is_error, "{shot:?}");
+    let shot = result_json(&shot)["screenshot"].clone();
+    assert!(shot.get("windowId").is_none(), "{shot}");
+    DisplayFrame {
+        id: shot["screenshotId"].clone(),
+        region: shot["region"].clone(),
+        scale: shot["scale"].as_f64().unwrap(),
+    }
+}
+
+fn grant_terminal_deny_calculator(h: &Harness) {
+    decide_by_app(h, |bundle| match bundle {
+        Some("org.kde.konsole") => ApprovalDecision::Accept,
+        _ => ApprovalDecision::Decline,
+    });
+}
+
+#[tokio::test]
+async fn a_display_coordinate_click_asks_for_the_app_under_the_point() {
+    let h = harness();
+    grant_terminal_deny_calculator(&h);
+    assert!(
+        !h.call("computer_type_text", type_into("fake-terminal"))
+            .await
+            .is_error
+    );
+    let display = display_frame(&h).await;
+    let at = |x: f64, y: f64| display.at(x, y);
+    let on_terminal = h.call("computer_click", at(200.0, 300.0)).await;
+    assert!(!on_terminal.is_error, "{on_terminal:?}");
+    assert_eq!(h.backend.calls_for("click").len(), 1);
+    let on_calculator = h.call("computer_click", at(1200.0, 400.0)).await;
+    assert!(on_calculator.is_error, "{on_calculator:?}");
+    let error = &result_json(&on_calculator)["error"];
+    assert_eq!(error["code"], COMPUTER_APP_CONSENT_DENIED_CODE);
+    assert_eq!(error["app"]["bundleId"], "org.kde.kcalc");
+    assert_eq!(
+        cards(&h).iter().map(bundle).collect::<Vec<_>>(),
+        [Some("org.kde.konsole"), Some("org.kde.kcalc")],
+        "the click under the point raised a card naming its app"
+    );
+    assert_eq!(
+        h.backend.calls_for("click").len(),
+        1,
+        "the denied click posted nothing"
+    );
+    let drag = h
+        .call(
+            "computer_drag",
+            json!({ "from": at(200.0, 300.0), "to": at(1200.0, 400.0) }),
+        )
+        .await;
+    assert!(drag.is_error, "{drag:?}");
+    assert_eq!(
+        result_json(&drag)["error"]["app"]["bundleId"],
+        "org.kde.kcalc"
+    );
+    assert!(h.backend.calls_for("drag").is_empty());
+    h.dispose().await;
+}
+
+#[tokio::test]
+async fn a_display_coordinate_run_step_asks_for_the_app_under_the_point() {
+    let h = harness();
+    grant_terminal_deny_calculator(&h);
+    let display = display_frame(&h).await;
+    let step = |x: f64, y: f64| {
+        let mut step = display.at(x, y);
+        step["type"] = json!("click");
+        step
+    };
+    let run = h
+        .call(
+            "computer_run",
+            json!({ "steps": [step(200.0, 300.0), step(1200.0, 400.0)] }),
+        )
+        .await;
+    assert!(run.is_error, "{run:?}");
+    let run = result_json(&run);
+    assert_eq!(run["error"]["code"], COMPUTER_APP_CONSENT_DENIED_CODE);
+    assert_eq!(run["error"]["app"]["bundleId"], "org.kde.kcalc");
+    assert_eq!(run["step"], 1);
+    assert!(h.backend.calls_for("click").is_empty());
+    h.dispose().await;
+}
+
+#[tokio::test]
+async fn window_less_keyboard_input_is_refused_in_ask_mode_and_unchanged_in_full() {
+    let h = harness();
+    for (tool, arguments) in [
+        ("computer_press_key", json!({ "key": "Return" })),
+        ("computer_type_text", json!({ "text": "echo hi" })),
+        ("computer_paste", json!({ "text": "x" })),
+    ] {
+        let full = h.call(tool, arguments.clone()).await;
+        assert!(!full.is_error, "{tool} in Full: {full:?}");
+    }
+    let dispatched = h.backend.methods().len();
+    h.decide(ApprovalDecision::Accept);
+    assert!(
+        !h.call("computer_type_text", type_into("fake-terminal"))
+            .await
+            .is_error
+    );
+    let granted_only = h.backend.methods().len();
+    for (tool, arguments) in [
+        ("computer_press_key", json!({ "key": "Return" })),
+        ("computer_type_text", json!({ "text": "echo hi" })),
+        ("computer_paste", json!({ "text": "x" })),
+        (
+            "computer_click",
+            json!({ "label": "Calculate", "role": "button" }),
+        ),
+    ] {
+        let refused = h.call(tool, arguments).await;
+        assert!(refused.is_error, "{tool}: {refused:?}");
+        assert_eq!(
+            result_json(&refused)["error"]["code"],
+            COMPUTER_APP_WINDOW_REQUIRED_CODE,
+            "{tool}"
+        );
+        assert_eq!(result_json(&refused)["error"]["effect"], "not-dispatched");
+    }
+    assert!(granted_only > dispatched);
+    assert_eq!(
+        h.backend
+            .methods()
+            .into_iter()
+            .skip(granted_only)
+            .filter(|method| matches!(
+                method.as_str(),
+                "pressKey" | "typeText" | "hotkey" | "click" | "writeClipboard"
+            ))
+            .count(),
+        0,
+        "no keyboard, click or clipboard input left for an unnamed app"
+    );
+    assert_eq!(cards(&h).len(), 1, "an unnamed app never raises a card");
+    h.dispose().await;
+}
+
+#[tokio::test]
+async fn dispatch_refuses_window_less_input_that_reaches_an_ungranted_app() {
+    use crate::computer::manager::{
+        COMPUTER_APP_CONSENT_REQUIRED_CODE, COMPUTER_APP_WINDOW_REQUIRED_CODE, ComputerClickGesture,
+    };
+    use crate::computer::task_context::with_computer_task;
+    use zeron_proto::computer::{ComputerTarget, CuaComputerTask};
+
+    let h = harness();
+    grant_terminal_deny_calculator(&h);
+    assert!(
+        !h.call("computer_type_text", type_into("fake-terminal"))
+            .await
+            .is_error
+    );
+    let task = CuaComputerTask {
+        thread_id: THREAD.into(),
+        turn_id: Some(super::TURN.into()),
+        label: None,
+    };
+    let click_at = |x: f64, y: f64| {
+        let manager = h.manager.clone();
+        let task = task.clone();
+        async move {
+            with_computer_task(
+                task,
+                manager.click(
+                    Some(THREAD),
+                    ComputerTarget {
+                        x: Some(x),
+                        y: Some(y),
+                        ..ComputerTarget::default()
+                    },
+                    &[],
+                    ComputerClickGesture::default(),
+                ),
+            )
+            .await
+        }
+    };
+    assert!(
+        click_at(200.0, 300.0).await.is_ok(),
+        "the granted app takes the click"
+    );
+    let error = click_at(1200.0, 400.0).await.unwrap_err();
+    assert_eq!(error.code(), Some(COMPUTER_APP_CONSENT_REQUIRED_CODE));
+    assert!(error.to_string().contains("org.kde.kcalc"), "{error}");
+    assert_eq!(h.backend.calls_for("click").len(), 1);
+    let unnamed = with_computer_task(
+        task.clone(),
+        h.manager.press_key(Some(THREAD), "Return", None, None),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(unnamed.code(), Some(COMPUTER_APP_WINDOW_REQUIRED_CODE));
+    assert!(h.backend.calls_for("pressKey").is_empty());
+    h.dispose().await;
 }

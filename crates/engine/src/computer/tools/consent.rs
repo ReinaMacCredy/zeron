@@ -1,21 +1,37 @@
 use serde_json::{Value, json};
-use zeron_proto::computer::{ComputerConsentApp, CuaEffect, McpToolResult};
+use zeron_proto::computer::{ComputerConsentApp, ComputerTarget, CuaEffect, McpToolResult};
 
 use super::args::{read_nested_screenshot_target, read_screenshot_target};
 use super::results::mcp_json_error;
 use super::tool_input::{ToolArgs, is_safe_integer, read_number_arg};
 use super::{ComputerToolContext, ComputerTools};
 use crate::computer::backend::{ComputerError, cua_effect_name};
-use crate::computer::manager::{ComputerConsent, ComputerConsentTarget};
+pub use crate::computer::manager::COMPUTER_APP_WINDOW_REQUIRED_CODE;
+use crate::computer::manager::{
+    COMPUTER_APP_WINDOW_REQUIRED_MESSAGE, ComputerConsent, ComputerConsentTarget,
+};
 
 pub const COMPUTER_APP_CONSENT_DENIED_CODE: &str = "app_consent_denied";
 
 const READ_ONLY_RUN_STEPS: &[&str] = &["wait", "get_state", "verify_state"];
 
+const EXPLICIT_TARGET_TOOLS: &[&str] = &[
+    "computer_launch_app",
+    "computer_invoke_menu",
+    "computer_activate_window",
+    "computer_set_window_frame",
+    "computer_kill_app",
+    "computer_set_window_minimized",
+    "computer_set_app_visibility",
+];
+
 pub(super) enum ConsentRefusal {
     Task,
     App {
         app: ComputerConsentApp,
+        step: Option<usize>,
+    },
+    Unscoped {
         step: Option<usize>,
     },
 }
@@ -50,6 +66,21 @@ pub(super) fn app_consent_refusal_result(
     mcp_json_error(&body)
 }
 
+pub(super) fn app_window_required_result(step: Option<usize>) -> McpToolResult {
+    let mut body = json!({
+        "error": {
+            "code": COMPUTER_APP_WINDOW_REQUIRED_CODE,
+            "message": COMPUTER_APP_WINDOW_REQUIRED_MESSAGE,
+            "effect": cua_effect_name(CuaEffect::NotDispatched),
+            "retryAllowed": false,
+        },
+    });
+    if let Some(step) = step {
+        body["step"] = json!(step);
+    }
+    mcp_json_error(&body)
+}
+
 fn text(args: &ToolArgs, key: &str) -> Option<String> {
     args.get(key)
         .and_then(Value::as_str)
@@ -67,49 +98,85 @@ fn positive_pid(args: &ToolArgs) -> Option<u32> {
 }
 
 impl ComputerTools {
-    fn target_window(&self, args: &ToolArgs, thread: &str) -> Option<String> {
-        read_screenshot_target(args)
-            .ok()
-            .and_then(|raw| self.resolve_target(raw, thread).ok())
-            .and_then(|resolved| resolved.target.window_id)
-            .or_else(|| text(args, "window_id"))
-            .or_else(|| text(args, "windowId"))
+    fn resolved_target(&self, args: &ToolArgs, thread: &str) -> Option<ComputerTarget> {
+        let raw = read_screenshot_target(args).ok()?;
+        Some(self.resolve_target(raw, thread).ok()?.target)
     }
 
-    fn call_consent_targets(
+    async fn reached_windows(
+        &self,
+        target: Option<ComputerTarget>,
+        args: &ToolArgs,
+    ) -> Vec<String> {
+        let explicit = text(args, "window_id").or_else(|| text(args, "windowId"));
+        let Some(target) = target else {
+            return explicit.into_iter().collect();
+        };
+        if let Some(window_id) = target.window_id.clone().or(explicit) {
+            return vec![window_id];
+        }
+        let coordinates = target.x.is_some()
+            && target.y.is_some()
+            && target.label.is_none()
+            && target.role.is_none()
+            && target.element_ref.is_none();
+        if !coordinates {
+            return Vec::new();
+        }
+        self.manager.consent_windows_at(&target).await
+    }
+
+    async fn call_consent_targets(
         &self,
         name: &str,
         args: &ToolArgs,
         thread: &str,
     ) -> Vec<ComputerConsentTarget> {
+        let mut targets = Vec::new();
         match name {
-            "computer_launch_app" => text(args, "app")
-                .map(ComputerConsentTarget::App)
-                .into_iter()
-                .collect(),
-            "computer_read_clipboard" | "computer_write_clipboard" => Vec::new(),
-            "computer_drag" => ["from", "to"]
-                .into_iter()
-                .filter_map(|end| {
-                    let raw = read_nested_screenshot_target(args, end).ok()?;
-                    self.resolve_target(raw, thread).ok()?.target.window_id
-                })
-                .map(ComputerConsentTarget::Window)
-                .collect(),
+            "computer_launch_app" => {
+                return text(args, "app")
+                    .map(ComputerConsentTarget::App)
+                    .into_iter()
+                    .collect();
+            }
+            "computer_read_clipboard" | "computer_write_clipboard" => return targets,
+            "computer_drag" => {
+                for end in ["from", "to"] {
+                    let target = read_nested_screenshot_target(args, end)
+                        .ok()
+                        .and_then(|raw| self.resolve_target(raw, thread).ok())
+                        .map(|resolved| resolved.target);
+                    let Some(target) = target else {
+                        continue;
+                    };
+                    targets.extend(
+                        self.reached_windows(Some(target), &ToolArgs::new())
+                            .await
+                            .into_iter()
+                            .map(ComputerConsentTarget::Window),
+                    );
+                }
+            }
             _ => {
-                let mut targets = Vec::new();
                 targets.extend(positive_pid(args).map(ComputerConsentTarget::Pid));
                 targets.extend(text(args, "app").map(ComputerConsentTarget::App));
+                let target = self.resolved_target(args, thread);
                 targets.extend(
-                    self.target_window(args, thread)
+                    self.reached_windows(target, args)
+                        .await
+                        .into_iter()
                         .map(ComputerConsentTarget::Window),
                 );
-                targets
             }
         }
+        if targets.is_empty() && !EXPLICIT_TARGET_TOOLS.contains(&name) {
+            targets.push(ComputerConsentTarget::Unscoped);
+        }
+        targets
     }
 
-    pub(super) fn consent_targets(
+    pub(super) async fn consent_targets(
         &self,
         name: &str,
         args: &ToolArgs,
@@ -124,7 +191,7 @@ impl ComputerTools {
             }
         };
         if name != "computer_run" {
-            push(None, self.call_consent_targets(name, args, thread));
+            push(None, self.call_consent_targets(name, args, thread).await);
             return found;
         }
         let Some(Value::Array(steps)) = args.get("steps") else {
@@ -142,7 +209,8 @@ impl ComputerTools {
             }
             push(
                 Some(index),
-                self.call_consent_targets(&format!("computer_{kind}"), step, thread),
+                self.call_consent_targets(&format!("computer_{kind}"), step, thread)
+                    .await,
             );
         }
         found
@@ -161,7 +229,11 @@ impl ComputerTools {
                 .manager
                 .authorize_consent(name, approval_args, &caller, context.signal.clone(), None)
                 .await?;
-            return Ok((consent != ComputerConsent::Granted).then_some(ConsentRefusal::Task));
+            return Ok(match consent {
+                ComputerConsent::Granted => None,
+                ComputerConsent::Unscoped => Some(ConsentRefusal::Unscoped { step: None }),
+                ComputerConsent::Denied(_) => Some(ConsentRefusal::Task),
+            });
         }
         for (step, target) in targets {
             match self
@@ -180,6 +252,9 @@ impl ComputerTools {
                     return Ok(Some(ConsentRefusal::App { app, step }));
                 }
                 ComputerConsent::Denied(None) => return Ok(Some(ConsentRefusal::Task)),
+                ComputerConsent::Unscoped => {
+                    return Ok(Some(ConsentRefusal::Unscoped { step }));
+                }
             }
         }
         Ok(None)

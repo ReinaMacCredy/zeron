@@ -577,6 +577,9 @@ impl ComputerManager {
                 .await;
             return Ok(ComputerConsent::Granted);
         }
+        if target == Some(&ComputerConsentTarget::Unscoped) {
+            return Ok(ComputerConsent::Unscoped);
+        }
         let task_consent = tool_name != "computer_read_clipboard" && caller.turn_id.is_some();
         let resolved = match target {
             Some(target) => Some(self.resolve_consent_app(target).await),

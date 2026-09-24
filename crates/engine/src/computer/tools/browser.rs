@@ -11,6 +11,7 @@ use zeron_proto::computer::{
 use super::browser_effect::{computer_browser_effect, computer_browser_field_readback};
 use super::consent::{
     COMPUTER_APP_CONSENT_DENIED_CODE, ConsentRefusal, app_consent_refusal_result,
+    app_window_required_result,
 };
 use super::results::{
     AuditOutcome, ToolFailure, computer_audit_error_outcome, cua_action_error_payload,
@@ -628,6 +629,9 @@ impl ComputerBrowserTools {
                     return Ok(McpToolResult::error(
                         "Computer browser action was denied or cancelled; no input was sent.",
                     ));
+                }
+                Some(ConsentRefusal::Unscoped { step }) => {
+                    return Ok(app_window_required_result(step));
                 }
                 Some(ConsentRefusal::App { app, step }) => {
                     self.audit(

@@ -1,8 +1,14 @@
-use zeron_proto::computer::{ComputerApp, ComputerConsentApp};
+use zeron_proto::PermissionMode;
+use zeron_proto::computer::{ComputerApp, ComputerConsentApp, ComputerWindow, CuaEffect};
 
 use super::{COMPUTER_DENYLIST_APP_CACHE_MS, ComputerConsentTarget, ComputerManager};
-use crate::computer::backend::ComputerBackendMethod;
+use crate::computer::backend::{ComputerBackendMethod, ComputerError, CuaActionError};
 use crate::computer::cua_backend::parse_cua_window_id;
+use crate::computer::task_context::current_computer_task;
+
+pub const COMPUTER_APP_CONSENT_REQUIRED_CODE: &str = "app_consent_required";
+pub const COMPUTER_APP_WINDOW_REQUIRED_CODE: &str = "app_window_required";
+pub const COMPUTER_APP_WINDOW_REQUIRED_MESSAGE: &str = "In Ask mode, Computer input must name the app it reaches: pass window_id, an element ref, or coordinates on a screenshot of that window. Nothing was sent.";
 
 pub(super) struct ResolvedConsentApp {
     pub app: ComputerConsentApp,
@@ -113,6 +119,9 @@ impl ComputerManager {
                 }
             }
             ComputerConsentTarget::Pid(pid) => self.resolve_consent_pid(*pid, None).await,
+            ComputerConsentTarget::Unscoped => {
+                unresolved("an unnamed app".into(), None, "unscoped".into())
+            }
             ComputerConsentTarget::App(wanted) => {
                 let wanted = wanted.trim();
                 let apps = self.consent_apps(None).await;
@@ -152,6 +161,61 @@ impl ComputerManager {
                     ),
                 }
             }
+        }
+    }
+
+    async fn ask_turn(&self, thread_id: Option<&str>) -> Option<(String, String)> {
+        let owner = super::agent_thread_id(thread_id)?;
+        let turn = current_computer_task().and_then(|task| task.turn_id)?;
+        let mode = self.seams.caller(owner, Some(&turn)).await.ok().flatten();
+        (mode == Some(PermissionMode::Ask)).then(|| (owner.to_owned(), turn))
+    }
+
+    pub(super) async fn assert_app_consent(
+        &self,
+        thread_id: Option<&str>,
+        windows: &[&ComputerWindow],
+    ) -> Result<(), ComputerError> {
+        let Some((owner, turn)) = self.ask_turn(thread_id).await else {
+            return Ok(());
+        };
+        for window in windows {
+            let resolved = self
+                .resolve_consent_app(&ComputerConsentTarget::Window(window.id.clone()))
+                .await;
+            if !self.approval_gate.app_granted(
+                &owner,
+                Some(&turn),
+                &resolved.key,
+                resolved.app.bundle_id.as_deref(),
+            ) {
+                let identity = match &resolved.app.bundle_id {
+                    Some(bundle_id) => format!("{} ({bundle_id})", resolved.app.name),
+                    None => format!("{} (unverified app)", resolved.app.name),
+                };
+                return Err(CuaActionError::new(
+                    format!("This input would reach {identity}, which has no Computer consent in this turn. Nothing was sent; retry so the app can be approved."),
+                    CuaEffect::NotDispatched,
+                )
+                .code(COMPUTER_APP_CONSENT_REQUIRED_CODE)
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) async fn assert_scoped_input(
+        &self,
+        thread_id: Option<&str>,
+    ) -> Result<(), ComputerError> {
+        match self.ask_turn(thread_id).await {
+            Some(_) => Err(CuaActionError::new(
+                COMPUTER_APP_WINDOW_REQUIRED_MESSAGE,
+                CuaEffect::NotDispatched,
+            )
+            .code(COMPUTER_APP_WINDOW_REQUIRED_CODE)
+            .into()),
+            None => Ok(()),
         }
     }
 

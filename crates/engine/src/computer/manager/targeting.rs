@@ -315,6 +315,19 @@ impl ComputerManager {
         Ok(())
     }
 
+    pub async fn consent_windows_at(&self, target: &ComputerTarget) -> Vec<String> {
+        let Ok(point) = self.resolve_coordinate_point(target, None).await else {
+            return Vec::new();
+        };
+        let Ok(windows) = self.read_windows().await else {
+            return Vec::new();
+        };
+        windows_reached_at(&windows, point)
+            .into_iter()
+            .map(|window| window.id.clone())
+            .collect()
+    }
+
     pub(super) async fn resolve_point_target(
         &self,
         target: &ObservedComputerTarget,
@@ -329,25 +342,12 @@ impl ComputerManager {
                 .await?;
             let Some(window_id) = plain.window_id.as_deref() else {
                 let windows = self.read_windows().await?;
-                match topmost_window_at_point(&windows, point) {
-                    Some(topmost) => {
-                        let topmost = topmost.id.clone();
-                        self.assert_window_input_allowed(thread_id, &topmost)
-                            .await?;
-                    }
-                    None => {
-                        for window in &windows {
-                            if !window.visible
-                                || window.minimized
-                                || !rect_contains_point(window.bounds.as_ref(), point)
-                            {
-                                continue;
-                            }
-                            self.assert_window_input_allowed_window(thread_id, window)
-                                .await?;
-                        }
-                    }
+                let reached = windows_reached_at(&windows, point);
+                for window in &reached {
+                    self.assert_window_input_allowed_window(thread_id, window)
+                        .await?;
                 }
+                self.assert_app_consent(thread_id, &reached).await?;
                 return Ok(ResolvedPointTarget {
                     point,
                     window_id: None,
@@ -587,7 +587,7 @@ impl ComputerManager {
         self.space_broker
             .assert_target_bound(agent_thread_id(thread_id), window_id)?;
         let Some(window_id) = window_id else {
-            return Ok(());
+            return self.assert_scoped_input(thread_id).await;
         };
         let windows = self.read_windows().await?;
         let window = windows
@@ -886,5 +886,19 @@ impl ComputerManager {
             }
         }
         merged
+    }
+}
+
+fn windows_reached_at(windows: &[ComputerWindow], point: ComputerPoint) -> Vec<&ComputerWindow> {
+    match topmost_window_at_point(windows, point) {
+        Some(topmost) => vec![topmost],
+        None => windows
+            .iter()
+            .filter(|window| {
+                window.visible
+                    && !window.minimized
+                    && rect_contains_point(window.bounds.as_ref(), point)
+            })
+            .collect(),
     }
 }

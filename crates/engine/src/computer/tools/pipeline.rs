@@ -8,7 +8,8 @@ use zeron_proto::computer::{
 };
 
 use super::consent::{
-    COMPUTER_APP_CONSENT_DENIED_CODE, ConsentRefusal, app_consent_refusal_result,
+    COMPUTER_APP_CONSENT_DENIED_CODE, COMPUTER_APP_WINDOW_REQUIRED_CODE, ConsentRefusal,
+    app_consent_refusal_result, app_window_required_result,
 };
 use super::progress_guard::{ComputerProgressAction, ComputerProgressOutcome, ComputerProgressScope};
 use super::results::{
@@ -273,7 +274,7 @@ impl ComputerTools {
             if raises {
                 approval_args.insert("delivery_mode".into(), json!("foreground"));
             }
-            let targets = self.consent_targets(name, args, &context.chat_id);
+            let targets = self.consent_targets(name, args, &context.chat_id).await;
             match self
                 .authorize_consent_targets(name, &approval_args, context, targets)
                 .await?
@@ -290,6 +291,19 @@ impl ComputerTools {
                     return Ok(McpToolResult::error(
                         "Computer action was denied or cancelled; no input was sent.",
                     ));
+                }
+                Some(ConsentRefusal::Unscoped { step }) => {
+                    self.audit(
+                        name,
+                        args,
+                        context,
+                        None,
+                        AuditOutcome::new(
+                            ComputerAuditEffect::Refused,
+                            Some(COMPUTER_APP_WINDOW_REQUIRED_CODE),
+                        ),
+                    );
+                    return Ok(app_window_required_result(step));
                 }
                 Some(ConsentRefusal::App { app, step }) => {
                     self.audit(

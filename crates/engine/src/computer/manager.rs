@@ -116,6 +116,10 @@ impl ComputerManagerEnv {
     }
 }
 
+pub use consent_app::{
+    COMPUTER_APP_CONSENT_REQUIRED_CODE, COMPUTER_APP_WINDOW_REQUIRED_CODE,
+    COMPUTER_APP_WINDOW_REQUIRED_MESSAGE,
+};
 pub use zeron_proto::computer::{ComputerConsentApp, ComputerConsentScope};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -134,12 +138,14 @@ pub enum ComputerConsentTarget {
     Window(String),
     Pid(u32),
     App(String),
+    Unscoped,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComputerConsent {
     Granted,
     Denied(Option<ComputerConsentApp>),
+    Unscoped,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
