@@ -126,6 +126,12 @@ struct CreateThreadParams {
     model: Option<String>,
     #[serde(default)]
     reasoning: Option<zeron_proto::ReasoningLevel>,
+    #[serde(default)]
+    space_id: Option<String>,
+    #[serde(default)]
+    sandbox: Option<zeron_proto::SandboxLevel>,
+    #[serde(default)]
+    cwd: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2009,6 +2015,9 @@ impl RpcService for EngineRpc {
                         p.harness,
                         p.model.as_deref(),
                         p.reasoning,
+                        p.space_id.as_deref(),
+                        p.sandbox,
+                        p.cwd.as_deref(),
                     )
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
@@ -3547,13 +3556,23 @@ mod tests {
             parse_params::<CreateThreadParams>(bad_harness),
             Err(RpcError::BadParams(_))
         ));
+        let mut bad_sandbox = base.clone();
+        bad_sandbox["sandbox"] = "yolo".into();
+        assert!(matches!(
+            parse_params::<CreateThreadParams>(bad_sandbox),
+            Err(RpcError::BadParams(_))
+        ));
         let p: CreateThreadParams = parse_params(serde_json::json!({
-            "fromChatId": "a", "prompt": "go", "harness": "codex", "model": "gpt-5", "reasoning": "xhigh"
+            "fromChatId": "a", "prompt": "go", "harness": "codex", "model": "gpt-5", "reasoning": "xhigh",
+            "spaceId": "s2", "sandbox": "read-only", "cwd": "/tmp"
         }))
         .unwrap();
         assert_eq!(p.harness, Some(HarnessId::Codex));
         assert_eq!(p.model.as_deref(), Some("gpt-5"));
         assert_eq!(p.reasoning, Some(zeron_proto::ReasoningLevel::XHigh));
+        assert_eq!(p.space_id.as_deref(), Some("s2"));
+        assert_eq!(p.sandbox, Some(zeron_proto::SandboxLevel::ReadOnly));
+        assert_eq!(p.cwd.as_deref(), Some("/tmp"));
     }
 
     // Each subprocess has private HOME/PATH/overrides, avoiding process-global test races.
