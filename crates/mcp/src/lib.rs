@@ -62,8 +62,6 @@ const REASONING_LEVELS: [&str; 9] = [
     "ultrathink",
 ];
 
-const SANDBOX_LEVELS: [&str; 3] = ["read-only", "workspace-write", "danger-full-access"];
-
 /// The tool catalog as `tools/list` reports it.
 pub fn tool_list() -> Value {
     let thread_id = json!({ "type": "string" });
@@ -102,7 +100,7 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "create_thread",
-            "description": "Open a new peer thread and give it `prompt` as its first message. It opens in this chat's project and folder unless `project` names another project on this device (it then runs in that project's folder) or `cwd` names an existing directory. It runs this chat's harness, model, reasoning level and sandbox unless `harness`, `model`, `reasoning` or `sandbox` pick others; picking a different harness without a `model` uses that harness's default model, and an unknown harness, model or reasoning level is an error. Returns the new thread's row as list_threads reports it; with `wait`, also `turn` once its first turn ends (see send_message_to_thread). Counts against this turn's send budget.",
+            "description": "Open a new peer thread and give it `prompt` as its first message. It opens in this chat's project and folder unless `project` names another project on this device (it then runs in that project's folder) or `cwd` names an existing directory. It runs this chat's harness, model and reasoning level unless `harness`, `model` or `reasoning` pick others; picking a different harness without a `model` uses that harness's default model, and an unknown harness, model or reasoning level is an error. Returns the new thread's row as list_threads reports it; with `wait`, also `turn` once its first turn ends (see send_message_to_thread). Counts against this turn's send budget.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -113,7 +111,6 @@ pub fn tool_list() -> Value {
                     "harness": { "type": "string", "description": "Harness id such as claude-code or codex; default: this chat's." },
                     "model": { "type": "string", "description": "Model id as the chosen harness names it (list_models); default: this chat's." },
                     "reasoning": { "type": "string", "enum": REASONING_LEVELS, "description": "Reasoning level; default: this chat's." },
-                    "sandbox": { "type": "string", "enum": SANDBOX_LEVELS, "description": "Sandbox level; default: this chat's." },
                     "wait": wait,
                     "timeoutSeconds": timeout
                 },
@@ -639,7 +636,6 @@ impl ThreadTools {
                     "model": args["model"].as_str(),
                     "reasoning": args["reasoning"].as_str(),
                     "spaceId": space_id,
-                    "sandbox": args["sandbox"].as_str(),
                     "cwd": args["cwd"].as_str(),
                 }),
             )
@@ -1823,10 +1819,6 @@ mod tests {
             serde_json::from_value::<zeron_proto::ReasoningLevel>(json!(level))
                 .unwrap_or_else(|e| panic!("{level}: {e}"));
         }
-        for level in SANDBOX_LEVELS {
-            serde_json::from_value::<zeron_proto::SandboxLevel>(json!(level))
-                .unwrap_or_else(|e| panic!("{level}: {e}"));
-        }
     }
 
     #[tokio::test]
@@ -2663,19 +2655,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_thread_resolves_a_project_on_this_device_and_passes_sandbox_and_cwd() {
+    async fn create_thread_resolves_a_project_on_this_device_and_passes_cwd() {
         let rig = rig(fixture());
         for (project, space) in [("DOCS", "s2"), ("/Users/r/app/", "s1"), ("s2", "s2")] {
             rig.tools
                 .create_thread(&json!({
-                    "prompt": "go", "project": project, "sandbox": "read-only", "cwd": "/tmp/wt"
+                    "prompt": "go", "project": project, "cwd": "/tmp/wt"
                 }))
                 .await
                 .unwrap();
             let created = logged(&rig.calls, methods::CREATE_THREAD);
             let params = created.last().unwrap();
             assert_eq!(params["spaceId"], space, "{project}");
-            assert_eq!(params["sandbox"], "read-only");
             assert_eq!(params["cwd"], "/tmp/wt");
         }
         rig.tools
@@ -2687,7 +2678,7 @@ mod tests {
             created[3]["spaceId"].is_null(),
             "default: the caller's project"
         );
-        assert!(created[3]["sandbox"].is_null() && created[3]["cwd"].is_null());
+        assert!(created[3]["cwd"].is_null());
 
         for project in ["Far", "s3", "nowhere"] {
             let err = rig

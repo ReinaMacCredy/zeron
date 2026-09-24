@@ -2787,8 +2787,8 @@ impl DocHost {
     }
 
     /// Thread tools: open a peer chat in the creator's project (its cwd and
-    /// run configuration, with any of harness/model/reasoning/sandbox
-    /// overridden if asked) or in another project on the creator's device
+    /// run configuration, with any of harness/model/reasoning overridden if
+    /// asked) or in another project on the creator's device
     /// (that project's folder), stamped `createdByChatId`, and hand it
     /// `prompt` as a message from the creator. `cwd` overrides the folder
     /// with an existing directory.
@@ -2802,7 +2802,6 @@ impl DocHost {
         model: Option<&str>,
         reasoning: Option<zeron_proto::ReasoningLevel>,
         space_id: Option<&str>,
-        sandbox: Option<zeron_proto::SandboxLevel>,
         cwd: Option<&str>,
     ) -> Result<String, EngineError> {
         let workspace = self
@@ -2841,7 +2840,7 @@ impl DocHost {
         }
         let mut config = from.config.clone();
         let model = model.map(str::trim).filter(|model| !model.is_empty());
-        if harness.is_some() || model.is_some() || reasoning.is_some() || sandbox.is_some() {
+        if harness.is_some() || model.is_some() || reasoning.is_some() {
             let config = config.get_or_insert_with(|| zeron_proto::ChatConfig {
                 harness: self.inner.config.default_harness,
                 model: None,
@@ -2864,9 +2863,6 @@ impl DocHost {
             }
             if let Some(reasoning) = reasoning {
                 config.reasoning = Some(reasoning);
-            }
-            if let Some(sandbox) = sandbox {
-                config.sandbox = sandbox;
             }
         }
         let chat_id = new_id();

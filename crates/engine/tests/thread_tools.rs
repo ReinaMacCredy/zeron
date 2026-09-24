@@ -240,7 +240,6 @@ async fn create_thread_opens_a_peer_whose_first_turn_is_a_message_from_its_creat
             None,
             None,
             None,
-            None,
         )
         .await
         .expect("create thread");
@@ -321,7 +320,6 @@ async fn create_thread_picks_the_peers_run_settings_and_copies_the_creators_othe
             Some(ReasoningLevel::Low),
             None,
             None,
-            None,
         )
         .await
         .unwrap();
@@ -338,7 +336,7 @@ async fn create_thread_picks_the_peers_run_settings_and_copies_the_creators_othe
     let copied = rig
         .core
         .doc_host
-        .create_thread("picky", "task", None, None, None, None, None, None, None)
+        .create_thread("picky", "task", None, None, None, None, None, None)
         .await
         .unwrap();
     assert_eq!(config_of(&copied), Some(creators.clone()));
@@ -353,7 +351,6 @@ async fn create_thread_picks_the_peers_run_settings_and_copies_the_creators_othe
             "task",
             None,
             Some(HarnessId::Codex),
-            None,
             None,
             None,
             None,
@@ -381,7 +378,6 @@ async fn create_thread_picks_the_peers_run_settings_and_copies_the_creators_othe
             None,
             None,
             None,
-            None,
         )
         .await
         .unwrap();
@@ -395,17 +391,7 @@ async fn create_thread_picks_the_peers_run_settings_and_copies_the_creators_othe
     let from_bare = rig
         .core
         .doc_host
-        .create_thread(
-            "lead",
-            "task",
-            None,
-            None,
-            Some("rec-3"),
-            None,
-            None,
-            None,
-            None,
-        )
+        .create_thread("lead", "task", None, None, Some("rec-3"), None, None, None)
         .await
         .unwrap();
     let config = config_of(&from_bare).expect("a config row");
@@ -441,7 +427,6 @@ async fn create_thread_can_open_in_another_project_on_the_device_or_an_existing_
             None,
             None,
             Some("space-other"),
-            Some(SandboxLevel::ReadOnly),
             None,
         )
         .await
@@ -450,10 +435,6 @@ async fn create_thread_can_open_in_another_project_on_the_device_or_an_existing_
     assert_eq!(moved.space_id.as_deref(), Some("space-other"));
     assert_eq!(moved.cwd.as_deref(), Some(other_path.as_str()));
     assert_eq!(moved.device_id, "dev-a");
-    assert_eq!(
-        moved.config.map(|c| c.sandbox),
-        Some(SandboxLevel::ReadOnly)
-    );
 
     let nested = other.path().join("wt");
     std::fs::create_dir(&nested).unwrap();
@@ -463,7 +444,6 @@ async fn create_thread_can_open_in_another_project_on_the_device_or_an_existing_
         .create_thread(
             "lead",
             "task",
-            None,
             None,
             None,
             None,
@@ -486,7 +466,7 @@ async fn create_thread_can_open_in_another_project_on_the_device_or_an_existing_
         let err = rig
             .core
             .doc_host
-            .create_thread("lead", "task", None, None, None, None, space, None, cwd)
+            .create_thread("lead", "task", None, None, None, None, space, cwd)
             .await
             .expect_err(expected);
         assert!(err.to_string().contains(expected), "{err}");
@@ -560,17 +540,7 @@ async fn a_message_to_a_working_peer_steers_its_turn_when_the_agent_takes_mid_tu
     let peer = rig
         .core
         .doc_host
-        .create_thread(
-            "lead",
-            "first task",
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        .create_thread("lead", "first task", None, None, None, None, None, None)
         .await
         .unwrap();
     wait_for(
@@ -625,17 +595,7 @@ async fn a_message_to_a_working_peer_waits_and_take_moves_it_into_the_transcript
     let peer = rig
         .core
         .doc_host
-        .create_thread(
-            "lead",
-            "first task",
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        .create_thread("lead", "first task", None, None, None, None, None, None)
         .await
         .unwrap();
     wait_for(
@@ -797,7 +757,6 @@ async fn the_creation_budget_refuses_the_ninth_open_thread() {
                 None,
                 None,
                 None,
-                None,
             )
             .await
             .unwrap_or_else(|e| panic!("thread {n}: {e}"));
@@ -805,17 +764,7 @@ async fn the_creation_budget_refuses_the_ninth_open_thread() {
     let err = rig
         .core
         .doc_host
-        .create_thread(
-            "lead",
-            "one too many",
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        .create_thread("lead", "one too many", None, None, None, None, None, None)
         .await
         .expect_err("ninth");
     assert!(err.to_string().contains("8 open threads"), "{err}");
