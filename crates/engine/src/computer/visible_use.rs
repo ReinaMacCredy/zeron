@@ -880,6 +880,7 @@ mod tests {
             from_chat_id: None,
             fork_import: false,
             answers_request_id: None,
+            duration_ms: None,
         }
     }
 

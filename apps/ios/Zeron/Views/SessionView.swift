@@ -15,6 +15,7 @@ struct SessionView: View {
     /// overflow menu (where a custom text stack renders as nothing) — seen on
     /// iPhone Air at 110.
     private static let headerChromeInset: CGFloat = 170
+    private static let topFadeHeight: CGFloat = 28
 
     /// The view's own width, the only reliable basis for capping the principal
     /// toolbar item (its container proposes an unbounded width).
@@ -83,6 +84,7 @@ struct SessionView: View {
             }
         }
         .onAppear {
+            model.attachSessionView(chatId: chatId)
             model.markSeen(chatId: chatId)
         }
         .onDisappear {
@@ -124,7 +126,7 @@ struct SessionView: View {
                 }
             VStack(spacing: 0) {
                 if verticalSizeClass != .compact || status == .working || status == .errored
-                    || model.sendState(for: chat) != nil {
+                    || model.sendState(for: chat) != nil || model.connectivity.state != .connected {
                     statusStrip(chat: chat, status: status, store: store)
                         .allowsHitTesting(model.sendState(for: chat) == .failed)
                 }
@@ -157,16 +159,17 @@ struct SessionView: View {
         .background(Theme.bg.ignoresSafeArea())
         .overlay {
             GeometryReader { geometry in
-                let fadeHeight = min(64, geometry.safeAreaInsets.top)
+                // The bar stays opaque so the header never collides with rows
+                // scrolling under it; the fade lives just below the bar.
                 VStack(spacing: 0) {
-                    Theme.bg.frame(height: geometry.safeAreaInsets.top - fadeHeight)
+                    Theme.bg.frame(height: geometry.safeAreaInsets.top)
                     LinearGradient(stops: [
                         .init(color: Theme.bg, location: 0),
-                        .init(color: Theme.bg.opacity(0.96), location: 0.5),
-                        .init(color: Theme.bg.opacity(0.8), location: 0.75),
+                        .init(color: Theme.bg.opacity(0.85), location: 0.35),
+                        .init(color: Theme.bg.opacity(0.45), location: 0.7),
                         .init(color: Theme.bg.opacity(0), location: 1),
                     ], startPoint: .top, endPoint: .bottom)
-                        .frame(height: fadeHeight)
+                        .frame(height: Self.topFadeHeight)
                 }
                 .offset(y: -geometry.safeAreaInsets.top)
             }
@@ -234,13 +237,30 @@ struct SessionView: View {
                             .foregroundStyle(Theme.textMuted)
                     }
                 case nil:
-                    normalStatus(chat: chat, status: status)
+                    switch model.connectivity.state {
+                    case .offline:
+                        Circle().fill(Theme.warning).frame(width: 5, height: 5)
+                        Text("Offline — sends are saved")
+                            .font(Theme.sans(11)).foregroundStyle(Theme.textFaint)
+                    case .reconnecting:
+                        ProgressView().controlSize(.mini).tint(Theme.textMuted)
+                        Text(reconnectingLabel)
+                            .font(Theme.sans(11)).foregroundStyle(Theme.textFaint).monospacedDigit()
+                    case .connected:
+                        normalStatus(chat: chat, status: status)
+                    }
                 }
             }
             .frame(height: 24)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.leading, 26)  // aligns with the composer's text start
         }
+    }
+
+    private var reconnectingLabel: String {
+        guard let retryAt = model.connectivity.retryAt else { return "Reconnecting…" }
+        let secs = Int(retryAt.timeIntervalSinceNow.rounded(.up))
+        return secs > 1 ? "Reconnecting in \(secs)s…" : "Reconnecting…"
     }
 
     @ViewBuilder

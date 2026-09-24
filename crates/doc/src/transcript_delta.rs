@@ -364,6 +364,7 @@ mod tests {
             from_chat_id: None,
             fork_import: false,
             answers_request_id: None,
+            duration_ms: None,
         }
     }
 
@@ -550,6 +551,7 @@ mod context_update_tests {
             from_chat_id: None,
             fork_import: false,
             answers_request_id: None,
+            duration_ms: None,
         };
         let baseline = TranscriptBaseline::capture(&[entry.clone()]);
         assert!(baseline.covers(&entry));

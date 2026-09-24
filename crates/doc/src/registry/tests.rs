@@ -1323,3 +1323,254 @@ fn completion_marker_replicates_and_survives_next_turn() {
     server_round(&mut server, &mut seq, &mut [&mut source, &mut viewer]);
     assert_eq!(viewer.read_sessions().unwrap(), vec![row]);
 }
+
+fn section_change(doc: &mut RegistryDoc, change: zeron_proto::SidebarSectionChange) {
+    doc.change_sidebar_pin(&zeron_proto::SidebarPinChange::Section { change })
+        .unwrap();
+}
+
+#[test]
+fn sidebar_sections_sync_metadata_membership_and_delete_without_deleting_sessions() {
+    use zeron_proto::SidebarSectionChange::*;
+    let mut a = RegistryDoc::new("a");
+    let mut b = RegistryDoc::new("b");
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    pin_sessions(&mut a, &["session"]);
+    section_change(
+        &mut a,
+        Create {
+            id: "focus".into(),
+            name: "Focus".into(),
+        },
+    );
+    section_change(
+        &mut a,
+        Assign {
+            session_id: "session".into(),
+            section_id: Some("focus".into()),
+        },
+    );
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    let prefs = b.sidebar_preferences().unwrap();
+    assert!(prefs.pinned_session_ids.is_empty());
+    assert_eq!(prefs.sections[0].session_ids, ["session"]);
+    section_change(
+        &mut b,
+        Rename {
+            id: "focus".into(),
+            name: "Today".into(),
+        },
+    );
+    section_change(
+        &mut a,
+        Collapse {
+            id: "focus".into(),
+            collapsed: true,
+        },
+    );
+    server_round(&mut server, &mut seq, &mut [&mut b, &mut a]);
+    let prefs = a.sidebar_preferences().unwrap();
+    assert_eq!(prefs, b.sidebar_preferences().unwrap());
+    assert_eq!(prefs.sections[0].name, "Today");
+    assert!(prefs.sections[0].collapsed);
+    let mut archived = a.chat("session").unwrap().unwrap();
+    archived.archived = true;
+    a.upsert_chat(&archived).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert_eq!(
+        b.sidebar_preferences().unwrap().sections[0].session_ids,
+        ["session"]
+    );
+    section_change(&mut b, Delete { id: "focus".into() });
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert!(a.sidebar_preferences().unwrap().sections.is_empty());
+    assert!(a.chat("session").unwrap().is_some());
+}
+
+#[test]
+fn sidebar_sections_concurrent_pin_and_section_moves_converge() {
+    use zeron_proto::{SidebarPinChange, SidebarSectionChange::*};
+    for reverse in [false, true] {
+        let mut a = RegistryDoc::new("a");
+        let mut b = RegistryDoc::new("b");
+        let mut server = HashMap::new();
+        let mut seq = 0;
+        pin_sessions(&mut a, &["session"]);
+        for id in ["focus", "later"] {
+            section_change(
+                &mut a,
+                Create {
+                    id: id.into(),
+                    name: id.into(),
+                },
+            );
+        }
+        server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+        section_change(
+            &mut a,
+            Assign {
+                session_id: "session".into(),
+                section_id: Some("focus".into()),
+            },
+        );
+        section_change(
+            &mut b,
+            Assign {
+                session_id: "session".into(),
+                section_id: Some("later".into()),
+            },
+        );
+        if reverse {
+            server_round(&mut server, &mut seq, &mut [&mut b, &mut a]);
+        } else {
+            server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+        }
+        let prefs = a.sidebar_preferences().unwrap();
+        assert_eq!(prefs, b.sidebar_preferences().unwrap());
+        assert_eq!(
+            prefs
+                .sections
+                .iter()
+                .map(|s| s.session_ids.len())
+                .sum::<usize>(),
+            1
+        );
+        a.change_sidebar_pin(&SidebarPinChange::Pin {
+            session_id: "session".into(),
+            after: None,
+            before: None,
+        })
+        .unwrap();
+        section_change(
+            &mut b,
+            Assign {
+                session_id: "session".into(),
+                section_id: Some("focus".into()),
+            },
+        );
+        if reverse {
+            server_round(&mut server, &mut seq, &mut [&mut b, &mut a]);
+        } else {
+            server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+        }
+        let prefs = a.sidebar_preferences().unwrap();
+        assert_eq!(prefs, b.sidebar_preferences().unwrap());
+        assert_eq!(
+            prefs.pinned_session_ids.len()
+                + prefs
+                    .sections
+                    .iter()
+                    .map(|s| s.session_ids.len())
+                    .sum::<usize>(),
+            1
+        );
+    }
+}
+
+#[test]
+fn sidebar_sections_migration_is_replay_safe_and_preserves_newer_remote_intent() {
+    use zeron_proto::SidebarSectionChange::*;
+    let mut a = RegistryDoc::new("a");
+    let mut b = RegistryDoc::new("b");
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    a.upsert_chat(&chat("session", "a")).unwrap();
+    let import = Import {
+        sections: vec![zeron_proto::SidebarSection {
+            id: "focus".into(),
+            name: "Focus".into(),
+            collapsed: true,
+            session_ids: vec!["session".into()],
+        }],
+    };
+    section_change(&mut a, import.clone());
+    // Offline outbox survives restart before it reaches the other device.
+    let mut a = RegistryDoc::from_bytes(&a.to_bytes().unwrap(), "a").unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert!(b.sidebar_preferences().unwrap().sections[0].collapsed);
+    section_change(
+        &mut b,
+        Assign {
+            session_id: "session".into(),
+            section_id: None,
+        },
+    );
+    section_change(
+        &mut b,
+        Rename {
+            id: "focus".into(),
+            name: "Renamed".into(),
+        },
+    );
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    section_change(&mut a, import.clone());
+    assert_eq!(a.sidebar_preferences().unwrap().sections[0].name, "Renamed");
+    assert!(
+        a.sidebar_preferences().unwrap().sections[0]
+            .session_ids
+            .is_empty()
+    );
+    section_change(&mut b, Delete { id: "focus".into() });
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    section_change(&mut a, import);
+    assert!(a.sidebar_preferences().unwrap().sections.is_empty());
+    assert!(a.chat("session").unwrap().is_some());
+}
+
+#[test]
+fn sidebar_sections_honor_pin_toggles_from_older_clients() {
+    use zeron_proto::SidebarSectionChange::*;
+    let mut doc = RegistryDoc::new("a");
+    pin_sessions(&mut doc, &["session"]);
+    section_change(
+        &mut doc,
+        Create {
+            id: "focus".into(),
+            name: "Focus".into(),
+        },
+    );
+    section_change(
+        &mut doc,
+        Assign {
+            session_id: "session".into(),
+            section_id: Some("focus".into()),
+        },
+    );
+    assert!(
+        doc.sidebar_preferences()
+            .unwrap()
+            .pinned_session_ids
+            .is_empty()
+    );
+    // An older client still only writes the existing per-pin fields.
+    doc.write(
+        KIND_SIDEBAR_PINS,
+        "session",
+        OpKind::Upsert,
+        fields([("pinned", json!(true))]),
+    );
+    let prefs = doc.sidebar_preferences().unwrap();
+    assert_eq!(prefs.pinned_session_ids, ["session"]);
+    assert!(prefs.sections[0].session_ids.is_empty());
+    doc.write(
+        KIND_SIDEBAR_PINS,
+        "session",
+        OpKind::Upsert,
+        fields([("pinned", json!(false))]),
+    );
+    let prefs = doc.sidebar_preferences().unwrap();
+    assert!(prefs.pinned_session_ids.is_empty());
+    assert!(prefs.sections[0].session_ids.is_empty());
+    section_change(
+        &mut doc,
+        Assign {
+            session_id: "session".into(),
+            section_id: Some("focus".into()),
+        },
+    );
+    assert_eq!(
+        doc.sidebar_preferences().unwrap().sections[0].session_ids,
+        ["session"]
+    );
+}

@@ -92,6 +92,8 @@ pub struct BrowserSurface {
     presentation: Presentation,
     #[cfg(target_os = "macos")]
     resize_inset: gpui::Pixels,
+    #[cfg(target_os = "macos")]
+    right_occlusion: gpui::Pixels,
     _input_sub: Subscription,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     native: Option<native::NativePage>,
@@ -168,6 +170,8 @@ impl BrowserSurface {
             presentation: Presentation::Hidden,
             #[cfg(target_os = "macos")]
             resize_inset: gpui::px(0.0),
+            #[cfg(target_os = "macos")]
+            right_occlusion: gpui::px(0.0),
             _input_sub: input_sub,
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             native: None,
@@ -217,6 +221,15 @@ impl BrowserSurface {
     pub fn set_resize_inset(&mut self, inset: gpui::Pixels, cx: &mut Context<Self>) {
         if self.resize_inset != inset {
             self.resize_inset = inset;
+            cx.notify();
+        }
+    }
+
+    /// Crop a GPUI overlay out of both native painting and native hit testing.
+    #[cfg(target_os = "macos")]
+    pub fn set_right_occlusion(&mut self, width: gpui::Pixels, cx: &mut Context<Self>) {
+        if self.right_occlusion != width {
+            self.right_occlusion = width;
             cx.notify();
         }
     }
@@ -487,12 +500,17 @@ impl BrowserSurface {
                     return;
                 }
                 let generation = self.favicon_generation;
+                // reqwest's system proxy has no loopback exemption; a local dev
+                // server's favicon must be fetched directly.
+                let direct = url::Url::parse(&url).is_ok_and(|parsed| model::loopback(&parsed));
                 let download = gpui_tokio::Tokio::spawn(cx, async move {
-                    let client = reqwest::Client::builder()
+                    let mut builder = reqwest::Client::builder()
                         .timeout(std::time::Duration::from_secs(5))
-                        .redirect(reqwest::redirect::Policy::limited(3))
-                        .build()
-                        .ok()?;
+                        .redirect(reqwest::redirect::Policy::limited(3));
+                    if direct {
+                        builder = builder.no_proxy();
+                    }
+                    let client = builder.build().ok()?;
                     let mut response =
                         client.get(url).send().await.ok()?.error_for_status().ok()?;
                     if response.content_length().is_some_and(|n| n > 1024 * 1024) {

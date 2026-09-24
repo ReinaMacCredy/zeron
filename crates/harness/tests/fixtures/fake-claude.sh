@@ -13,6 +13,12 @@ emit() { printf '%s\n' "$1"; }
 
 case "$first" in
 
+*scenario:command-echo*)
+  content=$(printf '%s\n' "$first" | sed 's/.*"content":"\([^"]*\)".*/\1/')
+  emit "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"$content\"}}}"
+  emit '{"type":"result","subtype":"success","result":"echoed","usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-command-echo"}'
+  ;;
+
 *scenario:title*)
   tools_off=false
   system_set=false
@@ -173,6 +179,12 @@ case "$first" in
   ;;
 
 *'"subtype":"initialize"'*)
+  if [ -f .command-fixture ]; then
+    rid=$(printf '%s' "$first" | sed 's/.*"request_id":"\([^"]*\)".*/\1/')
+    name=$(cat .command-fixture)
+    emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$rid\",\"response\":{\"commands\":[{\"name\":\"$name\"}]}}}"
+    exec sleep 30
+  fi
   # Command discovery: the initialize control request arrives as the FIRST
   # stdin line (no user message ever follows). Shape mirrors 2.1.228's
   # control_response: commands under response.response.

@@ -36,22 +36,24 @@ struct TranscriptView: View {
             }
             .modifier(TranscriptViewportProbe(chatId: chatId))
             .background(Theme.bg)
-            .overlay(alignment: .bottomTrailing) {
+            .overlay(alignment: .bottom) {
                 if scroll.showJump {
                     Button {
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
                         scroll.arm()
                         scroll.jumpToLatest?(!reduceMotion)
                     } label: {
                         Image(systemName: "arrow.down")
-                            .font(.system(size: 16, weight: .medium))
+                            .font(.system(size: 15, weight: .medium))
                             .foregroundStyle(Theme.text)
-                            .frame(width: 44, height: 44)
+                            .frame(width: 40, height: 40)
                     }
                     .glassEffect(.regular.interactive(), in: Circle())
+                    .shadow(color: .black.opacity(0.35), radius: 8, y: 2)
                     .accessibilityLabel("Jump to latest")
                     .accessibilityIdentifier("jump-to-latest")
                     .padding(12)
-                    .transition(.opacity)
+                    .transition(.opacity.combined(with: .scale(scale: 0.9)))
                 }
             }
             .motionAnimation(Motion.fadeQuick, value: scroll.showJump)

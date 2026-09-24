@@ -29,6 +29,7 @@ final class WorkspaceStore {
     private(set) var presence: [String: Int64] = [:]  // deviceId → last beat ms
     private(set) var changeRequestSnapshots: [ChangeRequestWatchKey: CheckoutChangeRequestStatus] = [:]
     private(set) var connected = false
+    private(set) var retryAt: Date?
     /// True once ANY transport delivered server state this session (socket
     /// state frame or HTTPS pull). Drives the "connecting" spinner: with the
     /// pull-first bootstrap this flips in ~1 round trip, while the socket
@@ -229,6 +230,7 @@ final class WorkspaceStore {
         case .connected:
             let reconnected = !connected
             connected = true
+            retryAt = nil
             registryJoinedAt = nowMs()
             if reconnected {
                 restartChangeRequestStreams(resetUnsupported: true)
@@ -252,8 +254,9 @@ final class WorkspaceStore {
         case .presence(let device, let at):
             presence[device] = at
             presenceReceivedAt[device] = nowMs()
-        case .disconnected:
+        case .disconnected(let retryAfterMs):
             connected = false
+            retryAt = Date().addingTimeInterval(TimeInterval(retryAfterMs) / 1_000)
             registryJoinedAt = nil
             doc.markDisconnected()
         }
@@ -563,7 +566,7 @@ final class WorkspaceStore {
         do {
             return try await listFoldersDetailed(deviceId: deviceId, path: path)
         } catch {
-            lastRelayError = error.localizedDescription
+            lastRelayError = describeTransportError(error)
             return nil
         }
     }
@@ -655,16 +658,19 @@ final class WorkspaceStore {
                 .call(method: "SwitchRef", params: ["repoPath": repoPath, "refName": refName])
             return nil
         } catch {
-            return error.localizedDescription
+            return describeTransportError(error)
         }
     }
 
     /// CreateWorktree — a fresh isolated worktree off the base ref; returns
     /// its path.
-    func createWorktree(deviceId: String, repoPath: String, branch: String) async -> String? {
+    func createWorktree(deviceId: String, spaceId: String,
+                        repoPath: String, branch: String) async -> String? {
         struct Reply: Decodable { var path: String }
         let reply: Reply? = try? await relay(for: deviceId)
-            .call(method: "CreateWorktree", params: ["repoPath": repoPath, "branch": branch])
+            .call(method: "CreateWorktree", params: ["repoPath": repoPath,
+                                                       "branch": branch,
+                                                       "spaceId": spaceId])
         return reply?.path
     }
 

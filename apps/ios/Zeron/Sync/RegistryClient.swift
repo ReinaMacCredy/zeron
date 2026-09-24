@@ -18,6 +18,8 @@
 import Foundation
 import os
 
+private struct RegistrySendTimeout: Error {}
+
 enum RegistryEvent: Sendable {
     /// The hello's `state` answer (also a late duplicate — applying twice is
     /// harmless and simpler than special-casing).
@@ -32,7 +34,7 @@ enum RegistryEvent: Sendable {
     /// A remote device's presence beat.
     case presence(device: String, at: Int64)
     /// The connection dropped; unacked batches become pushable again.
-    case disconnected
+    case disconnected(retryAfterMs: Int)
 }
 
 actor RegistryClient {
@@ -228,12 +230,13 @@ actor RegistryClient {
         guard gen == generation, !closed else { return }
         roomLog.warning("registry: session ended (joined=\(self.joined)); redialing in \(self.backoffMs)ms")
         joined = false
-        await delegate.event(.disconnected)
-        scheduleReconnect(gen: gen)
+        let retryAfterMs = scheduleReconnect(gen: gen)
+        await delegate.event(.disconnected(retryAfterMs: retryAfterMs))
     }
 
-    private func scheduleReconnect(gen: Int) {
-        guard gen == generation, !closed else { return }
+    @discardableResult
+    private func scheduleReconnect(gen: Int) -> Int {
+        guard gen == generation, !closed else { return 0 }
         socket?.cancel(with: .abnormalClosure, reason: nil)
         socket = nil
         cancelTasks()
@@ -253,6 +256,7 @@ actor RegistryClient {
             await OnlineBus.shared.waitBackoff(ms: delay)
             self.connect()
         }
+        return delay
     }
 
     // MARK: Timers
@@ -265,7 +269,7 @@ actor RegistryClient {
             await onSocketError(gen: gen)
             return
         }
-        try? await socket.send(.string("ping"))
+        await sendSocket(.string("ping"), socket: socket, gen: gen)
     }
 
     private func presenceTick(gen: Int) async {
@@ -316,7 +320,7 @@ actor RegistryClient {
         } catch {
             // Protocol breakdown — same as the Rust client: redial rather
             // than run blind against a server we can't parse.
-            roomLog.error("registry: unparseable frame (\(String(describing: error), privacy: .public)); redialing")
+            roomLog.error("registry: unparseable frame (\(describeTransportError(error), privacy: .public)); redialing")
             await onSocketError(gen: gen)
             return
         }
@@ -373,7 +377,29 @@ actor RegistryClient {
     private func send(_ frame: some Encodable) async {
         guard let socket, let data = try? JSONEncoder().encode(frame),
               let text = String(data: data, encoding: .utf8) else { return }
-        try? await socket.send(.string(text))
+        await sendSocket(.string(text), socket: socket, gen: generation)
+    }
+
+    private func sendSocket(_ message: URLSessionWebSocketTask.Message,
+                            socket: URLSessionWebSocketTask, gen: Int) async {
+        do {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask {
+                    try await socket.send(message)
+                }
+                group.addTask {
+                    try await Task.sleep(nanoseconds: RegistryClient.silenceLeaseNs)
+                    socket.cancel(with: .goingAway, reason: nil)
+                    throw RegistrySendTimeout()
+                }
+                defer { group.cancelAll() }
+                try await group.next()
+            }
+        } catch {
+            guard gen == generation, !closed else { return }
+            roomLog.error("registry: websocket send failed (\(describeTransportError(error), privacy: .public)); redialing")
+            await onSocketError(gen: gen)
+        }
     }
 }
 

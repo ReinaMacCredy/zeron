@@ -34,6 +34,7 @@
 //!   interrupt control request, then escalates to SIGTERM and SIGKILL.
 
 pub mod catalog;
+mod discovery;
 mod normalize;
 mod wire;
 
@@ -49,13 +50,13 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
 use zeron_proto::{
-    AgentEvent, Compaction, DoneStatus, HarnessId, Model, ModelOption, ReasoningLevel, RunRequest,
+    AgentEvent, Compaction, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest,
     SlashCommand, SlashCommandKind, SteeringMode, UserInputAnswer, UserInputQuestion,
 };
 
 use crate::process::{Child, ChildStdin, Command, Stdio};
 use crate::{Harness, HarnessError, RunControls, Signal, send_signal, shutdown_child};
-use catalog::{apply_ultrathink, static_models, to_effort};
+use catalog::{apply_ultrathink, to_effort};
 use normalize::Normalizer;
 use wire::{ControlRequestFrame, Frame, allow_response, control_response_line};
 
@@ -95,9 +96,9 @@ pub struct ClaudeHarness {
     kill_grace: Duration,
     /// Command discovery cache: only a successful probe is cached, so a
     /// broken CLI retries on the next picker open (ACP-harness parity).
-    commands: tokio::sync::OnceCell<Vec<SlashCommand>>,
-    /// Keyed on the installed build (see `cli_fingerprint`).
-    models: tokio::sync::Mutex<Option<(String, Vec<Model>)>>,
+    initialize: discovery::InitializeCache,
+    models_cache: crate::catalog::Catalog,
+    workspace_commands: crate::skills::CommandDiscovery,
 }
 
 impl Default for ClaudeHarness {
@@ -106,8 +107,9 @@ impl Default for ClaudeHarness {
             executable: None,
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_secs(3),
-            commands: tokio::sync::OnceCell::new(),
-            models: tokio::sync::Mutex::new(None),
+            initialize: discovery::InitializeCache::default(),
+            models_cache: crate::catalog::Catalog::default(),
+            workspace_commands: crate::skills::CommandDiscovery::default(),
         }
     }
 }
@@ -130,27 +132,24 @@ impl ClaudeHarness {
         self
     }
 
-    /// Skill names for the `$name` rewrite. The picker's list is reused when
-    /// it was already probed (opening the `$` popup probes it); otherwise the
-    /// probe runs only when the prompt carries a `$` at all, so an ordinary
-    /// first turn never waits on it.
+    /// Skill names for the `$name` rewrite. The probe runs only when the
+    /// prompt carries a `$` at all, so an ordinary first turn never waits on
+    /// it; the initialize response it reads is cached.
     async fn skill_names(&self, prompt: &str) -> Vec<String> {
-        let commands = match self.commands.get() {
-            Some(commands) => commands.clone(),
-            None if !prompt.contains('$') => return Vec::new(),
-            None => match self.commands().await {
-                Ok(commands) => commands,
-                Err(error) => {
-                    tracing::debug!(%error, "skill probe failed; `$` mentions sent as typed");
-                    return Vec::new();
-                }
-            },
-        };
-        commands
-            .into_iter()
-            .filter(|command| command.kind == SlashCommandKind::Skill)
-            .map(|command| command.name)
-            .collect()
+        if !prompt.contains('$') {
+            return Vec::new();
+        }
+        match self.commands().await {
+            Ok(commands) => commands
+                .into_iter()
+                .filter(|command| command.kind == SlashCommandKind::Skill)
+                .map(|command| command.name)
+                .collect(),
+            Err(error) => {
+                tracing::debug!(%error, "skill probe failed; `$` mentions sent as typed");
+                Vec::new()
+            }
+        }
     }
 
     fn resolve_executable(&self) -> Result<PathBuf, HarnessError> {
@@ -296,20 +295,34 @@ impl ClaudeHarness {
         cmd
     }
 
-    /// Short-lived discovery probe: spawn the CLI in stream-json mode, send
-    /// the `initialize` control request, and read the commands out of its
-    /// control_response. No user message is ever written, so no turn (and no
-    /// API call) happens; the child is torn down as soon as the response
-    /// lands.
-    /// Sequential, not batched: the CLI wires its control handlers during
-    /// `initialize` (live-verified on 2.1.280). Neither probe costs a turn.
-    async fn control_probe(
+    /// Share the complete initialize response between model and command discovery.
+    /// No user message is written; the short-lived child is retired after initialize.
+    async fn initialize(&self) -> Result<Value, HarnessError> {
+        self.initialize
+            .get(
+                || self.model_context().map(|c| c.unwrap().key()),
+                || self.probe_initialize(None),
+            )
+            .await
+    }
+
+    async fn discover_commands(
         &self,
-        requests: &[Value],
-        timeout: Duration,
-    ) -> Result<Vec<Result<Value, String>>, HarnessError> {
+        cwd: Option<&std::path::Path>,
+    ) -> Result<Vec<SlashCommand>, HarnessError> {
+        let response = match cwd {
+            Some(cwd) => self.probe_initialize(Some(cwd)).await?,
+            None => self.initialize().await?,
+        };
+        Ok(parse_initialize_commands(&response))
+    }
+
+    async fn probe_initialize(&self, cwd: Option<&std::path::Path>) -> Result<Value, HarnessError> {
         let exe = self.resolve_executable()?;
         let mut cmd = Command::new(&exe);
+        if let Some(cwd) = cwd {
+            cmd.current_dir(cwd);
+        }
         crate::compose_child_path(&mut cmd, &exe);
         cmd.args([
             "--print",
@@ -327,7 +340,7 @@ impl ClaudeHarness {
             .kill_on_drop(true);
         let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                HarnessError::NotInstalled(exe.display().to_string())
+                HarnessError::NotInstalled(crate::executable::binary_hint(&exe))
             } else {
                 HarnessError::Io(e)
             }
@@ -336,111 +349,49 @@ impl ClaudeHarness {
             shutdown_child(&mut child, self.kill_grace).await;
             return Err(HarnessError::Protocol("claude child has no stdio".into()));
         };
-        let exchange = async {
+        const PROBE_ID: &str = "zeron-command-probe";
+        let discovery = async {
+            let request = serde_json::json!({
+                "type": "control_request",
+                "request_id": PROBE_ID,
+                "request": { "subtype": "initialize" },
+            });
+            stdin
+                .write_all(format!("{request}\n").as_bytes())
+                .await
+                .map_err(HarnessError::Io)?;
+            stdin.flush().await.map_err(HarnessError::Io)?;
             let mut lines = BufReader::new(stdout).lines();
-            let mut answers = Vec::with_capacity(requests.len());
-            for (index, request) in requests.iter().enumerate() {
-                let id = format!("zeron-probe-{index}");
-                let frame = serde_json::json!({
-                    "type": "control_request",
-                    "request_id": id,
-                    "request": request,
-                });
-                stdin
-                    .write_all(format!("{frame}\n").as_bytes())
-                    .await
-                    .map_err(HarnessError::Io)?;
-                stdin.flush().await.map_err(HarnessError::Io)?;
-                let mut answer = None;
-                while let Some(line) = lines.next_line().await.map_err(HarnessError::Io)? {
-                    let Ok(frame) = serde_json::from_str::<Value>(&line) else {
-                        continue;
-                    };
-                    if frame.get("type").and_then(Value::as_str) != Some("control_response") {
-                        continue;
-                    }
-                    let response = frame.get("response").cloned().unwrap_or(Value::Null);
-                    if response.get("request_id").and_then(Value::as_str) != Some(id.as_str()) {
-                        continue;
-                    }
-                    answer = Some(
-                        if response.get("subtype").and_then(Value::as_str) == Some("error") {
-                            Err(response
-                                .get("error")
-                                .and_then(Value::as_str)
-                                .unwrap_or("control request failed")
-                                .to_owned())
-                        } else {
-                            Ok(response)
-                        },
-                    );
-                    break;
-                }
-                let Some(answer) = answer else {
-                    return Err(HarnessError::Protocol(
-                        "claude exited before answering a control request".into(),
-                    ));
+            while let Some(line) = lines.next_line().await.map_err(HarnessError::Io)? {
+                let Ok(frame) = serde_json::from_str::<Value>(&line) else {
+                    continue;
                 };
-                answers.push(answer);
+                if frame.get("type").and_then(Value::as_str) != Some("control_response") {
+                    continue;
+                }
+                let response = frame.get("response").cloned().unwrap_or(Value::Null);
+                if response.get("request_id").and_then(Value::as_str) != Some(PROBE_ID) {
+                    continue;
+                }
+                if response.get("subtype").and_then(Value::as_str) == Some("error") {
+                    let msg = response
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or("initialize control request failed");
+                    return Err(HarnessError::Protocol(msg.into()));
+                }
+                return Ok(response);
             }
-            Ok(answers)
+            Err(HarnessError::Protocol(
+                "claude exited before answering the initialize control request".into(),
+            ))
         };
-        let result = tokio::time::timeout(timeout, exchange).await;
+        let result = tokio::time::timeout(Duration::from_secs(10), discovery).await;
         shutdown_child(&mut child, self.kill_grace).await;
         match result {
             Ok(inner) => inner,
-            Err(_) => Err(HarnessError::Protocol("claude probe timed out".into())),
+            Err(_) => Err(HarnessError::Protocol("Claude initialize timed out".into())),
         }
-    }
-
-    async fn discover_commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
-        let initialize = serde_json::json!({ "subtype": "initialize" });
-        let mut answers = self
-            .control_probe(std::slice::from_ref(&initialize), Duration::from_secs(10))
-            .await?;
-        match answers.remove(0) {
-            Ok(response) => Ok(parse_initialize_commands(&response)),
-            Err(error) => Err(HarnessError::Protocol(error)),
-        }
-    }
-
-    /// A curated model the CLI stopped advertising is kept only while
-    /// `set_model` still resolves it, so a retired model drops out on its own.
-    async fn discover_models(&self) -> Result<Vec<Model>, HarnessError> {
-        let catalog = static_models();
-        let mut requests = Vec::with_capacity(catalog.len() + 1);
-        requests.push(serde_json::json!({ "subtype": "initialize" }));
-        requests.extend(catalog.iter().map(|entry| {
-            serde_json::json!({ "subtype": "set_model", "model": entry.id })
-        }));
-        let answers = self
-            .control_probe(&requests, Duration::from_secs(30))
-            .await?;
-        let Some(Ok(initialize)) = answers.first() else {
-            return Err(HarnessError::Protocol(
-                "claude did not answer the initialize control request".into(),
-            ));
-        };
-        let mut models = parse_initialize_models(initialize, &catalog);
-        let advertised: std::collections::HashSet<String> =
-            models.iter().map(|model| model.id.clone()).collect();
-        for (entry, answer) in catalog.iter().zip(answers.iter().skip(1)) {
-            if advertised.contains(&entry.id) || answer.is_err() {
-                continue;
-            }
-            models.push(entry.clone());
-        }
-        Ok(models)
-    }
-
-    /// A CLI update is the one event that changes the advertised models, and
-    /// it moves the launcher symlink (`…/versions/<version>`).
-    fn cli_fingerprint(&self) -> String {
-        self.resolve_executable()
-            .ok()
-            .map(|exe| std::fs::canonicalize(&exe).unwrap_or(exe))
-            .map(|path| path.display().to_string())
-            .unwrap_or_default()
     }
 }
 
@@ -481,116 +432,6 @@ fn parse_initialize_commands(response: &Value) -> Vec<SlashCommand> {
             })
         })
         .collect()
-}
-
-/// Identity must stay bare: zeron appends this suffix itself, so a stored one
-/// breaks the 200K/1M toggle (see [`catalog::context_window`]).
-fn strip_context_suffix(model: &str) -> &str {
-    model
-        .strip_suffix("[1m]")
-        .or_else(|| model.strip_suffix("[2m]"))
-        .unwrap_or(model)
-}
-
-/// The wire's `displayName` is the alias label ("Default (recommended)"),
-/// which would hide the version being picked.
-fn label_from_id(id: &str) -> String {
-    let stem = id.strip_prefix("claude-").unwrap_or(id);
-    let mut parts = stem.split('-');
-    let Some(family) = parts.next().filter(|family| family.is_ascii()) else {
-        return id.to_owned();
-    };
-    let Some(initial) = family.get(..1) else {
-        return id.to_owned();
-    };
-    let mut label = initial.to_uppercase();
-    label.push_str(&family[1..]);
-    let version: Vec<&str> = parts
-        .take_while(|part| part.len() < 5 && part.chars().all(|c| c.is_ascii_digit()))
-        .collect();
-    if !version.is_empty() {
-        label.push(' ');
-        label.push_str(&version.join("."));
-    }
-    label
-}
-
-/// Ultracode and ultrathink are zeron's own levels; the CLI never emits them.
-fn ladder_from_wire(row: &Value, id: &str) -> Vec<ReasoningLevel> {
-    if row.get("supportsEffort").and_then(Value::as_bool) != Some(true) {
-        return Vec::new();
-    }
-    let mut ladder: Vec<ReasoningLevel> = row
-        .get("supportedEffortLevels")
-        .and_then(Value::as_array)
-        .map(|levels| levels.as_slice())
-        .unwrap_or_default()
-        .iter()
-        .filter_map(Value::as_str)
-        .filter_map(|level| match level {
-            "low" => Some(ReasoningLevel::Low),
-            "medium" => Some(ReasoningLevel::Medium),
-            "high" => Some(ReasoningLevel::High),
-            "xhigh" => Some(ReasoningLevel::XHigh),
-            "max" => Some(ReasoningLevel::Max),
-            _ => None,
-        })
-        .collect();
-    if ladder.is_empty() {
-        return ladder;
-    }
-    if catalog::supports_xhigh(id) {
-        ladder.push(ReasoningLevel::Ultracode);
-    }
-    ladder.push(ReasoningLevel::Ultrathink);
-    ladder
-}
-
-fn options_from_wire(row: &Value, resolved: &str) -> Vec<ModelOption> {
-    let mut options = Vec::new();
-    if strip_context_suffix(resolved) != resolved {
-        options.push(catalog::context_window());
-    }
-    if row.get("supportsFastMode").and_then(Value::as_bool) == Some(true) {
-        options.push(catalog::toggle("fastMode", "Fast Mode"));
-    }
-    options
-}
-
-/// Rows are aliases and several resolve to the same model, so identity is the
-/// stripped `resolvedModel` and the first row for an id wins.
-fn parse_initialize_models(response: &Value, catalog: &[Model]) -> Vec<Model> {
-    let rows = response
-        .get("response")
-        .and_then(|r| r.get("models"))
-        .and_then(Value::as_array)
-        .map(|rows| rows.as_slice())
-        .unwrap_or_default();
-    let mut models: Vec<Model> = Vec::new();
-    for row in rows {
-        let Some(resolved) = row.get("resolvedModel").and_then(Value::as_str) else {
-            continue;
-        };
-        let id = strip_context_suffix(resolved);
-        if id.is_empty() || models.iter().any(|model| model.id == id) {
-            continue;
-        }
-        if let Some(curated) = catalog.iter().find(|model| model.id == id) {
-            models.push(curated.clone());
-            continue;
-        }
-        models.push(Model {
-            id: id.to_owned(),
-            label: label_from_id(id),
-            description: row
-                .get("description")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            reasoning_levels: ladder_from_wire(row, id),
-            options: options_from_wire(row, resolved),
-        });
-    }
-    models
 }
 
 #[async_trait]
@@ -636,29 +477,34 @@ impl Harness for ClaudeHarness {
         Compaction::SlashText("/compact".into())
     }
 
-    /// The curated static catalog (see [`catalog`]); requires an installed CLI
-    /// so an absent binary surfaces as [`HarnessError::NotInstalled`] here,
-    /// like the discovery call would.
+    /// Credential and executable identity scopes both initialize and catalog caches.
+    fn model_context(&self) -> Result<Option<crate::ModelContext>, HarnessError> {
+        crate::model_context::context(self.id(), &self.resolve_executable()?, &[]).map(Some)
+    }
+    fn fallback_models(&self) -> Vec<Model> {
+        catalog::configured_models()
+    }
+    async fn model_catalog(&self, force: bool) -> Result<crate::ModelCatalog, HarnessError> {
+        self.model_context()?.unwrap().log();
+        self.models_cache
+            .get_with_timeout(
+                force,
+                Duration::from_secs(35),
+                || self.model_context().map(|c| c.unwrap().key()),
+                || async {
+                    let response = self.initialize().await?;
+                    catalog::with_discovered_models(catalog::configured_models(), &response)
+                },
+            )
+            .await
+    }
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         self.resolve_executable()?;
-        let fingerprint = self.cli_fingerprint();
-        if let Some((cached_for, models)) = &*self.models.lock().await
-            && *cached_for == fingerprint
-        {
-            return Ok(models.clone());
-        }
-        match self.discover_models().await {
-            Ok(models) if !models.is_empty() => {
-                *self.models.lock().await = Some((fingerprint, models.clone()));
-                Ok(models)
-            }
-            Ok(_) => Ok(static_models()),
+        match self.model_catalog(false).await {
+            Ok(catalog) => Ok(catalog.models),
             Err(error) => {
-                tracing::debug!(
-                    target: "zeron_harness::claude",
-                    "model discovery failed; using fallback catalog: {error}"
-                );
-                Ok(static_models())
+                tracing::warn!(%error, source = "static", "Claude model discovery failed");
+                Ok(self.fallback_models())
             }
         }
     }
@@ -668,11 +514,49 @@ impl Harness for ClaudeHarness {
     /// carries every command with description + argument hint and involves no
     /// model turn (verified live, 2.1.228: the control_response is the first
     /// stdout line, well before any API traffic). Cached on success.
+    async fn skills(
+        &self,
+        cwd: &std::path::Path,
+    ) -> Result<Option<Vec<zeron_proto::invocation::Skill>>, HarnessError> {
+        let (skills, commands) = tokio::try_join!(
+            crate::skills::discover(self.id(), cwd),
+            self.workspace_commands
+                .get(cwd, self.discover_commands(Some(cwd)))
+        )?;
+        // The native advertised catalog controls availability (including plugin
+        // enablement and skillOverrides). Shared Agent Skills can use file delivery.
+        Ok(Some(
+            skills
+                .into_iter()
+                .filter_map(|mut skill| {
+                    if crate::skills::is_shared_skill(&skill.path) {
+                        // Shared files are not Claude command definitions. A
+                        // same-named built-in must not replace their identity.
+                        Some(skill)
+                    } else if zeron_proto::invocation::valid_skill_command_name(&skill.name)
+                        && commands.iter().any(|command| command.name == skill.name)
+                    {
+                        skill.command = Some(zeron_proto::invocation::SkillCommand {
+                            name: skill.name.clone(),
+                            harness: self.id(),
+                        });
+                        Some(skill)
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+        ))
+    }
+
     async fn commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
-        self.commands
-            .get_or_try_init(|| self.discover_commands())
+        self.discover_commands(None).await
+    }
+
+    async fn commands_for(&self, cwd: &std::path::Path) -> Result<Vec<SlashCommand>, HarnessError> {
+        self.workspace_commands
+            .get(cwd, self.discover_commands(Some(cwd)))
             .await
-            .cloned()
     }
 
     async fn run(
@@ -731,7 +615,7 @@ impl ClaudeHarness {
         }
         let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                HarnessError::NotInstalled(exe.display().to_string())
+                HarnessError::NotInstalled(crate::executable::binary_hint(&exe))
             } else {
                 HarnessError::Io(e)
             }
@@ -1300,87 +1184,6 @@ mod tests {
         );
         assert_eq!(commands[0].input_hint.as_deref(), Some("<focus>"));
         assert_eq!(commands[1].input_hint, None);
-    }
-
-    /// The exact `models` payload CLI 2.1.280 answered `initialize` with.
-    fn live_initialize_models() -> Value {
-        json!({ "response": { "models": [
-            { "value": "default", "resolvedModel": "claude-opus-5-5[1m]", "displayName": "Default (recommended)",
-              "description": "Opus 5.5 with 1M context · Best for everyday, complex tasks",
-              "supportsEffort": true, "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"],
-              "supportsAdaptiveThinking": true, "supportsFastMode": true, "supportsAutoMode": true },
-            { "value": "opus[1m]", "resolvedModel": "claude-opus-5-5[1m]", "displayName": "Opus (1M context)",
-              "description": "Opus 5.5 with 1M context · Best for everyday, complex tasks",
-              "supportsEffort": true, "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"],
-              "supportsAdaptiveThinking": true, "supportsFastMode": true, "supportsAutoMode": true },
-            { "value": "claude-fable-5-1[1m]", "resolvedModel": "claude-fable-5-1", "displayName": "Fable",
-              "description": "Fable 5.1 · Most capable for your hardest and longest-running tasks",
-              "supportsEffort": true, "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"],
-              "supportsAdaptiveThinking": true, "supportsAutoMode": true },
-            { "value": "sonnet", "resolvedModel": "claude-sonnet-5", "displayName": "Sonnet",
-              "description": "Sonnet 5 · Efficient for routine tasks",
-              "supportsEffort": true, "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"],
-              "supportsAdaptiveThinking": true, "supportsAutoMode": true },
-            { "value": "haiku", "resolvedModel": "claude-haiku-4-5-20251001", "displayName": "Haiku",
-              "description": "Haiku 4.5 · Fastest for quick answers" },
-        ]}})
-    }
-
-    #[test]
-    fn initialize_models_dedupe_aliases_onto_the_resolved_id() {
-        let models = parse_initialize_models(&live_initialize_models(), &static_models());
-        assert_eq!(
-            models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
-            vec![
-                "claude-opus-5-5",
-                "claude-fable-5-1",
-                "claude-sonnet-5",
-                "claude-haiku-4-5-20251001",
-            ]
-        );
-        assert_eq!(models[0].label, "Opus 5.5");
-        assert_eq!(models[3].label, "Haiku 4.5");
-    }
-
-    #[test]
-    fn unknown_models_derive_their_ladder_and_options_from_the_wire() {
-        let response = json!({ "response": { "models": [
-            { "value": "opus", "resolvedModel": "claude-opus-6[1m]", "displayName": "Opus",
-              "description": "Opus 6 · next", "supportsEffort": true,
-              "supportedEffortLevels": ["low", "high", "max"], "supportsFastMode": true },
-            { "value": "haiku", "resolvedModel": "claude-haiku-5", "displayName": "Haiku" },
-        ]}});
-        let models = parse_initialize_models(&response, &static_models());
-        assert_eq!(models[0].label, "Opus 6");
-        assert_eq!(models[0].description.as_deref(), Some("Opus 6 · next"));
-        assert_eq!(
-            models[0].reasoning_levels,
-            vec![
-                ReasoningLevel::Low,
-                ReasoningLevel::High,
-                ReasoningLevel::Max,
-                ReasoningLevel::Ultracode,
-                ReasoningLevel::Ultrathink,
-            ]
-        );
-        assert_eq!(
-            models[0]
-                .options
-                .iter()
-                .map(|o| o.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["contextWindow", "fastMode"]
-        );
-        assert!(models[1].reasoning_levels.is_empty());
-        assert!(models[1].options.is_empty());
-    }
-
-    #[test]
-    fn label_from_id_drops_the_date_stamp() {
-        assert_eq!(label_from_id("claude-opus-5-5"), "Opus 5.5");
-        assert_eq!(label_from_id("claude-haiku-4-5-20251001"), "Haiku 4.5");
-        assert_eq!(label_from_id("claude-sonnet-5"), "Sonnet 5");
-        assert_eq!(label_from_id("claude-fable-5-1"), "Fable 5.1");
     }
 
     // The Windows `Command` wrapper has no `as_std` to read the built line back.

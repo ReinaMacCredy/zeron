@@ -109,7 +109,7 @@ impl Shell {
 
     /// The Changes row: focus the working-tree diff tab, else the first diff
     /// tab, else open one.
-    fn focus_changes(&mut self, cx: &mut Context<Self>) {
+    fn focus_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let rows = self.right_surface_rows(cx);
         let diffs: Vec<u64> = rows
             .iter()
@@ -133,7 +133,7 @@ impl Shell {
                 if !self.right_pane_open(cx) {
                     self.toggle_right_pane(cx);
                 }
-                self.add_diff_surface(cx);
+                self.add_diff_surface(window, cx);
             }
         }
     }
@@ -374,8 +374,8 @@ impl Shell {
             card = card.when(git, |card| {
                 card.child(
                     row(theme, "pinned-summary-changes", 0, icons::LIST)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.focus_changes(cx);
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.focus_changes(window, cx);
                             this.close_summary_menu(cx);
                         }))
                         .child(label("Changes".into()))

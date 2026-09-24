@@ -211,6 +211,8 @@ final class DemoDataset {
         let store = SessionStore(chatId: chatId, config: Self.dummyConfig, offline: true)
         if ProcessInfo.processInfo.arguments.contains("-appshots") {
             seedAppshots(store)
+        } else if ProcessInfo.processInfo.arguments.contains("-longhistory") {
+            store.setEntries(BenchRunner.syntheticEntries(turns: 200))
         } else if ProcessInfo.processInfo.arguments.contains("-longprompt") {
             store.setEntries([
                 MessageEntry(id: "long-prompt", role: .user,
@@ -432,7 +434,9 @@ final class DemoDataset {
         When the turn settles, this entry flips `streaming → complete`, the veil \
         drops, and the row ids stay stable so nothing flickers.
         """
-        let words = reply.split(separator: " ", omittingEmptySubsequences: false)
+        let long = ProcessInfo.processInfo.arguments.contains("-longreply")
+        let words = (long ? Array(repeating: reply, count: 12).joined(separator: "\n\n---\n\n") : reply)
+            .split(separator: " ", omittingEmptySubsequences: false)
 
         streamTask = Task { [weak self, weak store] in
             var text = ""

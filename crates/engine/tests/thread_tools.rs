@@ -703,6 +703,7 @@ async fn summary_rpc_reads_a_bounded_preview_without_a_transcript_watch() {
             from_chat_id: None,
             fork_import: false,
             answers_request_id: None,
+            duration_ms: None,
         })
         .unwrap();
     let client = zeron_rpc::memory_client(rig.core.rpc_service());

@@ -89,6 +89,13 @@ else
   exit 1
 fi
 
+if [ -f .command-fixture ]; then
+  expected=$(pwd -P)
+  has "$line" "\"cwd\":\"$expected\"" || exit 1
+  name=$(cat .command-fixture)
+  emit "{\"method\":\"session/update\",\"params\":{\"sessionId\":\"$SID\",\"update\":{\"sessionUpdate\":\"available_commands_update\",\"availableCommands\":[{\"name\":\"$name\",\"description\":\"Project command\"}]}}}"
+fi
+
 # ---- model/config sets (0..n), then the first turn ---------------------------
 CONFIG_SETS=""
 MODEL_SETS=""

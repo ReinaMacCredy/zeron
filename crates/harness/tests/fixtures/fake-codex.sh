@@ -32,9 +32,9 @@ if has "$line" '"method":"config/read"'; then
 fi
 thread_line="$line"
 if has "$line" '"method":"skills/list"'; then
-  # Command discovery probe: answer with two cwd groups sharing one skill
-  # (dedupe by name) and settle; no thread ever starts.
-  emit "{\"id\":$(rid "$line"),\"result\":{\"data\":[{\"cwd\":\"/w\",\"skills\":[{\"name\":\"imagegen\",\"description\":\"Model-facing paragraph about images.\",\"interface\":{\"displayName\":\"Image Gen\",\"shortDescription\":\"Generate or edit images\"}},{\"name\":\"bare\",\"description\":\"No interface block\"}]},{\"cwd\":\"/x\",\"skills\":[{\"name\":\"imagegen\",\"description\":\"dupe\",\"interface\":{\"shortDescription\":\"dupe\"}}]}]}}"
+  # Skill discovery probe: answer with two cwd groups sharing one skill
+  # (dedupe by identity) and settle; no thread ever starts.
+  emit "{\"id\":$(rid "$line"),\"result\":{\"data\":[{\"cwd\":\"/w\",\"skills\":[{\"name\":\"imagegen\",\"path\":\"/skills/imagegen/SKILL.md\",\"description\":\"Model-facing paragraph about images.\",\"interface\":{\"displayName\":\"Image Gen\",\"shortDescription\":\"Generate or edit images\"}},{\"name\":\"bare\",\"path\":\"/skills/bare/SKILL.md\",\"description\":\"No interface block\"}]},{\"cwd\":\"/x\",\"skills\":[{\"name\":\"imagegen\",\"path\":\"/skills/imagegen/SKILL.md\",\"description\":\"dupe\",\"interface\":{\"shortDescription\":\"dupe\"}}]}]}}"
   exec sleep 30
 fi
 if has "$line" '"method":"model/list"'; then
@@ -82,7 +82,72 @@ fi
 read -r turnline || exit 1
 tid=$(rid "$turnline")
 
+if has "$turnline" '"method":"thread/compact/start"' && ! has "$turnline" '"threadId":"th-compact-'; then
+  emit "{\"id\":$tid,\"result\":{}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"native-1"}}}'
+  emit '{"method":"item/completed","params":{"item":{"id":"compact-1","type":"contextCompaction"}}}'
+  emit '{"method":"turn/completed","params":{"turn":{"id":"native-1","status":"completed"}}}'
+  exec sleep 30
+fi
+if has "$turnline" '"method":"review/start"'; then
+  has "$turnline" '"delivery":"inline"' || exit 1
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"native-1\"}}}"
+  emit '{"method":"item/completed","params":{"item":{"id":"review-1","type":"exitedReviewMode","review":"Review fixture result"}}}'
+  emit '{"method":"turn/completed","params":{"turn":{"id":"native-1","status":"completed"}}}'
+  exec sleep 30
+fi
+
 case "$turnline" in
+*scenario:native-skills*)
+  for want in '"type":"skill"' '"path":"/repo/a b/SKILL.md"' '[lib.rs](src/lib.rs)'; do
+    has "$turnline" "$want" || { fail_turn "$tid" "initial native skill or file path missing"; exit 0; }
+  done
+  if has "$turnline" 'zeron-invoke:' || has "$turnline" 'zeron-file:'; then
+    fail_turn "$tid" "private chip URI leaked"; exit 0
+  fi
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
+  read -r steerline || exit 1
+  sid=$(rid "$steerline")
+  for want in '"method":"turn/steer"' '"type":"skill"' '"path":"/repo/other/SKILL.md"'; do
+    has "$steerline" "$want" || { fail_turn "$sid" "steered native skill missing"; exit 0; }
+  done
+  emit "{\"id\":$sid,\"result\":{}}"
+  emit '{"method":"item/agentMessage/delta","params":{"delta":"native skills accepted"}}'
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"completed"}}}'
+  ;;
+
+*scenario:native-queue-order*)
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
+  emit '{"method":"item/agentMessage/delta","params":{"delta":"working"}}'
+  sleep 0.1
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"completed"}}}'
+  read -r next || exit 1
+  has "$next" '"method":"review/start"' || { fail_turn "$(rid "$next")" "followup overtook queued review"; exit 0; }
+  emit "{\"id\":$(rid "$next"),\"result\":{\"turn\":{\"id\":\"t-2\"}}}"
+  emit '{"method":"item/completed","params":{"item":{"id":"review-2","type":"exitedReviewMode","review":"Queued review result"}}}'
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-2","status":"completed"}}}'
+  read -r next || exit 1
+  has "$next" '"method":"turn/start"' && has "$next" 'Follow up after review' || { fail_turn "$(rid "$next")" "followup was lost"; exit 0; }
+  emit "{\"id\":$(rid "$next"),\"result\":{\"turn\":{\"id\":\"t-3\"}}}"
+  emit '{"method":"item/agentMessage/delta","params":{"delta":"followup"}}'
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-3","status":"completed"}}}'
+  ;;
+
+*scenario:native-queue*)
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
+  emit '{"method":"item/agentMessage/delta","params":{"delta":"working"}}'
+  sleep 0.1
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"completed"}}}'
+  read -r next || exit 1
+  has "$next" '"method":"review/start"' || { fail_turn "$(rid "$next")" "native command was sent as prompt text"; exit 0; }
+  emit "{\"id\":$(rid "$next"),\"result\":{\"turn\":{\"id\":\"t-2\"}}}"
+  emit '{"method":"item/completed","params":{"item":{"id":"review-2","type":"exitedReviewMode","review":"Queued review result"}}}'
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-2","status":"completed"}}}'
+  ;;
+
 
 *'"method":"thread/compact/start"'*)
   # Manual compaction: the driver never starts a turn, it asks the thread it
@@ -264,6 +329,10 @@ case "$turnline" in
   # The harness must fall back to a follow-up turn/start carrying the text.
   read -r followline || exit 1
   fid=$(rid "$followline")
+  if has "$steerline" '"type":"skill"'; then
+    has "$followline" '"type":"skill"' && has "$followline" '"path":"/repo/followup/SKILL.md"' ||
+      { fail_turn "$fid" "native skill lost on steer fallback"; exit 0; }
+  fi
   if has "$followline" '"method":"turn/start"' && has "$followline" 'redirect please'; then
     emit "{\"id\":$fid,\"result\":{\"turn\":{\"id\":\"t-2\"}}}"
     emit '{"method":"turn/started","params":{"turn":{"id":"t-2"}}}'

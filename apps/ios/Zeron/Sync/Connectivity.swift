@@ -41,6 +41,7 @@ final class ConnectivityCenter {
     private(set) var state: ConnectivityState = .connected
     /// Chat ids whose room is graced-degraded (only rooms that have dialed).
     private(set) var degradedChats: Set<String> = []
+    private(set) var retryAt: Date?
     /// 1Hz pulse, bumped only while something is degraded or a send is
     /// pending — views showing elapsed-based send states read it to
     /// subscribe; a healthy idle app never repaints on it.
@@ -49,7 +50,8 @@ final class ConnectivityCenter {
     /// Raw-source providers, wired by AppModel (poll-based, mirroring the
     /// engine's 1s recompute over in-memory stats).
     @ObservationIgnored var registryConnected: (() -> Bool)?
-    @ObservationIgnored var chatRooms: (() -> [(id: String, connected: Bool)])?
+    @ObservationIgnored var chatRooms: (() -> [(id: String, connected: Bool, retryAt: Date?)])?
+    @ObservationIgnored var registryRetryAt: (() -> Date?)?
     @ObservationIgnored var hasPendingSends: (() -> Bool)?
 
     @ObservationIgnored private var pathOffline = false
@@ -98,11 +100,15 @@ final class ConnectivityCenter {
 
         var chats: Set<String> = []
         var liveKeys: Set<String> = ["os", "registry"]
+        var nextRetryAt = registryRetryAt?()
         for room in chatRooms?() ?? [] {
             let key = "chat:\(room.id)"
             liveKeys.insert(key)
             if graced(key, raw: !room.connected, now: now) {
                 chats.insert(room.id)
+            }
+            if let retryAt = room.retryAt, nextRetryAt.map({ retryAt < $0 }) ?? true {
+                nextRetryAt = retryAt
             }
         }
         // Drop timers for rooms that closed (doc_host.rs retain_chats).
@@ -116,6 +122,7 @@ final class ConnectivityCenter {
         // Publish only on change — an idle connected app never invalidates.
         if newState != state { state = newState }
         if chats != degradedChats { degradedChats = chats }
+        if retryAt != nextRetryAt { retryAt = nextRetryAt }
         if newState != .connected || !chats.isEmpty || !degradedSince.isEmpty
             || (hasPendingSends?() ?? false) {
             pulse &+= 1

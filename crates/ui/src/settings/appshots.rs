@@ -342,7 +342,7 @@ impl ShortcutsPage {
     ) -> gpui::AnyElement {
         #[cfg(test)]
         self.permissions.guide.rendered.clear();
-        let theme = Theme::of(cx).clone();
+        let theme = Theme::of(cx).for_settings_surface();
         let accent = theme.accent;
         let capabilities = self.appshot_capabilities;
         let supported = capabilities.platform != AppshotPlatform::Unsupported;
@@ -361,7 +361,7 @@ impl ShortcutsPage {
         }
 
         let toggle = |id: &'static str, label: &'static str, enabled: bool| {
-            widgets::toggle_switch(&theme, enabled)
+            widgets::toggle_switch(&theme, enabled, id)
                 .id(id)
                 .role(gpui::Role::Switch)
                 .aria_label(label)
@@ -385,7 +385,6 @@ impl ShortcutsPage {
                 .p(px(0.0))
                 .rounded(px(6.0))
                 .justify_center()
-                .hover(|s| s.text_color(theme.text))
                 .child(
                     crate::icons::icon(crate::icons::RESTART)
                         .size(px(12.0))
@@ -690,8 +689,7 @@ impl ShortcutsPage {
             .border_color(theme.border)
             .when(restore_disabled, |el| el.opacity(0.35))
             .when(!restore_disabled, |el| {
-                el.hover(|s| s.bg(crate::theme::ink(0.04)).text_color(theme.text))
-                    .on_click(cx.listener(|this, _, _, cx| this.restore_appshot_defaults(cx)))
+                el.on_click(cx.listener(|this, _, _, cx| this.restore_appshot_defaults(cx)))
             })
             .child(
                 crate::icons::icon(crate::icons::RESTART)
@@ -713,7 +711,7 @@ impl ShortcutsPage {
             .on_hover(cx.listener(Self::on_scroll_hovered))
             .on_drag_move(cx.listener(Self::on_bar_drag_move))
             .child(
-                div()
+                crate::edge_fade::edge_faded(16.0, true, true, div()
                     .id("appshots-settings-page")
                     .size_full()
                     .overflow_y_scroll()
@@ -776,7 +774,7 @@ impl ShortcutsPage {
                                     .text_color(theme.text_muted)
                                     .child(helper),
                             ),
-                    ),
+                    )).fade_overflow_y(&self.scroll.scroll),
             )
             .children(scrollbar)
             .into_any_element()

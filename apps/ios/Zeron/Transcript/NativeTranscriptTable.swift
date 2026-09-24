@@ -127,10 +127,20 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
     private var updating = false
     private var settling = false
     private var animatingFollow = false
+    private var followAnimationGeneration: UInt64 = 0
     private var hasPositioned = false
     private var lastGeometry = TranscriptGeometry(contentHeight: 0, viewportHeight: 0, offset: 0, bottom: 0)
     private let runway = UIView()
     private var resizeScheduled = false
+    /// Measured row heights by row id. UITableView forgets every height on
+    /// `reloadData`/`endUpdates` and falls back to the estimate, so without
+    /// this the content size collapses to `rows × 140` and re-expands as rows
+    /// realize — the visible jump under a finger or while a reply streams.
+    private var measuredHeights: [String: CGFloat] = [:]
+    private var measuredWidth: CGFloat = 0
+    private static let fallbackEstimate: CGFloat = 140
+    /// Above this diff size a batch update costs more than a plain reload.
+    private static let maxBatchChanges = 400
 
     init(scroll: ScrollState) {
         follow = scroll
@@ -176,6 +186,10 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
             || abs(frame.width - nextFrame.width) > 0.01
             || abs(frame.height - nextFrame.height) > 0.01
             || abs(contentInset.top - topInset) > 0.01 else { return }
+        if abs(measuredWidth - size.width) > 0.5 {
+            measuredHeights.removeAll(keepingCapacity: true)
+            measuredWidth = size.width
+        }
         let logicalOffset = contentOffset.y + contentInset.top
         let anchor = followsBottom ? nil : visibleAnchor()
         updating = true
@@ -187,6 +201,7 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
             verticalScrollIndicatorInsets.top = topInset
             let target = min(max(-topInset, logicalOffset - topInset),
                              max(-topInset, contentSize.height - bounds.height))
+            cancelFollowAnimation()
             setContentOffset(CGPoint(x: 0, y: target), animated: false)
             layoutIfNeeded()
             if let anchor { restore(anchor) }
@@ -205,7 +220,7 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
         let target = min(max(-contentInset.top, contentOffset.y + step * max(44, viewportHeight - 80)),
                          max(-contentInset.top, contentSize.height - bounds.height))
         guard abs(target - contentOffset.y) > 0.5 else { return false }
-        animatingFollow = false
+        cancelFollowAnimation()
         follow.interactionEpoch &+= 1
         follow.pinned = false
         setContentOffset(CGPoint(x: 0, y: target), animated: false)
@@ -226,6 +241,7 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
     }
 
     func update(_ input: NativeTranscriptTable) {
+        reconcileGesture()
         render = input.render
         let previous = rows
         let previousIDs = previous.map(\.id)
@@ -247,26 +263,34 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
         }
         updating = true
         UIView.performWithoutAnimation {
+            var reloaded = false
             if previousIDs != nextIDs {
                 if appending {
                     insertRows(at: (previousIDs.count..<nextIDs.count).map { IndexPath(row: $0, section: 0) }, with: .none)
                 } else {
-                    reloadData()
+                    reloaded = !applyDifference(from: previousIDs, to: nextIDs)
                 }
             }
-            if previousIDs == nextIDs || appending {
+            if !reloaded {
                 // A chunk can finish the previous block and append the next one.
                 // Insertion alone leaves that visible block missing its suffix.
+                var previousVersions: [String: UInt64] = [:]
+                previousVersions.reserveCapacity(previous.count)
+                for row in previous { previousVersions[row.id] = row.version }
                 let visible = indexPathsForVisibleRows ?? []
                 let changed = visible.filter {
-                    $0.row < previous.count
-                        && (presentationChanged || previous[$0.row].version != rows[$0.row].version)
+                    guard $0.row < rows.count, let old = previousVersions[rows[$0.row].id] else { return false }
+                    return presentationChanged || old != rows[$0.row].version
                 }
                 if !changed.isEmpty { reconfigureRows(at: changed) }
             }
             layoutIfNeeded()
             updateRunway()
-            if let anchor, hasPositioned,
+            // Appended rows land below the viewport, so the anchor already
+            // holds. Rewriting the offset here would kill a live flick or the
+            // send animation (UIKit ends both silently, without a delegate call).
+            let momentum = isDragging || isDecelerating || animatingFollow
+            if let anchor, hasPositioned, !(appending && momentum),
                previousIDs != nextIDs || (presentationChanged && !follow.pinned) {
                 restore(anchor)
             }
@@ -284,8 +308,33 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
         }
     }
 
+    /// Delete/insert only the rows whose ids changed; returns false when the
+    /// change is too large (or the table has never laid out), in which case
+    /// the caller falls back to `reloadData`. Every retained row keeps its
+    /// realized cell and height, so reading history through a hydration or
+    /// a tool-group split no longer shifts the visible rows.
+    private func applyDifference(from previousIDs: [String], to nextIDs: [String]) -> Bool {
+        guard hasPositioned else { reloadData(); return false }
+        let difference = nextIDs.difference(from: previousIDs)
+        guard difference.count <= Self.maxBatchChanges else { reloadData(); return false }
+        var deletions: [IndexPath] = []
+        var insertions: [IndexPath] = []
+        for change in difference {
+            switch change {
+            case .remove(let offset, _, _): deletions.append(IndexPath(row: offset, section: 0))
+            case .insert(let offset, _, _): insertions.append(IndexPath(row: offset, section: 0))
+            }
+        }
+        performBatchUpdates {
+            if !deletions.isEmpty { deleteRows(at: deletions, with: .none) }
+            if !insertions.isEmpty { insertRows(at: insertions, with: .none) }
+        }
+        return true
+    }
+
     override func layoutSubviews() {
         UIView.performWithoutAnimation { super.layoutSubviews() }
+        recordVisibleHeights()
         guard window != nil, !updating, !settling, !rows.isEmpty else { return }
         if !hasPositioned {
             hasPositioned = true
@@ -303,22 +352,61 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
         settling = false
     }
 
+    private func recordVisibleHeights() {
+        guard bounds.width > 0 else { return }
+        if abs(measuredWidth - bounds.width) > 0.5 {
+            measuredHeights.removeAll(keepingCapacity: true)
+            measuredWidth = bounds.width
+        }
+        for path in indexPathsForVisibleRows ?? [] where path.row < rows.count {
+            let height = rectForRow(at: path).height
+            if height > 0 { measuredHeights[rows[path.row].id] = height }
+        }
+    }
+
     private var userOwnsScroll: Bool {
         isTracking || isDragging || isDecelerating || follow.userScrolling
     }
 
-    private func visibleAnchor() -> (id: String, offset: CGFloat)? {
+    /// A programmatic offset write during deceleration stops the scroll
+    /// without `scrollViewDidEndDecelerating`. Without this the gesture flag
+    /// would pin the transcript in user-owned state and follow would never
+    /// resume.
+    private func reconcileGesture() {
+        guard follow.userScrolling, !isTracking, !isDragging, !isDecelerating else { return }
+        finishGesture()
+    }
+
+    private struct Anchor {
+        let id: String
+        let version: UInt64
+        let offset: CGFloat
+        let height: CGFloat
+    }
+
+    private func visibleAnchor() -> Anchor? {
         let top = contentOffset.y + contentInset.top
         guard let index = indexPathsForVisibleRows?.sorted().first(where: { rectForRow(at: $0).maxY > top }),
               index.row < rows.count else { return nil }
-        return (rows[index.row].id, rectForRow(at: index).minY - top)
+        let rect = rectForRow(at: index)
+        return Anchor(id: rows[index.row].id, version: rows[index.row].version,
+                      offset: rect.minY - top, height: rect.height)
     }
 
-    private func restore(_ anchor: (id: String, offset: CGFloat)) {
+    private var tailTarget: CGFloat { max(-contentInset.top, contentSize.height - bounds.height) }
+
+    private func restore(_ anchor: Anchor) {
         guard let index = rows.firstIndex(where: { $0.id == anchor.id }) else { return }
         let rect = rectForRow(at: IndexPath(row: index, section: 0))
-        let visibleOffset = max(anchor.offset, -max(0, rect.height - 44))
+        // An unchanged row stays exactly where it was, however far it
+        // straddles the top edge. Only a row whose content collapsed keeps a
+        // 44pt handle in view so the fold stays reachable; a hosted cell
+        // settling its own measurement is not a collapse.
+        let shrank = rows[index].version != anchor.version && rect.height < anchor.height - 0.5
+        let visibleOffset = shrank ? max(anchor.offset, -max(0, rect.height - 44)) : anchor.offset
         let target = min(max(-contentInset.top, rect.minY - visibleOffset - contentInset.top), max(-contentInset.top, contentSize.height - bounds.height))
+        guard abs(contentOffset.y - target) > 0.5 else { return }
+        cancelFollowAnimation()
         setContentOffset(CGPoint(x: 0, y: target), animated: false)
     }
 
@@ -336,12 +424,17 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
     }
 
     private func alignBottom(animated: Bool) {
-        let target = max(-contentInset.top, contentSize.height - bounds.height)
+        let target = tailTarget
         guard abs(contentOffset.y - target) > 0.5 else {
-            animatingFollow = false
+            cancelFollowAnimation()
             return
         }
-        if animated { animatingFollow = true }
+        if animated {
+            animatingFollow = true
+            scheduleFollowAnimationWatchdog()
+        } else {
+            cancelFollowAnimation()
+        }
         setContentOffset(CGPoint(x: 0, y: target), animated: animated)
     }
 
@@ -350,7 +443,7 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
         setContentOffset(contentOffset, animated: false)
         follow.userScrolling = false
         follow.userDragging = false
-        animatingFollow = false
+        cancelFollowAnimation()
         goToLatest(animated: animated)
     }
 
@@ -366,10 +459,40 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
             alignBottom(animated: false)
             settling = false
         } else {
-            animatingFollow = true
-            layoutIfNeeded()
-            updateRunway()
+            let distance = tailTarget - contentOffset.y
+            if distance > 2 * bounds.height {
+                settling = true
+                scrollToRow(at: IndexPath(row: rows.count - 1, section: 0),
+                            at: .bottom, animated: false)
+                layoutIfNeeded()
+                updateRunway()
+                let target = max(-contentInset.top, tailTarget - bounds.height)
+                setContentOffset(CGPoint(x: 0, y: target), animated: false)
+                layoutIfNeeded()
+                updateRunway()
+                settling = false
+            }
             alignBottom(animated: true)
+        }
+    }
+
+    private func cancelFollowAnimation() {
+        followAnimationGeneration &+= 1
+        animatingFollow = false
+    }
+
+    private func scheduleFollowAnimationWatchdog() {
+        followAnimationGeneration &+= 1
+        let generation = followAnimationGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(450)) { [weak self] in
+            guard let self,
+                  self.followAnimationGeneration == generation,
+                  self.animatingFollow,
+                  self.follow.pinned,
+                  !self.userOwnsScroll,
+                  self.window != nil else { return }
+            self.animatingFollow = false
+            self.goToLatest(animated: false)
         }
     }
 
@@ -380,6 +503,7 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
             guard let self else { return }
             self.resizeScheduled = false
             guard self.window != nil else { return }
+            self.reconcileGesture()
             self.updating = true
             UIView.performWithoutAnimation {
                 self.beginUpdates()
@@ -395,6 +519,16 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
     }
 
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { rows.count }
+
+    func tableView(_ tableView: UITableView, estimatedHeightForRowAt indexPath: IndexPath) -> CGFloat {
+        guard indexPath.row < rows.count else { return Self.fallbackEstimate }
+        return measuredHeights[rows[indexPath.row].id] ?? Self.fallbackEstimate
+    }
+
+    func tableView(_ tableView: UITableView, didEndDisplaying cell: UITableViewCell, forRowAt indexPath: IndexPath) {
+        guard let id = cell.accessibilityIdentifier, cell.bounds.height > 0 else { return }
+        measuredHeights[id] = cell.bounds.height
+    }
     func tableView(_ tableView: UITableView, heightForHeaderInSection section: Int) -> CGFloat { .leastNormalMagnitude }
     func tableView(_ tableView: UITableView, heightForFooterInSection section: Int) -> CGFloat { .leastNormalMagnitude }
 
@@ -413,7 +547,7 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
     }
 
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
-        animatingFollow = false
+        cancelFollowAnimation()
         follow.interactionEpoch &+= 1
         follow.userScrolling = true
         follow.userDragging = true
@@ -438,7 +572,7 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
     }
 
     func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
-        animatingFollow = false
+        cancelFollowAnimation()
         if follow.pinned { goToLatest(animated: false) }
     }
 }

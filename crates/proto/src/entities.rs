@@ -32,6 +32,20 @@ pub fn validate_sidebar_pin_update(
 pub struct SidebarPreferences {
     #[serde(default)]
     pub pinned_session_ids: Vec<String>,
+    #[serde(default)]
+    pub sections: Vec<SidebarSection>,
+}
+
+/// A user-named sidebar section. Archived sessions retain membership so restoring
+/// them restores their section; deleting the section never deletes sessions.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SidebarSection {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub session_ids: Vec<String>,
+    #[serde(default)]
+    pub collapsed: bool,
 }
 
 /// Watch payload for pins. `initialized` records known cached state, including
@@ -47,6 +61,8 @@ pub struct SidebarPreferencesState {
     pub initialized: bool,
     #[serde(default)]
     pub pinned_session_ids: Vec<String>,
+    #[serde(default)]
+    pub sections: Vec<SidebarSection>,
 }
 
 impl SidebarPreferencesState {
@@ -735,6 +751,50 @@ pub struct DiffFileSummary {
     pub binary: bool,
 }
 
+/// Git porcelain states, independent of patch size and line counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GitFileState {
+    Unchanged,
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    Copied,
+    Unmerged,
+    Untracked,
+    TypeChanged,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitFileStatus {
+    pub path: String,
+    pub old_path: Option<String>,
+    pub index: GitFileState,
+    pub worktree: GitFileState,
+}
+
+/// Latest status only: never contains file content or a patch. `complete = false`
+/// means unavailable/partial, not clean. Revision covers only these statuses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckoutGitStatus {
+    pub checkout_id: String,
+    pub device_id: String,
+    pub revision: String,
+    pub complete: bool,
+    pub files: Vec<GitFileStatus>,
+}
+
+/// Keep unavailable updates inside an object: the RPC envelope uses JSON null
+/// for a missing item, so a bare optional snapshot cannot signal invalidation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceGitStatusFrame {
+    pub status: Option<CheckoutGitStatus>,
+}
+
 /// Working-tree diff for a checkout — latest-only sidecar, 3MiB patch cap.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -859,6 +919,16 @@ pub struct AgentAccount {
     pub active: bool,
     #[serde(default)]
     pub usage_windows: Vec<AgentUsageWindow>,
+    /// Epoch millis the `usage_windows` were fetched. The engine serves the
+    /// last good probe (persisted across restarts) while a refresh runs, so
+    /// windows may be minutes old; `None` = never fetched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_fetched_at: Option<i64>,
+    /// Why the last usage probe failed ("Rate limited — retrying in 2m",
+    /// "Sign in again", …), shown instead of a bare "Usage unavailable" — or
+    /// beside stale windows. `None` when the last probe succeeded or none ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -904,16 +974,24 @@ pub struct AgentAccountWarning {
 #[serde(rename_all = "camelCase")]
 pub struct AgentLoginStart {
     pub login_id: String,
+    /// Empty when the sign-in page is only known later (a poll carries it).
     pub url: String,
     pub mode: AgentLoginMode,
+    /// The loopback port the login's OAuth redirect lands on, on the device
+    /// running the login. A requester on ANOTHER device forwards that same
+    /// port on its own loopback to it, so its browser finishes the redirect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentLoginMode {
-    /// Claude: the user pastes the OAuth code back into the app.
+    /// Claude's fallback when no loopback port could be bound: the user
+    /// pastes the OAuth code back into the app.
     PasteCode,
-    /// Codex: the CLI's loopback callback completes in the browser; poll until done.
+    /// A loopback callback completes the sign-in in the browser (every
+    /// provider's default); poll until done.
     Browser,
 }
 
@@ -927,6 +1005,10 @@ pub struct AgentLoginPoll {
     /// agent had to install first); the app opens it once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// [`AgentLoginStart::callback_port`] for a page that arrived with this
+    /// poll.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -945,6 +1027,67 @@ pub struct AgentUsageWindow {
     /// 0.0..=1.0
     pub used_fraction: f32,
     pub resets_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProjectActionIcon {
+    Play,
+    Test,
+    Lint,
+    Configure,
+    Build,
+    Debug,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectAction {
+    pub id: String,
+    pub name: String,
+    pub command: String,
+    pub icon: ProjectActionIcon,
+    pub run_on_worktree_create: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectActionDraft {
+    pub name: String,
+    pub command: String,
+    pub icon: ProjectActionIcon,
+    #[serde(default)]
+    pub run_on_worktree_create: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectActionsSnapshot {
+    pub space_id: String,
+    pub actions: Vec<ProjectAction>,
+    pub importable_actions: Vec<ProjectActionDraft>,
+    pub project_file_issue: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectActionRun {
+    pub action_id: String,
+    pub action_name: String,
+    pub terminal: TerminalSession,
+}
+
+/// Result of creating a worktree. The worktree remains flattened so this is
+/// wire-compatible with both legacy callers and legacy engine replies.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateWorktreeOutcome {
+    #[serde(flatten)]
+    pub worktree: Worktree,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup_action: Option<ProjectActionRun>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup_error: Option<String>,
 }
 
 /// An open PTY session on the owning device (`OpenTerminal` reply).
@@ -1116,6 +1259,28 @@ mod tests {
             serde_json::from_value::<GetCheckoutFileDiffTextRequest>(value).unwrap(),
             request
         );
+    }
+
+    #[test]
+    fn create_worktree_outcome_accepts_legacy_reply_and_stays_flattened() {
+        let legacy = serde_json::json!({
+            "repoPath": "/repo",
+            "path": "/worktree",
+            "branch": "zeron/branch",
+            "name": "branch",
+            "checkoutId": "checkout",
+        });
+        let outcome: CreateWorktreeOutcome = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(outcome.worktree.path, "/worktree");
+        assert!(outcome.setup_action.is_none());
+        assert!(outcome.setup_error.is_none());
+
+        let encoded = serde_json::to_value(outcome).unwrap();
+        assert_eq!(encoded["path"], legacy["path"]);
+        assert!(encoded.get("worktree").is_none());
+        assert!(encoded.get("setupAction").is_none());
+        assert!(encoded.get("setupError").is_none());
+        assert!(serde_json::from_value::<Worktree>(encoded).is_ok());
     }
 
     #[test]

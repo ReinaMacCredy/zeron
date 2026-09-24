@@ -21,7 +21,7 @@ use crate::adapter_install::{OK_MARKER, adapters_root, install_lock};
 
 /// a pinned archive: where to fetch it and which file inside runs the agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ArchivePin {
+pub struct ArchivePin {
     pub name: &'static str,
     pub version: &'static str,
     pub url: &'static str,
@@ -42,7 +42,7 @@ fn install_dir(pin: &ArchivePin) -> Option<PathBuf> {
 }
 
 /// the entry of a completed install, `None` when absent.
-pub(crate) fn installed_entry(pin: &ArchivePin) -> Option<PathBuf> {
+pub fn installed_entry(pin: &ArchivePin) -> Option<PathBuf> {
     let dir = install_dir(pin)?;
     if std::fs::read_to_string(dir.join(OK_MARKER)).ok()?.trim() != pin.sha512 {
         return None;
@@ -56,7 +56,7 @@ pub(crate) fn entry_path(pin: &ArchivePin) -> Option<PathBuf> {
     install_dir(pin).map(|dir| dir.join(pin.entry))
 }
 
-pub(crate) async fn ensure_installed(
+pub async fn ensure_installed(
     pin: ArchivePin,
     display_name: &str,
 ) -> Result<PathBuf, HarnessError> {

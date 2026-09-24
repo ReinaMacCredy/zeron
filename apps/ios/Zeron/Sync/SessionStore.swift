@@ -51,6 +51,7 @@ final class SessionStore {
     /// the chat never parses markdown inside the first body pass.
     @ObservationIgnored let transcriptCache = TranscriptBuilderCache()
     private(set) var connected = false
+    private(set) var retryAt: Date?
     /// Client-minted ids of sends the host hasn't materialized yet.
     private(set) var pendingSends: [PendingSend] = []
     /// Messages typed while the agent was busy, in the order they will be sent
@@ -71,6 +72,14 @@ final class SessionStore {
     /// Persisted WITH the snapshot in one atomic file (DocDisk.saveChat2, the
     /// C2 rule), so content and cursor can never diverge.
     @ObservationIgnored private var cursor: UInt64 = 0
+    @ObservationIgnored private var cursorVerified = false
+    @ObservationIgnored private var firstContactQueued = false
+    @ObservationIgnored private(set) var outbox: [(batchId: String, bytes: Data)] = []
+    @ObservationIgnored private var admitted: Set<String> = []
+    private(set) var snapshotBytes = 0
+    private(set) var viewAttached = false
+    var keepsParseCacheWarm = false
+    var onPersisted: (() -> Void)?
     private var chatRoom: ChatRoomClient?
     private var subscriptions: [Subscription] = []
     private let config: AppConfig
@@ -78,11 +87,14 @@ final class SessionStore {
     /// the registry never walks a chat back to s2.
     @ObservationIgnored private var roomGen = 1
     @ObservationIgnored private var started = false
+    @ObservationIgnored private(set) var stopped = false
+    @ObservationIgnored private var lifecycleGeneration: UInt64 = 0
     /// Preload holds the dial (AppModel staggers the release) so a cold
     /// launch doesn't stampede N TLS handshakes against the registry dial
     /// on a thin link. The disk snapshot still hydrates immediately —
     /// only the socket waits its turn.
     @ObservationIgnored private var holdDial = false
+    @ObservationIgnored private var leaseToken = 0
 
     /// Demo mode: no room, entries driven externally.
     private let offline: Bool
@@ -142,20 +154,27 @@ final class SessionStore {
     func setEntries(_ new: [MessageEntry]) {
         entries = new
         revision &+= 1
-        transcriptCache.prewarm(entries: entries)
+        if viewAttached || keepsParseCacheWarm {
+            transcriptCache.prewarm(entries: entries)
+        }
     }
 
     @ObservationIgnored private var saver: DocSaver?
 
     func start(holdDial: Bool = false) {
-        guard !started, !offline else { return }
+        guard !stopped, !started, !offline else { return }
         started = true
+        leaseToken = SnapshotLease.claim(chatId)
         self.holdDial = holdDial
         // Local-first: the last-synced chat2 snapshot renders instantly (even
         // when the host device is offline); the join backfills incrementally
         // from its cursor.
         if let saved = DocDisk.loadChat2(into: doc, id: chatId) {
-            cursor = saved
+            cursor = saved.cursor
+            cursorVerified = saved.verified
+            firstContactQueued = saved.firstContactQueued
+            outbox = saved.outbox
+            snapshotBytes = saved.bytes
             project()
         } else if DocDisk.legacySnapshotExists(id: chatId) {
             // M3 discard-and-adopt: this device's cached doc predates the
@@ -164,8 +183,25 @@ final class SessionStore {
             adoptLegacyCommands()
         }
         saver = DocSaver { [weak self] in
-            guard let self else { return }
-            DocDisk.saveChat2(doc: self.doc, id: self.chatId, cursor: self.cursor)
+            guard let self else { return false }
+            guard SnapshotLease.isCurrent(self.chatId, self.leaseToken) else { return false }
+            guard DocDisk.saveChat2(doc: self.doc, id: self.chatId,
+                                    cursor: self.cursor,
+                                    verified: self.cursorVerified,
+                                    firstContactQueued: self.firstContactQueued,
+                                    outbox: self.outbox) else {
+                return false
+            }
+            self.snapshotBytes = DocDisk.chat2SnapshotSize(id: self.chatId)
+            return true
+        }
+        saver?.background = { [weak self] in
+            guard let self else { return false }
+            return await self.flushToDiskAsync()
+        }
+        saver?.onSaved = { [weak self] in
+            self?.admitDurableBatches()
+            self?.onPersisted?()
         }
         // Subscription BEFORE any connect: every local commit lands in the
         // client when it exists; commits made earlier are covered by the
@@ -175,10 +211,10 @@ final class SessionStore {
             let bytes = Data(update)
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                if let room = self.chatRoom {
-                    Task { await room.enqueue(update: bytes) }
-                }
-                self.saver?.poke()
+                let batchId = UUID().uuidString.lowercased()
+                self.outbox.append((batchId: batchId, bytes: bytes))
+                _ = self.saver?.commitNow()
+                self.admitDurableBatches()
             }
         }
         subscriptions.append(localSub)
@@ -193,6 +229,7 @@ final class SessionStore {
     /// A gen-1 store connects the moment the host's migration sweep flips
     /// the row.
     func updateRoomGen(_ gen: Int?) {
+        guard !stopped else { return }
         let gen = gen ?? 1
         if gen > roomGen { roomGen = gen }
         connectIfReady()
@@ -205,33 +242,18 @@ final class SessionStore {
     /// End a preload dial-hold: an open view (or the stagger timer) wants
     /// live sync now.
     func releaseDial() {
-        guard holdDial else { return }
+        guard !stopped, holdDial else { return }
         holdDial = false
         connectIfReady()
     }
 
     private func connectIfReady() {
-        guard started, !offline, !holdDial, chatRoom == nil, roomGen >= 2 else { return }
+        guard !stopped, started, !offline, !holdDial, chatRoom == nil, roomGen >= 2 else { return }
         let delegate = ChatRoomClient.Delegate(
             cursor: { [weak self] in self?.cursor ?? 0 },
             containsFrontier: { [weak self] frontier in
-                // Deliberately NO empty-frontier shortcut (mirror of
-                // EngineChatSink::contains_frontier): an empty payload on a
-                // present checkpoint is unreadable provenance, not proof of
-                // emptiness — skipping made fresh readers park every row that
-                // depends on the chat's founding ops ("Add Tweets" incident,
-                // 2026-08-18). Empty fails the decode: NOT contained, fetch —
-                // always safe, never silently skips history.
-                guard let self, !frontier.isEmpty,
-                      let vv = try? VersionVector.decode(bytes: frontier) else { return false }
-                // A decoded-but-EMPTY version vector is a vacuous claim every
-                // doc "includes" — the actual poison, one representation
-                // deeper than zero-length bytes. Fetch.
-                guard !vv.toHashmap().isEmpty else {
-                    roomLog.info("chat2 \(self.chatId, privacy: .public): frontier decodes empty (vacuous); fetching checkpoint")
-                    return false
-                }
-                return self.doc.oplogVv().includesVv(other: vv)
+                guard let self else { return false }
+                return Self.containsFrontier(frontier, in: self.doc)
             },
             applyCheckpoint: { [weak self] bytes, seq in
                 guard let self,
@@ -272,12 +294,25 @@ final class SessionStore {
                 // converts any lying cursor into a true one.
                 roomLog.info("chat2 \(self.chatId, privacy: .public): cursor amnesty \(self.cursor) → \(seq)")
                 self.cursor = seq
+                self.cursorVerified = false
                 self.saver?.poke()
             },
             setCursor: { [weak self] seq in
                 guard let self, self.cursor != seq else { return }
+                if seq < self.cursor {
+                    self.cursorVerified = false
+                }
                 self.cursor = seq
                 self.saver?.poke()
+            },
+            cursorVerified: { [weak self] in self?.cursorVerified ?? false },
+            setCursorVerified: { [weak self] verified in
+                guard let self, self.cursorVerified != verified else { return }
+                self.cursorVerified = verified
+                self.saver?.poke()
+            },
+            retirePush: { [weak self] batchId in
+                self?.retirePush(batchId: batchId)
             },
             event: { [weak self] event in self?.handle(event) }
         )
@@ -295,6 +330,7 @@ final class SessionStore {
             },
             delegate: delegate)
         chatRoom = client
+        admitDurableBatches()
         // First contact with the room (cursor 0): everything committed
         // BEFORE the local-update subscription saw a client — an adopt's
         // requeued commands, sends queued while waiting for the roomGen
@@ -303,11 +339,59 @@ final class SessionStore {
         // on unpushed deps sit in peers' pending-dep buffers forever). Push
         // the doc's full update log as the join's first batch; once acked
         // the cursor moves and this never re-arms.
-        if cursor == 0,
-           let all = try? doc.export(mode: .updates(from: VersionVector())), !all.isEmpty {
-            Task { await client.enqueue(update: all) }
+        if cursor == 0, !firstContactQueued {
+            if let all = try? doc.export(mode: .updates(from: VersionVector())), !all.isEmpty {
+                if all.count <= ChatRoomClient.maxPushBytes {
+                    let batchId = UUID().uuidString.lowercased()
+                    outbox.append((batchId: batchId, bytes: all))
+                } else {
+                    roomLog.error("chat2 \(self.chatId, privacy: .public): first-contact update exceeds push cap; replaying durable batches only")
+                }
+            }
+            firstContactQueued = true
+            _ = saver?.commitNow()
+            admitDurableBatches()
         }
-        Task { await client.start() }
+        let generation = lifecycleGeneration
+        Task { @MainActor [weak self] in
+            guard let self, !self.stopped,
+                  self.lifecycleGeneration == generation,
+                  self.chatRoom === client else { return }
+            await client.start()
+        }
+    }
+
+    func retirePush(batchId: String) {
+        guard !stopped else { return }
+        let oldCount = outbox.count
+        outbox.removeAll { $0.batchId == batchId }
+        admitted.remove(batchId)
+        if outbox.count != oldCount {
+            saver?.poke()
+        }
+    }
+
+    private func admitDurableBatches() {
+        guard !stopped, !outbox.isEmpty, saver?.isDirty == false, let room = chatRoom else { return }
+        let generation = lifecycleGeneration
+        for push in outbox where !admitted.contains(push.batchId) {
+            admitted.insert(push.batchId)
+            Task { @MainActor [weak self] in
+                guard let self, !self.stopped,
+                      self.lifecycleGeneration == generation,
+                      self.chatRoom === room else { return }
+                await room.enqueue(batchId: push.batchId, update: push.bytes)
+            }
+        }
+    }
+
+    var admittedBatchIDs: Set<String> { admitted }
+
+    static func containsFrontier(_ frontier: Data, in doc: LoroDoc) -> Bool {
+        guard !frontier.isEmpty,
+              let vv = try? VersionVector.decode(bytes: frontier),
+              !vv.toHashmap().isEmpty else { return false }
+        return doc.oplogVv().includesVv(other: vv)
     }
 
     /// Mine the retired s2 snapshot for OUR OWN still-pending commands and
@@ -350,38 +434,135 @@ final class SessionStore {
         roomLog.info("chat2 \(self.chatId, privacy: .public): adopt carried \(carried) pending command(s) from the s2 lineage")
     }
 
+    func attachView() {
+        viewAttached = true
+        transcriptCache.prewarm(entries: entries)
+    }
+
+    func detachView() {
+        viewAttached = false
+    }
+
     /// Backgrounding hook: persist immediately.
     func flushToDisk() {
         saver?.flush()
+    }
+
+    func retireSaverTimers() {
+        saver?.retireTimers()
+    }
+
+    func flushToDiskAsync() async -> Bool {
+        guard !stopped, let saver else { return false }
+        let cursor = self.cursor
+        let verified = self.cursorVerified
+        let firstContactQueued = self.firstContactQueued
+        let outbox = self.outbox
+        let chatId = self.chatId
+        let doc = self.doc
+        return await saver.commitAsync(
+            export: { [doc] in try? doc.export(mode: .snapshot) },
+            write: { [weak self] snapshot in
+                guard let self,
+                      SnapshotLease.isCurrent(chatId, self.leaseToken) else {
+                    return false
+                }
+                guard let written = DocDisk.saveChat2ReturningBytes(
+                    snapshot: snapshot,
+                    id: chatId,
+                    cursor: cursor,
+                    verified: verified,
+                    firstContactQueued: firstContactQueued,
+                    outbox: outbox
+                ) else {
+                    return false
+                }
+                self.snapshotBytes = written
+                return true
+            }
+        )
     }
 
     /// Foreground hook: revive the room after a suspension (see
     /// ChatRoomClient.kick). Also the catch-all re-check for a roomGen flip
     /// that landed while this store had no open view.
     func kickRoom() {
+        guard !stopped else { return }
         holdDial = false  // a kick is a user/foreground signal: dial now
         connectIfReady()
         guard let chatRoom else { return }
-        Task { await chatRoom.kick() }
+        let generation = lifecycleGeneration
+        Task { @MainActor [weak self] in
+            guard let self, !self.stopped,
+                  self.lifecycleGeneration == generation,
+                  self.chatRoom === chatRoom else { return }
+            await chatRoom.kick()
+        }
     }
 
-    func stop() {
+    /// Stops synchronously and returns the final persistence attempt, if dirty.
+    /// The task outlives the store; its result reports this attempt, not retries
+    /// or network shutdown. Repeated stops do not enqueue another write.
+    @discardableResult
+    func stop() -> Task<Bool, Never>? {
+        guard !stopped else { return nil }
+        stopped = true
+        started = false
+        holdDial = false
+        lifecycleGeneration &+= 1
         subscriptions.removeAll()
-        saver?.flush()
+        var persistence: Task<Bool, Never>?
+        if let saver, saver.isDirty {
+            let doc = self.doc
+            let cursor = self.cursor
+            let verified = self.cursorVerified
+            let firstContactQueued = self.firstContactQueued
+            let outbox = self.outbox
+            let chatId = self.chatId
+            let leaseToken = self.leaseToken
+            persistence = Task { @MainActor [weak self, saver, doc] in
+                await saver.commitAsync(
+                    export: { try? doc.export(mode: .snapshot) },
+                    write: { [weak self] snapshot in
+                        guard SnapshotLease.isCurrent(chatId, leaseToken) else {
+                            return false
+                        }
+                        guard let written = DocDisk.saveChat2ReturningBytes(
+                            snapshot: snapshot,
+                            id: chatId,
+                            cursor: cursor,
+                            verified: verified,
+                            firstContactQueued: firstContactQueued,
+                            outbox: outbox
+                        ) else {
+                            return false
+                        }
+                        self?.snapshotBytes = written
+                        return true
+                    }
+                )
+            }
+        }
+        saver?.onSaved = nil
+        saver = nil
         if let chatRoom {
             Task { await chatRoom.stop() }
         }
         chatRoom = nil
+        hostRelay = nil
         connected = false
+        return persistence
     }
 
     private func handle(_ event: ChatRoomEvent) {
         switch event {
         case .connected:
             connected = true
+            retryAt = nil
             project()
-        case .disconnected:
+        case .disconnected(let retryAfterMs):
             connected = false
+            retryAt = Date().addingTimeInterval(TimeInterval(retryAfterMs) / 1_000)
         }
     }
 
@@ -390,6 +571,23 @@ final class SessionStore {
     /// In-flight guard + trailing re-run for the off-main projection below.
     @ObservationIgnored private var projecting = false
     @ObservationIgnored private var projectPending = false
+    @ObservationIgnored private var projectionTrailingScheduled = false
+    @ObservationIgnored private var lastProjectionAt: DispatchTime?
+
+    private func scheduleTrailingProjection(after delay: UInt64) {
+        guard !projectionTrailingScheduled else { return }
+        projectionTrailingScheduled = true
+        let generation = lifecycleGeneration
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: delay)
+            guard let self, !self.stopped,
+                  self.lifecycleGeneration == generation else { return }
+            self.projectionTrailingScheduled = false
+            guard self.projectPending else { return }
+            self.projectPending = false
+            self.project()
+        }
+    }
 
     /// Re-derive `entries` from the doc, off the main thread.
     ///
@@ -403,25 +601,41 @@ final class SessionStore {
     ///
     /// Overlapping calls coalesce to a single trailing re-run — a streaming
     /// burst must not queue one whole-doc projection per token.
-    private func project() {
+    func project() {
         guard !projecting else {
             projectPending = true
             return
         }
+        if !viewAttached, let lastProjectionAt {
+            let elapsed = DispatchTime.now().uptimeNanoseconds &-
+                lastProjectionAt.uptimeNanoseconds
+            if elapsed < 1_000_000_000 {
+                projectPending = true
+                scheduleTrailingProjection(after: 1_000_000_000 - elapsed)
+                return
+            }
+        }
         projecting = true
         let doc = self.doc
+        let generation = lifecycleGeneration
         Task { @MainActor [weak self] in
             let decoded = await Task.detached(priority: .userInitiated) {
                 Self.decodeEntries(from: doc)
             }.value
-            guard let self else { return }
+            guard let self, !self.stopped,
+                  self.lifecycleGeneration == generation else { return }
             self.projecting = false
+            self.lastProjectionAt = .now()
             if let decoded {
                 self.apply(decoded.entries, queue: decoded.queue)
             }
             if self.projectPending {
-                self.projectPending = false
-                self.project()
+                if self.viewAttached {
+                    self.projectPending = false
+                    self.project()
+                } else {
+                    self.scheduleTrailingProjection(after: 1_000_000_000)
+                }
             }
         }
     }
@@ -435,7 +649,9 @@ final class SessionStore {
         revision &+= 1
         // If no transcript view is open, settle the parses now (off-main) so
         // the eventual open is memo hits all the way down.
-        transcriptCache.prewarm(entries: entries)
+        if viewAttached || keepsParseCacheWarm {
+            transcriptCache.prewarm(entries: entries)
+        }
     }
 
     /// Whole-doc decode. `nil` means the doc has no map root yet — leave the
@@ -738,7 +954,7 @@ final class SessionStore {
             var backoffMs = Self.transferBackoffBaseMs
             let deadline = nowMs() + Self.attachmentWaitMaxMs
             let totalBytes = max(remaining.reduce(0) { $0 + $1.data.count }, 1)
-            while let self, !pending.isEmpty, nowMs() < deadline {
+            while let self, !self.stopped, !pending.isEmpty, nowMs() < deadline {
                 do {
                     while let transfer = pending.first {
                         let doneBytes = totalBytes - pending.reduce(0) { $0 + $1.data.count }
@@ -756,7 +972,7 @@ final class SessionStore {
                     self.nudgeHost()
                     return
                 } catch {
-                    roomLog.warning("chat2 \(self.chatId, privacy: .public): attachment transfer failed (\(error.localizedDescription, privacy: .public)); retrying in \(backoffMs)ms")
+                    roomLog.warning("chat2 \(self.chatId, privacy: .public): attachment transfer failed (\(describeTransportError(error), privacy: .public)); retrying in \(backoffMs)ms")
                     await OnlineBus.shared.waitBackoff(ms: backoffMs)
                     backoffMs = min(backoffMs * 2, Self.transferBackoffCapMs)
                 }

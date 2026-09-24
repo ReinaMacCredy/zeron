@@ -880,6 +880,7 @@ async fn recover_stale_journal_stamps_aborted_on_boot() {
             from_chat_id: None,
             fork_import: false,
             answers_request_id: None,
+            duration_ms: None,
         })
         .unwrap();
         let mut writer = SegmentWriter::begin(&doc, "m-assist", device_id, 2).unwrap();
@@ -954,7 +955,7 @@ async fn rpc_surface_over_in_memory_transport() {
         )
         .await
         .unwrap();
-    assert_eq!(models[0]["id"], "mock-1");
+    assert_eq!(models["models"][0]["id"], "mock-1");
 
     // WatchSessions + WatchDocMessages streams.
     let mut sessions_stream = client
