@@ -9,7 +9,7 @@ use crate::computer::backend::{ComputerError, CuaErrorLayer, cua_effect_name};
 use crate::computer::setup_signal::{ComputerSetupSignal, computer_setup_tool_note};
 use crate::computer::ui_tree_targeting::{ComputerTargetCandidate, ComputerTargetError};
 
-pub const INPUT_PAUSE_REQUERY_HINT: &str = "Observe a usable window of the affected app after physical input stops; never replay an uncertain action.";
+pub const INPUT_PAUSE_REQUERY_HINT: &str = "Read fresh state with computer_get_state on the affected window, then continue the task from what it shows; never replay an uncertain action.";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ToolValue {

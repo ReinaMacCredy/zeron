@@ -413,7 +413,7 @@ pub(super) fn desktop_pause_reply(desktop_paused: bool) -> CuaReply {
     let message = if desktop_paused {
         "Computer input is paused because the desktop is locked, asleep or inactive. Return to the desktop, then read fresh state before continuing."
     } else {
-        "Computer input was interrupted or the user changed the controlled window. Read fresh computer state and inspect it before continuing; do not replay an uncertain action."
+        "Computer input was interrupted or the user changed the controlled window. Read fresh state with computer_get_state on that window, then continue from what it shows; do not replay an uncertain action."
     };
     refusal(
         message,
@@ -422,7 +422,7 @@ pub(super) fn desktop_pause_reply(desktop_paused: bool) -> CuaReply {
             "code": "computer_input_paused",
             "layer": "driver-host",
             "message": message,
-            "requery_hint": "After physical input stops, observe a usable window of the affected app with computer_get_state and its exact window_id. Do not replay an uncertain action.",
+            "requery_hint": "Call computer_get_state with the affected window_id; that read clears the pause once physical input has stopped. Then continue the task. Do not replay an uncertain action.",
         }),
     )
 }
@@ -445,7 +445,7 @@ pub(super) fn input_monitor_unavailable_reply(monitor_error: Option<&str>) -> Cu
 }
 
 pub(super) fn input_interrupted_reply(wait: Duration) -> CuaReply {
-    let message = "Computer input was interrupted by physical input. Wait for the user to finish, then read fresh computer state before continuing. Do not replay an uncertain action.";
+    let message = "Computer input was interrupted by physical input. After wait_seconds, read fresh state with computer_get_state on the affected window, then continue from what it shows. Do not replay an uncertain action.";
     refusal(
         message,
         json!({
@@ -454,7 +454,7 @@ pub(super) fn input_interrupted_reply(wait: Duration) -> CuaReply {
             "layer": "driver-host",
             "message": message,
             "wait_seconds": wait.as_secs_f64(),
-            "requery_hint": "Wait, then observe the affected target before deciding the next action. Waiting alone does not resume input.",
+            "requery_hint": "Wait wait_seconds, then call computer_get_state on the affected window; that read resumes input. Waiting alone does not.",
         }),
     )
 }
