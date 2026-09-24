@@ -73,7 +73,6 @@ mod summary;
 mod switcher;
 mod tabs;
 
-pub(crate) use split::SessionRowDrag;
 pub(crate) use tabs::TabDragPayload;
 
 use spaces::{AddSpaceFlow, RenameSpaceDialog};
@@ -1090,10 +1089,10 @@ struct RightTabDragState {
     prev_over: usize,
 }
 
-/// Sidebar-only drag payload. Regular sessions never acquire a manual order.
+/// A sidebar row's drag payload. Regular sessions never acquire a manual order.
 #[derive(Clone)]
-struct SidebarSessionDrag {
-    chat_id: String,
+pub(crate) struct SidebarSessionDrag {
+    pub(crate) chat_id: String,
     visible_ids: std::sync::Arc<Vec<String>>,
     filter: Option<String>,
     profile_key: String,
@@ -1247,6 +1246,28 @@ struct DragGhost;
 impl Render for DragGhost {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         Empty
+    }
+}
+
+/// A sidebar row's drag ghost: empty while the sidebar draws the lifted row
+/// under the pointer, the strip's tab ghost everywhere else.
+struct SessionRowGhost {
+    shell: gpui::WeakEntity<Shell>,
+    tab: Entity<tabs::TabGhost>,
+}
+
+impl Render for SessionRowGhost {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let lifted = self.shell.upgrade().is_some_and(|shell| {
+            let shell = shell.read(cx);
+            shell.sidebar_session_transfer.is_some()
+                && f32::from(window.mouse_position().x) <= shell.settings.sidebar_width
+        });
+        if lifted {
+            Empty.into_any_element()
+        } else {
+            self.tab.clone().into_any_element()
+        }
     }
 }
 
@@ -7747,9 +7768,6 @@ impl Shell {
         } else {
             hover
         };
-        let split_drag = !preview
-            && search_query.is_none()
-            && !archived;
         let rest_text = if selected || search_query.is_some() {
             text
         } else if archived {
@@ -7820,36 +7838,26 @@ impl Shell {
                     }),
                 )
             })
-            // Sidebar rows drag into the split view's drop zones (the
-            // palette's copies do not). gpui allows one drag listener per
-            // element, so the pin-transfer drag only rides rows the split
-            // drag leaves alone.
-            .when(split_drag, |el| {
-                el.on_drag(
-                    split::SessionRowDrag {
-                        chat_id: id.clone(),
-                        title: title.clone(),
-                        brand: harnesses
-                            .last()
-                            .copied()
-                            .map(crate::pickers::harness_brand_icon),
-                    },
-                    |payload, _point, _, cx| {
-                        let title = payload.title.clone();
-                        let brand = payload.brand;
-                        cx.stop_propagation();
-                        cx.new(|_| tabs::TabGhost { title, brand })
-                    },
-                )
-            })
-            .when_some(drag.filter(|_| !split_drag), |el, payload| {
-                let shell = cx.entity();
+            .when_some(drag, |el, payload| {
+                let shell = cx.weak_entity();
+                let title = title.clone();
+                let brand = harnesses
+                    .last()
+                    .copied()
+                    .map(crate::pickers::harness_brand_icon);
                 el.on_drag(payload, move |payload, point, window, cx| {
-                    shell.update(cx, |shell, cx| {
-                        shell.begin_sidebar_session_transfer(payload, point, window, cx);
-                    });
+                    shell
+                        .update(cx, |shell, cx| {
+                            shell.begin_sidebar_session_transfer(payload, point, window, cx);
+                        })
+                        .ok();
                     cx.stop_propagation();
-                    cx.new(|_| DragGhost)
+                    let tab = cx.new(|_| tabs::TabGhost {
+                        title: title.clone(),
+                        brand,
+                    });
+                    let shell = shell.clone();
+                    cx.new(|_| SessionRowGhost { shell, tab })
                 })
             })
             // Line 1: "project @ device", status word / time-ago right.

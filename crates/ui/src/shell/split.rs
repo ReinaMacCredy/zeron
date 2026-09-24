@@ -133,15 +133,6 @@ impl SplitPane {
     }
 }
 
-/// A sidebar row being dragged. Distinct from the strip's
-/// [`tabs::TabDragPayload`] on purpose: the strip's drag-move/drop
-/// listeners read a tab index and would reorder on a row drag.
-pub(crate) struct SessionRowDrag {
-    pub(crate) chat_id: String,
-    pub(super) title: SharedString,
-    pub(super) brand: Option<(&'static str, Option<gpui::Hsla>)>,
-}
-
 /// Which drop zone the pointer is over during a drag; `epoch` keys the
 /// grow/shrink animation restarts (the tab strip's slide idiom).
 #[derive(Debug, Default)]
@@ -796,8 +787,8 @@ impl Shell {
                         this.drop_session_on_side(payload.chat_id.clone(), side, cx);
                     },
                 ))
-                .on_drop::<SessionRowDrag>(cx.listener(
-                    move |this, payload: &SessionRowDrag, _, cx| {
+                .on_drop::<SidebarSessionDrag>(cx.listener(
+                    move |this, payload: &SidebarSessionDrag, _, cx| {
                         tracing::info!(chat = %payload.chat_id, ?side, "split: row dropped");
                         this.drop_session_on_side(payload.chat_id.clone(), side, cx);
                     },
@@ -832,8 +823,8 @@ impl Shell {
                         this.set_split_drop_hot(side, cx);
                     },
                 ))
-                .on_drag_move::<SessionRowDrag>(cx.listener(
-                    |this, event: &gpui::DragMoveEvent<SessionRowDrag>, _, cx| {
+                .on_drag_move::<SidebarSessionDrag>(cx.listener(
+                    |this, event: &gpui::DragMoveEvent<SidebarSessionDrag>, _, cx| {
                         let top = this.composer_drop_top(cx);
                         let side = Self::split_zone_at(event.bounds, event.event.position, top);
                         this.set_split_drop_hot(side, cx);
@@ -846,7 +837,7 @@ impl Shell {
                         1.0
                     })
                 })
-                .drag_over::<SessionRowDrag>(move |style, payload, _, cx| {
+                .drag_over::<SidebarSessionDrag>(move |style, payload, _, cx| {
                     style.opacity(if inert(&payload.chat_id, cx) {
                         0.3
                     } else {
@@ -912,6 +903,7 @@ mod drag_regressions {
 
     fn seed(shell: &Shell, cx: &mut Context<Shell>) {
         shell.state.update(cx, |state, _| {
+            state.workspace_scope = Some(zeron_proto::WorkspaceScope::Local);
             state.chats = vec![chat("a"), chat("b")];
             state.chats_synced = true;
             state.spaces_synced = true;
@@ -954,7 +946,12 @@ mod drag_regressions {
                     None,
                     false,
                     false,
-                    None,
+                    Some(SidebarSessionDrag {
+                        chat_id: "b".into(),
+                        visible_ids: Default::default(),
+                        filter: None,
+                        profile_key: "local".into(),
+                    }),
                     None,
                     None,
                     &theme,
@@ -1077,6 +1074,122 @@ mod drag_regressions {
             );
             let text = shell.composer.read(cx).input.read(cx).text().to_string();
             assert_eq!(text, "[b](zeron-thread:b) ");
+        });
+    }
+
+    /// The real sidebar beside the drop zones, so one row drag can reach a
+    /// custom section and a split half.
+    struct SidebarHost {
+        shell: Entity<Shell>,
+        _data_dir: tempfile::TempDir,
+    }
+
+    impl Render for SidebarHost {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.shell.update(cx, |shell, cx| {
+                let theme = Theme::of(cx).clone();
+                let sidebar = shell.render_chat_sidebar(&theme, cx);
+                let zones = shell.render_split_drop_zones(cx);
+                shell.viewport_height = 800.0;
+                div()
+                    .flex()
+                    .flex_row()
+                    .w(px(1000.))
+                    .h(px(800.))
+                    .on_drag_move::<SidebarSessionDrag>(
+                        cx.listener(Shell::contain_pinned_session_drag),
+                    )
+                    .on_drop::<SidebarSessionDrag>(
+                        cx.listener(|shell, _, _, cx| shell.cancel_sidebar_session_transfer(cx)),
+                    )
+                    .child(div().w(px(280.)).h_full().child(sidebar))
+                    .child(div().relative().flex_1().h_full().children(zones))
+            })
+        }
+    }
+
+    #[gpui::test]
+    fn one_row_drag_lands_in_a_custom_section_and_a_split_zone(cx: &mut TestAppContext) {
+        init(cx);
+        cx.update(|cx| {
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            )
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let (host, cx) = cx.add_window_view(|_, cx| {
+            let shell = cx.new(|cx| {
+                let state = cx.new(|_| AppState::new());
+                let mut shell = Shell::new(state, boot_config(&dir), cx);
+                seed(&shell, cx);
+                shell.state.update(cx, |state, _| {
+                    state.local_device_id = Some("dev".into());
+                });
+                shell.settings.sidebar_width = 280.0;
+                shell.settings.space_filter = None;
+                shell.settings.sidebar_organization = SidebarOrganization::InOneList;
+                shell.settings.sidebar_sections_by_profile.insert(
+                    "local".into(),
+                    vec![crate::settings::SidebarSection {
+                        id: "focus".into(),
+                        name: "Focus".into(),
+                        session_ids: vec![],
+                        collapsed: false,
+                    }],
+                );
+                shell
+            });
+            SidebarHost {
+                shell,
+                _data_dir: dir,
+            }
+        });
+        let shell = host.read_with(cx, |host, _| host.shell.clone());
+        cx.update(|window, cx| window.draw(cx).clear());
+
+        let start = cx.debug_bounds("chat-b").unwrap().center();
+        cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(
+            start + gpui::point(px(8.), px(0.)),
+            Some(MouseButton::Left),
+            gpui::Modifiers::default(),
+        );
+        let section = cx.debug_bounds("custom-section-focus").unwrap().center();
+        cx.simulate_mouse_move(section, Some(MouseButton::Left), gpui::Modifiers::default());
+        cx.simulate_mouse_up(section, MouseButton::Left, gpui::Modifiers::default());
+        shell.update(cx, |shell, cx| {
+            let sections = shell.active_sidebar_sections(cx);
+            assert_eq!(sections[0].session_ids, ["b"]);
+            assert!(shell.split_chat_id().is_none());
+            shell.sidebar_session_return = None;
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+
+        let start = cx.debug_bounds("chat-b").unwrap().center();
+        cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(
+            start + gpui::point(px(8.), px(0.)),
+            Some(MouseButton::Left),
+            gpui::Modifiers::default(),
+        );
+        cx.update(|window, cx| window.draw(cx).clear());
+        let zone = cx
+            .debug_bounds("split-drop-right")
+            .expect("drop zones mount while the row is dragged")
+            .center();
+        cx.simulate_mouse_move(zone, Some(MouseButton::Left), gpui::Modifiers::default());
+        cx.simulate_mouse_up(zone, MouseButton::Left, gpui::Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear());
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(shell.split_chat_id(), Some("b"));
+            assert_eq!(shell.split.as_ref().map(|s| s.side), Some(SplitSide::Right));
+            assert_eq!(shell.active_sidebar_sections(cx)[0].session_ids, ["b"]);
+            assert!(shell.sidebar_session_transfer.is_none());
         });
     }
 

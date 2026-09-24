@@ -11273,15 +11273,15 @@ impl Render for Composer {
                 .border_dashed()
                 .border_color(accent)
                 .opacity(0.0)
-                .drag_over::<crate::shell::SessionRowDrag>(|style, _, _, _| style.opacity(1.0))
+                .drag_over::<crate::shell::SidebarSessionDrag>(|style, _, _, _| style.opacity(1.0))
                 .drag_over::<crate::shell::TabDragPayload>(|style, _, _, _| style.opacity(1.0))
         };
         let pill_surface = div()
             .relative()
             .id("composer-surface")
             .debug_selector(|| "composer-surface".to_string())
-            .on_drop::<crate::shell::SessionRowDrag>(cx.listener(
-                |this, payload: &crate::shell::SessionRowDrag, window, cx| {
+            .on_drop::<crate::shell::SidebarSessionDrag>(cx.listener(
+                |this, payload: &crate::shell::SidebarSessionDrag, window, cx| {
                     this.add_thread_mention(&payload.chat_id, window, cx);
                 },
             ))

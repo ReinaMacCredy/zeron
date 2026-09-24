@@ -364,6 +364,10 @@ impl Shell {
         let drop_id = id.clone();
         let element = div()
             .id(SharedString::from(format!("custom-section-{id}")))
+            .debug_selector({
+                let id = id.clone();
+                move || format!("custom-section-{id}")
+            })
             .w_full()
             .flex()
             .flex_col()

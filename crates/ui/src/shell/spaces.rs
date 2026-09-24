@@ -1125,25 +1125,16 @@ mod pinned_session_tests {
         }
     }
 
-    // Sidebar rows carry the split-view drag on this fork, so the section
-    // transfer drag never attaches to them (render_chat_row).
-    #[ignore = "sidebar rows drag into the split view, not between sections"]
     #[gpui::test]
     fn session_section_drops_preserve_live_activity_order(cx: &mut gpui::TestAppContext) {
         exercise_session_section_drops(cx, false, true);
     }
 
-    // Sidebar rows carry the split-view drag on this fork, so the section
-    // transfer drag never attaches to them (render_chat_row).
-    #[ignore = "sidebar rows drag into the split view, not between sections"]
     #[gpui::test]
     fn compact_sidebar_section_drops_follow_pointer(cx: &mut gpui::TestAppContext) {
         exercise_session_section_drops(cx, true, false);
     }
 
-    // Sidebar rows carry the split-view drag on this fork, so the section
-    // transfer drag never attaches to them (render_chat_row).
-    #[ignore = "sidebar rows drag into the split view, not between sections"]
     #[gpui::test]
     fn hidden_label_sidebar_section_drops_follow_pointer(cx: &mut gpui::TestAppContext) {
         exercise_session_section_drops(cx, false, false);
@@ -2562,9 +2553,12 @@ impl Shell {
                             let Some(transfer) = shell.sidebar_session_transfer.as_ref() else {
                                 return false;
                             };
-                            if !cx.has_active_drag()
-                                || !std::rc::Rc::ptr_eq(&origin, &transfer.origin)
-                            {
+                            if !cx.has_active_drag() {
+                                // A drop outside the sidebar never reaches its handlers.
+                                cx.notify();
+                                return false;
+                            }
+                            if !std::rc::Rc::ptr_eq(&origin, &transfer.origin) {
                                 return false;
                             }
                             // Layout also animates while the pointer is stationary.
@@ -2704,11 +2698,13 @@ impl Shell {
         let viewport = self.sidebar_scroll.bounds();
         let scroll_top = -f32::from(self.sidebar_scroll.offset().y);
         let returning = self.sidebar_session_transfer.is_none();
+        let sidebar_width = self.settings.sidebar_width;
         let transfer = if let Some(transfer) = self.sidebar_session_transfer.as_mut() {
             transfer
         } else {
             &mut self.sidebar_session_return.as_mut().unwrap().transfer
         };
+        let outside = !returning && f32::from(transfer.pointer.x) > sidebar_width;
         let origin = f32::from(transfer.origin.get().y - viewport.top()) + scroll_top;
         let target = if returning {
             origin
@@ -2732,6 +2728,7 @@ impl Shell {
             .h(px(height))
             .rounded(px(8.0))
             .when(!returning, |el| el.bg(theme.surface_raised).shadow_md())
+            .when(outside, |el| el.invisible())
             .child(row);
         if self.reduced_motion {
             frame.top(px(to)).into_any_element()
@@ -4768,16 +4765,13 @@ impl Shell {
                 } else {
                     None
                 };
-                let drag = (self.pinned_open || slot >= pinned_count)
-                    .then(|| {
-                        profile_key.as_ref().map(|profile_key| SidebarSessionDrag {
-                            chat_id: chat.id.clone(),
-                            visible_ids: visible_pinned_ids.clone(),
-                            filter: filter.clone(),
-                            profile_key: profile_key.clone(),
-                        })
-                    })
-                    .flatten();
+                // Sidebar targets reject an empty profile; the split zones still take it.
+                let drag = (self.pinned_open || slot >= pinned_count).then(|| SidebarSessionDrag {
+                    chat_id: chat.id.clone(),
+                    visible_ids: visible_pinned_ids.clone(),
+                    filter: filter.clone(),
+                    profile_key: profile_key.clone().unwrap_or_default(),
+                });
                 slot += 1;
                 let created_by: Option<SharedString> = chat
                     .created_by_chat_id
