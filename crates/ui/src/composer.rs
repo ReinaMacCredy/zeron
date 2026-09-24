@@ -5166,7 +5166,7 @@ fn invocation_token(text: &str, cursor: usize, prefix: char) -> Option<MentionTo
             || matches!(grapheme, "-" | "_" | ":" | ".")
     };
     if !query.graphemes(true).all(name_grapheme)
-        || (prefix == '$' && query.starts_with(char::is_numeric))
+        || (prefix == '$' && query.starts_with(|c: char| c.is_numeric() || c.is_uppercase()))
     {
         return None;
     }
@@ -13139,6 +13139,8 @@ mod tests {
     fn invocation_completion_rejects_code_paths_currency_and_escapes() {
         for text in [
             "cost $100",
+            "echo $HOME",
+            "set $Path",
             "word$review",
             "\\$review",
             "`$review",
