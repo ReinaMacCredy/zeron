@@ -5,14 +5,14 @@ use futures::FutureExt;
 use serde_json::{Map, Value};
 use tokio_util::sync::CancellationToken;
 use zeron_proto::PermissionMode;
-use zeron_proto::computer::{ComputerEvent, CuaComputerTask};
+use zeron_proto::computer::{ComputerAllowedApp, ComputerEvent, CuaComputerTask};
 
 use super::{
-    Authority, COMPUTER_CONTROL_TEARDOWN_TIMEOUT_MS, ComputerCaller, ComputerConsentCard,
-    ComputerConsentScope, ComputerManager, SURFACED_CONTROL_DISCLOSURES_MAX, agent_thread_id, lock,
-    with_teardown_timeout,
+    Authority, COMPUTER_CONTROL_TEARDOWN_TIMEOUT_MS, ComputerCaller, ComputerConsent,
+    ComputerConsentCard, ComputerConsentScope, ComputerConsentTarget, ComputerManager,
+    SURFACED_CONTROL_DISCLOSURES_MAX, agent_thread_id, lock, with_teardown_timeout,
 };
-use crate::computer::approval_gate::{ApprovalPublish, ApprovalRequest};
+use crate::computer::approval_gate::{AppGrant, ApprovalPublish, ApprovalRequest};
 use crate::computer::backend::{ComputerBackendError, ComputerError};
 use crate::computer::call_context::{
     create_computer_call_context, current_computer_call, with_computer_call_context,
@@ -551,19 +551,38 @@ impl ComputerManager {
         caller: &ComputerCaller,
         signal: CancellationToken,
     ) -> Result<bool, ComputerError> {
+        let consent = self
+            .authorize_consent(tool_name, args, caller, signal, None)
+            .await?;
+        Ok(consent == ComputerConsent::Granted)
+    }
+
+    pub async fn authorize_consent(
+        &self,
+        tool_name: &str,
+        args: &Map<String, Value>,
+        caller: &ComputerCaller,
+        signal: CancellationToken,
+        target: Option<&ComputerConsentTarget>,
+    ) -> Result<ComputerConsent, ComputerError> {
         let Some(mode) = self
             .seams
             .caller(&caller.chat_id, caller.turn_id.as_deref())
             .await?
         else {
-            return Ok(false);
+            return Ok(ComputerConsent::Denied(None));
         };
         if mode != PermissionMode::Ask {
             self.surface_control_disclosure(&caller.chat_id, caller.turn_id.as_deref())
                 .await;
-            return Ok(true);
+            return Ok(ComputerConsent::Granted);
         }
         let task_consent = tool_name != "computer_read_clipboard" && caller.turn_id.is_some();
+        let resolved = match target {
+            Some(target) => Some(self.resolve_consent_app(target).await),
+            None => None,
+        };
+        let app = resolved.as_ref().map(|resolved| resolved.app.clone());
         let params_display = Value::Object(
             args.iter()
                 .filter(|(key, _)| !matches!(key.as_str(), "text" | "value" | "prompt_text"))
@@ -580,6 +599,7 @@ impl ComputerManager {
         } else {
             ComputerConsentScope::Call
         };
+        let card_app = app.clone();
         let publish: ApprovalPublish = Arc::new(move |request_id, decision| {
             let seams = seams.clone();
             let card = ComputerConsentCard {
@@ -589,8 +609,21 @@ impl ComputerManager {
                 tool_name: tool.clone(),
                 params_display: params_display.clone(),
                 scope,
+                app: card_app.clone(),
             };
             async move { seams.publish_consent(card, decision).await }.boxed()
+        });
+        let grant = resolved.map(|resolved| AppGrant {
+            always: resolved
+                .app
+                .bundle_id
+                .clone()
+                .filter(|_| task_consent)
+                .map(|bundle_id| ComputerAllowedApp {
+                    bundle_id,
+                    name: Some(resolved.app.name.clone()),
+                }),
+            key: resolved.key,
         });
         let request = ApprovalRequest {
             chat_id: caller.chat_id.clone(),
@@ -598,17 +631,19 @@ impl ComputerManager {
             mode,
             signal,
             publish,
+            app: grant,
         };
         let approved = if task_consent {
             self.approval_gate.request_task(request).await?
         } else {
             self.approval_gate.request(request).await?
         };
-        if approved {
-            self.surface_control_disclosure(&caller.chat_id, caller.turn_id.as_deref())
-                .await;
+        if !approved {
+            return Ok(ComputerConsent::Denied(app));
         }
-        Ok(approved)
+        self.surface_control_disclosure(&caller.chat_id, caller.turn_id.as_deref())
+            .await;
+        Ok(ComputerConsent::Granted)
     }
 
     async fn surface_control_disclosure(&self, chat_id: &str, turn_id: Option<&str>) {

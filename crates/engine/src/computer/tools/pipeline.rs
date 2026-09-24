@@ -7,6 +7,9 @@ use zeron_proto::computer::{
     McpToolResult, parse_cua_action_diagnostics,
 };
 
+use super::consent::{
+    COMPUTER_APP_CONSENT_DENIED_CODE, ConsentRefusal, app_consent_refusal_result,
+};
 use super::progress_guard::{ComputerProgressAction, ComputerProgressOutcome, ComputerProgressScope};
 use super::results::{
     AuditOutcome, ToolFailure, ToolValue, computer_audit_error_outcome,
@@ -270,26 +273,37 @@ impl ComputerTools {
             if raises {
                 approval_args.insert("delivery_mode".into(), json!("foreground"));
             }
-            let approved = self
-                .manager
-                .authorize_action(
-                    name,
-                    &approval_args,
-                    &self.caller(context),
-                    context.signal.clone(),
-                )
-                .await?;
-            if !approved {
-                self.audit(
-                    name,
-                    args,
-                    context,
-                    None,
-                    AuditOutcome::new(ComputerAuditEffect::Refused, Some("approval_denied")),
-                );
-                return Ok(McpToolResult::error(
-                    "Computer action was denied or cancelled; no input was sent.",
-                ));
+            let targets = self.consent_targets(name, args, &context.chat_id);
+            match self
+                .authorize_consent_targets(name, &approval_args, context, targets)
+                .await?
+            {
+                None => {}
+                Some(ConsentRefusal::Task) => {
+                    self.audit(
+                        name,
+                        args,
+                        context,
+                        None,
+                        AuditOutcome::new(ComputerAuditEffect::Refused, Some("approval_denied")),
+                    );
+                    return Ok(McpToolResult::error(
+                        "Computer action was denied or cancelled; no input was sent.",
+                    ));
+                }
+                Some(ConsentRefusal::App { app, step }) => {
+                    self.audit(
+                        name,
+                        args,
+                        context,
+                        None,
+                        AuditOutcome::new(
+                            ComputerAuditEffect::Refused,
+                            Some(COMPUTER_APP_CONSENT_DENIED_CODE),
+                        ),
+                    );
+                    return Ok(app_consent_refusal_result(&app, step));
+                }
             }
         }
         if name != "computer_scroll" {

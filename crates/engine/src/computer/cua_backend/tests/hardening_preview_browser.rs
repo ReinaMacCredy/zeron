@@ -1078,6 +1078,7 @@ mod foreground_guard {
                     mode: PermissionMode::Ask,
                     signal: CancellationToken::new(),
                     publish,
+                    app: None,
                 })
                 .await
             }

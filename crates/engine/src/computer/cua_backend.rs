@@ -336,7 +336,7 @@ fn decode_base64_prefix(data: &str, chars: usize) -> Vec<u8> {
     BASE64.decode(&prefix[..usable]).unwrap_or_default()
 }
 
-fn parse_cua_window_id(window_id: &str) -> Option<(u64, u64)> {
+pub(crate) fn parse_cua_window_id(window_id: &str) -> Option<(u64, u64)> {
     let rest = window_id.strip_prefix("cua:")?;
     let (pid, window) = rest.split_once(':')?;
     let valid = |part: &str| {

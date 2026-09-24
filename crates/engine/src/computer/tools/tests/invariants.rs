@@ -72,6 +72,10 @@ async fn routes_every_harness_through_the_same_task_gate() {
         .await;
     assert!(denied.is_error);
     assert_eq!(h.backend.calls_for("typeText").len(), 3);
-    assert!(result_json(&denied).is_null());
+    assert_eq!(result_json(&denied)["error"]["code"], "app_consent_denied");
+    assert_eq!(
+        result_json(&denied)["error"]["app"]["bundleId"],
+        "org.kde.konsole"
+    );
     h.dispose().await;
 }

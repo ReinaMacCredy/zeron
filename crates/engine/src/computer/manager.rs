@@ -1,5 +1,6 @@
 mod actions;
 mod authority;
+mod consent_app;
 mod foreground;
 mod lease;
 mod observe;
@@ -115,7 +116,7 @@ impl ComputerManagerEnv {
     }
 }
 
-pub use zeron_proto::computer::ComputerConsentScope;
+pub use zeron_proto::computer::{ComputerConsentApp, ComputerConsentScope};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComputerConsentCard {
@@ -125,6 +126,20 @@ pub struct ComputerConsentCard {
     pub tool_name: String,
     pub params_display: String,
     pub scope: ComputerConsentScope,
+    pub app: Option<ComputerConsentApp>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComputerConsentTarget {
+    Window(String),
+    Pid(u32),
+    App(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComputerConsent {
+    Granted,
+    Denied(Option<ComputerConsentApp>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

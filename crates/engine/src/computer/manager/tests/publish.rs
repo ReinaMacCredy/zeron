@@ -746,6 +746,7 @@ async fn settles_a_pending_approval_prompt_when_control_is_switched_off_mid_turn
                     mode: PermissionMode::Ask,
                     signal: CancellationToken::new(),
                     publish: Arc::new(|_, _| async { Ok(()) }.boxed()),
+                    app: None,
                 })
                 .await
         }

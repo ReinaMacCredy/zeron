@@ -25,6 +25,7 @@ use crate::computer::setup_signal::ComputerSetupSignal;
 use crate::computer::visible_use::ComputerForegroundAuthorization;
 
 mod actions;
+mod app_consent;
 mod batch_and_diffs;
 mod browser;
 mod catalog;

@@ -94,6 +94,7 @@ async fn a_late_accept_for_a_prompt_open_at_stop_settles_false() {
                 mode: PermissionMode::Ask,
                 signal: CancellationToken::new(),
                 publish,
+                app: None,
             })
             .await
         })
