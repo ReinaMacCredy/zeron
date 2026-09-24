@@ -80,7 +80,7 @@ async fn approving_one_app_raises_a_new_card_naming_the_next_app_in_the_same_tur
     );
     assert_eq!(
         question.options,
-        ["Allow", "Always allow Calculator", "Decline"]
+        ["Allow", "Always allow Calculator", "Deny"]
     );
     assert_eq!(h.backend.calls_for("typeText").len(), 3);
     let list = h.call("computer_list_windows", json!({})).await;
@@ -139,11 +139,23 @@ async fn an_unverified_app_says_so_and_cannot_be_always_allowed() {
         "{}",
         question.question
     );
-    assert_eq!(question.options, ["Allow", "Decline"]);
+    assert_eq!(question.options, ["Allow", "Deny"]);
     let error = &result_json(&denied)["error"];
     assert_eq!(error["code"], COMPUTER_APP_CONSENT_DENIED_CODE);
     assert_eq!(error["app"]["verified"], false);
     assert_eq!(h.backend.calls_for("typeText").len(), 0);
+    let lookups = h.backend.calls_for("listApps").len();
+    assert!(
+        h.call("computer_type_text", type_into("fake-terminal"))
+            .await
+            .is_error
+    );
+    assert_eq!(cards(&h).len(), 1, "the denial sticks for the turn");
+    assert_eq!(
+        h.backend.calls_for("listApps").len(),
+        lookups,
+        "an unknown pid is not looked up again on every call"
+    );
     h.decide(ApprovalDecision::Accept);
     let mut context = h.context_for(THREAD, None);
     context.turn_id = Some("turn-next".into());
@@ -226,8 +238,7 @@ fn the_always_label_maps_to_an_always_decision() {
         consent_decision(&answer("Always allow Safari")),
         ApprovalDecision::AcceptForSession
     );
-    assert_eq!(
-        consent_decision(&answer("Decline")),
-        ApprovalDecision::Decline
-    );
+    for denied in ["Deny", "Decline"] {
+        assert_eq!(consent_decision(&answer(denied)), ApprovalDecision::Decline);
+    }
 }

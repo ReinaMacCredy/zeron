@@ -1,6 +1,6 @@
 use zeron_proto::computer::{ComputerApp, ComputerConsentApp};
 
-use super::{ComputerConsentTarget, ComputerManager};
+use super::{COMPUTER_DENYLIST_APP_CACHE_MS, ComputerConsentTarget, ComputerManager};
 use crate::computer::backend::ComputerBackendMethod;
 use crate::computer::cua_backend::parse_cua_window_id;
 
@@ -57,9 +57,24 @@ impl ComputerManager {
         {
             return apps;
         }
+        let now = self.now_ms();
+        let fresh_miss = |at: &u64| now.saturating_sub(*at) < COMPUTER_DENYLIST_APP_CACHE_MS;
+        if self
+            .state()
+            .consent_pid_misses
+            .get(&pid)
+            .is_some_and(fresh_miss)
+        {
+            return apps;
+        }
         match self.backend.list_apps().await {
             Ok(fresh) => {
-                self.state().denied_apps_cache = Some((self.now_ms(), fresh.clone()));
+                let mut state = self.state();
+                state.denied_apps_cache = Some((now, fresh.clone()));
+                state.consent_pid_misses.retain(|_, at| fresh_miss(at));
+                if !fresh.iter().any(|app| app.pid == pid) {
+                    state.consent_pid_misses.insert(pid, now);
+                }
                 fresh
             }
             Err(_) => apps,

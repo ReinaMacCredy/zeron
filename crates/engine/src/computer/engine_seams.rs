@@ -11,7 +11,7 @@ use super::manager::{COMPUTER_CONTROL_ON_DISCLOSURE, ComputerConsentCard, Comput
 use crate::sessions::SessionsEngine;
 
 pub const COMPUTER_CONSENT_ALLOW: &str = "Allow";
-pub const COMPUTER_CONSENT_DECLINE: &str = "Decline";
+pub const COMPUTER_CONSENT_DECLINE: &str = "Deny";
 pub const COMPUTER_CONSENT_ALWAYS_PREFIX: &str = "Always allow ";
 
 pub struct EngineComputerSeams {

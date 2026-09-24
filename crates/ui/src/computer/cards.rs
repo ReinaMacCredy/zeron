@@ -441,8 +441,13 @@ mod tests {
             Some(ConsentOutcome::Allowed)
         );
         assert_eq!(
-            consent_outcome(true, Some(&answer(&["Decline"]))),
+            consent_outcome(true, Some(&answer(&["Deny"]))),
             Some(ConsentOutcome::Declined)
+        );
+        assert_eq!(
+            consent_outcome(true, Some(&answer(&["Decline"]))),
+            Some(ConsentOutcome::Declined),
+            "cards answered before the Deny label still read as declined"
         );
         assert_eq!(
             consent_outcome(true, Some(&[])),
@@ -461,7 +466,7 @@ mod tests {
         );
         assert_eq!(
             consent_answers("consent", &ConsentChoice::Decline),
-            answer(&["Decline"])
+            answer(&["Deny"])
         );
         assert_eq!(
             consent_answers("consent", &always),
@@ -502,7 +507,7 @@ mod tests {
                 .into_iter()
                 .map(|(_, label)| label)
                 .collect::<Vec<_>>(),
-            ["Allow for this task", "Always allow Safari", "Decline"]
+            ["Allow for this task", "Always allow Safari", "Deny"]
         );
         let unverified = safari(None);
         assert_eq!(
@@ -521,7 +526,7 @@ mod tests {
                 .into_iter()
                 .map(|(_, label)| label)
                 .collect::<Vec<_>>(),
-            ["Allow Computer for this task", "Decline"]
+            ["Allow Computer for this task", "Deny"]
         );
     }
 

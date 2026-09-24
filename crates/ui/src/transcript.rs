@@ -15312,7 +15312,7 @@ mod computer_tests {
             .debug_bounds("computer-consent-computer-consent-1-Allow Computer for this task")
             .expect("Allow painted");
         assert!(
-            cx.debug_bounds("computer-consent-computer-consent-1-Decline")
+            cx.debug_bounds("computer-consent-computer-consent-1-Deny")
                 .is_some()
         );
         cx.simulate_click(allow.center(), gpui::Modifiers::default());
@@ -15336,7 +15336,7 @@ mod computer_tests {
         fixture.update(cx, |_, cx| cx.notify());
         cx.run_until_parked();
         assert!(
-            cx.debug_bounds("computer-consent-computer-consent-1-Decline")
+            cx.debug_bounds("computer-consent-computer-consent-1-Deny")
                 .is_none(),
             "an answered card settles instead of offering the choice again"
         );
