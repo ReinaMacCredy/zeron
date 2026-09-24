@@ -4645,6 +4645,18 @@ impl Transcript {
 
     /// Rebuild rows from app state; splice minimal ranges into the list.
     fn sync(&mut self, cx: &mut Context<Self>) {
+        self.sync_rows(cx);
+        self.publish_protected_surface(cx);
+    }
+
+    fn publish_protected_surface(&self, cx: &Context<Self>) {
+        crate::computer::protected_surfaces::publish(
+            cx.entity_id(),
+            shows_protected_surface(&self.rows, &self.consent_sent, computer_setup_missing),
+        );
+    }
+
+    fn sync_rows(&mut self, cx: &mut Context<Self>) {
         if self.retain_on_deselect
             && self.doc_override.is_none()
             && self.state.read(cx).selected_chat.is_none()
@@ -9365,10 +9377,7 @@ fn computer_setup_missing() -> bool {
 
 impl Render for Transcript {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        crate::computer::protected_surfaces::publish(
-            cx.entity_id(),
-            shows_protected_surface(&self.rows, &self.consent_sent, computer_setup_missing),
-        );
+        self.publish_protected_surface(cx);
         if record_view_frame("transcript") {
             tracing::warn!(
                 distance = self.distance_from_bottom(),
