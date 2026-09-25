@@ -34,6 +34,7 @@
 
 use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
+use crate::settings::FrostTuning;
 use gpui::{App, Global, Hsla, SharedString, hsla};
 use serde::{Deserialize, Serialize};
 use zeron_syntax::HighlightKind;
@@ -602,6 +603,7 @@ pub struct Theme {
     /// The effective treatment after applying [`Self::surface_preference`] to
     /// the selected variant's recommendation.
     pub surface_treatment: SurfaceTreatment,
+    pub frost: FrostTuning,
     /// The selected interactive accent used to build this theme.
     pub accent_color: AccentColor,
 
@@ -851,20 +853,27 @@ impl Theme {
         if self.surface_treatment == SurfaceTreatment::Opaque {
             return self.surface;
         }
-        let base = match self.appearance {
-            Appearance::Dark => Self::GLASS_ALPHA,
-            Appearance::Light => Self::GLASS_ALPHA_LIGHT,
+        let (tint, base) = match self.appearance {
+            Appearance::Dark if Self::GLASS_ALPHA < 1.0 => self.dark_glass_tint(),
+            Appearance::Dark => (self.surface, Self::GLASS_ALPHA),
+            Appearance::Light => (self.surface, Self::GLASS_ALPHA_LIGHT),
         };
-        self.surface
-            .opacity(self.contrast_checked_glass_alpha(base))
+        tint.opacity(self.contrast_checked_tint_alpha(tint, base, self.adverse_backdrop()))
     }
 
-    /// Raise a requested tint's coverage until primary and muted shell text
-    /// remain legible against the adverse desktop luminance for this
-    /// appearance. A theme with unusually delicate contrast may therefore get
-    /// denser glass, never silently broken text.
-    fn contrast_checked_glass_alpha(&self, base: f32) -> f32 {
-        self.contrast_checked_tint_alpha(self.surface, base, self.adverse_backdrop())
+    fn dark_glass_tint(&self) -> (Hsla, f32) {
+        let frost = self.frost;
+        if !frost.dim_backdrop {
+            return (self.surface, frost.tint);
+        }
+        // Dimming the blurred desktop by k under a tint of coverage a paints the
+        // same pixels as one tint of coverage 1-(1-a)k, scaled toward black by a
+        // over that coverage, so no native backdrop filter is needed.
+        let alpha = 1.0 - (1.0 - frost.tint) * frost.backdrop_brightness;
+        let scale = frost.tint / alpha;
+        let [r, g, b] = hsl_to_rgb(self.surface.h, self.surface.s, self.surface.l);
+        let (h, s, l) = rgb_to_hsl(r * scale, g * scale, b * scale);
+        (hsla(h, s, l, 1.0), alpha)
     }
 
     /// Increase tint coverage only as far as needed for Zeron's shared text
@@ -1151,6 +1160,7 @@ impl Theme {
             accent_selection: AccentSelection::Preset(accent_color.into()),
             surface_preference: SurfacePreference::ThemeDefault,
             surface_treatment: SurfaceTreatment::Frosted,
+            frost: FrostTuning::UNDIMMED,
             accent_color,
             bg: grey(6),       // main panel — sampled #060606
             surface: grey(13), // shell / sidebar — sampled #0d0d0d
@@ -1231,6 +1241,7 @@ impl Theme {
             accent_selection: AccentSelection::Preset(accent_color.into()),
             surface_preference: SurfacePreference::ThemeDefault,
             surface_treatment: SurfaceTreatment::Frosted,
+            frost: FrostTuning::UNDIMMED,
             accent_color,
             bg: grey(0xff), // main panel — clean white
             // Deeper than ~neutral-100 looks on paper: the content card is pure
@@ -1549,10 +1560,15 @@ impl Theme {
                 .with_font_terminal(crate::typography::terminal_effective_family_name(cx))
                 .with_code_font_size(crate::typography::code_font_size(cx))
                 .with_terminal_font_size(crate::typography::terminal_font_size(cx));
+        let next = Self {
+            frost: crate::settings::frost(cx),
+            ..next
+        };
         let changed = cx.try_global::<Theme>().is_some_and(|theme| {
             theme.variant_id != next.variant_id
                 || theme.accent_selection != next.accent_selection
                 || theme.surface_preference != next.surface_preference
+                || theme.frost != next.frost
                 || theme.appearance != next.appearance
         });
         set_current_appearance(appearance);
@@ -2695,6 +2711,26 @@ mod tests {
             }
         }
         set_current_appearance(Appearance::Dark);
+    }
+
+    #[test]
+    fn dimmed_dark_glass_matches_the_backdrop_brightness_mock() {
+        if Theme::GLASS_ALPHA >= 1.0 {
+            return;
+        }
+        let undimmed = Theme::dark();
+        assert_eq!(undimmed.glass(), grey(13).opacity(Theme::GLASS_ALPHA));
+        let dimmed = Theme {
+            frost: FrostTuning::default(),
+            ..Theme::dark()
+        };
+        let painted = |backdrop: Hsla| {
+            let c = flatten(dimmed.glass(), backdrop);
+            srgb_u8(hsl_to_rgb(c.h, c.s, c.l))[0]
+        };
+        assert_eq!(painted(grey(0xff)), 0x1a);
+        assert_eq!(painted(hsla(0.0, 0.0, 0.08, 1.0)), 0x0c);
+        assert!(dimmed.is_glass());
     }
 
     /// Both appearances retain window and floating glass; the light floating

@@ -23,7 +23,7 @@ use gpui::{App, Global, Subscription, Window};
 use serde::{Deserialize, Serialize};
 use zeron_theme::{AccentSelection, SurfacePreference, ThemeSelection};
 
-use crate::settings::{self, SavePolicy};
+use crate::settings::{self, FrostTuning, SavePolicy};
 use crate::theme::{Appearance, Theme};
 
 /// The user's appearance preference. Persisted in `ui-settings.json`.
@@ -206,6 +206,15 @@ pub fn set_surface(surface: SurfacePreference, cx: &mut App) {
     });
 }
 
+pub fn update_frost(policy: SavePolicy, cx: &mut App, mutate: impl FnOnce(&mut FrostTuning)) {
+    if settings::update(policy, cx, |settings| {
+        mutate(&mut settings.frost);
+        settings.frost = settings.frost.clamped();
+    }) {
+        apply(cx);
+    }
+}
+
 /// Subscribe a window to OS appearance changes. The returned [`Subscription`]
 /// must outlive the window — callers typically `.detach()` it.
 ///
@@ -254,11 +263,13 @@ pub fn apply(cx: &mut App) {
     let accent = state.accent;
     let surface = state.surface;
     let variant_id = state.themes.variant_id(model_appearance(wanted)).to_owned();
+    let frost = settings::frost(cx);
     let changed = !cx.try_global::<Theme>().is_some_and(|theme| {
         theme.appearance == wanted
             && theme.variant_id.as_ref() == variant_id
             && theme.accent_selection == accent
             && theme.surface_preference == surface
+            && theme.frost == frost
     });
     if changed {
         tracing::debug!(?wanted, %variant_id, "appearance: installing palette");

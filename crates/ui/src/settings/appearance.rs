@@ -922,6 +922,109 @@ impl AppearancePage {
         .detach();
     }
 
+    fn render_frost_rows(
+        &mut self,
+        theme: &Theme,
+        frost: crate::settings::FrostTuning,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        use crate::settings::{FROST_BACKDROP_BRIGHTNESS_MIN, FROST_TINT_MIN, SavePolicy};
+        let percent_row = |title: &'static str, value: f32, control: gpui::Stateful<gpui::Div>| {
+            widgets::card_row(theme, false)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(160.0))
+                        .child(widgets::row_title(theme, title))
+                        .child(widgets::meta_line(
+                            theme,
+                            vec![
+                                div()
+                                    .child(SharedString::from(format!(
+                                        "{}%",
+                                        (value * 100.0).round()
+                                    )))
+                                    .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(control)
+                .into_any_element()
+        };
+        let mut rows = vec![
+            percent_row(
+                "Glass tint",
+                frost.tint,
+                slider(
+                    theme,
+                    "frost-tint",
+                    (frost.tint - FROST_TINT_MIN) / (1.0 - FROST_TINT_MIN),
+                    |fraction, cx| {
+                        appearance::update_frost(SavePolicy::Debounced, cx, |frost| {
+                            frost.tint = FROST_TINT_MIN + fraction * (1.0 - FROST_TINT_MIN);
+                        });
+                    },
+                ),
+            ),
+            widgets::card_row(theme, false)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(160.0))
+                        .child(widgets::row_title(theme, "Dim bright backdrops"))
+                        .child(widgets::meta_line(
+                            theme,
+                            vec![
+                                div()
+                                    .child("Keeps the glass dark over light windows behind Zeron.")
+                                    .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(
+                    div()
+                        .id("frost-dim-backdrop")
+                        .flex_none()
+                        .size(px(40.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .child(widgets::toggle_switch(
+                            theme,
+                            frost.dim_backdrop,
+                            "frost-dim-backdrop",
+                        ))
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            appearance::update_frost(SavePolicy::Immediate, cx, |frost| {
+                                frost.dim_backdrop = !frost.dim_backdrop;
+                            });
+                            cx.notify();
+                        })),
+                )
+                .into_any_element(),
+        ];
+        if frost.dim_backdrop {
+            rows.push(percent_row(
+                "Backdrop brightness",
+                frost.backdrop_brightness,
+                slider(
+                    theme,
+                    "frost-backdrop-brightness",
+                    (frost.backdrop_brightness - FROST_BACKDROP_BRIGHTNESS_MIN)
+                        / (1.0 - FROST_BACKDROP_BRIGHTNESS_MIN),
+                    |fraction, cx| {
+                        appearance::update_frost(SavePolicy::Debounced, cx, |frost| {
+                            frost.backdrop_brightness = FROST_BACKDROP_BRIGHTNESS_MIN
+                                + fraction * (1.0 - FROST_BACKDROP_BRIGHTNESS_MIN);
+                        });
+                    },
+                ),
+            ));
+        }
+        rows
+    }
+
     fn render_chat_background_rows(
         &mut self,
         theme: &Theme,
@@ -3141,6 +3244,12 @@ impl Render for AppearancePage {
                 .child(surface_control)
                 .into_any_element(),
         );
+        if matches!(theme.appearance, Appearance::Dark)
+            && theme.surface_treatment == SurfaceTreatment::Frosted
+            && Theme::GLASS_ALPHA < 1.0
+        {
+            settings_rows.extend(self.render_frost_rows(&theme, ui_settings.frost, cx));
+        }
         let background_available = current_background
             .as_ref()
             .is_some_and(|background| Path::new(&background.path).is_file());
