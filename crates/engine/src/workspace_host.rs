@@ -1486,7 +1486,10 @@ impl WorkspaceHostInner {
     fn persist_snapshot(&self) -> Result<(), EngineError> {
         // Keep export and disk write serialized: an older background snapshot
         // must not overwrite an acknowledged migration's durable snapshot.
-        let doc = lock(&self.reg);
+        let mut doc = lock(&self.reg);
+        if self.config.edge.is_none() {
+            doc.fold_pending();
+        }
         let bytes = doc.to_bytes()?;
         self.store
             .save_snapshot(REGISTRY_DOC_ID, &bytes)
@@ -1892,6 +1895,39 @@ mod tests {
             host.watch_spaces().borrow()[0].name.as_deref(),
             Some("Renamed")
         );
+    }
+
+    #[tokio::test]
+    async fn local_only_snapshots_carry_no_pending_batches() {
+        use super::*;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = WorkspaceHost::open(
+            store.clone(),
+            WorkspaceHostConfig {
+                device_id: "test-device".into(),
+                device_name: "Test device".into(),
+                platform: "macos".into(),
+                org_id: "test-org".into(),
+                user_id: "test-user".into(),
+                edge: None,
+            },
+        )
+        .unwrap();
+        host.create_space("space", "test-device", "/project", None, false)
+            .unwrap();
+        host.rename_space("space", Some("Renamed")).unwrap();
+        host.flush();
+
+        let bytes = store.load_snapshot(REGISTRY_DOC_ID).unwrap().unwrap();
+        let saved = RegistryDoc::from_bytes(&bytes, "test-device").unwrap();
+        assert_eq!(saved.pending_len(), 0);
+        assert_eq!(
+            saved.read_spaces().unwrap()[0].name.as_deref(),
+            Some("Renamed")
+        );
+        assert_eq!(saved.read_devices().unwrap()[0].id, "test-device");
     }
 
     #[tokio::test]

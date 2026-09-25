@@ -838,6 +838,52 @@ fn persistence_round_trips_rows_pending_and_cursor() {
 }
 
 #[test]
+fn folding_pending_keeps_every_read_and_empties_the_queue() {
+    let mut doc = RegistryDoc::new("dev-a");
+    doc.upsert_device(&device("dev-a", "Mac")).unwrap();
+    doc.rename_device("dev-a", "Studio").unwrap();
+    doc.upsert_space(&space("sp-1", "dev-a", "/tmp/a")).unwrap();
+    doc.upsert_space(&space("sp-2", "dev-a", "/tmp/b")).unwrap();
+    doc.rename_space("sp-1", Some("Alpha")).unwrap();
+    doc.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+    doc.upsert_chat(&chat("chat-2", "dev-a")).unwrap();
+    doc.upsert_chat(&chat("chat-3", "dev-a")).unwrap();
+    doc.rename_chat("chat-1", "renamed").unwrap();
+    doc.rename_chat("chat-1", "renamed again").unwrap();
+    for status in [
+        SessionStatus::Working,
+        SessionStatus::Idle,
+        SessionStatus::Working,
+    ] {
+        doc.upsert_session(&session("chat-1", "dev-a", status))
+            .unwrap();
+    }
+    doc.upsert_session(&session("chat-2", "dev-a", SessionStatus::Idle))
+        .unwrap();
+    doc.delete_chat("chat-3").unwrap();
+    doc.delete_space("sp-2").unwrap();
+    doc.rename_chat("chat-3", "after delete").unwrap();
+    pin_sessions(&mut doc, &["chat-1", "chat-2"]);
+    doc.change_sidebar_pin(&zeron_proto::SidebarPinChange::Unpin {
+        session_id: "chat-2".into(),
+    })
+    .unwrap();
+    assert!(doc.pending_len() > 10);
+
+    let before = doc.read_all().unwrap();
+    let prefs = doc.sidebar_preferences();
+    assert!(doc.fold_pending() > 10);
+    assert_eq!(doc.pending_len(), 0);
+    assert_eq!(doc.read_all().unwrap(), before);
+    assert_eq!(doc.sidebar_preferences(), prefs);
+
+    let restored = RegistryDoc::from_bytes(&doc.to_bytes().unwrap(), "dev-a").unwrap();
+    assert_eq!(restored.pending_len(), 0);
+    assert_eq!(restored.read_all().unwrap(), before);
+    assert_eq!(restored.sidebar_preferences(), prefs);
+}
+
+#[test]
 fn state_frames_delta_replace_and_reseed() {
     let mut doc = RegistryDoc::new("dev-a");
     doc.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
