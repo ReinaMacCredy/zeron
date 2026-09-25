@@ -385,9 +385,9 @@ mod about_panel {
         };
         let name = NSString::from_str("Zeron");
         let version = NSString::from_str(env!("CARGO_PKG_VERSION"));
-        // Empty build version: CFBundleVersion equals the marketing version, and
-        // AppKit would otherwise render "Version 0.2.61 (0.2.61)".
-        let build = NSString::from_str("");
+        // CFBundleVersion equals the marketing version, so the parenthesized
+        // build slot carries the commit instead of "Version 0.2.61 (0.2.61)".
+        let build = NSString::from_str(option_env!("ZERON_GIT_HASH").unwrap_or(""));
         let values: [&AnyObject; 3] = [&name, &version, &build];
         unsafe {
             let options = NSDictionary::from_slices(
