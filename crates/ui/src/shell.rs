@@ -91,7 +91,9 @@ actions!(
         OpenSettings,
         NextSession,
         PrevSession,
-        ArchiveSession
+        ArchiveSession,
+        IncreaseReasoning,
+        DecreaseReasoning
     ]
 );
 
@@ -350,6 +352,7 @@ pub fn apply_keymap(
     cx: &mut App,
     keymap: &KeymapConfig,
     composer_send_behavior: ComposerSendBehavior,
+    reasoning_modifier: crate::settings::ReasoningShortcutModifier,
 ) {
     fn valid_or_default(combo: &str, fallback: &str) -> String {
         let candidate = platform_combo(combo);
@@ -436,6 +439,12 @@ pub fn apply_keymap(
             OpenModelPicker,
             None,
         ),
+    ]);
+    let step = reasoning_modifier.combo_prefix();
+    cx.bind_keys([
+        KeyBinding::new(&platform_combo(&format!("{step}--")), DecreaseReasoning, None),
+        KeyBinding::new(&platform_combo(&format!("{step}-=")), IncreaseReasoning, None),
+        KeyBinding::new(&platform_combo(&format!("{step}-+")), IncreaseReasoning, None),
     ]);
     crate::browser::bind_keys(cx, keymap);
     // ⌘1..⌘9 open the sidebar's first nine rows. A slot left unbound (an empty
@@ -2315,7 +2324,12 @@ impl Shell {
             || (crate::appshots::is_desktop()
                 && std::env::var("ZERON_OPEN_DIALOG").as_deref() == Ok("appshot-welcome"));
         // Bind the customizable shortcuts from the persisted keymap.
-        apply_keymap(cx, &settings.keymap, settings.composer_send_behavior);
+        apply_keymap(
+            cx,
+            &settings.keymap,
+            settings.composer_send_behavior,
+            settings.reasoning_shortcut_modifier,
+        );
         // Dev/testing knob: `ZERON_OPEN_ROUTE=settings[/<section>]` boots
         // straight into a settings section — these pages have no deep link and
         // synthetic input can't reach them on headless compositors. Bare
@@ -5327,6 +5341,7 @@ impl Shell {
                     let follow_up_behavior = self.settings.follow_up_behavior;
                     let switcher_window = self.settings.switcher_window;
                     let switcher_limit = self.settings.switcher_limit;
+                    let reasoning_shortcut_modifier = self.settings.reasoning_shortcut_modifier;
                     let appshots_enabled = self.settings.appshots_enabled;
                     let appshot_sound_enabled = self.settings.appshot_sound_enabled;
                     let appshot_destination = self.settings.appshot_destination;
@@ -5337,6 +5352,7 @@ impl Shell {
                             escape_stops_active_agent,
                             composer_send_behavior,
                             follow_up_behavior,
+                            reasoning_shortcut_modifier,
                             switcher_window,
                             switcher_limit,
                             appshots_enabled,
@@ -5362,6 +5378,9 @@ impl Shell {
                                 ShortcutsEvent::FollowUpBehaviorChanged(behavior) => {
                                     this.settings.follow_up_behavior = *behavior;
                                 }
+                                ShortcutsEvent::ReasoningShortcutModifierChanged(modifier) => {
+                                    this.settings.reasoning_shortcut_modifier = *modifier;
+                                }
                                 ShortcutsEvent::SwitcherWindowChanged(window) => {
                                     this.settings.switcher_window = *window;
                                 }
@@ -5384,6 +5403,7 @@ impl Shell {
                                 cx,
                                 &this.settings.keymap,
                                 this.settings.composer_send_behavior,
+                                this.settings.reasoning_shortcut_modifier,
                             );
                             this.schedule_save(cx);
                             cx.notify();
@@ -5707,6 +5727,14 @@ impl Shell {
     /// a short list does nothing. Reads the DISPLAYED order — sort and
     /// grouping view options permute the list, and the chip on a row must
     /// name the key that opens it.
+    fn step_reasoning(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if !matches!(self.route, Route::Chat) || self.overlay_owns_keyboard(cx) {
+            return;
+        }
+        let pickers = self.composer.read(cx).pickers().clone();
+        pickers.update(cx, |pickers, cx| pickers.step_effort(delta, cx));
+    }
+
     fn jump_to_session(&mut self, slot: usize, cx: &mut Context<Self>) {
         let Some(chat_id) = self.sidebar_visible_order(cx).into_iter().nth(slot) else {
             return;
@@ -12961,6 +12989,12 @@ impl Render for Shell {
                     let pickers = this.composer.read(cx).pickers().clone();
                     pickers.update(cx, |pickers, cx| pickers.open_model_menu(window, cx));
                 }
+            }))
+            .on_action(cx.listener(|this, _: &IncreaseReasoning, _, cx| {
+                this.step_reasoning(1, cx);
+            }))
+            .on_action(cx.listener(|this, _: &DecreaseReasoning, _, cx| {
+                this.step_reasoning(-1, cx);
             }))
             .on_action(cx.listener(|this, _: &AddSpacePalette, _, cx| {
                 if matches!(this.route, Route::Settings(_)) {

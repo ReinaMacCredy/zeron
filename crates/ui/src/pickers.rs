@@ -2330,7 +2330,7 @@ impl Pickers {
         self.pick_reasoning(level, cx);
     }
 
-    fn step_effort(&mut self, delta: isize, cx: &mut Context<Self>) {
+    pub(crate) fn step_effort(&mut self, delta: isize, cx: &mut Context<Self>) {
         let len = self.trait_ladder(cx).len();
         if len == 0 {
             return;
@@ -7192,6 +7192,44 @@ mod tests {
             assert_eq!(pickers.space_target(cx).as_deref(), Some("remote"));
             assert_eq!(pickers.selected_space_index(cx), 0); // empty device
             assert!(pickers.target_generation >= 2);
+        });
+    }
+
+    #[gpui::test]
+    fn step_effort_walks_the_ladder_and_stops_at_its_ends(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let state = cx.new(|_| AppState::new());
+        let pickers = cx.new(|cx| Pickers::new(state, cx));
+        pickers.update(cx, |pickers, cx| {
+            let mut opus = bare_model("opus", "Opus");
+            opus.reasoning_levels = vec![
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High,
+            ];
+            pickers.defaults = ComposerDefaults::default();
+            pickers.config.harness = Some(HarnessId::ClaudeCode);
+            pickers.harnesses = Loadable::Ready(vec![descriptor(HarnessId::ClaudeCode, "Claude Code")]);
+            pickers
+                .models
+                .insert(HarnessId::ClaudeCode, Loadable::Ready(vec![opus]));
+            pickers.pick_model("opus".into(), cx);
+            pickers.pick_reasoning(ReasoningLevel::Medium, cx);
+            let mut seen = Vec::new();
+            for delta in [1, 1, -1, -1, -1] {
+                pickers.step_effort(delta, cx);
+                seen.push(pickers.effective_reasoning(cx));
+            }
+            assert_eq!(
+                seen,
+                [
+                    Some(ReasoningLevel::High),
+                    Some(ReasoningLevel::High),
+                    Some(ReasoningLevel::Medium),
+                    Some(ReasoningLevel::Low),
+                    Some(ReasoningLevel::Low),
+                ]
+            );
         });
     }
 

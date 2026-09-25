@@ -609,6 +609,24 @@ pub enum FollowUpBehavior {
     Steer,
 }
 
+/// The modifier that steps the thinking level with `-` and `=`/`+`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReasoningShortcutModifier {
+    #[default]
+    Command,
+    Control,
+}
+
+impl ReasoningShortcutModifier {
+    pub fn combo_prefix(self) -> &'static str {
+        match self {
+            ReasoningShortcutModifier::Command => "mod",
+            ReasoningShortcutModifier::Control => "ctrl",
+        }
+    }
+}
+
 /// How far back the Ctrl+Tab switcher reaches into the sidebar: every session
 /// the sidebar shows, or only those active within the window. The selected
 /// session and the strip's live tabs are always offered.
@@ -836,6 +854,8 @@ pub struct UiSettings {
     pub composer_send_behavior: ComposerSendBehavior,
     /// Queue or steer a message submitted while the agent is busy.
     pub follow_up_behavior: FollowUpBehavior,
+    /// Modifier for the thinking-level step shortcuts (modifier + `-`/`+`).
+    pub reasoning_shortcut_modifier: ReasoningShortcutModifier,
     /// Recency limit on the sessions the Ctrl+Tab switcher offers.
     pub switcher_window: SwitcherWindow,
     /// Most cards the Ctrl+Tab switcher shows; 0 for no cap.
@@ -1048,6 +1068,7 @@ impl Default for UiSettings {
             settings_section: crate::shell::SettingsSection::default(),
             composer_send_behavior: ComposerSendBehavior::default(),
             follow_up_behavior: FollowUpBehavior::default(),
+            reasoning_shortcut_modifier: ReasoningShortcutModifier::default(),
             switcher_window: SwitcherWindow::default(),
             switcher_limit: 0,
             skills_in_slash_menu: false,
@@ -1896,6 +1917,23 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_step_combos_parse_for_both_modifiers() {
+        for mac in [true, false] {
+            for modifier in [
+                ReasoningShortcutModifier::Command,
+                ReasoningShortcutModifier::Control,
+            ] {
+                for key in ["-", "=", "+"] {
+                    let combo =
+                        platform_combo_on(mac, &format!("{}-{key}", modifier.combo_prefix()));
+                    let stroke = gpui::Keystroke::parse(&combo).expect("parses");
+                    assert_eq!(stroke.key, key, "{combo}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn composer_send_behavior_is_opt_in_for_old_and_partial_settings() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -1907,6 +1945,10 @@ mod tests {
         let loaded = UiSettings::load(dir.path());
         assert_eq!(loaded.composer_send_behavior, ComposerSendBehavior::Enter);
         assert_eq!(loaded.follow_up_behavior, FollowUpBehavior::Queue);
+        assert_eq!(
+            loaded.reasoning_shortcut_modifier,
+            ReasoningShortcutModifier::Command
+        );
         assert!(loaded.open_web_links_in_zeron);
         assert!(loaded.new_thread_composer_background.is_none());
         assert_eq!(
@@ -2503,6 +2545,7 @@ mod tests {
             settings_section: crate::shell::SettingsSection::Shortcuts,
             composer_send_behavior: ComposerSendBehavior::ModEnter,
             follow_up_behavior: FollowUpBehavior::Steer,
+            reasoning_shortcut_modifier: ReasoningShortcutModifier::Control,
             switcher_window: SwitcherWindow::Hours12,
             switcher_limit: 8,
             skills_in_slash_menu: true,

@@ -15,7 +15,8 @@ use crate::popover::{self, ScrollRailHost};
 mod appshots_page;
 use crate::settings::widgets;
 use crate::settings::{
-    ComposerSendBehavior, FollowUpBehavior, KeymapConfig, ShortcutId, SwitcherWindow,
+    ComposerSendBehavior, FollowUpBehavior, KeymapConfig, ReasoningShortcutModifier, ShortcutId,
+    SwitcherWindow,
     combo_from_keystroke, display_combo,
 };
 use crate::state::AppState;
@@ -57,6 +58,8 @@ pub enum ShortcutsEvent {
     ComposerSendBehaviorChanged(ComposerSendBehavior),
     /// Busy-turn submits queue or steer by default — persist it locally.
     FollowUpBehaviorChanged(FollowUpBehavior),
+    /// The thinking-level step modifier changed — persist + re-apply.
+    ReasoningShortcutModifierChanged(ReasoningShortcutModifier),
     /// The switcher's recency window changed — persist it locally.
     SwitcherWindowChanged(SwitcherWindow),
     /// The switcher's card cap changed — persist it locally.
@@ -78,6 +81,7 @@ pub struct ShortcutsPage {
     escape_stops_active_agent: bool,
     composer_send_behavior: ComposerSendBehavior,
     follow_up_behavior: FollowUpBehavior,
+    reasoning_shortcut_modifier: ReasoningShortcutModifier,
     switcher_window: SwitcherWindow,
     switcher_limit: u32,
     recording: Option<ShortcutId>,
@@ -107,6 +111,7 @@ impl ShortcutsPage {
         escape_stops_active_agent: bool,
         composer_send_behavior: ComposerSendBehavior,
         follow_up_behavior: FollowUpBehavior,
+        reasoning_shortcut_modifier: ReasoningShortcutModifier,
         switcher_window: SwitcherWindow,
         switcher_limit: u32,
         appshots_enabled: bool,
@@ -125,6 +130,7 @@ impl ShortcutsPage {
             escape_stops_active_agent,
             composer_send_behavior,
             follow_up_behavior,
+            reasoning_shortcut_modifier,
             switcher_window,
             switcher_limit,
             recording: None,
@@ -217,6 +223,18 @@ impl ShortcutsPage {
             self.composer_send_behavior = behavior;
             self.conflict_notice = None;
             cx.emit(ShortcutsEvent::ComposerSendBehaviorChanged(behavior));
+            cx.notify();
+        }
+    }
+
+    fn set_reasoning_shortcut_modifier(
+        &mut self,
+        modifier: ReasoningShortcutModifier,
+        cx: &mut Context<Self>,
+    ) {
+        if self.reasoning_shortcut_modifier != modifier {
+            self.reasoning_shortcut_modifier = modifier;
+            cx.emit(ShortcutsEvent::ReasoningShortcutModifierChanged(modifier));
             cx.notify();
         }
     }
@@ -559,6 +577,7 @@ impl Render for ShortcutsPage {
         let escape_stops_active_agent = self.escape_stops_active_agent;
         let send_behavior = self.composer_send_behavior;
         let follow_up_behavior = self.follow_up_behavior;
+        let reasoning_modifier = self.reasoning_shortcut_modifier;
         let switcher_window = self.switcher_window;
         let switcher_limit = self.switcher_limit;
         let compact_mode = crate::settings::transcript_compact_mode(cx);
@@ -566,6 +585,7 @@ impl Render for ShortcutsPage {
             || escape_stops_active_agent
             || send_behavior != ComposerSendBehavior::default()
             || follow_up_behavior != FollowUpBehavior::default()
+            || reasoning_modifier != ReasoningShortcutModifier::default()
             || switcher_window != SwitcherWindow::default()
             || switcher_limit != 0;
         let modifier_label = modifier_send_label(cfg!(target_os = "macos"));
@@ -700,6 +720,70 @@ impl Render for ShortcutsPage {
                                         .hover(|s| s.text_color(theme.text))
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.set_follow_up_behavior(behavior, cx)
+                                        }))
+                                })
+                                .child(SharedString::from(label))
+                        }),
+                    ),
+            );
+        let reasoning_shortcut_row = widgets::card_row(&theme, false)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(widgets::row_title(&theme, "Thinking level shortcut"))
+                    .child(widgets::meta_line(
+                        &theme,
+                        vec![
+                            div()
+                                .child("Press the modifier with − or + to lower or raise the thinking level.")
+                                .into_any_element(),
+                        ],
+                    )),
+            )
+            .child(
+                div()
+                    .id("reasoning-shortcut-modifier")
+                    .flex_none()
+                    .flex()
+                    .flex_row()
+                    .rounded(px(9.0))
+                    .p(px(2.0))
+                    .bg(crate::theme::ink(0.04))
+                    .children(
+                        [
+                            (ReasoningShortcutModifier::Command, "⌘ Command"),
+                            (ReasoningShortcutModifier::Control, "⌃ Control"),
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(ix, (modifier, label))| {
+                            let selected = reasoning_modifier == modifier;
+                            div()
+                                .id(("reasoning-shortcut-option", ix))
+                                .min_w(px(72.0))
+                                .px(px(12.0))
+                                .py(px(6.0))
+                                .rounded(px(7.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_size(px(12.0))
+                                .text_color(if selected {
+                                    theme.text
+                                } else {
+                                    theme.text_muted
+                                })
+                                .when(selected, |el| {
+                                    el.bg(theme.bg)
+                                        .border_1()
+                                        .border_color(theme.border.opacity(0.8))
+                                })
+                                .when(!selected, |el| {
+                                    el.cursor_pointer()
+                                        .hover(|s| s.text_color(theme.text))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.set_reasoning_shortcut_modifier(modifier, cx)
                                         }))
                                 })
                                 .child(SharedString::from(label))
@@ -925,6 +1009,9 @@ impl Render for ShortcutsPage {
                                         widgets::section_card(&theme)
                                             .child(send_behavior_row)
                                             .child(follow_up_row)
+                                            .when(cfg!(target_os = "macos"), |card| {
+                                                card.child(reasoning_shortcut_row)
+                                            })
                                             .child(compact_mode_row)
                                             .child(escape_behavior_row),
                                     )
@@ -1039,6 +1126,10 @@ impl Render for ShortcutsPage {
                                                             FollowUpBehavior::Queue,
                                                             cx,
                                                         );
+                                                        this.set_reasoning_shortcut_modifier(
+                                                            ReasoningShortcutModifier::Command,
+                                                            cx,
+                                                        );
                                                         this.set_switcher_window(
                                                             SwitcherWindow::All,
                                                             cx,
@@ -1098,6 +1189,7 @@ mod tests {
                 false,
                 ComposerSendBehavior::Enter,
                 FollowUpBehavior::default(),
+                ReasoningShortcutModifier::default(),
                 SwitcherWindow::default(),
                 0,
                 false,
@@ -1156,6 +1248,7 @@ mod tests {
                 false,
                 ComposerSendBehavior::default(),
                 FollowUpBehavior::default(),
+                ReasoningShortcutModifier::default(),
                 SwitcherWindow::default(),
                 0,
                 false,
@@ -1266,6 +1359,7 @@ mod tests {
                 false,
                 ComposerSendBehavior::default(),
                 FollowUpBehavior::default(),
+                ReasoningShortcutModifier::default(),
                 SwitcherWindow::default(),
                 0,
                 false,
@@ -1321,6 +1415,7 @@ mod tests {
                 false,
                 ComposerSendBehavior::default(),
                 FollowUpBehavior::default(),
+                ReasoningShortcutModifier::default(),
                 SwitcherWindow::default(),
                 0,
                 false,
@@ -1497,6 +1592,7 @@ mod tests {
                 false,
                 ComposerSendBehavior::default(),
                 FollowUpBehavior::default(),
+                ReasoningShortcutModifier::default(),
                 SwitcherWindow::default(),
                 0,
                 false,
