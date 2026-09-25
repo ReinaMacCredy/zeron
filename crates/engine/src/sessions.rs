@@ -3327,6 +3327,9 @@ async fn drive_run(
     // into Streaming. Only a steer (UserMessage) legitimately REOPENS a
     // settled subagent: it announces more work is coming.
     let mut settled_subagents: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // The harness has background shells running: the process that owns them
+    // must outlive the idle window, or they die unfinished.
+    let mut background_busy = false;
     // Live subagent sinks, parent tool-use id → transcript doc state.
     let mut subagents: std::collections::HashMap<String, SubagentSink> =
         std::collections::HashMap::new();
@@ -3367,7 +3370,7 @@ async fn drive_run(
                 // was finalized at Done, so this end is clean — no aborted stamp.
                 _ = tokio::time::sleep_until(
                     idle_since.map(|at| at + SESSION_IDLE).unwrap_or_else(tokio::time::Instant::now)
-                ), if idle_since.is_some() && live_subagents.is_empty() => {
+                ), if idle_since.is_some() && live_subagents.is_empty() && !background_busy => {
                     tracing::info!(chat = %chat_id, "reaping idle persistent session");
                     if let Some(token) = lock(&inner.runs)
                         .get(&chat_id)
@@ -3713,6 +3716,10 @@ async fn drive_run(
         inner.touch_session(&chat_id);
         last_stream_activity = tokio::time::Instant::now();
         if let AgentEvent::BackgroundTasks { tasks } = &event {
+            let was_busy = std::mem::replace(&mut background_busy, !tasks.is_empty());
+            if was_busy && !background_busy && idle_since.is_some() {
+                idle_since = Some(tokio::time::Instant::now());
+            }
             inner.set_background_tasks(&chat_id, tasks.clone());
             continue;
         }
