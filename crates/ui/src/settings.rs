@@ -944,6 +944,10 @@ pub struct UiSettings {
     /// written by a pre-tabs build; seeded once from the last space's sessions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub open_tabs: Option<Vec<String>>,
+    /// Set once the stored tabs were pruned to what the old activity strip
+    /// showed; tabs no longer hide when idle, so the ids it kept hidden
+    /// would otherwise all surface at once.
+    pub open_tabs_stable: bool,
     /// Sidebar session filter: a space id, or `None` for "All spaces".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub space_filter: Option<String>,
@@ -1096,6 +1100,7 @@ impl Default for UiSettings {
             last_space_id: None,
             last_project_action_by_space_id: std::collections::HashMap::new(),
             open_tabs: None,
+            open_tabs_stable: false,
             space_filter: None,
             sidebar_pinned_session_ids_by_profile: HashMap::new(),
             sidebar_sections_by_profile: HashMap::new(),
@@ -2560,6 +2565,7 @@ mod tests {
                 "dev".into(),
             )]),
             open_tabs: Some(vec!["b".to_string(), "a".to_string()]),
+            open_tabs_stable: true,
             space_filter: Some("space-1".into()),
             sidebar_sections_by_profile: HashMap::new(),
             sidebar_pinned_session_ids_by_profile: HashMap::from([
