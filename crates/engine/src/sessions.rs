@@ -2211,6 +2211,7 @@ impl Inner {
                     status,
                     held_by_subagents,
                     compacting: false,
+                    background_tasks: Vec::new(),
                     started_at: None,
                     updated_at: now,
                 });
@@ -2265,6 +2266,41 @@ impl Inner {
             }
             entry.compacting = compacting;
             entry.updated_at = Utc::now();
+            let session = entry.clone();
+            let mut list: Vec<Session> = statuses.values().cloned().collect();
+            list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+            self.sessions_tx.send_replace(list);
+            session
+        };
+        if let Some(ws) = self.workspace() {
+            ws.record_session(&session);
+        }
+    }
+
+    fn set_background_tasks(&self, chat_id: &str, tasks: Vec<zeron_proto::BackgroundTask>) {
+        let session = {
+            let mut statuses = lock(&self.statuses);
+            let Some(entry) = statuses.get_mut(chat_id) else {
+                return;
+            };
+            let now = Utc::now();
+            let tasks: Vec<_> = tasks
+                .into_iter()
+                .map(|mut task| {
+                    task.started_at = entry
+                        .background_tasks
+                        .iter()
+                        .find(|known| known.id == task.id)
+                        .and_then(|known| known.started_at)
+                        .or(Some(now));
+                    task
+                })
+                .collect();
+            if entry.background_tasks == tasks {
+                return;
+            }
+            entry.background_tasks = tasks;
+            entry.updated_at = now;
             let session = entry.clone();
             let mut list: Vec<Session> = statuses.values().cloned().collect();
             list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
@@ -2525,13 +2561,20 @@ impl Inner {
     }
 
     fn remove_run(&self, chat_id: &str, run_id: &str) -> bool {
-        let mut runs = lock(&self.runs);
-        if runs.get(chat_id).is_some_and(|h| h.run_id == run_id) {
-            runs.remove(chat_id);
-            true
-        } else {
-            false
+        let removed = {
+            let mut runs = lock(&self.runs);
+            if runs.get(chat_id).is_some_and(|h| h.run_id == run_id) {
+                runs.remove(chat_id);
+                true
+            } else {
+                false
+            }
+        };
+        if removed {
+            // The harness process owned them; they died with it.
+            self.set_background_tasks(chat_id, Vec::new());
         }
+        removed
     }
 }
 
@@ -3651,6 +3694,10 @@ async fn drive_run(
         // push the quiesce watchdog's window out.
         inner.touch_session(&chat_id);
         last_stream_activity = tokio::time::Instant::now();
+        if let AgentEvent::BackgroundTasks { tasks } = &event {
+            inner.set_background_tasks(&chat_id, tasks.clone());
+            continue;
+        }
         if let AgentEvent::Compacting { active } = &event {
             // A compaction can begin after a stray Done parked the session
             // (2026-09-22); the gate below would hold it Idle throughout.

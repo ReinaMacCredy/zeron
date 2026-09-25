@@ -812,6 +812,7 @@ impl From<RawSession> for Session {
             status: raw.status,
             held_by_subagents: raw.held_by_subagents,
             compacting: raw.compacting,
+            background_tasks: Vec::new(),
             started_at: raw.started_at.map(dt),
             updated_at: dt(raw.updated_at),
         }
@@ -920,6 +921,7 @@ mod tests {
             last_completed_turn: None,
             held_by_subagents: false,
             compacting: false,
+            background_tasks: Vec::new(),
             chat_id: chat_id.into(),
             device_id: device_id.into(),
             status,

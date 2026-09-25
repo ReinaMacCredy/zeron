@@ -2428,6 +2428,82 @@ impl Harness for ControlledHarness {
     }
 }
 
+/// Background shells ride the session beside its status: they never hold a
+/// parked turn Working, keep their first-seen stamp across replacements, and
+/// vanish with the run that owned them.
+#[tokio::test]
+async fn background_tasks_ride_the_session_without_holding_it_working() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(ControlledHarness(std::sync::Mutex::new(Some(rx)))),
+    );
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-background",
+        SessionCommandPayload::Run {
+            request: run_request("background"),
+            message_id: "user-background".into(),
+        },
+    );
+    let session = || core.sessions.session_status(CHAT);
+    let shell = |id: &str| zeron_proto::BackgroundTask {
+        id: id.into(),
+        kind: zeron_proto::BackgroundTaskKind::Shell,
+        label: format!("shell {id}"),
+        started_at: None,
+    };
+    tx.send(AgentEvent::TextDelta {
+        text: "starting a build".into(),
+    })
+    .unwrap();
+    tx.send(AgentEvent::BackgroundTasks {
+        tasks: vec![shell("a")],
+    })
+    .unwrap();
+    wait_for(
+        || session().is_some_and(|s| s.background_tasks.len() == 1),
+        "first shell recorded",
+    )
+    .await;
+    let first_seen = session().unwrap().background_tasks[0].started_at;
+    assert!(first_seen.is_some());
+
+    tx.send(done(DoneStatus::Completed)).unwrap();
+    wait_for(
+        || session().is_some_and(|s| s.last_completed_turn.is_some()),
+        "turn completes",
+    )
+    .await;
+    let parked = session().unwrap();
+    assert_eq!(parked.status, SessionStatus::Idle);
+    assert!(!parked.held_by_subagents);
+    assert_eq!(parked.background_tasks.len(), 1);
+
+    tx.send(AgentEvent::BackgroundTasks {
+        tasks: vec![shell("a"), shell("b")],
+    })
+    .unwrap();
+    wait_for(
+        || session().is_some_and(|s| s.background_tasks.len() == 2),
+        "second shell recorded",
+    )
+    .await;
+    let both = session().unwrap();
+    assert_eq!(both.status, SessionStatus::Idle);
+    assert_eq!(both.background_tasks[0].started_at, first_seen);
+
+    drop(tx);
+    wait_for(
+        || session().is_some_and(|s| s.background_tasks.is_empty()),
+        "run end clears its shells",
+    )
+    .await;
+    core.shutdown().await;
+}
+
 /// A background subagent still streaming after its parent turn completed keeps
 /// the session Working (the sidebar dot), in either order: spawn-then-park, or
 /// park-then-spawn. The last tagged Done settles it to Idle.

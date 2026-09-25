@@ -1210,6 +1210,7 @@ mod drag_regressions {
                     last_completed_turn: None,
                     held_by_subagents: false,
                     compacting: false,
+                    background_tasks: Vec::new(),
                     chat_id: "b".into(),
                     device_id: "dev".into(),
                     status: zeron_proto::SessionStatus::Working,

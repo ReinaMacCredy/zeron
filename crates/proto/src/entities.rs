@@ -347,6 +347,10 @@ pub struct Session {
     pub held_by_subagents: bool,
     #[serde(default)]
     pub compacting: bool,
+    /// The run's live background tasks; independent of `status`, which
+    /// they never hold Working.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub background_tasks: Vec<BackgroundTask>,
     pub started_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
 }

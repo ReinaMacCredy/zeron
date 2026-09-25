@@ -1607,6 +1607,7 @@ mod strip_regressions {
             last_completed_turn: None,
             held_by_subagents: false,
             compacting: false,
+            background_tasks: Vec::new(),
             chat_id: id.into(),
             device_id: "local".into(),
             status: zeron_proto::SessionStatus::Working,
