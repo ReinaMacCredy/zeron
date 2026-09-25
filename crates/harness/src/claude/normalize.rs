@@ -321,6 +321,14 @@ impl Normalizer {
         }
     }
 
+    /// The CLI's task id for a subagent spawn: what `stop_task` addresses.
+    pub fn agent_task_for_spawn(&self, spawn: &str) -> Option<String> {
+        self.agent_tasks
+            .iter()
+            .find(|(_, tool)| tool.as_str() == spawn)
+            .map(|(task, _)| task.clone())
+    }
+
     fn spawn_of(&self, tool_use_id: &str) -> String {
         self.spawn_aliases
             .get(tool_use_id)
@@ -1614,6 +1622,28 @@ mod tests {
             r#"{"type":"system","subtype":"task_notification","task_id":"b7wb5vp5o","tool_use_id":"toolu_bash","status":"completed","summary":"done","uuid":"u4","session_id":"s1"}"#,
         );
         assert!(settled.is_empty(), "{settled:?}");
+    }
+
+    #[test]
+    fn stop_addresses_an_agent_by_its_task_id_and_a_shell_by_its_own() {
+        let mut norm = Normalizer::new();
+        let frame = crate::claude::wire::parse_frame(
+            r#"{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"toolu_spawn","subagent_type":"general-purpose"}"#,
+        )
+        .expect("parses");
+        norm.normalize(frame, false);
+        assert_eq!(
+            norm.agent_task_for_spawn("toolu_spawn").as_deref(),
+            Some("a1")
+        );
+        assert_eq!(norm.agent_task_for_spawn("b7wb5vp5o"), None);
+        let line: serde_json::Value = serde_json::from_str(
+            &crate::claude::wire::stop_task_request_line("zeron-stop-1", "a1"),
+        )
+        .unwrap();
+        assert_eq!(line["type"], "control_request");
+        assert_eq!(line["request"]["subtype"], "stop_task");
+        assert_eq!(line["request"]["task_id"], "a1");
     }
 
     #[test]

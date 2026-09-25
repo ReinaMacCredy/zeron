@@ -287,6 +287,7 @@ impl TurnWire {
                 steering,
                 interrupt: interrupt.clone(),
                 tool_server: None,
+                stop_tasks: None,
             },
             request: serde_json::from_value(request).unwrap(),
             interrupt_grace: Duration::from_secs(2),

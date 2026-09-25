@@ -124,6 +124,9 @@ pub struct RunControls {
     /// Thread tools for this run, `None` for runs that get no tools (titles,
     /// compaction) or when the engine bound no IPC port for them to dial.
     pub tool_server: Option<ToolServer>,
+    /// Stop requests for one live background task: a shell's task id, or a
+    /// subagent's spawn tool id. `None` where nothing can be stopped.
+    pub stop_tasks: Option<mpsc::UnboundedReceiver<String>>,
 }
 
 /// Catalog provenance stays internal; RPC clients retain the Vec<Model> shape.

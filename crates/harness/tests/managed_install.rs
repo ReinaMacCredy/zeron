@@ -33,6 +33,7 @@ async fn managed_install_reaches_session_started() {
         steering,
         interrupt: interrupt.clone(),
         tool_server: None,
+        stop_tasks: None,
     };
     let request = RunRequest {
         prompt: "say the word ok and stop".into(),

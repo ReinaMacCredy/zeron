@@ -144,6 +144,8 @@ struct RunHandle {
     /// can never silently evaporate from a transcript that shows it as sent.
     routed_steers: Arc<Mutex<std::collections::VecDeque<RoutedSteer>>>,
     computer: Arc<RunComputer>,
+    /// Stop one live background task of this run (see `RunControls::stop_tasks`).
+    stop_tx: mpsc::UnboundedSender<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -234,6 +236,7 @@ impl RunSetup {
         let pending = pending_inputs.clone();
         let events = engine_tx.clone();
         let interrupt_token = CancellationToken::new();
+        let (stop_tx, stop_rx) = mpsc::unbounded_channel();
         let controls = RunControls {
             request_input: Box::new(move |questions: Vec<UserInputQuestion>| {
                 let (tx, rx) = oneshot::channel();
@@ -252,6 +255,7 @@ impl RunSetup {
             steering: steer_rx,
             interrupt: interrupt_token.clone(),
             tool_server: None,
+            stop_tasks: Some(stop_rx),
         };
         Self {
             handle: RunHandle {
@@ -265,6 +269,7 @@ impl RunSetup {
                 pending_inputs,
                 routed_steers: Arc::new(Mutex::new(std::collections::VecDeque::new())),
                 computer: RunComputer::new(),
+                stop_tx,
             },
             controls,
             engine_rx,
@@ -492,6 +497,19 @@ impl SessionsEngine {
     /// Status watch: the full session list, re-sent on every transition.
     pub fn watch_sessions(&self) -> watch::Receiver<Vec<Session>> {
         self.inner.sessions_tx.subscribe()
+    }
+
+    /// Ask the chat's live run to stop one background task (a shell's task
+    /// id, or a subagent's spawn tool id). Harnesses without a stop ignore it.
+    pub fn stop_background_task(&self, chat_id: &str, task_id: &str) -> Result<(), EngineError> {
+        let runs = lock(&self.inner.runs);
+        let handle = runs
+            .get(chat_id)
+            .ok_or_else(|| EngineError::Other(format!("no live run for chat {chat_id}")))?;
+        handle
+            .stop_tx
+            .send(task_id.to_owned())
+            .map_err(|_| EngineError::Other("the run has ended".into()))
     }
 
     pub fn session_status(&self, chat_id: &str) -> Option<Session> {

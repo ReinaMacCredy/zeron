@@ -833,9 +833,12 @@ async fn run_session(session: Session) {
         request_input,
         mut steering,
         interrupt,
+        stop_tasks,
         ..
     } = controls;
     let request_input = Arc::new(request_input);
+    let mut stop_tasks = stop_tasks;
+    let mut stop_seq: u64 = 0;
 
     let mut norm = Normalizer::new();
     let mut steering_open = true;
@@ -896,6 +899,21 @@ async fn run_session(session: Session) {
                     let _ = event_tx.send(Err(HarnessError::Io(e))).await;
                     break 'main;
                 }
+            },
+
+            stop = async {
+                match stop_tasks.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            }, if stop_tasks.is_some() && !interrupted => match stop {
+                Some(id) => {
+                    let task = norm.agent_task_for_spawn(&id).unwrap_or(id);
+                    stop_seq += 1;
+                    let line = wire::stop_task_request_line(&format!("zeron-stop-{stop_seq}"), &task);
+                    let _ = stdin_tx.send(StdinMsg::Line(line));
+                }
+                None => stop_tasks = None,
             },
 
             steer = steering.recv(), if steering_open && !interrupted => match steer {

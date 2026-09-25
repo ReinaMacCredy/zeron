@@ -2495,6 +2495,15 @@ async fn background_tasks_ride_the_session_without_holding_it_working() {
     assert_eq!(both.status, SessionStatus::Idle);
     assert_eq!(both.background_tasks[0].started_at, first_seen);
 
+    core.sessions
+        .stop_background_task(CHAT, "a")
+        .expect("a live run takes a stop request");
+    assert!(
+        core.sessions
+            .stop_background_task("no-such-chat", "a")
+            .is_err()
+    );
+
     drop(tx);
     wait_for(
         || session().is_some_and(|s| s.background_tasks.is_empty()),

@@ -17,6 +17,7 @@ async fn live_run(cancel: bool) {
         steering,
         interrupt: interrupt.clone(),
         tool_server: None,
+        stop_tasks: None,
         request_input: Box::new(|_| {
             let (tx, rx) = oneshot::channel();
             let _ = tx.send(Vec::new());

@@ -27,6 +27,7 @@ async fn real_pi_mock_lifecycle() {
                 rx
             }),
             tool_server: None,
+            stop_tasks: None,
         };
         let request = RunRequest {
             prompt: match scenario {

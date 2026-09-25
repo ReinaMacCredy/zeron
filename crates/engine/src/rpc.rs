@@ -99,6 +99,13 @@ struct ListModelsParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct StopBackgroundTaskParams {
+    chat_id: String,
+    task_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct CompactChatParams {
     chat_id: String,
     /// Passed to the harness's own compaction command as its focus argument.
@@ -1498,6 +1505,7 @@ fn forwardable(method: &str) -> bool {
             | methods::LIST_COMMANDS
             | methods::HARNESS_COMPACTION
             | methods::COMPACT_CHAT
+            | methods::STOP_BACKGROUND_TASK
             | methods::FORK_CHAT
             | methods::REWIND_CHAT
             | methods::QUEUE_COMMAND
@@ -1967,6 +1975,13 @@ impl RpcService for EngineRpc {
                     compaction: harness.compaction().into(),
                     branching: harness.branching(),
                 })
+            }
+            methods::STOP_BACKGROUND_TASK => {
+                let p: StopBackgroundTaskParams = parse_params(params)?;
+                self.sessions
+                    .stop_background_task(&p.chat_id, &p.task_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "ok": true }))
             }
             methods::COMPACT_CHAT => {
                 let p: CompactChatParams = parse_params(params)?;
