@@ -92,6 +92,7 @@ async fn main() {
                 steering,
                 interrupt: interrupt.clone(),
                 tool_server: None,
+                stop_tasks: None,
             },
         )
         .await

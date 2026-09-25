@@ -23,6 +23,7 @@ async fn turn(
         steering,
         interrupt: token.clone(),
         tool_server: None,
+        stop_tasks: None,
         request_input: Box::new(|_| {
             let (tx, rx) = oneshot::channel();
             let _ = tx.send(vec![]);
@@ -145,6 +146,7 @@ async fn parked(harness: &CursorHarness, count: usize) {
         steering,
         interrupt: CancellationToken::new(),
         tool_server: None,
+        stop_tasks: None,
         request_input: Box::new(|_| {
             let (tx, rx) = oneshot::channel();
             let _ = tx.send(vec![]);
@@ -259,6 +261,7 @@ async fn burst(harness: &CursorHarness, count: usize, cancel: bool) {
         steering,
         interrupt: token.clone(),
         tool_server: None,
+        stop_tasks: None,
         request_input: Box::new(|_| {
             let (tx, rx) = oneshot::channel();
             let _ = tx.send(vec![]);
@@ -400,6 +403,7 @@ async fn history(harness: &CursorHarness, count: usize) {
         steering,
         interrupt: CancellationToken::new(),
         tool_server: None,
+        stop_tasks: None,
         request_input: Box::new(|_| {
             let (tx, rx) = oneshot::channel();
             let _ = tx.send(vec![]);

@@ -40,6 +40,7 @@ async fn main() {
         steering,
         interrupt: CancellationToken::new(),
         tool_server: None,
+        stop_tasks: None,
     };
     // Optional second arg overrides the prompt (e.g. the mock rig's
     // "TWO subagents" variant exercising concurrent binding).
