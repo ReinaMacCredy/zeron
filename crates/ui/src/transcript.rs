@@ -3457,6 +3457,7 @@ pub struct Transcript {
     /// Queue rows authored in this window. They become own-turn anchors only
     /// after the host promotes their stable id into a transcript message.
     pending_queued_turns: PendingQueuedTurns,
+    promoted_queued_turn: Option<(String, String)>,
     /// A layout-affecting change needs one post-layout own-turn measurement.
     own_turn_kick: bool,
     /// One own-turn `on_next_frame` callback in flight at most.
@@ -3756,6 +3757,7 @@ impl Transcript {
             pinned,
             own_turn: None,
             pending_queued_turns: PendingQueuedTurns::default(),
+            promoted_queued_turn: None,
             own_turn_kick: false,
             own_turn_scheduled: false,
             own_turn_last_tick: None,
@@ -4401,8 +4403,11 @@ impl Transcript {
         else {
             return;
         };
+        // Anchor after layout: the steer's frame leaves the finished reply unmeasured.
         if !attached {
-            self.on_own_send(chat_id, message_id, cx);
+            self.promoted_queued_turn = Some((chat_id, message_id));
+            self.own_turn_kick = true;
+            cx.notify();
         }
     }
 
@@ -4543,6 +4548,12 @@ impl Transcript {
             return;
         }
         self.own_turn_kick = false;
+        if let Some((chat_id, message_id)) = self.promoted_queued_turn.take() {
+            if self.chat_id.as_deref() == Some(chat_id.as_str()) {
+                self.on_own_send(chat_id, message_id, cx);
+            }
+            return;
+        }
         // Layout moves the bottom too (pad refinement, streaming growth):
         // refresh the wheel handler's escape baseline every frame so only a
         // WHEEL's own delta registers as user intent. Without this, the pad
@@ -5058,6 +5069,7 @@ impl Transcript {
                 self.own_turn_kick = false;
                 self.own_turn_last_tick = None;
             }
+            self.promoted_queued_turn = None;
             self.chat_id = selected;
             self.rows.clear();
             self.row_cache.clear();
@@ -12031,6 +12043,139 @@ mod tests {
         assert_eq!(inset(cx), 424.0);
         cx.update(|_, cx| preview::update_store(&store, cx, |store| store.hide_for_task("chat")));
         assert_eq!(inset(cx), 0.0, "a hidden card reserves nothing");
+    }
+
+    #[gpui::test]
+    fn queued_steer_in_a_long_followed_chat_stays_near_the_tail(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let state = cx.new(|_| AppState::new());
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        struct Fixture(Entity<Transcript>);
+        impl Render for Fixture {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+        let (_fixture, cx) = cx.add_window_view(|_, _| Fixture(transcript.clone()));
+        cx.simulate_resize(size(px(1000.0), px(800.0)));
+        let prompt = |id: &str| {
+            let mut entry = assistant(
+                id,
+                MessageStatus::Complete,
+                vec![text_part("text", "Please explain this.")],
+            );
+            entry.role = MessageRole::User;
+            entry
+        };
+        let feed = |entries: Vec<SessionMessageEntry>, cx: &mut gpui::VisualTestContext| {
+            state.update(cx, |state, _| {
+                state.selected_chat = Some("chat".into());
+                state.transcript_replayed = true;
+                state.transcript = entries;
+                state.transcript_revision += 1;
+            });
+            transcript.update(cx, |this, cx| this.sync(cx));
+        };
+        let frame = |cx: &mut gpui::VisualTestContext| {
+            cx.run_until_parked();
+            transcript.update(cx, |this, cx| {
+                this.own_turn_last_tick = Some(Instant::now() - Duration::from_millis(17));
+                this.spring_last_tick = Some(Instant::now() - Duration::from_millis(17));
+                if this.own_turn.is_some() || this.own_turn_kick {
+                    this.step_own_turn(cx);
+                }
+                if this.pinned {
+                    this.step_spring(cx);
+                }
+            });
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+        };
+
+        let paragraph =
+            "A line of reply text that wraps once or twice in the transcript. ".repeat(6);
+        let mut entries = Vec::new();
+        for ix in 0..40 {
+            entries.push(prompt(&format!("p{ix}")));
+            entries.push(assistant(
+                &format!("r{ix}"),
+                MessageStatus::Complete,
+                vec![text_part("text", &paragraph)],
+            ));
+        }
+        entries.push(prompt("live"));
+        let mut live = String::new();
+        for ix in 0..30 {
+            live.push_str(&format!("Step {ix}. {paragraph}\n\n"));
+        }
+        entries.push(assistant(
+            "live-reply",
+            MessageStatus::Streaming,
+            vec![text_part("text", &live)],
+        ));
+        feed(entries.clone(), cx);
+        transcript.update(cx, |this, _| {
+            this.pinned = true;
+            this.list.scroll_to_end();
+        });
+        for _ in 0..10 {
+            frame(cx);
+        }
+        assert!(
+            transcript.read_with(cx, |this, _| this.is_glued()),
+            "live output is followed"
+        );
+
+        transcript.update(cx, |this, cx| {
+            this.on_own_queued_send("chat".into(), "steer".into(), cx)
+        });
+        *entries.last_mut().unwrap() = assistant(
+            "live-reply",
+            MessageStatus::Complete,
+            vec![text_part("text", &live)],
+        );
+        entries.push(prompt("steer"));
+        feed(entries.clone(), cx);
+        let (floor, top) = transcript.read_with(cx, |this, _| {
+            (
+                this.rows
+                    .iter()
+                    .position(|row| row.entry_id.as_ref() == "p38")
+                    .unwrap(),
+                this.list.logical_scroll_top(),
+            )
+        });
+        assert!(
+            top.item_ix >= floor,
+            "steer jumped to {top:?} (floor {floor})"
+        );
+        for _ in 0..80 {
+            frame(cx);
+            let top = transcript.read_with(cx, |this, _| this.list.logical_scroll_top());
+            assert!(
+                top.item_ix >= floor,
+                "steer glided from {top:?} (floor {floor})"
+            );
+        }
+        let (rows, anchor, bounds) = transcript.read_with(cx, |this, _| {
+            let anchor = this.own_turn_anchor_ix();
+            (
+                this.rows.len(),
+                anchor,
+                anchor.and_then(|ix| this.list.bounds_for_item(ix)),
+            )
+        });
+        assert_eq!(anchor, Some(rows - 1), "the steer owns the runway");
+        let top = bounds.expect("the steer is on screen").top();
+        assert!(
+            (top - px(Transcript::own_send_inset(rows - 1))).abs() <= px(3.0),
+            "the steer glides to the top: {top:?}"
+        );
     }
 
     #[gpui::test]
