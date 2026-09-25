@@ -6,7 +6,9 @@
 //! types) are accepted, and unknown item types map to nothing.
 
 use serde_json::Value;
-use zeron_proto::{AgentEvent, DoneStatus, TodoItem, ToolCall};
+use zeron_proto::{AgentEvent, DoneStatus, TodoItem, ToolCall, ToolDiff};
+
+use crate::acp::normalize::{capped_diff, patch_diff};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Phase {
@@ -201,6 +203,27 @@ fn file_change_call(changes: &[(String, String)]) -> ToolCall {
     }
 }
 
+/// v2 sends `{"type": "add"}`; older builds sent a bare string.
+fn change_kind(change: &Value) -> &str {
+    // Unknown kinds degrade to "update", like codex.ts.
+    change
+        .get("kind")
+        .and_then(|k| k.as_str().or_else(|| k.get("type").and_then(Value::as_str)))
+        .filter(|k| matches!(*k, "add" | "delete" | "update"))
+        .unwrap_or("update")
+}
+
+/// Codex's `diff` is the whole file for an add or delete, a unified diff for an update.
+fn file_change_diff(change: &Value) -> Option<ToolDiff> {
+    let path = str_field(change, &["path"]);
+    let text = change.get("diff").and_then(Value::as_str)?;
+    match change_kind(change) {
+        "add" => Some(capped_diff(path, None, text)),
+        "delete" => Some(capped_diff(path, Some(text), "")),
+        _ => patch_diff(path, text),
+    }
+}
+
 pub(crate) fn item_type(item: &Value) -> &str {
     item.get("type").and_then(Value::as_str).unwrap_or("")
 }
@@ -321,28 +344,24 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
             }
         },
         "fileChange" | "file_change" => {
-            let changes: Vec<(String, String)> = item
+            let raw = item
                 .get("changes")
                 .and_then(Value::as_array)
                 .map(|a| a.as_slice())
-                .unwrap_or_default()
+                .unwrap_or_default();
+            let changes: Vec<(String, String)> = raw
                 .iter()
-                .map(|c| {
-                    // Unknown kinds degrade to "update", like codex.ts.
-                    let kind = c
-                        .get("kind")
-                        .and_then(Value::as_str)
-                        .filter(|k| matches!(*k, "add" | "delete" | "update"))
-                        .unwrap_or("update");
-                    (str_field(c, &["path"]), kind.to_owned())
-                })
+                .map(|c| (str_field(c, &["path"]), change_kind(c).to_owned()))
                 .collect();
-            tool_lifecycle(
-                phase,
-                id,
-                file_change_call(&changes),
-                status == "failed" || status == "declined",
-            )
+            let is_error = status == "failed" || status == "declined";
+            let mut events = tool_lifecycle(phase, id, file_change_call(&changes), is_error);
+            if !is_error
+                && let [change] = raw
+                && let Some(AgentEvent::ToolResult { diff, .. }) = events.last_mut()
+            {
+                *diff = file_change_diff(change);
+            }
+            events
         }
         "mcpToolCall" | "mcp_tool_call" => match phase {
             Phase::Started => {
@@ -839,6 +858,57 @@ mod tests {
                 call: ToolCall::ApplyPatch { path: None },
             }]
         );
+    }
+
+    #[test]
+    fn a_completed_file_change_carries_its_diff() {
+        let result = |item: Value| {
+            map_item(Phase::Completed, &item)
+                .into_iter()
+                .find_map(|e| match e {
+                    AgentEvent::ToolResult { diff, .. } => Some(diff),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let update = result(
+            json!({"type": "fileChange", "id": "f1", "status": "completed",
+            "changes": [{"path": "/b.rs", "kind": {"type": "update", "move_path": null},
+                "diff": "@@ -4,3 +4,4 @@\n keep\n-old\n+new\n+more\n tail\n@@ -20 +21 @@\n-x\n+y\n"}]}),
+        );
+        assert_eq!(
+            update,
+            Some(ToolDiff {
+                path: "/b.rs".into(),
+                old_text: Some("keep\nold\ntail\nx\n".into()),
+                new_text: "keep\nnew\nmore\ntail\ny\n".into(),
+                line_offset: Some(3),
+            })
+        );
+        let add = map_item(
+            Phase::Completed,
+            &json!({"type": "fileChange", "id": "f2", "status": "completed",
+                "changes": [{"path": "/a.rs", "kind": {"type": "add"}, "diff": "a\nb\n"}]}),
+        );
+        assert_eq!(
+            add[0],
+            AgentEvent::ToolCall {
+                id: "f2".into(),
+                call: ToolCall::WriteFile {
+                    path: "/a.rs".into(),
+                    content: None
+                },
+            }
+        );
+        assert!(matches!(
+            &add[1],
+            AgentEvent::ToolResult { diff: Some(d), .. } if d.old_text.is_none() && d.new_text == "a\nb\n"
+        ));
+        let declined = result(
+            json!({"type": "fileChange", "id": "f3", "status": "declined",
+            "changes": [{"path": "/c.rs", "kind": {"type": "delete"}, "diff": "gone\n"}]}),
+        );
+        assert_eq!(declined, None);
     }
 
     #[test]

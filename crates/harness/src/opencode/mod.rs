@@ -3451,11 +3451,26 @@ fn part_snapshot_events(
                     })
                     .filter(|t| !t.is_empty())
                     .map(|t| cap_text(t, OUTPUT_CAP));
+                let diff = part
+                    .get("state")
+                    .and_then(|s| s.get("metadata")?.get("filediff"))
+                    .filter(|_| status == "completed")
+                    .and_then(|f| {
+                        let path = f
+                            .get("file")
+                            .or_else(|| input.get("filePath"))
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        crate::acp::normalize::patch_diff(
+                            path.to_owned(),
+                            f.get("patch")?.as_str()?,
+                        )
+                    });
                 events.push(AgentEvent::ToolResult {
                     id: call_id,
                     is_error: status == "error",
                     output,
-                    diff: None,
+                    diff,
                 });
             }
             events

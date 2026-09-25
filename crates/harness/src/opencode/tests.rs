@@ -1062,6 +1062,28 @@ fn tool_parts_open_and_resolve_once() {
 }
 
 #[test]
+fn a_completed_edit_carries_its_filediff() {
+    let mut feed = feed_with_assistant("msg_a");
+    let patch = "Index: /r/a.rs\n===================================================================\n\
+        --- /r/a.rs\n+++ /r/a.rs\n@@ -2,3 +2,3 @@\n keep\n-old\n+new\n tail\n";
+    let done = json!({
+        "id": "prt_e", "messageID": "msg_a", "sessionID": "ses_1",
+        "type": "tool", "tool": "edit", "callID": "call-e",
+        "state": {"status": "completed", "input": {"filePath": "/r/a.rs"}, "output": "",
+            "metadata": {"filediff": {"file": "/r/a.rs", "patch": patch, "additions": 1, "deletions": 1}}},
+    });
+    let events = part_snapshot_events(&mut feed, &done, true, None);
+    assert!(matches!(
+        events.as_slice(),
+        [AgentEvent::ToolCall { .. }, AgentEvent::ToolResult { diff: Some(d), .. }]
+            if d.path == "/r/a.rs"
+                && d.old_text.as_deref() == Some("keep\nold\ntail\n")
+                && d.new_text == "keep\nnew\ntail\n"
+                && d.line_offset == Some(1)
+    ));
+}
+
+#[test]
 fn task_spawn_registers_child_by_metadata_and_completion_settles() {
     for name in ["task", "subagent"] {
         let mut feed = feed_with_assistant("msg_a");

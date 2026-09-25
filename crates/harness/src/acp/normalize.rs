@@ -75,6 +75,42 @@ pub(crate) fn capped_diff(path: String, old_text: Option<&str>, new_text: &str) 
     }
 }
 
+/// A unified diff's hunks rejoined into old/new texts that start at the first
+/// hunk's line; `None` when it has no hunk.
+pub(crate) fn patch_diff(path: String, patch: &str) -> Option<ToolDiff> {
+    let (mut old, mut new, mut start) = (String::new(), String::new(), None);
+    for line in patch.split_inclusive('\n') {
+        if let Some(header) = line.strip_prefix("@@ -") {
+            start.get_or_insert_with(|| {
+                header
+                    .split([',', ' '])
+                    .next()
+                    .and_then(|n| n.parse::<u32>().ok())
+                    .unwrap_or(1)
+                    .saturating_sub(1)
+            });
+            continue;
+        }
+        if start.is_none() {
+            continue;
+        }
+        match line.split_at_checked(1) {
+            Some(("-", rest)) => old.push_str(rest),
+            Some(("+", rest)) => new.push_str(rest),
+            Some((" ", rest)) => {
+                old.push_str(rest);
+                new.push_str(rest);
+            }
+            _ => {}
+        }
+    }
+    let start = start?;
+    let mut diff = capped_diff(path, Some(&old), &new);
+    let offset = start + diff.line_offset.unwrap_or(0);
+    diff.line_offset = (offset > 0).then_some(offset);
+    Some(diff)
+}
+
 /// The text of a `ContentBlock` (`{type: "text", text}`); non-text blocks
 /// (image, audio, resource, resource_link) render as nothing.
 fn content_block_text(block: &Value) -> Option<&str> {
