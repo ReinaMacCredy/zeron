@@ -41,6 +41,8 @@ use crate::settings::{ComposerSendBehavior, FollowUpBehavior, platform_combo};
 use crate::state::{AppState, Indicator};
 use crate::theme::Theme;
 
+pub(crate) mod background;
+
 // ---------------------------------------------------------------------------
 // Constants + pure decision logic
 // ---------------------------------------------------------------------------
@@ -4974,6 +4976,12 @@ pub enum ComposerEvent {
     OpenComputerSetup {
         missing: Vec<zeron_proto::computer::ComputerPermission>,
     },
+    OpenSubagent {
+        chat_id: String,
+        doc_id: String,
+        title: String,
+        frozen: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5899,6 +5907,7 @@ pub struct Composer {
     pub(crate) queue_edit_finishing: bool,
     pub(crate) queue_edit_task: Option<Task<()>>,
     pub(crate) queue_edit_renew_task: Option<Task<()>>,
+    background: background::BackgroundUi,
     /// Focus once on mount, navigation, or after opening/closing a queue edit.
     pub(crate) focus_pending: bool,
     /// Live drag over the queue panel: which row, and where it would land.
@@ -6159,6 +6168,7 @@ impl Composer {
             queue_edit_finishing: false,
             queue_edit_task: None,
             queue_edit_renew_task: None,
+            background: Default::default(),
             focus_pending: true,
             queue_drag: None,
             queue_scroll: gpui::ScrollHandle::new(),
@@ -10789,6 +10799,10 @@ impl Render for Composer {
                 self.staged().len() + self.staged_appshots().len(),
                 self.staged_chip_count(cx),
             );
+        let container = container
+            .when_some(self.render_background_corner(window, cx), |el, corner| {
+                el.child(corner)
+            });
         let container = container.when_some(
             self.render_queue_panel(show_queue_latest_shortcut, window, cx),
             |el, panel| {

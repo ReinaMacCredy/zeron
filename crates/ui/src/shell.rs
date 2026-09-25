@@ -2266,6 +2266,18 @@ impl Shell {
                 ComposerEvent::OpenComputerSetup { missing } => {
                     this.open_computer_permission_guide(missing.clone(), cx)
                 }
+                ComposerEvent::OpenSubagent {
+                    chat_id,
+                    doc_id,
+                    title,
+                    frozen,
+                } => this.add_subagent_surface(
+                    chat_id.clone(),
+                    doc_id.clone(),
+                    title.clone(),
+                    *frozen,
+                    cx,
+                ),
             }
         });
         // Spawn chips open their subagent's transcript as a right-pane tab.
@@ -4332,7 +4344,8 @@ impl Shell {
                 | ComposerEvent::NewThreadTransitionStarted
                 | ComposerEvent::BackgroundStarted
                 | ComposerEvent::WorkspaceCommand(_)
-                | ComposerEvent::WorktreeSetup { .. } => {}
+                | ComposerEvent::WorktreeSetup { .. }
+                | ComposerEvent::OpenSubagent { .. } => {}
                 ComposerEvent::UnsentChanged => cx.notify(),
                 ComposerEvent::OpenComputerSetup { missing } => {
                     _this.open_computer_permission_guide(missing.clone(), cx)
@@ -7523,8 +7536,13 @@ impl Shell {
         let queued = queued && !undelivered;
         let working =
             status == zeron_proto::ChatIndicator::Working && !queued && !undelivered && !expired;
+        let ring =
+            crate::composer::background::sidebar_ring(status, self.state.read(cx).session_for(&id))
+                .filter(|_| !queued && !undelivered && !expired);
         let compact_status = compact.then(|| {
-            let glyph = if working {
+            let glyph = if ring.is_some() {
+                crate::composer::background::sidebar_ring_mark(0, theme).into_any_element()
+            } else if working {
                 loaders::mini_glyph_spinner(
                     format!("{row_id}-working"),
                     2.0,
@@ -7646,30 +7664,32 @@ impl Shell {
                     // Glyph slot: Working wears the preset's animated pixel
                     // glyph beside its label, Done wears the check, and the
                     // remaining statuses use a compact dot.
-                    let glyph: AnyElement =
-                        if status == zeron_proto::ChatIndicator::Completed && !expired {
-                            icon(icons::CHECK)
-                                .size(px(11.0))
-                                .flex_none()
-                                .text_color(status_color)
-                                .into_any_element()
-                        } else if working {
-                            loaders::mini_glyph_spinner(
-                                format!("{row_id}-working"),
-                                2.0,
-                                theme.glyph,
-                                self.sidebar_pane.entity_id(),
-                                cx,
-                            )
+                    let glyph: AnyElement = if let Some(count) = ring {
+                        crate::composer::background::sidebar_ring_mark(count, theme)
                             .into_any_element()
-                        } else {
-                            div()
-                                .size(px(6.0))
-                                .flex_none()
-                                .rounded_full()
-                                .bg(status_color)
-                                .into_any_element()
-                        };
+                    } else if status == zeron_proto::ChatIndicator::Completed && !expired {
+                        icon(icons::CHECK)
+                            .size(px(11.0))
+                            .flex_none()
+                            .text_color(status_color)
+                            .into_any_element()
+                    } else if working {
+                        loaders::mini_glyph_spinner(
+                            format!("{row_id}-working"),
+                            2.0,
+                            theme.glyph,
+                            self.sidebar_pane.entity_id(),
+                            cx,
+                        )
+                        .into_any_element()
+                    } else {
+                        div()
+                            .size(px(6.0))
+                            .flex_none()
+                            .rounded_full()
+                            .bg(status_color)
+                            .into_any_element()
+                    };
                     div()
                         .flex()
                         .flex_row()
@@ -7686,8 +7706,15 @@ impl Shell {
                         .into_any_element()
                 }
                 None => div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(4.0))
                     .text_size(crate::typography::ui_rems(10.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
+                    .children(ring.map(|count| {
+                        crate::composer::background::sidebar_ring_mark(count, theme)
+                    }))
                     .child(time_ago.clone())
                     .into_any_element(),
             }
