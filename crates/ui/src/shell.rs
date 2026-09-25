@@ -73,6 +73,7 @@ mod summary;
 mod switcher;
 mod tabs;
 
+pub(crate) use spaces::status_dot_color;
 pub(crate) use tabs::TabDragPayload;
 
 use spaces::{AddSpaceFlow, RenameSpaceDialog};
