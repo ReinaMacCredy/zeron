@@ -2463,9 +2463,7 @@ pub fn consulting_advisor(entries: &[SessionMessageEntry]) -> bool {
 /// What the resume button sends. A user entry carrying exactly this text
 /// renders as a "Resumed" divider instead of a bubble; the text itself is
 /// the divider's hover hint.
-pub const RESUME_PROMPT: &str = "Continue exactly where you left off. Your previous reply was \
-interrupted before it finished. Do not restart, do not repeat what was already said, and do \
-not ask whether to continue: pick up the remaining work at the point it stopped and finish it.";
+pub const RESUME_PROMPT: &str = "Resume without asking to continue.";
 
 /// True when the chat's last turn stopped short and the chat sits idle (the
 /// composer's send circle becomes the resume triangle): the reply was interrupted (its entry is `Aborted`), or the interrupt landed

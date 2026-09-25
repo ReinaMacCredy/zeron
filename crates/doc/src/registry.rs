@@ -553,6 +553,22 @@ impl RegistryDoc {
         }
     }
 
+    /// Local-only replicas get no acks; unfolded, `pending` grows forever and every snapshot re-serializes it.
+    pub fn fold_pending(&mut self) -> usize {
+        let pending = std::mem::take(&mut self.pending);
+        let mut folded = 0;
+        for batch in &pending {
+            for op in &batch.ops {
+                let current = self.authoritative.get(&op.kind).and_then(|m| m.get(&op.id));
+                if let (Some(next), _) = apply_op(current, op) {
+                    self.put_authoritative(next);
+                }
+                folded += 1;
+            }
+        }
+        folded
+    }
+
     /// Batches to push: everything not already in flight on this connection.
     pub fn take_pushable(&mut self) -> Vec<PendingBatch> {
         let mut out = Vec::new();
