@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -30,6 +31,7 @@ const ROSTER_RISE: Duration = Duration::from_millis(150);
 const ELAPSED_TICK: Duration = Duration::from_secs(1);
 const STOP_TIMEOUT: Duration = Duration::from_secs(15);
 const SHELLS_MENU_WIDTH: f32 = 420.0;
+const EXPANDED_TAIL_LINES: usize = 12;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RunState {
@@ -163,6 +165,18 @@ pub(crate) fn elapsed_label(secs: i64) -> String {
     format!("{}h {:02}m", mins / 60, mins % 60)
 }
 
+pub(crate) fn latest_line(lines: &[String]) -> Option<&str> {
+    lines
+        .iter()
+        .rev()
+        .map(|line| line.trim())
+        .find(|line| !line.is_empty())
+}
+
+pub(crate) fn expanded_tail(lines: &[String]) -> &[String] {
+    &lines[lines.len().saturating_sub(EXPANDED_TAIL_LINES)..]
+}
+
 pub(crate) fn dot_lit(frame: u16, dot: usize) -> bool {
     frame & (1 << (8 - dot)) != 0
 }
@@ -208,6 +222,13 @@ pub(crate) struct BackgroundUi {
     shells: Popup<()>,
     agents_glyph: Option<(RunState, Option<Instant>)>,
     tick: Option<gpui::Task<()>>,
+    outputs: HashMap<String, ShellOutput>,
+    expanded: Option<String>,
+}
+
+struct ShellOutput {
+    lines: Vec<String>,
+    _watch: Option<gpui::Task<()>>,
 }
 
 fn tween_progress(since: Option<Instant>, span: Duration, reduced: bool, now: Instant) -> f32 {
@@ -283,6 +304,7 @@ impl Composer {
             window.request_animation_frame();
         }
         let shells_mounted = self.background.shells.get().is_some();
+        self.sync_output_watches(if shells_mounted { &shells } else { &[] }, cx);
         let ticking = (rise.is_some() && overall == RunState::Working) || shells_mounted;
         if ticking && self.background.tick.is_none() {
             self.background.tick = Some(cx.spawn(async move |this, cx| {
@@ -565,15 +587,61 @@ impl Composer {
                         },
                     ))
                 });
-                div()
-                    .debug_selector(move || format!("background-shell-row-{ix}"))
+                let lines = self
+                    .background
+                    .outputs
+                    .get(&task.id)
+                    .map(|output| output.lines.as_slice())
+                    .unwrap_or_default();
+                let expanded = self.background.expanded.as_deref() == Some(task.id.as_str());
+                let latest = (!expanded)
+                    .then(|| latest_line(lines))
+                    .flatten()
+                    .map(|line| {
+                        div()
+                            .debug_selector(move || format!("background-shell-line-{ix}"))
+                            .pl(px(GLYPH_SIZE + 8.0))
+                            .truncate()
+                            .font_family(theme.font_mono.clone())
+                            .text_size(crate::typography::ui_rems(10.5))
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(line.to_owned()))
+                    });
+                let tail = (expanded && !lines.is_empty()).then(|| {
+                    div()
+                        .debug_selector(move || format!("background-shell-tail-{ix}"))
+                        .ml(px(GLYPH_SIZE + 8.0))
+                        .px(px(8.0))
+                        .py(px(6.0))
+                        .rounded(px(6.0))
+                        .bg(theme.wash(0.06))
+                        .font_family(theme.font_mono.clone())
+                        .text_size(crate::typography::ui_rems(10.5))
+                        .text_color(theme.text_muted)
+                        .children(expanded_tail(lines).iter().map(|line| {
+                            div()
+                                .truncate()
+                                .child(SharedString::from(if line.is_empty() {
+                                    " ".to_owned()
+                                } else {
+                                    line.clone()
+                                }))
+                        }))
+                });
+                let toggle = {
+                    let task_id = task.id.clone();
+                    cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.background.expanded = (this.background.expanded.as_deref()
+                            != Some(task_id.as_str()))
+                        .then(|| task_id.clone());
+                        cx.notify();
+                    })
+                };
+                let head = div()
                     .flex()
                     .flex_row()
                     .items_center()
                     .gap(px(8.0))
-                    .px(px(8.0))
-                    .py(px(7.0))
-                    .rounded(px(popover::MENU_ITEM_RADIUS))
                     .child(glyph(
                         SharedString::from(format!("background-shell-glyph-{ix}")),
                         RunState::Working,
@@ -597,7 +665,22 @@ impl Composer {
                             .text_color(theme.text_muted)
                             .child(SharedString::from(elapsed))
                     }))
-                    .child(div().size(px(20.0)).flex_none().children(stop))
+                    .child(div().size(px(20.0)).flex_none().children(stop));
+                div()
+                    .id(("background-shell-row", ix))
+                    .debug_selector(move || format!("background-shell-row-{ix}"))
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .px(px(8.0))
+                    .py(px(7.0))
+                    .rounded(px(popover::MENU_ITEM_RADIUS))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.glass_hover()))
+                    .child(head)
+                    .children(latest)
+                    .children(tail)
+                    .on_click(toggle)
             });
             let content = popover::popover_card(theme)
                 .debug_selector(|| "background-shells-menu".into())
@@ -634,6 +717,85 @@ impl Composer {
             .child(pill)
             .children(menu)
             .into_any_element()
+    }
+
+    fn sync_output_watches(&mut self, shells: &[BackgroundTask], cx: &mut Context<Self>) {
+        let watched: Vec<&str> = shells
+            .iter()
+            .filter(|task| task.output_path.is_some())
+            .map(|task| task.id.as_str())
+            .collect();
+        self.background
+            .outputs
+            .retain(|id, _| watched.contains(&id.as_str()));
+        if self
+            .background
+            .expanded
+            .as_deref()
+            .is_some_and(|id| !shells.iter().any(|task| task.id == id))
+        {
+            self.background.expanded = None;
+        }
+        for id in watched {
+            if !self.background.outputs.contains_key(id) {
+                let watch = self.watch_shell_output(id.to_owned(), cx);
+                self.background.outputs.insert(
+                    id.to_owned(),
+                    ShellOutput {
+                        lines: Vec::new(),
+                        _watch: watch,
+                    },
+                );
+            }
+        }
+    }
+
+    fn watch_shell_output(
+        &self,
+        task_id: String,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Task<()>> {
+        #[derive(serde::Deserialize)]
+        struct OutputFrame {
+            #[serde(default)]
+            lines: Vec<String>,
+        }
+        let engine = self.state.read(cx).engine().cloned()?;
+        let (chat_id, device_id) = self
+            .bound_chat_row(cx)
+            .map(|chat| (chat.id.clone(), chat.device_id.clone()))?;
+        let params = serde_json::json!({
+            "chatId": chat_id,
+            "taskId": task_id,
+            "targetDeviceId": device_id,
+        });
+        Some(cx.spawn(async move |this, cx| {
+            let mut rx = match engine
+                .client()
+                .subscribe_checked(methods::WATCH_BACKGROUND_OUTPUT, params)
+                .await
+            {
+                Ok(rx) => rx,
+                Err(error) => {
+                    tracing::debug!(%error, task_id, "background output watch failed");
+                    return;
+                }
+            };
+            while let Some(value) = rx.recv().await {
+                let Ok(frame) = serde_json::from_value::<OutputFrame>(value) else {
+                    continue;
+                };
+                let alive = this.update(cx, |this, cx| {
+                    if let Some(output) = this.background.outputs.get_mut(&task_id) {
+                        output.lines = frame.lines;
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    return;
+                }
+            }
+        }))
     }
 
     fn stop_background_task(&mut self, task_id: String, cx: &mut Context<Self>) {
@@ -1113,7 +1275,10 @@ mod tests {
             state.sessions = vec![session(
                 SessionStatus::Working,
                 true,
-                vec![task("shell-1", BackgroundTaskKind::Shell)],
+                vec![BackgroundTask {
+                    output_path: Some("/tmp/shell-1.output".into()),
+                    ..task("shell-1", BackgroundTaskKind::Shell)
+                }],
             )];
             state.transcript = vec![
                 entry("u1", MessageRole::User, 1, vec![]),
@@ -1203,6 +1368,43 @@ mod tests {
         assert!(cx.debug_bounds("background-shells-menu").is_some());
         assert!(cx.debug_bounds("background-shell-row-0").is_some());
         assert!(cx.debug_bounds("background-shell-stop-0").is_some());
+        assert!(cx.debug_bounds("background-shell-line-0").is_none());
+
+        composer.update(cx, |composer, cx| {
+            composer
+                .background
+                .outputs
+                .get_mut("shell-1")
+                .unwrap()
+                .lines = vec![
+                "Compiling zeron".into(),
+                "   Finished dev".into(),
+                "".into(),
+            ];
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("background-shell-line-0").is_some());
+        assert!(cx.debug_bounds("background-shell-tail-0").is_none());
+
+        let row = cx
+            .debug_bounds("background-shell-row-0")
+            .expect("shell row painted");
+        cx.simulate_click(row.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("background-shells-menu").is_some());
+        assert!(cx.debug_bounds("background-shell-tail-0").is_some());
+        assert!(cx.debug_bounds("background-shell-line-0").is_none());
+    }
+
+    #[test]
+    fn the_live_line_is_the_last_non_blank_one_and_the_tail_is_capped() {
+        let lines: Vec<String> = (0..20).map(|i| format!("line {i}")).collect();
+        assert_eq!(expanded_tail(&lines).len(), EXPANDED_TAIL_LINES);
+        assert_eq!(expanded_tail(&lines)[0], "line 8");
+        let with_blank = vec!["  Finished dev ".to_string(), "  ".to_string()];
+        assert_eq!(latest_line(&with_blank), Some("Finished dev"));
+        assert_eq!(latest_line(&[]), None);
     }
 
     #[test]
