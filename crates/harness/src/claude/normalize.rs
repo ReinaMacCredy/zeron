@@ -264,6 +264,11 @@ pub(crate) struct Normalizer {
     /// re-keys them onto the spawn chip's feed (the wire never echoes the
     /// steer on the child feed — live-verified 2.1.228).
     agent_tasks: std::collections::HashMap<String, String>,
+    /// A resumed agent (`SendMessage` to a settled background agent) starts
+    /// a second `task_started` for the SAME task id, keyed on the
+    /// SendMessage call; its frames and completion then carry that id. It
+    /// maps back to the original spawn so the resumed run settles its chip.
+    spawn_aliases: std::collections::HashMap<String, String>,
     /// tool_use ids of Agent/Task spawn calls, recorded from their own
     /// assistant frames (plus `task_started`'s agent-task pairing). Gates
     /// `task_notification`: background SHELL tasks settle through the same
@@ -306,6 +311,7 @@ impl Normalizer {
             saw_init: false,
             last_model: None,
             agent_tasks: std::collections::HashMap::new(),
+            spawn_aliases: std::collections::HashMap::new(),
             agent_spawn_tools: std::collections::HashSet::new(),
             seeded_prompts: std::collections::HashMap::new(),
             pending_advisor: std::collections::HashMap::new(),
@@ -313,6 +319,13 @@ impl Normalizer {
             session_id: None,
             pending_error: None,
         }
+    }
+
+    fn spawn_of(&self, tool_use_id: &str) -> String {
+        self.spawn_aliases
+            .get(tool_use_id)
+            .cloned()
+            .unwrap_or_else(|| tool_use_id.to_owned())
     }
 
     fn advisor_events(&mut self, parent: Option<&str>, b: &ContentBlock) -> Vec<AgentEvent> {
@@ -387,6 +400,7 @@ impl Normalizer {
                     let Some(parent) = f.tool_use_id.as_deref().filter(|t| !t.is_empty()) else {
                         return Vec::new();
                     };
+                    let parent = &self.spawn_of(parent);
                     // Only a KNOWN spawn settles as a subagent. Background
                     // SHELL tasks (`Bash` with `run_in_background`) settle
                     // through this same subtype carrying the Bash call's id —
@@ -426,8 +440,15 @@ impl Normalizer {
                         f.tool_use_id.as_deref().filter(|t| !t.is_empty()),
                     )
                 {
-                    self.agent_tasks.insert(task.to_owned(), tool.to_owned());
-                    self.agent_spawn_tools.insert(tool.to_owned());
+                    match self.agent_tasks.get(task) {
+                        Some(spawn) if spawn != tool => {
+                            self.spawn_aliases.insert(tool.to_owned(), spawn.clone());
+                        }
+                        _ => {
+                            self.agent_tasks.insert(task.to_owned(), tool.to_owned());
+                            self.agent_spawn_tools.insert(tool.to_owned());
+                        }
+                    }
                     return Vec::new();
                 }
                 // The CLI's own compaction boundary. Must precede the init
@@ -471,7 +492,8 @@ impl Normalizer {
                 if f.event.kind != "content_block_delta" {
                     return Vec::new();
                 }
-                if let Some(parent) = &f.parent_tool_use_id {
+                if let Some(parent) = f.parent_tool_use_id.as_deref().map(|p| self.spawn_of(p)) {
+                    let parent = &parent;
                     return match f.event.delta.kind.as_str() {
                         "text_delta" => vec![tag(
                             parent,
@@ -510,7 +532,8 @@ impl Normalizer {
             }
 
             Frame::Assistant(f) => {
-                if let Some(parent) = &f.parent_tool_use_id {
+                if let Some(parent) = f.parent_tool_use_id.as_deref().map(|p| self.spawn_of(p)) {
+                    let parent = &parent;
                     // Subagent content, attributed. The 2.1.x wire streams NO
                     // tagged partial deltas (live-verified): a subagent's text
                     // arrives only as full text blocks on its tagged
@@ -678,7 +701,8 @@ impl Normalizer {
                     output: None,
                     diff: diff.clone(),
                 });
-                if let Some(parent) = &f.parent_tool_use_id {
+                if let Some(parent) = f.parent_tool_use_id.as_deref().map(|p| self.spawn_of(p)) {
+                    let parent = &parent;
                     // A subagent's tool results echo on the main channel too;
                     // they belong to its transcript, attributed like its calls.
                     let mut out: Vec<AgentEvent> =
@@ -1533,6 +1557,62 @@ mod tests {
             )),
             "a real steer must still reach the subagent"
         );
+    }
+
+    #[test]
+    fn a_resumed_agent_settles_its_original_spawn() {
+        let mut norm = Normalizer::new();
+        let mut feed = |line: &str| {
+            let frame = crate::claude::wire::parse_frame(line).expect("parses");
+            norm.normalize(frame, false)
+        };
+        let settled_on = |events: &[AgentEvent]| -> Vec<String> {
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    AgentEvent::Subagent {
+                        parent_tool_use_id,
+                        event,
+                    } if matches!(event.as_ref(), AgentEvent::Done { .. }) => {
+                        Some(parent_tool_use_id.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        feed(
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_spawn","name":"Agent","input":{"prompt":"p","run_in_background":true}}]}}"#,
+        );
+        feed(
+            r#"{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"toolu_spawn","subagent_type":"general-purpose"}"#,
+        );
+        let first = feed(
+            r#"{"type":"system","subtype":"task_notification","task_id":"a1","tool_use_id":"toolu_spawn","status":"completed"}"#,
+        );
+        assert_eq!(settled_on(&first), ["toolu_spawn"]);
+
+        // SendMessage wakes the settled agent: the CLI opens a second task
+        // for the same agent id keyed on the SendMessage call (live 2.1.281).
+        feed(
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_send","name":"SendMessage","input":{"to":"a1","message":"one more thing"}}]}}"#,
+        );
+        feed(
+            r#"{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"toolu_send","subagent_type":"general-purpose"}"#,
+        );
+        let work = feed(
+            r#"{"type":"assistant","parent_tool_use_id":"toolu_send","message":{"content":[{"type":"tool_use","id":"t9","name":"Bash","input":{"command":"ls"}}]}}"#,
+        );
+        assert!(
+            work.iter().all(|e| matches!(
+                e,
+                AgentEvent::Subagent { parent_tool_use_id, .. } if parent_tool_use_id == "toolu_spawn"
+            )),
+            "{work:?}"
+        );
+        let second = feed(
+            r#"{"type":"system","subtype":"task_notification","task_id":"a1","tool_use_id":"toolu_send","status":"completed"}"#,
+        );
+        assert_eq!(settled_on(&second), ["toolu_spawn"]);
     }
 
     #[test]
