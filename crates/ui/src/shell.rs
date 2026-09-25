@@ -28,7 +28,7 @@ use zeron_proto::{AgentAccountsSnapshot, AuthState, WorkspaceScope};
 use zeron_rpc::methods;
 
 use crate::changes::{Changes, ChangesEvent};
-use crate::composer::{Composer, ComposerEvent, ComposerInput, ComposerInputEvent};
+use crate::composer::{Composer, ComposerEvent, ComposerInput, ComposerInputEvent, SidechatStaged};
 use crate::computer::cards::ComputerRequest;
 use crate::files::{FilesCloseDisposition, FilesEvent, FilesSurface, WorkspacePathDrag};
 use crate::icons::{self, icon};
@@ -2256,7 +2256,8 @@ impl Shell {
                 ComposerEvent::OpenSidechat {
                     source_chat_id,
                     prompt,
-                } => this.open_sidechat(source_chat_id.clone(), prompt.clone(), cx),
+                    staged,
+                } => this.open_sidechat(source_chat_id.clone(), prompt.clone(), staged.clone(), cx),
                 ComposerEvent::UnsentChanged => cx.notify(),
                 ComposerEvent::BackgroundStarted => {
                     this.freeze_draft_row(cx);
@@ -4210,6 +4211,7 @@ impl Shell {
         &mut self,
         source_chat_id: String,
         prompt: Option<String>,
+        staged: SidechatStaged,
         cx: &mut Context<Self>,
     ) {
         if !self.right_pane_open(cx) {
@@ -4222,16 +4224,17 @@ impl Shell {
             .cloned()
         {
             let id = self.add_sidechat_surface(&chat, cx);
-            self.send_into_sidechat(id, prompt, cx);
+            self.send_into_sidechat(id, prompt, staged, cx);
             return;
         }
-        self.create_sidechat(source_chat_id, prompt, cx);
+        self.create_sidechat(source_chat_id, prompt, staged, cx);
     }
 
     fn create_sidechat(
         &mut self,
         source_chat_id: String,
         prompt: Option<String>,
+        staged: SidechatStaged,
         cx: &mut Context<Self>,
     ) {
         if self
@@ -4283,7 +4286,7 @@ impl Shell {
                             }
                         });
                         let id = shell.add_sidechat_surface(&chat, cx);
-                        shell.send_into_sidechat(id, prompt, cx);
+                        shell.send_into_sidechat(id, prompt, staged, cx);
                     }
                     Err(err) => tracing::warn!(%err, "CreateSidechat failed"),
                 }
@@ -4391,14 +4394,22 @@ impl Shell {
 
     /// The first turn of a `/sidechat <prompt>`: the tab's own composer sends
     /// it, so the Run is built from the SIDECHAT's row, not the source's.
-    fn send_into_sidechat(&mut self, id: u64, prompt: Option<String>, cx: &mut Context<Self>) {
-        let Some(prompt) = prompt.filter(|prompt| !prompt.trim().is_empty()) else {
-            return;
-        };
+    fn send_into_sidechat(
+        &mut self,
+        id: u64,
+        prompt: Option<String>,
+        staged: SidechatStaged,
+        cx: &mut Context<Self>,
+    ) {
         let Some(composer) = self.sidechat_tabs.get(&id).map(|tab| tab.composer.clone()) else {
             return;
         };
-        composer.update(cx, |composer, cx| composer.send_prompt(prompt, cx));
+        composer.update(cx, |composer, cx| {
+            composer.stage_carried(staged, cx);
+            if let Some(prompt) = prompt.filter(|prompt| !prompt.trim().is_empty()) {
+                composer.send_prompt(prompt, cx);
+            }
+        });
     }
 
     /// Fetch a finished subagent's frozen transcript blob
@@ -11295,7 +11306,7 @@ impl Shell {
                             )
                             .on_click(cx.listener(|this, _, _, cx| {
                                 if let Some(source) = this.sidechat_source_chat(cx) {
-                                    this.create_sidechat(source, None, cx);
+                                    this.create_sidechat(source, None, Default::default(), cx);
                                 }
                             })),
                         )
@@ -11847,7 +11858,12 @@ impl Shell {
                                     .id("right-plus-sidechat-row")
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         if let Some(source) = this.sidechat_source_chat(cx) {
-                                            this.create_sidechat(source, None, cx);
+                                            this.create_sidechat(
+                                                source,
+                                                None,
+                                                Default::default(),
+                                                cx,
+                                            );
                                         }
                                         this.close_right_plus(cx);
                                     }))
@@ -16181,19 +16197,35 @@ mod right_tab_mouse_regressions {
                 state.chats = vec![source, side];
                 state.selected_chat = Some("parent".into());
             });
-            shell.open_sidechat("parent".into(), None, cx);
+            shell.open_sidechat("parent".into(), None, Default::default(), cx);
             assert_eq!(shell.resolved_right_active(cx), RightSurface::Sidechat(1));
             assert_eq!(shell.sidechat_tabs.len(), 1);
             assert!(shell.state.read(cx).open_sidechat_tabs.contains("side"));
             // A second ask reuses the tab instead of opening another, and its
             // prompt is handed to the TAB's composer (which, with no engine
             // here, fails on its own chat rather than building a Run).
-            shell.open_sidechat("parent".into(), Some("compare".into()), cx);
+            let staged = SidechatStaged {
+                attachments: vec![crate::attachments::StagedAttachment {
+                    id: "shot".into(),
+                    name: "shot.png".into(),
+                    image: std::sync::Arc::new(gpui::Image::from_bytes(
+                        gpui::ImageFormat::Png,
+                        vec![1, 2, 3],
+                    )),
+                }],
+                appshots: Vec::new(),
+            };
+            shell.open_sidechat("parent".into(), Some("compare".into()), staged, cx);
             assert_eq!(shell.sidechat_tabs.len(), 1);
             let composer = shell.sidechat_tabs[&1].composer.clone();
             composer.read_with(cx, |composer, cx| {
                 assert_eq!(composer.bound_chat_id(cx).as_deref(), Some("side"));
                 assert_eq!(composer.failure.as_deref(), Some("Engine not connected"));
+                assert_eq!(
+                    composer.staged().len(),
+                    1,
+                    "the image rides with the prompt"
+                );
             });
         });
         cx.update(|window, cx| {

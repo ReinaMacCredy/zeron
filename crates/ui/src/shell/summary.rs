@@ -467,7 +467,7 @@ impl Shell {
                     row(theme, "pinned-summary-new-sidechat", 0, icons::PLUS)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if let Some(source) = source.clone() {
-                                this.create_sidechat(source, None, cx);
+                                this.create_sidechat(source, None, Default::default(), cx);
                             }
                             this.close_summary_menu(cx);
                         }))
