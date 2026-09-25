@@ -119,8 +119,10 @@ impl RuntimeConfig {
         }
     }
 
+    /// Attachments ride the steer mailbox (inlined by drivers that can,
+    /// path refs in the text otherwise), so they never force a new run.
     fn can_route(&self, harness_id: HarnessId, request: &RunRequest) -> bool {
-        request.attachments.is_empty() && self == &Self::from_request(harness_id, request)
+        self == &Self::from_request(harness_id, request)
     }
 }
 

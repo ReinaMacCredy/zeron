@@ -2428,6 +2428,66 @@ impl Harness for ControlledHarness {
     }
 }
 
+/// A prompt carrying attachments reaches the live run's mailbox like any
+/// other: replacing the run killed its background shells mid-flight
+/// (2026-09-25, a screenshot sent while a test suite ran in the background).
+#[tokio::test]
+async fn an_attachment_prompt_routes_into_the_live_run() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(ControlledHarness(std::sync::Mutex::new(Some(rx)))),
+    );
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-first",
+        SessionCommandPayload::Run {
+            request: run_request("start the suite"),
+            message_id: "user-first".into(),
+        },
+    );
+    tx.send(AgentEvent::TextDelta {
+        text: "running".into(),
+    })
+    .unwrap();
+    tx.send(done(DoneStatus::Completed)).unwrap();
+    wait_for(
+        || {
+            core.sessions
+                .session_status(CHAT)
+                .is_some_and(|s| s.last_completed_turn.is_some())
+        },
+        "first turn parks",
+    )
+    .await;
+
+    let mut request = run_request("what is this?");
+    request.attachments = vec!["/tmp/shot.png".into()];
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-attachment",
+        SessionCommandPayload::Run {
+            request,
+            message_id: "user-attachment".into(),
+        },
+    );
+    wait_for(
+        || entries(&core).iter().any(|e| e.id == "user-attachment"),
+        "attachment prompt lands",
+    )
+    .await;
+    // A replacement interrupts the live run and drops its stream within the
+    // harness's interrupt grace.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    assert!(
+        !tx.is_closed(),
+        "the live run keeps its process: no replacement run was started"
+    );
+    core.shutdown().await;
+}
+
 /// Background shells ride the session beside its status: they never hold a
 /// parked turn Working, keep their first-seen stamp across replacements, and
 /// vanish with the run that owned them.
