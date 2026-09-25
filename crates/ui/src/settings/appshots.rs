@@ -742,10 +742,13 @@ impl ShortcutsPage {
                                     .flex()
                                     .flex_row()
                                     .items_start()
+                                    .flex_wrap()
                                     .justify_between()
                                     .gap(px(24.0))
                                     .child(
                                         div()
+                                            .flex_1()
+                                            .min_w(px(200.0))
                                             .flex()
                                             .flex_col()
                                             .child(widgets::page_header(&theme, "Appshots", None))
@@ -754,6 +757,7 @@ impl ShortcutsPage {
                                                     &theme,
                                                     "Capture another app's frontmost window directly into a session.",
                                                 )
+                                                .max_w(px(512.0))
                                                 .line_height(px(20.0)),
                                             ),
                                     )

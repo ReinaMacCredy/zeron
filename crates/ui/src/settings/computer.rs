@@ -1659,6 +1659,8 @@ impl Render for ComputerPage {
                                     .gap(px(24.0))
                                     .child(
                                         div()
+                                            .flex_1()
+                                            .min_w(px(200.0))
                                             .flex()
                                             .flex_col()
                                             .child(widgets::page_header(&theme, "Computer", None))
@@ -1667,6 +1669,7 @@ impl Render for ComputerPage {
                                                     &theme,
                                                     "Let an agent see and drive this Mac's apps.",
                                                 )
+                                                .max_w(px(512.0))
                                                 .line_height(px(20.0)),
                                             ),
                                     ),
