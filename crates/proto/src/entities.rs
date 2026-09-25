@@ -303,6 +303,29 @@ pub enum SessionStatus {
     Errored,
 }
 
+/// Work a harness runs beside its turns — a background shell today. Lives
+/// only as long as the harness process that owns it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackgroundTask {
+    pub id: String,
+    pub kind: BackgroundTaskKind,
+    pub label: String,
+    /// Stamped by the engine the first time it sees the task; the harness
+    /// wire carries no start time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BackgroundTaskKind {
+    Shell,
+    Agent,
+    #[serde(other)]
+    Other,
+}
+
 /// Live run status for a chat — drives the Working indicator and sidebar status dots.
 /// Staleness-checked client-side against `updated_at` so a crashed backend never shows
 /// an eternal "Working".

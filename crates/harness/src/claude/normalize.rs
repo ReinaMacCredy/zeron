@@ -460,6 +460,27 @@ impl Normalizer {
                         post_tokens: meta.post_tokens,
                     }];
                 }
+                if f.subtype == "background_tasks_changed" {
+                    let tasks = f
+                        .tasks
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|t| !t.task_id.is_empty())
+                        .map(|t| zeron_proto::BackgroundTask {
+                            kind: match t.task_type.as_str() {
+                                "local_bash" => zeron_proto::BackgroundTaskKind::Shell,
+                                "local_agent" | "remote_agent" => {
+                                    zeron_proto::BackgroundTaskKind::Agent
+                                }
+                                _ => zeron_proto::BackgroundTaskKind::Other,
+                            },
+                            label: t.description,
+                            id: t.task_id,
+                            started_at: None,
+                        })
+                        .collect();
+                    return vec![AgentEvent::BackgroundTasks { tasks }];
+                }
                 if f.subtype == "status" {
                     return vec![AgentEvent::Compacting {
                         active: f.status.as_deref() == Some("compacting"),
@@ -1557,6 +1578,42 @@ mod tests {
             )),
             "a real steer must still reach the subagent"
         );
+    }
+
+    #[test]
+    fn background_tasks_changed_replaces_the_live_set_and_never_tags_a_subagent() {
+        let mut norm = Normalizer::new();
+        let mut feed = |line: &str| {
+            let frame = crate::claude::wire::parse_frame(line).expect("parses");
+            norm.normalize(frame, false)
+        };
+        // Captured from CLI 2.1.281 running `sleep 4 && echo hi` in the background.
+        let started = feed(
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b7wb5vp5o","task_type":"local_bash","description":"Sleep for 4 seconds then echo hi"}],"uuid":"u1","session_id":"s1"}"#,
+        );
+        assert_eq!(
+            started,
+            [AgentEvent::BackgroundTasks {
+                tasks: vec![zeron_proto::BackgroundTask {
+                    id: "b7wb5vp5o".into(),
+                    kind: zeron_proto::BackgroundTaskKind::Shell,
+                    label: "Sleep for 4 seconds then echo hi".into(),
+                    started_at: None,
+                }]
+            }]
+        );
+        let shell_started = feed(
+            r#"{"type":"system","subtype":"task_started","task_id":"b7wb5vp5o","tool_use_id":"toolu_bash","description":"Sleep for 4 seconds then echo hi","is_backgrounded":true,"task_type":"local_bash","uuid":"u2","session_id":"s1"}"#,
+        );
+        assert!(shell_started.is_empty(), "{shell_started:?}");
+        let ended = feed(
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[],"uuid":"u3","session_id":"s1"}"#,
+        );
+        assert_eq!(ended, [AgentEvent::BackgroundTasks { tasks: vec![] }]);
+        let settled = feed(
+            r#"{"type":"system","subtype":"task_notification","task_id":"b7wb5vp5o","tool_use_id":"toolu_bash","status":"completed","summary":"done","uuid":"u4","session_id":"s1"}"#,
+        );
+        assert!(settled.is_empty(), "{settled:?}");
     }
 
     #[test]

@@ -583,6 +583,11 @@ pub enum AgentEvent {
     Compacting {
         active: bool,
     },
+    /// The harness's full set of live background tasks (replace, never
+    /// merge); empty when the last one ends. Not subagent traffic.
+    BackgroundTasks {
+        tasks: Vec<crate::BackgroundTask>,
+    },
     /// Kept as a harness passthrough (rate-limit probes); never persisted to docs.
     #[serde(rename_all = "camelCase")]
     Usage {

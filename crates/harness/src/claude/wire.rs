@@ -53,6 +53,20 @@ pub(crate) struct SystemFrame {
     /// just performed.
     #[serde(default)]
     pub compact_metadata: Option<CompactMetadata>,
+    /// `background_tasks_changed`: every live background task after the
+    /// change (the CLI's replace semantics).
+    #[serde(default)]
+    pub tasks: Option<Vec<BackgroundTaskFrame>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct BackgroundTaskFrame {
+    #[serde(default)]
+    pub task_id: String,
+    #[serde(default)]
+    pub task_type: String,
+    #[serde(default)]
+    pub description: String,
 }
 
 /// `system`/`compact_boundary` `compact_metadata` — only the occupancy fields
