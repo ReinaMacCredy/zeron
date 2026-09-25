@@ -2059,6 +2059,11 @@ pub struct Shell {
     /// Last seen session status per chat — the chime trigger compares against
     /// it (a row's FIRST appearance never chimes, so boot stays silent).
     sound_prev: std::collections::HashMap<String, crate::sound::SessionNotificationState>,
+    /// Last indicator per chat for the tab strip's auto-open edges.
+    tab_status_prev: std::collections::HashMap<String, zeron_proto::ChatIndicator>,
+    /// A chat first seen with an older `created_at` seeds its baseline
+    /// silently, so boot doesn't open every running chat.
+    tab_watch_since: chrono::DateTime<Utc>,
     /// Startup-aware durable connectivity notification baseline.
     connectivity_notifications: crate::sound::ConnectivityNotificationState,
     /// Persistent across AppState observer callbacks so simultaneous session
@@ -2560,6 +2565,8 @@ impl Shell {
             sidebar_pin_write_notice: None,
             space_boot_applied: false,
             sound_prev: std::collections::HashMap::new(),
+            tab_status_prev: std::collections::HashMap::new(),
+            tab_watch_since: Utc::now(),
             connectivity_notifications: Default::default(),
             attention_sound_gate: Default::default(),
             user_menu: popover::Popup::default(),

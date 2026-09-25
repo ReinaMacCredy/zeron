@@ -577,29 +577,20 @@ impl Shell {
     }
 
     /// The open tabs in VISUAL order: `open_tabs` minus ids the doc no longer
-    /// backs with a live (non-archived) chat, and minus idle sessions — the
-    /// strip is an activity strip (user request): a tab shows while its
-    /// session is working, waiting on input, or finished-but-unseen, plus the
-    /// selected one. Idle tabs stay in the stored vec and resurface when the
-    /// session runs again. The stored vec is pruned separately by
-    /// [`Shell::sync_open_tabs`]; this read-only view just skips rows that
-    /// haven't been reconciled yet.
+    /// backs with a live (non-archived) chat. A tab stays until the user
+    /// closes it; idle ones dim instead of hiding. The stored vec is pruned
+    /// separately by [`Shell::sync_open_tabs`]; this read-only view just
+    /// skips rows that haven't been reconciled yet.
     pub(super) fn open_tab_ids(&self, cx: &App) -> Vec<String> {
         let Some(open) = self.settings.open_tabs.as_ref() else {
             return Vec::new();
         };
         let state = self.state.read(cx);
         let now = Utc::now();
-        let pair = self.split_pair.as_ref();
         let chats: std::collections::HashMap<_, _> = state
             .chats
             .iter()
             .map(|chat| (chat.id.as_str(), chat))
-            .collect();
-        let sessions: std::collections::HashMap<_, _> = state
-            .sessions
-            .iter()
-            .map(|session| (session.chat_id.as_str(), session))
             .collect();
         let drafts: std::collections::HashSet<_> = state
             .draft_sessions
@@ -612,19 +603,90 @@ impl Shell {
                 // session started in the background shows from its send on.
                 drafts.contains(id.as_str())
                     || state.send_pending(id, now)
-                    || chats.get(id.as_str()).is_some_and(|c| {
-                        !c.archived
-                            && (state.selected_chat.as_deref() == Some(c.id.as_str())
-                                || pair.as_ref().is_some_and(|p| p.contains(&c.id))
-                                || crate::state::display_status(
-                                    c,
-                                    sessions.get(c.id.as_str()).copied(),
-                                    now,
-                                ) != ChatIndicator::Idle)
-                    })
+                    || chats.get(id.as_str()).is_some_and(|c| !c.archived)
             })
             .cloned()
             .collect()
+    }
+
+    /// Chats whose tab should open on its own: a person-opened chat that
+    /// starts a new run, or any chat that starts waiting on input. Edges
+    /// only, so a closed tab stays closed until the next run or question.
+    fn auto_open_tab_ids(&mut self, cx: &App) -> Vec<String> {
+        let state = self.state.read(cx);
+        if !state.sessions_synced() || !state.spaces_synced {
+            return Vec::new();
+        }
+        let now = Utc::now();
+        let mut opened = Vec::new();
+        let mut next = std::collections::HashMap::new();
+        for (status, chat) in state.overview_chats(now) {
+            let prev = match self.tab_status_prev.get(&chat.id) {
+                Some(prev) => Some(*prev),
+                None if chat.created_at > self.tab_watch_since => Some(ChatIndicator::Idle),
+                None => None,
+            };
+            // A run whose lease went stale (host asleep or offline) reads
+            // Idle; keeping the old baseline stops its return from counting
+            // as a new run.
+            let stale_run = status == ChatIndicator::Idle
+                && state.session_for(&chat.id).is_some_and(|s| {
+                    matches!(
+                        s.status,
+                        zeron_proto::SessionStatus::Working
+                            | zeron_proto::SessionStatus::AwaitingInput
+                    )
+                });
+            next.insert(
+                chat.id.clone(),
+                match (stale_run, prev) {
+                    (true, Some(prev)) => prev,
+                    _ => status,
+                },
+            );
+            let Some(prev) = prev else { continue };
+            let person_chat =
+                chat.sidechat_source_chat_id.is_none() && chat.created_by_chat_id.is_none();
+            let new_run = status == ChatIndicator::Working
+                && !matches!(prev, ChatIndicator::Working | ChatIndicator::AwaitingInput);
+            let asks =
+                status == ChatIndicator::AwaitingInput && prev != ChatIndicator::AwaitingInput;
+            if (new_run && person_chat) || asks {
+                opened.push(chat.id.clone());
+            }
+        }
+        self.tab_status_prev = next;
+        opened
+    }
+
+    /// Tabs the "Close idle tabs" menu row would close: idle sessions that
+    /// are neither focused, a split member, nor a draft.
+    fn idle_tab_ids(&self, cx: &App) -> Vec<String> {
+        let state = self.state.read(cx);
+        let now = Utc::now();
+        let focused = state.focused_id();
+        self.open_tab_ids(cx)
+            .into_iter()
+            .filter(|id| {
+                focused.as_deref() != Some(id.as_str())
+                    && !self.split_pair_contains(id)
+                    && !state.is_draft(id)
+                    && state
+                        .chats
+                        .iter()
+                        .find(|c| &c.id == id)
+                        .is_some_and(|c| state.display_status_for(c, now) == ChatIndicator::Idle)
+            })
+            .collect()
+    }
+
+    pub(super) fn close_idle_tabs(&mut self, cx: &mut Context<Self>) {
+        let idle = self.idle_tab_ids(cx);
+        if let Some(tabs) = self.settings.open_tabs.as_mut() {
+            tabs.retain(|id| !idle.contains(id));
+        }
+        self.schedule_save(cx);
+        cx.notify();
     }
 
     /// Reconcile the device-local tab list against the synced doc. Runs on
@@ -637,6 +699,8 @@ impl Shell {
     ///   just-sent new session's row hasn't synced yet).
     /// - Any selected chat becomes a tab (sidebar clicks, boot landing,
     ///   palette, fresh sends — one invariant covers every selection path).
+    /// - [`Shell::auto_open_tab_ids`] appends chats that just started a run
+    ///   or a question.
     pub(super) fn sync_open_tabs(&mut self, cx: &mut Context<Self>) {
         if !self.state.read(cx).chats_synced {
             return;
@@ -654,9 +718,10 @@ impl Shell {
         };
         let mut changed = false;
         if self.settings.open_tabs.is_none() {
-            // First run with tabs (or a pre-tabs settings file): every
-            // session the sidebar is showing opens as a tab, so the strip
-            // doesn't start out as the single boot-selected session. The
+            // First run with tabs (or a pre-tabs settings file): seed from
+            // the sidebar; the `open_tabs_stable` pass below then keeps only
+            // the active ones, so the strip doesn't start out as the single
+            // boot-selected session nor as the whole sidebar. The
             // sidebar list is space-gated, so wait for the spaces frame too —
             // chats alone seeded a single tab (the boot selection).
             if !self.state.read(cx).spaces_synced {
@@ -664,6 +729,32 @@ impl Shell {
             }
             self.settings.open_tabs = Some(self.sidebar_visible_order(cx));
             changed = true;
+        }
+        if !self.settings.open_tabs_stable {
+            let state = self.state.read(cx);
+            if state.sessions_synced() && state.spaces_synced {
+                let now = Utc::now();
+                let pair = self.split_pair.as_ref();
+                let keep: Vec<String> = self
+                    .settings
+                    .open_tabs
+                    .iter()
+                    .flatten()
+                    .filter(|id| {
+                        selected.as_deref() == Some(id.as_str())
+                            || pair.is_some_and(|p| p.contains(id))
+                            || state.is_draft(id)
+                            || state.send_pending(id, now)
+                            || state.chats.iter().find(|c| &c.id == *id).is_some_and(|c| {
+                                state.display_status_for(c, now) != ChatIndicator::Idle
+                            })
+                    })
+                    .cloned()
+                    .collect();
+                self.settings.open_tabs = Some(keep);
+                self.settings.open_tabs_stable = true;
+                changed = true;
+            }
         }
         // A background-started session is neither a draft nor a synced chat
         // until its doc frame lands; its pending send keeps the tab.
@@ -683,6 +774,7 @@ impl Shell {
             .iter()
             .flat_map(|p| [p.left.clone(), p.right.clone()])
             .collect();
+        let opened = self.auto_open_tab_ids(cx);
         let tabs = self.settings.open_tabs.get_or_insert_with(Vec::new);
         let before = tabs.len();
         tabs.retain(|id| {
@@ -693,7 +785,7 @@ impl Shell {
         });
         changed |= tabs.len() != before;
         // The split pair is always on the strip (its double chip).
-        for pinned in selected.iter().chain(pair.iter()) {
+        for pinned in selected.iter().chain(pair.iter()).chain(opened.iter()) {
             if !tabs.contains(pinned) {
                 tabs.push(pinned.clone());
                 changed = true;
@@ -833,9 +925,7 @@ impl Shell {
     }
 
     /// Commit a drag: the reordered visual list becomes the stored list, with
-    /// the hidden (idle) ids kept after it so they resurface later
-    /// (device-local; unreconciled ids drop out, which the prune would do
-    /// anyway).
+    /// not-yet-synced ids kept after it (device-local).
     fn commit_tab_reorder(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
         let mut order = self.open_tab_ids(cx);
         if from < order.len() {
@@ -999,14 +1089,21 @@ impl Shell {
                     // Hover state lives in Shell (the trailing slot swaps dot ↔
                     // close), so the wash snaps off it too — gpui allows only one
                     // `on_hover` per element, and the state listener wins.
+                    let dim = !is_draft && status == ChatIndicator::Idle;
                     let (text_color, bg) = if is_selected {
                         (theme.text, crate::theme::glass_selected_bg())
                     } else if is_hovered {
                         (theme.text_muted.opacity(0.8), theme.glass_hover())
+                    } else if dim {
+                        (theme.text_muted.opacity(0.35), crate::theme::wash(0.0))
                     } else {
                         (theme.text_muted.opacity(0.6), crate::theme::wash(0.0))
                     };
-                    let glyph_alpha = if is_selected { 0.9 } else { 0.6 };
+                    let glyph_alpha = match (is_selected, dim && !is_hovered) {
+                        (true, _) => 0.9,
+                        (false, true) => 0.35,
+                        (false, false) => 0.6,
+                    };
                     let brand = harness.last().copied().map(crate::pickers::harness_brand_icon);
                     let select_id = id.clone();
                     let middle_id = id.clone();
@@ -1450,6 +1547,7 @@ impl Shell {
         let has_others = order.len() > 1;
         let has_right = ix + 1 < order.len();
         let has_left = ix > 0;
+        let has_idle = !self.idle_tab_ids(cx).is_empty();
 
         let row = |label: &'static str,
                    id: &'static str,
@@ -1487,6 +1585,17 @@ impl Shell {
         }
         if has_left {
             menu = menu.child(row("Close to the left", "tab-menu-left", false, true, cx));
+        }
+        if has_idle {
+            menu = menu.child(
+                popover::menu_row(&theme, false, format!("tab-menu-idle-{chat_id}"))
+                    .id("tab-menu-idle")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.close_tab_menu(cx);
+                        this.close_idle_tabs(cx);
+                    }))
+                    .child(SharedString::from("Close idle tabs")),
+            );
         }
         Some(popover::menu_at(
             "tab-context-menu",
@@ -1942,7 +2051,7 @@ mod strip_regressions {
     }
 
     #[gpui::test]
-    fn bulk_close_preserves_hidden_idle_tabs(cx: &mut TestAppContext) {
+    fn bulk_close_closes_idle_tabs_like_any_other(cx: &mut TestAppContext) {
         let (shell, cx) = setup(cx);
         shell.update(cx, |shell, cx| {
             shell.state.update(cx, |state, cx| {
@@ -1953,9 +2062,9 @@ mod strip_regressions {
                 state.select_chat(Some("anchor".into()), cx);
             });
             for (keep_left, keep_right, expected) in [
-                (false, false, vec!["idle", "anchor"]),
+                (false, false, vec!["anchor"]),
                 (true, false, vec!["left", "idle", "anchor"]),
-                (false, true, vec!["idle", "anchor", "right"]),
+                (false, true, vec!["anchor", "right"]),
             ] {
                 shell.settings.open_tabs = Some(
                     ["left", "idle", "anchor", "right"]
@@ -1965,15 +2074,11 @@ mod strip_regressions {
                 shell.close_tabs_around("anchor", keep_left, keep_right, cx);
                 assert_eq!(shell.settings.open_tabs.as_ref().unwrap(), &expected);
             }
-            shell.state.update(cx, |state, _| {
-                state.apply_sessions(vec![working("idle"), working("anchor"), working("right")]);
-            });
-            assert_eq!(shell.open_tab_ids(cx), ["idle", "anchor", "right"]);
         });
     }
 
     #[gpui::test]
-    fn idle_tabs_hide_until_selected_or_active_again(cx: &mut TestAppContext) {
+    fn idle_tabs_stay_where_they_are(cx: &mut TestAppContext) {
         let (shell, cx) = setup(cx);
         shell.update(cx, |shell, cx| {
             shell.state.update(cx, |state, cx| {
@@ -1984,33 +2089,152 @@ mod strip_regressions {
                 state.select_chat(Some("busy".into()), cx);
             });
             shell.on_state_changed(&shell.state.clone(), cx);
-            // The selected tab always shows, whatever its status.
             shell.open_chat("quiet".into(), cx);
             shell.on_state_changed(&shell.state.clone(), cx);
-            assert_eq!(shell.open_tab_ids(cx), ["busy", "quiet"]);
-            // Deselected and idle: the tab hides but stays stored.
             shell.open_chat("busy".into(), cx);
-            shell.on_state_changed(&shell.state.clone(), cx);
-            assert_eq!(shell.open_tab_ids(cx), ["busy"]);
-            assert_eq!(
-                shell.settings.open_tabs.as_deref(),
-                Some(&["busy".to_string(), "quiet".to_string()][..])
-            );
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
-        assert!(cx.debug_bounds("session-tab-busy").is_some());
-        assert!(cx.debug_bounds("session-tab-quiet").is_none());
-
-        shell.update(cx, |shell, cx| {
-            // The session runs again: the tab resurfaces in its stored slot.
-            shell.state.update(cx, |state, _| {
-                state.apply_sessions(vec![working("busy"), working("quiet")]);
-            });
             shell.on_state_changed(&shell.state.clone(), cx);
             assert_eq!(shell.open_tab_ids(cx), ["busy", "quiet"]);
         });
         cx.update(|window, cx| window.draw(cx).clear());
         assert!(cx.debug_bounds("session-tab-quiet").is_some());
+    }
+
+    fn loose_chat(id: &str, extra: serde_json::Value) -> zeron_proto::Chat {
+        let mut json = serde_json::json!({
+            "id": id, "deviceId": "local", "archived": false,
+            "createdAt": Utc::now() - chrono::Duration::hours(1),
+        });
+        json.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(json).unwrap()
+    }
+
+    fn with_status(id: &str, status: zeron_proto::SessionStatus) -> zeron_proto::Session {
+        zeron_proto::Session {
+            status,
+            ..working(id)
+        }
+    }
+
+    #[gpui::test]
+    fn runs_and_questions_open_their_tab_once(cx: &mut TestAppContext) {
+        use zeron_proto::SessionStatus::{AwaitingInput, Idle, Working};
+        let (shell, cx) = setup(cx);
+        let sync =
+            |shell: &mut Shell, sessions: Vec<zeron_proto::Session>, cx: &mut Context<Shell>| {
+                shell.state.update(cx, |state, _| {
+                    state.apply_sessions(sessions);
+                });
+                shell.on_state_changed(&shell.state.clone(), cx);
+            };
+        shell.update(cx, |shell, cx| {
+            shell.settings.open_tabs = Some(vec!["home".into()]);
+            shell.state.update(cx, |state, cx| {
+                state.chats = vec![
+                    loose_chat("home", serde_json::json!({})),
+                    loose_chat("boot", serde_json::json!({})),
+                    loose_chat("phone", serde_json::json!({})),
+                    loose_chat("spawned", serde_json::json!({ "createdByChatId": "home" })),
+                    loose_chat("side", serde_json::json!({ "sidechatSourceChatId": "home", "lastMessageAt": Utc::now() })),
+                ];
+                state.chats_synced = true;
+                state.spaces_synced = true;
+                state.select_chat(Some("home".into()), cx);
+            });
+            // Already running when the viewer attaches: baseline, no tab.
+            sync(shell, vec![with_status("boot", Working)], cx);
+            assert_eq!(shell.open_tab_ids(cx), ["home"]);
+
+            // A person's chat starting a run opens; agent-made ones don't.
+            sync(
+                shell,
+                vec![
+                    with_status("boot", Working),
+                    with_status("phone", Working),
+                    with_status("spawned", Working),
+                    with_status("side", Working),
+                ],
+                cx,
+            );
+            assert_eq!(shell.open_tab_ids(cx), ["home", "phone"]);
+
+            // Any chat waiting on the user opens.
+            sync(
+                shell,
+                vec![
+                    with_status("boot", Working),
+                    with_status("phone", Working),
+                    with_status("spawned", AwaitingInput),
+                    with_status("side", Working),
+                ],
+                cx,
+            );
+            assert_eq!(shell.open_tab_ids(cx), ["home", "phone", "spawned"]);
+
+            // A closed tab stays closed for the rest of that run...
+            shell.close_session_tab("phone".into(), cx);
+            sync(
+                shell,
+                vec![with_status("phone", Working), with_status("spawned", Working)],
+                cx,
+            );
+            assert_eq!(shell.open_tab_ids(cx), ["home", "spawned"]);
+            // A host that slept past the lease is the same run, not a new one.
+            let mut asleep = with_status("phone", Working);
+            asleep.updated_at = Utc::now() - chrono::Duration::minutes(5);
+            sync(shell, vec![asleep], cx);
+            sync(shell, vec![with_status("phone", Working)], cx);
+            assert_eq!(shell.open_tab_ids(cx), ["home", "spawned"]);
+            // ...and comes back with the next one.
+            sync(shell, vec![with_status("phone", Idle)], cx);
+            sync(shell, vec![with_status("phone", Working)], cx);
+            assert_eq!(shell.open_tab_ids(cx), ["home", "spawned", "phone"]);
+        });
+    }
+
+    #[gpui::test]
+    fn upgrade_drops_the_tabs_the_activity_strip_kept_hidden(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            shell.settings.open_tabs = Some(["a", "hidden", "b"].map(String::from).to_vec());
+            shell.state.update(cx, |state, cx| {
+                state.chats = ["a", "hidden", "b"].map(chat).to_vec();
+                state.chats_synced = true;
+                state.spaces_synced = true;
+                state.select_chat(Some("a".into()), cx);
+            });
+            // Without a sessions frame every chat reads Idle: wait.
+            shell.on_state_changed(&shell.state.clone(), cx);
+            assert_eq!(shell.open_tab_ids(cx), ["a", "hidden", "b"]);
+            shell.state.update(cx, |state, _| {
+                state.apply_sessions(vec![working("b")]);
+            });
+            shell.on_state_changed(&shell.state.clone(), cx);
+            assert_eq!(shell.open_tab_ids(cx), ["a", "b"]);
+            assert!(shell.settings.open_tabs_stable);
+            // Once only: later idle tabs stay.
+            shell.open_chat("b".into(), cx);
+            shell.on_state_changed(&shell.state.clone(), cx);
+            assert_eq!(shell.open_tab_ids(cx), ["a", "b"]);
+        });
+    }
+
+    #[gpui::test]
+    fn close_idle_tabs_keeps_focus_and_active_ones(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                state.chats = ["a", "b", "c", "d"].map(chat).to_vec();
+                state.chats_synced = true;
+                state.spaces_synced = true;
+                state.apply_sessions(vec![working("c")]);
+                state.select_chat(Some("a".into()), cx);
+            });
+            shell.settings.open_tabs = Some(["a", "b", "c", "d"].map(String::from).to_vec());
+            shell.close_idle_tabs(cx);
+            assert_eq!(shell.open_tab_ids(cx), ["a", "c"]);
+        });
     }
 
     #[gpui::test]
@@ -2079,8 +2303,8 @@ mod strip_regressions {
                 state.chats = vec![loose("a", 0), loose("stale", 9), loose("fresh", 1)];
                 state.chats_synced = true;
                 state.spaces_synced = true;
-                // Only "a" runs: the other two are idle sidebar rows with no
-                // tab on the strip.
+                // Only "a" runs: the upgrade pass drops the other two idle
+                // sidebar rows from the strip.
                 state.apply_sessions(vec![working("a")]);
                 state.select_chat(Some("a".into()), cx);
             });
