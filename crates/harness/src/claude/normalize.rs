@@ -217,7 +217,8 @@ fn background_launch(text: &str) -> Option<(String, String)> {
         .split("Output is being written to: ")
         .nth(1)?
         .split_whitespace()
-        .next()?;
+        .next()?
+        .trim_end_matches('.');
     let named = std::path::Path::new(path)
         .file_name()
         .and_then(|name| name.to_str())
@@ -1723,6 +1724,15 @@ mod tests {
                 ("bq1".into(), Some(path.into())),
                 ("bq2".into(), Some(path.replace("bq1", "bq2")))
             ]
+        );
+        assert_eq!(
+            background_launch(
+                "Command running in background with ID: bo4rzant3. Output is being written to: /private/tmp/claude-501/p/s/tasks/bo4rzant3.output. You will be notified when it completes."
+            ),
+            Some((
+                "bo4rzant3".into(),
+                "/private/tmp/claude-501/p/s/tasks/bo4rzant3.output".into()
+            ))
         );
         assert_eq!(
             background_launch(
