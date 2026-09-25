@@ -195,6 +195,49 @@ impl ChatBackground {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct FrostTuning {
+    pub tint: f32,
+    pub dim_backdrop: bool,
+    pub backdrop_brightness: f32,
+}
+
+pub const FROST_TINT_MIN: f32 = 0.5;
+pub const FROST_BACKDROP_BRIGHTNESS_MIN: f32 = 0.1;
+
+impl FrostTuning {
+    pub const UNDIMMED: Self = Self {
+        tint: 0.80,
+        dim_backdrop: false,
+        backdrop_brightness: 0.30,
+    };
+
+    pub fn clamped(mut self) -> Self {
+        let default = Self::default();
+        self.tint =
+            (clamp_or(self.tint, FROST_TINT_MIN, 1.0, default.tint) * 100.0).round() / 100.0;
+        self.backdrop_brightness = (clamp_or(
+            self.backdrop_brightness,
+            FROST_BACKDROP_BRIGHTNESS_MIN,
+            1.0,
+            default.backdrop_brightness,
+        ) * 100.0)
+            .round()
+            / 100.0;
+        self
+    }
+}
+
+impl Default for FrostTuning {
+    fn default() -> Self {
+        Self {
+            dim_backdrop: true,
+            ..Self::UNDIMMED
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct GitHistoryColumns {
@@ -483,6 +526,12 @@ pub fn set_new_thread_background_effect(effect: NewThreadBackgroundEffect, cx: &
     }) {
         cx.refresh_windows();
     }
+}
+
+pub fn frost(cx: &App) -> FrostTuning {
+    cx.try_global::<SettingsStore>()
+        .map(|store| store.current.frost)
+        .unwrap_or_default()
 }
 
 pub fn update_chat_background(
@@ -1014,6 +1063,7 @@ pub struct UiSettings {
     pub accent: zeron_theme::AccentSelection,
     /// Glass policy, independent from the selected appearance, theme, and accent.
     pub surface: zeron_theme::SurfacePreference,
+    pub frost: FrostTuning,
     /// Optional device-local artwork behind the blank new-thread composer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_thread_composer_background: Option<NewThreadComposerBackground>,
@@ -1104,6 +1154,7 @@ impl Default for UiSettings {
             summary_collapsed: Vec::new(),
             accent: zeron_theme::AccentSelection::default(),
             surface: zeron_theme::SurfacePreference::default(),
+            frost: FrostTuning::default(),
             new_thread_composer_background: None,
             new_thread_background_effect: NewThreadBackgroundEffect::None,
             chat_background: ChatBackground::default(),
@@ -1695,6 +1746,7 @@ impl UiSettings {
         self.git_history_column_widths = self.git_history_column_widths.clamped();
         self.git_history_column_order = self.git_history_column_order.normalized();
         self.chat_background = self.chat_background.clamped();
+        self.frost = self.frost.clamped();
         self.ui_font_size = self.ui_font_size.normalized();
         self.keymap.heal_jump_slots();
         self.keymap.heal_reserved_composer_shortcuts();
@@ -2603,6 +2655,11 @@ mod tests {
             summary_collapsed: vec!["subagents".into()],
             accent: zeron_theme::AccentSelection::Preset(zeron_theme::AccentPreset::Cyan),
             surface: zeron_theme::SurfacePreference::Frosted,
+            frost: FrostTuning {
+                tint: 0.9,
+                dim_backdrop: false,
+                backdrop_brightness: 0.45,
+            },
             new_thread_composer_background: Some(NewThreadComposerBackground {
                 path: "/tmp/zeron/new-thread-background.png".into(),
                 name: "background.png".into(),
