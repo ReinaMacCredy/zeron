@@ -230,6 +230,22 @@ icon_assets![
     (PI_MARK, "pi-mark"),
     (OPENCODE_MARK, "opencode-mark"),
     (ANTIGRAVITY_MARK, "antigravity-mark"),
+    // Astra's cursor-icons-16.woff2 glyphs as SVG: gpui draws the font's private-use codepoints as "?" boxes.
+    (ASTRA_PLUS_MINUS, "astra-plus-minus"),
+    (ASTRA_GLOBE, "astra-globe"),
+    (ASTRA_GIT_BRANCH, "astra-git-branch"),
+    (ASTRA_LAPTOP, "astra-laptop"),
+    (ASTRA_CHAT_BUBBLE, "astra-chat-bubble"),
+    (ASTRA_PLUS, "astra-plus"),
+    (ASTRA_AGENT, "astra-agent"),
+    (ASTRA_FILE, "astra-file"),
+    (ASTRA_BOOK, "astra-book"),
+    (ASTRA_GRAPH, "astra-graph"),
+    (ASTRA_FOLDER, "astra-folder"),
+    (ASTRA_CHEVRONS_LEFT, "astra-chevrons-left"),
+    (ASTRA_CHEVRONS_RIGHT, "astra-chevrons-right"),
+    (ASTRA_X, "astra-x"),
+    (ASTRA_TERMINAL, "astra-terminal"),
 ];
 
 /// Serves both the compact control-icon set and the complete file-identity

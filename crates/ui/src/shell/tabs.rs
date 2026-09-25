@@ -24,8 +24,6 @@ use zeron_proto::ChatIndicator;
 pub(super) const SESSION_TAB_WIDTH: f32 = 140.0;
 /// Flex gap between tabs — part of the drop-index slot width.
 const TAB_GAP: f32 = 4.0;
-/// Width of one fixed trailing titlebar button (summary, right-pane toggle).
-const TITLEBAR_FIXED_BUTTON: f32 = 28.0;
 /// Width of the overflow edge fades. Wide enough that per-glyph fade steps
 /// (title text fades glyph-by-glyph on glass) stay gentle.
 const FADE_WIDTH: f32 = 36.0;
@@ -1281,17 +1279,15 @@ impl Shell {
             self.viewport_width - row_left - right_pad - gap_budget,
             right_pad,
         );
-        // The summary trigger is a fixed button between the surface tabs and
-        // the explorer slot, so it comes out of the tabs' reveal width.
-        let surface_reveal = (widths.surface_reveal - TITLEBAR_FIXED_BUTTON).max(0.0);
-        // The trailing strip always carries the summary trigger and the
-        // explorer slot with its two toggles; the surface tabs reveal to
-        // their left only while the surface host is open.
+        let surface_reveal = widths.surface_reveal;
+        // The trailing strip always carries the explorer slot with its two
+        // toggles; the surface tabs reveal to their left only while the
+        // surface host is open.
         let trailing_width = if on_canvas {
             0.0
         } else {
             let surface = if right_pane_open { surface_reveal } else { 0.0 };
-            surface + TITLEBAR_FIXED_BUTTON + widths.files_controls
+            surface + widths.files_controls
         };
         let available_titlebar_width =
             (self.viewport_width - row_left - right_pad - trailing_width - row_gap * 3.0).max(0.0);
@@ -1354,7 +1350,6 @@ impl Shell {
             // search and visibility controls live in its secondary header.
             Some(
                 controls
-                    .child(self.render_summary_trigger(cx))
                     .child(
                         div()
                             .w(px(widths.files_controls))

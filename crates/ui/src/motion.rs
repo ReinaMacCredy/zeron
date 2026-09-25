@@ -395,6 +395,12 @@ pub const DIALOG_IN: MotionSpec = MotionSpec::new(180, EASE);
 pub const SPLASH_OUT: MotionSpec = MotionSpec::new(500, EASE).with_delay(150);
 /// Sidebar / pane width+height transitions: 200ms ease-out.
 pub const RESIZE: MotionSpec = MotionSpec::new(200, EASE_OUT);
+/// Astra `sidecar.css` values.
+pub const SIDECAR_LAYOUT: MotionSpec = MotionSpec::new(300, CubicBezier::new(0.32, 0.72, 0.0, 1.0));
+pub const SIDECAR_FADE: MotionSpec = MotionSpec::new(150, EASE);
+pub const SIDECAR_POPOVER_FADE: MotionSpec = MotionSpec::new(160, EASE);
+pub const SIDECAR_POPOVER_SLIDE: MotionSpec =
+    MotionSpec::new(220, CubicBezier::new(0.32, 0.72, 0.0, 1.0));
 /// Terminal tab drag-reorder sliding transforms: 150ms (§1.10).
 pub const TAB_SLIDE: MotionSpec = MotionSpec::new(150, EASE_OUT);
 /// Diff-pane per-file collapse: 180ms height (§1.11).

@@ -1880,14 +1880,13 @@ pub struct Shell {
     right_terminal: Option<Entity<TerminalPanel>>,
     /// The surface-tab strip's `+` menu (Browser / Terminal / Diffs / History rows).
     right_plus: popover::Popup<()>,
-    /// The titlebar's pinned-summary card (environment / threads / sources /
-    /// project).
-    summary_menu: popover::Popup<()>,
-    /// The card's Local Servers row is unfolded to list the browser tabs.
-    summary_servers_open: bool,
+    sidecar_collapsed_now: Option<bool>,
+    sidecar_flip: Option<summary::SidecarFlip>,
+    sidecar_popover: Option<summary::PopoverFade>,
+    sidecar_press_found_popover: bool,
     /// Per chat: the instructions file found at the checkout root (`AGENTS.md`
-    /// / `CLAUDE.md`), `None` once checked and absent. Refreshed each time the
-    /// card opens; the in-flight probe is keyed the same way.
+    /// / `CLAUDE.md`), `None` once checked and absent. Probed once per chat;
+    /// the in-flight probe is keyed the same way.
     summary_instructions: std::collections::HashMap<String, Option<String>>,
     summary_instruction_probes: std::collections::HashMap<String, Task<()>>,
     /// Host-owned project Actions cached per (device, space).
@@ -2451,8 +2450,10 @@ impl Shell {
             terminal: None,
             right_terminal: None,
             right_plus: popover::Popup::default(),
-            summary_menu: popover::Popup::default(),
-            summary_servers_open: false,
+            sidecar_collapsed_now: None,
+            sidecar_flip: None,
+            sidecar_popover: None,
+            sidecar_press_found_popover: false,
             summary_instructions: std::collections::HashMap::new(),
             summary_instruction_probes: std::collections::HashMap::new(),
             project_actions: crate::project_actions::ProjectActionsController::default(),
@@ -9780,11 +9781,8 @@ impl Shell {
         if self.right_plus.get().is_some() {
             return true;
         }
-        if self.summary_menu.is_open() {
-            self.close_summary_menu(cx);
-            return true;
-        }
-        if self.summary_menu.get().is_some() {
+        if self.sidecar_popover_open() {
+            self.set_sidecar_popover(false, cx);
             return true;
         }
         self.active_changes(cx)
@@ -13163,17 +13161,22 @@ impl Render for Shell {
                     self.composer
                         .update(cx, |c, cx| c.debug_open_model_switch(window, cx));
                 }
-                // `=summary` (capture knob): give the selected chat one browser
-                // tab so Outputs has a row, then pop the pinned-summary card.
-                if self.debug_dialog.as_deref() == Some("summary")
-                    && self.state.read(cx).selected_chat.is_some()
+                // `=summary` / `=sidecar-popover` (capture knobs): one browser tab,
+                // then the sidecar expanded, or railed with its popover up.
+                if matches!(
+                    self.debug_dialog.as_deref(),
+                    Some("summary" | "sidecar-popover")
+                ) && self.state.read(cx).selected_chat.is_some()
                 {
+                    let popover = self.debug_dialog.as_deref() == Some("sidecar-popover");
                     self.debug_dialog = None;
                     self.add_browser_surface(None, window, cx);
-                    if self.right_pane_open(cx) {
+                    if self.right_pane_open(cx) != popover {
                         self.toggle_right_pane(cx);
                     }
-                    self.open_summary_menu(cx);
+                    if popover {
+                        self.set_sidecar_popover(true, cx);
+                    }
                 }
                 // `=background-send`: once the boot draft carries text (see
                 // `ZERON_DRAFT_TEXT`), fire the Mod+Enter background start
@@ -13314,11 +13317,13 @@ impl Render for Shell {
                     self.motion_active.set(true);
                 }
                 let split_open = on_chat && self.split.is_some();
-                let column = conversation_width(
+                let full_column = conversation_width(
                     viewport - self.files_reserved_width(cx),
                     self.sidebar_target(),
                     right_target_width,
                 );
+                let sidecar_width = self.sidecar_layout(full_column, split_open, cx);
+                let column = (full_column - sidecar_width).max(0.0);
                 // The persisted share belongs to the LEFT pane, whichever
                 // session sits there.
                 let main_target_width = match self.split.as_ref().map(|s| s.side) {
@@ -13460,6 +13465,7 @@ impl Render for Shell {
                     }
                     _ => columns.push(main),
                 }
+                let sidecar = (sidecar_width > 0.0).then(|| self.render_sidecar(sidecar_width, cx));
                 let card: AnyElement = div()
                     .flex_1()
                     .min_w_0()
@@ -13468,6 +13474,7 @@ impl Render for Shell {
                     .flex_row()
                     .overflow_hidden()
                     .children(columns)
+                    .children(sidecar)
                     .children(drop_zones)
                     .into_any_element();
                 // The whole app page is one keyed `animate-in` entrance (zeron
@@ -16505,149 +16512,6 @@ mod right_tab_mouse_regressions {
                 &vec![RightSurface::Subagent(2), RightSurface::Subagent(1)],
                 "tab drag did not reorder the strip"
             );
-        });
-    }
-}
-
-#[cfg(test)]
-mod pinned_summary_regressions {
-    use super::*;
-    use gpui::{AppContext, TestAppContext, VisualTestContext};
-
-    struct TriggerHost {
-        shell: Entity<Shell>,
-        _data_dir: tempfile::TempDir,
-    }
-
-    impl Render for TriggerHost {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            self.shell.update(cx, |shell, cx| {
-                let trigger = shell.render_summary_trigger(cx);
-                shell.titlebar_drag_region(
-                    "pinned-summary-test-titlebar",
-                    div().w(px(400.)).h(px(40.)).child(trigger),
-                    cx,
-                )
-            })
-        }
-    }
-
-    fn setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-        });
-        let (host, cx) = cx.add_window_view(|window, cx| {
-            let shell = cx.new(|cx| {
-                let state = cx.new(|_| AppState::new());
-                let mut shell = Shell::new(
-                    state,
-                    EngineBootConfig {
-                        data_dir: dir.path().into(),
-                        ipc_port: 0,
-                        edge_url: "http://127.0.0.1:1".into(),
-                        edge_token: None,
-                        org_id: None,
-                        workos_client_id: None,
-                        default_harness: zeron_proto::HarnessId::Mock,
-                    },
-                    cx,
-                );
-                shell.active_chat = "parent".into();
-                shell.add_browser_surface(None, window, cx);
-                // The card must open the pane itself.
-                if shell.right_pane_open(cx) {
-                    shell.toggle_right_pane(cx);
-                }
-                shell
-            });
-            TriggerHost {
-                shell,
-                _data_dir: dir,
-            }
-        });
-        let shell = host.read_with(cx, |host, _| host.shell.clone());
-        cx.update(|window, cx| window.draw(cx).clear());
-        (shell, cx)
-    }
-
-    #[gpui::test]
-    fn summary_opens_each_sidechat_and_reuses_only_the_matching_tab(cx: &mut TestAppContext) {
-        let (shell, cx) = setup(cx);
-        shell.update(cx, |shell, cx| {
-            shell.state.update(cx, |state, _| {
-                let source: zeron_proto::Chat = serde_json::from_value(serde_json::json!({
-                    "id": "parent", "deviceId": "dev", "title": "Parent",
-                    "archived": false, "createdAt": "2026-09-18T00:00:00Z"
-                }))
-                .unwrap();
-                state.chats.push(source.clone());
-                for id in ["side-a", "side-b"] {
-                    let mut chat = source.clone();
-                    chat.id = id.into();
-                    chat.sidechat_source_chat_id = Some("parent".into());
-                    state.chats.push(chat);
-                }
-                state.selected_chat = Some("parent".into());
-            });
-        });
-        for (row, expected, count) in [
-            ("pinned-summary-sidechat-0", "side-a", 1),
-            ("pinned-summary-sidechat-1", "side-b", 2),
-            ("pinned-summary-sidechat-0", "side-a", 2),
-        ] {
-            shell.update(cx, |shell, cx| {
-                shell.summary_menu.open(());
-                cx.notify();
-            });
-            cx.update(|window, cx| window.draw(cx).clear());
-            assert!(cx.debug_bounds("pinned-summary-new-sidechat-0").is_some());
-            let bounds = cx.debug_bounds(row).unwrap();
-            cx.simulate_click(bounds.center(), gpui::Modifiers::default());
-            shell.read_with(cx, |shell, cx| {
-                assert!(shell.right_pane_open(cx));
-                assert_eq!(shell.sidechat_tabs.len(), count);
-                let RightSurface::Sidechat(id) = shell.resolved_right_active(cx) else {
-                    panic!("sidechat must be active");
-                };
-                assert_eq!(shell.sidechat_tabs[&id].chat_id, expected);
-                assert!(!shell.summary_menu.is_open());
-            });
-        }
-    }
-
-    #[gpui::test]
-    fn server_row_opens_the_pane_on_that_browser_and_escape_closes(cx: &mut TestAppContext) {
-        let (shell, cx) = setup(cx);
-        shell.read_with(cx, |shell, cx| assert!(!shell.right_pane_open(cx)));
-        let trigger = cx.debug_bounds("pinned-summary").unwrap().center();
-        cx.simulate_click(trigger, gpui::Modifiers::default());
-        shell.read_with(cx, |shell, _| assert!(shell.summary_menu.is_open()));
-        cx.update(|window, cx| window.draw(cx).clear());
-        // Browser tabs sit folded under Local Servers: unfold, then pick one.
-        let servers = cx
-            .debug_bounds("pinned-summary-servers-0")
-            .expect("Local Servers row under Environment")
-            .center();
-        cx.simulate_click(servers, gpui::Modifiers::default());
-        shell.read_with(cx, |shell, _| assert!(shell.summary_menu.is_open()));
-        cx.update(|window, cx| window.draw(cx).clear());
-        let row = cx
-            .debug_bounds("pinned-summary-server-0")
-            .expect("browser tab listed under Local Servers")
-            .center();
-        cx.simulate_click(row, gpui::Modifiers::default());
-        shell.read_with(cx, |shell, cx| {
-            assert!(shell.right_pane_open(cx));
-            assert_eq!(shell.resolved_right_active(cx), RightSurface::Browser(1));
-            assert!(!shell.summary_menu.is_open());
-        });
-        shell.update(cx, |shell, cx| {
-            shell.summary_menu.open(());
-            assert!(shell.capture_escape_surface(cx));
-            assert!(!shell.summary_menu.is_open());
         });
     }
 }

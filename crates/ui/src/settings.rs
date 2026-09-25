@@ -1057,8 +1057,8 @@ pub struct UiSettings {
     pub files_word_wrap: bool,
     /// Include hidden and ignored entries in workspace file trees.
     pub files_show_all: bool,
-    /// Pinned-summary card sections the user folded shut (section keys).
-    pub summary_collapsed: Vec<String>,
+    /// The user collapsed the sidecar beside the transcript to its icon rail.
+    pub sidecar_collapsed: bool,
     /// Interactive identity overlay; imported themes default to their own accent.
     pub accent: zeron_theme::AccentSelection,
     /// Glass policy, independent from the selected appearance, theme, and accent.
@@ -1151,7 +1151,7 @@ impl Default for UiSettings {
             files_autosave_delay_ms: FILES_AUTOSAVE_DELAY_DEFAULT_MS,
             files_word_wrap: false,
             files_show_all: false,
-            summary_collapsed: Vec::new(),
+            sidecar_collapsed: false,
             accent: zeron_theme::AccentSelection::default(),
             surface: zeron_theme::SurfacePreference::default(),
             frost: FrostTuning::default(),
@@ -2652,7 +2652,7 @@ mod tests {
             code_font_family: crate::typography::UiFontFamily::Geist,
             code_font_size: 11.0,
             files_show_all: true,
-            summary_collapsed: vec!["subagents".into()],
+            sidecar_collapsed: true,
             accent: zeron_theme::AccentSelection::Preset(zeron_theme::AccentPreset::Cyan),
             surface: zeron_theme::SurfacePreference::Frosted,
             frost: FrostTuning {
@@ -2864,7 +2864,7 @@ mod tests {
             crate::typography::TERMINAL_FONT_SIZE_DEFAULT
         );
         assert!(!loaded.files_show_all);
-        assert!(loaded.summary_collapsed.is_empty());
+        assert!(!loaded.sidecar_collapsed);
         assert!(
             loaded.notifications_enabled,
             "pre-banner files default banners on"
