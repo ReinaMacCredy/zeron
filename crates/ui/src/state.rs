@@ -1720,6 +1720,10 @@ impl AppState {
         self.chats.iter().filter(|c| !c.archived)
     }
 
+    pub fn sessions_synced(&self) -> bool {
+        self.session_presentation.is_some()
+    }
+
     pub(crate) fn restore_composer_target(
         &mut self,
         defaults: &crate::settings::composer::ComposerDefaults,
