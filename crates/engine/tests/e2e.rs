@@ -2514,6 +2514,7 @@ async fn background_tasks_ride_the_session_without_holding_it_working() {
         kind: zeron_proto::BackgroundTaskKind::Shell,
         label: format!("shell {id}"),
         started_at: None,
+        output_path: None,
     };
     tx.send(AgentEvent::TextDelta {
         text: "starting a build".into(),
@@ -2570,6 +2571,89 @@ async fn background_tasks_ride_the_session_without_holding_it_working() {
         "run end clears its shells",
     )
     .await;
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_background_shell_streams_its_output_tail_until_it_ends() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(ControlledHarness(std::sync::Mutex::new(Some(rx)))),
+    );
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-shell-output",
+        SessionCommandPayload::Run {
+            request: run_request("background"),
+            message_id: "user-shell-output".into(),
+        },
+    );
+    let output = dir.path().join("bq1.output");
+    std::fs::write(&output, "\x1b[32mCompiling\x1b[0m zeron\n").unwrap();
+    let shell = |id: &str, path: &std::path::Path| zeron_proto::BackgroundTask {
+        id: id.into(),
+        kind: zeron_proto::BackgroundTaskKind::Shell,
+        label: "cargo build".into(),
+        started_at: None,
+        output_path: Some(path.display().to_string()),
+    };
+    tx.send(AgentEvent::BackgroundTasks {
+        tasks: vec![
+            shell("bq1", &output),
+            shell("bq2", &dir.path().join("elsewhere.output")),
+        ],
+    })
+    .unwrap();
+    wait_for(
+        || {
+            core.sessions
+                .session_status(CHAT)
+                .is_some_and(|s| s.background_tasks.len() == 2)
+        },
+        "shells recorded",
+    )
+    .await;
+
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let watch = |task: &str| {
+        client.subscribe_checked(
+            zeron_rpc::methods::WATCH_BACKGROUND_OUTPUT,
+            serde_json::json!({ "chatId": CHAT, "taskId": task }),
+        )
+    };
+    assert!(
+        watch("bq2").await.is_err(),
+        "a path not named <task>.output is refused"
+    );
+    let mut rx = watch("bq1").await.expect("WatchBackgroundOutput");
+    async fn next(rx: &mut zeron_rpc::RpcSubscription) -> Option<serde_json::Value> {
+        tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("an output frame")
+    }
+    let first = next(&mut rx).await.expect("stream open");
+    assert_eq!(first["lines"], serde_json::json!(["Compiling zeron"]));
+    assert_eq!(first["running"], true);
+
+    std::fs::write(&output, "Compiling zeron\nFinished dev\n").unwrap();
+    let grown = next(&mut rx).await.expect("stream open");
+    assert_eq!(
+        grown["lines"],
+        serde_json::json!(["Compiling zeron", "Finished dev"])
+    );
+
+    tx.send(AgentEvent::BackgroundTasks { tasks: vec![] })
+        .unwrap();
+    let last = next(&mut rx).await.expect("a final frame");
+    assert_eq!(last["running"], false);
+    assert!(
+        next(&mut rx).await.is_none(),
+        "the stream ends with the task"
+    );
+    drop(tx);
     core.shutdown().await;
 }
 
@@ -2745,6 +2829,7 @@ async fn idle_reaper_waits_for_background_shells() {
                 kind: zeron_proto::BackgroundTaskKind::Shell,
                 label: "cargo test".into(),
                 started_at: None,
+                output_path: None,
             })
             .collect(),
     };

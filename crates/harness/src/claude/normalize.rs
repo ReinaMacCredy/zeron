@@ -195,6 +195,36 @@ fn file_diff(result: &Value) -> Option<ToolDiff> {
     ))
 }
 
+fn tool_result_text(content: &Value) -> String {
+    match content {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|b| b.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+fn background_launch(text: &str) -> Option<(String, String)> {
+    let id = text
+        .split("with ID: ")
+        .nth(1)?
+        .split(|c: char| c == '.' || c.is_whitespace())
+        .next()?;
+    let path = text
+        .split("Output is being written to: ")
+        .nth(1)?
+        .split_whitespace()
+        .next()?;
+    let named = std::path::Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        == Some(&format!("{id}.output"));
+    (!id.is_empty() && named).then(|| (id.to_owned(), path.to_owned()))
+}
+
 fn new_message_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
@@ -269,6 +299,9 @@ pub(crate) struct Normalizer {
     /// SendMessage call; its frames and completion then carry that id. It
     /// maps back to the original spawn so the resumed run settles its chip.
     spawn_aliases: std::collections::HashMap<String, String>,
+    /// Only the Bash launch tool_result names a shell's output file.
+    task_outputs: std::collections::HashMap<String, String>,
+    live_tasks: Vec<zeron_proto::BackgroundTask>,
     /// tool_use ids of Agent/Task spawn calls, recorded from their own
     /// assistant frames (plus `task_started`'s agent-task pairing). Gates
     /// `task_notification`: background SHELL tasks settle through the same
@@ -312,6 +345,8 @@ impl Normalizer {
             last_model: None,
             agent_tasks: std::collections::HashMap::new(),
             spawn_aliases: std::collections::HashMap::new(),
+            task_outputs: std::collections::HashMap::new(),
+            live_tasks: Vec::new(),
             agent_spawn_tools: std::collections::HashSet::new(),
             seeded_prompts: std::collections::HashMap::new(),
             pending_advisor: std::collections::HashMap::new(),
@@ -475,6 +510,7 @@ impl Normalizer {
                         .into_iter()
                         .filter(|t| !t.task_id.is_empty())
                         .map(|t| zeron_proto::BackgroundTask {
+                            output_path: self.task_outputs.get(&t.task_id).cloned(),
                             kind: match t.task_type.as_str() {
                                 "local_bash" => zeron_proto::BackgroundTaskKind::Shell,
                                 "local_agent" | "remote_agent" => {
@@ -486,7 +522,8 @@ impl Normalizer {
                             id: t.task_id,
                             started_at: None,
                         })
-                        .collect();
+                        .collect::<Vec<_>>();
+                    self.live_tasks = tasks.clone();
                     return vec![AgentEvent::BackgroundTasks { tasks }];
                 }
                 if f.subtype == "status" {
@@ -724,6 +761,22 @@ impl Normalizer {
                 let diff = (results.len() == 1)
                     .then(|| f.tool_use_result.as_ref().and_then(file_diff))
                     .flatten();
+                let mut learned_output = false;
+                if f.parent_tool_use_id.is_none() {
+                    for (task, path) in results
+                        .iter()
+                        .filter_map(|b| background_launch(&tool_result_text(&b.content)))
+                    {
+                        if let Some(live) = self.live_tasks.iter_mut().find(|t| t.id == task) {
+                            live.output_path = Some(path.clone());
+                            learned_output = true;
+                        }
+                        self.task_outputs.insert(task, path);
+                    }
+                }
+                let relisted = learned_output.then(|| AgentEvent::BackgroundTasks {
+                    tasks: self.live_tasks.clone(),
+                });
                 let tool_results = results.into_iter().map(|b| AgentEvent::ToolResult {
                     id: b.tool_use_id.clone(),
                     is_error: b.is_error.unwrap_or(false),
@@ -786,7 +839,11 @@ impl Normalizer {
                         id: uuid.to_owned(),
                         entry_id: None,
                     });
-                anchor.into_iter().chain(tool_results).collect()
+                anchor
+                    .into_iter()
+                    .chain(tool_results)
+                    .chain(relisted)
+                    .collect()
             }
 
             // A claude.ai plan window was hit. A hard `rejected` blocks the
@@ -1607,6 +1664,7 @@ mod tests {
                     kind: zeron_proto::BackgroundTaskKind::Shell,
                     label: "Sleep for 4 seconds then echo hi".into(),
                     started_at: None,
+                    output_path: None,
                 }]
             }]
         );
@@ -1622,6 +1680,57 @@ mod tests {
             r#"{"type":"system","subtype":"task_notification","task_id":"b7wb5vp5o","tool_use_id":"toolu_bash","status":"completed","summary":"done","uuid":"u4","session_id":"s1"}"#,
         );
         assert!(settled.is_empty(), "{settled:?}");
+    }
+
+    #[test]
+    fn a_background_launch_result_names_the_shell_output_file() {
+        let mut norm = Normalizer::new();
+        let mut feed = |line: &str| {
+            let frame = crate::claude::wire::parse_frame(line).expect("parses");
+            norm.normalize(frame, false)
+        };
+        let listed = |events: &[AgentEvent]| -> Vec<(String, Option<String>)> {
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    AgentEvent::BackgroundTasks { tasks } => Some(tasks),
+                    _ => None,
+                })
+                .flatten()
+                .map(|t| (t.id.clone(), t.output_path.clone()))
+                .collect()
+        };
+        let path = "/private/tmp/claude-501/-Users-me-proj/s1/tasks/bq1.output";
+        let first = feed(
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"bq1","task_type":"local_bash","description":"cargo test"}],"session_id":"s1"}"#,
+        );
+        assert_eq!(listed(&first), [("bq1".into(), None)]);
+        let launched = feed(&format!(
+            r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_bash","content":[{{"type":"text","text":"Command running in background with ID: bq1. Output is being written to: {path}"}}]}}]}},"session_id":"s1"}}"#
+        ));
+        assert_eq!(listed(&launched), [("bq1".into(), Some(path.into()))]);
+        let later = feed(&format!(
+            r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_bash2","content":"Command running in background with ID: bq2. Output is being written to: {}"}}]}},"session_id":"s1"}}"#,
+            path.replace("bq1", "bq2")
+        ));
+        assert!(listed(&later).is_empty(), "{later:?}");
+        let both = feed(
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"bq1","task_type":"local_bash","description":"cargo test"},{"task_id":"bq2","task_type":"local_bash","description":"sleep"}],"session_id":"s1"}"#,
+        );
+        assert_eq!(
+            listed(&both),
+            [
+                ("bq1".into(), Some(path.into())),
+                ("bq2".into(), Some(path.replace("bq1", "bq2")))
+            ]
+        );
+        assert_eq!(
+            background_launch(
+                "Command running in background with ID: bq3. Output is being written to: /tmp/other.output"
+            ),
+            None,
+            "a path whose file is not <id>.output is refused"
+        );
     }
 
     #[test]

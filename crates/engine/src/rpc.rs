@@ -99,7 +99,7 @@ struct ListModelsParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct StopBackgroundTaskParams {
+struct BackgroundTaskParams {
     chat_id: String,
     task_id: String,
 }
@@ -1506,6 +1506,7 @@ fn forwardable(method: &str) -> bool {
             | methods::HARNESS_COMPACTION
             | methods::COMPACT_CHAT
             | methods::STOP_BACKGROUND_TASK
+            | methods::WATCH_BACKGROUND_OUTPUT
             | methods::FORK_CHAT
             | methods::REWIND_CHAT
             | methods::QUEUE_COMMAND
@@ -1589,6 +1590,7 @@ fn is_stream_method(method: &str) -> bool {
         method,
         methods::WATCH_DOC_MESSAGES
             | methods::WATCH_QUEUE
+            | methods::WATCH_BACKGROUND_OUTPUT
             | methods::SUBSCRIBE_TERMINAL
             | methods::WATCH_CHECKOUT_DIFFS
             | methods::WATCH_WORKSPACE_GIT_STATUS
@@ -1977,11 +1979,18 @@ impl RpcService for EngineRpc {
                 })
             }
             methods::STOP_BACKGROUND_TASK => {
-                let p: StopBackgroundTaskParams = parse_params(params)?;
+                let p: BackgroundTaskParams = parse_params(params)?;
                 self.sessions
                     .stop_background_task(&p.chat_id, &p.task_id)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "ok": true }))
+            }
+            methods::WATCH_BACKGROUND_OUTPUT => {
+                let p: BackgroundTaskParams = parse_params(params)?;
+                let stream =
+                    crate::background_output::watch(self.sessions.clone(), p.chat_id, p.task_id)
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                Ok(RpcReply::Stream(stream))
             }
             methods::COMPACT_CHAT => {
                 let p: CompactChatParams = parse_params(params)?;

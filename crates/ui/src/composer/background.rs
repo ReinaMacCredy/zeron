@@ -896,6 +896,7 @@ mod tests {
             kind,
             label: format!("cargo test {id}"),
             started_at: None,
+            output_path: None,
         }
     }
 

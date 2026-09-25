@@ -57,6 +57,9 @@ pub mod methods {
     /// Stop one live background task (a shell, or a subagent by its spawn
     /// tool id) of `chatId`'s running harness: `{chatId, taskId}`.
     pub const STOP_BACKGROUND_TASK: &str = "StopBackgroundTask";
+    /// Tail of a live background shell's output file: `{chatId, taskId}` →
+    /// stream of `{lines, running}`, ending after the task leaves the set.
+    pub const WATCH_BACKGROUND_OUTPUT: &str = "WatchBackgroundOutput";
     /// Create a sidechat of `sourceChatId` under the client-minted `chatId`,
     /// replying with the created `Chat` row. The first prompt is the caller's
     /// to send afterwards, as an ordinary `QueueCommand` Run on `chatId`.
