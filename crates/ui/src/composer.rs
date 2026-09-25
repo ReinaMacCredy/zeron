@@ -1001,6 +1001,14 @@ impl FileMentionLink {
     fn is_thread(&self) -> bool {
         self.prefix == THREAD_MENTION_PREFIX
     }
+
+    fn is_invocation(&self) -> bool {
+        matches!(self.prefix, '/' | '$')
+    }
+
+    fn in_accent_flow(&self) -> bool {
+        self.is_thread() || self.is_invocation()
+    }
 }
 
 fn escape_mention_label(label: &str) -> String {
@@ -1607,6 +1615,7 @@ pub enum SentMentionTarget {
     Thread {
         chat_id: SharedString,
     },
+    Invocation,
 }
 
 /// Project a sent message's raw Markdown for transcript display: mention links
@@ -1634,6 +1643,8 @@ pub fn sent_mention_display(raw: &str) -> Option<(String, Vec<SentMentionSpan>)>
                 SentMentionTarget::Thread {
                     chat_id: SharedString::from(link.path.clone()),
                 }
+            } else if link.is_invocation() {
+                SentMentionTarget::Invocation
             } else {
                 SentMentionTarget::File {
                     path: SharedString::from(format!(
@@ -3857,6 +3868,16 @@ impl ComposerInput {
         for (_, range) in &self.projection.mentions {
             boundaries.extend([range.start, range.end]);
         }
+        let owned_command = (self.mentions_enabled && !is_placeholder)
+            .then(|| zeron_owned_command_range(&self.content))
+            .flatten()
+            .map(|range| {
+                self.projection.raw_to_display(range.start)
+                    ..self.projection.raw_to_display(range.end)
+            });
+        if let Some(range) = &owned_command {
+            boundaries.extend([range.start, range.end]);
+        }
         if let Some(range) = &marked {
             boundaries.extend([range.start, range.end]);
         }
@@ -3900,7 +3921,9 @@ impl ComposerInput {
                     marked.as_ref().is_some_and(|range| range.contains(&r[0])),
                     chip || code,
                 );
-                if chip_link.is_some_and(FileMentionLink::is_thread) {
+                if chip_link.is_some_and(FileMentionLink::in_accent_flow)
+                    || (!chip && owned_command.as_ref().is_some_and(|c| c.contains(&r[0])))
+                {
                     run.font = thread_font.clone();
                     run.color = thread_color;
                 }
@@ -4492,8 +4515,7 @@ impl gpui::Element for ComposerTextElement {
                     ),
                     size(local_bounds.size.width, local_bounds.size.height - px(4.0)),
                 );
-                // Thread mentions sit in plain flow; only file chips get the wash.
-                if !mention.is_thread() {
+                if !mention.in_accent_flow() {
                     mention_quads.push(quad(
                         chip_bounds,
                         px(5.0),
@@ -4927,6 +4949,21 @@ impl Render for ComposerInput {
 // Composer wrapper
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Default)]
+pub struct SidechatStaged {
+    pub attachments: Vec<StagedAttachment>,
+    pub appshots: Vec<CapturedAppshot>,
+}
+
+impl std::fmt::Debug for SidechatStaged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SidechatStaged")
+            .field("attachments", &self.attachments.len())
+            .field("appshots", &self.appshots.len())
+            .finish()
+    }
+}
+
 /// Events the shell listens for.
 #[derive(Debug, Clone)]
 pub enum ComposerEvent {
@@ -4965,6 +5002,7 @@ pub enum ComposerEvent {
     OpenSidechat {
         source_chat_id: String,
         prompt: Option<String>,
+        staged: SidechatStaged,
     },
     /// A chat key's unsent-content answer flipped (t3code
     /// `useThreadHasUnsentDraft`): the sidebar pen needs one repaint, not one
@@ -5332,6 +5370,12 @@ fn with_zeron_commands(
 // Send intercepts these from the typed text, so they insert as plain `/name`.
 fn zeron_owned_command(name: &str) -> bool {
     [COMPACT_COMMAND, SIDECHAT_COMMAND, COMPUTER_USE_COMMAND].contains(&name)
+}
+
+fn zeron_owned_command_range(raw: &str) -> Option<Range<usize>> {
+    let (name, _) = zeron_proto::invocation::leading_command(raw)?;
+    let end = name.as_ptr() as usize - raw.as_ptr() as usize + name.len();
+    zeron_owned_command(name).then(|| end - name.len() - 1..end)
 }
 
 /// The pill names the sidechat once: the engine titles a sidechat
@@ -5768,6 +5812,59 @@ fn invocation_candidates(
         .collect()
 }
 
+const SLASH_PREFETCH_DELAY: Duration = Duration::from_millis(400);
+
+fn slash_context(
+    skill: bool,
+    include_skills: bool,
+    commands_allowed: bool,
+    catalog_context: &str,
+) -> String {
+    format!(
+        "{}:{include_skills}:{commands_allowed}:{catalog_context}",
+        if skill { "skill" } else { "command" },
+    )
+}
+
+async fn fetch_invocation_catalog(
+    engine: crate::state::EngineHandle,
+    params: serde_json::Value,
+    harness: Option<HarnessId>,
+    skill: bool,
+    include_skills: bool,
+    commands_allowed: bool,
+) -> Result<(Vec<InvocationCandidate>, bool, Option<SharedString>), RpcError> {
+    let commands = async {
+        if skill || !commands_allowed {
+            return Ok(Vec::new());
+        }
+        let value = engine
+            .client()
+            .call(methods::LIST_COMMANDS, params.clone())
+            .await?;
+        serde_json::from_value::<Vec<SlashCommand>>(value)
+            .map(|commands| with_zeron_commands(harness, commands))
+            .map_err(|e| RpcError::Failed(e.to_string()))
+    };
+    let skills = async {
+        // Even separated slash menus need this metadata to exclude
+        // provider commands that are actually skill aliases.
+        let value = engine
+            .client()
+            .call(methods::LIST_SKILLS, params.clone())
+            .await?;
+        serde_json::from_value::<Option<Vec<zeron_proto::invocation::Skill>>>(value)
+            .map_err(|e| RpcError::Failed(e.to_string()))
+    };
+    let (commands, skills) = futures::join!(commands, skills);
+    merge_invocation_results(commands, skills, skill).map(|(mut rows, supported, warning)| {
+        if !include_skills {
+            rows.retain(|row| row.invocation.prefix() == '/');
+        }
+        (rows, supported, warning)
+    })
+}
+
 fn merge_invocation_results(
     commands: Result<Vec<SlashCommand>, RpcError>,
     skills: Result<Option<Vec<zeron_proto::invocation::Skill>>, RpcError>,
@@ -5855,6 +5952,7 @@ pub struct Composer {
     mention_task: Option<Task<()>>,
     mention: FileMentionState,
     slash_task: Option<Task<()>>,
+    slash_prefetch: Option<(String, Task<()>)>,
     slash: SlashState,
     /// Advertised invocations for the current device/harness/workspace.
     /// Invalidated on context changes; filtering stays local while typing.
@@ -6058,6 +6156,7 @@ impl Composer {
         // The harness can change without an AppState notify (picker switch).
         let pickers_observe = cx.observe(&pickers, |this: &mut Self, _, cx| {
             this.ensure_compaction_kind(cx);
+            this.prefetch_slash_catalog(cx);
             this.on_input_edited(cx);
             cx.notify();
         });
@@ -6136,6 +6235,7 @@ impl Composer {
             mention_task: None,
             mention: FileMentionState::default(),
             slash_task: None,
+            slash_prefetch: None,
             slash: SlashState::default(),
             slash_cache: HashMap::new(),
             compaction_cache: HashMap::new(),
@@ -7829,10 +7929,7 @@ impl Composer {
             "{preferences:?}:{}:{params}",
             self.completion_connection_context(cx),
         );
-        let context = format!(
-            "{}:{include_skills}:{commands_allowed}:{catalog_context}",
-            if skill { "skill" } else { "command" },
-        );
+        let context = slash_context(skill, include_skills, commands_allowed, &catalog_context);
         let context_changed = self.slash.context != context;
         if !context_changed
             && token.as_ref().is_some_and(|token| {
@@ -7899,39 +7996,14 @@ impl Composer {
         self.slash.error = None;
         self.refilter_slash(cx);
         self.slash_task = Some(cx.spawn(async move |this, cx| {
-            let result = async {
-                let commands = async {
-                    if skill || !commands_allowed {
-                        return Ok(Vec::new());
-                    }
-                    let value = engine
-                        .client()
-                        .call(methods::LIST_COMMANDS, params.clone())
-                        .await?;
-                    serde_json::from_value::<Vec<SlashCommand>>(value)
-                        .map(|commands| with_zeron_commands(harness, commands))
-                        .map_err(|e| RpcError::Failed(e.to_string()))
-                };
-                let skills = async {
-                    // Even separated slash menus need this metadata to exclude
-                    // provider commands that are actually skill aliases.
-                    let value = engine
-                        .client()
-                        .call(methods::LIST_SKILLS, params.clone())
-                        .await?;
-                    serde_json::from_value::<Option<Vec<zeron_proto::invocation::Skill>>>(value)
-                        .map_err(|e| RpcError::Failed(e.to_string()))
-                };
-                let (commands, skills) = futures::join!(commands, skills);
-                merge_invocation_results(commands, skills, skill).map(
-                    |(mut rows, supported, warning)| {
-                        if !include_skills {
-                            rows.retain(|row| row.invocation.prefix() == '/');
-                        }
-                        (rows, supported, warning)
-                    },
-                )
-            }
+            let result = fetch_invocation_catalog(
+                engine,
+                params,
+                harness,
+                skill,
+                include_skills,
+                commands_allowed,
+            )
             .await;
             this.update(cx, |composer, cx| {
                 if composer.slash.request != request || composer.slash.context != context {
@@ -7974,6 +8046,91 @@ impl Composer {
             .ok();
         }));
         cx.notify();
+    }
+
+    fn prefetch_slash_catalog(&mut self, cx: &mut Context<Self>) {
+        if self.slash.token.is_some() {
+            return;
+        }
+        let Some(harness) = self.pickers.read(cx).resolved(cx).harness else {
+            return;
+        };
+        let preferences = crate::settings::current(cx).skill_completion(harness);
+        let params = self.catalog_params(cx);
+        let catalog_context = format!(
+            "{preferences:?}:{}:{params}",
+            self.completion_connection_context(cx),
+        );
+        if self.slash.catalog_context == catalog_context
+            || self
+                .slash_prefetch
+                .as_ref()
+                .is_some_and(|(pending, _)| *pending == catalog_context)
+        {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let triggers: Vec<_> = ["/", "$"]
+            .into_iter()
+            .filter_map(|trigger| {
+                let (token, skill, include_skills, commands_allowed) =
+                    completion_trigger(trigger, 1, preferences);
+                token.map(|_| (skill, include_skills, commands_allowed))
+            })
+            .collect();
+        let context = catalog_context.clone();
+        let task = cx.spawn(async move |this, cx| {
+            // Clicking through chats replaces this task before any agent is spawned.
+            cx.background_executor().timer(SLASH_PREFETCH_DELAY).await;
+            let results = futures::future::join_all(triggers.iter().map(
+                |&(skill, include_skills, commands_allowed)| {
+                    fetch_invocation_catalog(
+                        engine.clone(),
+                        params.clone(),
+                        Some(harness),
+                        skill,
+                        include_skills,
+                        commands_allowed,
+                    )
+                },
+            ))
+            .await;
+            this.update(cx, |composer, cx| {
+                if composer
+                    .slash_prefetch
+                    .take_if(|(pending, _)| *pending == context)
+                    .is_none()
+                    || composer.slash.token.is_some()
+                {
+                    return;
+                }
+                if composer.slash.catalog_context != context {
+                    composer.slash_cache.clear();
+                    composer.slash.catalog_context = context.clone();
+                }
+                let chat_selected = composer.state.read(cx).selected_chat.is_some();
+                for ((skill, include_skills, commands_allowed), result) in
+                    triggers.into_iter().zip(results)
+                {
+                    let Ok((candidates, _, _)) = result else {
+                        continue;
+                    };
+                    let candidates = if !skill && commands_allowed {
+                        with_workspace_commands(candidates, chat_selected)
+                    } else {
+                        candidates
+                    };
+                    composer.slash_cache.insert(
+                        slash_context(skill, include_skills, commands_allowed, &context),
+                        candidates,
+                    );
+                }
+            })
+            .ok();
+        });
+        self.slash_prefetch = Some((catalog_context, task));
     }
 
     /// Re-rank the cached list for the current query (pure local filter).
@@ -8263,7 +8420,12 @@ impl Composer {
     /// Ask the shell to open this chat's side conversation — from `/sidechat`
     /// or from the footer pill. The shell owns the right pane, the creation
     /// RPC and the first turn; the composer only names the source.
-    pub(crate) fn request_sidechat(&mut self, prompt: Option<String>, cx: &mut Context<Self>) {
+    pub(crate) fn request_sidechat(
+        &mut self,
+        prompt: Option<String>,
+        carry_staged: bool,
+        cx: &mut Context<Self>,
+    ) {
         let Some((source_chat_id, nested)) = self
             .bound_chat_row(cx)
             .map(|chat| (chat.id.clone(), chat.sidechat_source_chat_id.is_some()))
@@ -8276,11 +8438,30 @@ impl Composer {
             return;
         }
         self.failure = None;
+        let staged = if carry_staged {
+            SidechatStaged {
+                attachments: self
+                    .attachments
+                    .remove(&self.current_key)
+                    .unwrap_or_default(),
+                appshots: self.appshots.remove(&self.current_key).unwrap_or_default(),
+            }
+        } else {
+            SidechatStaged::default()
+        };
         cx.emit(ComposerEvent::OpenSidechat {
             source_chat_id,
             prompt,
+            staged,
         });
         cx.notify();
+    }
+
+    pub(crate) fn stage_carried(&mut self, staged: SidechatStaged, cx: &mut Context<Self>) {
+        self.add_staged(staged.attachments, cx);
+        for appshot in staged.appshots {
+            self.stage_appshot(appshot, cx);
+        }
     }
 
     /// The reopen pill: this chat's newest sidechat, while its tab is closed.
@@ -8319,7 +8500,7 @@ impl Composer {
                         .text_color(theme.text_muted),
                 )
                 .child(label)
-                .on_click(cx.listener(|this, _, _, cx| this.request_sidechat(None, cx)))
+                .on_click(cx.listener(|this, _, _, cx| this.request_sidechat(None, false, cx)))
                 .into_any_element(),
         )
     }
@@ -8505,6 +8686,7 @@ impl Composer {
 
     fn on_state_changed(&mut self, cx: &mut Context<Self>) {
         self.ensure_compaction_kind(cx);
+        self.prefetch_slash_catalog(cx);
         self.prune_drafts(cx);
         {
             let state = self.state.read(cx);
@@ -9103,8 +9285,8 @@ impl Composer {
         // never runs a turn on THIS chat.
         if let Some(prompt) = sidechat_prompt(&plain) {
             self.input.update(cx, |input, cx| input.set_text("", cx));
+            self.request_sidechat(prompt, true, cx);
             self.sync_draft(cx);
-            self.request_sidechat(prompt, cx);
             return;
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
@@ -13421,6 +13603,93 @@ mod tests {
     }
 
     #[gpui::test]
+    fn the_first_slash_opens_on_a_prefetched_catalog(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _runtime = runtime.enter();
+        let directory = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            crate::settings::init(crate::settings::UiSettings::default(), directory.path(), cx);
+        });
+        let (out, mut requests) = tokio::sync::mpsc::channel(64);
+        let (replies, inbound) = tokio::sync::mpsc::channel(64);
+        let state = cx.new(|_| AppState::new());
+        let harness = crate::settings::SKILL_COMPLETION_HARNESSES[0].0;
+        state.update(cx, |state, _| {
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(
+                zeron_rpc::RpcClient::new(out, inbound),
+            ));
+            state.chats = vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "chat", "deviceId": "host", "archived": false,
+                    "cwd": "/checkout", "createdAt": chrono::Utc::now(),
+                    "config": { "harness": harness, "sandbox": "workspace-write" }
+                }))
+                .unwrap(),
+            ];
+            state.selected_chat = Some("chat".into());
+        });
+        let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+        let catalog_frames = |requests: &mut tokio::sync::mpsc::Receiver<String>| {
+            let mut frames = Vec::new();
+            while let Ok(frame) = requests.try_recv() {
+                let frame: zeron_rpc::ClientFrame = serde_json::from_str(&frame).unwrap();
+                if matches!(
+                    frame.method.as_deref(),
+                    Some(methods::LIST_COMMANDS | methods::LIST_SKILLS)
+                ) {
+                    frames.push(frame);
+                }
+            }
+            frames
+        };
+        state.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert!(catalog_frames(&mut requests).is_empty(), "debounced");
+        cx.executor().advance_clock(SLASH_PREFETCH_DELAY);
+        cx.run_until_parked();
+        let frames = catalog_frames(&mut requests);
+        assert!(!frames.is_empty());
+        for frame in frames {
+            let value = if frame.method.as_deref() == Some(methods::LIST_COMMANDS) {
+                serde_json::json!([{ "name": "review", "description": "Review" }])
+            } else {
+                serde_json::json!([])
+            };
+            replies
+                .try_send(
+                    serde_json::to_string(&zeron_rpc::ServerFrame {
+                        id: frame.id,
+                        ok: Some(value),
+                        ..Default::default()
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        runtime.block_on(async { tokio::task::yield_now().await });
+        cx.run_until_parked();
+        composer.update(cx, |composer, cx| {
+            composer
+                .input
+                .update(cx, |input, cx| input.set_text("/", cx));
+        });
+        composer.read_with(cx, |composer, _| {
+            let rows = composer.slash_cache.get(&composer.slash.context).unwrap();
+            assert!(
+                composer
+                    .slash
+                    .filtered
+                    .iter()
+                    .any(|&index| rows[index].name == "review"),
+                "rows are there before the refresh answers"
+            );
+        });
+    }
+
+    #[gpui::test]
     fn delayed_catalogs_cannot_replace_current_harness_or_preferences(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -14343,6 +14612,27 @@ mod tests {
     }
 
     #[test]
+    fn a_leading_zeron_command_is_the_only_plain_text_painted_as_a_command() {
+        assert_eq!(zeron_owned_command_range("/sidechat á"), Some(0..9));
+        assert_eq!(zeron_owned_command_range("\n  /compact"), Some(3..11));
+        assert_eq!(zeron_owned_command_range("/sidechats"), None);
+        assert_eq!(zeron_owned_command_range("/model"), None);
+        assert_eq!(zeron_owned_command_range("ask in a /sidechat"), None);
+    }
+
+    #[test]
+    fn sent_commands_and_skills_echo_as_invocations() {
+        let command = zeron_proto::invocation::Invocation::Command {
+            name: "review".into(),
+        }
+        .link();
+        let (display, spans) = sent_mention_display(&format!("{command} now")).unwrap();
+        assert!(display.contains("/review"));
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].target, SentMentionTarget::Invocation);
+    }
+
+    #[test]
     fn compact_is_intercepted_with_its_focus_and_nothing_else_is() {
         assert_eq!(compact_focus("/compact"), Some(None));
         assert_eq!(
@@ -14586,7 +14876,7 @@ mod tests {
     fn submitting_sidechat_asks_for_the_tab_and_never_builds_a_run(cx: &mut gpui::TestAppContext) {
         let (_dir, handle) = composer_focus_window(cx);
         let composer = handle.root(cx).unwrap();
-        let seen: std::rc::Rc<std::cell::RefCell<Vec<(String, Option<String>)>>> =
+        let seen: std::rc::Rc<std::cell::RefCell<Vec<(String, Option<String>, Vec<String>)>>> =
             std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         cx.update(|cx| {
             let seen = seen.clone();
@@ -14594,10 +14884,14 @@ mod tests {
                 if let ComposerEvent::OpenSidechat {
                     source_chat_id,
                     prompt,
+                    staged,
                 } = event
                 {
-                    seen.borrow_mut()
-                        .push((source_chat_id.clone(), prompt.clone()));
+                    seen.borrow_mut().push((
+                        source_chat_id.clone(),
+                        prompt.clone(),
+                        staged.attachments.iter().map(|a| a.id.clone()).collect(),
+                    ));
                 }
             })
             .detach();
@@ -14609,13 +14903,27 @@ mod tests {
                     state.chats = vec![chat_row("src", None), chat_row("side", Some("src"))];
                     state.selected_chat = Some("src".into());
                 });
-                for text in ["/sidechat", "/sidechat compare"] {
+                for (text, image) in [("/sidechat", None), ("/sidechat compare", Some("shot"))] {
+                    if let Some(id) = image {
+                        composer.add_staged(
+                            vec![StagedAttachment {
+                                id: id.into(),
+                                name: "shot.png".into(),
+                                image: std::sync::Arc::new(gpui::Image::from_bytes(
+                                    gpui::ImageFormat::Png,
+                                    vec![1, 2, 3],
+                                )),
+                            }],
+                            cx,
+                        );
+                    }
                     composer
                         .input
                         .update(cx, |input, cx| input.set_text(text, cx));
                     composer.on_submit(cx);
                     // Intercepted: draft cleared, no echo, no send in flight.
                     assert!(composer.input.read(cx).text().is_empty());
+                    assert!(composer.staged().is_empty());
                     assert!(composer.state.read(cx).transcript.is_empty());
                     assert!(!composer.sending);
                     assert!(composer.failure.is_none());
@@ -14626,8 +14934,12 @@ mod tests {
         assert_eq!(
             seen.borrow().as_slice(),
             [
-                ("src".to_string(), None),
-                ("src".to_string(), Some("compare".to_string()))
+                ("src".to_string(), None, vec![]),
+                (
+                    "src".to_string(),
+                    Some("compare".to_string()),
+                    vec!["shot".to_string()]
+                )
             ]
         );
     }

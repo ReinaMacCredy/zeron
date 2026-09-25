@@ -6126,7 +6126,8 @@ impl Transcript {
                             crate::composer::thread_chip_icon(chat),
                         ))
                     }
-                    crate::composer::SentMentionTarget::File { .. } => None,
+                    crate::composer::SentMentionTarget::File { .. }
+                    | crate::composer::SentMentionTarget::Invocation => None,
                 })
                 .collect()
         };
@@ -8636,7 +8637,8 @@ fn user_bubble_text(
         }
         runs.push(match span.target {
             crate::composer::SentMentionTarget::File { .. } => chip_run(span.range.len()),
-            crate::composer::SentMentionTarget::Thread { .. } => thread_run(span.range.len()),
+            crate::composer::SentMentionTarget::Thread { .. }
+            | crate::composer::SentMentionTarget::Invocation => thread_run(span.range.len()),
         });
         at = span.range.end;
     }
@@ -8653,7 +8655,7 @@ fn user_bubble_text(
         |_, _, _| (),
         move |_, _, window, cx| {
             for span in mentions.iter() {
-                if matches!(span.target, crate::composer::SentMentionTarget::Thread { .. }) {
+                if !matches!(span.target, crate::composer::SentMentionTarget::File { .. }) {
                     continue;
                 }
                 for rect in render::range_rects(&layout, &span.range, 0.0, 2.0) {
