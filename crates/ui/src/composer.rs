@@ -6077,6 +6077,9 @@ pub struct Composer {
     route_snap_until: Option<Instant>,
     _observe: Subscription,
     _pickers_observe: Subscription,
+    /// The footer's rings: plan usage of the session harness's live
+    /// account, and context occupancy — each opening a popover.
+    account_usage: Entity<crate::account_usage::AccountUsage>,
     _picker_focus: Subscription,
     _input_events: Subscription,
 }
@@ -6150,6 +6153,9 @@ impl Composer {
             input
         });
         let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
+        let composer = cx.entity().downgrade();
+        let account_usage =
+            cx.new(|cx| crate::account_usage::AccountUsage::new(state.clone(), composer, cx));
         // The footer toolbar (checkout kind + ref picker) is rendered INLINE
         // by the composer from picker state — a pickers-side notify (refs
         // loaded, popover toggled, pick made) must repaint the composer too.
@@ -6301,6 +6307,7 @@ impl Composer {
             route_snap_until: None,
             _observe: observe,
             _pickers_observe: pickers_observe,
+            account_usage,
             _picker_focus: picker_focus,
             _input_events: input_events,
         };
@@ -11557,17 +11564,23 @@ impl Render for Composer {
                 self.pickers
                     .update(cx, |pickers, cx| pickers.render_footer(cx))
             });
-            // Context usage is tracked for the selected chat's watch only.
-            let usage = self
-                .chat_override
-                .is_none()
-                .then(|| self.state.read(cx).context_usage)
-                .flatten();
             let sidechat_pill = self.render_sidechat_pill(&theme, cx);
             let permission_chip = (session_chrome_opacity > 0.0).then(|| {
                 self.pickers
                     .update(cx, |pickers, cx| pickers.render_permission_chip(cx))
             });
+            if session_chrome_opacity > 0.0 {
+                let harness = self.pickers.read(cx).resolved(cx).harness;
+                let target = {
+                    let state = self.state.read(cx);
+                    state
+                        .selected_chat_row()
+                        .map(|chat| chat.device_id.clone())
+                        .filter(|device| state.local_device_id.as_ref() != Some(device))
+                };
+                self.account_usage
+                    .update(cx, |usage, cx| usage.track(harness, target, cx));
+            }
             container.child(
                 div()
                     .w_full()
@@ -11599,20 +11612,22 @@ impl Render for Composer {
                                 .opacity(session_chrome_opacity)
                                 .child(div().flex_1().min_w_0().children(footer.flatten()))
                                 .child(
+                                    // The footer row's own 4px gap: the PR badge
+                                    // ends flush with the row, so the rings keep
+                                    // their distance here.
                                     div()
                                         .flex_none()
+                                        .pl(px(4.0))
                                         .pr(px(10.0))
                                         .flex()
                                         .items_center()
                                         .gap(px(4.0))
                                         .children(sidechat_pill)
                                         .children(permission_chip)
-                                        .child(crate::context_usage::render(
-                                            usage,
-                                            self.state.clone(),
-                                            cx.entity(),
-                                            &theme,
-                                        )),
+                                        // Context usage is tracked for the selected chat's watch only.
+                                        .when(self.chat_override.is_none(), |row| {
+                                            row.child(self.account_usage.clone())
+                                        }),
                                 ),
                         )
                     }),

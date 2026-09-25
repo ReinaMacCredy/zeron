@@ -77,6 +77,20 @@ pub(crate) use tabs::TabDragPayload;
 
 use spaces::{AddSpaceFlow, RenameSpaceDialog};
 
+/// `connected` already includes the engine's degradation grace. A brief
+/// focus-triggered dial needs no sidebar status; queued changes or a sustained
+/// outage still deserve one.
+fn chat_sync_pill_caption(chat: &zeron_proto::ChatConnectivity) -> Option<&'static str> {
+    use zeron_proto::ChatSyncState as S;
+    let sustained_or_queued = !chat.connected || chat.pending_pushes > 0;
+    match chat.sync_state {
+        S::Waiting if sustained_or_queued => Some("Sync queued — changes are saved"),
+        S::Connecting if sustained_or_queued => Some("Syncing…"),
+        S::Offline if !chat.connected => Some("Offline — changes are saved"),
+        _ => None,
+    }
+}
+
 actions!(
     shell,
     [
@@ -2011,6 +2025,8 @@ pub struct Shell {
     /// The add-space palette (device tabs + folder search), `Some`
     /// while open.
     add_space: Option<AddSpaceFlow>,
+    /// The New project palette's collapsed-breadcrumbs (`…`) menu.
+    project_crumb_menu: popover::Popup<()>,
     command_palette: Option<command_palette::CommandPalette>,
     pending_workspace_command: Option<crate::composer::WorkspaceCommand>,
     /// The sidebar's space-filter dropdown.
@@ -2194,6 +2210,12 @@ impl Shell {
             this.on_state_changed(&state, cx);
             cx.notify();
         });
+        // A reopened window reuses AppState, so the engine may already be
+        // ready. Only show the boot splash while it is actually connecting.
+        let splash = match &state.read(cx).connection {
+            ConnectionStatus::Connecting => SplashPhase::Visible,
+            ConnectionStatus::Ready | ConnectionStatus::Failed(_) => SplashPhase::Gone,
+        };
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
         transcript.update(cx, |transcript, _| transcript.retain_for_route_exit());
         // Invested drafts from the last launch (d19); the canvas itself is
@@ -2516,6 +2538,7 @@ impl Shell {
             section_menu_active: None,
             delete_space_confirm: None,
             add_space: None,
+            project_crumb_menu: popover::Popup::default(),
             command_palette: None,
             pending_workspace_command: None,
             spaces_menu: popover::Popup::default(),
@@ -2593,7 +2616,7 @@ impl Shell {
             reduced_motion: false,
             motion_active: std::cell::Cell::new(false),
             render_time: None,
-            splash: SplashPhase::Visible,
+            splash,
             splash_task: None,
             focus_sub: None,
             shortcut_focus: cx.focus_handle(),
@@ -3384,6 +3407,13 @@ impl Shell {
     }
 
     fn set_right_active(&mut self, surface: RightSurface, cx: &mut Context<Self>) {
+        if let RightSurface::Subagent(id) = surface
+            && let Some(tab) = self.subagent_tabs.get(&id)
+        {
+            let doc_id = tab.doc_id.clone();
+            self.state
+                .update(cx, |state, cx| state.focus_subagent_sync(&doc_id, cx));
+        }
         if self.resolved_right_active(cx) != surface {
             self.suspend_file_images(cx);
         }
@@ -8219,17 +8249,35 @@ impl Shell {
     /// Chat-mode sidebar (spaces overhaul): window-control strip, the Spaces
     /// section (folder + device rows, add-space), the global Active sessions
     /// list, the notice strip, and the UserMenu (§1.6).
-    /// The global connection line. `None` while healthy (`Connected`) or on
-    /// local profiles (`Disabled`) — and the engine's degrade grace means it
-    /// only exists during REAL outages, never join/wake blips. No surface,
+    /// Global connection health, with selected-chat queue and storage status.
+    /// Persistence failures take precedence even when the network is offline.
+    /// No surface,
     /// no border (v0.2.12 feedback): a bare spinner + faint caption while
     /// reconnecting; an amber dot only when the OS says offline. The
     /// transport error belongs in logs, not the sidebar.
     fn render_connection_pill(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         use zeron_proto::ConnectivityState as S;
         let conn = self.state.read(cx).connectivity.clone();
+        let selected = self.state.read(cx).selected_chat.as_deref();
+        let chat = conn.chats.iter()
+            .find(|c| Some(c.chat_id.as_str()) == selected);
+        let chat_state = chat.map(|c| c.sync_state);
         let (label, glyph): (SharedString, AnyElement) = match conn.state {
-            S::Disabled | S::Connected => return None,
+            _ if chat_state == Some(zeron_proto::ChatSyncState::StorageError) => (
+                "Changes could not be saved".into(),
+                div().size(px(5.0)).rounded_full().bg(theme.warning).into_any_element(),
+            ),
+            S::Disabled => return None,
+            S::Connected => {
+                let caption = chat_sync_pill_caption(chat?)?;
+                (
+                    caption.into(),
+                    loaders::mini_mono_spinner(
+                        "chat-sync-spinner", 2.0, theme.text_muted,
+                        self.sidebar_pane.entity_id(), cx,
+                    ).into_any_element(),
+                )
+            }
             S::Offline => (
                 "Offline — sends are saved".into(),
                 div()
@@ -9704,6 +9752,11 @@ impl Shell {
         if self.rename_space_dialog.is_some() {
             self.rename_space_dialog = None;
             cx.notify();
+            return true;
+        }
+        // The folded-breadcrumbs menu floats over the palette; it closes first.
+        if self.add_space.is_some() && self.project_crumb_menu.is_open() {
+            self.close_project_crumb_menu(cx);
             return true;
         }
         if self.add_space.is_some() {
@@ -13606,6 +13659,42 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_sync_status_waits_for_grace_or_queued_changes() {
+        use zeron_proto::{ChatConnectivity, ChatSyncState as S};
+
+        let mut chat = ChatConnectivity {
+            chat_id: "remote".into(),
+            sync_state: S::Local,
+            connected: false,
+            delivery_live: false,
+            pending_pushes: 0,
+        };
+        assert_eq!(chat_sync_pill_caption(&chat), None);
+
+        for state in [S::Waiting, S::Connecting, S::Offline] {
+            chat.sync_state = state;
+            chat.connected = true;
+            assert_eq!(chat_sync_pill_caption(&chat), None, "transient {state:?}");
+        }
+
+        chat.sync_state = S::Waiting;
+        chat.connected = false;
+        assert_eq!(chat_sync_pill_caption(&chat), Some("Sync queued — changes are saved"));
+        chat.sync_state = S::Connecting;
+        assert_eq!(chat_sync_pill_caption(&chat), Some("Syncing…"));
+        chat.sync_state = S::Offline;
+        assert_eq!(chat_sync_pill_caption(&chat), Some("Offline — changes are saved"));
+
+        // Real pending pushes remain visible even with a live room.
+        chat.connected = true;
+        chat.pending_pushes = 1;
+        chat.sync_state = S::Waiting;
+        assert_eq!(chat_sync_pill_caption(&chat), Some("Sync queued — changes are saved"));
+        chat.sync_state = S::Connecting;
+        assert_eq!(chat_sync_pill_caption(&chat), Some("Syncing…"));
+    }
+
+    #[test]
     fn update_strip_labels_cover_every_install_kind() {
         // Managed (curl|sh daemon layout): the CLI hint.
         let managed = zeron_update::InstallKind::Managed {
@@ -14810,6 +14899,53 @@ mod exit_regressions {
             .update(cx, |shell, _, cx| shell.close_settings(cx))
             .unwrap();
         assert_eq!(polling(cx), Some(false), "closing Settings stops it");
+    }
+
+    #[gpui::test]
+    fn new_shell_only_shows_boot_splash_while_connecting(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let boot = EngineBootConfig {
+            data_dir: dir.path().into(),
+            ipc_port: 0,
+            edge_url: "http://127.0.0.1:1".into(),
+            edge_token: None,
+            org_id: None,
+            workos_client_id: None,
+            default_harness: zeron_proto::HarnessId::Mock,
+        };
+        for (connection, expected) in [
+            (ConnectionStatus::Connecting, SplashPhase::Visible),
+            (ConnectionStatus::Ready, SplashPhase::Gone),
+            (
+                ConnectionStatus::Failed("offline".into()),
+                SplashPhase::Gone,
+            ),
+        ] {
+            let window = cx.add_window(|_, cx| {
+                let state = cx.new(|_| {
+                    let mut state = AppState::new();
+                    state.connection = connection;
+                    state
+                });
+                Shell::new(state, boot.clone(), cx)
+            });
+            window
+                .update(cx, |shell, _, _| assert_eq!(shell.splash, expected))
+                .unwrap();
+        }
     }
 
     #[gpui::test]
