@@ -255,6 +255,7 @@ impl TurnWire {
                     prompt: "second".into(),
                     message_id: None,
                     attachments: Vec::new(),
+                    reasoning: None,
                 })
                 .await
                 .unwrap();

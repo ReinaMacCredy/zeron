@@ -47,6 +47,8 @@ pub struct SteerMessage {
     /// Local file paths the prompt's trailer already names; a harness that
     /// can inline them on a first turn does so on a steer too.
     pub attachments: Vec<String>,
+    /// A new reasoning level for a harness with `live_reasoning`; `None` keeps the run's.
+    pub reasoning: Option<ReasoningLevel>,
 }
 
 /// The MCP stdio server the engine serves to a run's agent (the thread
@@ -239,6 +241,11 @@ pub trait Harness: Send + Sync {
     /// at a [`zeron_proto::SessionBranch`] (fork and rewind). Drivers that
     /// return true emit [`AgentEvent::Anchor`] for prompts and replies.
     fn branching(&self) -> bool {
+        false
+    }
+
+    /// Whether a steer can change the live run's reasoning level in place.
+    fn live_reasoning(&self) -> bool {
         false
     }
 

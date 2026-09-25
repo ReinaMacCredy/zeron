@@ -2488,6 +2488,112 @@ async fn an_attachment_prompt_routes_into_the_live_run() {
     core.shutdown().await;
 }
 
+/// A harness that sets effort in place keeps its run across a reasoning
+/// change, so the run's background shells survive it (2026-09-26: lowering
+/// the level killed a running test suite).
+#[tokio::test]
+async fn a_reasoning_change_steers_a_harness_that_sets_effort_in_place() {
+    struct Effort {
+        rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<AgentEvent>>>,
+        seen: tokio::sync::mpsc::UnboundedSender<Option<ReasoningLevel>>,
+    }
+    #[async_trait]
+    impl Harness for Effort {
+        fn id(&self) -> HarnessId {
+            HarnessId::Mock
+        }
+        fn display_name(&self) -> &str {
+            "Effort"
+        }
+        fn supports_steering(&self) -> bool {
+            true
+        }
+        fn live_reasoning(&self) -> bool {
+            true
+        }
+        fn steering_mode(&self) -> SteeringMode {
+            SteeringMode::StepBoundary
+        }
+        fn reasoning_levels(&self) -> &[ReasoningLevel] {
+            &[ReasoningLevel::Low, ReasoningLevel::High]
+        }
+        async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+            Ok(vec![])
+        }
+        async fn run(
+            &self,
+            _: RunRequest,
+            mut controls: RunControls,
+        ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+            let rx = self.rx.lock().unwrap().take().unwrap();
+            let seen = self.seen.clone();
+            tokio::spawn(async move {
+                while let Some(steer) = controls.steering.recv().await {
+                    let _ = seen.send(steer.reasoning);
+                }
+            });
+            Ok(futures::stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|event| (Ok(event), rx))
+            })
+            .boxed())
+        }
+    }
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (seen_tx, mut seen) = tokio::sync::mpsc::unbounded_channel();
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(Effort {
+            rx: std::sync::Mutex::new(Some(rx)),
+            seen: seen_tx,
+        }),
+    );
+    let handle = core.doc_host.open(CHAT).unwrap();
+    let at = |prompt: &str, level: ReasoningLevel| {
+        let mut request = run_request(prompt);
+        request.reasoning = Some(level);
+        request
+    };
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-high",
+        SessionCommandPayload::Run {
+            request: at("start the suite", ReasoningLevel::High),
+            message_id: "user-high".into(),
+        },
+    );
+    tx.send(done(DoneStatus::Completed)).unwrap();
+    wait_for(
+        || {
+            core.sessions
+                .session_status(CHAT)
+                .is_some_and(|s| s.last_completed_turn.is_some())
+        },
+        "first turn parks",
+    )
+    .await;
+
+    for (id, level) in [
+        ("low", ReasoningLevel::Low),
+        ("low-again", ReasoningLevel::Low),
+    ] {
+        queue_as_viewer(
+            handle.doc(),
+            &format!("cmd-{id}"),
+            SessionCommandPayload::Run {
+                request: at("how long does it take?", level),
+                message_id: format!("user-{id}"),
+            },
+        );
+        let steered = tokio::time::timeout(Duration::from_secs(10), seen.recv())
+            .await
+            .expect("the prompt reaches the live run's mailbox");
+        assert_eq!(steered, Some(Some(level)));
+    }
+    assert!(!tx.is_closed(), "the live run keeps its process");
+    core.shutdown().await;
+}
+
 /// Background shells ride the session beside its status: they never hold a
 /// parked turn Working, keep their first-seen stamp across replacements, and
 /// vanish with the run that owned them.

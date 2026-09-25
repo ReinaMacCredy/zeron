@@ -445,6 +445,9 @@ impl Harness for ClaudeHarness {
     fn supports_steering(&self) -> bool {
         true
     }
+    fn live_reasoning(&self) -> bool {
+        true
+    }
     fn steering_mode(&self) -> SteeringMode {
         SteeringMode::StepBoundary
     }
@@ -676,6 +679,7 @@ impl ClaudeHarness {
             event_tx,
             controls,
             reasoning: request.reasoning,
+            model: request.model.clone(),
             skills,
             interrupt_grace: self.interrupt_grace,
             kill_grace: self.kill_grace,
@@ -803,6 +807,7 @@ struct Session {
     event_tx: mpsc::Sender<Result<AgentEvent, HarnessError>>,
     controls: RunControls,
     reasoning: Option<ReasoningLevel>,
+    model: Option<String>,
     /// Skill names the `$name` rewrite recognizes, for steers too.
     skills: Vec<String>,
     interrupt_grace: Duration,
@@ -823,7 +828,8 @@ async fn run_session(session: Session) {
         stdin_tx,
         event_tx,
         controls,
-        reasoning,
+        mut reasoning,
+        model,
         skills,
         interrupt_grace,
         kill_grace,
@@ -918,6 +924,16 @@ async fn run_session(session: Session) {
 
             steer = steering.recv(), if steering_open && !interrupted => match steer {
                 Some(msg) => {
+                    if let Some(level) = msg.reasoning.filter(|level| Some(*level) != reasoning) {
+                        stop_seq += 1;
+                        let line = wire::effort_request_line(
+                            &format!("zeron-effort-{stop_seq}"),
+                            to_effort(Some(level), model.as_deref()),
+                            level == ReasoningLevel::Ultracode,
+                        );
+                        let _ = stdin_tx.send(StdinMsg::Line(line));
+                        reasoning = Some(level);
+                    }
                     let images = load_image_blocks(&msg.attachments).await;
                     let line = wire::user_message_line_with_images(
                         &apply_ultrathink(

@@ -360,6 +360,7 @@ async fn steering_extension_injects_mid_turn() {
                         prompt: "redirect please".into(),
                         message_id: None,
                         attachments: Vec::new(),
+                        reasoning: None,
                     })
                     .await
                     .expect("steer sent");
@@ -407,6 +408,7 @@ async fn steer_racing_the_turn_end_never_emits_steered_after_done() {
                         prompt: "redirect please".into(),
                         message_id: None,
                         attachments: Vec::new(),
+                        reasoning: None,
                     })
                     .await
                     .expect("steer sent");
@@ -459,6 +461,7 @@ async fn rejected_steer_queues_and_delivers_at_the_turn_boundary() {
                         prompt: "redirect please".into(),
                         message_id: None,
                         attachments: Vec::new(),
+                        reasoning: None,
                     })
                     .await
                     .expect("steer sent");
@@ -1926,6 +1929,7 @@ async fn pi_boundary_steer(scenario: &str, trigger_on_done: bool) {
                         prompt: "second".into(),
                         message_id: None,
                         attachments: Vec::new(),
+                        reasoning: None,
                     })
                     .await
                     .unwrap();

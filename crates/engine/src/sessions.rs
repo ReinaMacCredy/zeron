@@ -121,8 +121,12 @@ impl RuntimeConfig {
 
     /// Attachments ride the steer mailbox (inlined by drivers that can,
     /// path refs in the text otherwise), so they never force a new run.
-    fn can_route(&self, harness_id: HarnessId, request: &RunRequest) -> bool {
-        self == &Self::from_request(harness_id, request)
+    fn can_route(&self, harness_id: HarnessId, request: &RunRequest, live_reasoning: bool) -> bool {
+        let mut wanted = Self::from_request(harness_id, request);
+        if live_reasoning && self.reasoning.is_some() && wanted.reasoning.is_some() {
+            wanted.reasoning = self.reasoning;
+        }
+        self == &wanted
     }
 }
 
@@ -706,11 +710,17 @@ impl SessionsEngine {
             turn_computer = false;
             request.computer_control = live;
         }
+        let live_reasoning = self
+            .inner
+            .registry
+            .resolve(harness_id)
+            .is_ok_and(|harness| harness.live_reasoning());
         let routed = lock(&self.inner.runs).get(chat_id).map(|h| {
             (
                 h.run_id.clone(),
                 h.steerable,
-                h.runtime_config.can_route(harness_id, &request),
+                h.runtime_config
+                    .can_route(harness_id, &request, live_reasoning),
                 h.steer_tx.clone(),
                 h.routed_steers.clone(),
             )
@@ -740,6 +750,7 @@ impl SessionsEngine {
                     },
                     message_id: Some(user_id.clone()),
                     attachments: request.attachments.clone(),
+                    reasoning: request.reasoning,
                 };
                 if steer_tx.try_send(message).is_ok() {
                     pending.push_back(RoutedSteer {
@@ -756,6 +767,12 @@ impl SessionsEngine {
                 false
             };
             if accepted {
+                if let Some(live) = lock(&self.inner.runs)
+                    .get_mut(chat_id)
+                    .filter(|h| h.run_id == run_id)
+                {
+                    live.runtime_config.reasoning = request.reasoning;
+                }
                 let handle = self.doc_handle(chat_id)?;
                 handle.write_user_message(&user_id, &request.prompt, now_ms())?;
                 if self.is_live(chat_id, &run_id) {
@@ -978,6 +995,7 @@ impl SessionsEngine {
             },
             message_id: Some(user_id.clone()),
             attachments: attachments.to_vec(),
+            reasoning: None,
         };
         {
             // Serialize mailbox acceptance with confirmation and Done-time
@@ -4648,18 +4666,24 @@ mod tests {
         let mut follow_up = initial.clone();
         follow_up.prompt = "second".into();
         follow_up.resume = Some("session-1".into());
-        assert!(config.can_route(HarnessId::Grok, &follow_up));
+        assert!(config.can_route(HarnessId::Grok, &follow_up, false));
 
         follow_up.model = Some("grok-4.5".into());
-        assert!(!config.can_route(HarnessId::Grok, &follow_up));
+        assert!(!config.can_route(HarnessId::Grok, &follow_up, true));
         follow_up.model = initial.model.clone();
 
         follow_up.reasoning = Some(zeron_proto::ReasoningLevel::Medium);
-        assert!(!config.can_route(HarnessId::Grok, &follow_up));
+        assert!(!config.can_route(HarnessId::Grok, &follow_up, false));
+        assert!(
+            config.can_route(HarnessId::Grok, &follow_up, true),
+            "a harness that changes effort in place keeps its run"
+        );
+        follow_up.reasoning = None;
+        assert!(!config.can_route(HarnessId::Grok, &follow_up, true));
         follow_up.reasoning = initial.reasoning;
 
         follow_up.attachments.push("/tmp/image.png".into());
-        assert!(config.can_route(HarnessId::Grok, &follow_up));
+        assert!(config.can_route(HarnessId::Grok, &follow_up, false));
     }
 
     #[test]

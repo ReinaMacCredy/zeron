@@ -83,6 +83,7 @@ async fn real_pi_mock_lifecycle() {
                                     prompt: "second".into(),
                                     message_id: None,
                                     attachments: Vec::new(),
+                                    reasoning: None,
                                 })
                                 .await
                                 .unwrap();

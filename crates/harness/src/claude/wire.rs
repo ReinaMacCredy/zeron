@@ -326,6 +326,22 @@ pub(crate) fn interrupt_request_line(request_id: &str) -> String {
     .to_string()
 }
 
+pub(crate) fn effort_request_line(
+    request_id: &str,
+    effort: Option<&str>,
+    ultracode: bool,
+) -> String {
+    json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": {
+            "subtype": "apply_flag_settings",
+            "settings": { "effortLevel": effort, "ultracode": ultracode },
+        },
+    })
+    .to_string()
+}
+
 pub(crate) fn stop_task_request_line(request_id: &str, task_id: &str) -> String {
     json!({
         "type": "control_request",

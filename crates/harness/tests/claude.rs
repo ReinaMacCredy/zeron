@@ -462,6 +462,7 @@ async fn ultrathink_preserves_selected_commands_on_initial_and_steered_sends() {
                     prompt,
                     message_id: None,
                     attachments: Vec::new(),
+                    reasoning: None,
                 })
                 .await
                 .unwrap();
@@ -486,6 +487,7 @@ async fn steering_lines_are_written_to_stdin_mid_run() {
             prompt: "redirect please".into(),
             message_id: None,
             attachments: Vec::new(),
+            reasoning: None,
         })
         .await
         .expect("steer queued");
@@ -531,6 +533,7 @@ async fn steering_lines_inline_their_image_attachments() {
             prompt: "look at this".into(),
             message_id: None,
             attachments: vec![shot.to_string_lossy().into_owned()],
+            reasoning: None,
         })
         .await
         .expect("steer queued");
@@ -543,6 +546,35 @@ async fn steering_lines_inline_their_image_attachments() {
         }),
         "steer line must inline the attachment like a first turn: {events:?}"
     );
+}
+
+#[tokio::test]
+async fn a_steer_at_a_new_reasoning_level_sets_the_effort_in_place() {
+    for (level, expected) in [
+        (Some(zeron_proto::ReasoningLevel::Low), "effort:low"),
+        (Some(zeron_proto::ReasoningLevel::High), "effort:none"),
+        (None, "effort:none"),
+    ] {
+        let (controls, steer, _token) = controls("A");
+        steer
+            .send(SteerMessage {
+                prompt: "keep going".into(),
+                message_id: None,
+                attachments: Vec::new(),
+                reasoning: level,
+            })
+            .await
+            .expect("steer queued");
+        let mut req = request("scenario:steer-effort");
+        req.reasoning = Some(zeron_proto::ReasoningLevel::High);
+        let events = run_to_end(&harness(), req, controls).await;
+        assert!(
+            events.contains(&AgentEvent::TextDelta {
+                text: expected.into()
+            }),
+            "{level:?}: {events:?}"
+        );
+    }
 }
 
 #[tokio::test]
