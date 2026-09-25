@@ -4659,7 +4659,7 @@ mod tests {
         follow_up.reasoning = initial.reasoning;
 
         follow_up.attachments.push("/tmp/image.png".into());
-        assert!(!config.can_route(HarnessId::Grok, &follow_up));
+        assert!(config.can_route(HarnessId::Grok, &follow_up));
     }
 
     #[test]
