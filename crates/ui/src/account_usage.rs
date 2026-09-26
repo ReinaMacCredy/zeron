@@ -202,11 +202,9 @@ impl AccountUsage {
         let cache = &mut cx.default_global::<AccountsSnapshotCache>().0;
         let previous = cache.get(&key).cloned();
         if let Some(snapshot) = cache.get_mut(&key) {
-            for row in snapshot.accounts.iter_mut() {
-                if row.harness == account.harness {
-                    row.active = row.id == account.id;
-                }
-            }
+            // Per-provider agents keep one live login per provider: only the
+            // switched-to row's group changes.
+            accounts::mark_switched(snapshot, account);
         }
         self.error = None;
         let params = self.params(serde_json::json!({
