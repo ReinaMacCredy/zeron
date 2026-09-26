@@ -3491,8 +3491,7 @@ impl Shell {
         let show_branch = self.settings.sidebar_show_branch;
         let show_pr = self.settings.sidebar_show_pull_request;
 
-        let labels = [
-            "By project",
+        let labels: [&str; SIDEBAR_VIEW_ROWS.len()] = [
             "By device",
             "By project",
             "None",
@@ -3504,8 +3503,7 @@ impl Shell {
             "Project icon",
             "Location",
         ];
-        let icons = [
-            icons::FOLDER,
+        let icons: [&str; SIDEBAR_VIEW_ROWS.len()] = [
             icons::LAPTOP,
             icons::FOLDER,
             icons::LIST,
@@ -3517,8 +3515,7 @@ impl Shell {
             icons::PROJECT_DEFAULT,
             icons::FOLDER,
         ];
-        let selected = [
-            organization == SidebarOrganization::ByProject,
+        let selected: [bool; SIDEBAR_VIEW_ROWS.len()] = [
             organization == SidebarOrganization::ByDevice,
             organization == SidebarOrganization::ByProject,
             organization == SidebarOrganization::InOneList,
