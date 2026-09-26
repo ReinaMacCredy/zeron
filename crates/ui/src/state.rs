@@ -4927,7 +4927,7 @@ mod tests {
     }
 
     #[test]
-    fn side_chats_remain_addressable_but_do_not_appear_in_sidebar() {
+    fn side_chats_stay_in_the_sidebar_and_addressable() {
         let mut state = AppState::new();
         let main = chat("main", 0, None);
         let mut side = chat("side", 1, Some(2));
@@ -4938,7 +4938,7 @@ mod tests {
                 .visible_chats()
                 .map(|c| c.id.as_str())
                 .collect::<Vec<_>>(),
-            ["main"]
+            ["side", "main"]
         );
         state.selected_chat = Some("side".into());
         assert_eq!(
