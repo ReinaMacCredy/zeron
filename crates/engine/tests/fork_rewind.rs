@@ -202,6 +202,7 @@ fn run_payload(prompt: &str, message_id: &str, cwd: &str) -> SessionCommandPaylo
             branch: None,
             forked_at: None,
             computer_control: false,
+            mcp: None,
         },
         message_id: message_id.into(),
     }

@@ -269,6 +269,7 @@ fn request(prompt: &str, mode: PermissionMode) -> RunRequest {
         resume: None,
         forked_at: None,
         computer_control: false,
+        mcp: None,
     }
 }
 

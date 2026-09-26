@@ -673,6 +673,7 @@ impl Harness for CodexHarness {
         request.resume = None;
         request.worktree = None;
         request.attachments.clear();
+        request.mcp = None;
         request.model_options.clear();
         request.auto_approve = false;
         self.run_with_mode(request, controls, true).await
@@ -2413,6 +2414,7 @@ mod tests {
             resume: None,
             attachments: Vec::new(),
             worktree: None,
+            mcp: None,
             branch: None,
             forked_at: None,
             computer_control,

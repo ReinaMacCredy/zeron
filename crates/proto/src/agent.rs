@@ -195,6 +195,29 @@ pub struct RunRequest {
     // Engine-resolved at dispatch; a value a client sends is overwritten.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub computer_control: bool,
+    /// Zeron's own MCP server, injected by the HOST engine as it starts the
+    /// run: the `zeron mcp` subcommand of this same binary, pointed at the
+    /// engine's loopback IPC and stamped with the originating chat so the
+    /// agent can spawn, read, and message side chats. Additive +
+    /// serde-defaulted — an old host leaves it unset and the agent simply has
+    /// no Zeron tools; title runs never carry it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<McpServer>,
+}
+
+/// A stdio MCP server the harness should add to the agent's session, on top
+/// of whatever the user configured. Each driver spells it in its own dialect
+/// (Claude `--mcp-config`, ACP `session/new` `mcpServers`, Codex
+/// `mcp_servers.*` config overrides).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServer {
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 /// Where a resumed harness session is cut when the run starts: history

@@ -578,6 +578,7 @@ impl Harness for ClaudeHarness {
         request.resume = None;
         request.worktree = None;
         request.attachments.clear();
+        request.mcp = None;
         request.model_options.clear();
         request.auto_approve = false;
         self.run_with_mode(request, controls, true).await
@@ -847,10 +848,21 @@ async fn run_session(session: Session) {
     let mut stop_seq: u64 = 0;
 
     let mut norm = Normalizer::new();
+    let mut pending_steers = std::collections::VecDeque::new();
+    // Top-level tool calls in flight: a steer must not abort them (see
+    // `wire::steer_message_line`).
+    let mut open_tools = std::collections::HashSet::new();
     let mut steering_open = true;
     let mut interrupted = false;
     let mut interrupt_sent = false;
     let mut any_done = false;
+    // A turn end held back while steers wait for their replay. Rapid `now`
+    // steers each interrupt the turn the previous one started, and the CLI
+    // replays only the last (verified on 2.1.280; the earlier texts still
+    // reach the model). If nothing follows the held result, the steers were
+    // absorbed: release them and the turn end instead of spinning forever.
+    const HELD_DONE_SETTLE: Duration = Duration::from_secs(5);
+    let mut held_done: Option<(AgentEvent, tokio::time::Instant)> = None;
     let mut done_after_interrupt = false;
     let mut escalation: Option<tokio::task::JoinHandle<()>> = None;
 
@@ -861,6 +873,11 @@ async fn run_session(session: Session) {
                     let line = line.trim();
                     if line.is_empty() {
                         continue;
+                    }
+                    // The CLI is still producing: whatever it is doing is not
+                    // the quiet end the held turn end waits for.
+                    if let Some((_, deadline)) = held_done.as_mut() {
+                        *deadline = tokio::time::Instant::now() + HELD_DONE_SETTLE;
                     }
                     let frame = match wire::parse_frame(line) {
                         Ok(frame) => frame,
@@ -886,8 +903,49 @@ async fn run_session(session: Session) {
                         }
                         continue;
                     }
+                    // Only the CLI's replay confirms that a prompt joined its
+                    // conversation. Writing stdin must not split ongoing text.
+                    if let Frame::User(ref user) = frame {
+                        // A replay confirms its steer and every earlier one:
+                        // superseded steers are never replayed themselves.
+                        if user.parent_tool_use_id.is_none()
+                            && let Some(at) = user
+                                .uuid
+                                .as_ref()
+                                .and_then(|id| pending_steers.iter().position(|p| p == id))
+                        {
+                            for _ in 0..=at {
+                                pending_steers.pop_front();
+                                let (prev, next) = norm.rotate_for_steer();
+                                if event_tx.send(Ok(AgentEvent::Steered {
+                                    assistant_message_id: Some(prev), next_assistant_message_id: Some(next),
+                                })).await.is_err() { break 'main; }
+                            }
+                        }
+                    }
                     for ev in norm.normalize(frame, interrupted) {
+                        match &ev {
+                            AgentEvent::ToolCall { id, .. } => {
+                                open_tools.insert(id.clone());
+                            }
+                            AgentEvent::ToolResult { id, .. } => {
+                                open_tools.remove(id);
+                            }
+                            AgentEvent::Done { .. } => open_tools.clear(),
+                            _ => {}
+                        }
                         let is_done = matches!(ev, AgentEvent::Done { .. });
+                        // A `now` steer ends the turn it interrupts with a
+                        // result frame; the steer continues the run, so that
+                        // result is a steer boundary, not the end of the turn.
+                        if is_done && !interrupted && !pending_steers.is_empty() {
+                            held_done =
+                                Some((ev, tokio::time::Instant::now() + HELD_DONE_SETTLE));
+                            continue;
+                        }
+                        if is_done {
+                            held_done = None;
+                        }
                         if event_tx.send(Ok(ev)).await.is_err() {
                             break 'main; // consumer gone — reap below
                         }
@@ -935,23 +993,18 @@ async fn run_session(session: Session) {
                         reasoning = Some(level);
                     }
                     let images = load_image_blocks(&msg.attachments).await;
-                    let line = wire::user_message_line_with_images(
+                    let id = uuid::Uuid::new_v4().to_string();
+                    let line = wire::steer_message_line(
                         &apply_ultrathink(
                             reasoning,
                             &crate::skill_mentions_as_slash(&msg.prompt, &skills),
                         ),
                         &images,
+                        &id,
+                        open_tools.is_empty(),
                     );
-                    let _ = stdin_tx.send(StdinMsg::Line(line));
-                    // The CLI consumes the queued line at its own step
-                    // boundary; rotate the assistant message id so post-steer
-                    // output folds into a fresh message.
-                    let (prev, next) = norm.rotate_for_steer();
-                    let ev = AgentEvent::Steered {
-                        assistant_message_id: Some(prev),
-                        next_assistant_message_id: Some(next),
-                    };
-                    if event_tx.send(Ok(ev)).await.is_err() {
+                    pending_steers.push_back(id);
+                    if stdin_tx.send(StdinMsg::Line(line)).is_err() {
                         break 'main;
                     }
                 }
@@ -980,8 +1033,33 @@ async fn run_session(session: Session) {
                 }
             },
 
+            _ = tokio::time::sleep_until(
+                held_done.as_ref().map_or_else(tokio::time::Instant::now, |(_, d)| *d)
+            ), if held_done.is_some() => {
+                // The steers were absorbed into the turn that just ended.
+                while pending_steers.pop_front().is_some() {
+                    let (prev, next) = norm.rotate_for_steer();
+                    if event_tx.send(Ok(AgentEvent::Steered {
+                        assistant_message_id: Some(prev), next_assistant_message_id: Some(next),
+                    })).await.is_err() { break 'main; }
+                }
+                let (done, _) = held_done.take().expect("guarded by if");
+                if event_tx.send(Ok(done)).await.is_err() {
+                    break 'main;
+                }
+                any_done = true;
+            },
+
             _ = event_tx.closed() => break 'main,
         }
+    }
+
+    // A turn end still held when the CLI exited is the run's real end.
+    if let Some((done, _)) = held_done.take()
+        && !event_tx.is_closed()
+        && event_tx.send(Ok(done)).await.is_ok()
+    {
+        any_done = true;
     }
 
     // Terminal bookkeeping: never end the stream without a Done unless the
@@ -1240,6 +1318,7 @@ mod tests {
                 resume: None,
                 attachments: Vec::new(),
                 worktree: None,
+                mcp: None,
                 branch: None,
                 forked_at: None,
                 computer_control: false,
@@ -1292,6 +1371,7 @@ mod tests {
                 resume: None,
                 attachments: Vec::new(),
                 worktree: None,
+                mcp: None,
                 branch: None,
                 forked_at: None,
                 computer_control: false,
@@ -1425,6 +1505,7 @@ mod tests {
             resume: Some("sess-a".into()),
             attachments: Vec::new(),
             worktree: None,
+            mcp: None,
             branch: Some(zeron_proto::SessionBranch {
                 keep: Some("uuid-reply-1".into()),
                 drop: Some("uuid-prompt-2".into()),
@@ -1506,6 +1587,7 @@ mod tests {
             resume: Some("sess-source".into()),
             attachments: Vec::new(),
             worktree: None,
+            mcp: None,
             branch: Some(zeron_proto::SessionBranch {
                 keep: Some("uuid-reply-1".into()),
                 drop: None,

@@ -134,6 +134,7 @@ fn request(prompt: &str) -> RunRequest {
         auto_approve: false,
         attachments: Vec::new(),
         worktree: None,
+        mcp: None,
         branch: None,
         resume: None,
         forked_at: None,

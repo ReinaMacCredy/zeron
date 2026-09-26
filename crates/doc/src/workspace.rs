@@ -283,6 +283,7 @@ impl WorkspaceDoc {
             chat.harness_session_cwd.as_deref(),
         )?;
         set_opt_str(&row, "spaceId", chat.space_id.as_deref())?;
+        set_opt_str(&row, "createdByChatId", chat.created_by_chat_id.as_deref())?;
         set_opt_ms(&row, "lastSeenAt", chat.last_seen_at)?;
         row.insert(
             "previousHarnesses",

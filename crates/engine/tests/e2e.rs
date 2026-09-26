@@ -27,6 +27,7 @@ const VIEWER: &str = "viewer-device";
 
 fn run_request(prompt: &str) -> RunRequest {
     RunRequest {
+        mcp: None,
         prompt: prompt.into(),
         harness: None,
         model: None,
@@ -1921,6 +1922,7 @@ async fn real_claude_sees_uploaded_image_inline() {
          Attached images (local files — open them to view):\n- {path}"
     );
     let request = RunRequest {
+        mcp: None,
         prompt,
         harness: None,
         model: Some("haiku".into()),
@@ -3369,12 +3371,21 @@ async fn pending_steer_handoff_does_not_publish_a_completion() {
                 zeron_engine::sessions::SteerOutcome::Accepted
             );
         }
+        let before_done = core.sessions.session_status(CHAT).unwrap().updated_at;
         tx.send(done(DoneStatus::Completed)).unwrap();
         wait_for(
-            || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle),
+            || {
+                core.sessions
+                    .session_status(CHAT)
+                    .is_some_and(|s| s.updated_at > before_done)
+            },
             "internal handoff",
         )
         .await;
+        assert_eq!(
+            core.sessions.session_status(CHAT).unwrap().status,
+            SessionStatus::Working
+        );
         assert_eq!(
             core.sessions
                 .session_status(CHAT)

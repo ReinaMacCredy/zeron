@@ -93,6 +93,7 @@ fn request(prompt: &str, cwd: &str) -> RunRequest {
         branch: None,
         forked_at: None,
         computer_control: false,
+        mcp: None,
     }
 }
 

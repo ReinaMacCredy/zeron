@@ -211,6 +211,7 @@ fn queue_human_run(core: &EngineCore, chat_id: &str, command_id: &str, message_i
                     resume: None,
                     forked_at: None,
                     computer_control: false,
+                    mcp: None,
                 },
                 message_id: message_id.into(),
             },

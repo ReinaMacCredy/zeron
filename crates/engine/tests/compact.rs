@@ -193,6 +193,7 @@ fn run_payload(message_id: &str, cwd: &str) -> SessionCommandPayload {
             branch: None,
             forked_at: None,
             computer_control: false,
+            mcp: None,
         },
         message_id: message_id.into(),
     }
