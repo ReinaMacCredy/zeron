@@ -4245,6 +4245,13 @@ impl DocHost {
             handle.publish_queue();
             return Ok(true);
         }
+        if self.sessions().is_some_and(|sessions| {
+            sessions.turn_in_flight(chat_id) && !sessions.steers_mid_turn(self.harness_for(chat_id))
+        }) {
+            return Err(EngineError::Other(
+                "the selected agent cannot accept mid-turn steering".into(),
+            ));
+        }
         let Some(item) = handle.doc.take_queued(id)? else {
             return Ok(false);
         };
