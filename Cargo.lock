@@ -11766,7 +11766,7 @@ dependencies = [
 
 [[package]]
 name = "zeron"
-version = "0.2.90"
+version = "0.2.91"
 dependencies = [
  "anyhow",
  "clap",
@@ -11788,7 +11788,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-doc"
-version = "0.2.90"
+version = "0.2.91"
 dependencies = [
  "chrono",
  "loro",
@@ -11802,7 +11802,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-engine"
-version = "0.2.90"
+version = "0.2.91"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11828,6 +11828,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
+ "toml 0.8.23",
  "tracing",
  "uuid",
  "windows-sys 0.61.2",
@@ -11843,7 +11844,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-harness"
-version = "0.2.90"
+version = "0.2.91"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11870,7 +11871,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-mcp"
-version = "0.2.90"
+version = "0.2.91"
 dependencies = [
  "async-trait",
  "chrono",
@@ -11885,7 +11886,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-preview"
-version = "0.2.90"
+version = "0.2.91"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11913,7 +11914,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-proto"
-version = "0.2.90"
+version = "0.2.91"
 dependencies = [
  "chrono",
  "pulldown-cmark",
@@ -11924,7 +11925,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-rpc"
-version = "0.2.90"
+version = "0.2.91"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11943,7 +11944,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-sync"
-version = "0.2.90"
+version = "0.2.91"
 dependencies = [
  "block2 0.6.2",
  "chrono",
@@ -11966,7 +11967,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-syntax"
-version = "0.2.90"
+version = "0.2.91"
 dependencies = [
  "thiserror 2.0.20",
  "tree-sitter",
@@ -12000,7 +12001,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-theme"
-version = "0.2.90"
+version = "0.2.91"
 dependencies = [
  "anyhow",
  "clap",
@@ -12015,7 +12016,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-ui"
-version = "0.2.90"
+version = "0.2.91"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -12083,7 +12084,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-update"
-version = "0.2.90"
+version = "0.2.91"
 dependencies = [
  "anyhow",
  "futures",

@@ -27,7 +27,7 @@ use zeron_engine::InstanceLock;
 use zeron_proto::{AgentAccountsSnapshot, AuthState, WorkspaceScope};
 use zeron_rpc::methods;
 
-use crate::changes::{Changes, ChangesEvent};
+use crate::changes::{Changes, ChangesEvent, DiscardWorkingTreeRequest};
 use crate::composer::{Composer, ComposerEvent, ComposerInput, ComposerInputEvent, SidechatStaged};
 use crate::computer::cards::ComputerRequest;
 use crate::files::{FilesCloseDisposition, FilesEvent, FilesSurface, WorkspacePathDrag};
@@ -253,6 +253,30 @@ fn right_panel_content_width(
 
 fn conversation_width(viewport: f32, sidebar: f32, right: f32) -> f32 {
     (viewport - sidebar - right).max(0.0)
+}
+
+/// The chat's working directory as the host device spells it — the folder the
+/// harness runs in (a worktree chat's worktree). Projectless `~` chats have
+/// none. Deliberately not `source_context.repo_root`: that is canonicalized
+/// (symlinks resolved, `\\?\` verbatim prefix on Windows hosts).
+fn chat_copy_path(chat: &zeron_proto::Chat) -> Option<&str> {
+    chat.cwd
+        .as_deref()
+        .map(str::trim)
+        .filter(|cwd| is_host_absolute_path(cwd))
+}
+
+/// Absolute on the HOST, whatever the viewer's OS: a remote engine may hand a
+/// POSIX path to a Windows viewport (no drive, so `Path::is_absolute` says
+/// no) or a drive path to a POSIX one.
+fn is_host_absolute_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    path.starts_with('/')
+        || path.starts_with("\\\\")
+        || (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'\\' | b'/'))
 }
 
 fn composer_target_width(panel_width: f32, content_width: f32, docked: bool) -> f32 {
@@ -1553,6 +1577,12 @@ enum AccountMenuAction {
     SignOut,
 }
 
+#[derive(Debug, Clone)]
+enum DiscardWorkingTreeFlow {
+    Confirm(DiscardWorkingTreeRequest),
+    Failed(SharedString),
+}
+
 const RUNTIME_CHANGE_TIMEOUT: Duration = Duration::from_secs(10);
 const RUNTIME_CHANGE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -2011,6 +2041,10 @@ pub struct Shell {
     appshot_welcome: bool,
     /// The fork/rewind confirmation, centered like the delete dialog.
     branch_modal: Option<BranchModal>,
+    /// Global confirmation/error dialog for the Changes-pane trash action. The
+    /// RPC task is retained separately so rerenders do not cancel it.
+    discard_working_tree: Option<DiscardWorkingTreeFlow>,
+    discard_working_tree_task: Option<Task<()>>,
     /// Space-row context menu (dropdown rows): (space id, window position).
     space_menu: popover::Popup<(String, Point<Pixels>)>,
     rename_space_dialog: Option<RenameSpaceDialog>,
@@ -2535,6 +2569,8 @@ impl Shell {
             delete_confirm: None,
             appshot_welcome,
             branch_modal: None,
+            discard_working_tree: None,
+            discard_working_tree_task: None,
             space_menu: popover::Popup::default(),
             rename_space_dialog: None,
             sidebar_section_migration: None,
@@ -3667,6 +3703,16 @@ impl Shell {
 
     /// Open or focus a session-owned editor tab. The explorer is independent.
     fn add_file_surface(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.add_file_surface_at(path, None, window, cx);
+    }
+
+    fn add_file_surface_at(
+        &mut self,
+        path: String,
+        location: Option<(u32, Option<u32>)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.active_chat.is_empty() {
             return;
         }
@@ -3676,6 +3722,11 @@ impl Shell {
         if let Some(id) = self.file_surface_keys.get(&lookup).copied() {
             let surface = RightSurface::File(id);
             self.set_right_active(surface, cx);
+            if let Some((line, column)) = location
+                && let Some(file) = self.file_surfaces.get(&id).cloned()
+            {
+                file.update(cx, |file, cx| file.navigate_to_line(line, column, cx));
+            }
             self.focus_right_file_editor(surface, window, cx);
             return;
         }
@@ -3750,6 +3801,11 @@ impl Shell {
             RightSurface::File(id),
         );
         self.set_right_active(RightSurface::File(id), cx);
+        if let Some((line, column)) = location
+            && let Some(file) = self.file_surfaces.get(&id).cloned()
+        {
+            file.update(cx, |file, cx| file.navigate_to_line(line, column, cx));
+        }
     }
 
     fn open_workspace_file_link(
@@ -3781,7 +3837,12 @@ impl Shell {
         if !was_open {
             self.right_tween = Some(WidthTween::new(from, self.right_target(cx)));
         }
-        self.add_file_surface(link.path, window, cx);
+        self.add_file_surface_at(
+            link.path,
+            link.line.map(|line| (line, link.column)),
+            window,
+            cx,
+        );
         true
     }
 
@@ -3844,6 +3905,13 @@ impl Shell {
                 }
                 ChangesEvent::OpenFile(path) => {
                     this.add_file_surface(path.clone(), window, cx);
+                }
+                ChangesEvent::DiscardWorkingTree(request) => {
+                    if this.discard_working_tree_task.is_none() {
+                        this.discard_working_tree =
+                            Some(DiscardWorkingTreeFlow::Confirm(request.clone()));
+                        cx.notify();
+                    }
                 }
             },
         );
@@ -5109,6 +5177,23 @@ impl Shell {
         cx.notify();
     }
 
+    fn copy_chat_path(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        let path = self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .and_then(chat_copy_path)
+            .map(str::to_owned);
+        if let Some(path) = path {
+            cx.write_to_clipboard(ClipboardItem::new_string(path));
+            self.sidebar_notice = Some("Path copied".into());
+        }
+        self.close_chat_menu(cx);
+        cx.notify();
+    }
+
     fn open_settings(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
         let section = section.canonical();
         self.command_palette = None;
@@ -5886,6 +5971,60 @@ impl Shell {
             serde_json::json!({ "op": "deleteChat", "chatId": chat_id }),
             cx,
         );
+        cx.notify();
+    }
+
+    fn confirm_discard_working_tree(&mut self, cx: &mut Context<Self>) {
+        if self.discard_working_tree_task.is_some() {
+            return;
+        }
+        let Some(DiscardWorkingTreeFlow::Confirm(request)) = self.discard_working_tree.clone()
+        else {
+            return;
+        };
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.discard_working_tree = Some(DiscardWorkingTreeFlow::Failed(
+                "Engine is not connected.".into(),
+            ));
+            cx.notify();
+            return;
+        };
+
+        let mut params = serde_json::Map::new();
+        params.insert("chatId".into(), serde_json::Value::String(request.chat_id));
+        params.insert(
+            "checkoutId".into(),
+            serde_json::Value::String(request.checkout_id),
+        );
+        params.insert(
+            "expectedChecksum".into(),
+            serde_json::Value::String(request.expected_checksum),
+        );
+        if let Some(target) = request.target_device_id {
+            params.insert("targetDeviceId".into(), serde_json::Value::String(target));
+        }
+
+        // Dismiss the confirmation immediately. The task remains retained so
+        // repeat clicks cannot issue a second destructive request.
+        self.discard_working_tree = None;
+        self.discard_working_tree_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(
+                    methods::DISCARD_WORKING_TREE,
+                    serde_json::Value::Object(params),
+                )
+                .await;
+            this.update(cx, |shell, cx| {
+                shell.discard_working_tree_task = None;
+                shell.discard_working_tree = match result {
+                    Ok(_) => None,
+                    Err(error) => Some(DiscardWorkingTreeFlow::Failed(format!("{error}").into())),
+                };
+                cx.notify();
+            })
+            .ok();
+        }));
         cx.notify();
     }
 
@@ -9763,6 +9902,11 @@ impl Shell {
             cx.notify();
             return true;
         }
+        if self.discard_working_tree.is_some() {
+            self.discard_working_tree = None;
+            cx.notify();
+            return true;
+        }
         // The folded-breadcrumbs menu floats over the palette; it closes first.
         if self.add_space.is_some() && self.project_crumb_menu.is_open() {
             self.close_project_crumb_menu(cx);
@@ -9984,9 +10128,11 @@ impl Shell {
                         .as_ref()
                         .and_then(|chat| chat.harness_session_id.as_deref())
                         .is_some_and(|id| !id.trim().is_empty());
+                    let has_path = chat.as_ref().and_then(chat_copy_path).is_some();
                     let zeron_id = chat_id.clone();
                     let harness_id = chat_id.clone();
                     let session_chat_id = chat_id.clone();
+                    let path_chat_id = chat_id.clone();
                     menu.child(
                         popover::menu_row(&theme, false, format!("chat-copy-back-{chat_id}"))
                             .id("chat-copy-back")
@@ -10004,6 +10150,21 @@ impl Shell {
                             .child(SharedString::from("Back")),
                     )
                     .child(popover::menu_separator())
+                    .when(has_path, |menu| {
+                        menu.child(
+                            popover::menu_row(&theme, false, format!("chat-copy-path-{chat_id}"))
+                                .id("chat-copy-path")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.copy_chat_path(&path_chat_id, cx)
+                                }))
+                                .child(
+                                    icon(icons::COPY)
+                                        .size(px(16.0))
+                                        .text_color(theme.text_muted),
+                                )
+                                .child(SharedString::from("Path")),
+                        )
+                    })
                     .child(
                         popover::menu_row(&theme, false, format!("chat-copy-zeron-{chat_id}"))
                             .id("chat-copy-zeron")
@@ -10268,6 +10429,69 @@ impl Shell {
                 viewport,
                 card,
                 20.0,
+            ));
+        }
+
+        if let Some(flow) = self.discard_working_tree.clone() {
+            let card = match flow {
+                DiscardWorkingTreeFlow::Confirm(_) => {
+                    popover::dialog_card(&theme)
+                        .child(popover::dialog_title(
+                            &theme,
+                            "Discard working tree changes?",
+                        ))
+                        .child(div().mt(px(6.0)).child(popover::dialog_body(
+                            &theme,
+                            "Discard all uncommitted changes in this working tree? This can’t be undone.",
+                        )))
+                        .child(
+                            div()
+                                .mt(px(16.0))
+                                .flex()
+                                .flex_row()
+                                .justify_end()
+                                .gap(px(8.0))
+                                .child(
+                                    popover::btn_ghost(
+                                        &theme,
+                                        "Cancel",
+                                        "discard-working-tree-cancel",
+                                    )
+                                    .id("discard-working-tree-cancel")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.discard_working_tree = None;
+                                        cx.notify();
+                                    })),
+                                )
+                                .child(
+                                    popover::btn_danger(&theme, "Discard changes")
+                                        .id("discard-working-tree-confirm")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.confirm_discard_working_tree(cx)
+                                        })),
+                                ),
+                        )
+                        .into_any_element()
+                }
+                DiscardWorkingTreeFlow::Failed(error) => popover::dialog_card(&theme)
+                    .child(popover::dialog_title(&theme, "Couldn’t discard changes"))
+                    .child(div().mt(px(6.0)).child(popover::dialog_body(&theme, error)))
+                    .child(
+                        div().mt(px(16.0)).flex().justify_end().child(
+                            popover::btn_primary(&theme, "Close")
+                                .id("discard-working-tree-error-close")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.discard_working_tree = None;
+                                    cx.notify();
+                                })),
+                        ),
+                    )
+                    .into_any_element(),
+            };
+            overlays.push(popover::modal(
+                "discard-working-tree-dialog",
+                viewport,
+                card,
             ));
         }
 
@@ -13641,6 +13865,84 @@ impl Render for Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn chat_with_path(cwd: Option<&str>, source: Option<(&str, &str)>) -> zeron_proto::Chat {
+        zeron_proto::Chat {
+            id: "chat".into(),
+            device_id: "remote-device".into(),
+            title: None,
+            archived: false,
+            cwd: cwd.map(str::to_owned),
+            branch: None,
+            checkout_id: None,
+            source_context: source.map(|(source_cwd, repo_root)| {
+                zeron_proto::ConversationSourceContext {
+                    checkout_id: "checkout".into(),
+                    repo_root: repo_root.into(),
+                    cwd: source_cwd.into(),
+                    branch: "main".into(),
+                    head_sha: None,
+                    observed_at: chrono::Utc::now(),
+                }
+            }),
+            config: None,
+            last_message_preview: None,
+            last_message_at: None,
+            created_at: chrono::Utc::now(),
+            harness_session_id: None,
+            harness_session_cwd: None,
+            space_id: None,
+            last_seen_at: None,
+            room_gen: None,
+            sidechat_source_chat_id: None,
+            created_by_chat_id: None,
+            previous_harnesses: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn copy_path_copies_the_chat_cwd_not_the_canonical_repo_root() {
+        let chat = chat_with_path(
+            Some("/remote/repo/packages/app"),
+            Some(("/remote/repo/packages/app", "/remote/repo")),
+        );
+        assert_eq!(chat_copy_path(&chat), Some("/remote/repo/packages/app"));
+
+        let windows = chat_with_path(
+            Some(r"C:\Users\me\repo"),
+            Some((r"C:\Users\me\repo", r"\\?\C:\Users\me\repo")),
+        );
+        assert_eq!(chat_copy_path(&windows), Some(r"C:\Users\me\repo"));
+    }
+
+    #[test]
+    fn copy_path_accepts_host_absolute_paths_from_any_os() {
+        for cwd in [
+            "/home/me/repo",
+            r"C:\Users\me\repo",
+            "D:/work/repo",
+            r"\\server\share\repo",
+        ] {
+            let chat = chat_with_path(Some(cwd), None);
+            assert_eq!(chat_copy_path(&chat), Some(cwd));
+        }
+    }
+
+    #[test]
+    fn copy_path_is_unavailable_without_an_absolute_path() {
+        for cwd in [
+            None,
+            Some(""),
+            Some("  "),
+            Some("~"),
+            Some("~/repo"),
+            Some("."),
+            Some("C:"),
+        ] {
+            let chat = chat_with_path(cwd, None);
+            assert_eq!(chat_copy_path(&chat), None);
+        }
+    }
 
     #[test]
     fn settings_search_matches_labels_and_row_keywords() {

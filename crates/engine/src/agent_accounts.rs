@@ -1,8 +1,25 @@
-//! AgentAccounts — the Claude Code / Codex / Cursor / Antigravity logins on
-//! this device (feature-inventory §3.7 "Agent accounts"; port of zeron's
+//! AgentAccounts — the logins of every agent CLI on this device that has one
+//! (feature-inventory §3.7 "Agent accounts"; port of zeron's
 //! `agent-accounts.ts`).
 //!
-//! Each provider stores exactly one live login:
+//! Grok, Devin, OpenCode, Pi and Hermes live in [`stores`] (credential
+//! formats and detection), [`oauth`] (the sign-ins the engine drives itself)
+//! and [`usage`] (their quota probes); each module documents per provider
+//! what is supported and why. In short:
+//!
+//! | agent    | detect | switch | add account                    | usage |
+//! |----------|--------|--------|--------------------------------|-------|
+//! | Grok     | yes    | yes    | `grok login --device-auth`     | yes   |
+//! | Devin    | yes    | yes    | ACP `authenticate` (loopback)  | yes   |
+//! | OpenCode | yes    | yes    | ChatGPT loopback, Copilot code | yes   |
+//! | Pi       | yes    | yes    | ChatGPT loopback               | yes   |
+//! | Hermes   | yes    | no¹    | `hermes auth add` (device code) | yes  |
+//!
+//! ¹ Hermes keeps every account in its own credential pool and rotates
+//! through it itself; zeron lists the pool and adds to it through Hermes'
+//! own CLI, but never rewrites it.
+//!
+//! The original four providers each store exactly one live login:
 //!
 //! - **Claude Code** — credentials in `~/.claude/.credentials.json`
 //!   (`$CLAUDE_CONFIG_DIR` relocates the dir) or, on macOS, the Keychain item
@@ -77,6 +94,12 @@ use zeron_proto::{
 use crate::repos::home_dir;
 use crate::{EngineError, new_id, now_ms};
 
+mod oauth;
+#[cfg(test)]
+mod provider_tests;
+mod stores;
+mod usage;
+
 // Claude Code's public OAuth client (the one the CLI itself uses for the manual
 // "paste the code" flow — no secret involved, PKCE carries the proof).
 const CLAUDE_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -121,6 +144,17 @@ const CLAUDE_CREDENTIALS_TTL: Duration = Duration::from_secs(10);
 const FLOW_TTL: Duration = Duration::from_secs(15 * 60);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(8);
 
+/// A failed identity lookup is retried no sooner than this — an offline
+/// device must not call the profile endpoint on every list.
+const IDENTITY_RETRY: Duration = Duration::from_secs(5 * 60);
+
+/// A remembered identity lookup (see `Inner::identities`).
+#[derive(Clone)]
+enum IdentityLookup {
+    Known(String, SlotProfile),
+    Failed(Instant),
+}
+
 /// Filesystem knobs — env-resolved in production ([`AgentAccountsConfig::detect`]),
 /// explicit in tests.
 #[derive(Debug, Clone)]
@@ -146,6 +180,19 @@ pub struct AgentAccountsConfig {
     /// Whether Antigravity's Keychain token counts (macOS production); tests
     /// look at the temp token files only.
     pub antigravity_keychain: bool,
+    /// Grok's `GROK_HOME` (default `~/.grok`) — holds `auth.json`.
+    pub grok_home: PathBuf,
+    /// Devin's `credentials.toml` (`$XDG_DATA_HOME/devin/`, default
+    /// `~/.local/share/devin/`).
+    pub devin_credentials_file: PathBuf,
+    /// OpenCode's `auth.json` (`$XDG_DATA_HOME/opencode/`, default
+    /// `~/.local/share/opencode/`).
+    pub opencode_auth_file: PathBuf,
+    /// Pi's agent dir (`$PI_CODING_AGENT_DIR`, default `~/.pi/agent`) —
+    /// holds `auth.json`.
+    pub pi_agent_dir: PathBuf,
+    /// Hermes' `HERMES_HOME` (default `~/.hermes`) — holds `auth.json`.
+    pub hermes_home: PathBuf,
 }
 
 impl AgentAccountsConfig {
@@ -174,6 +221,32 @@ impl AgentAccountsConfig {
             antigravity_keychain: cfg!(target_os = "macos")
                 && std::env::var_os("AGY_ACP_FORCE_FILE_STORAGE")
                     .is_none_or(|v| !matches!(v.to_str(), Some("1" | "true"))),
+            grok_home: stores::default_grok_home(),
+            devin_credentials_file: stores::default_devin_credentials_file(),
+            opencode_auth_file: stores::default_opencode_auth_file(),
+            pi_agent_dir: stores::default_pi_agent_dir(),
+            hermes_home: stores::default_hermes_home(),
+        }
+    }
+
+    /// Every provider pointed into `root` — never a real login or the
+    /// Keychain. For tests.
+    #[doc(hidden)]
+    pub fn isolated(root: &Path) -> Self {
+        Self {
+            data_dir: root.join("data"),
+            claude_config_dir: root.join("claude"),
+            claude_config_file: root.join("claude.json"),
+            codex_home: root.join("codex"),
+            cursor_sdk_auth_file: root.join("cursor-sdk").join("auth.json"),
+            claude_keychain_service: None,
+            antigravity_home: Some(root.join("gemini")),
+            antigravity_keychain: false,
+            grok_home: root.join("grok"),
+            devin_credentials_file: root.join("devin").join("credentials.toml"),
+            opencode_auth_file: root.join("opencode").join("auth.json"),
+            pi_agent_dir: root.join("pi"),
+            hermes_home: root.join("hermes"),
         }
     }
 
@@ -189,8 +262,40 @@ impl AgentAccountsConfig {
         self.data_dir.join("agent-accounts")
     }
 
+    /// [`Self::root_dir`], created (or tightened) owner-only — it holds slot
+    /// files and every throwaway sign-in home.
+    fn private_root(&self) -> std::io::Result<PathBuf> {
+        let root = self.root_dir();
+        private_dir(&root)?;
+        Ok(root)
+    }
+
     fn usage_cache_file(&self) -> PathBuf {
         self.root_dir().join("usage-cache.json")
+    }
+}
+
+/// `dir` created (parents as needed) and itself made owner-only — 0700 on
+/// Unix, an existing looser dir included. Sign-in homes hold whatever a CLI
+/// writes there (fresh tokens, in modes the CLI picks), so the directory is
+/// the boundary that keeps other local users out.
+fn private_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        if let Some(parent) = dir.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => {}
+            Err(err) => return Err(err),
+        }
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)
     }
 }
 
@@ -244,6 +349,11 @@ struct Slot {
     /// active account (which re-snapshots and bumps `saved_at`) never reorders.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     created_at: Option<i64>,
+    /// Agents that keep one login PER model provider in one store (OpenCode,
+    /// Pi, Hermes): the store key this slot's `credentials` entry lives
+    /// under (`openai`, `anthropic`, …). Swapping rewrites that entry only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    store_key: Option<String>,
 }
 
 /// A live detection result (before it's persisted into a slot).
@@ -254,6 +364,31 @@ struct Detected {
     /// `None` ⇒ we know a login exists but couldn't read the secret.
     credentials: Option<serde_json::Value>,
     claude_config: Option<serde_json::Value>,
+    /// See [`Slot::store_key`].
+    store_key: Option<String>,
+    /// `false` when the store carries no identity (Devin's bare API key):
+    /// the profile is a placeholder, and a snapshot keeps whatever identity
+    /// a usage probe already wrote into the slot.
+    identity_known: bool,
+}
+
+impl Detected {
+    /// A login whose store names who it is — the common case.
+    fn known(account_key: String, profile: SlotProfile, credentials: serde_json::Value) -> Self {
+        Self {
+            account_key,
+            profile,
+            credentials: Some(credentials),
+            claude_config: None,
+            store_key: None,
+            identity_known: true,
+        }
+    }
+
+    fn keyed(mut self, store_key: &str) -> Self {
+        self.store_key = Some(store_key.to_string());
+        self
+    }
 }
 
 // ── login flows ─────────────────────────────────────────────────────────────
@@ -267,30 +402,52 @@ enum LoginFlow {
         started_at: Instant,
     },
     /// A spawned login child polled to completion: `codex login` against a
-    /// throwaway `CODEX_HOME`, or the cursor shim's login mode minting into a
-    /// throwaway store file. Either way the LIVE login is never touched;
-    /// completion is the credential file appearing under `home`.
+    /// throwaway `CODEX_HOME`, the cursor shim's login mode minting into a
+    /// throwaway store file, `grok login` against a throwaway `GROK_HOME`, or
+    /// `hermes auth add` appending to Hermes' own pool.
     Spawned {
         harness: HarnessId,
         /// The login child; monitored (try_wait) + killable from cancel.
         child: Arc<Mutex<Option<zeron_harness::process::Child>>>,
-        /// Throwaway credential dir, reclaimed on cancel/completion.
+        /// Throwaway dir, reclaimed on cancel/completion.
         home: PathBuf,
+        /// What finishing looks like.
+        completion: SpawnedCompletion,
         started_at: Instant,
         output: Arc<Mutex<String>>,
         /// `Some(code)` once the child exited (`None` code = killed by signal).
         exit: Arc<Mutex<Option<Option<i32>>>>,
+        /// Finds the sign-in page in the child's output.
+        scan_url: fn(&str) -> Option<String>,
+        /// The device a remote login's callback is forwarded for.
+        requester: Option<String>,
     },
-    /// A sign-in the engine drives itself — Claude's loopback callback,
-    /// Antigravity's ACP `authenticate` — reporting the browser url and its
-    /// outcome through `state`.
+    /// A sign-in the engine drives itself — Claude's and ChatGPT's loopback
+    /// callbacks, GitHub's device code, Antigravity's and Devin's ACP
+    /// `authenticate` — reporting the browser url and its outcome through
+    /// `state`.
     Task {
         harness: HarnessId,
         started_at: Instant,
         state: Arc<Mutex<TaskLoginState>>,
         /// aborting drops the sign-in future, which kills its agent child.
         handle: tokio::task::JoinHandle<()>,
+        /// A throwaway dir the sign-in writes into, reclaimed on cancel.
+        home: Option<PathBuf>,
+        /// A FIXED loopback port the sign-in holds (ChatGPT's 1455) — a new
+        /// sign-in needing the same port supersedes this one.
+        port: Option<u16>,
     },
+}
+
+/// How a [`LoginFlow::Spawned`] child signals success.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpawnedCompletion {
+    /// Its credential file appears under the throwaway home (`auth.json`);
+    /// the child keeps running until then.
+    CredentialFile,
+    /// It exits 0 — the CLI saved the login into its own store (Hermes).
+    ExitSuccess,
 }
 
 #[derive(Default)]
@@ -351,6 +508,9 @@ enum ProbeError {
     /// The slot holds nothing probeable.
     #[serde(rename_all = "camelCase")]
     NoCredentials { why: NoCredentials },
+    /// The credentials name a server (issuer, API or portal url) outside the
+    /// provider's known hosts: nothing was sent.
+    UntrustedEndpoint,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -362,6 +522,9 @@ enum NoCredentials {
     Missing,
     /// Cursor's minted key is past its expiry.
     KeyExpired,
+    /// The provider behind this login has no usage view zeron can read
+    /// (a Hermes API key for some other vendor, Pi's Copilot session).
+    Unsupported,
 }
 
 impl ProbeError {
@@ -376,6 +539,7 @@ impl ProbeError {
             ProbeError::Network { .. } => "network",
             ProbeError::Schema => "schema",
             ProbeError::NoCredentials { .. } => "no-credentials",
+            ProbeError::UntrustedEndpoint => "untrusted-endpoint",
         }
     }
 
@@ -407,9 +571,9 @@ impl ProbeError {
             ProbeError::Network { .. } => Duration::from_secs(MIN),
             // Lifted early when the slot's credentials change (re-login, the
             // CLI refreshing its token) — see `UsageEntry::probe_due`.
-            ProbeError::Unauthorized { .. } | ProbeError::NoCredentials { .. } => {
-                Duration::from_secs(10 * 60)
-            }
+            ProbeError::Unauthorized { .. }
+            | ProbeError::NoCredentials { .. }
+            | ProbeError::UntrustedEndpoint => Duration::from_secs(10 * 60),
         }
     }
 }
@@ -453,7 +617,9 @@ impl UsageEntry {
                 // rate limit or outage is not, so it holds regardless.
                 matches!(
                     error,
-                    ProbeError::Unauthorized { .. } | ProbeError::NoCredentials { .. }
+                    ProbeError::Unauthorized { .. }
+                        | ProbeError::NoCredentials { .. }
+                        | ProbeError::UntrustedEndpoint
                 ) && self.credentials.as_deref() != Some(credentials)
             }
             _ => true,
@@ -496,7 +662,24 @@ struct ProbeEndpoints {
     claude_loopback_token: String,
     claude_profile: String,
     codex_usage: String,
+    /// Grok's billing view (`/v1/billing?format=credits`).
+    grok_usage: String,
+    /// GitHub's REST root (`/user`, `/copilot_internal/user`).
+    github_api: String,
+    /// GitHub's OAuth root (`/login/device/code`, `/login/oauth/access_token`).
+    github_login: String,
+    /// OpenAI's OAuth root (`/oauth/authorize`, `/oauth/token`).
+    openai_auth: String,
+    /// The ChatGPT sign-in's loopback port — FIXED at 1455 by the client
+    /// registration; tests bind any free port (0).
+    openai_port: u16,
+    /// The Nous portal (`/api/oauth/account`).
+    nous_portal: String,
     allow_slot_refresh: bool,
+    /// Test seam: admit `http://127.0.0.1` for credential-DEFINED endpoints
+    /// (Grok issuer, Devin server, …) so mock servers can stand in. Always
+    /// `false` in production — see [`stores::trusted_base`].
+    allow_loopback_http: bool,
 }
 
 impl Default for ProbeEndpoints {
@@ -507,7 +690,14 @@ impl Default for ProbeEndpoints {
             claude_loopback_token: CLAUDE_LOOPBACK_TOKEN_URL.into(),
             claude_profile: CLAUDE_PROFILE_URL.into(),
             codex_usage: CODEX_USAGE_URL.into(),
+            grok_usage: usage::GROK_USAGE_URL.into(),
+            github_api: "https://api.github.com".into(),
+            github_login: "https://github.com".into(),
+            openai_auth: oauth::OPENAI_AUTH.into(),
+            openai_port: oauth::OPENAI_LOOPBACK_PORT,
+            nous_portal: usage::NOUS_PORTAL.into(),
             allow_slot_refresh: true,
+            allow_loopback_http: false,
         }
     }
 }
@@ -541,6 +731,13 @@ struct Inner {
     claude_credentials: Mutex<Option<CachedClaudeCredentials>>,
     /// Callback ports of logins run for another device (see module docs).
     callback_routes: zeron_preview::login::CallbackRoutes,
+    /// Who an opaque live token belongs to (Pi's Claude login, a Copilot
+    /// token), by token fingerprint — one profile call per token, not per
+    /// list; a failed lookup waits [`IDENTITY_RETRY`] before the next. See
+    /// [`stores`].
+    identities: Mutex<HashMap<String, IdentityLookup>>,
+    /// Test seam: fixed CLI binaries per agent instead of PATH resolution.
+    cli_overrides: Mutex<HashMap<HarnessId, PathBuf>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -593,6 +790,12 @@ impl AgentAccounts {
         // `.login-<uuid>` throwaway CODEX_HOME dirs — each may hold live OAuth
         // tokens — with no owner to clean them. Reclaim them at boot.
         let root = config.root_dir();
+        // A root from an older build may be group/world-readable: tighten it.
+        if root.is_dir()
+            && let Err(err) = private_dir(&root)
+        {
+            tracing::warn!(error = %err, "could not make the agent-accounts dir private");
+        }
         if let Ok(entries) = std::fs::read_dir(&root) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
@@ -624,8 +827,32 @@ impl AgentAccounts {
                 inflight_refreshes: Mutex::new(std::collections::HashSet::new()),
                 claude_credentials: Mutex::new(None),
                 callback_routes,
+                identities: Mutex::new(HashMap::new()),
+                cli_overrides: Mutex::new(HashMap::new()),
             }),
         }
+    }
+
+    /// Test seam: run `harness`'s sign-in with the CLI at `path` instead of
+    /// the one PATH resolution finds.
+    #[doc(hidden)]
+    pub fn override_cli(&self, harness: HarnessId, path: impl Into<PathBuf>) {
+        lock(&self.inner.cli_overrides).insert(harness, path.into());
+    }
+
+    /// The ACP harness for `harness`'s CLI, honouring [`Self::override_cli`].
+    fn acp_harness(&self, harness: HarnessId) -> Option<zeron_harness::AcpHarness> {
+        let acp = match harness {
+            HarnessId::Grok => zeron_harness::AcpHarness::grok(),
+            HarnessId::Devin => zeron_harness::AcpHarness::devin(),
+            HarnessId::Hermes => zeron_harness::AcpHarness::hermes(),
+            HarnessId::Antigravity => zeron_harness::AcpHarness::antigravity(),
+            _ => return None,
+        };
+        Some(match lock(&self.inner.cli_overrides).get(&harness) {
+            Some(path) => acp.with_executable(path.clone()),
+            None => acp,
+        })
     }
 
     // ── list ────────────────────────────────────────────────────────────────
@@ -645,8 +872,19 @@ impl AgentAccounts {
     /// Caller holds [`Inner::ops`].
     async fn list_locked(&self, force_usage: bool) -> Result<AgentAccountsSnapshot, EngineError> {
         let mut warnings: Vec<AgentAccountWarning> = Vec::new();
-        let mut active_keys: HashMap<HarnessId, String> = HashMap::new();
-        let mut unreadable: HashMap<HarnessId, Detected> = HashMap::new();
+        // Per agent, the live logins' account keys — one for single-login
+        // agents, one per model provider for OpenCode / Pi.
+        let mut active_keys: HashMap<HarnessId, std::collections::HashSet<String>> = HashMap::new();
+        // Live logins listed without a slot: credentials unreadable (Keychain
+        // denied) or identity unresolvable (an opaque token whose profile
+        // call failed). Active, never switchable.
+        let mut unreadable: Vec<(HarnessId, Detected)> = Vec::new();
+        let mut live = |harness: HarnessId, detected: &Detected| {
+            active_keys
+                .entry(harness)
+                .or_default()
+                .insert(detected.account_key.clone());
+        };
 
         let (claude, claude_warning) = self.detect_claude().await;
         if let Some(message) = claude_warning {
@@ -656,20 +894,20 @@ impl AgentAccounts {
             });
         }
         if let Some(detected) = claude {
-            active_keys.insert(HarnessId::ClaudeCode, detected.account_key.clone());
+            live(HarnessId::ClaudeCode, &detected);
             if detected.credentials.is_some() {
                 self.snapshot_detected(HarnessId::ClaudeCode, &detected)?;
             } else {
-                unreadable.insert(HarnessId::ClaudeCode, detected);
+                unreadable.push((HarnessId::ClaudeCode, detected));
             }
         }
         self.migrate_codex_slot_keys()?;
         if let Some(detected) = self.detect_codex() {
-            active_keys.insert(HarnessId::Codex, detected.account_key.clone());
+            live(HarnessId::Codex, &detected);
             self.snapshot_detected(HarnessId::Codex, &detected)?;
         }
         if let Some(detected) = self.detect_cursor() {
-            active_keys.insert(HarnessId::Cursor, detected.account_key.clone());
+            live(HarnessId::Cursor, &detected);
             self.snapshot_detected(HarnessId::Cursor, &detected)?;
             // The SDK's minted keys expire (90-day default) — an expired live
             // key fails every run with an auth error, so say so up front.
@@ -681,35 +919,78 @@ impl AgentAccounts {
                 });
             }
         }
+        let mut detected_more: Vec<(HarnessId, Detected)> = Vec::new();
+        detected_more.extend(self.detect_grok().map(|d| (HarnessId::Grok, d)));
+        detected_more.extend(self.detect_devin().map(|d| (HarnessId::Devin, d)));
+        for harness in [HarnessId::Opencode, HarnessId::Pi] {
+            let (resolved, unresolved) = self.detect_keyed(harness).await;
+            detected_more.extend(resolved.into_iter().map(|d| (harness, d)));
+            for detected in unresolved {
+                live(harness, &detected);
+                unreadable.push((harness, detected));
+            }
+        }
+        for (harness, detected) in &detected_more {
+            live(*harness, detected);
+            self.snapshot_detected(*harness, detected)?;
+        }
+        if let Some(message) = stores::opencode_env_warning() {
+            warnings.push(AgentAccountWarning {
+                harness: HarnessId::Opencode,
+                message,
+            });
+        }
         let antigravity = self.detect_antigravity().await;
 
         // Stable presentation order: provider, then slot creation order (never
-        // active-first — switching must not reshuffle the cards).
-        let providers: Vec<(HarnessId, Vec<Slot>)> =
-            [HarnessId::ClaudeCode, HarnessId::Codex, HarnessId::Cursor]
-                .into_iter()
-                .map(|harness| (harness, self.read_slots(harness)))
-                .collect();
+        // active-first — switching must not reshuffle the cards). Hermes'
+        // rows are its own credential pool, read live (never copied).
+        let mut providers: Vec<(HarnessId, Vec<Slot>)> = [
+            HarnessId::ClaudeCode,
+            HarnessId::Codex,
+            HarnessId::Cursor,
+            HarnessId::Grok,
+            HarnessId::Devin,
+            HarnessId::Opencode,
+            HarnessId::Pi,
+        ]
+        .into_iter()
+        .map(|harness| (harness, self.read_slots(harness)))
+        .collect();
+        let (hermes, hermes_active) = self.hermes_slots();
+        active_keys.insert(HarnessId::Hermes, hermes_active);
+        providers.push((HarnessId::Hermes, hermes));
         if force_usage {
             let targets: Vec<(HarnessId, &Slot, bool)> = providers
                 .iter()
                 .flat_map(|(harness, slots)| {
-                    let active_key = active_keys.get(harness);
-                    slots
-                        .iter()
-                        .map(move |slot| (*harness, slot, active_key == Some(&slot.account_key)))
+                    let active = active_keys.get(harness);
+                    slots.iter().map(move |slot| {
+                        (
+                            *harness,
+                            slot,
+                            active.is_some_and(|keys| keys.contains(&slot.account_key)),
+                        )
+                    })
                 })
                 .collect();
             self.refresh_usage(&targets).await;
+            // A probe can teach a slot who it is (Devin's key file names no
+            // one): show that in this very list.
+            for (harness, slots) in providers.iter_mut() {
+                if *harness == HarnessId::Devin {
+                    *slots = self.read_slots(*harness);
+                }
+            }
         }
         let now = now_ms();
         let usage = lock(&self.inner.usage).clone();
         let mut accounts: Vec<AgentAccount> = Vec::new();
         for (harness, slots) in &providers {
             let harness = *harness;
-            let active_key = active_keys.get(&harness).cloned();
+            let active_set = active_keys.get(&harness);
             for slot in slots {
-                let active = active_key.as_deref() == Some(slot.account_key.as_str());
+                let active = active_set.is_some_and(|keys| keys.contains(&slot.account_key));
                 let entry = usage.get(&usage_key(harness, &slot.account_key));
                 let snapshot = entry.and_then(|entry| entry.usage.as_ref());
                 accounts.push(AgentAccount {
@@ -728,20 +1009,30 @@ impl AgentAccounts {
                         .unwrap_or_default(),
                     usage_fetched_at: entry.and_then(|entry| entry.fetched_at),
                     usage_error: entry.and_then(|entry| {
-                        usage_error_message(harness, active, entry.error.as_ref()?, entry, now)
+                        usage_error_message(
+                            harness,
+                            slot.store_key.as_deref(),
+                            active,
+                            entry.error.as_ref()?,
+                            entry,
+                            now,
+                        )
                     }),
                     display_name: slot.profile.display_name.clone(),
                     organization: slot.profile.organization.clone(),
                     auth_kind: Some(slot.profile.auth_kind),
-                    switchable: true,
-                    saved_at: Some(slot.saved_at),
+                    // Hermes' pool is Hermes' to order (see module docs).
+                    switchable: harness != HarnessId::Hermes,
+                    saved_at: (harness != HarnessId::Hermes).then_some(slot.saved_at),
+                    provider: provider_group(harness, slot.store_key.as_deref()),
                 });
             }
             // A live login whose credentials we couldn't read has no slot — still
             // show it (active, but not re-activatable until the Keychain relents).
-            if let Some(u) = unreadable.get(&harness)
-                && !slots.iter().any(|s| s.account_key == u.account_key)
-            {
+            for (_, u) in unreadable.iter().filter(|(h, _)| *h == harness) {
+                if slots.iter().any(|s| s.account_key == u.account_key) {
+                    continue;
+                }
                 accounts.push(AgentAccount {
                     id: slot_id_for(harness, &u.account_key),
                     harness,
@@ -756,6 +1047,7 @@ impl AgentAccounts {
                     auth_kind: Some(u.profile.auth_kind),
                     switchable: false,
                     saved_at: None,
+                    provider: provider_group(harness, u.store_key.as_deref()),
                 });
             }
         }
@@ -772,11 +1064,23 @@ impl AgentAccounts {
     /// Swap the CLI's live login to a saved slot. Detection runs first, so the
     /// CURRENT login is snapshotted into its slot before being overwritten (the
     /// claude-swap trick — a swap never strands the session it replaces).
+    ///
+    /// Refused for Hermes (and by [`Self::forget`]): Hermes owns its
+    /// credential pool and rotates through it itself — a running Hermes
+    /// would write its own order back over any change — so zeron keeps it
+    /// read-only (see [`stores`]).
     pub async fn activate(
         &self,
         harness: HarnessId,
         account_id: &str,
     ) -> Result<AgentAccountsSnapshot, EngineError> {
+        if harness == HarnessId::Hermes {
+            return Err(EngineError::Other(
+                "Hermes picks from its own credential pool — zeron doesn't reorder it. Use \
+                 `hermes auth` to manage it."
+                    .into(),
+            ));
+        }
         let _ops = self.inner.ops.lock().await;
         // The pre-swap snapshot must hold the CURRENT tokens (the CLI may have
         // rotated its refresh token seconds ago) — never a cached read.
@@ -795,6 +1099,16 @@ impl AgentAccounts {
             HarnessId::ClaudeCode => self.activate_claude(&slot).await?,
             HarnessId::Codex => self.activate_codex(&slot)?,
             HarnessId::Cursor => self.write_cursor_auth(&slot.credentials)?,
+            HarnessId::Grok => {
+                self.write_grok_entry(slot.store_key.as_deref(), &slot.credentials)?
+            }
+            HarnessId::Devin => self.write_devin_credentials(&slot.credentials)?,
+            HarnessId::Opencode | HarnessId::Pi => {
+                let key = slot.store_key.as_deref().ok_or_else(|| {
+                    EngineError::Other("That saved login names no provider.".into())
+                })?;
+                self.write_keyed_entry(harness, key, Some(&slot.credentials))?;
+            }
             other => {
                 return Err(EngineError::Other(format!(
                     "agent accounts are not supported for {other:?}"
@@ -867,8 +1181,15 @@ impl AgentAccounts {
         write_file_atomic(&self.inner.config.codex_auth_file(), json.as_bytes(), true)
     }
 
-    /// The live login's account key, from the identity alone (no secret read).
-    fn live_account_key(&self, harness: HarnessId) -> Option<String> {
+    /// The live login's account key, from the identity alone (no secret read
+    /// for Claude). `store_key` names the entry for agents that keep one
+    /// login per model provider (OpenCode, Pi); an entry that is there but
+    /// can't be identified has no key.
+    async fn live_account_key(
+        &self,
+        harness: HarnessId,
+        store_key: Option<&str>,
+    ) -> Option<String> {
         match harness {
             HarnessId::ClaudeCode => {
                 let cfg = read_json(&self.inner.config.claude_config_file)?;
@@ -877,7 +1198,26 @@ impl AgentAccounts {
             }
             HarnessId::Codex => self.detect_codex().map(|d| d.account_key),
             HarnessId::Cursor => self.detect_cursor().map(|d| d.account_key),
+            HarnessId::Grok => self.detect_grok().map(|d| d.account_key),
+            HarnessId::Devin => self.detect_devin().map(|d| d.account_key),
+            HarnessId::Opencode | HarnessId::Pi => self
+                .detect_keyed_entry(harness, store_key?)
+                .await
+                .flatten()
+                .map(|d| d.account_key),
             _ => None,
+        }
+    }
+
+    /// Whether a per-provider agent has a live entry under `store_key` at
+    /// all, identified or not — a live login zeron can't identify is still
+    /// never replaced unasked.
+    fn has_live_entry(&self, harness: HarnessId, store_key: Option<&str>) -> bool {
+        match harness {
+            HarnessId::Opencode | HarnessId::Pi => {
+                store_key.is_none_or(|key| self.live_keyed_entry(harness, key).is_some())
+            }
+            _ => false,
         }
     }
 
@@ -887,10 +1227,11 @@ impl AgentAccounts {
     /// is no live login at all (nothing to strand; "add" must mean "works").
     /// Any other live login stays untouched — switching remains explicit.
     async fn adopt_if_live(&self, slot: &Slot) -> Result<(), EngineError> {
-        let live = self.live_account_key(slot.harness);
+        let store_key = slot.store_key.as_deref();
+        let live = self.live_account_key(slot.harness, store_key).await;
         let usable = match slot.harness {
             HarnessId::Cursor => self.cursor_live_usable(),
-            _ => live.is_some(),
+            _ => live.is_some() || self.has_live_entry(slot.harness, store_key),
         };
         if usable && live.as_deref() != Some(slot.account_key.as_str()) {
             return Ok(());
@@ -899,6 +1240,13 @@ impl AgentAccounts {
             HarnessId::ClaudeCode => self.activate_claude(slot).await?,
             HarnessId::Codex => self.activate_codex(slot)?,
             HarnessId::Cursor => self.write_cursor_auth(&slot.credentials)?,
+            HarnessId::Grok => self.write_grok_entry(store_key, &slot.credentials)?,
+            HarnessId::Devin => self.write_devin_credentials(&slot.credentials)?,
+            HarnessId::Opencode | HarnessId::Pi => {
+                if let Some(key) = store_key {
+                    self.write_keyed_entry(slot.harness, key, Some(&slot.credentials))?;
+                }
+            }
             _ => {}
         }
         *lock(&self.inner.claude_credentials) = None;
@@ -909,18 +1257,21 @@ impl AgentAccounts {
     async fn sign_out(
         &self,
         harness: HarnessId,
+        store_key: Option<&str>,
         expected_account_key: &str,
     ) -> Result<(), EngineError> {
-        if self.live_account_key(harness).as_deref() != Some(expected_account_key) {
+        if self.live_account_key(harness, store_key).await.as_deref() != Some(expected_account_key)
+        {
             return Err(EngineError::Other(
-                "The live login changed while it was being removed — refresh and try again."
-                    .into(),
+                "The live login changed while it was being removed — refresh and try again.".into(),
             ));
         }
         match harness {
             HarnessId::ClaudeCode => {
                 let (live, warning) = self.read_claude_credentials().await;
-                if self.live_account_key(harness).as_deref() != Some(expected_account_key) {
+                if self.live_account_key(harness, None).await.as_deref()
+                    != Some(expected_account_key)
+                {
                     return Err(EngineError::Other(
                         "The live login changed while it was being removed — refresh and try again."
                             .into(),
@@ -949,6 +1300,23 @@ impl AgentAccounts {
             }
             HarnessId::Codex => remove_if_exists(&self.inner.config.codex_auth_file())?,
             HarnessId::Cursor => remove_if_exists(&self.inner.config.cursor_sdk_auth_file)?,
+            // Only this login's own entry goes: other issuers (Grok) and
+            // other providers' logins and API keys (OpenCode, Pi) stay.
+            HarnessId::Grok => {
+                let map_key = self
+                    .detect_grok()
+                    .and_then(|d| d.store_key)
+                    .ok_or_else(|| {
+                        EngineError::Other("Couldn't find grok's live login to sign out.".into())
+                    })?;
+                self.remove_grok_entry(&map_key)?;
+            }
+            HarnessId::Devin => remove_if_exists(&self.inner.config.devin_credentials_file)?,
+            HarnessId::Opencode | HarnessId::Pi => {
+                let key = store_key
+                    .ok_or_else(|| EngineError::Other("That login names no provider.".into()))?;
+                self.write_keyed_entry(harness, key, None)?;
+            }
             _ => {
                 return Err(EngineError::Other(
                     "That's the live login — it can't be removed here.".into(),
@@ -975,29 +1343,43 @@ impl AgentAccounts {
         {
             return Err(EngineError::Other("Unknown account.".into()));
         }
+        if harness == HarnessId::Hermes {
+            // Hermes' rows are its own pool, not zeron slots.
+            return Err(EngineError::Other(
+                "Hermes keeps this login in its own credential pool — remove it with \
+                 `hermes auth remove`."
+                    .into(),
+            ));
+        }
         let _ops = self.inner.ops.lock().await;
         let snapshot = self.list_locked(false).await?;
-        let active = snapshot
+        let row = snapshot
             .accounts
             .iter()
-            .any(|a| a.harness == harness && a.id == account_id && a.active);
-        if active {
+            .find(|a| a.harness == harness && a.id == account_id);
+        // Per-provider agents (OpenCode, Pi): the store entry this row is.
+        let store_key = row.and_then(|a| a.provider.clone());
+        if row.is_some_and(|a| a.active) {
             // Removing the live login signs the CLI out — dropping only the
             // slot would re-detect (and re-snapshot) it on the next list, and
             // the only account must stay removable.
-            let expected = self.live_account_key(harness).ok_or_else(|| {
-                EngineError::Other(
+            let expected = self
+                .live_account_key(harness, store_key.as_deref())
+                .await
+                .ok_or_else(|| {
+                    EngineError::Other(
                     "The live login changed while it was being removed — refresh and try again."
                         .into(),
                 )
-            })?;
+                })?;
             if slot_id_for(harness, &expected) != account_id {
                 return Err(EngineError::Other(
                     "The live login changed while it was being removed — refresh and try again."
                         .into(),
                 ));
             }
-            self.sign_out(harness, &expected).await?;
+            self.sign_out(harness, store_key.as_deref(), &expected)
+                .await?;
         }
         let file = self.slots_dir(harness)?.join(format!("{account_id}.json"));
         if file.exists() {
@@ -1020,7 +1402,21 @@ impl AgentAccounts {
         harness: HarnessId,
         requester: Option<&str>,
     ) -> Result<AgentLoginStart, EngineError> {
+        self.start_login_with(harness, None, requester).await
+    }
+
+    /// [`Self::start_login_for`] for one model provider of an agent that
+    /// keeps a login per provider (`provider`: OpenCode's `openai` /
+    /// `github-copilot`, Pi's `openai-codex`, Hermes' `openai-codex` /
+    /// `nous`); `None` picks the agent's default.
+    pub async fn start_login_with(
+        &self,
+        harness: HarnessId,
+        provider: Option<&str>,
+        requester: Option<&str>,
+    ) -> Result<AgentLoginStart, EngineError> {
         self.sweep_flows();
+        let provider = provider.filter(|p| !p.is_empty());
         let mut start = match harness {
             HarnessId::ClaudeCode => {
                 // A new start supersedes any earlier Claude flow and its
@@ -1028,9 +1424,33 @@ impl AgentAccounts {
                 self.reap_spawned_flows(HarnessId::ClaudeCode);
                 self.start_claude_login().await
             }
-            HarnessId::Codex => self.start_codex_login().await?,
+            HarnessId::Codex => self.start_codex_login(requester).await?,
             HarnessId::Cursor => self.start_cursor_login().await?,
             HarnessId::Antigravity => self.start_antigravity_login(requester),
+            HarnessId::Grok => self.start_grok_login(requester).await?,
+            HarnessId::Devin => self.start_devin_login(requester)?,
+            HarnessId::Opencode => match provider.unwrap_or("openai") {
+                "openai" => {
+                    self.start_openai_login(HarnessId::Opencode, "openai")
+                        .await?
+                }
+                "github-copilot" => self.start_copilot_login(HarnessId::Opencode).await?,
+                other => return Err(stores::unsupported_login(harness, other)),
+            },
+            HarnessId::Pi => match provider.unwrap_or("openai-codex") {
+                "openai-codex" => {
+                    self.start_openai_login(HarnessId::Pi, "openai-codex")
+                        .await?
+                }
+                other => return Err(stores::unsupported_login(harness, other)),
+            },
+            HarnessId::Hermes => {
+                let provider = provider.unwrap_or("openai-codex");
+                if !stores::HERMES_LOGINS.contains(&provider) {
+                    return Err(stores::unsupported_login(harness, provider));
+                }
+                self.start_hermes_login(provider).await?
+            }
             other => {
                 return Err(EngineError::Other(format!(
                     "agent logins are not supported for {other:?}"
@@ -1104,6 +1524,8 @@ impl AgentAccounts {
                 started_at: Instant::now(),
                 state: task_state,
                 handle,
+                home: None,
+                port: None,
             },
         );
         AgentLoginStart {
@@ -1152,7 +1574,7 @@ impl AgentAccounts {
                 &format!(
                     "<!doctype html><title>Sign-in failed</title><p>{}</p>\
                      <p>Return to Zeron to try again.</p>",
-                    html_escape(&error.to_string())
+                    html_escape(&zeron_harness::redact::redact_output(&error.to_string()))
                 ),
             ),
         };
@@ -1211,17 +1633,94 @@ impl AgentAccounts {
         }
     }
 
-    async fn start_codex_login(&self) -> Result<AgentLoginStart, EngineError> {
+    /// Cancel every pending flow holding the fixed loopback `port` — the
+    /// ChatGPT sign-ins (codex's, OpenCode's, Pi's) all need 1455, and a
+    /// lingering one makes every retry fail to bind.
+    fn reap_port_flows(&self, port: u16) {
+        let stale: Vec<String> = lock(&self.inner.flows)
+            .iter()
+            .filter(|(_, f)| match f {
+                LoginFlow::Task { port: Some(p), .. } => *p == port,
+                LoginFlow::Spawned {
+                    harness: HarnessId::Codex,
+                    ..
+                } => port == oauth::OPENAI_LOOPBACK_PORT,
+                _ => false,
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in stale {
+            self.cancel_login(&id);
+        }
+    }
+
+    /// Spawn a CLI login child, register it as a [`LoginFlow::Spawned`], and
+    /// wait briefly for the sign-in page it prints. `home` is the flow's
+    /// throwaway dir — reclaimed on any failure here, and on cancel/finish.
+    #[allow(clippy::too_many_arguments)]
+    async fn spawn_login_child(
+        &self,
+        login_id: String,
+        harness: HarnessId,
+        mut command: zeron_harness::process::Command,
+        home: PathBuf,
+        completion: SpawnedCompletion,
+        scan_url: fn(&str) -> Option<String>,
+        requester: Option<&str>,
+    ) -> Result<AgentLoginStart, EngineError> {
+        command
+            .stdin(zeron_harness::process::Stdio::null())
+            .stdout(zeron_harness::process::Stdio::piped())
+            .stderr(zeron_harness::process::Stdio::piped());
+        let child = match command.spawn() {
+            Ok(child) => child,
+            Err(err) => {
+                let _ = std::fs::remove_dir_all(&home);
+                let cli = stores::cli_name(harness);
+                return Err(EngineError::Other(
+                    if err.kind() == std::io::ErrorKind::NotFound {
+                        format!("The `{cli}` CLI was not found on this device — install it first.")
+                    } else {
+                        format!("Could not start the {cli} sign-in: {err}")
+                    },
+                ));
+            }
+        };
+        let (child, output, exit) = wire_login_child(child);
+        lock(&self.inner.flows).insert(
+            login_id.clone(),
+            LoginFlow::Spawned {
+                harness,
+                child,
+                home,
+                completion,
+                started_at: Instant::now(),
+                output: output.clone(),
+                exit: exit.clone(),
+                scan_url,
+                requester: requester.map(str::to_string),
+            },
+        );
+        let url = await_login_url(&output, &exit, scan_url).await;
+        Ok(AgentLoginStart {
+            login_id,
+            url,
+            mode: AgentLoginMode::Browser,
+            callback_port: None,
+        })
+    }
+
+    async fn start_codex_login(
+        &self,
+        requester: Option<&str>,
+    ) -> Result<AgentLoginStart, EngineError> {
         self.reap_spawned_flows(HarnessId::Codex);
+        // `codex login` binds the same fixed port as the ChatGPT sign-ins.
+        self.reap_port_flows(oauth::OPENAI_LOOPBACK_PORT);
         let login_id = new_id();
         // A throwaway CODEX_HOME isolates the new login completely — the live
         // ~/.codex session is never touched until the user explicitly switches.
-        let home = self
-            .inner
-            .config
-            .root_dir()
-            .join(format!(".login-{login_id}"));
-        std::fs::create_dir_all(&home)?;
+        let home = self.login_home(&login_id)?;
         // Resolve through the harness itself (`CODEX_EXECUTABLE`, PATH, the
         // login-shell snapshot, install dirs — the Windows npm payload
         // included) and compose the same child PATH a chat run gets, so
@@ -1254,42 +1753,19 @@ impl AgentAccounts {
         if let Some(noop_browser) = ensure_noop_browser(&self.inner.config.root_dir()) {
             command.env("BROWSER", noop_browser);
         }
-        let child = match command.spawn() {
-            Ok(child) => child,
-            Err(err) => {
-                let _ = std::fs::remove_dir_all(&home);
-                return Err(EngineError::Other(
-                    if err.kind() == std::io::ErrorKind::NotFound {
-                        "The `codex` CLI was not found on this device — install it first.".into()
-                    } else {
-                        format!("Could not start codex login: {err}")
-                    },
-                ));
-            }
-        };
-
         // codex prints the authorize URL (to stderr as of 0.142 — scan both
         // streams); grab it so the app can open the single authorization tab
         // (the CLI's own browser-open is suppressed via BROWSER above).
-        let (child, output, exit) = wire_login_child(child);
-        lock(&self.inner.flows).insert(
-            login_id.clone(),
-            LoginFlow::Spawned {
-                harness: HarnessId::Codex,
-                child,
-                home,
-                started_at: Instant::now(),
-                output: output.clone(),
-                exit: exit.clone(),
-            },
-        );
-        let url = await_login_url(&output, &exit, scan_openai_url).await;
-        Ok(AgentLoginStart {
+        self.spawn_login_child(
             login_id,
-            url,
-            mode: AgentLoginMode::Browser,
-            callback_port: None,
-        })
+            HarnessId::Codex,
+            command,
+            home,
+            SpawnedCompletion::CredentialFile,
+            scan_openai_url,
+            requester,
+        )
+        .await
     }
 
     /// Antigravity: its ACP server's own Google sign-in. The start replies at
@@ -1306,10 +1782,11 @@ impl AgentAccounts {
         }));
         #[cfg(unix)]
         let browser = {
-            let root = self.inner.config.root_dir();
-            std::fs::create_dir_all(&root)
+            self.inner
+                .config
+                .private_root()
                 .ok()
-                .and_then(|()| ensure_noop_browser(&root))
+                .and_then(|root| ensure_noop_browser(&root))
         };
         #[cfg(not(unix))]
         let browser = None;
@@ -1346,6 +1823,8 @@ impl AgentAccounts {
                 started_at: Instant::now(),
                 state,
                 handle,
+                home: None,
+                port: None,
             },
         );
         AgentLoginStart {
@@ -1363,49 +1842,23 @@ impl AgentAccounts {
     async fn start_cursor_login(&self) -> Result<AgentLoginStart, EngineError> {
         self.reap_spawned_flows(HarnessId::Cursor);
         let login_id = new_id();
-        let home = self
-            .inner
-            .config
-            .root_dir()
-            .join(format!(".login-{login_id}"));
-        std::fs::create_dir_all(&home)?;
-        let mut cmd = zeron_harness::cursor::login_command(&home.join("auth.json"))
+        let home = self.login_home(&login_id)?;
+        let cmd = zeron_harness::cursor::login_command(&home.join("auth.json"))
             .await
             .map_err(|e| {
                 let _ = std::fs::remove_dir_all(&home);
                 EngineError::Other(format!("Could not start the Cursor login: {e}"))
             })?;
-        cmd.stdin(zeron_harness::process::Stdio::null())
-            .stdout(zeron_harness::process::Stdio::piped())
-            .stderr(zeron_harness::process::Stdio::piped());
-        let child = match cmd.spawn() {
-            Ok(child) => child,
-            Err(err) => {
-                let _ = std::fs::remove_dir_all(&home);
-                return Err(EngineError::Other(format!(
-                    "Could not start the Cursor login: {err}"
-                )));
-            }
-        };
-        let (child, output, exit) = wire_login_child(child);
-        lock(&self.inner.flows).insert(
-            login_id.clone(),
-            LoginFlow::Spawned {
-                harness: HarnessId::Cursor,
-                child,
-                home,
-                started_at: Instant::now(),
-                output: output.clone(),
-                exit: exit.clone(),
-            },
-        );
-        let url = await_login_url(&output, &exit, scan_cursor_url).await;
-        Ok(AgentLoginStart {
+        self.spawn_login_child(
             login_id,
-            url,
-            mode: AgentLoginMode::Browser,
-            callback_port: None,
-        })
+            HarnessId::Cursor,
+            cmd,
+            home,
+            SpawnedCompletion::CredentialFile,
+            scan_cursor_url,
+            None,
+        )
+        .await
     }
 
     /// Exchange the pasted `code#state` for tokens and save the account as a
@@ -1482,10 +1935,10 @@ impl AgentAccounts {
             .map_err(|e| EngineError::Other(format!("token exchange failed: {e}")))?;
         if !token.status().is_success() {
             let status = token.status();
-            let body = token.text().await.unwrap_or_default();
-            let excerpt: String = body.chars().take(200).collect();
+            // Never echo the body: it can carry token material on odd errors,
+            // and the loopback page shows this message to the browser.
             return Err(EngineError::Other(format!(
-                "Anthropic rejected the code ({status}): {excerpt}"
+                "Anthropic rejected the code ({status}) — try again."
             )));
         }
         let token: serde_json::Value = token
@@ -1596,6 +2049,7 @@ impl AgentAccounts {
             claude_config: Some(serde_json::json!({ "oauthAccount": oauth_account })),
             saved_at: now_ms(),
             created_at: None,
+            store_key: None,
         };
         let _ops = self.inner.ops.lock().await;
         self.write_slot(&slot)?;
@@ -1607,34 +2061,53 @@ impl AgentAccounts {
         if let Some(poll) = self.poll_task_login(login_id) {
             return Ok(poll);
         }
-        let (harness, home, exit, output) = match lock(&self.inner.flows).get(login_id) {
-            None => {
-                return Err(EngineError::Other(
-                    "This sign-in attempt expired — start again.".into(),
-                ));
+        let (harness, home, completion, exit, output, scan_url, requester) =
+            match lock(&self.inner.flows).get(login_id) {
+                None => {
+                    return Err(EngineError::Other(
+                        "This sign-in attempt expired — start again.".into(),
+                    ));
+                }
+                Some(LoginFlow::Claude { .. }) => {
+                    return Ok(AgentLoginPoll {
+                        status: AgentLoginStatus::Pending,
+                        message: None,
+                        url: None,
+                        callback_port: None,
+                    });
+                }
+                Some(LoginFlow::Task { .. }) => unreachable!("task logins poll above"),
+                Some(LoginFlow::Spawned {
+                    harness,
+                    home,
+                    completion,
+                    exit,
+                    output,
+                    scan_url,
+                    requester,
+                    ..
+                }) => (
+                    *harness,
+                    home.clone(),
+                    *completion,
+                    exit.clone(),
+                    output.clone(),
+                    *scan_url,
+                    requester.clone(),
+                ),
+            };
+        let exited = *lock(&exit);
+        let detected = match completion {
+            SpawnedCompletion::CredentialFile => {
+                read_json(&home.join("auth.json")).and_then(|auth| match harness {
+                    HarnessId::Codex => parse_codex_auth(auth),
+                    HarnessId::Cursor => parse_cursor_auth(auth),
+                    HarnessId::Grok => stores::parse_grok_auth(auth),
+                    _ => None,
+                })
             }
-            Some(LoginFlow::Claude { .. }) => {
-                return Ok(AgentLoginPoll {
-                    status: AgentLoginStatus::Pending,
-                    message: None,
-                    url: None,
-                    callback_port: None,
-                });
-            }
-            Some(LoginFlow::Task { .. }) => unreachable!("task logins poll above"),
-            Some(LoginFlow::Spawned {
-                harness,
-                home,
-                exit,
-                output,
-                ..
-            }) => (*harness, home.clone(), exit.clone(), output.clone()),
+            SpawnedCompletion::ExitSuccess => None,
         };
-        let detected = read_json(&home.join("auth.json")).and_then(|auth| match harness {
-            HarnessId::Codex => parse_codex_auth(auth),
-            HarnessId::Cursor => parse_cursor_auth(auth),
-            _ => None,
-        });
         if let Some(detected) = detected {
             let _ops = self.inner.ops.lock().await;
             self.snapshot_detected(harness, &detected)?;
@@ -1652,7 +2125,15 @@ impl AgentAccounts {
                 callback_port: None,
             });
         }
-        let exited = *lock(&exit);
+        if completion == SpawnedCompletion::ExitSuccess && exited == Some(Some(0)) {
+            self.cancel_login(login_id);
+            return Ok(AgentLoginPoll {
+                status: AgentLoginStatus::Done,
+                message: None,
+                url: None,
+                callback_port: None,
+            });
+        }
         if let Some(code) = exited {
             self.cancel_login(login_id);
             let message = if code == Some(0) {
@@ -1660,9 +2141,9 @@ impl AgentAccounts {
             } else {
                 let output = lock(&output);
                 // The cursor shim reports failures as a JSONL fatal frame;
-                // codex prints plain text. Surface the human part.
+                // the CLIs print plain text. Surface the human part.
                 scan_shim_fatal(&output).unwrap_or_else(|| {
-                    output
+                    strip_ansi(&output)
                         .trim()
                         .lines()
                         .last()
@@ -1670,18 +2151,40 @@ impl AgentAccounts {
                         .to_string()
                 })
             };
+            // A CLI's last words can carry an authorize url, a device code or
+            // worse — never hand them to the UI (or a log) raw.
             return Ok(AgentLoginPoll {
                 status: AgentLoginStatus::Error,
-                message: Some(message),
+                message: Some(zeron_harness::redact::redact_output(&message)),
                 url: None,
                 callback_port: None,
             });
         }
+        // Still waiting: re-report the sign-in page (a page printed after
+        // the start's short wait only reaches the app here) and any device
+        // code the user has to type in.
+        let (url, message) = {
+            let output = lock(&output);
+            // Only the device-code CLIs print a code; a loopback login's
+            // output (codex's authorize url) is never scanned for one.
+            let code = matches!(harness, HarnessId::Grok | HarnessId::Hermes)
+                .then(|| scan_device_code(&output))
+                .flatten();
+            (scan_url(&output), code)
+        };
+        let callback_port = url.as_deref().and_then(loopback_port);
+        if let (Some(requester), Some(port)) = (&requester, callback_port)
+            && !self.inner.callback_routes.is_registered(login_id)
+        {
+            self.inner
+                .callback_routes
+                .register(login_id, port, requester, FLOW_TTL);
+        }
         Ok(AgentLoginPoll {
             status: AgentLoginStatus::Pending,
-            message: None,
-            url: None,
-            callback_port: None,
+            message: message.map(|code| format!("Enter the code {code} when asked.")),
+            url,
+            callback_port,
         })
     }
 
@@ -1720,7 +2223,7 @@ impl AgentAccounts {
                 },
                 Some(Err(message)) => AgentLoginPoll {
                     status: AgentLoginStatus::Error,
-                    message: Some(message.clone()),
+                    message: Some(zeron_harness::redact::redact_output(message)),
                     url: None,
                     callback_port: None,
                 },
@@ -1748,7 +2251,12 @@ impl AgentAccounts {
                 }
                 let _ = std::fs::remove_dir_all(&home);
             }
-            Some(LoginFlow::Task { handle, .. }) => handle.abort(),
+            Some(LoginFlow::Task { handle, home, .. }) => {
+                handle.abort();
+                if let Some(home) = home {
+                    let _ = std::fs::remove_dir_all(&home);
+                }
+            }
             _ => {}
         }
     }
@@ -1809,6 +2317,8 @@ impl AgentAccounts {
                 },
                 credentials,
                 claude_config: Some(claude_config),
+                store_key: None,
+                identity_known: true,
             }),
             warning,
         )
@@ -1877,16 +2387,33 @@ impl AgentAccounts {
         let Some(credentials) = &d.credentials else {
             return Ok(());
         };
+        let id = slot_id_for(harness, &d.account_key);
+        // A store without identity (Devin's bare key) must not overwrite the
+        // identity a usage probe already wrote into the slot.
+        let profile = match d.identity_known {
+            true => d.profile.clone(),
+            false => self
+                .read_slot(harness, &id)
+                .map(|existing| existing.profile)
+                .unwrap_or_else(|| d.profile.clone()),
+        };
         self.write_slot(&Slot {
-            id: slot_id_for(harness, &d.account_key),
+            id,
             harness,
             account_key: d.account_key.clone(),
-            profile: d.profile.clone(),
+            profile,
             credentials: credentials.clone(),
             claude_config: d.claude_config.clone(),
             saved_at: now_ms(),
             created_at: None,
+            store_key: d.store_key.clone(),
         })
+    }
+
+    /// One saved slot by id (`None` when missing or unparseable).
+    fn read_slot(&self, harness: HarnessId, id: &str) -> Option<Slot> {
+        let file = self.slots_dir(harness).ok()?.join(format!("{id}.json"));
+        serde_json::from_str(&std::fs::read_to_string(file).ok()?).ok()
     }
 
     // ── Claude credential store (Keychain on macOS, file elsewhere) ─────────
@@ -1969,8 +2496,12 @@ impl AgentAccounts {
     // ── slot files ──────────────────────────────────────────────────────────
 
     fn slots_dir(&self, harness: HarnessId) -> Result<PathBuf, EngineError> {
-        let dir = self.inner.config.root_dir().join(harness_slug(harness));
-        std::fs::create_dir_all(&dir)?;
+        let dir = self
+            .inner
+            .config
+            .private_root()?
+            .join(harness_slug(harness));
+        private_dir(&dir)?;
         Ok(dir)
     }
 
@@ -2106,7 +2637,7 @@ impl AgentAccounts {
         let persisted = serde_json::to_vec_pretty(&file)
             .map_err(|e| EngineError::Other(e.to_string()))
             .and_then(|json| {
-                std::fs::create_dir_all(self.inner.config.root_dir())?;
+                self.inner.config.private_root()?;
                 write_file_atomic(&self.inner.config.usage_cache_file(), &json, true)
             });
         if let Err(err) = persisted {
@@ -2125,6 +2656,11 @@ impl AgentAccounts {
             HarnessId::ClaudeCode => self.claude_usage(slot, is_active).await,
             HarnessId::Codex => self.codex_usage(slot).await,
             HarnessId::Cursor => self.cursor_usage(slot).await,
+            HarnessId::Grok => self.grok_usage(slot, is_active).await,
+            HarnessId::Devin => self.devin_usage(slot).await,
+            HarnessId::Opencode | HarnessId::Pi | HarnessId::Hermes => {
+                self.keyed_usage(harness, slot).await
+            }
             _ => Err(ProbeError::NoCredentials {
                 why: NoCredentials::Missing,
             }),
@@ -2502,6 +3038,7 @@ impl AntigravityLogin {
             auth_kind: Some(kind),
             switchable: false,
             saved_at: None,
+            provider: None,
         }
     }
 }
@@ -2541,6 +3078,19 @@ async fn antigravity_keychain_item(_account: &str) -> bool {
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────
+
+/// The upstream group a row belongs to (`AgentAccount::provider`): only
+/// agents that keep one login PER model provider have one. (Grok slots also
+/// carry a store key — the issuer entry they swap — but one Grok login is
+/// live at a time, so its rows form a single group.)
+fn provider_group(harness: HarnessId, store_key: Option<&str>) -> Option<String> {
+    matches!(
+        harness,
+        HarnessId::Opencode | HarnessId::Pi | HarnessId::Hermes
+    )
+    .then(|| store_key.map(str::to_string))
+    .flatten()
+}
 
 fn harness_slug(harness: HarnessId) -> &'static str {
     match harness {
@@ -2742,6 +3292,8 @@ fn parse_codex_auth(auth: serde_json::Value) -> Option<Detected> {
             },
             credentials: Some(auth),
             claude_config: None,
+            store_key: None,
+            identity_known: true,
         });
     }
     let api_key = str_field(&auth, "OPENAI_API_KEY")?;
@@ -2765,6 +3317,8 @@ fn parse_codex_auth(auth: serde_json::Value) -> Option<Detected> {
         },
         credentials: Some(auth),
         claude_config: None,
+        store_key: None,
+        identity_known: true,
     })
 }
 
@@ -2806,6 +3360,8 @@ fn parse_cursor_auth(auth: serde_json::Value) -> Option<Detected> {
         },
         credentials: Some(auth),
         claude_config: None,
+        store_key: None,
+        identity_known: true,
     })
 }
 
@@ -2938,15 +3494,19 @@ fn schema_error(provider: &'static str, body: &serde_json::Value) -> ProbeError 
 /// failures that need no explanation beyond the missing meters.
 fn usage_error_message(
     harness: HarnessId,
+    store_key: Option<&str>,
     active: bool,
     error: &ProbeError,
     entry: &UsageEntry,
     now: i64,
 ) -> Option<String> {
-    let provider = match harness {
-        HarnessId::ClaudeCode => "Anthropic",
-        HarnessId::Codex => "OpenAI",
-        HarnessId::Cursor => "Cursor",
+    let provider = match (harness, store_key) {
+        (HarnessId::ClaudeCode, _) => "Anthropic",
+        (HarnessId::Codex, _) => "OpenAI",
+        (HarnessId::Cursor, _) => "Cursor",
+        (HarnessId::Grok, _) => "xAI",
+        (HarnessId::Devin, _) => "Devin",
+        (_, Some(key)) => stores::upstream_vendor(key),
         _ => "the provider",
     };
     let retry = entry
@@ -2956,19 +3516,31 @@ fn usage_error_message(
         .unwrap_or_default();
     Some(match error {
         ProbeError::RateLimited { .. } => format!("Rate limited by {provider}{retry}"),
+        // Devin's key never expires on its own: a rejection means it was
+        // revoked, whichever login it is.
+        ProbeError::Unauthorized { .. } if harness == HarnessId::Devin => {
+            "Signed out — sign in again".to_string()
+        }
         ProbeError::Unauthorized { .. } if active => {
             // The CLI owns (and refreshes) the live token; it just hasn't yet.
-            let cli = match harness {
-                HarnessId::Codex => "codex",
-                HarnessId::Cursor => "Cursor",
-                _ => "claude",
-            };
-            format!("Session expired — it refreshes the next time {cli} runs")
+            format!(
+                "Session expired — it refreshes the next time {} runs",
+                stores::cli_name(harness)
+            )
         }
-        // Codex slots aren't refreshed in the background; the CLI refreshes
-        // a switched-to login on its next run.
-        ProbeError::Unauthorized { .. } if harness == HarnessId::Codex => {
+        // Codex-style slots aren't refreshed in the background (their
+        // refresh tokens rotate); the CLI refreshes a switched-to login on
+        // its next run. Hermes refreshes its own pool.
+        ProbeError::Unauthorized { .. }
+            if matches!(
+                harness,
+                HarnessId::Codex | HarnessId::Opencode | HarnessId::Pi
+            ) =>
+        {
             "Session expired — switch to it to refresh".to_string()
+        }
+        ProbeError::Unauthorized { .. } if harness == HarnessId::Hermes => {
+            "Session expired — it refreshes the next time hermes uses it".to_string()
         }
         ProbeError::Unauthorized { .. } => "Signed out — sign in again".to_string(),
         ProbeError::Http { status, .. } if *status >= 500 => {
@@ -2987,6 +3559,12 @@ fn usage_error_message(
         ProbeError::NoCredentials {
             why: NoCredentials::Missing,
         } => return None,
+        ProbeError::NoCredentials {
+            why: NoCredentials::Unsupported,
+        } => "No usage view for this login".to_string(),
+        ProbeError::UntrustedEndpoint => {
+            "Usage skipped — this login names a server zeron doesn't recognize".to_string()
+        }
     })
 }
 
@@ -3090,10 +3668,106 @@ fn json_ms(value: Option<&serde_json::Value>) -> Option<DateTime<Utc>> {
 }
 
 fn scan_openai_url(output: &str) -> Option<String> {
-    let start = output.find("https://auth.openai.com/")?;
-    let rest = &output[start..];
-    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
-    Some(rest[..end].to_string())
+    scan_https_url(output, &["auth.openai.com"])
+}
+
+/// Terminal escape sequences (colours, cursor moves) removed — the CLIs
+/// colour their sign-in urls and codes.
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek() {
+            // CSI: parameters/intermediates up to a final byte in @..~.
+            Some('[') => {
+                chars.next();
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            // OSC (hyperlinks): up to BEL or ESC \.
+            Some(']') => {
+                chars.next();
+                while let Some(c) = chars.next() {
+                    if c == '\u{7}' {
+                        break;
+                    }
+                    if c == '\u{1b}' {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            _ => {
+                chars.next();
+            }
+        }
+    }
+    out
+}
+
+/// The first `https://` url in `output` (escapes stripped) whose host is
+/// one of `hosts` or a subdomain of one (on a label boundary), with no
+/// userinfo or explicit port — see [`stores::trusted_page`].
+fn scan_https_url(output: &str, hosts: &[&str]) -> Option<String> {
+    let text = strip_ansi(output);
+    let mut rest = text.as_str();
+    while let Some(start) = rest.find("https://") {
+        let candidate = &rest[start..];
+        let end = candidate
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>'))
+            .unwrap_or(candidate.len());
+        let url = candidate[..end].trim_end_matches(['.', ',', ';', ')', ']']);
+        if stores::trusted_page(url, hosts) {
+            return Some(url.to_string());
+        }
+        rest = &candidate[end.max(1)..];
+    }
+    None
+}
+
+/// A device-flow user code a CLI printed for the user to type in: `Code:
+/// ABCD-1234` / `enter code: ABCD-1234` on one line, or a line saying to
+/// enter the code followed by the code alone. `None` for anything else — a
+/// loopback login's output has no code.
+fn scan_device_code(output: &str) -> Option<String> {
+    let text = strip_ansi(output);
+    let is_code = |token: &str| {
+        let token = token.trim();
+        (4..=16).contains(&token.len())
+            && token.chars().any(|c| c.is_ascii_digit() || c == '-')
+            && token
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-')
+            && !token.starts_with('-')
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    for (ix, line) in lines.iter().enumerate() {
+        let lower = line.to_ascii_lowercase();
+        let Some(at) = lower.rfind("code") else {
+            continue;
+        };
+        let after = line[at + 4..].trim_start_matches([':', ' ', '\t']);
+        if let Some(token) = after.split_whitespace().next()
+            && is_code(token)
+        {
+            return Some(token.to_string());
+        }
+        if lower.contains("enter") || lower.trim_end().ends_with("code:") {
+            if let Some(next) = lines[ix + 1..].iter().find(|l| !l.trim().is_empty())
+                && is_code(next)
+            {
+                return Some(next.trim().to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Path of the no-op "browser" script `start_codex_login` hands the CLI via
@@ -3112,6 +3786,25 @@ fn ensure_noop_browser(root: &Path) -> Option<PathBuf> {
     Some(path)
 }
 
+/// A "browser" that records the url it was asked to open into
+/// `$ZERON_LOGIN_URL_FILE` instead of opening it — so the app opens the
+/// one tab (on the requesting device, for a remote login) even when the CLI
+/// never prints its sign-in url. Unix only, like [`ensure_noop_browser`].
+#[cfg(unix)]
+fn ensure_recording_browser(root: &Path) -> Option<PathBuf> {
+    // `umask 077`: should the file not exist yet, it's still owner-only
+    // (the sign-in pre-creates it 0600).
+    const SCRIPT: &str = "#!/bin/sh\numask 077\n[ -n \"$ZERON_LOGIN_URL_FILE\" ] && \
+                          printf '%s\\n' \"$1\" >> \"$ZERON_LOGIN_URL_FILE\"\nexit 0\n";
+    let path = root.join(".record-browser");
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(SCRIPT) {
+        std::fs::write(&path, SCRIPT).ok()?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).ok()?;
+    }
+    Some(path)
+}
+
 /// First JSONL frame with the given `ev` in a cursor-shim output accumulator.
 fn scan_shim_event(output: &str, ev: &str) -> Option<serde_json::Value> {
     output.lines().find_map(|line| {
@@ -3120,9 +3813,15 @@ fn scan_shim_event(output: &str, ev: &str) -> Option<serde_json::Value> {
     })
 }
 
+/// The Cursor SDK's sign-in page from the shim's `auth-url` frame — only a
+/// Cursor https page (it's opened on the requesting device).
 fn scan_cursor_url(output: &str) -> Option<String> {
     str_field(&scan_shim_event(output, "auth-url")?, "url")
+        .filter(|url| stores::trusted_page(url, CURSOR_DOMAINS))
 }
+
+/// Where the Cursor SDK's browser sign-in lives.
+const CURSOR_DOMAINS: &[&str] = &["cursor.com", "cursor.sh"];
 
 fn scan_shim_fatal(output: &str) -> Option<String> {
     str_field(&scan_shim_event(output, "fatal")?, "message")
@@ -3245,7 +3944,10 @@ fn pkce_pair() -> (String, String) {
 /// actually redirects to — a buggy or hostile peer can't make us bind (and
 /// receive local traffic on) an arbitrary loopback port.
 pub(crate) fn tunnel_port_allowed(port: u16, url: Option<&str>) -> bool {
-    port >= 1024 && url.and_then(loopback_port).is_some_and(|redirect| redirect == port)
+    port >= 1024
+        && url
+            .and_then(loopback_port)
+            .is_some_and(|redirect| redirect == port)
 }
 
 pub(crate) fn loopback_port(url: &str) -> Option<u16> {
@@ -3273,6 +3975,17 @@ async fn await_claude_callback(
     listener: &tokio::net::TcpListener,
     state: &str,
 ) -> (Result<String, String>, tokio::net::TcpStream) {
+    await_loopback_callback(listener, "/callback", state, "Claude").await
+}
+
+/// [`await_claude_callback`] for any loopback redirect: serve `path` until a
+/// request carries our `state`; `who` names the provider in a refusal.
+async fn await_loopback_callback(
+    listener: &tokio::net::TcpListener,
+    path: &str,
+    state: &str,
+    who: &str,
+) -> (Result<String, String>, tokio::net::TcpStream) {
     use tokio::io::AsyncWriteExt as _;
     loop {
         let Ok((mut socket, _)) = listener.accept().await else {
@@ -3283,7 +3996,7 @@ async fn await_claude_callback(
             continue;
         };
         let url = reqwest::Url::parse(&format!("http://localhost{target}")).ok();
-        let Some(url) = url.filter(|url| url.path() == "/callback") else {
+        let Some(url) = url.filter(|url| url.path() == path) else {
             let _ = socket
                 .write_all(http_response("404 Not Found", &[], "").as_bytes())
                 .await;
@@ -3306,7 +4019,7 @@ async fn await_claude_callback(
         let reason = param("error_description")
             .or_else(|| param("error"))
             .unwrap_or_else(|| "no authorization code came back".into());
-        return (Err(format!("Claude sign-in failed: {reason}")), socket);
+        return (Err(format!("{who} sign-in failed: {reason}")), socket);
     }
 }
 
@@ -3380,7 +4093,6 @@ fn urlencode(input: &str) -> String {
     out
 }
 
-/// Atomic write via a same-dir temp file + rename; `secret` = 0600 from birth.
 fn remove_if_exists(file: &Path) -> Result<(), EngineError> {
     match std::fs::remove_file(file) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
@@ -3388,24 +4100,65 @@ fn remove_if_exists(file: &Path) -> Result<(), EngineError> {
     }
 }
 
+/// Atomic write via a same-dir temp file + rename; `secret` = 0600 from birth.
+///
+/// The temp file has a random name and is created exclusively (`O_CREAT |
+/// O_EXCL`, which never follows or reuses a pre-planted path or symlink),
+/// gets its permissions set on the open handle before any byte is written,
+/// is fsynced, then renamed over `file` — replacing a symlink there rather
+/// than writing through it. A crash leaves at worst an owner-only temp file
+/// and never a torn target.
 fn write_file_atomic(file: &Path, bytes: &[u8], secret: bool) -> Result<(), EngineError> {
-    let tmp = file.with_extension(format!("tmp-{}", std::process::id()));
-    {
-        use std::io::Write;
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        if secret {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        #[cfg(not(unix))]
-        let _ = secret;
-        let mut handle = options.open(&tmp)?;
-        handle.write_all(bytes)?;
-    }
-    std::fs::rename(&tmp, file)?;
+    stage_file_atomic(file, bytes, secret)?
+        .persist(file)
+        .map_err(|e| EngineError::from(e.error))?;
     Ok(())
+}
+
+/// The first half of [`write_file_atomic`]: `bytes` written and synced to a
+/// fresh, exclusive, same-directory temp file with the final permissions,
+/// ready to `persist` over `file`. Callers that must re-check the target
+/// right before replacing it (see `stores::merge_json_entry`) stage first, so
+/// only the comparison and the rename remain between their check and the
+/// swap. Dropping the returned file deletes it.
+fn stage_file_atomic(
+    file: &Path,
+    bytes: &[u8],
+    secret: bool,
+) -> Result<tempfile::NamedTempFile, EngineError> {
+    use std::io::Write;
+    let dir = file
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let name = file
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut tmp = tempfile::Builder::new()
+        .prefix(&format!(".{name}."))
+        .suffix(".tmp")
+        .tempfile_in(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Secrets: owner-only. Anything else keeps the target's mode (a
+        // config file the user made group-readable stays so).
+        let mode = if secret {
+            0o600
+        } else {
+            std::fs::metadata(file)
+                .map(|m| m.permissions().mode() & 0o777)
+                .unwrap_or(0o644)
+        };
+        tmp.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(mode))?;
+    }
+    #[cfg(not(unix))]
+    let _ = secret;
+    tmp.write_all(bytes)?;
+    tmp.as_file().sync_all()?;
+    Ok(tmp)
 }
 
 #[cfg(test)]
@@ -3572,6 +4325,24 @@ mod tests {
             Some("https://cursor.com/loginDeepControl?challenge=x")
         );
         assert_eq!(scan_cursor_url("no frames here"), None);
+        // Only a Cursor https page is ever opened on the requesting device.
+        for url in [
+            "https://evil.example/loginDeepControl?challenge=x",
+            "https://cursor.com.evil.example/loginDeepControl",
+            "http://cursor.com/loginDeepControl",
+            "https://user@cursor.com/loginDeepControl",
+            "https://cursor.com:8443/loginDeepControl",
+            "javascript:alert(1)",
+        ] {
+            let frame = format!("{}\n", serde_json::json!({ "ev": "auth-url", "url": url }));
+            assert_eq!(scan_cursor_url(&frame), None, "{url}");
+        }
+        assert!(
+            scan_cursor_url(
+                "{\"ev\":\"auth-url\",\"url\":\"https://www.cursor.com/loginDeepControl?c=1\"}\n"
+            )
+            .is_some()
+        );
         assert_eq!(
             scan_shim_fatal("{\"ev\":\"fatal\",\"message\":\"cursor login failed: boom\"}\n")
                 .as_deref(),
@@ -3587,6 +4358,14 @@ mod tests {
             Some("https://auth.openai.com/authorize?x=1")
         );
         assert_eq!(scan_openai_url("nothing here"), None);
+        for output in [
+            "open https://auth.openai.com.evil.example/authorize?x=1",
+            "open https://auth.openai.com@evil.example/authorize?x=1",
+            "open https://auth.openai.com:8443/authorize?x=1",
+            "open http://auth.openai.com/authorize?x=1",
+        ] {
+            assert_eq!(scan_openai_url(output), None, "{output}");
+        }
     }
 
     #[cfg(unix)]
@@ -3725,12 +4504,15 @@ mod probe_tests {
             claude_keychain_service: None,
             antigravity_home: None,
             antigravity_keychain: false,
+            ..AgentAccountsConfig::isolated(dir.path())
         });
         let start = accounts.start_claude_paste_login();
         assert!(start.url.contains("state="));
         // The verifier never rides the authorize url.
         let verifier = match lock(&accounts.inner.flows).get(&start.login_id) {
-            Some(LoginFlow::Claude { verifier, state, .. }) => {
+            Some(LoginFlow::Claude {
+                verifier, state, ..
+            }) => {
                 assert_ne!(verifier, state);
                 verifier.clone()
             }
@@ -3838,7 +4620,7 @@ mod probe_tests {
             0,
         );
         let message = |harness, active, error: &ProbeError| {
-            usage_error_message(harness, active, error, &entry, 0)
+            usage_error_message(harness, None, active, error, &entry, 0)
         };
         assert_eq!(
             message(
@@ -3905,6 +4687,7 @@ mod login_tests {
             claude_keychain_service: None,
             antigravity_home: Some(root.join("gemini")),
             antigravity_keychain: false,
+            ..AgentAccountsConfig::isolated(root)
         }
     }
 
@@ -4052,6 +4835,7 @@ mod login_tests {
                 let mut request = vec![0u8; 16 * 1024];
                 let n = socket.read(&mut request).await.unwrap_or(0);
                 let request = String::from_utf8_lossy(&request[..n]).to_string();
+                let leaky = request.contains("\"code\":\"leaky-code\"");
                 let body = if request.contains("\"code\":\"good-code\"")
                     && request.contains("\"redirect_uri\":\"http://localhost:")
                 {
@@ -4062,10 +4846,13 @@ mod login_tests {
                         "account": { "email_address": "new@example.com", "uuid": "acct-new" },
                     })
                     .to_string()
+                } else if leaky {
+                    // An odd error that echoes token material.
+                    r#"{"error":"invalid_grant","access_token":"LEAKED-SECRET-123"}"#.into()
                 } else {
                     String::new()
                 };
-                let status = if body.is_empty() {
+                let status = if body.is_empty() || leaky {
                     "400 Bad Request"
                 } else {
                     "200 OK"
@@ -4261,6 +5048,45 @@ mod login_tests {
                 .accounts
                 .iter()
                 .any(|a| a.email.as_deref() == Some("bob@example.com") && a.active)
+        );
+    }
+
+    /// A failed exchange reports its status only — never the provider's
+    /// body — on the browser page and in the poll.
+    #[tokio::test]
+    async fn a_failed_claude_exchange_never_echoes_the_response_body() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (token_url, _server) = token_server().await;
+        let endpoints = ProbeEndpoints {
+            claude_loopback_token: token_url,
+            claude_profile: "http://127.0.0.1:9/profile".into(),
+            ..Default::default()
+        };
+        let accounts =
+            AgentAccounts::with_endpoints(config(tmp.path()), endpoints, Default::default());
+        let start = accounts.start_login(HarnessId::ClaudeCode).await.unwrap();
+        let port = start.callback_port.unwrap();
+        let state = reqwest::Url::parse(&start.url)
+            .unwrap()
+            .query_pairs()
+            .find(|(k, _)| k == "state")
+            .unwrap()
+            .1
+            .into_owned();
+        let page = browser_get(port, &format!("/callback?code=leaky-code&state={state}")).await;
+        assert!(page.starts_with("HTTP/1.1 400"), "{page}");
+        assert!(!page.contains("LEAKED"), "{page}");
+        assert!(!page.contains("invalid_grant"), "{page}");
+        assert!(
+            page.contains("Anthropic rejected the code (400 Bad Request) — try again."),
+            "{page}"
+        );
+        let poll = poll_until_settled(&accounts, &start.login_id).await;
+        assert_eq!(poll.status, AgentLoginStatus::Error);
+        let message = poll.message.unwrap();
+        assert_eq!(
+            message,
+            "Anthropic rejected the code (400 Bad Request) — try again."
         );
     }
 
