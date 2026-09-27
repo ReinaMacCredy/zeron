@@ -360,6 +360,7 @@ impl Shell {
                 | ComposerEvent::WorktreeSetup { .. }
                 | ComposerEvent::OpenSubagent { .. } => {}
                 ComposerEvent::UnsentChanged => cx.notify(),
+                ComposerEvent::ThreadMentionDropped => _this.accept_command_palette_drop(),
                 ComposerEvent::OpenComputerSetup { missing } => {
                     _this.open_computer_permission_guide(missing.clone(), cx)
                 }
@@ -473,6 +474,7 @@ impl Shell {
         tracing::info!(chat = %chat_id, ?side, ?selected, pair = ?self.split_pair, ?verdict, "split: drop verdict");
         let SplitDrop { pair, select } = verdict;
         self.split_pair = pair;
+        self.accept_command_palette_drop();
         match select {
             Some(chat) => self.open_chat(chat, cx),
             None => self.reconcile_split_with_selection(selected.as_deref(), cx),

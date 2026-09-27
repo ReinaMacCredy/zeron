@@ -2543,6 +2543,10 @@ impl Shell {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
+        if self.lift_command_palette() && !self.sidebar_session_transfer_is_valid(payload, cx) {
+            cx.notify();
+            return;
+        }
         self.chat_status_hover = None;
         self.cancel_pinned_session_drag(cx);
         self.sidebar_session_return = None;
@@ -2659,18 +2663,44 @@ impl Shell {
         {
             return false;
         }
-        let state = self.state.read(cx);
-        let visible: HashSet<String> = state
-            .sidebar_chats(Utc::now(), payload.filter.as_deref())
-            .into_iter()
-            .map(|(_, chat)| chat.id.clone())
-            .collect();
+        let visible = self.sidebar_visible_chat_ids(payload.filter.as_deref(), cx);
         if !visible.contains(&payload.chat_id) {
             return false;
         }
-        let pins = self.sidebar_pins_for_profile(&payload.profile_key, cx);
-        let current: Vec<_> = pins.into_iter().filter(|id| visible.contains(id)).collect();
-        current == *payload.visible_ids
+        self.visible_sidebar_pins(&payload.profile_key, &visible, cx) == *payload.visible_ids
+    }
+
+    fn sidebar_visible_chat_ids(&self, filter: Option<&str>, cx: &App) -> HashSet<String> {
+        self.state
+            .read(cx)
+            .sidebar_chats(Utc::now(), filter)
+            .into_iter()
+            .map(|(_, chat)| chat.id.clone())
+            .collect()
+    }
+
+    fn visible_sidebar_pins(
+        &self,
+        profile_key: &str,
+        visible: &HashSet<String>,
+        cx: &App,
+    ) -> Vec<String> {
+        self.sidebar_pins_for_profile(profile_key, cx)
+            .into_iter()
+            .filter(|id| visible.contains(id))
+            .collect()
+    }
+
+    pub(super) fn palette_session_drag(&self, chat_id: String, cx: &App) -> SidebarSessionDrag {
+        let filter = self.settings.space_filter.clone();
+        let profile_key = self.active_sidebar_pin_profile_key(cx).unwrap_or_default();
+        let visible = self.sidebar_visible_chat_ids(filter.as_deref(), cx);
+        SidebarSessionDrag {
+            chat_id,
+            visible_ids: std::sync::Arc::new(self.visible_sidebar_pins(&profile_key, &visible, cx)),
+            filter,
+            profile_key,
+        }
     }
 
     pub(super) fn cancel_sidebar_session_transfer(&mut self, cx: &mut Context<Self>) {
@@ -2893,6 +2923,7 @@ impl Shell {
             }
         }
         self.sidebar_session_transfer = None;
+        self.accept_command_palette_drop();
         self.cancel_pinned_session_drag(cx);
         if matches!(target, SidebarSessionDrop::Pinned(_)) {
             self.pinned_open = true;

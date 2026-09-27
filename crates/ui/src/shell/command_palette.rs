@@ -15,6 +15,8 @@ pub(super) struct CommandPalette {
     // while this input is still absent from the dispatch tree.
     focus_pending: bool,
     scroll: gpui::ScrollHandle,
+    lifted: bool,
+    drop_accepted: bool,
     _search_events: Subscription,
 }
 
@@ -119,6 +121,8 @@ impl Shell {
             enter_press: EnterPress::default(),
             focus_pending: true,
             scroll: gpui::ScrollHandle::new(),
+            lifted: false,
+            drop_accepted: false,
             _search_events: events,
         });
         cx.notify();
@@ -131,6 +135,44 @@ impl Shell {
             }
             cx.notify();
         }
+    }
+
+    pub(super) fn lift_command_palette(&mut self) -> bool {
+        let Some(palette) = self.command_palette.as_mut() else {
+            return false;
+        };
+        palette.lifted = true;
+        palette.drop_accepted = false;
+        true
+    }
+
+    pub(super) fn accept_command_palette_drop(&mut self) {
+        if let Some(palette) = self.command_palette.as_mut().filter(|p| p.lifted) {
+            palette.drop_accepted = true;
+        }
+    }
+
+    pub(super) fn command_palette_lifted(&self) -> bool {
+        self.command_palette.as_ref().is_some_and(|p| p.lifted)
+    }
+
+    fn settle_command_palette_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(palette) = self.command_palette.as_mut().filter(|p| p.lifted) else {
+            return false;
+        };
+        if cx.has_active_drag() {
+            return true;
+        }
+        let accepted = palette.drop_accepted;
+        palette.lifted = false;
+        palette.focus_pending = true;
+        if self.sidebar_session_transfer.is_some() {
+            self.cancel_sidebar_session_transfer(cx);
+        }
+        if accepted {
+            self.close_command_palette(window, cx);
+        }
+        accepted
     }
 
     fn command_entries(&self, cx: &App) -> Vec<Entry> {
@@ -217,6 +259,9 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        if self.settle_command_palette_drag(window, cx) {
+            return None;
+        }
         let entries = self.command_entries(cx);
         let palette = self.command_palette.as_mut()?;
         if std::mem::take(&mut palette.focus_pending) {
@@ -230,6 +275,7 @@ impl Shell {
         let scroll = palette.scroll.clone();
         let theme = Theme::of(cx).for_popup();
         let action_count = entries.iter().take_while(|e| e.action().is_some()).count();
+        let drag = self.palette_session_drag(String::new(), cx);
         let mut rows = Vec::new();
         for (ix, entry) in entries.iter().enumerate() {
             // End spacing belongs to the content, so it scrolls out of the
@@ -335,7 +381,10 @@ impl Shell {
                     None,
                     chat.archived,
                     false,
-                    None,
+                    Some(SidebarSessionDrag {
+                        chat_id: id.clone(),
+                        ..drag.clone()
+                    }),
                     None,
                     Some(&query),
                     &theme,
@@ -642,5 +691,130 @@ mod tests {
         ));
         assert!(matches_query("  ", "Any chat"));
         assert!(!matches_query("mac windows", "Zeron @ MacBook"));
+    }
+
+    fn palette_drag_shell(
+        cx: &mut gpui::TestAppContext,
+        dir: &std::path::Path,
+    ) -> gpui::WindowHandle<Shell> {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            crate::settings::init(crate::settings::UiSettings::default(), dir, cx);
+        });
+        cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        })
+    }
+
+    fn palette_drag_chat(id: &str, archived: bool) -> zeron_proto::Chat {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "title": id, "deviceId": "local", "archived": archived,
+            "createdAt": chrono::Utc::now(),
+        }))
+        .unwrap()
+    }
+
+    #[gpui::test]
+    fn palette_row_drag_hides_then_closes_on_accept_and_restores_on_miss(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let window = palette_drag_shell(cx, dir.path());
+        window
+            .update(cx, |shell, window, cx| {
+                shell.state.update(cx, |state, _| {
+                    state.workspace_scope = Some(WorkspaceScope::Local);
+                    state.chats = vec![
+                        palette_drag_chat("live", false),
+                        palette_drag_chat("old", true),
+                    ];
+                });
+                shell.settings.space_filter = None;
+                shell.toggle_command_palette(window, cx);
+                let search = shell.command_palette.as_ref().unwrap().search.clone();
+                search.update(cx, |input, cx| input.set_text("li", cx));
+                let payload = shell.palette_session_drag("live".into(), cx);
+                assert!(shell.sidebar_session_transfer_is_valid(&payload, cx));
+                shell.begin_sidebar_session_transfer(
+                    &payload,
+                    gpui::point(px(0.0), px(0.0)),
+                    window,
+                    cx,
+                );
+                assert!(shell.command_palette_lifted());
+                assert!(shell.sidebar_session_transfer.is_some());
+                shell.cancel_sidebar_session_transfer(cx);
+            })
+            .unwrap();
+        window
+            .update(cx, |shell, window, cx| {
+                assert!(!shell.settle_command_palette_drag(window, cx));
+                let palette = shell
+                    .command_palette
+                    .as_ref()
+                    .expect("a miss restores the palette");
+                assert!(!palette.lifted);
+                assert_eq!(palette.search.read(cx).text(), "li");
+
+                let payload = shell.palette_session_drag("old".into(), cx);
+                shell.begin_sidebar_session_transfer(
+                    &payload,
+                    gpui::point(px(0.0), px(0.0)),
+                    window,
+                    cx,
+                );
+                assert!(shell.command_palette_lifted());
+                assert!(
+                    shell.sidebar_session_transfer.is_none(),
+                    "a chat the sidebar does not list never lifts a sidebar row"
+                );
+            })
+            .unwrap();
+        window
+            .update(cx, |shell, window, cx| {
+                assert!(!shell.settle_command_palette_drag(window, cx));
+                assert!(!shell.command_palette_lifted());
+                let payload = shell.palette_session_drag("live".into(), cx);
+                shell.begin_sidebar_session_transfer(
+                    &payload,
+                    gpui::point(px(0.0), px(0.0)),
+                    window,
+                    cx,
+                );
+                shell.finish_sidebar_session_transfer(&payload, SidebarSessionDrop::Pinned(0), cx);
+                assert_eq!(shell.active_sidebar_pins(cx), vec!["live".to_string()]);
+            })
+            .unwrap();
+        window
+            .update(cx, |shell, window, cx| {
+                assert!(shell.settle_command_palette_drag(window, cx));
+                assert!(
+                    shell.command_palette.is_none(),
+                    "an accepted drop closes the palette"
+                );
+            })
+            .unwrap();
     }
 }

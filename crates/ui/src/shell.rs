@@ -1308,7 +1308,10 @@ impl Render for SessionRowGhost {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let lifted = self.shell.upgrade().is_some_and(|shell| {
             let shell = shell.read(cx);
-            shell.sidebar_session_transfer.is_some()
+            shell
+                .sidebar_session_transfer
+                .as_ref()
+                .is_some_and(|transfer| transfer.row_height > 0.0)
                 && f32::from(window.mouse_position().x) <= shell.settings.sidebar_width
         });
         if lifted {
@@ -2320,6 +2323,7 @@ impl Shell {
                     staged,
                 } => this.open_sidechat(source_chat_id.clone(), prompt.clone(), staged.clone(), cx),
                 ComposerEvent::UnsentChanged => cx.notify(),
+                ComposerEvent::ThreadMentionDropped => this.accept_command_palette_drop(),
                 ComposerEvent::BackgroundStarted => {
                     this.freeze_draft_row(cx);
                     this.focus_composer(cx);
@@ -4457,6 +4461,7 @@ impl Shell {
                 | ComposerEvent::WorktreeSetup { .. }
                 | ComposerEvent::OpenSubagent { .. } => {}
                 ComposerEvent::UnsentChanged => cx.notify(),
+                ComposerEvent::ThreadMentionDropped => _this.accept_command_palette_drop(),
                 ComposerEvent::OpenComputerSetup { missing } => {
                     _this.open_computer_permission_guide(missing.clone(), cx)
                 }
@@ -9953,7 +9958,9 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.note_appshot_interaction(cx);
-        if event.keystroke.key == "escape" && self.sidebar_session_transfer.is_some() {
+        if event.keystroke.key == "escape"
+            && (self.sidebar_session_transfer.is_some() || self.command_palette_lifted())
+        {
             cx.stop_active_drag(window);
             self.cancel_sidebar_session_transfer(cx);
             cx.stop_propagation();
