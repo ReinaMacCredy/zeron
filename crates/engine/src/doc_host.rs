@@ -5230,6 +5230,10 @@ impl DocHost {
                     && !skipped.contains(&c.id)
                     && is_processed(&c.id)
                     && !lock(&self.inner.executing).contains(&c.id)
+                    && handle.doc.read_commands().is_ok_and(|now| {
+                        now.iter()
+                            .any(|n| n.id == c.id && n.status == SessionCommandStatus::Pending)
+                    })
                 {
                     tracing::warn!(chat = %handle.chat_id, command = %c.id,
                         "command consumed but never resolved (crash mid-execute?); rejecting");
