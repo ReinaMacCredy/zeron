@@ -245,7 +245,6 @@ impl WorkspaceSnapshot {
         let mut hits: Vec<SearchHit> = self
             .sessions
             .values()
-            .filter(|row| row.parent_chat_id.is_none())
             .filter_map(|row| score_row(row, &terms).map(|(score, field)| (row, score, field)))
             .map(|(row, score, field)| SearchHit {
                 session: row.clone(),
@@ -553,11 +552,11 @@ pub(crate) fn derive(
         .map(|chat| (chat.id.clone(), build_row(chat, &rc, cx)))
         .collect();
 
-    // Active = not archived, top-level, project alive (or projectless).
+    // Active = not archived, project alive (or projectless).
     let mut active: Vec<&Chat> = state
         .chats
         .iter()
-        .filter(|c| !c.archived && c.created_by_chat_id.is_none())
+        .filter(|c| !c.archived)
         .filter(|c| {
             c.space_id
                 .as_deref()
@@ -658,11 +657,7 @@ pub(crate) fn derive(
         }
     }
 
-    let mut archived_chats: Vec<&Chat> = state
-        .chats
-        .iter()
-        .filter(|c| c.archived && c.created_by_chat_id.is_none())
-        .collect();
+    let mut archived_chats: Vec<&Chat> = state.chats.iter().filter(|c| c.archived).collect();
     sort_recency(&mut archived_chats);
     let archived: Vec<Arc<SessionRow>> = archived_chats.iter().map(|c| row(c)).collect();
 

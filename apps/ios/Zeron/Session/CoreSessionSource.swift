@@ -131,6 +131,15 @@ final class CoreSessionSource: SessionSource {
         try? handle.respondInput(requestId: requestId, answers: answers.map { UserInputAnswer(questionId: $0.questionId, labels: $0.labels) })
     }
 
+    func answerConsent(requestId: String, questionId: String, answer: String) {
+        _ = try? handle.answerConsent(requestId: requestId, questionId: questionId, answer: answer)
+    }
+
+    func computerStill() async -> (sequence: UInt64, image: UIImage)? {
+        guard let still = try? await handle.computerStillFrame(), let image = UIImage(data: still.image) else { return nil }
+        return (still.sequence, image)
+    }
+
     func queueAction(_ id: String, _ action: QueueAction) {
         switch action {
         case .sendNow: Task { _ = try? await handle.sendQueuedNow(id: id) }

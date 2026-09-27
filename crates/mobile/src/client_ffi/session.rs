@@ -204,6 +204,12 @@ pub struct UserInputAnswer {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ComputerStill {
+    pub sequence: u64,
+    pub image: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct InputRequest {
     pub entry_id: String,
     pub request_id: String,
@@ -538,6 +544,26 @@ impl SessionHandle {
             })
             .collect();
         Ok(self.inner.respond_input(&request_id, answers)?)
+    }
+
+    pub fn answer_consent(
+        &self,
+        request_id: String,
+        question_id: String,
+        answer: String,
+    ) -> CoreResult<bool> {
+        Ok(self
+            .inner
+            .answer_consent(&request_id, &question_id, &answer)?)
+    }
+
+    pub async fn computer_still_frame(&self) -> CoreResult<Option<ComputerStill>> {
+        let inner = self.inner.clone();
+        let still = on_runtime(async move { inner.computer_still_frame().await }).await?;
+        Ok(still.map(|s| ComputerStill {
+            sequence: s.sequence,
+            image: s.image,
+        }))
     }
 
     /// Park a message on the shared queue directly. Returns the row id.

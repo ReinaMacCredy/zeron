@@ -104,7 +104,8 @@ final class AppModel {
             fixture: args.contains("-no-projects") ? .noProjects : args.contains("-ios-only") ? .iosOnly : .standard,
             transcriptScale: scale,
             streamSpeed: args.contains("-fast") ? .fast : .realistic,
-            longReply: args.contains("-longreply")
+            longReply: args.contains("-longreply"),
+            computerStill: args.contains("-still")
         )
     }
 

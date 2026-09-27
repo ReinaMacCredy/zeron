@@ -92,6 +92,13 @@ enum Palette {
         case .diffAddBar: dynamic(0x15803D, 0x34D399, alpha: 0.55)
         case .diffDelBar: dynamic(0xDC2626, 0xF87171, alpha: 0.55)
         case .diffHunk: dual(UIColor(hex: 0x5B43E8, alpha: 0.07), UIColor(hex: 0x8B7CF6, alpha: 0.08))
+        case .cardBackground: dual(UIColor(white: 0, alpha: 0.045), UIColor(white: 1, alpha: 0.045))
+        case .cardBorder: dual(UIColor(white: 0, alpha: 0.108), UIColor(white: 1, alpha: 0.08))
+        case .cardTile: dual(UIColor(white: 0, alpha: 0.09), UIColor(white: 1, alpha: 0.09))
+        case .successTile: success.withAlphaComponent(0.12)
+        case .warningTile: warning.withAlphaComponent(0.12)
+        case .buttonBorder: dual(UIColor(white: 0, alpha: 0.135), UIColor(white: 1, alpha: 0.1))
+        case .onSolid: background
         }
     }
 }

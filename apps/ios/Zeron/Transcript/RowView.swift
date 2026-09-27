@@ -36,6 +36,7 @@ protocol RowViewDelegate: AnyObject {
     func rowView(_ view: RowView, toggleDetail detail: UInt64, open: Bool)
     func rowView(_ view: RowView, open url: URL)
     func rowView(_ view: RowView, imageFor reference: String, into imageView: UIImageView)
+    func rowView(_ view: RowView, perform action: CardAction)
 }
 
 /// A reusable transcript row: canvas + horizontal scrollers + native widgets.
@@ -150,6 +151,7 @@ final class RowView: UIView {
         case .chip: "row-chip"
         case .image: "row-image"
         case .working: "row-working"
+        case .card: "row-card"
         }
         element.accessibilityTraits = .staticText
         element.accessibilityFrameInContainerSpace = bounds
@@ -277,6 +279,14 @@ final class RowView: UIView {
                 view = b
             case .shimmer:
                 view = ShimmerView(model: model!, rect: rect)
+            case let .cardButton(action):
+                let b = CardButtonControl(action: action, label: w.payload ?? "")
+                b.addAction(UIAction { [weak self] _ in
+                    guard let self else { return }
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    self.delegate?.rowView(self, perform: action)
+                }, for: .touchUpInside)
+                view = b
             }
             view.frame = rect
             host.addSubview(view)
@@ -369,6 +379,40 @@ final class DisclosureControl: UIControl {
 
     override var isHighlighted: Bool {
         didSet { alpha = isHighlighted ? 0.5 : 1 }
+    }
+}
+
+final class CardButtonControl: UIControl {
+    init(action: CardAction, label: String) {
+        super.init(frame: .zero)
+        isAccessibilityElement = true
+        accessibilityTraits = .button
+        accessibilityLabel = label
+        accessibilityIdentifier = Self.identifier(action)
+        layer.cornerCurve = .continuous
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    static func identifier(_ action: CardAction) -> String {
+        switch action {
+        case let .consent(_, _, answer):
+            switch answer {
+            case "Allow": "computer-consent-allow"
+            case "Deny": "computer-consent-decline"
+            default: "computer-consent-always"
+            }
+        case .enableComputer: "computer-denied-enable"
+        }
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        layer.cornerRadius = bounds.height / 2
+    }
+
+    override var isHighlighted: Bool {
+        didSet { backgroundColor = isHighlighted ? Palette.text.withAlphaComponent(0.12) : nil }
     }
 }
 

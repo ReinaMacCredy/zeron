@@ -156,6 +156,7 @@ impl DemoHost {
                 fixtures::seed(
                     doc,
                     self.options.fixture,
+                    self.options.computer_still,
                     &client.config.device_id,
                     &client.config.device_name,
                 )
@@ -405,14 +406,24 @@ impl DemoHost {
                     request_id,
                     answers,
                 } => {
+                    let consent = core.snapshot().transcript().iter().any(|entry| {
+                        entry.message.parts.iter().any(|part| {
+                            matches!(part, MessagePart::Input { request_id: rid, questions, .. }
+                                if *rid == request_id && questions.iter().any(|q| q.is_consent()))
+                        })
+                    });
                     let _ = core.write(|doc| doc.resolve_input(&request_id, Some(&answers)));
-                    let labels: Vec<String> = answers.into_iter().flat_map(|a| a.labels).collect();
-                    self.spawn_turn(
-                        chat_id.to_owned(),
-                        None,
-                        transcripts::answered(&labels),
-                        None,
-                    );
+                    let steps = if consent {
+                        transcripts::consent_answered(crate::computer::consent_outcome(
+                            true,
+                            Some(&answers),
+                        ))
+                    } else {
+                        let labels: Vec<String> =
+                            answers.into_iter().flat_map(|a| a.labels).collect();
+                        transcripts::answered(&labels)
+                    };
+                    self.spawn_turn(chat_id.to_owned(), None, steps, None);
                 }
             }
         }
@@ -945,6 +956,17 @@ impl DemoHost {
             m::REMOVE_QUEUED_MESSAGE => {
                 let removed = core.write(|doc| doc.remove_queued(&id))?;
                 serde_json::json!({ "removed": removed })
+            }
+            m::GET_COMPUTER_STILL_FRAME => {
+                let frame = self.options.computer_still.then(|| {
+                    serde_json::json!({
+                        "sequence": 1,
+                        "timestampMs": now as f64,
+                        "keyframe": true,
+                        "data": crate::live::b64::encode(&png::gradient(320, 200, 4)),
+                    })
+                });
+                serde_json::json!({ "frame": frame })
             }
             other => return Err(ClientError::Unsupported(other.to_owned())),
         };

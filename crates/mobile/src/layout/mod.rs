@@ -8,6 +8,7 @@
 //! ranges are a binary search, display lists are built on demand from the
 //! frame's prepared rows (pure arithmetic, no measurement).
 
+mod cards;
 pub mod display;
 mod markdown;
 mod file_icons;
@@ -388,6 +389,7 @@ impl TranscriptView {
                 working: snap.working,
                 working_since_ms: snap.working_since_ms,
                 streaming: snap.streaming,
+                input_answers: snap.input_answers.clone(),
             };
             let _ = tx.lock().unwrap().send(Msg::Input(input));
         });
@@ -473,6 +475,7 @@ pub(crate) fn debug_input(entries: Vec<DebugEntry>, working: bool) -> Transcript
         working,
         working_since_ms: None,
         streaming: working,
+        input_answers: Default::default(),
     }
 }
 
