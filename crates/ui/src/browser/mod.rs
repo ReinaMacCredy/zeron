@@ -94,6 +94,8 @@ pub struct BrowserSurface {
     resize_inset: gpui::Pixels,
     #[cfg(target_os = "macos")]
     right_occlusion: gpui::Pixels,
+    #[cfg(target_os = "macos")]
+    file_root: Option<std::path::PathBuf>,
     _input_sub: Subscription,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     native: Option<native::NativePage>,
@@ -172,6 +174,8 @@ impl BrowserSurface {
             resize_inset: gpui::px(0.0),
             #[cfg(target_os = "macos")]
             right_occlusion: gpui::px(0.0),
+            #[cfg(target_os = "macos")]
+            file_root: None,
             _input_sub: input_sub,
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             native: None,
@@ -337,17 +341,11 @@ impl BrowserSurface {
             {
                 self.favicon_generation += 1;
                 self.favicon_task = None;
+                self.file_root = None;
             }
-            let result = if let Some(native) = &self.native {
-                native.load(&url)
-            } else {
-                native::NativePage::new(window, &self.context.data, self.native_tx.clone())
-                    .map(|mut native| {
-                        native.present(self.presentation);
-                        self.native = Some(native);
-                    })
-                    .and_then(|_| self.native.as_ref().unwrap().load(&url))
-            };
+            let result = self
+                .ensure_native(window)
+                .and_then(|native| native.load(&url));
             self.page.loading = result.is_ok();
             if let Err(error) = result {
                 self.page.error = Some(format!("Could not open this page: {error}"));
@@ -363,6 +361,61 @@ impl BrowserSurface {
         cx.notify();
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn ensure_native(&mut self, window: &mut Window) -> Result<&native::NativePage, String> {
+        if self.native.is_none() {
+            let mut native =
+                native::NativePage::new(window, &self.context.data, self.native_tx.clone())?;
+            native.present(self.presentation);
+            self.native = Some(native);
+        }
+        Ok(self.native.as_ref().unwrap())
+    }
+
+    /// Callers pass a canonical `root` that contains the canonical `file`.
+    #[cfg(target_os = "macos")]
+    pub fn open_workspace_file(
+        &mut self,
+        file: std::path::PathBuf,
+        root: std::path::PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.validation = None;
+        self.page.title.clear();
+        self.page.error = None;
+        self.clear_favicon(cx);
+        self.favicon_generation += 1;
+        self.favicon_task = None;
+        match self
+            .ensure_native(window)
+            .and_then(|native| native.load_file(&file, &root))
+        {
+            Ok(url) => {
+                self.address
+                    .update(cx, |input, cx| input.set_text(url.clone(), cx));
+                self.page.url = Some(url);
+                self.page.loading = true;
+            }
+            Err(error) => self.page.error = Some(format!("Could not open this page: {error}")),
+        }
+        self.address_edited = false;
+        self.file_root = Some(root);
+        window.focus(&self.focus, cx);
+        cx.emit(BrowserEvent::Changed);
+        cx.notify();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn page_file(&self) -> Option<std::path::PathBuf> {
+        self.file_root.as_ref()?;
+        url::Url::parse(self.page.url.as_deref()?)
+            .ok()
+            .filter(|url| url.scheme() == "file")?
+            .to_file_path()
+            .ok()
+    }
+
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let url = self.address.read(cx).text().to_owned();
         self.navigate(&url, window, cx);
@@ -372,6 +425,15 @@ impl BrowserSurface {
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         if let Some(native) = &self.native {
             if self.page.error.is_some() {
+                #[cfg(target_os = "macos")]
+                if let Some(root) = &self.file_root
+                    && let Some(file) = self.page_file()
+                {
+                    let _ = native.load_file(&file, root);
+                    self.page.error = None;
+                    cx.notify();
+                    return;
+                }
                 if let Some(url) = &self.page.url {
                     let _ = native.load(url);
                 }
@@ -386,6 +448,11 @@ impl BrowserSurface {
     }
 
     fn open_external(&self, cx: &mut Context<Self>) {
+        #[cfg(target_os = "macos")]
+        if let Some(file) = self.page_file() {
+            crate::html_open::open_with(&file, crate::html_open::default_browser().as_deref());
+            return;
+        }
         if let Some(url) = self
             .page
             .url

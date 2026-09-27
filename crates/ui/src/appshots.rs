@@ -929,6 +929,11 @@ impl AppshotPresentation {
 /// Resolve an installed app's icon locally; remote/mobile viewers retain the
 /// app-name badge when that application is not installed. Icons never enter
 /// the model prompt or add another attachment to the transport.
+#[cfg(target_os = "macos")]
+pub(crate) fn app_icon_png(app_path: &str) -> Option<Vec<u8>> {
+    macos::icon_for_path(app_path)
+}
+
 pub fn presentation_icon(presentation: &AppshotPresentation) -> Option<Arc<gpui::Image>> {
     #[cfg(target_os = "macos")]
     {

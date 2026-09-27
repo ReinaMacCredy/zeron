@@ -673,6 +673,15 @@ pub(super) fn icon_for_bundle(bundle: &str) -> Option<Vec<u8>> {
     })
 }
 
+pub(super) fn icon_for_path(path: &str) -> Option<Vec<u8>> {
+    autoreleasepool(|| unsafe {
+        let workspace: *mut Object = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let path = CFString::new(path);
+        let icon: *mut Object = msg_send![workspace, iconForFile: path.as_concrete_TypeRef()];
+        nsimage_png(icon)
+    })
+}
+
 unsafe fn nsimage_png(image: *mut Object) -> Option<Vec<u8>> {
     if image.is_null() {
         return None;

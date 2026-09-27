@@ -34,6 +34,7 @@ pub mod file_icons;
 pub mod files;
 pub mod frost;
 pub mod history;
+pub(crate) mod html_open;
 pub mod icons;
 pub(crate) mod image_media;
 pub(crate) mod image_viewer;

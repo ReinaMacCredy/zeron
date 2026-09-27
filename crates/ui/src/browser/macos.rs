@@ -1,7 +1,7 @@
 //! AppKit boundary for the browser. Wry owns the native child and its UI
 //! delegate; our navigation delegate supplies browser policy and state. All
 //! callbacks enqueue events, never re-enter GPUI. No page-to-engine IPC.
-use super::model::{PageState, Presentation, allowed_navigation};
+use super::model::{PageState, Presentation, allowed_file_navigation, allowed_navigation};
 use gpui::{Bounds, Pixels, Window};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
@@ -13,7 +13,7 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{
     NSDictionary, NSError, NSKeyValueChangeKey, NSKeyValueObservingOptions, NSObject,
-    NSObjectNSKeyValueObserverRegistration, NSObjectProtocol, NSString,
+    NSObjectNSKeyValueObserverRegistration, NSObjectProtocol, NSString, NSURL,
 };
 use objc2_web_kit::{
     WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate,
@@ -156,6 +156,7 @@ struct ObserverState {
     pending: Cell<bool>,
     error: RefCell<Option<String>>,
     requested_url: RefCell<Option<String>>,
+    file_root: RefCell<Option<std::path::PathBuf>>,
 }
 
 define_class!(
@@ -175,10 +176,12 @@ define_class!(
         #[unsafe(method(webView:decidePolicyForNavigationAction:decisionHandler:))]
         fn policy(&self, _view: &WKWebView, action: &WKNavigationAction, decision: &block2::Block<dyn Fn(WKNavigationActionPolicy)>) {
             let url = unsafe { action.request().URL() }.and_then(|u| u.absoluteString()).map(|u| u.to_string()).unwrap_or_default();
-            if allowed_navigation(&url) && unsafe { action.targetFrame() }.is_some_and(|frame| unsafe { frame.isMainFrame() }) {
+            let allowed = allowed_navigation(&url)
+                || self.ivars().file_root.borrow().as_deref().is_some_and(|root| allowed_file_navigation(&url, root));
+            if allowed && unsafe { action.targetFrame() }.is_some_and(|frame| unsafe { frame.isMainFrame() }) {
                 *self.ivars().requested_url.borrow_mut() = Some(url.clone());
             }
-            decision.call((if allowed_navigation(&url) { WKNavigationActionPolicy::Allow } else { WKNavigationActionPolicy::Cancel },));
+            decision.call((if allowed { WKNavigationActionPolicy::Allow } else { WKNavigationActionPolicy::Cancel },));
         }
         #[unsafe(method(webView:decidePolicyForNavigationResponse:decisionHandler:))]
         fn response(&self, _view: &WKWebView, response: &WKNavigationResponse, decision: &block2::Block<dyn Fn(WKNavigationResponsePolicy)>) {
@@ -226,6 +229,7 @@ impl Observer {
             pending: Cell::new(false),
             error: RefCell::new(None),
             requested_url: RefCell::new(None),
+            file_root: RefCell::new(None),
         });
         unsafe { msg_send![super(object), init] }
     }
@@ -448,8 +452,31 @@ impl NativePage {
         let host = self.0.borrow();
         host.data.register_preview(url);
         host.observer.ivars().error.borrow_mut().take();
+        host.observer.ivars().file_root.borrow_mut().take();
         *host.observer.ivars().requested_url.borrow_mut() = Some(url.into());
         host.web.load_url(url).map_err(|e| e.to_string())
+    }
+    pub fn load_file(
+        &self,
+        file: &std::path::Path,
+        root: &std::path::Path,
+    ) -> Result<String, String> {
+        let host = self.0.borrow();
+        let url = NSURL::fileURLWithPath(&NSString::from_str(&file.to_string_lossy()));
+        let read_access =
+            NSURL::fileURLWithPath_isDirectory(&NSString::from_str(&root.to_string_lossy()), true);
+        let address = url
+            .absoluteString()
+            .map(|url| url.to_string())
+            .ok_or("Invalid file path")?;
+        host.observer.ivars().error.borrow_mut().take();
+        *host.observer.ivars().file_root.borrow_mut() = Some(root.to_path_buf());
+        *host.observer.ivars().requested_url.borrow_mut() = Some(address.clone());
+        unsafe {
+            host.view
+                .loadFileURL_allowingReadAccessToURL(&url, &read_access)
+        };
+        Ok(address)
     }
     pub fn reload(&self) {
         let host = self.0.borrow();
