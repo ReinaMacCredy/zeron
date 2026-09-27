@@ -5008,6 +5008,7 @@ pub enum ComposerEvent {
     /// `useThreadHasUnsentDraft`): the sidebar pen needs one repaint, not one
     /// per keystroke.
     UnsentChanged,
+    ThreadMentionDropped,
     /// A draft was started in the background and the canvas now shows the
     /// next draft (d23); the shell refreshes its row snapshot and focus.
     BackgroundStarted,
@@ -6674,7 +6675,9 @@ impl Composer {
             return;
         };
         let link = thread_link(chat_id, &chat_mention_title(chat));
-        self.insert_link(link, window, cx);
+        if self.insert_link(link, window, cx) {
+            cx.emit(ComposerEvent::ThreadMentionDropped);
+        }
     }
 
     /// The device a thread mention must live on, plus the chat it must not
@@ -6702,7 +6705,7 @@ impl Composer {
             .map(|space| space.id.clone())
     }
 
-    fn insert_link(&mut self, link: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn insert_link(&mut self, link: String, window: &mut Window, cx: &mut Context<Self>) -> bool {
         // A drop while the `@` picker is open completes that token instead
         // of leaving a stray `@` beside the chip.
         let token = self.mention.token.clone();
@@ -6720,6 +6723,7 @@ impl Composer {
             window.focus(&focus, cx);
             cx.notify();
         }
+        inserted
     }
 
     fn remove_attachment(&mut self, id: &str, cx: &mut Context<Self>) {
