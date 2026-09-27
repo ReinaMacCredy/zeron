@@ -69,6 +69,8 @@ pub struct CompactOutcome {
 pub enum SteerOutcome {
     /// Delivered into the live run's steering mailbox.
     Accepted,
+    /// A live run owns the turn, but an update prevents accepting another prompt.
+    DeferredByUpdate,
     /// No live steerable run — the caller should dispatch the prompt as a new turn.
     NotSteerable,
 }
@@ -247,6 +249,7 @@ impl RunSetup {
         let interrupt_token = CancellationToken::new();
         let (stop_tx, stop_rx) = mpsc::unbounded_channel();
         let controls = RunControls {
+            execution_lease: None,
             request_input: Box::new(move |questions: Vec<UserInputQuestion>| {
                 let (tx, rx) = oneshot::channel();
                 if accepts_input {
@@ -596,6 +599,15 @@ impl SessionsEngine {
         live.is_some_and(|(harness, routable)| routable && !self.steers_mid_turn(harness))
     }
 
+    /// Whether an accepted agent update gates the chat's live run, so a new
+    /// prompt waits in the queue rather than joining that run's transcript.
+    pub fn live_run_update_pending(&self, chat_id: &str) -> bool {
+        let harness = lock(&self.inner.runs)
+            .get(chat_id)
+            .map(|h| h.runtime_config.harness_id);
+        harness.is_some_and(|harness| self.inner.registry.update_pending(harness))
+    }
+
     /// The last request dispatched for a chat (steer→new-turn fallback).
     pub fn last_request(&self, chat_id: &str) -> Option<RunRequest> {
         lock(&self.inner.last_requests).get(chat_id).cloned()
@@ -719,8 +731,6 @@ impl SessionsEngine {
         // cross-harness delivery before recording or routing the user turn.
         zeron_proto::invocation::validate_harness_invocations(&request.prompt, harness_id)
             .map_err(EngineError::Other)?;
-        // Every dispatched prompt is a turn — routed steer or fresh run alike.
-        self.note_turn_start(chat_id, &request.cwd);
         self.label_computer_chat(chat_id);
         if request.computer_control
             && self
@@ -797,16 +807,23 @@ impl SessionsEngine {
                     reasoning: request.reasoning,
                 };
                 if let Ok(permit) = steer_tx.reserve().await {
-                    let mut pending = lock(&ledger);
-                    pending.push_back(RoutedSteer {
-                        prompt: request.prompt.clone(),
-                        message_id: user_id.clone(),
-                        attachments: request.attachments.clone(),
-                        computer_control: turn_computer,
-                        fork_history: bootstrap.is_some(),
-                    });
-                    permit.send(message);
-                    true
+                    // Commit the reserved slot atomically with the update
+                    // marker. An accepted update releases the slot instead, and
+                    // the prompt takes the fresh-run path behind the update.
+                    self.inner
+                        .registry
+                        .while_update_clear(harness_id, || {
+                            let mut pending = lock(&ledger);
+                            pending.push_back(RoutedSteer {
+                                prompt: request.prompt.clone(),
+                                message_id: user_id.clone(),
+                                attachments: request.attachments.clone(),
+                                computer_control: turn_computer,
+                                fork_history: bootstrap.is_some(),
+                            });
+                            permit.send(message);
+                        })
+                        .is_some()
                 } else {
                     false
                 }
@@ -822,6 +839,7 @@ impl SessionsEngine {
                 }
                 let handle = self.doc_handle(chat_id)?;
                 handle.write_user_message(&user_id, &request.prompt, now_ms())?;
+                self.note_turn_start(chat_id, &request.cwd);
                 if self.is_live(chat_id, &run_id) {
                     if bootstrap.is_some() {
                         history_sent.store(true, std::sync::atomic::Ordering::Release);
@@ -1036,6 +1054,26 @@ impl SessionsEngine {
         message_id: Option<String>,
         computer_control: Option<bool>,
     ) -> Result<SteerOutcome, EngineError> {
+        self.steer_at(
+            chat_id,
+            prompt,
+            attachments,
+            message_id,
+            computer_control,
+            now_ms(),
+        )
+        .await
+    }
+
+    pub(crate) async fn steer_at(
+        &self,
+        chat_id: &str,
+        prompt: &str,
+        attachments: &[String],
+        message_id: Option<String>,
+        computer_control: Option<bool>,
+        issued_at: i64,
+    ) -> Result<SteerOutcome, EngineError> {
         self.ensure_sidechat_active(chat_id)?;
         let target = lock(&self.inner.runs)
             .get(chat_id)
@@ -1087,9 +1125,11 @@ impl SessionsEngine {
         let Ok(permit) = steer_tx.reserve().await else {
             return Ok(SteerOutcome::NotSteerable);
         };
-        {
+        let accepted = self.inner.registry.while_update_clear(harness_id, || {
             // Serialize mailbox acceptance with confirmation and Done-time
             // inspection: a fast consumer must never outrun its ledger entry.
+            // The update marker is checked in the same critical section, so an
+            // accepted update releases the reserved slot instead.
             let mut pending = lock(&ledger);
             pending.push_back(RoutedSteer {
                 prompt: prompt.to_string(),
@@ -1099,9 +1139,12 @@ impl SessionsEngine {
                 fork_history: bootstrap.is_some(),
             });
             permit.send(message);
+        });
+        if accepted.is_none() {
+            return Ok(SteerOutcome::DeferredByUpdate);
         }
         let handle = self.doc_handle(chat_id)?;
-        handle.write_user_message(&user_id, prompt, now_ms())?;
+        handle.write_user_message(&user_id, prompt, issued_at.min(now_ms()))?;
         // A routed steer is a turn too. Fired here (not only on the confirmed
         // path) — a reclaim falls back to dispatch, which just re-snapshots.
         if let Some(request) = self.last_request(chat_id) {
@@ -3337,7 +3380,7 @@ async fn drive_run(
     harness: Arc<dyn Harness>,
     mut request: RunRequest,
     doc: crate::doc_host::DocWriter,
-    controls: RunControls,
+    mut controls: RunControls,
     mut engine_rx: mpsc::UnboundedReceiver<AgentEvent>,
     mut cancel_rx: watch::Receiver<bool>,
     resume_state: RunResumeState,
@@ -3432,14 +3475,40 @@ async fn drive_run(
     } else {
         Ok(())
     };
+    // Waiting here keeps dispatch and the shared queue-flush watcher responsive.
+    // The pending-update marker still orders new subprocesses after installation.
+    // Share the lease with the adapter so child cleanup outlives this event loop.
+    let mut _execution_lease = None;
     let started = match prepared {
         Ok(()) => {
-            let mut wire_request = request;
-            if !matches!(harness_id, HarnessId::Cursor | HarnessId::Opencode) {
-                wire_request.prompt =
-                    zeron_proto::invocation::harness_prompt(&wire_request.prompt, harness_id);
+            let lease = tokio::select! {
+                biased;
+                _ = controls.interrupt.cancelled() => None,
+                lease = inner.registry.execution_lease(harness_id) => Some(Arc::new(lease)),
+            };
+            if let Some(lease) = lease {
+                _execution_lease = Some(lease.clone());
+                controls.execution_lease = Some(lease);
+                if let Some(listener) = inner.turn_listener.get() {
+                    listener(&chat_id, &request.cwd);
+                }
+                let mut wire_request = request;
+                if !matches!(harness_id, HarnessId::Cursor | HarnessId::Opencode) {
+                    wire_request.prompt =
+                        zeron_proto::invocation::harness_prompt(&wire_request.prompt, harness_id);
+                }
+                harness.run(wire_request, controls).await
+            } else {
+                Ok(futures::stream::once(async {
+                    Ok(AgentEvent::Done {
+                        status: DoneStatus::Interrupted,
+                        result: None,
+                        error: None,
+                        session_id: None,
+                    })
+                })
+                .boxed())
             }
-            harness.run(wire_request, controls).await
         }
         Err(error) => Err(error),
     };
@@ -3620,6 +3689,22 @@ async fn drive_run(
                 _ = live_heartbeat.tick() => {
                     inner.touch_session(&chat_id);
                     continue;
+                }
+                // An accepted update must not wait behind a warm between-turn
+                // child for the full idle-reaper window. The completed turn is
+                // already durable, so retire the parked process cleanly and let
+                // the queued exclusive lease proceed.
+                _ = tokio::time::sleep_until(tokio::time::Instant::now()),
+                    if idle_since.is_some() && inner.registry.update_pending(harness_id) =>
+                {
+                    if let Some(token) = lock(&inner.runs)
+                        .get(&chat_id)
+                        .filter(|h| h.run_id == run_id)
+                        .map(|h| h.interrupt_token.clone())
+                    {
+                        token.cancel();
+                    }
+                    break SessionStatus::Idle;
                 }
                 // Idle reaper (zeron SESSION_IDLE_MS): a parked persistent session
                 // nobody returned to in 30 minutes releases its child. The turn
@@ -4439,7 +4524,11 @@ async fn drive_run(
             // PERSISTENT SESSION: a cleanly completed turn on a steerable
             // harness PARKS instead of ending — child + mailbox stay warm for
             // the next routed dispatch; per-turn state resets for it.
-            if *status == DoneStatus::Completed && steerable && !interrupted {
+            if *status == DoneStatus::Completed
+                && steerable
+                && !interrupted
+                && !inner.registry.update_pending(harness_id)
+            {
                 folded.clear();
                 dirty = false;
                 entry_id = new_id();

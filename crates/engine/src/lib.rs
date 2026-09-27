@@ -24,6 +24,7 @@ mod chat_persistence;
 pub mod computer;
 pub mod diff_sync;
 pub mod doc_host;
+pub mod harness_updates;
 mod http_error;
 pub mod instance_lock;
 pub mod local_import;
@@ -142,6 +143,7 @@ pub struct EngineCore {
     pub uploads: Uploads,
     pub agent_accounts: AgentAccounts,
     pub computer: Arc<computer::runtime::ComputerRuntime>,
+    pub harness_updates: harness_updates::HarnessUpdateCoordinator,
     pub device_id: String,
     /// Local→synced profile import (account-scoped runtimes only).
     pub local_import: Option<local_import::LocalImporter>,
@@ -304,6 +306,9 @@ impl EngineCore {
         // the P2P service, which serves it to that device alone.
         let agent_accounts =
             AgentAccounts::with_callback_routes(agent_accounts_config, previews.callback_routes());
+        let harness_updates =
+            harness_updates::HarnessUpdateCoordinator::new(data_dir, registry.clone());
+        harness_updates.start();
         sessions.set_titles(TitleGenerator::new(
             workspace.clone(),
             registry.clone(),
@@ -334,6 +339,7 @@ impl EngineCore {
             uploads,
             agent_accounts,
             computer,
+            harness_updates,
             device_id,
             local_import,
             workspace_scope: profile.scope(),
@@ -471,7 +477,8 @@ impl EngineCore {
         )
         .with_auth(self.auth())
         .with_previews(self.previews.clone())
-        .with_computer(self.computer.clone());
+        .with_computer(self.computer.clone())
+        .with_harness_updates(self.harness_updates.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);
         }
@@ -501,6 +508,7 @@ impl EngineCore {
     /// snapshot.
     pub async fn shutdown(&self) {
         self.previews.shutdown().await;
+        self.harness_updates.shutdown().await;
         // A run interruption transitions its chat to Idle, and Idle normally
         // releases the next queued row. Freeze first so quitting never starts
         // recovered work while the engine is being torn down.

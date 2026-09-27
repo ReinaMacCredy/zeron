@@ -13,13 +13,17 @@ members = [
     "crates/update",
     "crates/ui",
     "crates/syntax",
+    "crates/markdown",
+    "crates/mobile",
+    "crates/client",
     "crates/mcp",
+    "crates/text",
     "apps/zeron",
 ]
 exclude = ["vendor/cua-driver"]
 
 [workspace.package]
-version = "0.2.92"
+version = "0.2.94"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -36,7 +40,11 @@ zeron-mcp = { path = "crates/mcp" }
 zeron-update = { path = "crates/update" }
 zeron-ui = { path = "crates/ui" }
 zeron-syntax = { path = "crates/syntax" }
+zeron-markdown = { path = "crates/markdown" }
+zeron-mobile = { path = "crates/mobile" }
+zeron-client = { path = "crates/client" }
 zeron-theme = { path = "crates/theme" }
+zeron-text = { path = "crates/text" }
 
 # CRDT
 loro = "1.13"
@@ -153,3 +161,20 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 2
+
+# Mobile core (scripts/ios/build-core.sh). Always optimized — layout and sync
+# run on the phone's hot paths, so even Debug app builds link an -O core.
+[profile.mobile]
+inherits = "release"
+lto = false
+strip = false
+debug = "line-tables-only"
+incremental = true
+codegen-units = 16
+
+# TestFlight/App Store archives.
+[profile.mobile-dist]
+inherits = "release"
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"

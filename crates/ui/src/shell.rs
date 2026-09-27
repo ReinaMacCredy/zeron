@@ -64,6 +64,10 @@ use crate::workspace_links::resolve_workspace_file_link;
 mod actions_ui;
 mod command_palette;
 mod files_panel;
+mod harness_updates;
+mod navigation_focus;
+#[cfg(test)]
+mod navigation_tests;
 mod project_icon;
 mod side_chats;
 mod sidebar_pins;
@@ -865,6 +869,8 @@ pub struct ChatPanels {
 #[derive(Debug, Default)]
 pub struct SessionPanels {
     map: std::collections::HashMap<String, ChatPanels>,
+    /// Unique surface visits, oldest first, independent of the strip order.
+    right_tab_history: std::collections::HashMap<String, Vec<RightSurface>>,
 }
 
 impl SessionPanels {
@@ -888,7 +894,46 @@ impl SessionPanels {
 
     /// Mutate `key`'s flags in place (right-pane surface bookkeeping).
     pub fn update(&mut self, key: &str, f: impl FnOnce(&mut ChatPanels)) {
-        f(self.map.entry(key.to_string()).or_default());
+        let panel = self.map.entry(key.to_string()).or_default();
+        let previous = panel.right_active;
+        f(panel);
+        let surface = panel.right_active;
+        if surface != previous && surface != RightSurface::Picker {
+            let history = self.right_tab_history.entry(key.to_string()).or_default();
+            history.retain(|visited| *visited != surface);
+            history.push(surface);
+        }
+    }
+
+    fn forget_right_surface(&mut self, key: &str, surface: RightSurface) {
+        if let Some(history) = self.right_tab_history.get_mut(key) {
+            history.retain(|visited| *visited != surface);
+            if history.is_empty() {
+                self.right_tab_history.remove(key);
+            }
+        }
+    }
+
+    /// Resolve against live surfaces so stale terminal/entity ids are skipped.
+    /// The strip's first tab remains the fallback for surfaces never visited.
+    fn right_surface_fallback(
+        &self,
+        key: &str,
+        mut available: impl Iterator<Item = RightSurface>,
+    ) -> RightSurface {
+        let Some(first) = available.next() else {
+            return RightSurface::Picker;
+        };
+        let Some(history) = self.right_tab_history.get(key) else {
+            return first;
+        };
+        let live: std::collections::HashSet<_> = std::iter::once(first).chain(available).collect();
+        history
+            .iter()
+            .rev()
+            .find(|surface| live.contains(surface))
+            .copied()
+            .unwrap_or(first)
     }
 }
 
@@ -2125,6 +2170,18 @@ pub struct Shell {
     /// Persistent across AppState observer callbacks so simultaneous session
     /// failures and connectivity degradation produce one attention sound.
     attention_sound_gate: crate::sound::AttentionSoundGate,
+    /// `{device,harness,latest}` discoveries already delivered as a desktop
+    /// banner during this viewport lifetime.
+    harness_update_seen: std::collections::HashSet<String>,
+    /// Short debounce that aggregates providers finishing the same check at
+    /// slightly different times into one banner.
+    harness_update_banner_task: Option<Task<()>>,
+    /// Independent watches retain device identity across selection changes.
+    harness_update_devices: std::collections::BTreeMap<String, harness_updates::DeviceUpdates>,
+    harness_update_expanded: bool,
+    harness_update_transition: Option<WidthTween>,
+    harness_update_geometry: [Option<WidthTween>; 2],
+    harness_update_scroll: settings::widgets::PageScroll,
     user_menu: popover::Popup<()>,
     /// Inline sidebar error strip (mutation failures); click dismisses.
     sidebar_notice: Option<SharedString>,
@@ -2251,6 +2308,7 @@ pub struct Shell {
     /// settle, preserving focus on mounted controls.
     focus_sub: Option<Subscription>,
     shortcut_focus: FocusHandle,
+    navigation_focus: navigation_focus::NavigationFocus,
     /// Neutral shortcut target after clicking away from an input.
     unfocused: FocusHandle,
     /// Clears the jump hints when the window deactivates: a Cmd+Tab away
@@ -2630,6 +2688,13 @@ impl Shell {
             tab_watch_since: Utc::now(),
             connectivity_notifications: Default::default(),
             attention_sound_gate: Default::default(),
+            harness_update_seen: std::collections::HashSet::new(),
+            harness_update_banner_task: None,
+            harness_update_devices: Default::default(),
+            harness_update_expanded: false,
+            harness_update_transition: None,
+            harness_update_geometry: [None; 2],
+            harness_update_scroll: settings::widgets::PageScroll::default(),
             user_menu: popover::Popup::default(),
             sidebar_notice: None,
             update_flow: UpdateFlow::Idle,
@@ -2690,6 +2755,7 @@ impl Shell {
             splash_task: None,
             focus_sub: None,
             shortcut_focus: cx.focus_handle(),
+            navigation_focus: navigation_focus::NavigationFocus::new(cx),
             unfocused: cx.focus_handle(),
             activation_sub: None,
             _ticker: ticker,
@@ -2789,6 +2855,7 @@ impl Shell {
 
     fn on_state_changed(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) {
         self.prune_file_explorers(cx);
+        self.refresh_harness_update_watch(cx);
         if state.read(cx).engine().is_none() {
             self.side_chats.clear();
             self.side_chat_creating = false;
@@ -3002,6 +3069,75 @@ impl Shell {
                     crate::notify::post("Connection unavailable", body, None);
                 }
             }
+        }
+        // Agent release discoveries finish independently (bounded provider
+        // concurrency), so debounce the transition and deliver one aggregate
+        // banner. Versioned releases deduplicate by version. Versionless
+        // availability deduplicates until a confirmed Current/Updated status;
+        // transient checks, disconnections and cancellation do not reset it.
+        let has_unseen_harness_update = {
+            let state = state.read(cx);
+            let device = state.local_device_id.as_deref().unwrap_or("local");
+            for status in &state.harness_updates {
+                if matches!(
+                    status.phase,
+                    zeron_proto::HarnessUpdatePhase::Current
+                        | zeron_proto::HarnessUpdatePhase::Updated
+                ) {
+                    self.harness_update_seen.remove(
+                        &harness_updates::versionless_notification_key(device, status.harness),
+                    );
+                }
+            }
+            state.harness_updates.iter().any(|status| {
+                harness_updates::notification_key(device, status)
+                    .is_some_and(|key| !self.harness_update_seen.contains(&key))
+            })
+        };
+        if has_unseen_harness_update && self.harness_update_banner_task.is_none() {
+            self.harness_update_banner_task = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                this.update(cx, |this, cx| {
+                    this.harness_update_banner_task = None;
+                    let new: Vec<String> = {
+                        let state = this.state.read(cx);
+                        let device = state.local_device_id.as_deref().unwrap_or("local");
+                        state
+                            .harness_updates
+                            .iter()
+                            .filter_map(|status| harness_updates::notification_key(device, status))
+                            .filter(|key| !this.harness_update_seen.contains(key))
+                            .collect()
+                    };
+                    if new.is_empty() {
+                        return;
+                    }
+                    let count = new.len();
+                    for key in &new {
+                        this.harness_update_seen.insert(key.clone());
+                    }
+                    let focused = cx.active_window().is_some();
+                    if this.settings.notifications_enabled
+                        && this.settings.agent_update_notifications
+                        && !(this.settings.notifications_background_only && focused)
+                    {
+                        let body = if count == 1 {
+                            "A coding agent update is ready"
+                        } else {
+                            "Coding agent updates are ready"
+                        };
+                        crate::notify::post(
+                            &format!(
+                                "{count} agent update{} available",
+                                if count == 1 { "" } else { "s" }
+                            ),
+                            body,
+                            Some(crate::notify::AGENT_UPDATES_TARGET),
+                        );
+                    }
+                })
+                .ok();
+            }));
         }
         // An explicit projectless canvas must be visible in the sidebar:
         // retaining a project filter would hide the session on its first send.
@@ -3468,8 +3604,8 @@ impl Shell {
     }
 
     /// The surface that actually renders: the stored pick when it still
-    /// exists, else the first remaining tab, else the picker. Terminal keys
-    /// go stale when their tab closes/exits — never render a dead surface.
+    /// exists, else the most recently visited live tab, else the picker.
+    /// Terminal keys go stale when their tab closes/exits — never render a dead surface.
     fn resolved_right_active(&self, cx: &App) -> RightSurface {
         let picked = self.panels.get(&self.panel_key(cx)).right_active;
         let rows = self.right_surface_rows(cx);
@@ -3480,9 +3616,10 @@ impl Shell {
         if exists {
             picked
         } else {
-            rows.first()
-                .map(|(s, _, _, _)| *s)
-                .unwrap_or(RightSurface::Picker)
+            self.panels.right_surface_fallback(
+                &self.panel_key(cx),
+                rows.iter().map(|(surface, _, _, _)| *surface),
+            )
         }
     }
 
@@ -4733,6 +4870,8 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let was_active = self.resolved_right_active(cx) == surface;
+        let restore_focus = was_active && self.navigation_focus.in_right(window, cx);
+        self.navigation_focus.remember(&self.shortcut_focus, window, cx);
         let key = self.panel_key(cx);
         let files = match surface {
             RightSurface::File(id) => self.file_surfaces.get(&id).cloned(),
@@ -4742,6 +4881,9 @@ impl Shell {
             match files.update(cx, |files, cx| files.prepare_close(cx)) {
                 FilesCloseDisposition::Allow => {
                     self.complete_file_close(surface, &key, cx);
+                    if restore_focus {
+                        self.restore_right_focus_after_close(window, cx);
+                    }
                 }
                 FilesCloseDisposition::Pending | FilesCloseDisposition::Blocked => {
                     self.pending_file_closes.insert(surface);
@@ -4760,9 +4902,6 @@ impl Shell {
                     browser.update(cx, |browser, cx| browser.close(cx));
                 }
                 self.browser_subs.remove(&id);
-                if was_active {
-                    window.focus(&self.composer.focus_handle(cx), cx);
-                }
             }
             RightSurface::Diff(id) => {
                 // Dropping the entity tears down its diff watch.
@@ -4775,16 +4914,12 @@ impl Shell {
             }
             RightSurface::SideChat(id) => {
                 // An unsent draft outlives the tab: the side chat stays
-                // loaded, detached, and reopening it restores the draft.
-                if self
-                    .side_chats
-                    .get(&id)
-                    .is_none_or(|side| !side.composer.read(cx).has_draft(cx))
-                {
+                // loaded, detached, and reopening it restores the draft. An
+                // unsaved side chat has no row to reopen it from.
+                if self.side_chats.get(&id).is_none_or(|side| {
+                    side.state.read(cx).side_chat_unsaved() || !side.composer.read(cx).has_draft(cx)
+                }) {
                     self.side_chats.remove(&id);
-                }
-                if was_active {
-                    window.focus(&self.composer.focus_handle(cx), cx);
                 }
             }
             RightSurface::Subagent(id) => {
@@ -4818,18 +4953,20 @@ impl Shell {
             RightSurface::Picker => {}
         }
         self.close_empty_right_pane(&key, cx);
-        let fallback = self
-            .right_tabs
-            .get(&key)
-            .and_then(|tabs| tabs.first())
-            .copied()
-            .unwrap_or_default();
+        self.panels.forget_right_surface(&key, surface);
+        let fallback = self.panels.right_surface_fallback(
+            &key,
+            self.right_tabs.get(&key).into_iter().flatten().copied(),
+        );
         self.panels.update(&key, |p| {
             if p.right_active == surface {
                 p.right_active = fallback;
             }
         });
         self.collapse_surfaces_if_empty(&key, cx);
+        if restore_focus {
+            self.restore_right_focus_after_close(window, cx);
+        }
         cx.notify();
     }
 
@@ -4965,12 +5102,15 @@ impl Shell {
         }
         self.pending_file_closes.remove(&surface);
         self.close_empty_right_pane(panel_key, cx);
-        let fallback = self
-            .right_tabs
-            .get(panel_key)
-            .and_then(|tabs| tabs.first())
-            .copied()
-            .unwrap_or_default();
+        self.panels.forget_right_surface(panel_key, surface);
+        let fallback = self.panels.right_surface_fallback(
+            panel_key,
+            self.right_tabs
+                .get(panel_key)
+                .into_iter()
+                .flatten()
+                .copied(),
+        );
         self.panels.update(panel_key, |panel| {
             if panel.right_active == surface {
                 panel.right_active = fallback;
@@ -5372,7 +5512,7 @@ impl Shell {
         cx.notify();
     }
 
-    fn open_settings(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
+    pub(crate) fn open_settings(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
         let section = section.canonical();
         self.command_palette = None;
         // Recreate per visit: the page's ListHarnesses load re-probes which
@@ -5626,6 +5766,7 @@ impl Shell {
                             self.settings.sound_attention_enabled,
                             self.settings.notifications_enabled,
                             self.settings.notifications_background_only,
+                            self.settings.agent_update_notifications,
                             cx,
                         )
                     });
@@ -5640,6 +5781,7 @@ impl Shell {
                                 attention_sound,
                                 desktop,
                                 background_only,
+                                agent_updates,
                             } = *event;
                             this.settings.sound_enabled = sound;
                             this.settings.sound_completion_enabled = completion_sound;
@@ -5647,6 +5789,7 @@ impl Shell {
                             this.settings.sound_attention_enabled = attention_sound;
                             this.settings.notifications_enabled = desktop;
                             this.settings.notifications_background_only = background_only;
+                            this.settings.agent_update_notifications = agent_updates;
                             this.schedule_save(cx);
                             cx.notify();
                         },
@@ -6074,14 +6217,15 @@ impl Shell {
     /// branch…). Session-nav shortcuts (cycle/jump/archive) go quiet
     /// underneath one: gpui runs a matched binding before any `on_key_down`,
     /// so an unguarded jump would switch sessions UNDER the open popover,
-    /// stranding it over a session the user never picked.
+    /// stranding it over a session the user never picked. The Settings page
+    /// is not one: navigating leaves it, and its shortcut recorder intercepts
+    /// the keys it records before they can dispatch.
     pub(super) fn overlay_owns_keyboard(&self, cx: &App) -> bool {
         self.command_palette.is_some()
             || self.switcher.is_some()
             || self.branch_modal.is_some()
             || self.section_dialog.is_some()
             || self.section_menu.is_some()
-            || matches!(self.route, Route::Settings(_))
             || self.add_space.is_some()
             || self.composer.read(cx).pickers().read(cx).is_open()
             || self.open_side_chat_pickers(cx).is_some()
@@ -10080,6 +10224,10 @@ impl Shell {
         {
             return true;
         }
+        if self.harness_update_expanded {
+            self.set_harness_updates_expanded(false, cx);
+            return true;
+        }
         if self.rename_dialog.is_some() {
             self.rename_dialog = None;
             cx.notify();
@@ -11121,6 +11269,22 @@ impl Shell {
             Empty.into_any_element()
         };
 
+        // Share the dock's choreography: release the bottom chip early on
+        // departure, reveal it with the Home selectors on return. Absolute
+        // mounting keeps it out of composer measurements and centering.
+        let chip_opacity = if has_selection {
+            1.0 - crate::composer_dock::stage(dock_frame.dissolve(), 0.0, 0.22)
+        } else {
+            dock_frame.selectors()
+        } * self.composer_dock.borrow().opacity();
+        if has_selection {
+            self.set_harness_updates_expanded(false, cx);
+        }
+        let harness_update_card = if chip_opacity > 0.001 && (!has_selection || dock_frame.active) {
+            self.render_harness_update_card(window, main_content_width, cx)
+        } else {
+            None
+        };
         let status = self.render_status_strip(composer_width, cx);
         // Attachment dropzone over the ENTIRE conversation column (transcript
         // + composer, not just the pill). OS images keep using the upload
@@ -11133,6 +11297,10 @@ impl Shell {
         // such as a pane resize.
         div()
             .id("chat-dropzone")
+            .track_focus(&self.navigation_focus.main)
+            .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
+                this.capture_navigation_focus(false, false, window, cx);
+            }))
             .relative()
             .flex_1()
             .min_w_0()
@@ -11267,6 +11435,22 @@ impl Shell {
                         )
                     })
                     .child(self.render_terminal_container(window, cx))
+            })
+            .when_some(harness_update_card, |column, chip| {
+                column.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .bottom(px(24.0 - 8.0 * (1.0 - chip_opacity)))
+                        .opacity(chip_opacity)
+                        .flex()
+                        .justify_center()
+                        .child(chip)
+                        .when(has_selection, |el| {
+                            el.child(div().absolute().inset_0().occlude())
+                        }),
+                )
             })
             .child(
                 div()
@@ -11731,6 +11915,11 @@ impl Shell {
         // lives outside this clipped container, on the root layout's seam.
         let panel_bg = theme.panel_bg();
         let panel = div()
+            .id("right-pane-focus")
+            .track_focus(&self.navigation_focus.right)
+            .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
+                this.capture_navigation_focus(true, false, window, cx);
+            }))
             .size_full()
             .flex()
             .flex_col()
@@ -11997,6 +12186,10 @@ impl Shell {
         let scroll_for_drag = self.right_tab_scroll.clone();
         let mut strip = div()
             .id("right-surface-strip")
+            .track_focus(&self.navigation_focus.tabs)
+            .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
+                this.capture_navigation_focus(true, true, window, cx);
+            }))
             .flex()
             .flex_row()
             .items_center()
@@ -12146,8 +12339,7 @@ impl Shell {
                 })
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
-                    this.set_right_active(surface, cx);
-                    this.focus_right_file_editor(surface, window, cx);
+                    this.activate_right_surface(surface, window, cx);
                 }))
                 .on_mouse_down(
                     MouseButton::Right,
@@ -13238,6 +13430,8 @@ fn header_icon_button(
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.navigation_focus
+            .remember(&self.shortcut_focus, window, cx);
         if let Some(command) = self.pending_workspace_command.take() {
             use crate::composer::WorkspaceCommand;
             match command {
@@ -13435,12 +13629,7 @@ impl Render for Shell {
         if self.focus_sub.is_none() {
             self.focus_sub = Some(cx.on_focus_lost(window, |this: &mut Shell, window, cx| {
                 let root = this.shortcut_focus.clone();
-                let unfocused = this.unfocused.clone();
-                let preferred = if matches!(this.route, Route::Settings(_)) {
-                    this.settings_focus.clone()
-                } else {
-                    this.composer.focus_handle(cx)
-                };
+                let (preferred, unfocused) = this.navigation_focus_fallback(cx);
                 window.on_next_frame(move |window, cx| {
                     restore_mounted_focus(&root, &preferred, &unfocused, window, cx);
                 });
@@ -13456,12 +13645,7 @@ impl Render for Shell {
             window.on_next_frame(move |window, cx| window.focus(&target, cx));
         }
         let shortcut_focus = self.shortcut_focus.clone();
-        let unfocused = self.unfocused.clone();
-        let preferred_focus = if matches!(self.route, Route::Settings(_)) {
-            self.settings_focus.clone()
-        } else {
-            self.composer.focus_handle(cx)
-        };
+        let (preferred_focus, unfocused) = self.navigation_focus_fallback(cx);
         window.defer(cx, move |window, cx| {
             restore_mounted_focus(&shortcut_focus, &preferred_focus, &unfocused, window, cx);
         });
@@ -13551,18 +13735,16 @@ impl Render for Shell {
             }))
             // New session works from anywhere — `open_new_session` routes back
             // to chat itself, so Settings is not a dead spot.
-            .on_action(cx.listener(|this, _: &NewSession, _, cx| {
-                if !matches!(this.route, Route::Settings(_)) {
-                    this.open_new_session(cx)
-                }
-            }))
+            .on_action(cx.listener(|this, _: &NewSession, _, cx| this.open_new_session(cx)))
             // Native Settings menu item and the platform convention (Cmd+, on
             // macOS, Ctrl+, elsewhere) toggle the modal from any section.
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.toggle_settings(cx)))
-            // Chat-scoped, unlike new-session — `switcher_step` holds the guard
-            // and says why.
-            .on_action(cx.listener(|this, _: &NextSession, _, cx| this.switcher_step(true, cx)))
-            .on_action(cx.listener(|this, _: &PrevSession, _, cx| this.switcher_step(false, cx)))
+            .on_action(cx.listener(|this, _: &NextSession, window, cx| {
+                this.cycle_navigation(true, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &PrevSession, window, cx| {
+                this.cycle_navigation(false, window, cx)
+            }))
             .on_action(cx.listener(|this, _: &ToggleChanges, window, cx| {
                 if matches!(this.route, Route::Chat) {
                     this.toggle_right_pane(cx);
@@ -15238,6 +15420,131 @@ mod tests {
         // Distinct per handle, and never confused with another surface kind.
         assert_ne!(RightSurface::Sidechat(2), RightSurface::Sidechat(3));
         assert_ne!(RightSurface::Sidechat(2), RightSurface::Subagent(2));
+    }
+
+    #[test]
+    fn session_panels_right_history_tracks_visits_without_duplicates() {
+        let mut panels = SessionPanels::default();
+        let [a, b, c, d] = [1, 2, 3, 4].map(RightSurface::Browser);
+        for surface in [a, b, c, d, c, b, d, d] {
+            panels.update("chat", |p| p.right_active = surface);
+        }
+        assert_eq!(panels.right_tab_history["chat"], vec![a, c, b, d]);
+        panels.forget_right_surface("chat", d);
+        let next = panels.right_surface_fallback("chat", [a, b, c].into_iter());
+        assert_eq!(next, b);
+        panels.update("chat", |p| p.right_active = next);
+        panels.forget_right_surface("chat", b);
+        assert_eq!(panels.right_surface_fallback("chat", [a, c].into_iter()), c);
+        // Dragging the strip into another order cannot change recency.
+        assert_eq!(panels.right_surface_fallback("chat", [c, a].into_iter()), c);
+    }
+
+    #[test]
+    fn session_panels_right_history_is_scoped_and_skips_stale_surfaces() {
+        let mut panels = SessionPanels::default();
+        let a = RightSurface::File(1);
+        let b = RightSurface::SideChat(2);
+        let stale = RightSurface::Terminal(3);
+        for surface in [a, b, stale] {
+            panels.update("first", |p| p.right_active = surface);
+        }
+        for surface in [b, a] {
+            panels.update("second", |p| p.right_active = surface);
+        }
+        assert_eq!(
+            panels.right_surface_fallback("first", [a, b].into_iter()),
+            b
+        );
+        assert_eq!(
+            panels.right_surface_fallback("second", [a, b].into_iter()),
+            a
+        );
+        assert_eq!(panels.right_surface_fallback("new", [a, b].into_iter()), a);
+        assert_eq!(
+            panels.right_surface_fallback("first", [].into_iter()),
+            RightSurface::Picker
+        );
+        // Changing visibility or showing the picker is not a surface visit.
+        panels.update("first", |p| p.changes_open = true);
+        panels.update("first", |p| p.right_active = RightSurface::Picker);
+        assert_eq!(panels.right_tab_history["first"], vec![a, b, stale]);
+        for surface in [a, b, stale] {
+            panels.forget_right_surface("first", surface);
+        }
+        assert!(!panels.right_tab_history.contains_key("first"));
+        assert_eq!(panels.right_tab_history["second"], vec![b, a]);
+    }
+
+    #[gpui::test]
+    fn right_tabs_close_in_visit_order_across_surface_types(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, window, cx| {
+                shell.active_chat = "owner".into();
+                let mut tabs = Vec::new();
+                for _ in 0..4 {
+                    shell.add_browser_surface(None, window, cx);
+                    tabs.push(RightSurface::Browser(shell.browser_seq));
+                }
+                let [a, b, c, d] = <[_; 4]>::try_from(tabs).unwrap();
+                for surface in [c, b, d] {
+                    shell.set_right_active(surface, cx);
+                }
+                shell.reorder_right_tabs(2, 0, cx);
+                shell.close_right_surface(d, window, cx);
+                assert_eq!(shell.resolved_right_active(cx), b);
+                shell.close_right_surface(a, window, cx);
+                assert_eq!(shell.resolved_right_active(cx), b, "inactive close");
+                shell.close_right_surface(b, window, cx);
+                assert_eq!(shell.resolved_right_active(cx), c);
+
+                shell.add_browser_surface(None, window, cx);
+                let recent = RightSurface::Browser(shell.browser_seq);
+                shell.add_file_surface("README.md".into(), window, cx);
+                let file = RightSurface::File(shell.file_surface_seq);
+                shell.close_right_surface(file, window, cx);
+                assert_eq!(shell.resolved_right_active(cx), recent);
+
+                // A save may complete after switching to another session.
+                shell.add_file_surface("README.md".into(), window, cx);
+                let file = RightSurface::File(shell.file_surface_seq);
+                let owner = shell.panel_key(cx);
+                shell.active_chat = "other".into();
+                shell.add_browser_surface(None, window, cx);
+                let other = RightSurface::Browser(shell.browser_seq);
+                shell.complete_file_close(file, &owner, cx);
+                assert_eq!(shell.resolved_right_active(cx), other);
+                shell.active_chat = "owner".into();
+                assert_eq!(shell.resolved_right_active(cx), recent);
+                shell.close_right_surface(recent, window, cx);
+                shell.close_right_surface(c, window, cx);
+                assert_eq!(shell.resolved_right_active(cx), RightSurface::Picker);
+                assert!(!shell.panels.right_tab_history.contains_key(&owner));
+                assert!(!shell.right_pane_open(cx));
+            })
+            .unwrap();
     }
 
     #[test]
@@ -17030,6 +17337,72 @@ mod right_tab_mouse_regressions {
     }
 
     #[gpui::test]
+    fn update_banner_fires_during_continuous_state_changes(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            shell.settings.notifications_enabled = false;
+            shell.state.update(cx, |state, _| {
+                state.harness_updates = vec![
+                    serde_json::from_value(serde_json::json!({
+                        "harness": "codex", "phase": "available", "latestVersion": "2.0.0",
+                        "policy": "notify", "source": "unknown", "canApply": true
+                    }))
+                    .unwrap(),
+                    serde_json::from_value(serde_json::json!({
+                        "harness": "hermes", "phase": "available",
+                        "policy": "notify", "source": "unknown", "canApply": true
+                    }))
+                    .unwrap(),
+                ];
+            });
+        });
+        for _ in 0..12 {
+            shell.update(cx, |shell, cx| {
+                shell.on_state_changed(&shell.state.clone(), cx)
+            });
+            cx.run_until_parked();
+            cx.executor().advance_clock(Duration::from_millis(100));
+        }
+        cx.run_until_parked();
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.harness_update_seen.len(), 2);
+            assert!(shell.harness_update_banner_task.is_none());
+        });
+        // Rechecks and repeated versionless availability remain deduplicated.
+        for phase in [
+            zeron_proto::HarnessUpdatePhase::Checking,
+            zeron_proto::HarnessUpdatePhase::Available,
+        ] {
+            shell.update(cx, |shell, cx| {
+                shell
+                    .state
+                    .update(cx, |state, _| state.harness_updates[1].phase = phase);
+                shell.on_state_changed(&shell.state.clone(), cx);
+                assert!(shell.harness_update_banner_task.is_none());
+            });
+        }
+        // A confirmed current state ends the availability episode, permitting
+        // another commit-only update to notify even if the version is unchanged.
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.harness_updates[1].phase = zeron_proto::HarnessUpdatePhase::Current
+            });
+            shell.on_state_changed(&shell.state.clone(), cx);
+            assert_eq!(shell.harness_update_seen.len(), 1);
+            shell.state.update(cx, |state, _| {
+                state.harness_updates[1].phase = zeron_proto::HarnessUpdatePhase::Available
+            });
+            shell.on_state_changed(&shell.state.clone(), cx);
+        });
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.harness_update_seen.len(), 2)
+        });
+    }
+
+    #[gpui::test]
     fn subagent_close_press_does_not_start_parent_drag(cx: &mut TestAppContext) {
         let (shell, cx) = setup(cx);
         let start = cx.debug_bounds("right-surface-close-0").unwrap().center();
@@ -17088,9 +17461,7 @@ mod right_tab_mouse_regressions {
             Some(MouseButton::Left),
             gpui::Modifiers::default(),
         );
-        cx.update(|_, cx| {
-            assert!(cx.has_active_drag(), "tab drag did not start")
-        });
+        cx.update(|_, cx| assert!(cx.has_active_drag(), "tab drag did not start"));
         cx.simulate_mouse_up(start, MouseButton::Left, gpui::Modifiers::default());
         cx.simulate_mouse_down(start, MouseButton::Middle, gpui::Modifiers::default());
         cx.simulate_mouse_up(start, MouseButton::Middle, gpui::Modifiers::default());
@@ -17576,6 +17947,71 @@ mod settings_modal_regressions {
         }
         assert_eq!(settings_open_route("settings/billing", remembered), None);
         assert_eq!(settings_open_route("new", remembered), None);
+    }
+
+    /// Session navigation shortcuts are not swallowed by Settings: each one
+    /// leaves the page and lands on its target, as it would from chat.
+    #[gpui::test]
+    fn navigation_shortcuts_work_from_settings(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
+        let keymap = KeymapConfig::default();
+        cx.update(|cx| {
+            apply_keymap(
+                cx,
+                &keymap,
+                ComposerSendBehavior::default(),
+                Default::default(),
+            )
+        });
+        let window = cx.add_window(|_, cx| {
+            let mut shell = test_shell(dir.path(), cx);
+            shell.settings.sidebar_organization = SidebarOrganization::InOneList;
+            shell.state.update(cx, |state, _| {
+                state.workspace_scope = Some(WorkspaceScope::Local);
+                state.local_device_id = Some("local".into());
+                state.chats = ["older", "newer"]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(ix, id)| {
+                        serde_json::from_value(serde_json::json!({
+                            "id": id, "title": id, "deviceId": "local", "archived": false,
+                            "createdAt": Utc::now() - chrono::Duration::minutes(10 - ix as i64),
+                        }))
+                        .unwrap()
+                    })
+                    .collect();
+                state.selected_chat = Some("older".into());
+            });
+            shell
+        });
+        let mut press = |combo: &str| {
+            window
+                .update(cx, |shell, _, cx| {
+                    shell.open_settings(SettingsSection::Shortcuts, cx)
+                })
+                .unwrap();
+            cx.run_until_parked();
+            cx.simulate_keystrokes(window.into(), &platform_combo(combo));
+            window
+                .read_with(cx, |shell, cx| {
+                    (shell.route, shell.state.read(cx).selected_chat.clone())
+                })
+                .unwrap()
+        };
+        assert_eq!(
+            press(keymap.get(ShortcutId::JumpSession(0))),
+            (Route::Chat, Some("newer".into()))
+        );
+        assert_eq!(
+            press(&keymap.next_session),
+            (Route::Chat, Some("older".into()))
+        );
+        assert_eq!(
+            press(&keymap.prev_session),
+            (Route::Chat, Some("newer".into()))
+        );
+        assert_eq!(press(&keymap.new_session), (Route::Chat, None));
     }
 
     #[gpui::test]
