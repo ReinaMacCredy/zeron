@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
-use zeron_proto::{ChatIndicator, ContextUsage, UserInputQuestion};
+use zeron_proto::{ChatIndicator, ContextUsage, UserInputAnswer, UserInputQuestion};
 
 use crate::connectivity::SendState;
 
@@ -109,6 +109,7 @@ pub struct SessionSnapshot {
     pub hydrated: bool,
     pub delta: SnapshotDelta,
     pub(crate) index: Arc<HashMap<String, usize>>,
+    pub input_answers: Arc<HashMap<String, Vec<UserInputAnswer>>>,
 }
 
 impl SessionSnapshot {

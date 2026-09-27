@@ -10,6 +10,8 @@
 //! The host writes all transcript entries and command outcomes.
 
 mod snapshot;
+#[cfg(test)]
+mod tests;
 pub(crate) mod transcript;
 
 use std::collections::{HashMap, HashSet};
@@ -23,7 +25,8 @@ use zeron_doc::{
     SessionMessageEntry,
 };
 use zeron_proto::{
-    ChatIndicator, ContextUsage, RunRequest, SandboxLevel, UserInputAnswer, WorktreeSpec,
+    ChatIndicator, ContextUsage, RunRequest, SandboxLevel, UserInputAnswer, UserInputQuestion,
+    WorktreeSpec,
 };
 
 pub use snapshot::{
@@ -449,14 +452,22 @@ impl SessionCore {
             let live_changed = previous.working != live.working
                 || previous.working_since_ms != live.working_since_ms
                 || previous.hydrated != st.hydrated;
+            let answers = sent_answers(&st.commands, now);
+            let answers_changed = *previous.input_answers != answers;
             if change.is_some()
                 || echoes_changed
                 || dirty.meta
                 || live_changed
+                || answers_changed
                 || st.transcript_revision == 0
             {
                 st.transcript_revision += 1;
-                let snapshot = build_snapshot(&self.chat_id, &st, change, live, &previous);
+                let answers = if answers_changed {
+                    Arc::new(answers)
+                } else {
+                    previous.input_answers.clone()
+                };
+                let snapshot = build_snapshot(&self.chat_id, &st, change, live, answers, &previous);
                 transcript_event = Some(snapshot.revision);
                 self.transcript_tx.send_replace(Arc::new(snapshot));
             }
@@ -564,6 +575,10 @@ impl SessionCore {
 
     fn queue_command(&self, device_id: &str, payload: SessionCommandPayload) -> Result<String> {
         let now = now_ms();
+        let message = matches!(
+            payload,
+            SessionCommandPayload::Run { .. } | SessionCommandPayload::Steer { .. }
+        );
         let entry = SessionCommandEntry {
             id: crate::new_id(),
             payload,
@@ -576,7 +591,7 @@ impl SessionCore {
             expires_at: Some(now + zeron_doc::COMMAND_DEFAULT_TTL_MS),
             status: SessionCommandStatus::Pending,
             resolution: None,
-            computer_generation: None,
+            computer_generation: message.then(|| self.doc.computer_generation()),
         };
         let id = entry.id.clone();
         self.write(|doc| doc.queue_command(&entry))?;
@@ -679,6 +694,7 @@ fn open_input(entries: &[Arc<Entry>]) -> Option<InputRequest> {
                 ..
             } = part
                 && !questions.is_empty()
+                && !questions.iter().any(UserInputQuestion::is_consent)
             {
                 return Some(InputRequest {
                     entry_id: entry.id.clone(),
@@ -819,11 +835,33 @@ struct LiveFlags {
     working_since_ms: Option<i64>,
 }
 
+fn sent_answers(
+    commands: &[SessionCommandEntry],
+    now: i64,
+) -> HashMap<String, Vec<UserInputAnswer>> {
+    commands
+        .iter()
+        .filter(|command| match command.status {
+            SessionCommandStatus::Pending => now < command.effective_expiry(),
+            SessionCommandStatus::Applied => true,
+            _ => false,
+        })
+        .filter_map(|command| match &command.payload {
+            SessionCommandPayload::RespondInput {
+                request_id,
+                answers,
+            } => Some((request_id.clone(), answers.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
 fn build_snapshot(
     chat_id: &str,
     st: &CoreState,
     change: Option<transcript::TranscriptChange>,
     live: LiveFlags,
+    input_answers: Arc<HashMap<String, Vec<UserInputAnswer>>>,
     previous: &SessionSnapshot,
 ) -> SessionSnapshot {
     let transcript = st.tracker.entries();
@@ -854,6 +892,7 @@ fn build_snapshot(
         hydrated: st.hydrated,
         delta: SnapshotDelta::default(),
         index: Arc::new(index),
+        input_answers,
     };
     snapshot.delta = match change {
         Some(change) if change.reset => SnapshotDelta {
@@ -1089,6 +1128,33 @@ impl SessionHandle {
         Ok(())
     }
 
+    pub fn answer_consent(&self, request_id: &str, question_id: &str, label: &str) -> Result<bool> {
+        if self.snapshot().input_answers.contains_key(request_id) {
+            return Ok(false);
+        }
+        self.respond_input(
+            request_id,
+            crate::computer::consent_answers(question_id, label),
+        )?;
+        Ok(true)
+    }
+
+    pub async fn computer_still_frame(&self) -> Result<Option<crate::computer::ComputerStill>> {
+        let host = self.composer().host.clone();
+        if host.device_id.is_empty() || !host.online {
+            return Ok(None);
+        }
+        let client = self.core.client()?;
+        let reply = client
+            .host_rpc(
+                &host.device_id,
+                zeron_rpc::methods::GET_COMPUTER_STILL_FRAME,
+                serde_json::json!({ "chatId": self.core.chat_id }),
+            )
+            .await?;
+        Ok(crate::computer::parse_still_reply(&reply))
+    }
+
     fn enqueue_inner(
         &self,
         device_id: &str,
@@ -1100,6 +1166,7 @@ impl SessionHandle {
         item.attachments = attachments;
         item.hold_for_turn_end = hold_for_turn_end;
         item.issued_at = now_ms();
+        item.computer_generation = Some(self.core.doc.computer_generation());
         let id = item.id.clone();
         self.core.write(|doc| doc.push_queued(&item))?;
         Ok(id)

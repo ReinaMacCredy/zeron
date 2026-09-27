@@ -196,6 +196,17 @@ pub(crate) fn chats() -> Vec<DemoChat> {
             )
         },
         DemoChat {
+            last_ago_ms: DAY + MIN,
+            created_ago_ms: 2 * DAY,
+            ..chat(
+                "chat-computer",
+                Some("space-zeron"),
+                MAC,
+                "Calculator check with Computer",
+                "Allow Computer for this task?",
+            )
+        },
+        DemoChat {
             parent: Some("chat-veil"),
             last_ago_ms: 30 * MIN,
             ..chat(
@@ -337,6 +348,7 @@ pub(crate) struct Seeded {
 pub(crate) fn seed(
     doc: &mut RegistryDoc,
     fixture: DemoFixture,
+    computer_still: bool,
     self_id: &str,
     self_name: &str,
 ) -> Result<Seeded, zeron_doc::DocError> {
@@ -367,7 +379,10 @@ pub(crate) fn seed(
     for space in &spaces {
         doc.upsert_space(space)?;
     }
-    for demo in chats() {
+    for mut demo in chats() {
+        if computer_still && demo.id == "chat-computer" {
+            demo.status = Some(SessionStatus::Working);
+        }
         let space = demo.space.and_then(|id| spaces.iter().find(|s| s.id == id));
         let last = now - demo.last_ago_ms;
         let source_context = match (demo.branch, space) {

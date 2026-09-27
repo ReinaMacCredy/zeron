@@ -58,10 +58,17 @@ fn front_page_mirrors_the_desktop_sidebar() {
             ("Mobile", vec!["chat-ios-scroll", "chat-ios-keyboard"]),
         ]
     );
-    // Recency order; archived + child chats never appear.
+    // Recency order; archived chats never appear, child chats stay listed.
     assert_eq!(
         ids(&ws.front.recent),
-        ["chat-cjk", "chat-home", "chat-deploy", "chat-blog"]
+        [
+            "chat-cjk",
+            "chat-side",
+            "chat-home",
+            "chat-deploy",
+            "chat-computer",
+            "chat-blog"
+        ]
     );
     assert_eq!(ids(&ws.archived), ["chat-oklch", "chat-presence"]);
     assert_eq!(ids(ws.children("chat-veil")), ["chat-side"]);

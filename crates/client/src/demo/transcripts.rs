@@ -5,7 +5,10 @@
 //! for benchmarks, and the scripted streaming reply.
 
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, ToolDiffStat};
-use zeron_proto::{TodoItem, ToolCall, UserInputQuestion};
+use zeron_proto::computer::ComputerConsentScope;
+use zeron_proto::{TodoItem, ToolCall, UserInputAnswer, UserInputKind, UserInputQuestion};
+
+use crate::computer::{self, ConsentOutcome};
 
 pub(crate) const PHONE: &str = "ios-demo";
 
@@ -587,6 +590,134 @@ fn cjk(host: &str, now: i64) -> Vec<SessionMessageEntry> {
     ]
 }
 
+fn computer_tool(
+    id: &str,
+    name: &str,
+    input: Option<serde_json::Value>,
+    denied: bool,
+) -> MessagePart {
+    let call = ToolCall::Mcp {
+        server: "zeron".into(),
+        tool: name.into(),
+        input,
+    };
+    let output = r#"{"error":{"code":"capability_denied","message":"Computer control is off for this turn; no input was sent."}}"#;
+    tool(id, call, denied, denied.then_some(output))
+}
+
+fn consent(
+    id: &str,
+    scope: ComputerConsentScope,
+    question: &str,
+    answer: Option<&str>,
+) -> MessagePart {
+    MessagePart::Input {
+        id: id.into(),
+        request_id: id.into(),
+        questions: vec![UserInputQuestion {
+            id: "consent".into(),
+            header: "Computer".into(),
+            question: question.into(),
+            options: vec![
+                computer::CONSENT_ALLOW.into(),
+                computer::CONSENT_DECLINE.into(),
+            ],
+            multi_select: false,
+            kind: Some(UserInputKind::Consent { scope, app: None }),
+        }],
+        resolved: answer.is_some(),
+        answers: answer.map(|label| {
+            vec![UserInputAnswer {
+                question_id: "consent".into(),
+                labels: vec![label.into()],
+            }]
+        }),
+    }
+}
+
+fn computer(host: &str, now: i64) -> Vec<SessionMessageEntry> {
+    let note = |id: &str, at: i64, body: &str, hint: Option<&str>| {
+        let mut parts = vec![text("t0", body)];
+        parts.extend(hint.map(|hint| text("t1", hint)));
+        entry(id, MessageRole::System, host, at, parts)
+    };
+    vec![
+        user(
+            "m1",
+            now - 600_000,
+            "/computer-use Open Calculator and work out 2 + 2",
+        ),
+        note(
+            "n1",
+            now - 560_000,
+            computer::SETUP_NOTE,
+            Some("Allow Accessibility for Zeron in System Settings, then continue."),
+        ),
+        note(
+            "n2",
+            now - 540_000,
+            computer::UNAVAILABLE_NOTE,
+            Some(
+                "OpenCode does not receive Zeron's Computer tools. Switch this chat to Claude, Codex or another agent that does to use Computer.",
+            ),
+        ),
+        note("n3", now - 520_000, computer::ESCAPE_STOP_NOTICE, None),
+        assistant(
+            "m2",
+            host,
+            now - 400_000,
+            vec![
+                computer_tool(
+                    "c0",
+                    "mcp__zeron__computer_click",
+                    Some(serde_json::json!({ "x": 412, "y": 300 })),
+                    true,
+                ),
+                consent(
+                    "computer-consent-demo-call",
+                    ComputerConsentScope::Call,
+                    "Allow the agent to run computer_read_clipboard once?",
+                    Some(computer::CONSENT_ALLOW),
+                ),
+            ],
+        ),
+        note("n4", now - 350_000, computer::CONTROL_ON_DISCLOSURE, None),
+        assistant(
+            "m3",
+            host,
+            now - 300_000,
+            vec![
+                computer_tool(
+                    "c1",
+                    "computer_launch_app",
+                    Some(serde_json::json!({ "name": "Calculator" })),
+                    false,
+                ),
+                computer_tool(
+                    "c2",
+                    "computer_click",
+                    Some(serde_json::json!({ "x": 380, "y": 220 })),
+                    false,
+                ),
+                computer_tool(
+                    "c3",
+                    "computer_type_text",
+                    Some(serde_json::json!({ "text": "2+2=" })),
+                    false,
+                ),
+                computer_tool("c4", "computer_read_clipboard", None, false),
+                text("t0", "Calculator shows 4. One more step needs the desktop:"),
+                consent(
+                    "computer-consent-demo-task",
+                    ComputerConsentScope::Task,
+                    "Allow Computer for this task? The agent wants to run computer_click and will drive this Mac's apps until the turn ends.",
+                    None,
+                ),
+            ],
+        ),
+    ]
+}
+
 fn short(host: &str, now: i64, prompt: &str, reply: &str) -> Vec<SessionMessageEntry> {
     vec![
         user("m1", now - 120_000, prompt),
@@ -605,6 +736,7 @@ pub(crate) fn fixture(chat_id: &str, host: &str, last_activity: i64) -> Vec<Sess
         "chat-ios-scroll" => scroll(host, now),
         "chat-home" => home(host, now),
         "chat-cjk" => cjk(host, now),
+        "chat-computer" => computer(host, now),
         "chat-deploy" => short(
             host,
             now,
@@ -782,6 +914,16 @@ pub(crate) fn answered(labels: &[String]) -> Vec<Step> {
     vec![Step::Text(format!(
         "Going with **{picked}**. Wiring `ListModels` to the session's host device now — the picker will refresh whenever the host changes."
     ))]
+}
+
+pub(crate) fn consent_answered(outcome: Option<ConsentOutcome>) -> Vec<Step> {
+    let reply = match outcome {
+        Some(ConsentOutcome::Allowed | ConsentOutcome::AlwaysAllowed) => {
+            "Clicked **=** — Calculator shows 4 again, so the sum checks out."
+        }
+        _ => "Stopping here: I won't touch the desktop without your go-ahead.",
+    };
+    vec![Step::Text(reply.into())]
 }
 
 /// A reply that ends by asking a question (prompts containing "?ask").

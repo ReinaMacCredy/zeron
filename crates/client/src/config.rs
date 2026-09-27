@@ -96,6 +96,7 @@ pub struct DemoOptions {
     pub stream_speed: StreamSpeed,
     /// Repeat the scripted reply 12× (long streaming stress, `-longreply`).
     pub long_reply: bool,
+    pub computer_still: bool,
 }
 
 impl Default for DemoOptions {
@@ -105,6 +106,7 @@ impl Default for DemoOptions {
             transcript_scale: TranscriptScale::Normal,
             stream_speed: StreamSpeed::Realistic,
             long_reply: false,
+            computer_still: false,
         }
     }
 }

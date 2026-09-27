@@ -28,6 +28,7 @@ pub mod attachments;
 pub mod auth;
 pub mod catalog;
 mod client;
+pub mod computer;
 pub mod config;
 pub mod connectivity;
 mod demo;
