@@ -1308,7 +1308,10 @@ impl Render for SessionRowGhost {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let lifted = self.shell.upgrade().is_some_and(|shell| {
             let shell = shell.read(cx);
-            shell.sidebar_session_transfer.is_some()
+            shell
+                .sidebar_session_transfer
+                .as_ref()
+                .is_some_and(|transfer| transfer.row_height > 0.0)
                 && f32::from(window.mouse_position().x) <= shell.settings.sidebar_width
         });
         if lifted {

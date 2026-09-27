@@ -2544,6 +2544,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         if self.lift_command_palette() && !self.sidebar_session_transfer_is_valid(payload, cx) {
+            cx.notify();
             return;
         }
         self.chat_status_hover = None;
