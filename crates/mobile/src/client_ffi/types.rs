@@ -155,6 +155,7 @@ pub struct DemoOptions {
     pub stream_speed: StreamSpeed,
     /// Repeat the scripted reply 12× (long streaming stress).
     pub long_reply: bool,
+    pub computer_still: bool,
 }
 
 impl From<DemoOptions> for zc::DemoOptions {
@@ -176,6 +177,7 @@ impl From<DemoOptions> for zc::DemoOptions {
                 StreamSpeed::Fast => zc::StreamSpeed::Fast,
             },
             long_reply: o.long_reply,
+            computer_still: o.computer_still,
         }
     }
 }

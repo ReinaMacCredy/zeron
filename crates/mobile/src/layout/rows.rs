@@ -11,12 +11,15 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use zeron_client::computer;
 use zeron_doc::parts::MessagePart;
 use zeron_doc::parts::MessageStatus;
 use zeron_doc::schema::{MessageRole, SessionMessageEntry};
 use zeron_markdown::parser::{IncrementalParser, TopBlock};
+use zeron_proto::UserInputAnswer;
 use zeron_text::WhiteSpace;
 
+use super::cards::{Card, consent_row, denied_row, notice_row, place_card};
 use super::display::{ColorRole, DisplayBuilder, FadeEdge, TextRun, WidgetKind};
 use super::markdown::{Ctx, PBlock, PText, Px, place, place_text, prepare_block, prepare_plain};
 use super::style::{Family, TYPE, Weight};
@@ -31,6 +34,7 @@ pub enum RowKind {
     Chip,
     Image,
     Working,
+    Card,
 }
 
 /// A user message awaiting its host echo (client-minted id = the echo's id).
@@ -49,6 +53,7 @@ pub struct TranscriptInput {
     pub working: bool,
     pub working_since_ms: Option<i64>,
     pub streaming: bool,
+    pub input_answers: Arc<HashMap<String, Vec<UserInputAnswer>>>,
 }
 
 pub(crate) fn row_key(id: &str) -> u64 {
@@ -89,6 +94,7 @@ pub(crate) enum Content {
     Chip(Chip),
     Image { reference: String },
     Working { since_ms: Option<i64>, streaming: bool },
+    Card(Card),
 }
 
 /// A width-independent row: identity, top gap class and prepared content.
@@ -200,7 +206,7 @@ impl RowBuilder {
         for entry in &input.entries {
             live_entries.insert(entry.id.as_str());
             let first = out.is_empty();
-            let sig = self.entry_sig(entry, first, prev_role);
+            let sig = self.entry_sig(entry, first, prev_role, &input.input_answers);
             let reuse = self
                 .entries
                 .get(&entry.id)
@@ -216,7 +222,7 @@ impl RowBuilder {
                     rows
                 }
                 None => {
-                    let rows = self.entry_rows(ctx, entry, first, prev_role, &mut live_parts);
+                    let rows = self.entry_rows(ctx, entry, first, prev_role, &input.input_answers, &mut live_parts);
                     self.entries.insert(
                         entry.id.clone(),
                         EntryState {
@@ -289,9 +295,18 @@ impl RowBuilder {
         self.pending.retain(|_, (_, row)| row.key != key);
     }
 
-    /// Context outside the entry that changes its rows (gaps only).
-    fn entry_sig(&self, _entry: &SessionMessageEntry, first: bool, prev: Option<MessageRole>) -> u64 {
-        (first as u64) | ((prev.map_or(0, |r| r as u64 + 1)) << 1)
+    /// Context outside the entry that changes its rows: gaps, and answers
+    /// on their way to the entry's questions.
+    fn entry_sig(&self, entry: &SessionMessageEntry, first: bool, prev: Option<MessageRole>, sent: &HashMap<String, Vec<UserInputAnswer>>) -> u64 {
+        let gaps = (first as u64) | ((prev.map_or(0, |r| r as u64 + 1)) << 1);
+        entry
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                MessagePart::Input { request_id, .. } => sent.get(request_id),
+                _ => None,
+            })
+            .fold(gaps, |sig, answers| sig.rotate_left(7) ^ quick_hash(&format!("{answers:?}")))
     }
 
     fn entry_rows(
@@ -300,6 +315,7 @@ impl RowBuilder {
         entry: &SessionMessageEntry,
         first: bool,
         prev: Option<MessageRole>,
+        sent: &HashMap<String, Vec<UserInputAnswer>>,
         live_parts: &mut HashSet<String>,
     ) -> Vec<Placed> {
         let mut rows: Vec<Placed> = Vec::new();
@@ -332,6 +348,20 @@ impl RowBuilder {
             rows.push(Placed { core: Arc::new(self.user_row(ctx, &entry.id, &text, false)), gap });
             return rows;
         }
+        if entry.role == MessageRole::System {
+            let mut texts = entry.parts.iter().filter_map(|p| match p {
+                MessagePart::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            });
+            let text = texts.next().unwrap_or_default();
+            if let Some(notice) = computer::notice(text) {
+                let hint = texts.next().filter(|hint| !hint.trim().is_empty());
+                let gap = if first { Gap::First } else { Gap::Turn };
+                let core = notice_row(ctx, &format!("{}#notice", entry.id), &entry.id, notice, text, hint);
+                rows.push(Placed { core: Arc::new(core), gap });
+                return rows;
+            }
+        }
         let streaming = entry.status == Some(MessageStatus::Streaming);
         let mut tools: Vec<&MessagePart> = Vec::new();
         let mut group_ix = 0usize;
@@ -348,11 +378,12 @@ impl RowBuilder {
             tools.clear();
         };
         let nparts = entry.parts.len();
+        let mut denied_tools: HashSet<&'static str> = HashSet::new();
         for (pi, part) in entry.parts.iter().enumerate() {
             match part {
                 // Consecutive tools and thoughts share a group; subagent
                 // spawns never share one with ordinary tools (desktop genus).
-                MessagePart::Tool { call, .. } => {
+                MessagePart::Tool { id, call, is_error, output, .. } => {
                     let spawn = call.is_subagent_spawn();
                     let genus_flip = tools.iter().any(|p| match p {
                         MessagePart::Tool { call, .. } => call.is_subagent_spawn() != spawn,
@@ -362,6 +393,15 @@ impl RowBuilder {
                         flush_tools(self, ctx, &mut rows, &mut tools, &mut group_ix, false);
                     }
                     tools.push(part);
+                    if let Some(tool) = computer::computer_tool(call)
+                        && computer::is_control_denied(*is_error, output.as_deref())
+                        && denied_tools.insert(tool)
+                    {
+                        flush_tools(self, ctx, &mut rows, &mut tools, &mut group_ix, false);
+                        let gap = gap_for(&rows, false);
+                        let core = denied_row(ctx, &format!("{}#{}-denied", entry.id, id), &entry.id);
+                        rows.push(Placed { core: Arc::new(core), gap });
+                    }
                 }
                 MessagePart::Reasoning { text, .. } if !text.trim().is_empty() => {
                     if tools.iter().any(|p| matches!(p, MessagePart::Tool { call, .. } if call.is_subagent_spawn())) {
@@ -396,13 +436,19 @@ impl RowBuilder {
                             });
                             rows.push(Placed { core, gap });
                         }
-                        MessagePart::Input { id, questions, resolved, .. } => {
+                        MessagePart::Input { id, request_id, questions, resolved, answers } => {
+                            let gap = gap_for(&rows, false);
+                            if let Some(question) = computer::consent_question(questions) {
+                                let answers = answers.as_deref().or_else(|| sent.get(request_id).map(Vec::as_slice));
+                                let core = consent_row(ctx, &format!("{}#{}", entry.id, id), &entry.id, request_id, question, *resolved, answers);
+                                rows.push(Placed { core: Arc::new(core), gap });
+                                continue;
+                            }
                             let text = if *resolved {
                                 "Answered a question".to_owned()
                             } else {
                                 questions.first().map_or("Awaiting your answer…".to_owned(), |q| q.question.clone())
                             };
-                            let gap = gap_for(&rows, false);
                             rows.push(Placed { core: Arc::new(chip_row(ctx, &entry.id, id, "questionmark.bubble", ColorRole::Accent, &text)), gap });
                         }
                         MessagePart::Error { id, message } => {
@@ -618,6 +664,7 @@ pub(crate) fn place_row(core: &RowCore, gap: Gap, px: Px, width: f32, mut out: O
             }
             side
         }
+        Content::Card(card) => place_card(card, px, x, top, cw, out),
         Content::Working { since_ms, streaming } => {
             let h = px.v(WORKING);
             if let Some(out) = out {
@@ -741,5 +788,6 @@ pub(crate) fn content_heap_bytes(content: &Content) -> usize {
         Content::Chip(c) => c.text.p.heap_bytes(),
         Content::Image { reference } => reference.len(),
         Content::Working { .. } => 0,
+        Content::Card(card) => super::cards::heap_bytes(card),
     }
 }

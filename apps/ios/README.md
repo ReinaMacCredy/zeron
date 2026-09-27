@@ -73,6 +73,7 @@ Zeron/
 | `-demo` | Offline demo workspace (Rust `DemoHost`: registry, docs, streaming replies) |
 | `-fast` / `-longreply` | Demo stream speed / reply length |
 | `-big` / `-huge` | Demo transcripts with 120 / 600 turns |
+| `-still` | Demo `chat-computer` works and its host serves a Computer still frame |
 | `-route chat:<id>` / `new` / `more` / `search` | Open a screen at launch |
 | `-signedout` | Clear stored credentials |
 | `-dev <userId> <orgId> [-edge <url>]` | Dev bearer against an `AUTH_MODE=dev` edge (e.g. `wrangler dev`); not persisted |

@@ -356,7 +356,12 @@ impl RowBuilder {
                 let dkey = row_key(&format!("{id}/{}", part.id()));
                 match part {
                     MessagePart::Tool { call, is_error, resolved, subagent_ref, subagent_status, .. } => {
-                        let (label, detail) = zeron_proto::view::tool_chip_content(call);
+                        // Computer calls show their title only: arguments can hold typed text.
+                        let computer = zeron_client::computer::computer_tool(call);
+                        let (label, detail) = match computer {
+                            Some(tool) => (zeron_client::computer::tool_title(tool), String::new()),
+                            None => zeron_proto::view::tool_chip_content(call),
+                        };
                         // Subagent lifecycle is distinct from `resolved`: under
                         // eager-done the spawn call resolves while the subagent
                         // still runs (desktop transcript.rs `running`/`failed`).
@@ -379,12 +384,12 @@ impl RowBuilder {
                         let detail = (badge.is_none() && !detail.is_empty()).then(|| prepare_plain(ctx, &detail, st.label, st.lh, detail_color, WhiteSpace::Pre));
                         let open = !agents && self.detail_open.get(&dkey).copied().unwrap_or(false);
                         let mut body = Vec::new();
-                        if open {
+                        if open && computer.is_none() {
                             body.extend(lines_block(ctx, &st, &call_text(call), Some(CALL_WRAP_COLS)));
                             body.extend(result_block(ctx, &st, part));
                         }
                         lines.push(ToolLine {
-                            icon: tool_icon(call).to_owned(),
+                            icon: computer.map_or(tool_icon(call), |_| "cursorarrow").to_owned(),
                             label: prepare_plain(ctx, label, if agents { medium } else { st.label }, st.lh, color, WhiteSpace::Pre),
                             detail,
                             badge,

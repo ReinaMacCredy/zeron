@@ -13,6 +13,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     private let questions = QuestionPanel()
     private let queue = QueuePanel()
     private let pill = StatusPill()
+    private let still = ComputerStillPreview()
     private let bottom = UIStackView()
     private let jump = Glass.circleButton(symbol: "arrow.down", size: 40, pointSize: 15)
     private let titleView = SessionTitleView()
@@ -50,7 +51,15 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             guard let self else { return }
             self.setJumpVisible(d > 140 && !self.list.following)
         }
+        list.onCardAction = { [weak self] action in self?.perform(action) }
         view.addSubview(list)
+        still.translatesAutoresizingMaskIntoConstraints = false
+        still.fetch = { [weak self] in await self?.source.computerStill() }
+        view.addSubview(still)
+        NSLayoutConstraint.activate([
+            still.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
+            still.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
+        ])
         // Tapping the transcript puts the composer (and keyboard) away.
         let dismissTap = UITapGestureRecognizer(target: self, action: #selector(dismissComposer))
         dismissTap.cancelsTouchesInView = false
@@ -323,6 +332,16 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         bottom.alpha = 1
     }
 
+    private func perform(_ action: CardAction) {
+        switch action {
+        case let .consent(requestId, questionId, answer):
+            source.answerConsent(requestId: requestId, questionId: questionId, answer: answer)
+        case .enableComputer:
+            composer.text = computerUseEnablingDraft(draft: composer.text)
+            composer.becomeFirstResponder()
+        }
+    }
+
     @objc private func dismissComposer() {
         if composer.textView.isFirstResponder { composer.resignFirstResponder() }
     }
@@ -463,6 +482,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         titleView.set(title: c.title, subtitle: c.subtitle)
         list.uploadProgress = c.uploadProgress
         composer.running = c.running
+        still.working = c.running
         composer.canSteer = c.canSteer
         composer.placeholder = c.placeholder
         composer.chips = c.chips

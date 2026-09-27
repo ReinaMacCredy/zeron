@@ -38,6 +38,7 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
     var onFollowChange: ((Bool) -> Void)?
     var onDistanceFromBottom: ((CGFloat) -> Void)?
     var imageLoader: ((String, UIImageView) -> Void)?
+    var onCardAction: ((CardAction) -> Void)?
 
     // MARK: Runway (desktop transcript.rs `OwnTurnAnchor`)
     //
@@ -582,6 +583,10 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
 
     func rowView(_ view: RowView, imageFor reference: String, into imageView: UIImageView) {
         imageLoader?(reference, imageView)
+    }
+
+    func rowView(_ view: RowView, perform action: CardAction) {
+        onCardAction?(action)
     }
 
     fileprivate func row(at point: CGPoint) -> RowView? {

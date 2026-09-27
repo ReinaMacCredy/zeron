@@ -591,6 +591,11 @@ pub fn project_color_count() -> u32 {
     zc::workspace::PROJECT_COLOR_COUNT
 }
 
+#[uniffi::export]
+pub fn computer_use_enabling_draft(draft: String) -> String {
+    zc::computer::enabling_computer_use(&draft)
+}
+
 /// Split a user prompt into visible text + attachment refs.
 #[uniffi::export]
 pub fn parse_user_message(content: String) -> ParsedUserMessage {

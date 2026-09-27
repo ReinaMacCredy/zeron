@@ -2697,6 +2697,8 @@ public func FfiConverterTypePlatformMeasurer_lower(_ value: PlatformMeasurer) ->
  */
 public protocol SessionHandleProtocol: AnyObject, Sendable {
     
+    func answerConsent(requestId: String, questionId: String, answer: String) throws  -> Bool
+    
     func beginQueuedEdit(id: String, instanceId: String) async  -> QueueEditStart
     
     func chatId()  -> String
@@ -2707,6 +2709,8 @@ public protocol SessionHandleProtocol: AnyObject, Sendable {
      * Composer + status strip state (pull after `ComposerChanged`).
      */
     func composer()  -> ComposerState
+    
+    func computerStillFrame() async throws  -> ComputerStill?
     
     /**
      * Park a message on the shared queue directly. Returns the row id.
@@ -2822,6 +2826,18 @@ open class SessionHandle: SessionHandleProtocol, @unchecked Sendable {
     
 
     
+open func answerConsent(requestId: String, questionId: String, answer: String)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_sessionhandle_answer_consent(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(requestId),
+        FfiConverterString.lower(questionId),
+        FfiConverterString.lower(answer),uniffiCallStatus
+    )
+})
+}
+    
 open func beginQueuedEdit(id: String, instanceId: String)async  -> QueueEditStart  {
     return
         try!  await uniffiRustCallAsync(
@@ -2866,6 +2882,22 @@ open func composer() -> ComposerState  {
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
+}
+    
+open func computerStillFrame()async throws  -> ComputerStill?  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_sessionhandle_computer_still_frame(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionTypeComputerStill.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
 }
     
     /**
@@ -4287,6 +4319,60 @@ public func FfiConverterTypeComposerState_lower(_ value: ComposerState) -> RustB
 }
 
 
+public struct ComputerStill: Equatable, Hashable {
+    public var sequence: UInt64
+    public var image: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(sequence: UInt64, image: Data) {
+        self.sequence = sequence
+        self.image = image
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ComputerStill: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeComputerStill: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ComputerStill {
+        return
+            try ComputerStill(
+                sequence: FfiConverterUInt64.read(from: &buf), 
+                image: FfiConverterData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ComputerStill, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.sequence, into: &buf)
+        FfiConverterData.write(value.image, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeComputerStill_lift(_ buf: RustBuffer) throws -> ComputerStill {
+    return try FfiConverterTypeComputerStill.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeComputerStill_lower(_ value: ComputerStill) -> RustBuffer {
+    return FfiConverterTypeComputerStill.lower(value)
+}
+
+
 public struct Connectivity: Equatable, Hashable {
     public var state: ConnectivityState
     /**
@@ -4602,6 +4688,7 @@ public struct DemoOptions: Equatable, Hashable {
      * Repeat the scripted reply 12× (long streaming stress).
      */
     public var longReply: Bool
+    public var computerStill: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -4611,11 +4698,12 @@ public struct DemoOptions: Equatable, Hashable {
          */transcriptScale: TranscriptScale, streamSpeed: StreamSpeed, 
         /**
          * Repeat the scripted reply 12× (long streaming stress).
-         */longReply: Bool) {
+         */longReply: Bool, computerStill: Bool) {
         self.fixture = fixture
         self.transcriptScale = transcriptScale
         self.streamSpeed = streamSpeed
         self.longReply = longReply
+        self.computerStill = computerStill
     }
 
     
@@ -4637,7 +4725,8 @@ public struct FfiConverterTypeDemoOptions: FfiConverterRustBuffer {
                 fixture: FfiConverterTypeDemoFixture.read(from: &buf), 
                 transcriptScale: FfiConverterTypeTranscriptScale.read(from: &buf), 
                 streamSpeed: FfiConverterTypeStreamSpeed.read(from: &buf), 
-                longReply: FfiConverterBool.read(from: &buf)
+                longReply: FfiConverterBool.read(from: &buf), 
+                computerStill: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -4646,6 +4735,7 @@ public struct FfiConverterTypeDemoOptions: FfiConverterRustBuffer {
         FfiConverterTypeTranscriptScale.write(value.transcriptScale, into: &buf)
         FfiConverterTypeStreamSpeed.write(value.streamSpeed, into: &buf)
         FfiConverterBool.write(value.longReply, into: &buf)
+        FfiConverterBool.write(value.computerStill, into: &buf)
     }
 }
 
@@ -8333,6 +8423,77 @@ public func FfiConverterTypeBusyPolicy_lower(_ value: BusyPolicy) -> RustBuffer 
 
 
 
+public enum CardAction: Equatable, Hashable {
+    
+    case consent(requestId: String, questionId: String, answer: String
+    )
+    case enableComputer
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CardAction: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCardAction: FfiConverterRustBuffer {
+    typealias SwiftType = CardAction
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CardAction {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .consent(requestId: try FfiConverterString.read(from: &buf), questionId: try FfiConverterString.read(from: &buf), answer: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 2: return .enableComputer
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: CardAction, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .consent(requestId,questionId,answer):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(requestId, into: &buf)
+            FfiConverterString.write(questionId, into: &buf)
+            FfiConverterString.write(answer, into: &buf)
+            
+        
+        case .enableComputer:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCardAction_lift(_ buf: RustBuffer) throws -> CardAction {
+    return try FfiConverterTypeCardAction.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCardAction_lower(_ value: CardAction) -> RustBuffer {
+    return FfiConverterTypeCardAction.lower(value)
+}
+
+
+
+
 public enum ChatIndicator: Equatable, Hashable {
     
     case working
@@ -8629,6 +8790,13 @@ public enum ColorRole: Equatable, Hashable {
     case diffAddBar
     case diffDelBar
     case diffHunk
+    case cardBackground
+    case cardBorder
+    case cardTile
+    case successTile
+    case warningTile
+    case buttonBorder
+    case onSolid
 
 
 
@@ -8741,6 +8909,20 @@ public struct FfiConverterTypeColorRole: FfiConverterRustBuffer {
         case 45: return .diffDelBar
         
         case 46: return .diffHunk
+        
+        case 47: return .cardBackground
+        
+        case 48: return .cardBorder
+        
+        case 49: return .cardTile
+        
+        case 50: return .successTile
+        
+        case 51: return .warningTile
+        
+        case 52: return .buttonBorder
+        
+        case 53: return .onSolid
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -8932,6 +9114,34 @@ public struct FfiConverterTypeColorRole: FfiConverterRustBuffer {
         
         case .diffHunk:
             writeInt(&buf, Int32(46))
+        
+        
+        case .cardBackground:
+            writeInt(&buf, Int32(47))
+        
+        
+        case .cardBorder:
+            writeInt(&buf, Int32(48))
+        
+        
+        case .cardTile:
+            writeInt(&buf, Int32(49))
+        
+        
+        case .successTile:
+            writeInt(&buf, Int32(50))
+        
+        
+        case .warningTile:
+            writeInt(&buf, Int32(51))
+        
+        
+        case .buttonBorder:
+            writeInt(&buf, Int32(52))
+        
+        
+        case .onSolid:
+            writeInt(&buf, Int32(53))
         
         }
     }
@@ -10202,6 +10412,7 @@ public enum RowKind: Equatable, Hashable {
     case chip
     case image
     case working
+    case card
 
 
 
@@ -10235,6 +10446,8 @@ public struct FfiConverterTypeRowKind: FfiConverterRustBuffer {
         
         case 6: return .working
         
+        case 7: return .card
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -10265,6 +10478,10 @@ public struct FfiConverterTypeRowKind: FfiConverterRustBuffer {
         
         case .working:
             writeInt(&buf, Int32(6))
+        
+        
+        case .card:
+            writeInt(&buf, Int32(7))
         
         }
     }
@@ -11012,6 +11229,11 @@ public enum WidgetKind: Equatable, Hashable {
      * gradient).
      */
     case shimmer
+    /**
+     * `payload` is the button's label.
+     */
+    case cardButton(action: CardAction
+    )
 
 
 
@@ -11065,6 +11287,9 @@ public struct FfiConverterTypeWidgetKind: FfiConverterRustBuffer {
         )
         
         case 12: return .shimmer
+        
+        case 13: return .cardButton(action: try FfiConverterTypeCardAction.read(from: &buf)
+        )
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -11139,6 +11364,11 @@ public struct FfiConverterTypeWidgetKind: FfiConverterRustBuffer {
         case .shimmer:
             writeInt(&buf, Int32(12))
         
+        
+        case let .cardButton(action):
+            writeInt(&buf, Int32(13))
+            FfiConverterTypeCardAction.write(action, into: &buf)
+            
         }
     }
 }
@@ -11418,6 +11648,30 @@ fileprivate struct FfiConverterOptionTypeChatConfig: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeChatConfig.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeComputerStill: FfiConverterRustBuffer {
+    typealias SwiftType = ComputerStill?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeComputerStill.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeComputerStill.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -12665,6 +12919,14 @@ public func authRefresh(edgeUrl: String, refreshToken: String, organizationId: S
             errorHandler: FfiConverterTypeCoreError_lift
         )
 }
+public func computerUseEnablingDraft(draft: String) -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_computer_use_enabling_draft(
+        FfiConverterString.lower(draft),uniffiCallStatus
+    )
+})
+}
 /**
  * Static harness catalog (the device-unreachable fallback).
  */
@@ -12909,6 +13171,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_func_auth_refresh() != 53630) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_func_computer_use_enabling_draft() != 23369) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_func_fallback_harnesses() != 7289) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -13137,6 +13402,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_uploadprogress_on_progress() != 40458) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_sessionhandle_answer_consent() != 18593) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_sessionhandle_begin_queued_edit() != 9014) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -13147,6 +13415,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_sessionhandle_composer() != 12678) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_sessionhandle_computer_still_frame() != 8543) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_sessionhandle_enqueue() != 37832) {

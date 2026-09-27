@@ -65,6 +65,8 @@ protocol SessionSource: AnyObject {
     func send(text: String, images: [StagedImage], mode: DeliveryMode) -> Bool
     func stop()
     func answer(requestId: String, answers: [(questionId: String, labels: [String])])
+    func answerConsent(requestId: String, questionId: String, answer: String)
+    func computerStill() async -> (sequence: UInt64, image: UIImage)?
     func queueAction(_ id: String, _ action: QueueAction)
     func retryDelivery()
     /// Lease a queued message for editing; returns its text when acquired.
@@ -186,6 +188,9 @@ final class FixtureSessionSource: SessionSource {
     func answer(requestId: String, answers: [(questionId: String, labels: [String])]) {
         update { $0.questions = nil }
     }
+
+    func answerConsent(requestId: String, questionId: String, answer: String) {}
+    func computerStill() async -> (sequence: UInt64, image: UIImage)? { nil }
 
     func queueAction(_ id: String, _ action: QueueAction) {
         update { chrome in

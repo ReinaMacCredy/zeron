@@ -62,6 +62,23 @@ pub enum ColorRole {
     DiffAddBar,
     DiffDelBar,
     DiffHunk,
+    CardBackground,
+    CardBorder,
+    CardTile,
+    SuccessTile,
+    WarningTile,
+    ButtonBorder,
+    OnSolid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum CardAction {
+    Consent {
+        request_id: String,
+        question_id: String,
+        answer: String,
+    },
+    EnableComputer,
 }
 
 /// Text decorations, painted relative to the run's baseline.
@@ -193,6 +210,8 @@ pub enum WidgetKind {
     /// underneath; the painter re-draws those runs brighter through a moving
     /// gradient).
     Shimmer,
+    /// `payload` is the button's label.
+    CardButton { action: CardAction },
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
