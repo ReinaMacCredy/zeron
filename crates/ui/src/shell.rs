@@ -3639,8 +3639,25 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.active_chat.is_empty() {
+        let Some(browser) = self.new_browser_surface(window, cx) else {
             return;
+        };
+        browser.update(cx, |browser, cx| {
+            if let Some(url) = url {
+                browser.navigate(&url, window, cx);
+            } else {
+                browser.focus_address(window, cx);
+            }
+        });
+    }
+
+    fn new_browser_surface(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<crate::browser::BrowserSurface>> {
+        if self.active_chat.is_empty() {
+            return None;
         }
         let key = self.panel_key(cx);
         let remote = {
@@ -3684,11 +3701,32 @@ impl Shell {
             .or_default()
             .push(RightSurface::Browser(id));
         self.set_right_active(RightSurface::Browser(id), cx);
-        browser.update(cx, |browser, cx| {
-            if let Some(url) = url {
-                browser.navigate(&url, window, cx);
-            } else {
-                browser.focus_address(window, cx);
+        Some(browser)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn open_html_in_browser(&mut self, chat_id: &str, path: &str, cx: &mut Context<Self>) {
+        let Some(root) = self.chat_cwd(chat_id, cx) else {
+            return;
+        };
+        let Some(link) = resolve_workspace_file_link(path, &root) else {
+            return;
+        };
+        let Ok(root) = std::path::Path::new(&root).canonicalize() else {
+            return;
+        };
+        let Ok(file) = root.join(link.path).canonicalize() else {
+            return;
+        };
+        if !file.starts_with(&root) {
+            return;
+        }
+        self.defer_in_active_window(cx, move |shell, window, cx| {
+            shell.set_surfaces_open(true, cx);
+            if let Some(browser) = shell.new_browser_surface(window, cx) {
+                browser.update(cx, |browser, cx| {
+                    browser.open_workspace_file(file, root, window, cx)
+                });
             }
         });
     }
@@ -3988,6 +4026,12 @@ impl Shell {
             }
             TranscriptEvent::OpenFile { chat_id, path } => self.open_tool_file(chat_id, path, cx),
             TranscriptEvent::OpenChat { chat_id } => self.open_chat(chat_id.clone(), cx),
+            #[cfg(target_os = "macos")]
+            TranscriptEvent::OpenHtml { chat_id, path } => {
+                self.open_html_in_browser(chat_id, path, cx)
+            }
+            #[cfg(not(target_os = "macos"))]
+            TranscriptEvent::OpenHtml { .. } => {}
             TranscriptEvent::Computer {
                 request: ComputerRequest::EnableControl,
             } => {

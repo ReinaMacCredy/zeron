@@ -1049,6 +1049,7 @@ pub struct UiSettings {
     /// Open a normal web-link activation in the session Browser. Explicit
     /// context-menu actions remain available regardless of this preference.
     pub open_web_links_in_zeron: bool,
+    pub html_open_app: crate::html_open::HtmlOpenApp,
     /// Compact transcript: a turn's working steps (thinking, tool calls, and
     /// the narration between them) fold into one collapsed accordion, so only
     /// the reply text stays visible.
@@ -1151,6 +1152,7 @@ impl Default for UiSettings {
             code_fences_fit_content: false,
             transcript_width: TRANSCRIPT_WIDTH_DEFAULT,
             open_web_links_in_zeron: true,
+            html_open_app: crate::html_open::HtmlOpenApp::SystemDefault,
             transcript_compact_mode: false,
             files_autosave_enabled: false,
             files_autosave_delay_ms: FILES_AUTOSAVE_DELAY_DEFAULT_MS,
@@ -2007,6 +2009,10 @@ mod tests {
             ReasoningShortcutModifier::Command
         );
         assert!(loaded.open_web_links_in_zeron);
+        assert_eq!(
+            loaded.html_open_app,
+            crate::html_open::HtmlOpenApp::SystemDefault
+        );
         assert!(loaded.new_thread_composer_background.is_none());
         assert_eq!(
             loaded.new_thread_background_effect,
@@ -2649,6 +2655,9 @@ mod tests {
             code_fences_fit_content: true,
             transcript_width: 960.0,
             open_web_links_in_zeron: false,
+            html_open_app: crate::html_open::HtmlOpenApp::App {
+                path: "/Applications/Safari.app".into(),
+            },
             transcript_compact_mode: true,
             files_autosave_enabled: true,
             files_autosave_delay_ms: 1_500,
@@ -2686,6 +2695,7 @@ mod tests {
         assert_eq!(UiSettings::load(dir.path()), settings);
         assert!(json.contains(r#""codeFencesFitContent": true"#));
         assert!(json.contains(r#""openWebLinksInZeron": false"#));
+        assert!(json.contains(r#""kind": "app""#));
         assert!(json.contains(r#""newThreadBackgroundEffect": "ascii""#));
         assert!(json.contains(r#""placement": "full""#));
         assert!(json.contains(r#""terminalFontFamily": "installed:Menlo""#));
