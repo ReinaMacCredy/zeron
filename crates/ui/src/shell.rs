@@ -4697,9 +4697,10 @@ impl Shell {
     /// when the close was consumed by the pane.
     ///
     /// The pane's empty picker state and a closed pane both yield false, so the
-    /// caller falls through to [`Self::prepare_window_close`] and the window
-    /// closes — the same cascade browsers use. The native traffic-light close
-    /// deliberately skips this rung: it always closes the window.
+    /// caller falls through to [`Self::close_focused_tab`], then to
+    /// [`Self::prepare_window_close`] — the same cascade browsers use. The
+    /// native traffic-light close deliberately skips these rungs: it always
+    /// closes the window.
     pub fn close_active_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some(surface) = self.closable_right_surface(cx) else {
             return false;
@@ -5489,6 +5490,7 @@ impl Shell {
                     let follow_up_behavior = self.settings.follow_up_behavior;
                     let switcher_window = self.settings.switcher_window;
                     let switcher_limit = self.settings.switcher_limit;
+                    let switcher_cycles_tabs = self.settings.switcher_cycles_tabs;
                     let reasoning_shortcut_modifier = self.settings.reasoning_shortcut_modifier;
                     let appshots_enabled = self.settings.appshots_enabled;
                     let appshot_sound_enabled = self.settings.appshot_sound_enabled;
@@ -5503,6 +5505,7 @@ impl Shell {
                             reasoning_shortcut_modifier,
                             switcher_window,
                             switcher_limit,
+                            switcher_cycles_tabs,
                             appshots_enabled,
                             appshot_sound_enabled,
                             appshot_destination,
@@ -5534,6 +5537,9 @@ impl Shell {
                                 }
                                 ShortcutsEvent::SwitcherLimitChanged(limit) => {
                                     this.settings.switcher_limit = *limit;
+                                }
+                                ShortcutsEvent::SwitcherCyclesTabsChanged(enabled) => {
+                                    this.settings.switcher_cycles_tabs = *enabled;
                                 }
                                 ShortcutsEvent::AppshotsChanged {
                                     enabled,
@@ -16452,6 +16458,7 @@ mod exit_regressions {
                     assert!(!shell.all_file_edits_flushed(cx));
                     shell.cancel_file_close(RightSurface::File(0), cx);
                     assert!(shell.pending_exit.is_none());
+                    shell.route = Route::Settings(SettingsSection::default());
                 })
                 .unwrap();
             cx.update(|cx| cx.dispatch_action(&crate::app_menus::CloseWindow));

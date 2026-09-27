@@ -282,8 +282,9 @@ impl Shell {
     }
 
     /// Ctrl+Tab / Ctrl+Shift+Tab: open the switcher on the previous (next)
-    /// session, or move the highlight while it is up. Chat-scoped like the
-    /// panel toggles, and quiet under any other overlay.
+    /// session, or move the highlight while it is up; with the cycle-tabs
+    /// setting, step straight to the neighboring strip tab. Chat-scoped like
+    /// the panel toggles, and quiet under any other overlay.
     pub(super) fn switcher_step(&mut self, forward: bool, cx: &mut Context<Self>) {
         if !matches!(self.route, Route::Chat) {
             return;
@@ -295,6 +296,19 @@ impl Shell {
             return;
         }
         if self.overlay_owns_keyboard(cx) {
+            return;
+        }
+        if self.settings.switcher_cycles_tabs {
+            let order = self.open_tab_ids(cx);
+            let focused = self.state.read(cx).focused_id();
+            let next = match focused.and_then(|id| order.iter().position(|t| *t == id)) {
+                Some(ix) => step_index(ix, order.len(), forward),
+                None if forward => 0,
+                None => order.len().saturating_sub(1),
+            };
+            if let Some(id) = order.get(next).cloned() {
+                self.navigate_to(Some(id), true, cx);
+            }
             return;
         }
         let cutoff = self.settings.switcher_window.cutoff(Utc::now());

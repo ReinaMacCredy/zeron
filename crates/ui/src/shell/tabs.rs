@@ -841,6 +841,20 @@ impl Shell {
         cx.notify();
     }
 
+    /// The second rung of `⌘W`: close the focused tab. The chat route always
+    /// consumes it (the canvas is a draft), so `⌘W` never closes the window
+    /// from there.
+    pub fn close_focused_tab(&mut self, cx: &mut Context<Self>) -> bool {
+        if !matches!(self.route, Route::Chat) {
+            return false;
+        }
+        let Some(id) = self.state.read(cx).focused_id() else {
+            return false;
+        };
+        self.close_session_tab(id, cx);
+        true
+    }
+
     /// Bulk closes (tab context menu). `keep_side`: retain tabs left/right of
     /// the anchor per the flags. The anchor always survives; if the selected
     /// tab was closed, selection lands on the anchor.
@@ -1760,6 +1774,69 @@ mod strip_regressions {
         });
         let shell = host.read_with(cx, |host, _| host.shell.clone());
         (shell, cx)
+    }
+
+    #[gpui::test]
+    fn cmd_w_closes_the_focused_tab_and_keeps_the_window(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                state.chats = vec![chat("a"), chat("b")];
+                state.chats_synced = true;
+                state.spaces_synced = true;
+                state.apply_sessions(vec![working("a"), working("b")]);
+                state.select_chat(Some("a".into()), cx);
+            });
+            shell.on_state_changed(&shell.state.clone(), cx);
+            shell.open_chat("b".into(), cx);
+            shell.on_state_changed(&shell.state.clone(), cx);
+            assert_eq!(shell.open_tab_ids(cx), ["a", "b"]);
+
+            assert!(shell.close_focused_tab(cx));
+            shell.on_state_changed(&shell.state.clone(), cx);
+            assert_eq!(shell.open_tab_ids(cx), ["a"]);
+            assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("a"));
+
+            assert!(shell.close_focused_tab(cx));
+            shell.on_state_changed(&shell.state.clone(), cx);
+            assert_eq!(shell.state.read(cx).selected_chat, None);
+            assert!(shell.close_focused_tab(cx));
+
+            shell.route = Route::Settings(SettingsSection::default());
+            assert!(!shell.close_focused_tab(cx));
+        });
+    }
+
+    #[gpui::test]
+    fn ctrl_tab_cycles_the_strip_when_the_setting_is_on(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                state.chats = vec![chat("a"), chat("b"), chat("c")];
+                state.chats_synced = true;
+                state.spaces_synced = true;
+                state.apply_sessions(vec![working("a"), working("b"), working("c")]);
+                state.select_chat(Some("a".into()), cx);
+            });
+            shell.on_state_changed(&shell.state.clone(), cx);
+            for id in ["b", "c", "a"] {
+                shell.open_chat(id.into(), cx);
+                shell.on_state_changed(&shell.state.clone(), cx);
+            }
+            assert_eq!(shell.open_tab_ids(cx), ["a", "b", "c"]);
+            shell.settings.switcher_cycles_tabs = true;
+
+            let focused = |shell: &Shell, cx: &App| shell.state.read(cx).focused_id();
+            shell.switcher_step(true, cx);
+            assert!(shell.switcher.is_none());
+            assert_eq!(focused(shell, cx).as_deref(), Some("b"));
+            shell.switcher_step(false, cx);
+            shell.switcher_step(false, cx);
+            assert_eq!(focused(shell, cx).as_deref(), Some("c"));
+            shell.switcher_step(true, cx);
+            assert_eq!(focused(shell, cx).as_deref(), Some("a"));
+            assert!(shell.switcher.is_none());
+        });
     }
 
     #[gpui::test]

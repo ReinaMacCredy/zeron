@@ -909,6 +909,8 @@ pub struct UiSettings {
     pub switcher_window: SwitcherWindow,
     /// Most cards the Ctrl+Tab switcher shows; 0 for no cap.
     pub switcher_limit: u32,
+    /// Ctrl+Tab steps through the tab strip in place of the switcher.
+    pub switcher_cycles_tabs: bool,
     /// Legacy global opt-in; per-harness preferences take precedence.
     pub skills_in_slash_menu: bool,
     pub skill_completion_by_harness:
@@ -1126,6 +1128,7 @@ impl Default for UiSettings {
             reasoning_shortcut_modifier: ReasoningShortcutModifier::default(),
             switcher_window: SwitcherWindow::default(),
             switcher_limit: 0,
+            switcher_cycles_tabs: false,
             skills_in_slash_menu: false,
             skill_completion_by_harness: Default::default(),
             appshots_enabled: false,
@@ -2606,6 +2609,7 @@ mod tests {
             reasoning_shortcut_modifier: ReasoningShortcutModifier::Control,
             switcher_window: SwitcherWindow::Hours12,
             switcher_limit: 8,
+            switcher_cycles_tabs: true,
             skills_in_slash_menu: true,
             skill_completion_by_harness: Default::default(),
             appshots_enabled: false,
