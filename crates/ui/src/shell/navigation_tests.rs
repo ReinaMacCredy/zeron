@@ -32,6 +32,9 @@ impl Render for NavigationHost {
                 .on_action(cx.listener(|shell, _: &PrevSession, window, cx| {
                     shell.cycle_navigation(false, window, cx);
                 }))
+                .on_modifiers_changed(
+                    cx.listener(|shell, event, _, cx| shell.on_modifiers_changed(event, cx)),
+                )
                 .child(div().h(px(40.)).child(shell.render_right_tab_strip(cx)))
                 .child(
                     div()
@@ -134,6 +137,7 @@ fn press(cx: &mut VisualTestContext, forward: bool) {
         ShortcutId::PrevSession
     };
     cx.simulate_keystrokes(&platform_combo(id.default_combo()));
+    cx.simulate_modifiers_change(gpui::Modifiers::default());
     cx.update(|window, cx| window.draw(cx).clear());
 }
 

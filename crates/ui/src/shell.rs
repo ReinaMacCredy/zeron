@@ -17994,6 +17994,17 @@ mod settings_modal_regressions {
             cx.run_until_parked();
             cx.simulate_keystrokes(window.into(), &platform_combo(combo));
             window
+                .update(cx, |shell, _, cx| {
+                    shell.on_modifiers_changed(
+                        &gpui::ModifiersChangedEvent {
+                            modifiers: gpui::Modifiers::default(),
+                            capslock: gpui::Capslock::default(),
+                        },
+                        cx,
+                    )
+                })
+                .unwrap();
+            window
                 .read_with(cx, |shell, cx| {
                     (shell.route, shell.state.read(cx).selected_chat.clone())
                 })

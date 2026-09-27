@@ -282,9 +282,12 @@ impl Shell {
     }
 
     /// Ctrl+Tab / Ctrl+Shift+Tab: open the switcher on the previous (next)
-    /// session, or move the highlight while it is up. Chat-scoped like the
-    /// panel toggles, and quiet under any other overlay.
+    /// session, or move the highlight while it is up. Settings closes
+    /// first, as a jump does; quiet under any other overlay.
     pub(super) fn switcher_step(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if matches!(self.route, Route::Settings(_)) {
+            self.close_settings(cx);
+        }
         if !matches!(self.route, Route::Chat) {
             return;
         }
