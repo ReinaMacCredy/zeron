@@ -1131,6 +1131,10 @@ impl Pickers {
             .or_else(|| state.selected_space_row())
     }
 
+    fn harness_is_committed(&self, cx: &App) -> bool {
+        self.chat_id(cx).is_some() && !self.state.read(cx).side_chat_harness_editable()
+    }
+
     /// The harness whose models the picker lists: the browsed tab on an
     /// existing chat, else the effective harness.
     fn rail_harness(&self, cx: &App) -> Option<HarnessId> {
@@ -2044,7 +2048,7 @@ impl Pickers {
     }
 
     fn pick_harness(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
-        if self.chat_id(cx).is_some() {
+        if self.harness_is_committed(cx) {
             // An existing chat only browses the tab: its harness changes on a
             // confirmed model pick (`pick_foreign_model`), never on a click here.
             self.viewed_harness = Some(harness);
@@ -2053,6 +2057,24 @@ impl Pickers {
             self.active = self.selected_model_index(cx);
             cx.notify();
             return;
+        }
+        if self.state.read(cx).side_chat_unsaved() && self.effective_harness(cx) != Some(harness) {
+            // A side-chat draft already has a selected row. Replace its inherited
+            // provider settings so both the picker and first createChat use the
+            // new harness, even when its model catalog has not loaded yet.
+            let model = self.defaults.model_for(harness).map(|m| m.id.clone());
+            let reasoning = self.defaults.reasoning;
+            let options = model
+                .as_deref()
+                .and_then(|model| self.defaults.model_options_for(harness, model))
+                .cloned()
+                .unwrap_or_default();
+            self.update_chat_config(cx, None, move |config| {
+                config.harness = harness;
+                config.model = model;
+                config.reasoning = reasoning;
+                config.model_options = options;
+            });
         }
         if self.config.harness != Some(harness) {
             // The remembered model for this harness takes over via the
@@ -2513,6 +2535,10 @@ impl Pickers {
         self.config.harness = None;
         self.config.model = None;
         self.config.reasoning = None;
+        // The first send creates this row. Until then all choices stay local.
+        if self.state.read(cx).side_chat_unsaved() {
+            return;
+        }
         let Some(engine) = self.engine(cx) else {
             return;
         };
@@ -2716,7 +2742,7 @@ impl Pickers {
             return;
         }
         if self.effective_harness(cx) != Some(row.harness) {
-            if self.chat_id(cx).is_some() {
+            if self.harness_is_committed(cx) {
                 self.pick_foreign_model(row.harness, row.model.id, cx);
                 return;
             }
@@ -6998,6 +7024,150 @@ mod tests {
         let rows = vec![bare_model("first", "First")];
         assert_eq!(selected_catalog_model(&rows, None).unwrap().id, "first");
         assert!(selected_catalog_model(&rows, Some("saved")).is_none());
+    }
+
+    fn side_chat_picker(unsaved: bool, cx: &mut App) -> (Entity<AppState>, Entity<Pickers>) {
+        let parent = cx.new(|_| AppState::new());
+        let chat = serde_json::from_value(serde_json::json!({
+            "id": "side", "createdByChatId": "main", "deviceId": "local",
+            "cwd": "/tmp/main", "branch": "main", "archived": false,
+            "createdAt": chrono::Utc::now(),
+            "config": {
+                "harness": "claude-code", "model": "parent-model", "reasoning": "high",
+                "modelOptions": { "context": "1m" }, "sandbox": "read-only"
+            }
+        }))
+        .unwrap();
+        let state = cx.new(|cx| AppState::side_chat_state(&parent, chat, unsaved, cx));
+        let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
+        pickers.update(cx, |pickers, _| {
+            pickers.harnesses = Loadable::Ready(vec![
+                descriptor(HarnessId::ClaudeCode, "Claude Code"),
+                descriptor(HarnessId::Codex, "Codex"),
+            ]);
+            pickers.models.insert(
+                HarnessId::ClaudeCode,
+                Loadable::Ready(vec![bare_model("parent-model", "Parent model")]),
+            );
+        });
+        (state, pickers)
+    }
+
+    #[gpui::test]
+    fn unsaved_side_chat_can_pick_another_harness_before_catalog_load(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            let (state, pickers) = side_chat_picker(true, cx);
+            pickers.update(cx, |pickers, cx| {
+                assert!(!pickers.harness_is_committed(cx));
+                assert_eq!(pickers.rail_descriptors(cx).len(), 2);
+                pickers.pick_harness(HarnessId::Codex, cx);
+                let resolved = pickers.resolved(cx);
+                assert_eq!(resolved.harness, Some(HarnessId::Codex));
+                assert_eq!(resolved.model, None);
+                assert_eq!(resolved.reasoning, None);
+                assert!(resolved.model_options.is_empty());
+                let create = state.read(cx).unsaved_side_chat_create("side").unwrap();
+                assert_eq!(create["config"]["harness"], "codex");
+                assert_eq!(create["config"]["model"], serde_json::Value::Null);
+                assert_eq!(create["config"]["sandbox"], "read-only");
+                assert_eq!(create["createdByChatId"], "main");
+                assert_eq!(create["cwd"], "/tmp/main");
+                assert_eq!(create["branch"], "main");
+
+                pickers.apply_model_catalog(
+                    HarnessId::Codex,
+                    Loadable::Ready(vec![bare_model("codex-model", "Codex model")]),
+                    cx,
+                );
+                assert_eq!(pickers.resolved(cx).model.as_deref(), Some("codex-model"));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn side_chat_favorites_switch_harness_locally_and_lock_after_creation(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (out, mut requests) = tokio::sync::mpsc::channel::<String>(256);
+        let (_replies, inbound) = tokio::sync::mpsc::channel::<String>(256);
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            let (state, pickers) = side_chat_picker(true, cx);
+            state.update(cx, |state, _| {
+                state.set_test_engine(EngineHandle::from_test_client(zeron_rpc::RpcClient::new(
+                    out, inbound,
+                )));
+            });
+            pickers.update(cx, |pickers, cx| {
+                let mut model = bare_model("codex-model", "Codex model");
+                model.reasoning_levels = vec![ReasoningLevel::Low, ReasoningLevel::Medium];
+                pickers
+                    .models
+                    .insert(HarnessId::Codex, Loadable::Ready(vec![model]));
+                pickers
+                    .defaults
+                    .toggle_favorite(HarnessId::Codex, "codex-model");
+                pickers.model_rail = ModelRail::Favorites;
+                let rows = pickers.model_rows(cx);
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].harness, HarnessId::Codex);
+                pickers.activate_model_index(0, cx);
+                pickers.pick_reasoning(ReasoningLevel::Low, cx);
+                let create = state.read(cx).unsaved_side_chat_create("side").unwrap();
+                assert_eq!(create["config"]["harness"], "codex");
+                assert_eq!(create["config"]["model"], "codex-model");
+                assert_eq!(create["config"]["reasoning"], "low");
+                assert_eq!(create["config"]["modelOptions"], serde_json::json!({}));
+                assert!(pickers.mutate_task.is_none());
+            });
+        });
+        cx.run_until_parked();
+        assert!(
+            requests.try_recv().is_err(),
+            "draft choices must not send RPCs"
+        );
+
+        cx.update(|cx| {
+            // Forks are already persisted when opened, even before their first
+            // own message. Saved empty side chats must have the same lock.
+            let (_, fork) = side_chat_picker(false, cx);
+            fork.update(cx, |pickers, cx| {
+                assert!(pickers.harness_is_committed(cx));
+                pickers.pick_harness(HarnessId::Codex, cx);
+                assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::ClaudeCode));
+            });
+            let (state, pickers) = side_chat_picker(true, cx);
+            state.update(cx, |state, _| {
+                state.begin_pending_send("side", "first", chrono::Utc::now());
+            });
+            pickers.update(cx, |pickers, cx| {
+                assert!(
+                    pickers.harness_is_committed(cx),
+                    "first send fixes the harness before the RPC finishes"
+                );
+                pickers.pick_harness(HarnessId::Codex, cx);
+                assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::ClaudeCode));
+            });
+            state.update(cx, |state, _| state.end_pending_send("side", "first"));
+            assert!(
+                !pickers.read(cx).harness_is_committed(cx),
+                "failed creation remains editable"
+            );
+            state.update(cx, |state, cx| state.side_chat_saved("side", cx));
+            pickers.update(cx, |pickers, cx| {
+                assert!(pickers.harness_is_committed(cx));
+                pickers.pick_harness(HarnessId::Codex, cx);
+                assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::ClaudeCode));
+            });
+        });
     }
 
     #[gpui::test]

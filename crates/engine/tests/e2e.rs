@@ -941,6 +941,118 @@ async fn steer_with_no_live_run_falls_back_to_new_turn() {
     );
 }
 
+/// A live turn with no steering mailbox. Hangs until interrupted, recording
+/// whether that ever happened.
+struct UnsteerableHarness {
+    interrupted: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait]
+impl Harness for UnsteerableHarness {
+    fn id(&self) -> HarnessId {
+        HarnessId::Mock
+    }
+    fn display_name(&self) -> &str {
+        "Unsteerable"
+    }
+    fn supports_steering(&self) -> bool {
+        false
+    }
+    fn steering_mode(&self) -> SteeringMode {
+        SteeringMode::TurnBoundary
+    }
+    fn reasoning_levels(&self) -> &[ReasoningLevel] {
+        &[ReasoningLevel::Medium]
+    }
+    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+        Ok(vec![])
+    }
+    async fn run(
+        &self,
+        _request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(8);
+        let token = controls.interrupt.clone();
+        let interrupted = self.interrupted.clone();
+        tokio::spawn(async move {
+            let _ = tx
+                .send(Ok(AgentEvent::TextDelta {
+                    text: "working".into(),
+                }))
+                .await;
+            token.cancelled().await;
+            interrupted.store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = tx.send(Ok(done(DoneStatus::Interrupted))).await;
+        });
+        Ok(futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|event| (event, rx))
+        })
+        .boxed())
+    }
+}
+
+/// Steering must never kill the turn it steers (a mobile steer used to reach
+/// an interrupting dispatch — a Codex app-server takes its subagents down
+/// with it). A live turn with no mailbox holds the steer for the boundary.
+#[tokio::test]
+async fn steer_into_unsteerable_live_turn_holds_instead_of_interrupting() {
+    let dir = tempfile::tempdir().unwrap();
+    let interrupted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let core = assemble(
+        dir.path(),
+        Arc::new(UnsteerableHarness {
+            interrupted: interrupted.clone(),
+        }),
+    );
+    let handle = core.doc_host.open(CHAT).unwrap();
+
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-1",
+        SessionCommandPayload::Run {
+            request: run_request("first"),
+            message_id: "m-1".into(),
+        },
+    );
+    wait_for(
+        || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Working),
+        "turn running",
+    )
+    .await;
+
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-steer-1",
+        SessionCommandPayload::Steer {
+            prompt: "also do this".into(),
+            message_id: Some("m-2".into()),
+        },
+    );
+    wait_for(
+        || {
+            command_status(&core, "cmd-steer-1")
+                .is_some_and(|(s, _)| s != SessionCommandStatus::Pending)
+        },
+        "steer resolved",
+    )
+    .await;
+    let (status, resolution) = command_status(&core, "cmd-steer-1").unwrap();
+    assert_eq!(status, SessionCommandStatus::Applied);
+    assert_eq!(resolution.as_deref(), Some("held until the turn ends"));
+    assert!(!interrupted.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(
+        core.sessions.session_status(CHAT).map(|s| s.status),
+        Some(SessionStatus::Working)
+    );
+    let queue = handle.doc().read_queue().unwrap();
+    assert!(queue.iter().any(|q| q.id == "m-2"), "held on the queue");
+    assert!(
+        !entries(&core).iter().any(|e| e.id == "m-2"),
+        "not in the transcript until delivered"
+    );
+}
+
 #[tokio::test]
 async fn processed_commands_are_skipped_on_redelivery() {
     let dir = tempfile::tempdir().unwrap();

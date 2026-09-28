@@ -854,7 +854,7 @@ impl Engine {
             tokens: Arc::new(auth.clone()),
         });
         core.previews.start(projects, preview_signaling).await;
-        // Release checker: polls {edge}/releases on a 6h cadence; headless
+        // Release checker: polls {edge}/releases hourly (wall clock); headless
         // installs with ZERON_AUTO_UPDATE=1 apply + restart themselves — gated
         // on quiescence so a restart never lands under a live run or open PTY.
         // Spawned for every install: application updates must not depend on
@@ -933,6 +933,11 @@ impl Engine {
             .ok_or_else(|| EngineError::Other("synced workspace profile is not ready".into()))?;
 
         let runtime = Self::assemble_runtime(&config, auth, profile).await?;
+        // The desktop app or `zeron update` may install a newer binary under
+        // a running service; restart into it once no run or terminal is live.
+        if let Some(updater) = runtime.core().updater() {
+            updater.restart_when_superseded();
+        }
 
         // A daemon exists to serve this port, so a bind failure is fatal here —
         // unlike the headed app, which can still work over its in-process

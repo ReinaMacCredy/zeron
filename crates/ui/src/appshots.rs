@@ -704,7 +704,7 @@ pub fn can_restart_app() -> bool {
 /// relaunch through the updater's detached relauncher.
 pub fn restart_app(cx: &mut gpui::App) {
     if let zeron_update::InstallKind::MacApp { bundle } = zeron_update::detect_install() {
-        zeron_update::relaunch_app_after_exit(&bundle);
+        zeron_update::relaunch_after_exit(std::path::Path::new("/usr/bin/open"), &bundle);
         crate::app_menus::request_quit(cx);
     }
 }

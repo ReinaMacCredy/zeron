@@ -1141,6 +1141,9 @@ pub(crate) fn sidebar_faded_label(
 /// [`gpui::EdgeFade`] scope — per-primitive, so text fades per glyph).
 const SIDEBAR_GLASS_FADE_BAND: f32 = 24.0;
 
+/// Target of the sidebar's "Star on GitHub" banner (same as the landing page).
+const GITHUB_REPO_URL: &str = "https://github.com/zeronsh/comet";
+
 /// New-thread controls float over the tail of a top-anchored image hero. The
 /// hero reaches below the composer, giving its lower mask room to dissolve
 /// gradually into the otherwise empty lower canvas.
@@ -1512,15 +1515,6 @@ struct RenameChatDialog {
     /// Focus the input on the dialog's first paint (opened without window access).
     focus_pending: bool,
     _events: Subscription,
-}
-
-/// In-app update lifecycle (macOS bundle installs; see `render_update_strip`).
-enum UpdateFlow {
-    Idle,
-    Downloading,
-    /// Staged bundle ready to swap in — one click restarts into it.
-    Ready(PathBuf),
-    Failed(SharedString),
 }
 
 /// Account lifecycle owned by this process. Sign-in on a local workspace
@@ -1924,6 +1918,16 @@ impl Render for SidebarPane {
     }
 }
 
+/// A button in the "Check for Updates…" dialog.
+#[derive(Debug, Clone, Copy)]
+enum UpdatePromptButton {
+    Close(&'static str),
+    CheckAgain,
+    Download,
+    Restart,
+    OpenDownloads,
+}
+
 #[derive(Debug, Clone)]
 enum PendingExit {
     CloseWindow,
@@ -2191,17 +2195,10 @@ pub struct Shell {
     user_menu: popover::Popup<()>,
     /// Inline sidebar error strip (mutation failures); click dismisses.
     sidebar_notice: Option<SharedString>,
-    /// Local lifecycle of an in-app update (macOS bundle swap) — the engine's
-    /// UpdateStatus stream says WHETHER one exists; this says how far the
-    /// download/stage of it has come in this process.
-    update_flow: UpdateFlow,
-    update_task: Option<Task<()>>,
-    /// Version whose update strip the user dismissed (advisory installs only —
-    /// a newer release shows the strip again).
-    update_dismissed: Option<String>,
-    /// How this binary was installed — decides the strip's click behavior.
-    /// Cached: `detect_install` stats `current_exe` and this renders per frame.
-    install: zeron_update::InstallKind,
+    /// Repaints the update strip and dialog as the app-level update
+    /// lifecycle ([`crate::app_update`]) moves. `None` when the app runs
+    /// without a desktop checker (tests).
+    _app_update_observation: Option<Subscription>,
     org: Option<OrgGateUi>,
     sync_flow: SyncFlow,
     mutate_task: Option<Task<()>>,
@@ -2704,10 +2701,8 @@ impl Shell {
             harness_update_scroll: settings::widgets::PageScroll::default(),
             user_menu: popover::Popup::default(),
             sidebar_notice: None,
-            update_flow: UpdateFlow::Idle,
-            update_task: None,
-            update_dismissed: None,
-            install: zeron_update::detect_install(),
+            _app_update_observation: crate::app_update::AppUpdate::global(cx)
+                .map(|update| cx.observe(&update, |_, _, cx| cx.notify())),
             org: None,
             sync_flow: SyncFlow::Idle,
             mutate_task: None,
@@ -9235,6 +9230,11 @@ impl Shell {
         )
         .fade_overflow_y(&self.sidebar_scroll);
 
+        let update_strip = self.render_update_strip(theme, cx);
+        // Stacked above the update strip, the banner needs its own gap; alone
+        // it leans on the user-menu block's padding like the strip does.
+        let github_star_banner = self.render_github_star_banner(update_strip.is_some(), theme, cx);
+
         div()
             .w(px(self.settings.sidebar_width))
             .h_full()
@@ -9250,10 +9250,10 @@ impl Shell {
             .when_some(self.render_connection_pill(theme, cx), |el, pill| {
                 el.child(pill)
             })
-            // Update strip (above the user menu; below the lists).
-            .when_some(self.render_update_strip(theme, cx), |el, strip| {
-                el.child(strip)
-            })
+            // "Star on GitHub" banner until dismissed (persisted), then the
+            // update strip — both above the user menu, below the lists.
+            .when_some(github_star_banner, |el, banner| el.child(banner))
+            .when_some(update_strip, |el, strip| el.child(strip))
             // Inline mutation-failure notice.
             .when_some(self.sidebar_notice.clone(), |el, notice| {
                 el.child(
@@ -9285,25 +9285,95 @@ impl Shell {
             .into_any_element()
     }
 
-    /// Update strip: shown above the user menu whenever the engine's
-    /// UpdateStatus stream reports a newer release. On desktop-update installs
-    /// (macOS bundles, Windows portable packages) it drives the whole flow —
-    /// click to download, then click to restart into the staged replacement.
-    /// Managed installs are advisory (`zeron update`); unmanaged installs link
-    /// to the GitHub releases page. Clicking an advisory dismisses it for that
-    /// version.
+    /// "Star on GitHub" banner, styled like the update strip. Clicking it
+    /// opens the repository; either that or the close button dismisses it for
+    /// good — the choice is persisted so it never returns on the next launch.
+    fn render_github_star_banner(
+        &self,
+        above_update_strip: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if self.settings.github_star_banner_dismissed {
+            return None;
+        }
+        let tone = theme.accent;
+        let chip_bg_hover = theme.accent.opacity(0.16);
+        let close_bg_hover = theme.accent.opacity(0.22);
+        Some(
+            div()
+                .id("github-star-banner")
+                .mx(px(Theme::SPACE_SM))
+                .when(above_update_strip, |el| el.mb(px(Theme::SPACE_XS)))
+                .pl(px(Theme::SPACE_SM))
+                .pr(px(Theme::SPACE_XS))
+                .py(px(4.0))
+                .rounded(px(Theme::CONTROL_RADIUS))
+                .bg(theme.accent_wash)
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .text_size(crate::typography::ui_rems(11.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(tone)
+                .cursor_pointer()
+                .hover(move |s| s.bg(chip_bg_hover))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    cx.open_url(GITHUB_REPO_URL);
+                    this.dismiss_github_star_banner(cx);
+                }))
+                // Glyphs sit below the line box's optical center: nudge the
+                // star half a pixel down so it centers on the cap height.
+                .child(
+                    icon(icons::STAR_BOLD)
+                        .flex_none()
+                        .relative()
+                        .top(px(0.5))
+                        .size(px(12.0))
+                        .text_color(tone),
+                )
+                .child(div().flex_1().min_w_0().truncate().child("Star on GitHub"))
+                .child(
+                    div()
+                        .id("github-star-banner-dismiss")
+                        .flex_none()
+                        .size(px(18.0))
+                        .rounded(px(4.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(close_bg_hover))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.dismiss_github_star_banner(cx);
+                        }))
+                        .child(icon(icons::CLOSE).size(px(10.0)).text_color(tone)),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn dismiss_github_star_banner(&mut self, cx: &mut Context<Self>) {
+        self.settings.github_star_banner_dismissed = true;
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
+    /// Update strip: shown above the user menu whenever this app's release
+    /// checker ([`crate::app_update`]) has found a newer version. Self-updating
+    /// installs (macOS bundles, Windows installs, Linux managed installs) show
+    /// the background download and then "restart to apply"; installs that
+    /// can't replace themselves explain why; advisory installs point at
+    /// `zeron update` or the GitHub releases page and dismiss per version.
     fn render_update_strip(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let status = self.state.read(cx).update.clone()?;
-        if !status.update_available {
-            return None;
-        }
-        let latest = status.latest_version.clone()?;
-        if self.update_dismissed.as_deref() == Some(latest.as_str()) {
-            return None;
-        }
-        let (label, clickable) =
-            Self::update_strip_label(&self.install, &self.update_flow, &latest);
-        let failed = matches!(self.update_flow, UpdateFlow::Failed(_));
+        let update = crate::app_update::AppUpdate::global(cx)?;
+        let (label, action) = update.read(cx).strip()?;
+        let failed = matches!(
+            update.read(cx).flow(),
+            crate::app_update::Flow::Failed { .. }
+        );
         let tone = if failed { theme.danger } else { theme.accent };
         // Follow the selected spectrum with a low-emphasis glass tint rather
         // than painting the bright text accent as a solid slab.
@@ -9329,118 +9399,228 @@ impl Shell {
             .font_weight(gpui::FontWeight::MEDIUM)
             .text_color(tone)
             .child(div().flex_1().min_w_0().child(label));
-        if clickable {
+        if action != crate::app_update::StripAction::None {
             strip = strip
                 .cursor_pointer()
                 .hover(move |s| s.bg(chip_bg_hover))
-                .on_click(cx.listener(move |this, _, _, cx| this.on_update_strip_click(cx)));
+                .on_click(
+                    cx.listener(move |this, _, _, cx| this.on_update_strip_click(action, cx)),
+                );
         }
         Some(strip.into_any_element())
     }
 
-    /// The update strip's label and click affordance per install kind. Desktop
-    /// update installs (macOS bundles, Windows portable packages) drive their
-    /// flow from the strip; managed installs get the `zeron update` hint;
-    /// unmanaged installs (source builds, hand-copied binaries) are pointed at
-    /// the GitHub releases page.
-    fn update_strip_label(
-        install: &zeron_update::InstallKind,
-        flow: &UpdateFlow,
-        latest: &str,
-    ) -> (SharedString, bool) {
-        if install.supports_desktop_update() {
-            match flow {
-                UpdateFlow::Idle => (format!("Update available — v{latest}").into(), true),
-                UpdateFlow::Downloading => (format!("Downloading v{latest}…").into(), false),
-                UpdateFlow::Ready(_) => ("Update ready — restart to apply".into(), true),
-                UpdateFlow::Failed(message) => (format!("Update failed: {message}").into(), true),
-            }
-        } else if matches!(install, zeron_update::InstallKind::Managed { .. }) {
-            (
-                format!("Update available — v{latest} · run `zeron update`").into(),
-                true,
-            )
-        } else {
-            (
-                format!("Update available — v{latest} · download from GitHub").into(),
-                true,
-            )
-        }
-    }
-
-    /// Idle → download; Ready → swap + relaunch; Failed → retry; advisory
-    /// installs (managed: `zeron update`, unmanaged: the GitHub releases page)
-    /// → open the destination if there is one, then dismiss for this version.
-    fn on_update_strip_click(&mut self, cx: &mut Context<Self>) {
-        if !self.install.supports_desktop_update() {
-            if matches!(self.install, zeron_update::InstallKind::Unmanaged) {
-                cx.open_url(zeron_update::RELEASES_PAGE);
-            }
-            self.update_dismissed = self
-                .state
-                .read(cx)
-                .update
-                .as_ref()
-                .and_then(|s| s.latest_version.clone());
-            cx.notify();
+    /// Download → the background stage; Restart → swap + relaunch; Explain →
+    /// the update dialog; advisory installs open their destination (if any),
+    /// then dismiss for this version.
+    fn on_update_strip_click(
+        &mut self,
+        action: crate::app_update::StripAction,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::app_update::{AppUpdate, StripAction};
+        let Some(update) = AppUpdate::global(cx) else {
             return;
-        }
-        match std::mem::replace(&mut self.update_flow, UpdateFlow::Idle) {
-            UpdateFlow::Idle | UpdateFlow::Failed(_) => self.begin_update_download(cx),
-            UpdateFlow::Downloading => self.update_flow = UpdateFlow::Downloading,
-            UpdateFlow::Ready(staged) => self.apply_staged_update(staged, cx),
+        };
+        match action {
+            StripAction::None => {}
+            StripAction::Download => update.update(cx, |update, cx| update.start_download(cx)),
+            StripAction::Restart => {
+                if let Some(staged) = update.read(cx).staged() {
+                    self.apply_staged_update(staged, cx);
+                }
+            }
+            StripAction::Explain => update.update(cx, |update, cx| update.show_result(cx)),
+            StripAction::Advise { open_releases } => {
+                if open_releases {
+                    cx.open_url(zeron_update::RELEASES_PAGE);
+                }
+                update.update(cx, |update, cx| update.dismiss_advisory(cx));
+            }
         }
     }
 
-    /// Fetch the manifest and stage the new Zeron desktop bundle under the data dir
-    /// (tokio — reqwest); the strip flips to "restart to apply" when done.
-    fn begin_update_download(&mut self, cx: &mut Context<Self>) {
-        let edge_url = self.boot.edge_url.clone();
-        let data_dir = self.data_dir.clone();
-        let install = self.install.clone();
-        self.update_flow = UpdateFlow::Downloading;
-        let download = Tokio::spawn(cx, async move {
-            let manifest = zeron_update::fetch_latest(&edge_url).await?;
-            install.stage_desktop(&edge_url, &manifest, &data_dir).await
-        });
-        self.update_task = Some(cx.spawn(async move |this, cx| {
-            let outcome = match download.await {
-                Ok(Ok(staged)) => Ok(staged),
-                Ok(Err(err)) => Err(format!("{err:#}")),
-                Err(join_err) => Err(join_err.to_string()),
-            };
-            this.update(cx, |shell, cx| {
-                shell.update_flow = match outcome {
-                    Ok(staged) => UpdateFlow::Ready(staged),
-                    Err(message) => {
-                        tracing::warn!(%message, "update download failed");
-                        UpdateFlow::Failed(message.into())
-                    }
-                };
-                cx.notify();
-            })
-            .ok();
-        }));
-        cx.notify();
-    }
-
-    /// Swap the staged bundle over the installed one, arm the detached
-    /// relauncher, and quit — the relauncher `open`s the new bundle once this
+    /// Swap the staged update over the installed one, arm the detached
+    /// relauncher, and quit — the relauncher starts the new version once this
     /// process (and its engine lock / IPC port) is gone.
     fn apply_staged_update(&mut self, staged: PathBuf, cx: &mut Context<Self>) {
         if !self.prepare_exit(PendingExit::InstallUpdate(staged.clone()), cx) {
             return;
         }
-        match self.install.apply_desktop(&staged) {
-            Ok(()) => {
-                crate::app_menus::quit_after_save(cx);
-            }
-            Err(err) => {
-                tracing::error!(error = %err, "update apply failed");
-                self.update_flow = UpdateFlow::Failed(format!("{err:#}").into());
-                cx.notify();
-            }
+        let Some(update) = crate::app_update::AppUpdate::global(cx) else {
+            return;
+        };
+        if update
+            .update(cx, |update, cx| update.install_for_restart(&staged, cx))
+            .is_ok()
+        {
+            crate::app_menus::quit_after_save(cx);
         }
+    }
+
+    /// The "Check for Updates…" dialog: checking, then the outcome, which
+    /// stays live (download progress, ready to restart) while it is open.
+    fn render_update_prompt(
+        &mut self,
+        viewport: gpui::Size<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        use crate::app_update::{AppUpdate, Flow, Prompt};
+        let update = AppUpdate::global(cx)?;
+        let theme = Theme::of(cx).for_popup();
+        let current = zeron_update::current_version();
+        let (title, body, buttons): (SharedString, SharedString, Vec<UpdatePromptButton>) = {
+            let update = update.read(cx);
+            match update.prompt()? {
+                Prompt::Checking => (
+                    "Checking for updates…".into(),
+                    format!("You're on Zeron {current}.").into(),
+                    vec![UpdatePromptButton::Close("Cancel")],
+                ),
+                Prompt::CheckFailed(message) => (
+                    "Couldn't check for updates".into(),
+                    message.clone(),
+                    vec![
+                        UpdatePromptButton::Close("Close"),
+                        UpdatePromptButton::CheckAgain,
+                    ],
+                ),
+                Prompt::Result => match update.available() {
+                    None => (
+                        "Zeron is up to date".into(),
+                        format!("Version {current} is the newest release.").into(),
+                        vec![UpdatePromptButton::Close("OK")],
+                    ),
+                    Some(latest) => {
+                        let title: SharedString = format!("Zeron {latest} is available").into();
+                        if let Some(blocker) = update.blocker() {
+                            (
+                                title,
+                                blocker.to_string().into(),
+                                vec![
+                                    UpdatePromptButton::Close("Later"),
+                                    UpdatePromptButton::OpenDownloads,
+                                ],
+                            )
+                        } else if update.install().supports_desktop_update() {
+                            match update.flow() {
+                                Flow::Idle => (
+                                    title,
+                                    format!("You're on {current}.").into(),
+                                    vec![
+                                        UpdatePromptButton::Close("Later"),
+                                        UpdatePromptButton::Download,
+                                    ],
+                                ),
+                                Flow::Downloading { .. } | Flow::Installed => (
+                                    title,
+                                    "Downloading the update in the background — you can keep working."
+                                        .into(),
+                                    vec![UpdatePromptButton::Close("Hide")],
+                                ),
+                                Flow::Ready { version, .. } => (
+                                    format!("Zeron {version} is ready").into(),
+                                    "Restart to finish updating. If you don't, it installs the next time you quit Zeron."
+                                        .into(),
+                                    vec![
+                                        UpdatePromptButton::Close("Later"),
+                                        UpdatePromptButton::Restart,
+                                    ],
+                                ),
+                                Flow::Failed { message, .. } => (
+                                    title,
+                                    format!("The download failed: {message}").into(),
+                                    vec![
+                                        UpdatePromptButton::Close("Later"),
+                                        UpdatePromptButton::Download,
+                                    ],
+                                ),
+                            }
+                        } else if matches!(
+                            update.install(),
+                            zeron_update::InstallKind::Managed { .. }
+                        ) {
+                            (
+                                title,
+                                "Run `zeron update` in a terminal to install it.".into(),
+                                vec![UpdatePromptButton::Close("OK")],
+                            )
+                        } else {
+                            (
+                                title,
+                                "This copy of Zeron wasn't set up by an installer (for example, a source build), so it can't update itself."
+                                    .into(),
+                                vec![
+                                    UpdatePromptButton::Close("Later"),
+                                    UpdatePromptButton::OpenDownloads,
+                                ],
+                            )
+                        }
+                    }
+                },
+            }
+        };
+        let mut row = div()
+            .mt(px(16.0))
+            .flex()
+            .flex_row()
+            .justify_end()
+            .gap(px(8.0));
+        for button in buttons {
+            row = row.child(match button {
+                UpdatePromptButton::Close(label) => {
+                    popover::btn_ghost(&theme, label, "update-prompt-close")
+                        .id("update-prompt-close")
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            if let Some(update) = crate::app_update::AppUpdate::global(cx) {
+                                update.update(cx, |update, cx| update.dismiss_prompt(cx));
+                            }
+                        }))
+                }
+                UpdatePromptButton::CheckAgain => popover::btn_primary(&theme, "Try again")
+                    .id("update-prompt-check")
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        if let Some(update) = crate::app_update::AppUpdate::global(cx) {
+                            update.update(cx, |update, cx| update.check_for_updates(cx));
+                        }
+                    })),
+                UpdatePromptButton::Download => popover::btn_primary(&theme, "Download")
+                    .id("update-prompt-download")
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        if let Some(update) = crate::app_update::AppUpdate::global(cx) {
+                            update.update(cx, |update, cx| update.start_download(cx));
+                        }
+                    })),
+                UpdatePromptButton::Restart => popover::btn_primary(&theme, "Restart to update")
+                    .id("update-prompt-restart")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let Some(update) = crate::app_update::AppUpdate::global(cx) else {
+                            return;
+                        };
+                        let staged = update.read(cx).staged();
+                        update.update(cx, |update, cx| update.dismiss_prompt(cx));
+                        if let Some(staged) = staged {
+                            this.apply_staged_update(staged, cx);
+                        }
+                    })),
+                UpdatePromptButton::OpenDownloads => {
+                    popover::btn_primary(&theme, "Open download page")
+                        .id("update-prompt-downloads")
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            cx.open_url(zeron_update::LATEST_RELEASE_PAGE);
+                            if let Some(update) = crate::app_update::AppUpdate::global(cx) {
+                                update.update(cx, |update, cx| update.dismiss_prompt(cx));
+                            }
+                        }))
+                }
+            });
+        }
+        let card = popover::dialog_card(&theme)
+            .child(popover::dialog_title(&theme, &title))
+            .child(div().mt(px(6.0)).child(popover::dialog_body(&theme, body)))
+            .child(row)
+            .into_any_element();
+        Some(popover::modal("update-prompt-dialog", viewport, card))
     }
 
     /// The sidebar's bottom row: account menu on the left, settings toggle on
@@ -9654,6 +9834,24 @@ impl Shell {
                         }
                     };
                     menu.child(row)
+                })
+                // macOS keeps "Check for Updates…" in the app menu under
+                // About; elsewhere there is no app menu, so it lives here.
+                .when(!cfg!(target_os = "macos"), |menu| {
+                    menu.child(
+                        popover::menu_row(theme, false, "user-menu-check-updates")
+                            .id("user-menu-check-updates")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.close_user_menu(cx);
+                                crate::app_update::check_for_updates(cx);
+                            }))
+                            .child(
+                                icon(icons::REFRESH)
+                                    .size(px(16.0))
+                                    .text_color(theme.text_muted),
+                            )
+                            .child(SharedString::from("Check for updates")),
+                    )
                 })
                 .into_any_element();
             // Opens upward, left-aligned with the pill: the card is as wide as
@@ -10299,6 +10497,12 @@ impl Shell {
         if self.discard_working_tree.is_some() {
             self.discard_working_tree = None;
             cx.notify();
+            return true;
+        }
+        if let Some(update) = crate::app_update::AppUpdate::global(cx)
+            && update.read(cx).prompt().is_some()
+        {
+            update.update(cx, |update, cx| update.dismiss_prompt(cx));
             return true;
         }
         // The folded-breadcrumbs menu floats over the palette; it closes first.
@@ -10955,6 +11159,9 @@ impl Shell {
 
         if let Some(sync) = self.render_sync_overlay(viewport, cx) {
             overlays.push(sync);
+        }
+        if let Some(update) = self.render_update_prompt(viewport, cx) {
+            overlays.push(update);
         }
 
         overlays
@@ -13675,6 +13882,13 @@ impl Render for Shell {
             self.activation_sub = Some(cx.observe_window_activation(
                 window,
                 |this: &mut Shell, window, cx| {
+                    if window.is_window_active()
+                        && let Some(update) = crate::app_update::AppUpdate::global(cx)
+                    {
+                        // Coming back to the app (often after sleep) checks
+                        // at once when a check is due by the wall clock.
+                        update.read(cx).poke();
+                    }
                     if !window.is_window_active() {
                         this.reset_command_palette_key_state();
                         this.set_jump_hints(false, cx);
@@ -14554,57 +14768,6 @@ mod tests {
         assert_eq!(chat_sync_pill_caption(&chat), Some("Sync queued — changes are saved"));
         chat.sync_state = S::Connecting;
         assert_eq!(chat_sync_pill_caption(&chat), Some("Syncing…"));
-    }
-
-    #[test]
-    fn update_strip_labels_cover_every_install_kind() {
-        // Managed (curl|sh daemon layout): the CLI hint.
-        let managed = zeron_update::InstallKind::Managed {
-            app_root: PathBuf::from("/home/u/.zeron/app"),
-        };
-        assert_eq!(
-            Shell::update_strip_label(&managed, &UpdateFlow::Idle, "0.2.86").0,
-            SharedString::from("Update available — v0.2.86 · run `zeron update`")
-        );
-        // Unmanaged (source builds, hand-copied binaries — bare Windows
-        // release exes): the GitHub releases page, clickable to open it.
-        let unmanaged = Shell::update_strip_label(
-            &zeron_update::InstallKind::Unmanaged,
-            &UpdateFlow::Idle,
-            "0.2.86",
-        );
-        assert_eq!(
-            unmanaged.0,
-            SharedString::from("Update available — v0.2.86 · download from GitHub")
-        );
-        assert!(unmanaged.1);
-        // Downloading is not clickable (desktop flow) and the flow labels stay
-        // untouched for the installs that own them.
-        let mac_app = zeron_update::InstallKind::MacApp {
-            bundle: PathBuf::from("/Applications/Zeron.app"),
-        };
-        assert_eq!(
-            Shell::update_strip_label(&mac_app, &UpdateFlow::Downloading, "0.2.86").0,
-            SharedString::from("Downloading v0.2.86…")
-        );
-        assert!(!Shell::update_strip_label(&mac_app, &UpdateFlow::Downloading, "0.2.86").1);
-        assert_eq!(
-            Shell::update_strip_label(&mac_app, &UpdateFlow::Idle, "0.2.86").0,
-            SharedString::from("Update available — v0.2.86")
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_portable_strip_drives_the_desktop_flow() {
-        let portable = zeron_update::InstallKind::WindowsPortable {
-            directory: PathBuf::from(r"C:\Users\u\AppData\Local\Programs\Zeron"),
-        };
-        assert_eq!(
-            Shell::update_strip_label(&portable, &UpdateFlow::Idle, "0.2.86").0,
-            SharedString::from("Update available — v0.2.86")
-        );
-        assert!(Shell::update_strip_label(&portable, &UpdateFlow::Idle, "0.2.86").1);
     }
 
     #[test]
@@ -17175,7 +17338,6 @@ mod exit_regressions {
                         shell.pending_exit,
                         Some(PendingExit::InstallUpdate(_))
                     ));
-                    assert!(matches!(shell.update_flow, UpdateFlow::Idle));
                     shell.cancel_file_close(RightSurface::File(0), cx);
                     assert!(shell.pending_exit.is_none());
                 })

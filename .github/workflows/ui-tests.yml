@@ -128,6 +128,8 @@ jobs:
             frame-source-tests
       - name: Check macOS application
         run: cargo check --release --locked -p zeron
+      - name: Updater tests (bundle staging, install detection)
+        run: cargo test --release --locked -p zeron-update
       - name: Native diff font geometry regression
         run: cargo test --release --locked -p zeron-ui --lib native_diff_font_geometry -- --test-threads=1
       - name: Native notification click regressions

@@ -608,6 +608,13 @@ impl SessionsEngine {
         harness.is_some_and(|harness| self.inner.registry.update_pending(harness))
     }
 
+    /// The chat's live run accepts steering into its mailbox.
+    pub fn live_run_steerable(&self, chat_id: &str) -> bool {
+        lock(&self.inner.runs)
+            .get(chat_id)
+            .is_some_and(|h| h.steerable)
+    }
+
     /// The last request dispatched for a chat (steer→new-turn fallback).
     pub fn last_request(&self, chat_id: &str) -> Option<RunRequest> {
         lock(&self.inner.last_requests).get(chat_id).cloned()

@@ -229,6 +229,7 @@ impl Shell {
                         | ComposerEvent::BackgroundStarted
                         | ComposerEvent::OpenSubagent { .. } => {}
                         ComposerEvent::UnsentChanged => cx.notify(),
+                        ComposerEvent::ThreadMentionDropped => this.accept_command_palette_drop(),
                         ComposerEvent::OpenComputerSetup { missing } => {
                             this.open_computer_permission_guide(missing.clone(), cx)
                         }

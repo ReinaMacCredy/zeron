@@ -1193,16 +1193,19 @@ impl DocHost {
         let _ = self.inner.links.set(links);
     }
 
-    /// Re-evaluate every open chat's command queue NOW. Called after an
-    /// upload commit lands bytes on this device: a Run deferred on those
-    /// bytes (`pending://` refs not yet on disk) becomes executable the
-    /// moment its transfer completes — event-driven, not timer luck.
+    /// Re-evaluate every open chat's commands and queue NOW. Called after an
+    /// upload commit lands bytes on this device: a Run or queued row deferred
+    /// on those bytes (`pending://` refs not yet on disk) becomes executable
+    /// the moment its transfer completes — event-driven, not timer luck.
     pub fn kick_drains(&self) {
         let handles: Vec<Arc<ChatDocHandle>> =
             lock(&self.inner.handles).values().cloned().collect();
         for handle in handles {
             let host = self.clone();
-            self.spawn_worker(async move { host.drain_commands(&handle).await });
+            self.spawn_worker(async move {
+                host.drain_commands(&handle).await;
+                host.drain_queue(&handle).await;
+            });
         }
     }
 
@@ -4333,6 +4336,16 @@ impl DocHost {
             if sessions.turn_in_flight(&handle.chat_id) {
                 return; // All queued messages wait, including rows from older clients.
             }
+            // A row from another device names its images by `pending://` ref
+            // while the bytes chase it over the peer link. Hold it (in order)
+            // until they land — UploadCommit re-drains — rather than handing
+            // the agent refs it cannot open.
+            if !self.missing_row_attachments(&head).is_empty() {
+                tracing::info!(chat = %handle.chat_id, row = %head.id,
+                    "queued row held: attachment bytes in transit");
+                self.arm_attachment_wait(handle);
+                return;
+            }
             let send = QueueSend::NextTurn;
             // Take it only once we know it is going out — a row that stays in
             // the queue on a failed send is recoverable; a vanished one is not.
@@ -4393,6 +4406,11 @@ impl DocHost {
         // therefore wait without disturbing the active turn's runway, then
         // anchor the prompt only once this exact row reaches the transcript.
         let message_id = item.id.clone();
+        if !self.missing_row_attachments(item).is_empty() {
+            return Err(EngineError::Other(
+                "this message's images are still uploading".into(),
+            ));
+        }
         let computer_control = self.computer_control_for(
             &sessions,
             handle,
@@ -4408,7 +4426,9 @@ impl DocHost {
             handle.publish_queue();
             return Ok(());
         }
-        let mut prompt = queued_message_prompt(&item.text, &item.attachments);
+        let mut attachments = item.attachments.clone();
+        let mut prompt = queued_message_prompt(&item.text, &attachments);
+        self.resolve_attachment_refs(&mut prompt, &mut attachments);
         if let Some(from) = &item.from_chat_id {
             // The entry keeps the raw text with its provenance; only what the
             // harness sees carries the framing. Written first so the
@@ -4430,7 +4450,7 @@ impl DocHost {
                 .steer_with(
                     chat_id,
                     &prompt,
-                    &item.attachments,
+                    &attachments,
                     Some(message_id.clone()),
                     Some(computer_control),
                 )
@@ -4477,7 +4497,7 @@ impl DocHost {
         };
         request.prompt = prompt;
         request.resume = None; // dispatch re-derives the harness session
-        request.attachments = item.attachments.clone();
+        request.attachments = attachments;
         request.computer_control = computer_control;
         let harness = self.harness_for_request(chat_id, &request);
         self.dispatch_with_source_context(&sessions, chat_id, harness, request, Some(message_id))
@@ -5393,6 +5413,7 @@ impl DocHost {
                     break;
                 }
                 host.drain_commands(&handle).await;
+                host.drain_queue(&handle).await;
                 let Some(handle) = weak.upgrade() else { break };
                 if !host.awaiting_attachments(&handle) {
                     break;
@@ -5405,11 +5426,18 @@ impl DocHost {
     /// True while some pending, unprocessed command still waits on bytes.
     fn awaiting_attachments(&self, handle: &Arc<ChatDocHandle>) -> bool {
         let commands = handle.doc.read_commands().unwrap_or_default();
-        commands.iter().any(|c| {
+        let command_waiting = commands.iter().any(|c| {
             c.status == SessionCommandStatus::Pending
                 && !self.inner.store.is_processed(&c.id).unwrap_or(false)
                 && !self.missing_attachments(c).is_empty()
-        })
+        });
+        command_waiting
+            || handle
+                .doc
+                .read_queue()
+                .ok()
+                .and_then(|q| q.into_iter().next())
+                .is_some_and(|head| !self.missing_row_attachments(&head).is_empty())
     }
 
     /// Rewrite a request's landed `pending://` refs to this device's absolute
@@ -5417,15 +5445,44 @@ impl DocHost {
     /// (and the persisted user entry) see ordinary local files, exactly like
     /// the legacy pre-upload flow produced.
     fn resolve_request_attachments(&self, request: &mut zeron_proto::RunRequest) {
+        self.resolve_attachment_refs(&mut request.prompt, &mut request.attachments);
+    }
+
+    /// Rewrite landed `pending://` refs in `attachments` (and wherever the
+    /// prompt names them) to this device's absolute paths.
+    fn resolve_attachment_refs(&self, prompt: &mut String, attachments: &mut [String]) {
         let Some(uploads) = self.inner.uploads.get() else {
             return;
         };
-        for path in request.attachments.iter_mut() {
+        for path in attachments.iter_mut() {
             if let Some(abs) = uploads.resolve_pending(path) {
-                request.prompt = request.prompt.replace(path.as_str(), &abs);
+                *prompt = prompt.replace(path.as_str(), &abs);
                 *path = abs;
             }
         }
+    }
+
+    /// A queue row's `pending://` refs whose bytes are not on this device
+    /// yet ([`Self::missing_attachments`] for rows). Covers refs in the
+    /// row's text too: older clients inlined the attachment trailer.
+    fn missing_row_attachments(&self, item: &QueuedMessage) -> Vec<String> {
+        let Some(uploads) = self.inner.uploads.get() else {
+            return Vec::new();
+        };
+        let mut refs: Vec<String> = item
+            .attachments
+            .iter()
+            .filter(|p| crate::uploads::is_pending_ref(p))
+            .cloned()
+            .collect();
+        for r in crate::uploads::pending_refs_in(&item.text) {
+            if !refs.contains(&r) {
+                refs.push(r);
+            }
+        }
+        refs.into_iter()
+            .filter(|r| uploads.resolve_pending(r).is_none())
+            .collect()
     }
 
     /// [`Self::resolve_request_attachments`] for a bare prompt (Steer).
@@ -5800,7 +5857,13 @@ impl DocHost {
         let prompt = self.resolve_prompt_attachments(prompt);
         let computer_control =
             self.computer_control_for(sessions, handle, &prompt, None, computer_generation);
-        if !prompt.trim().is_empty() && sessions.defers_to_turn_end(chat_id, None) {
+        // A live turn without a mailbox can't take it either: the fresh
+        // dispatch below would interrupt it.
+        let unsteerable_turn =
+            sessions.turn_in_flight(chat_id) && !sessions.live_run_steerable(chat_id);
+        if !prompt.trim().is_empty()
+            && (unsteerable_turn || sessions.defers_to_turn_end(chat_id, None))
+        {
             let id = message_id.unwrap_or_else(new_id);
             self.hold_until_turn_end(handle, &id, &prompt, issued_at, true, computer_generation)?;
             return Ok((
