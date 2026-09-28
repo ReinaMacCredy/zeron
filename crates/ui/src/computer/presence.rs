@@ -84,6 +84,63 @@ pub fn presences(store: &ComputerPreviewStore) -> Vec<ChatPresence> {
     presences
 }
 
+pub const RING_LIMIT: usize = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RingTone {
+    Accent,
+    Warning,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RingSpec {
+    pub chat_id: String,
+    pub pid: i32,
+    pub window: u32,
+    pub tone: RingTone,
+    pub dashed: bool,
+    pub label: String,
+}
+
+fn cua_window(window_id: &str) -> Option<(i32, u32)> {
+    let (pid, window) = window_id.strip_prefix("cua:")?.split_once(':')?;
+    let valid = |part: &str| {
+        !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()) && !part.starts_with('0')
+    };
+    if !valid(pid) || !valid(window) {
+        return None;
+    }
+    Some((pid.parse().ok()?, window.parse().ok()?))
+}
+
+pub fn ring_specs(presences: &[ChatPresence]) -> Vec<RingSpec> {
+    presences
+        .iter()
+        .filter_map(|presence| {
+            let (pid, window) = cua_window(presence.window_id.as_deref()?)?;
+            let (tone, dashed, label) = match presence.tone {
+                PresenceTone::Driving => (
+                    RingTone::Accent,
+                    false,
+                    presence.activity.as_deref().unwrap_or("Working").to_owned(),
+                ),
+                PresenceTone::Paused => (RingTone::Warning, false, "Paused".to_owned()),
+                PresenceTone::NeedsYou => (RingTone::Accent, true, "Waiting for you".to_owned()),
+                PresenceTone::Revoked { .. } => return None,
+            };
+            Some(RingSpec {
+                chat_id: presence.chat_id.clone(),
+                pid,
+                window,
+                tone,
+                dashed,
+                label: format!("Zeron · {label}"),
+            })
+        })
+        .take(RING_LIMIT)
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RailEntry {
     pub chat_id: String,
@@ -336,6 +393,119 @@ mod tests {
         store.remove_chat("a");
         assert!(map.set_rail(rail_entries(&store)));
         assert!(map.rail_entry("a").is_none());
+    }
+
+    fn active(store: &mut ComputerPreviewStore, thread: &str, activity: Option<&str>) {
+        let mut driving = thread_state(thread, true);
+        driving.activity = activity.map(Into::into);
+        state(store, driving);
+    }
+
+    #[test]
+    fn a_ring_follows_each_driving_chat_target() {
+        let mut store = ComputerPreviewStore::default();
+        driving(&mut store, "a");
+        assert!(ring_specs(&presences(&store)).is_empty(), "no target yet");
+        action(&mut store, "a", "cua:4242:9191", "computer_type_text");
+        active(&mut store, "a", Some("Typing"));
+        driving(&mut store, "b");
+        action(&mut store, "b", "cua:77:5", "computer_click");
+        driving(&mut store, "c");
+        action(&mut store, "c", "w1", "computer_click");
+        assert_eq!(
+            ring_specs(&presences(&store)),
+            vec![
+                RingSpec {
+                    chat_id: "a".into(),
+                    pid: 4242,
+                    window: 9191,
+                    tone: RingTone::Accent,
+                    dashed: false,
+                    label: "Zeron · Typing".into(),
+                },
+                RingSpec {
+                    chat_id: "b".into(),
+                    pid: 77,
+                    window: 5,
+                    tone: RingTone::Accent,
+                    dashed: false,
+                    label: "Zeron · Working".into(),
+                },
+            ],
+            "a window id that is not a desktop window gets no ring"
+        );
+        action(&mut store, "a", "cua:4242:9192", "computer_click");
+        assert_eq!(ring_specs(&presences(&store))[0].window, 9192);
+        for bad in [
+            "cua:0:1",
+            "cua:12:01",
+            "cua:12",
+            "cua::3",
+            "cua:-1:2",
+            "cua:1:2:3",
+        ] {
+            assert_eq!(cua_window(bad), None, "{bad}");
+        }
+        for chat in ["d", "e", "f", "g"] {
+            driving(&mut store, chat);
+            action(&mut store, chat, "cua:9:9", "computer_click");
+        }
+        assert_eq!(ring_specs(&presences(&store)).len(), RING_LIMIT);
+        let labels: Vec<_> = ring_specs(&presences(&store))
+            .into_iter()
+            .map(|spec| spec.label)
+            .collect();
+        assert!(
+            labels.iter().all(|label| !label.contains("hunter2")
+                && !label.contains("computer_")
+                && !label.contains("4242")),
+            "{labels:?}"
+        );
+    }
+
+    #[test]
+    fn no_ring_after_revoke_or_idle() {
+        let mut store = ComputerPreviewStore::default();
+        driving(&mut store, "a");
+        action(&mut store, "a", "cua:42:7", "computer_click");
+        assert_eq!(ring_specs(&presences(&store)).len(), 1);
+        let mut revoked = thread_state("a", true);
+        revoked.input_stopped = Some(true);
+        state(&mut store, revoked);
+        assert!(ring_specs(&presences(&store)).is_empty(), "revoked");
+        state(&mut store, thread_state("a", false));
+        store.clear_revoked("a");
+        driving(&mut store, "b");
+        action(&mut store, "b", "cua:42:8", "computer_click");
+        state(&mut store, thread_state("b", false));
+        assert!(ring_specs(&presences(&store)).is_empty(), "idle");
+    }
+
+    #[test]
+    fn paused_rings_are_warning() {
+        let mut store = ComputerPreviewStore::default();
+        driving(&mut store, "a");
+        action(&mut store, "a", "cua:42:7", "computer_click");
+        let mut paused = thread_state("a", true);
+        paused.input_pause = Some(ComputerInputPause {
+            window_id: Some("cua:42:7".into()),
+            pid: Some(42),
+            message: "Screen locked".into(),
+        });
+        state(&mut store, paused);
+        let specs = ring_specs(&presences(&store));
+        assert_eq!(specs.len(), 1);
+        assert_eq!(
+            (specs[0].tone, specs[0].dashed, specs[0].label.as_str()),
+            (RingTone::Warning, false, "Zeron · Paused")
+        );
+        let mut waiting = presences(&store).remove(0);
+        waiting.tone = PresenceTone::NeedsYou;
+        let specs = ring_specs(&[waiting]);
+        assert_eq!(
+            (specs[0].tone, specs[0].dashed, specs[0].label.as_str()),
+            (RingTone::Accent, true, "Zeron · Waiting for you")
+        );
     }
 
     #[test]
