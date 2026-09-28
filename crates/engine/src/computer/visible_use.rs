@@ -341,7 +341,7 @@ pub fn visible_use_entries(entries: &[SessionMessageEntry]) -> Vec<VisibleUseEnt
                         questions,
                         answers,
                         ..
-                    } if !questions.iter().any(UserInputQuestion::is_consent) => {
+                    } if !questions.iter().any(UserInputQuestion::is_computer) => {
                         Some(VisibleUseInput {
                             request_id: request_id.clone(),
                             question_titles: questions
@@ -962,6 +962,8 @@ mod tests {
         let consent = Some(zeron_proto::UserInputKind::Consent {
             scope: zeron_proto::computer::ComputerConsentScope::Task,
             app: None,
+            tool: None,
+            params: None,
         });
         let walk = visible_use_entries(&[
             doc_entry(MessageRole::User, vec![text("show me the browser")]),

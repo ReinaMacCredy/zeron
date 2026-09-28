@@ -155,6 +155,31 @@ async fn preserves_bounded_cooldown_hints_and_scopes_native_pause_recovery_to_th
     assert_eq!(pause.window_id.as_deref(), Some("cua:10:20"));
     assert_eq!(pause.pid, Some(10));
     assert_eq!(effect(&error), Some(CuaEffect::NotDispatched));
+    assert!(!pause.user_takeover);
+}
+
+#[tokio::test]
+async fn a_user_input_refusal_marks_the_pause_as_a_takeover() {
+    let f = fixture();
+    f.on_tool("press_key", |_| {
+        json!({
+            "isError": true,
+            "structuredContent": {
+                "effect": "refused",
+                "code": "computer_input_paused",
+                "cause": "user_input",
+                "layer": "driver-host",
+            },
+        })
+    });
+    let error = f
+        .backend
+        .press_key("enter", Some("cua:10:20"), None)
+        .await
+        .unwrap_err();
+    let pause = error.input_pause().unwrap();
+    assert!(pause.user_takeover);
+    assert_eq!(pause.window_id.as_deref(), Some("cua:10:20"));
 }
 
 #[tokio::test]

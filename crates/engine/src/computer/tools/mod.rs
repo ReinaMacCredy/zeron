@@ -43,9 +43,7 @@ use super::setup_signal::ComputerSetupSignal;
 use super::turn_timing::ComputerTurnTimings;
 use super::visible_use::ComputerForegroundAuthorization;
 
-pub const COMPUTER_CONTROL_FIRST_MUTATION_DISCLOSURE: &str = "Computer control ON for this turn: the agent is driving the desktop and the user can switch it off in Settings.";
-
-pub const COMPUTER_TOOL_REFRESH_GUIDANCE: &str = "Computer routing reminder: observe with computer_get_state and exact window_id before acting; prefer element refs; computer_invoke_menu activates the app, so only with visible-use consent. Use coordinates only for controls absent from elements. computer_type_text with window_id alone inserts the whole string into the focused field; never spell text through computer_press_key. Background text is focus-neutral only when Cua proves one writable Accessibility target. Foreground delivery requires the user's visible-use authorization; never replay uncertain delivery; off-Space pixels are not live.";
+pub const COMPUTER_TOOL_REFRESH_GUIDANCE: &str = "Computer routing reminder: observe with computer_get_state and exact window_id before acting; prefer element refs; computer_invoke_menu activates the app, so it needs foreground permission. Use coordinates only for controls absent from elements. computer_type_text with window_id alone inserts the whole string into the focused field; never spell text through computer_press_key. Background text is focus-neutral only when Cua proves one writable Accessibility target. When background input cannot reach a window safely, retry that call with delivery_mode:\"foreground\": Zeron asks the user, only their click or their own request authorizes it, and foreground_declined means continue in the background or tell the user what is left; never replay uncertain delivery; off-Space pixels are not live.";
 
 pub const COMPUTER_APPROVAL_REQUIRED_TOOLS: &[&str] = &[
     "computer_read_clipboard",
@@ -223,7 +221,10 @@ impl ComputerToolEntry {
 pub trait ComputerToolSeams: Send + Sync {
     fn assert_turn_active(&self) -> Result<(), ComputerError>;
 
-    async fn foreground_authorization(&self) -> ComputerForegroundAuthorization;
+    async fn foreground_authorization(
+        &self,
+        target: Option<&ToolArgs>,
+    ) -> ComputerForegroundAuthorization;
 
     async fn setup_required(&self, _tool: &str, _signal: &ComputerSetupSignal) {}
 

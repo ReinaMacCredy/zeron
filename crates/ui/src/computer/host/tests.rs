@@ -109,6 +109,7 @@ fn fixture_with(driver: Driver, configure: impl FnOnce(&mut CuaDriverHostOptions
         Box::new(|| Box::pin(async { Ok(()) })),
     );
     options.warm_on_first_touch = false;
+    options.input_quiet = Duration::ZERO;
     configure(&mut options);
     Fixture {
         host: CuaDriverHost::new(options).unwrap(),
@@ -460,5 +461,6 @@ mod retirement;
 mod risk;
 mod self_guard;
 mod shield;
+mod takeover;
 mod task_stop;
 mod warm;

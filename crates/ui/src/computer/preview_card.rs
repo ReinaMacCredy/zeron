@@ -1,10 +1,10 @@
 use gpui::{
-    Bounds, Context, Entity, FontWeight, Hsla, ImageSource, InteractiveElement as _, IntoElement,
-    MouseButton, MouseDownEvent, ObjectFit, ParentElement as _, Pixels, Point, Render,
+    Bounds, Context, Entity, EventEmitter, FontWeight, Hsla, ImageSource, InteractiveElement as _,
+    IntoElement, MouseButton, MouseDownEvent, ObjectFit, ParentElement as _, Pixels, Point, Render,
     SharedString, Size, StatefulInteractiveElement as _, Styled as _, StyledImage as _,
     Subscription, Task, Window, div, img, point, prelude::FluentBuilder as _, px,
 };
-use zeron_proto::computer::{ComputerPreviewSize, ComputerSettings};
+use zeron_proto::computer::{ComputerPreviewPlacement, ComputerPreviewSize, ComputerSettings};
 use zeron_proto::view::Indicator;
 
 use super::preview::{
@@ -80,13 +80,39 @@ fn view_aspect(view: &PreviewView) -> f32 {
         .unwrap_or(FALLBACK_ASPECT)
 }
 
+pub const SCREEN_RECORDING_REQUIRED: &str = "screen_recording_required";
+
+pub fn body_copy(view: &PreviewView) -> Option<String> {
+    if view.frame.is_some() {
+        return None;
+    }
+    match &view.failure {
+        Some(failure) if failure.code == SCREEN_RECORDING_REQUIRED => {
+            Some("Screen Recording is off, so the preview can't show this window.".into())
+        }
+        Some(failure) => Some(failure.message.clone()),
+        None => view.connecting.then(|| match &view.app {
+            Some(app) => format!("Connecting to {app}…"),
+            None => "Connecting to the desktop…".into(),
+        }),
+    }
+}
+
 pub fn docked_inset(view: &PreviewView, size: ComputerPreviewSize, slot: Size<Pixels>) -> f32 {
-    if !view.visually_open() || view.floating.is_some() {
+    if !view.visually_open()
+        || view.floating.is_some()
+        || view.placement == ComputerPreviewPlacement::Rail
+    {
         return 0.0;
     }
     let caps = card_caps(size);
     fit_width(caps, slot, view_aspect(view)).min(budget_width(caps, f32::from(slot.width)))
         + INSET_GAP
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewCardEvent {
+    OpenSetup,
 }
 
 struct Drag {
@@ -102,6 +128,7 @@ pub struct ComputerPreviewCard {
     slot: Size<Pixels>,
     viewport: Size<Pixels>,
     card_bounds: Option<Bounds<Pixels>>,
+    dock_anchor: Option<Point<Pixels>>,
     drag: Option<Drag>,
     hovered: bool,
     still_poll: Option<(String, Task<()>)>,
@@ -127,6 +154,7 @@ impl ComputerPreviewCard {
             slot: Size::default(),
             viewport: Size::default(),
             card_bounds: None,
+            dock_anchor: None,
             drag: None,
             hovered: false,
             still_poll: None,
@@ -172,11 +200,25 @@ impl ComputerPreviewCard {
     }
 
     pub fn pop_out(&mut self, cx: &mut Context<Self>) {
-        let Some(bounds) = self.card_bounds else {
+        if let Some(bounds) = self.card_bounds {
+            let card = Size::new(f32::from(bounds.size.width), f32::from(bounds.size.height));
+            let origin = point(f32::from(bounds.origin.x), f32::from(bounds.origin.y));
+            self.set_floating(Some(clamp_float(origin, card, self.viewport)), cx);
+            return;
+        }
+        let (Some(anchor), Some(chat)) = (self.dock_anchor, self.chat_id.as_deref()) else {
             return;
         };
-        let card = Size::new(f32::from(bounds.size.width), f32::from(bounds.size.height));
-        let origin = point(f32::from(bounds.origin.x), f32::from(bounds.origin.y));
+        let (aspect, caps) = {
+            let store = self.store.read(cx);
+            (
+                view_aspect(&store.view(chat)),
+                card_caps(store.preview_size()),
+            )
+        };
+        let width = float_width(caps, self.viewport, aspect);
+        let origin = point(f32::from(anchor.x) - width, f32::from(anchor.y));
+        let card = Size::new(width, width / aspect);
         self.set_floating(Some(clamp_float(origin, card, self.viewport)), cx);
     }
 
@@ -352,6 +394,8 @@ fn control(
         )
 }
 
+impl EventEmitter<PreviewCardEvent> for ComputerPreviewCard {}
+
 impl Render for ComputerPreviewCard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(chat) = self.chat_id.clone() else {
@@ -363,12 +407,28 @@ impl Render for ComputerPreviewCard {
             (store.view(&chat), store.preview_size())
         };
         self.reconcile(&chat, &view, cx);
-        if !view.visually_open() {
+        self.viewport = window.viewport_size();
+        let railed = view.placement == ComputerPreviewPlacement::Rail && view.floating.is_none();
+        if !view.visually_open() || railed {
             self.drag = None;
-            return div().into_any_element();
+            self.card_bounds = None;
+            if !railed {
+                return div().into_any_element();
+            }
+            let anchor = cx.entity().downgrade();
+            return gpui::canvas(
+                move |bounds, _, cx| {
+                    let _ = anchor.update(cx, |this, _| this.dock_anchor = Some(bounds.origin));
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .top(px(CARD_TOP))
+            .right(px(CARD_RIGHT))
+            .size_0()
+            .into_any_element();
         }
         let theme = Theme::of(cx).clone();
-        self.viewport = window.viewport_size();
         let aspect = view_aspect(&view);
         let caps = card_caps(size);
         let floating = view.floating.map(|stored| {
@@ -383,21 +443,61 @@ impl Render for ComputerPreviewCard {
                 .size_full()
                 .object_fit(ObjectFit::Contain)
                 .into_any_element(),
-            None => div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .px(px(12.0))
-                .text_size(px(12.0))
-                .text_color(theme.text_muted)
-                .child(SharedString::from(
-                    view.failure
-                        .as_ref()
-                        .map(|failure| failure.message.clone())
-                        .unwrap_or_else(|| "Waiting for the window the agent is using…".into()),
-                ))
-                .into_any_element(),
+            None => {
+                let set_up = view
+                    .failure
+                    .as_ref()
+                    .is_some_and(|failure| failure.code == SCREEN_RECORDING_REQUIRED);
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(10.0))
+                    .px(px(12.0))
+                    .text_size(px(12.0))
+                    .text_color(theme.text_muted)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .when(view.connecting, |line| {
+                                line.child(crate::loaders::mini_mono_spinner(
+                                    "computer-preview-connecting",
+                                    2.0,
+                                    theme.text_muted,
+                                    cx.entity_id(),
+                                    cx,
+                                ))
+                            })
+                            .child(SharedString::from(body_copy(&view).unwrap_or_default())),
+                    )
+                    .when(set_up, |body| {
+                        body.child(
+                            div()
+                                .id("computer-preview-set-up")
+                                .debug_selector(|| "computer-preview-set-up".into())
+                                .px(px(12.0))
+                                .py(px(4.0))
+                                .rounded_full()
+                                .border_1()
+                                .border_color(gpui::white().opacity(0.2))
+                                .bg(gpui::white().opacity(0.12))
+                                .text_color(gpui::white())
+                                .cursor_pointer()
+                                .hover(|s| s.bg(gpui::white().opacity(0.2)))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_click(cx.listener(|_, _, _, cx| {
+                                    cx.stop_propagation();
+                                    cx.emit(PreviewCardEvent::OpenSetup);
+                                }))
+                                .child("Set up"),
+                        )
+                    })
+                    .into_any_element()
+            }
         };
         let badge = view
             .badge
@@ -612,6 +712,13 @@ mod tests {
         }
     }
 
+    fn card_placement() -> ComputerSettings {
+        ComputerSettings {
+            computer_preview_placement: ComputerPreviewPlacement::Card,
+            ..ComputerSettings::default()
+        }
+    }
+
     fn mount<'a>(
         cx: &'a mut TestAppContext,
         dir: &std::path::Path,
@@ -636,7 +743,11 @@ mod tests {
                 zeron_rpc::RpcClient::new(out, inbound),
             ))
         });
-        let store = cx.new(|_| ComputerPreviewStore::default());
+        let store = cx.new(|_| {
+            let mut store = ComputerPreviewStore::default();
+            store.set_settings(card_placement());
+            store
+        });
         let card = cx.new(|cx| ComputerPreviewCard::new(state, store.clone(), cx));
         card.update(cx, |card, cx| {
             card.set_target(Some("a".into()), size(px(1200.0), px(800.0)), cx)
@@ -663,7 +774,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn the_card_appears_with_its_first_frame_and_sizes_from_settings(cx: &mut TestAppContext) {
+    fn the_card_says_connecting_before_the_first_frame(cx: &mut TestAppContext) {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();
         let dir = tempfile::tempdir().unwrap();
@@ -682,10 +793,27 @@ mod tests {
             Some(PreviewPhase::Live),
             "rendering the chat views it"
         );
-        assert!(
-            cx.debug_bounds("computer-preview-card").is_none(),
-            "no empty box before the first frame"
-        );
+        let connecting = cx
+            .debug_bounds("computer-preview-card")
+            .expect("a connecting card before the first frame");
+        assert_eq!(f32::from(connecting.size.width), 400.0);
+        let copy =
+            |cx: &mut VisualTestContext| cx.update(|_, cx| body_copy(&store.read(cx).view("a")));
+        assert_eq!(copy(cx).as_deref(), Some("Connecting to the desktop…"));
+        change(&store, cx, |store| {
+            store.apply_event(&ComputerEvent::Action {
+                window_id: Some("w1".into()),
+                delivery: None,
+                action: "computer_type_text".into(),
+                ok: true,
+                message: Some("typed hunter2".into()),
+                thread_id: Some("a".into()),
+                restored_window_id: None,
+                restore_status: None,
+                masked: false,
+            })
+        });
+        assert_eq!(copy(cx).as_deref(), Some("Connecting to Calculator…"));
         let asked: Vec<_> = wire.methods(cx).into_iter().map(|(m, _)| m).collect();
         assert!(asked.contains(&methods::GET_COMPUTER_SETTINGS.to_owned()));
         change(&store, cx, |store| {
@@ -698,7 +826,7 @@ mod tests {
         change(&store, cx, |store| {
             store.set_settings(ComputerSettings {
                 computer_preview_size: ComputerPreviewSize::Large,
-                ..ComputerSettings::default()
+                ..card_placement()
             })
         });
         let large = cx
@@ -722,7 +850,7 @@ mod tests {
         change(&store, cx, |store| {
             store.set_settings(ComputerSettings {
                 auto_open_computer_pane: false,
-                ..ComputerSettings::default()
+                ..card_placement()
             })
         });
         assert!(cx.debug_bounds("computer-preview-card").is_none());
@@ -813,13 +941,19 @@ mod tests {
         );
 
         let mut store = ComputerPreviewStore::default();
-        driving(&mut store, "a");
-        store.mark_live("a");
+        store.set_settings(card_placement());
         let slot = size(px(1200.0), px(800.0));
         assert_eq!(
             docked_inset(&store.view("a"), ComputerPreviewSize::Compact, slot),
             0.0,
-            "no gutter before the card has content"
+            "no gutter for a chat that never drove"
+        );
+        driving(&mut store, "a");
+        store.mark_live("a");
+        assert_eq!(
+            docked_inset(&store.view("a"), ComputerPreviewSize::Compact, slot),
+            424.0,
+            "a connecting card holds its gutter"
         );
         store.accept_tap_frame("a", image(1, 960, 600));
         assert_eq!(
@@ -845,6 +979,103 @@ mod tests {
             0.0,
             "a floating card frees the gutter"
         );
+        store.set_floating("a", None);
+        store.set_settings(ComputerSettings::default());
+        assert_eq!(
+            docked_inset(&store.view("a"), ComputerPreviewSize::Compact, slot),
+            0.0,
+            "the rail placement never docks"
+        );
+    }
+
+    #[gpui::test]
+    fn rail_placement_never_docks_but_pops_out(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let (store, card, _wire, cx) = mount(cx, dir.path());
+        change(&store, cx, |store| {
+            store.set_settings(ComputerSettings::default());
+            store.set_events_live(true);
+            driving(store, "a");
+            store.accept_tap_frame("a", image(1, 960, 600))
+        });
+        assert_eq!(
+            phase(&store, cx),
+            Some(PreviewPhase::Live),
+            "the rail still views it"
+        );
+        assert!(cx.debug_bounds("computer-preview-card").is_none());
+        assert!(cx.update(|_, cx| store.read(cx).thumbnail_shown("a")));
+        card.update(cx, |card, cx| card.pop_out(cx));
+        cx.run_until_parked();
+        let floating = cx
+            .debug_bounds("computer-preview-card")
+            .expect("the thumbnail pops out a floating card");
+        assert_eq!(f32::from(floating.size.width), 600.0);
+        assert_eq!(
+            (f32::from(floating.origin.x), f32::from(floating.origin.y)),
+            (1200.0 - CARD_RIGHT - 600.0, CARD_TOP),
+            "it opens where the docked card would sit"
+        );
+        assert!(!cx.update(|_, cx| store.read(cx).thumbnail_shown("a")));
+        let dock = reveal(cx, "computer-preview-dock");
+        cx.simulate_click(dock.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("computer-preview-card").is_none(),
+            "docking goes back to the rail"
+        );
+        assert!(cx.update(|_, cx| store.read(cx).thumbnail_shown("a")));
+    }
+
+    #[gpui::test]
+    fn a_screen_recording_failure_offers_set_up(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let (store, card, _wire, cx) = mount(cx, dir.path());
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&card, move |_, event: &PreviewCardEvent, _| {
+                seen.borrow_mut().push(*event)
+            })
+            .detach()
+        });
+        change(&store, cx, |store| {
+            store.set_events_live(true);
+            driving(store, "a");
+            store.accept_tap_failure(
+                "a",
+                PreviewFailure {
+                    code: "target_unavailable".into(),
+                    message: "The selected window is no longer available.".into(),
+                },
+            )
+        });
+        assert!(cx.debug_bounds("computer-preview-card").is_some());
+        assert!(cx.debug_bounds("computer-preview-set-up").is_none());
+        change(&store, cx, |store| {
+            store.accept_tap_failure(
+                "a",
+                PreviewFailure {
+                    code: SCREEN_RECORDING_REQUIRED.into(),
+                    message: "screen_recording_required: grant missing".into(),
+                },
+            )
+        });
+        assert_eq!(
+            cx.update(|_, cx| body_copy(&store.read(cx).view("a")))
+                .as_deref(),
+            Some("Screen Recording is off, so the preview can't show this window.")
+        );
+        let set_up = cx
+            .debug_bounds("computer-preview-set-up")
+            .expect("Set up on a missing grant");
+        cx.simulate_click(set_up.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(*events.borrow(), vec![PreviewCardEvent::OpenSetup]);
     }
 
     fn live_card(

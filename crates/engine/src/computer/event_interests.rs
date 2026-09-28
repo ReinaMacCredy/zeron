@@ -248,6 +248,7 @@ mod tests {
                 },
                 input_stopped: None,
                 last_error: None,
+                pending_request: None,
             }),
         }
     }

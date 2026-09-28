@@ -3,13 +3,15 @@ use gpui::{
 };
 use zeron_engine::computer::engine_seams::{
     COMPUTER_CONSENT_ALLOW, COMPUTER_CONSENT_ALWAYS_PREFIX, COMPUTER_CONSENT_DECLINE,
-    consent_always_label, consent_app_title,
+    consent_always_label, consent_app_title, foreground_allowed,
 };
-use zeron_engine::computer::manager::COMPUTER_CONTROL_ON_DISCLOSURE;
-use zeron_engine::computer::runtime::COMPUTER_ESCAPE_STOP_NOTICE;
-use zeron_proto::computer::{
-    ComputerConsentApp, ComputerConsentScope, ComputerPermission, ThreadComputerState,
+use zeron_engine::computer::manager::{
+    COMPUTER_CONTROL_ON_DISCLOSURE, COMPUTER_USER_PAUSE_NOTE_PREFIX,
 };
+use zeron_engine::computer::runtime::{
+    COMPUTER_DESKTOP_REVOKED_NOTE, COMPUTER_ESCAPE_STOP_NOTICE, RevokeSource,
+};
+use zeron_proto::computer::{ComputerConsentApp, ComputerConsentScope, ComputerPermission};
 use zeron_proto::{UserInputAnswer, UserInputQuestion};
 
 use crate::appshots::{AppshotCapabilities, CapabilityState};
@@ -18,24 +20,54 @@ use crate::theme::Theme;
 pub const COMPUTER_SETUP_NOTE: &str = "Computer control needs setup";
 pub const COMPUTER_UNAVAILABLE_NOTE: &str = "Computer is unavailable for this turn";
 const CAPABILITY_DENIED_CODE: &str = "capability_denied";
+const LEGACY_CONTROL_ON_NOTE: &str = "Computer control ON for this turn: the agent is driving the desktop and the user can switch it off in Settings.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComputerNotice {
     Disclosure,
-    EscapeStop,
+    Revoked,
+    Paused,
     SetupRequired,
     Unavailable,
     ControlDenied,
+    Foreground,
+    LeftOpen,
+}
+
+pub fn left_open_app(note: &str) -> Option<&str> {
+    let rest = note.strip_prefix("Left ")?;
+    let rest = rest
+        .strip_suffix(" windows open")
+        .or_else(|| rest.strip_suffix(" window open"))?;
+    let (count, app) = rest.split_once(' ')?;
+    (count.parse::<usize>().is_ok_and(|count| count > 0) && !app.trim().is_empty()).then_some(app)
 }
 
 pub fn computer_notice(note: &str) -> Option<ComputerNotice> {
+    if left_open_app(note).is_some() {
+        return Some(ComputerNotice::LeftOpen);
+    }
+    if note
+        .strip_prefix(COMPUTER_USER_PAUSE_NOTE_PREFIX)
+        .is_some_and(|app| !app.is_empty())
+    {
+        return Some(ComputerNotice::Paused);
+    }
     match note {
-        COMPUTER_CONTROL_ON_DISCLOSURE => Some(ComputerNotice::Disclosure),
-        COMPUTER_ESCAPE_STOP_NOTICE => Some(ComputerNotice::EscapeStop),
+        COMPUTER_CONTROL_ON_DISCLOSURE | LEGACY_CONTROL_ON_NOTE => Some(ComputerNotice::Disclosure),
+        COMPUTER_DESKTOP_REVOKED_NOTE | COMPUTER_ESCAPE_STOP_NOTICE => {
+            Some(ComputerNotice::Revoked)
+        }
         COMPUTER_SETUP_NOTE => Some(ComputerNotice::SetupRequired),
         COMPUTER_UNAVAILABLE_NOTE => Some(ComputerNotice::Unavailable),
         _ => None,
     }
+}
+
+pub fn revoked_label(text: &str, hint: Option<&str>) -> String {
+    let escape = text == COMPUTER_ESCAPE_STOP_NOTICE || hint == Some(RevokeSource::Escape.hint());
+    let suffix = if escape { " (Esc)" } else { "" };
+    format!("{COMPUTER_DESKTOP_REVOKED_NOTE}{suffix}")
 }
 
 pub fn is_control_denied(is_error: bool, output: Option<&str>) -> bool {
@@ -88,15 +120,63 @@ pub fn consent_question(questions: &[UserInputQuestion]) -> Option<&UserInputQue
 pub fn consent_app(question: &UserInputQuestion) -> Option<ComputerConsentApp> {
     match &question.kind {
         Some(zeron_proto::UserInputKind::Consent { app, .. }) => app.clone(),
-        None => None,
+        _ => None,
     }
 }
 
 pub fn consent_scope(question: &UserInputQuestion) -> ComputerConsentScope {
     match &question.kind {
         Some(zeron_proto::UserInputKind::Consent { scope, .. }) => *scope,
-        None => ComputerConsentScope::Task,
+        _ => ComputerConsentScope::Task,
     }
+}
+
+pub fn foreground_outcome_label(
+    questions: &[UserInputQuestion],
+    answers: Option<&[UserInputAnswer]>,
+) -> Option<String> {
+    let app = questions.iter().find_map(|question| match &question.kind {
+        Some(zeron_proto::UserInputKind::Foreground { app }) => Some(app.as_ref()),
+        _ => None,
+    })?;
+    let app = app.map_or("the app", |app| app.name.as_str());
+    Some(if foreground_allowed(answers?)? {
+        format!("You allowed {app} to come to the front")
+    } else {
+        format!("You kept {app} in the background")
+    })
+}
+
+fn consent_action(question: &UserInputQuestion) -> Option<(&str, Option<&str>)> {
+    match &question.kind {
+        Some(zeron_proto::UserInputKind::Consent {
+            tool: Some(tool),
+            params,
+            ..
+        }) => Some((tool.as_str(), params.as_deref())),
+        _ => None,
+    }
+}
+
+pub fn consent_action_sentence(
+    tool: &str,
+    params: Option<&str>,
+    app: Option<&ComputerConsentApp>,
+) -> String {
+    let params: Option<serde_json::Value> =
+        params.and_then(|params| serde_json::from_str(params).ok());
+    let tool = super::presentation::computer_tool_name(tool).unwrap_or(tool);
+    let mut sentence = super::presentation::describe_computer_call(
+        tool,
+        params.as_ref().and_then(serde_json::Value::as_object),
+    );
+    if let Some(app) = app
+        && !sentence.contains(app.name.as_str())
+    {
+        sentence.push_str(" in ");
+        sentence.push_str(&app.name);
+    }
+    sentence
 }
 
 pub fn consent_outcome(
@@ -131,19 +211,17 @@ pub fn consent_answers(question_id: &str, choice: &ConsentChoice) -> Vec<UserInp
     }]
 }
 
-/// The engine's task question opens with the card's own title; drop it.
-pub fn consent_detail(
-    scope: ComputerConsentScope,
-    app: Option<&ComputerConsentApp>,
-    question: &str,
-) -> String {
-    let question = question.trim();
-    match scope {
-        ComputerConsentScope::Task => question
-            .strip_prefix(consent_card_title(scope, app).as_str())
-            .map_or(question, str::trim_start)
+pub fn consent_detail(question: &UserInputQuestion) -> String {
+    if let Some((tool, params)) = consent_action(question) {
+        return consent_action_sentence(tool, params, consent_app(question).as_ref());
+    }
+    let text = question.question.trim();
+    match consent_scope(question) {
+        ComputerConsentScope::Task => text
+            .split_once("? ")
+            .map_or(text, |(_, rest)| rest.trim_start())
             .to_owned(),
-        ComputerConsentScope::Call => question.to_owned(),
+        ComputerConsentScope::Call => text.to_owned(),
     }
 }
 
@@ -203,12 +281,46 @@ pub fn consent_choices(
     choices
 }
 
-pub fn consent_outcome_label(outcome: ConsentOutcome) -> &'static str {
-    match outcome {
-        ConsentOutcome::Allowed => "Allowed",
-        ConsentOutcome::AlwaysAllowed => "Always allowed",
-        ConsentOutcome::Declined => "Declined",
-        ConsentOutcome::Cancelled => "Cancelled",
+pub fn strip_consent_choices(
+    scope: ComputerConsentScope,
+    app: Option<&ComputerConsentApp>,
+) -> Vec<(ConsentChoice, String)> {
+    consent_choices(scope, app)
+        .into_iter()
+        .map(|(choice, label)| {
+            let label = match (&choice, scope) {
+                (ConsentChoice::Allow, ComputerConsentScope::Task) => "Allow for this task".into(),
+                (ConsentChoice::Allow, ComputerConsentScope::Call) => "Allow once".into(),
+                (ConsentChoice::AlwaysAllow(_), _) => label,
+                (ConsentChoice::Decline, _) => "No".into(),
+            };
+            (choice, label)
+        })
+        .collect()
+}
+
+pub fn consent_event_label(
+    outcome: ConsentOutcome,
+    scope: ComputerConsentScope,
+    app: Option<&ComputerConsentApp>,
+) -> String {
+    let name = app.map(|app| app.name.as_str());
+    match (outcome, scope, name) {
+        (ConsentOutcome::Allowed, ComputerConsentScope::Task, Some(name)) => {
+            format!("Allowed {name} for this task")
+        }
+        (ConsentOutcome::Allowed, ComputerConsentScope::Task, None) => {
+            "Allowed Computer for this task".into()
+        }
+        (ConsentOutcome::Allowed, ComputerConsentScope::Call, Some(name)) => {
+            format!("Allowed {name} once")
+        }
+        (ConsentOutcome::Allowed, ComputerConsentScope::Call, None) => "Allowed once".into(),
+        (ConsentOutcome::AlwaysAllowed, _, Some(name)) => format!("Always allowed {name}"),
+        (ConsentOutcome::AlwaysAllowed, _, None) => "Always allowed".into(),
+        (ConsentOutcome::Declined, _, Some(name)) => format!("Declined {name}"),
+        (ConsentOutcome::Declined, _, None) => "Declined".into(),
+        (ConsentOutcome::Cancelled, _, _) => "Cancelled".into(),
     }
 }
 
@@ -237,33 +349,6 @@ pub fn missing_computer_permissions(capabilities: AppshotCapabilities) -> Vec<Co
         .collect()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InputPauseNotice {
-    pub title: String,
-    pub body: String,
-}
-
-/// No "Check again": Zeron has no UI-facing readiness read; the next state clears it.
-pub fn input_pause_notice(state: &ThreadComputerState) -> Option<InputPauseNotice> {
-    let pause = state.input_pause.as_ref()?;
-    let window = pause
-        .window_id
-        .as_deref()
-        .and_then(|id| state.windows.iter().find(|window| window.id == id));
-    let target = window
-        .and_then(|window| window.app_name.clone())
-        .or_else(|| window.map(|window| window.title.clone()))
-        .filter(|target| !target.trim().is_empty())
-        .unwrap_or_else(|| "the target window".into());
-    Some(InputPauseNotice {
-        title: format!("Input paused — return to {target}"),
-        body: Some(pause.message.trim())
-            .filter(|message| !message.is_empty())
-            .unwrap_or("Bring the window onto this desktop, or exit the full-screen app. Continue from the current page once input is available.")
-            .into(),
-    })
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CardTone {
     Info,
@@ -284,6 +369,51 @@ fn tone_color(tone: CardTone, theme: &Theme) -> Hsla {
         CardTone::Success => theme.success,
         CardTone::Warning => theme.warning,
     }
+}
+
+pub fn computer_event_row(
+    icon: &'static str,
+    text: SharedString,
+    tone: CardTone,
+    action: Option<CardAction>,
+    theme: &Theme,
+) -> AnyElement {
+    let color = tone_color(tone, theme);
+    div()
+        .h(px(26.0))
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .text_size(px(12.5))
+        .text_color(color)
+        .child(
+            crate::icons::icon(icon)
+                .flex_none()
+                .size(px(13.0))
+                .text_color(color),
+        )
+        .child(div().min_w_0().truncate().child(text))
+        .when_some(action, |row, action| {
+            let on_click = action.on_click;
+            let selector = action.id.to_string();
+            row.child(
+                div()
+                    .id(action.id)
+                    .debug_selector(move || selector)
+                    .flex_none()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text.opacity(0.9))
+                    .cursor_pointer()
+                    .hover(|s| s.opacity(0.8))
+                    .on_click(move |event, window, cx| {
+                        cx.stop_propagation();
+                        on_click(event, window, cx)
+                    })
+                    .child(action.label),
+            )
+        })
+        .into_any_element()
 }
 
 pub fn computer_card(
@@ -419,8 +549,16 @@ mod tests {
             Some(ComputerNotice::Disclosure)
         );
         assert_eq!(
+            computer_notice(LEGACY_CONTROL_ON_NOTE),
+            Some(ComputerNotice::Disclosure)
+        );
+        assert_eq!(
             computer_notice(COMPUTER_ESCAPE_STOP_NOTICE),
-            Some(ComputerNotice::EscapeStop)
+            Some(ComputerNotice::Revoked)
+        );
+        assert_eq!(
+            computer_notice(COMPUTER_DESKTOP_REVOKED_NOTE),
+            Some(ComputerNotice::Revoked)
         );
         assert_eq!(
             computer_notice("Computer control needs setup"),
@@ -431,6 +569,61 @@ mod tests {
             Some(ComputerNotice::Unavailable)
         );
         assert_eq!(computer_notice("Context compacted"), None);
+    }
+
+    #[test]
+    fn a_left_open_note_names_its_app_in_the_singular_and_the_plural() {
+        use zeron_engine::computer::manager::{ComputerLeftOpen, left_open_note};
+        for (count, app) in [(1, "Ghostty"), (3, "Google Chrome")] {
+            let note = left_open_note(&ComputerLeftOpen {
+                app: app.into(),
+                count,
+            });
+            assert_eq!(computer_notice(&note), Some(ComputerNotice::LeftOpen));
+            assert_eq!(left_open_app(&note), Some(app));
+        }
+        assert_eq!(left_open_app("Left 1 Ghostty window open"), Some("Ghostty"));
+        assert_eq!(
+            left_open_app("Left 2 Ghostty windows open"),
+            Some("Ghostty")
+        );
+        for other in [
+            "Left the chat",
+            "Left 0 Ghostty windows open",
+            "Left two Ghostty windows open",
+            "Left 1  window open",
+            "Left 1 Ghostty window open now",
+        ] {
+            assert_eq!(computer_notice(other), None, "{other}");
+        }
+    }
+
+    #[test]
+    fn a_takeover_note_is_a_paused_event_whatever_the_app() {
+        use zeron_engine::computer::manager::COMPUTER_USER_PAUSE_NOTE_PREFIX;
+        for app in ["Ghostty", "the target window"] {
+            assert_eq!(
+                computer_notice(&format!("{COMPUTER_USER_PAUSE_NOTE_PREFIX}{app}")),
+                Some(ComputerNotice::Paused)
+            );
+        }
+        assert_eq!(computer_notice("Paused"), None);
+    }
+
+    #[test]
+    fn a_revoke_row_says_who_took_the_desktop_and_how() {
+        assert_eq!(
+            revoked_label(COMPUTER_DESKTOP_REVOKED_NOTE, Some("Esc")),
+            "Desktop access revoked by you (Esc)"
+        );
+        assert_eq!(
+            revoked_label(COMPUTER_DESKTOP_REVOKED_NOTE, Some("Stop")),
+            "Desktop access revoked by you"
+        );
+        assert_eq!(
+            revoked_label(COMPUTER_ESCAPE_STOP_NOTICE, None),
+            "Desktop access revoked by you (Esc)"
+        );
     }
 
     #[test]
@@ -486,6 +679,91 @@ mod tests {
         );
     }
 
+    #[test]
+    fn strip_consent_labels_map_to_engine_answers() {
+        use zeron_engine::computer::approval_gate::ApprovalDecision;
+        use zeron_engine::computer::engine_seams::consent_decision;
+        let verified = safari(Some("com.apple.Safari"));
+        let task = strip_consent_choices(ComputerConsentScope::Task, Some(&verified));
+        assert_eq!(
+            task.iter()
+                .map(|(_, label)| label.as_str())
+                .collect::<Vec<_>>(),
+            ["Allow for this task", "Always allow Safari", "No"]
+        );
+        let decisions: Vec<_> = task
+            .iter()
+            .map(|(choice, _)| consent_decision(&consent_answers("consent", choice)))
+            .collect();
+        assert_eq!(
+            decisions,
+            [
+                ApprovalDecision::Accept,
+                ApprovalDecision::AcceptForSession,
+                ApprovalDecision::Decline
+            ]
+        );
+        assert_eq!(
+            strip_consent_choices(ComputerConsentScope::Task, Some(&safari(None)))
+                .into_iter()
+                .map(|(_, label)| label)
+                .collect::<Vec<_>>(),
+            ["Allow for this task", "No"],
+            "Always only for a verified bundle"
+        );
+        assert_eq!(
+            strip_consent_choices(ComputerConsentScope::Call, None)
+                .into_iter()
+                .map(|(_, label)| label)
+                .collect::<Vec<_>>(),
+            ["Allow once", "No"]
+        );
+    }
+
+    #[test]
+    fn a_settled_consent_reads_as_its_outcome() {
+        let app = safari(Some("com.apple.Safari"));
+        let task = ComputerConsentScope::Task;
+        let call = ComputerConsentScope::Call;
+        let cases = [
+            (
+                ConsentOutcome::Allowed,
+                task,
+                Some(&app),
+                "Allowed Safari for this task",
+            ),
+            (
+                ConsentOutcome::Allowed,
+                task,
+                None,
+                "Allowed Computer for this task",
+            ),
+            (ConsentOutcome::Allowed, call, None, "Allowed once"),
+            (
+                ConsentOutcome::AlwaysAllowed,
+                task,
+                Some(&app),
+                "Always allowed Safari",
+            ),
+            (
+                ConsentOutcome::Declined,
+                task,
+                Some(&app),
+                "Declined Safari",
+            ),
+            (ConsentOutcome::Declined, call, None, "Declined"),
+            (ConsentOutcome::Cancelled, task, Some(&app), "Cancelled"),
+        ];
+        for (outcome, scope, app, expected) in cases {
+            let label = consent_event_label(outcome, scope, app);
+            assert_eq!(label, expected);
+            assert!(
+                !label.contains("com.apple") && !label.contains("42"),
+                "{label}"
+            );
+        }
+    }
+
     fn safari(bundle_id: Option<&str>) -> ComputerConsentApp {
         ComputerConsentApp {
             name: "Safari".into(),
@@ -500,7 +778,7 @@ mod tests {
         let task = ComputerConsentScope::Task;
         assert_eq!(
             consent_card_title(task, Some(&verified)),
-            "Allow Computer to use Safari (com.apple.Safari)?"
+            "Allow Computer to use Safari?"
         );
         assert_eq!(
             consent_choices(task, Some(&verified))
@@ -512,7 +790,7 @@ mod tests {
         let unverified = safari(None);
         assert_eq!(
             consent_card_title(task, Some(&unverified)),
-            "Allow Computer to use Safari (unverified app)?"
+            "Allow Computer to use Safari?"
         );
         assert_eq!(
             consent_choices(task, Some(&unverified))
@@ -530,32 +808,91 @@ mod tests {
         );
     }
 
+    fn consent(
+        scope: ComputerConsentScope,
+        app: Option<ComputerConsentApp>,
+        tool: Option<&str>,
+        params: Option<&str>,
+        question: &str,
+    ) -> UserInputQuestion {
+        UserInputQuestion {
+            id: "consent".into(),
+            header: "Computer".into(),
+            question: question.into(),
+            options: vec!["Allow".into(), "Deny".into()],
+            multi_select: false,
+            kind: Some(zeron_proto::UserInputKind::Consent {
+                scope,
+                app,
+                tool: tool.map(str::to_owned),
+                params: params.map(str::to_owned),
+            }),
+        }
+    }
+
     #[test]
     fn the_task_question_drops_its_title_sentence() {
+        let task = ComputerConsentScope::Task;
         assert_eq!(
-            consent_detail(
-                ComputerConsentScope::Task,
+            consent_detail(&consent(
+                task,
                 None,
-                "Allow Computer for this task? The agent wants to run computer_click."
-            ),
-            "The agent wants to run computer_click."
+                None,
+                None,
+                "Allow Computer for this task? The agent will use this Mac's apps until this response ends."
+            )),
+            "The agent will use this Mac's apps until this response ends."
         );
         assert_eq!(
-            consent_detail(
-                ComputerConsentScope::Task,
-                Some(&safari(Some("com.apple.Safari"))),
+            consent_detail(&consent(
+                task,
+                Some(safari(Some("com.apple.Safari"))),
+                None,
+                None,
                 "Allow Computer to use Safari (com.apple.Safari)? The agent wants to run computer_click."
-            ),
-            "The agent wants to run computer_click."
+            )),
+            "The agent wants to run computer_click.",
+            "an old doc's title sentence drops even with its bundle id"
         );
         assert_eq!(
-            consent_detail(
+            consent_detail(&consent(
                 ComputerConsentScope::Call,
                 None,
-                "Allow the agent to run x once?"
-            ),
-            "Allow the agent to run x once?"
+                None,
+                None,
+                "Allow the agent to read the clipboard once?"
+            )),
+            "Allow the agent to read the clipboard once?"
         );
+    }
+
+    #[test]
+    fn consent_body_names_the_action_never_the_tool_or_typed_text() {
+        let ghostty = ComputerConsentApp {
+            name: "Ghostty".into(),
+            bundle_id: Some("com.mitchellh.ghostty".into()),
+            pid: Some(4242),
+        };
+        let question = consent(
+            ComputerConsentScope::Task,
+            Some(ghostty.clone()),
+            Some("computer_type_text"),
+            Some(r#"{"window_id":"cua:4242:17","text":"hunter2"}"#),
+            "Allow Computer to use Ghostty? The agent will use Ghostty until this response ends.",
+        );
+        let detail = consent_detail(&question);
+        assert_eq!(detail, "Type in Ghostty");
+        for leak in ["computer_", "hunter2", "com.mitchellh", "4242"] {
+            assert!(!detail.contains(leak), "{leak}: {detail}");
+        }
+        let launch = consent(
+            ComputerConsentScope::Task,
+            Some(ghostty),
+            Some("mcp__zeron__computer_launch_app"),
+            Some(r#"{"app":"Ghostty"}"#),
+            "",
+        );
+        assert_eq!(consent_detail(&launch), "Open Ghostty");
     }
 
     #[test]
@@ -565,42 +902,6 @@ mod tests {
         assert!(!is_control_denied(false, Some(output)));
         assert!(!is_control_denied(true, Some("approval_denied")));
         assert!(!is_control_denied(true, None));
-    }
-
-    #[test]
-    fn an_input_pause_names_its_window_and_clears_with_the_pause() {
-        let mut state: ThreadComputerState = serde_json::from_value(serde_json::json!({
-            "threadId": "chat-1",
-            "version": 1,
-            "computerId": "local",
-            "windows": [{ "id": "w1", "title": "Invoices", "appName": "Numbers", "focused": false, "minimized": false, "visible": true }],
-            "screenSize": { "width": 100, "height": 100 },
-            "agentActive": true,
-            "controlledByOtherThread": false,
-            "availability": { "kind": "available", "backend": "mac" },
-            "health": { "status": "connected", "consecutiveFailures": 0, "reconnects": 0, "captureAvailable": true },
-            "capabilities": {
-                "windows": true, "windowBounds": true, "stacking": false, "capture": true, "input": true,
-                "clipboard": false, "focus": true, "raise": true, "ghostCursor": true, "visibleDesktop": true
-            }
-        }))
-        .expect("thread state");
-        assert_eq!(input_pause_notice(&state), None);
-        state.input_pause = Some(zeron_proto::computer::ComputerInputPause {
-            window_id: Some("w1".into()),
-            pid: None,
-            message: "Screen locked".into(),
-        });
-        assert_eq!(
-            input_pause_notice(&state).unwrap().title,
-            "Input paused — return to Numbers"
-        );
-        assert_eq!(input_pause_notice(&state).unwrap().body, "Screen locked");
-        state.input_pause.as_mut().unwrap().window_id = Some("gone".into());
-        assert_eq!(
-            input_pause_notice(&state).unwrap().title,
-            "Input paused — return to the target window"
-        );
     }
 
     #[test]

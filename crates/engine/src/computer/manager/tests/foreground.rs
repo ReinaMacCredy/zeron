@@ -1026,6 +1026,7 @@ async fn a_pause_arriving_after_control_was_revoked_leaves_no_stale_pause_state(
                     window_id: Some("fake-calculator".into()),
                     pid: None,
                     message: "Return to the target window.".into(),
+                    user_takeover: false,
                 }),
                 ..ComputerBackendError::new("Return to the target window.")
             }

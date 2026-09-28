@@ -319,13 +319,29 @@ fn split_tab_chip(
                         cx.new(|_| TabGhost { title, brand })
                     },
                 )
-                .when(!harness.is_empty(), |el| {
-                    el.child(crate::pickers::harness_mark_stack(
-                        &harness,
+                .map(|el| {
+                    match crate::computer::strip::chat_glyph(
+                        "session-tab",
+                        &id,
                         14.0,
-                        theme.text_muted,
                         0.9,
-                    ))
+                        theme,
+                        cx,
+                    ) {
+                        Some(glyph) => el.child(glyph),
+                        None => el.when(!harness.is_empty(), |el| {
+                            let selector = format!("session-tab-harness-{id}");
+                            el.child(
+                                crate::pickers::harness_mark_stack(
+                                    &harness,
+                                    14.0,
+                                    theme.text_muted,
+                                    0.9,
+                                )
+                                .debug_selector(move || selector),
+                            )
+                        }),
+                    }
                 })
                 .child(div().flex_1().min_w_0().truncate().child(title))
                 .child(trailing),
@@ -748,7 +764,7 @@ impl Shell {
 
     /// Tabs the "Close idle tabs" menu row would close: idle sessions that
     /// are neither focused, a split member, nor a draft.
-    fn idle_tab_ids(&self, cx: &App) -> Vec<String> {
+    pub(super) fn idle_tab_ids(&self, cx: &App) -> Vec<String> {
         let state = self.state.read(cx);
         let now = Utc::now();
         let focused = state.focused_id();
@@ -1285,13 +1301,29 @@ impl Shell {
                                 cx.new(|_| TabGhost { title, brand })
                             },
                         )
-                        .when(!harness.is_empty(), |el| {
-                            el.child(crate::pickers::harness_mark_stack(
-                                &harness,
+                        .map(|el| {
+                            match crate::computer::strip::chat_glyph(
+                                "session-tab",
+                                &id,
                                 14.0,
-                                theme.text_muted,
                                 glyph_alpha,
-                            ))
+                                &theme,
+                                cx,
+                            ) {
+                                Some(glyph) => el.child(glyph),
+                                None => el.when(!harness.is_empty(), |el| {
+                                    let selector = format!("session-tab-harness-{id}");
+                                    el.child(
+                                        crate::pickers::harness_mark_stack(
+                                            &harness,
+                                            14.0,
+                                            theme.text_muted,
+                                            glyph_alpha,
+                                        )
+                                        .debug_selector(move || selector),
+                                    )
+                                }),
+                            }
                         })
                         // A draft wears the amber pen where a session wears
                         // its harness brand (d18); a session with unsent
@@ -2033,6 +2065,73 @@ mod strip_regressions {
         assert!(cx.debug_bounds("session-tab-a").is_none());
     }
 
+    #[gpui::test]
+    fn a_driving_chat_wears_the_cursor_glyph_and_gets_its_harness_mark_back_after(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::computer::preview::{self, tests::thread_state};
+        use zeron_proto::computer::{ComputerEvent, ComputerInputPause};
+
+        cx.update(preview::init);
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                let mut driven = chat("a");
+                driven.config = serde_json::from_value(serde_json::json!({
+                    "harness": "claude-code", "sandbox": "workspace-write"
+                }))
+                .ok();
+                state.chats = vec![driven, chat("b")];
+                state.chats_synced = true;
+                state.spaces_synced = true;
+                state.apply_sessions(vec![working("a"), working("b")]);
+                state.select_chat(Some("a".into()), cx);
+            });
+            shell.on_state_changed(&shell.state.clone(), cx);
+            shell.open_chat("b".into(), cx);
+            shell.on_state_changed(&shell.state.clone(), cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("session-tab-harness-a").is_some());
+        let store = cx.update(|_, cx| preview::store(cx).unwrap());
+        let mut apply = |state: zeron_proto::computer::ThreadComputerState| {
+            cx.update(|window, cx| {
+                preview::update_store(&store, cx, |store| {
+                    store.apply_event(&ComputerEvent::ThreadState {
+                        state: Box::new(state),
+                    })
+                });
+                window.draw(cx).clear();
+            });
+            (
+                cx.debug_bounds("session-tab-computer-a").is_some(),
+                cx.debug_bounds("session-tab-harness-a").is_some(),
+                cx.debug_bounds("session-tab-computer-b").is_some(),
+            )
+        };
+        assert_eq!(apply(thread_state("a", true)), (true, false, false));
+        let mut paused = thread_state("a", true);
+        paused.input_pause = Some(ComputerInputPause {
+            window_id: Some("w1".into()),
+            pid: None,
+            message: "Screen locked".into(),
+            user_takeover: false,
+        });
+        assert_eq!(
+            apply(paused),
+            (true, false, false),
+            "paused still holds the desktop"
+        );
+        let mut revoked = thread_state("a", false);
+        revoked.input_stopped = Some(true);
+        assert_eq!(
+            apply(revoked),
+            (false, true, false),
+            "revoked wears the harness mark"
+        );
+        assert_eq!(apply(thread_state("a", false)), (false, true, false));
+    }
+
     fn invest(id: &str, text: &str, cx: &mut gpui::App) {
         crate::draft_store::set(
             id,
@@ -2443,6 +2542,39 @@ mod strip_regressions {
             shell.settings.open_tabs = Some(["a", "b", "c", "d"].map(String::from).to_vec());
             shell.close_idle_tabs(cx);
             assert_eq!(shell.open_tab_ids(cx), ["a", "c"]);
+        });
+    }
+
+    #[gpui::test]
+    fn switcher_cap_holds_against_idle_strip_tabs(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            let ids = ["a", "b", "c", "d", "e", "f"];
+            shell.state.update(cx, |state, cx| {
+                state.chats = ids
+                    .map(|id| {
+                        let mut chat = chat(id);
+                        chat.space_id = None;
+                        chat.last_message_at = Some(Utc::now());
+                        chat.last_seen_at = chat.last_message_at;
+                        chat
+                    })
+                    .to_vec();
+                state.chats_synced = true;
+                state.spaces_synced = true;
+                state.apply_sessions(vec![working("c")]);
+                state.select_chat(Some("a".into()), cx);
+            });
+            shell.on_state_changed(&shell.state.clone(), cx);
+            assert_eq!(shell.sidebar_visible_order(cx).len(), 6);
+            shell.settings.open_tabs = Some(ids.map(String::from).to_vec());
+            shell.touch_session_mru("a");
+            shell.settings.switcher_limit = 2;
+            shell.switcher_step(true, cx);
+            let order = &shell.switcher.as_ref().unwrap().order;
+            assert_eq!(order[0], "a");
+            assert!(order.contains(&"c".to_string()));
+            assert!(order.len() <= 3, "{order:?}");
         });
     }
 

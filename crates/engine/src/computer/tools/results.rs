@@ -200,6 +200,19 @@ pub fn with_disclosure_on_result(mut result: McpToolResult, disclosure: &str) ->
     result
 }
 
+pub fn with_app_on_result(mut result: McpToolResult, app: &str) -> McpToolResult {
+    let Some(index) = first_text_index(&result) else {
+        return result;
+    };
+    if let Ok(Value::Object(mut map)) = serde_json::from_str::<Value>(text_at(&result, index))
+        && !map.contains_key("appName")
+    {
+        map.insert("appName".into(), Value::String(app.to_owned()));
+        replace_text(&mut result, index, Value::Object(map).to_string());
+    }
+    result
+}
+
 pub fn with_guidance_on_result(mut result: McpToolResult, guidance: Option<&str>) -> McpToolResult {
     let Some(guidance) = guidance else {
         return result;
@@ -229,8 +242,10 @@ pub fn with_guidance_on_result(mut result: McpToolResult, guidance: Option<&str>
 }
 
 pub fn computer_audit_target(
+    tool: &str,
     args: &ToolArgs,
     result_window_id: Option<String>,
+    window_app: impl Fn(&str) -> Option<String>,
 ) -> Option<ComputerAuditTarget> {
     let window_id = args
         .get("window_id")
@@ -245,11 +260,21 @@ pub fn computer_audit_target(
         .and_then(Value::as_f64)
         .filter(|pid| pid.fract() == 0.0 && *pid > 0.0 && *pid <= f64::from(u32::MAX))
         .map(|pid| pid as u32);
-    let app = args
-        .get("app")
-        .and_then(Value::as_str)
-        .filter(|app| !app.trim().is_empty())
-        .map(str::to_owned);
+    let named = || {
+        ["app", "app_name", "appName"]
+            .into_iter()
+            .find_map(|key| {
+                args.get(key)
+                    .and_then(Value::as_str)
+                    .filter(|app| !app.trim().is_empty())
+            })
+            .map(str::to_owned)
+    };
+    let app = if matches!(tool, "computer_launch_app" | "computer_invoke_menu") {
+        named()
+    } else {
+        window_id.as_deref().and_then(window_app).or_else(named)
+    };
     if window_id.is_none() && pid.is_none() && app.is_none() {
         return None;
     }
@@ -594,6 +619,78 @@ mod tests {
             tool_result_payload(&guided).unwrap()["toolGuidance"],
             json!("first second")
         );
+    }
+
+    #[test]
+    fn the_audit_target_names_the_app_from_app_or_app_name() {
+        let target = |args: Value| {
+            computer_audit_target("computer_click", args.as_object().unwrap(), None, |_| None)
+                .and_then(|target| target.app)
+        };
+        assert_eq!(
+            target(json!({ "app": "Finder" })).as_deref(),
+            Some("Finder")
+        );
+        assert_eq!(
+            target(json!({ "window_id": "cua:1:2", "app_name": "Ghostty" })).as_deref(),
+            Some("Ghostty")
+        );
+        assert_eq!(
+            target(json!({ "appName": "Calculator" })).as_deref(),
+            Some("Calculator")
+        );
+        assert_eq!(target(json!({ "window_id": "w1", "app_name": " " })), None);
+    }
+
+    #[test]
+    fn the_audit_target_prefers_the_resolved_window_app_over_model_written_names() {
+        let resolve = |window_id: &str| (window_id == "cua:1:2").then(|| "1Password".to_owned());
+        let target = |tool: &str, args: Value, result: Option<&str>| {
+            computer_audit_target(
+                tool,
+                args.as_object().unwrap(),
+                result.map(str::to_owned),
+                resolve,
+            )
+            .and_then(|target| target.app)
+        };
+        let typed = json!({ "window_id": "cua:1:2", "app_name": "Notes", "text": "x" });
+        assert_eq!(
+            target("computer_type_text", typed, None).as_deref(),
+            Some("1Password")
+        );
+        assert_eq!(
+            target(
+                "computer_click",
+                json!({ "app_name": "Notes" }),
+                Some("cua:1:2")
+            )
+            .as_deref(),
+            Some("1Password"),
+            "the result's window resolves too"
+        );
+        assert_eq!(
+            target(
+                "computer_click",
+                json!({ "window_id": "gone", "app_name": "Notes" }),
+                None
+            )
+            .as_deref(),
+            Some("Notes"),
+            "args only when nothing resolves"
+        );
+        for tool in ["computer_launch_app", "computer_invoke_menu"] {
+            assert_eq!(
+                target(
+                    tool,
+                    json!({ "window_id": "cua:1:2", "app": "Finder" }),
+                    None
+                )
+                .as_deref(),
+                Some("Finder"),
+                "{tool} names its app as a real parameter"
+            );
+        }
     }
 
     #[test]

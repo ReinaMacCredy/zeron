@@ -547,7 +547,7 @@ impl ComputerBrowserTools {
     ) -> Result<(), ComputerError> {
         if context
             .seams
-            .foreground_authorization()
+            .foreground_authorization(None)
             .await
             .user_requested_visible_use
         {

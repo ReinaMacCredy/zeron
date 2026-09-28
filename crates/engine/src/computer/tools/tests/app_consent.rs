@@ -76,7 +76,7 @@ async fn approving_one_app_raises_a_new_card_naming_the_next_app_in_the_same_tur
     assert!(
         question
             .question
-            .starts_with("Allow Computer to use Calculator (org.kde.kcalc)?"),
+            .starts_with("Allow Computer to use Calculator?"),
         "{}",
         question.question
     );
@@ -137,7 +137,10 @@ async fn an_unverified_app_says_so_and_cannot_be_always_allowed() {
     assert!(!app.verified());
     let question = consent_question(&card);
     assert!(
-        question.question.contains("unverified") && question.question.contains("could not verify"),
+        question
+            .question
+            .contains("could not confirm which app this is")
+            && !question.question.contains("1001"),
         "{}",
         question.question
     );

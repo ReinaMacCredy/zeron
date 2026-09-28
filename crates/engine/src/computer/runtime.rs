@@ -19,7 +19,7 @@ use super::approval_gate::ComputerApprovalGate;
 use super::control_state::ComputerControlState;
 use super::engine_seams::EngineComputerSeams;
 use super::host_wire::{HostRegistration, HostSlot};
-use super::manager::{ComputerManagerSeams, ComputerManagerSubscription};
+use super::manager::{ComputerManagerSeams, ComputerManagerSubscription, left_open_note};
 use super::service::{ComputerService, ComputerServiceOptions};
 use super::tool_calls::ComputerCalls;
 use crate::sessions::SessionsEngine;
@@ -29,6 +29,22 @@ const EVENT_BUFFER: usize = 256;
 const SHUTDOWN_BUDGET: Duration = Duration::from_secs(5);
 
 pub const COMPUTER_ESCAPE_STOP_NOTICE: &str = "Computer use stopped: Escape was pressed";
+pub const COMPUTER_DESKTOP_REVOKED_NOTE: &str = "Desktop access revoked by you";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevokeSource {
+    Escape,
+    Stop,
+}
+
+impl RevokeSource {
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::Escape => "Esc",
+            Self::Stop => "Stop",
+        }
+    }
+}
 
 pub struct ComputerRuntime {
     data_dir: PathBuf,
@@ -82,6 +98,20 @@ impl ComputerRuntime {
                     tracing::warn!(%error, "computer always-allowed app not saved");
                 }
             }));
+        let weak = Arc::downgrade(&runtime);
+        runtime
+            .engine_seams
+            .on_pending(Arc::new(move |chat_id, turn_id, input_id, request| {
+                let Some(service) = weak.upgrade().and_then(|runtime| runtime.service()) else {
+                    return;
+                };
+                match request {
+                    Some(request) => service
+                        .manager
+                        .push_pending_request(chat_id, turn_id, request),
+                    None => service.manager.clear_pending_request(chat_id, input_id),
+                }
+            }));
         tokio::spawn(runtime.clone().rebuild(None));
         runtime
     }
@@ -122,6 +152,9 @@ impl ComputerRuntime {
     }
 
     async fn apply_chat_change(&self, change: ChatChange) {
+        if let ChatChange::Removed(chat_id) = &change {
+            self.calls.forget_chat(chat_id);
+        }
         let Some(service) = self.service() else {
             return;
         };
@@ -217,11 +250,63 @@ impl ComputerRuntime {
         let Some(service) = self.service() else {
             return Vec::new();
         };
-        let (stopped, result) = service.manager.emergency_stop().await;
+        let sessions = self.engine_seams.sessions();
+        let latched: Vec<String> = service
+            .manager
+            .desktop_holders()
+            .into_iter()
+            .filter(|chat_id| {
+                sessions
+                    .as_ref()
+                    .is_some_and(|sessions| sessions.revoke_computer_turn(chat_id).is_some())
+            })
+            .collect();
+        let (mut stopped, result) = service.manager.emergency_stop().await;
         if let Err(error) = result {
             tracing::warn!(%error, "computer emergency stop relay failed");
         }
+        if let Some(sessions) = &sessions {
+            for chat_id in &latched {
+                self.finish_revoke(sessions, chat_id, RevokeSource::Escape)
+                    .await;
+            }
+        }
+        for chat_id in stopped.iter().filter(|chat_id| !latched.contains(chat_id)) {
+            self.revoke_desktop(chat_id, RevokeSource::Escape).await;
+        }
+        stopped.extend(latched);
+        stopped.sort();
+        stopped.dedup();
         stopped
+    }
+
+    pub async fn revoke_desktop(&self, chat_id: &str, source: RevokeSource) -> bool {
+        let Some(sessions) = self.engine_seams.sessions() else {
+            return false;
+        };
+        if sessions.revoke_computer_turn(chat_id).is_none() {
+            return false;
+        }
+        self.finish_revoke(&sessions, chat_id, source).await;
+        true
+    }
+
+    async fn finish_revoke(&self, sessions: &SessionsEngine, chat_id: &str, source: RevokeSource) {
+        match self.service() {
+            Some(service) => {
+                for pending in service.manager.drain_pending_requests(chat_id, None) {
+                    sessions.settle_input(chat_id, &pending.input_id);
+                }
+                if let Err(error) = service.manager.revoke_desktop(chat_id).await {
+                    tracing::warn!(chat = %chat_id, %error, "computer desktop revoke failed");
+                }
+            }
+            None => tracing::warn!(
+                chat = %chat_id,
+                "computer desktop revoke latched the turn with no computer service to drain"
+            ),
+        }
+        sessions.write_computer_note(chat_id, COMPUTER_DESKTOP_REVOKED_NOTE, Some(source.hint()));
     }
 
     pub fn turn_ended(&self, chat_id: &str, turn_id: &str) {
@@ -230,6 +315,16 @@ impl ComputerRuntime {
         let Some(service) = self.service() else {
             return;
         };
+        service.manager.clear_desktop_revoked(chat_id);
+        let sessions = self.engine_seams.sessions();
+        for pending in service
+            .manager
+            .drain_pending_requests(chat_id, Some(turn_id))
+        {
+            if let Some(sessions) = &sessions {
+                sessions.settle_input(chat_id, &pending.input_id);
+            }
+        }
         let (chat_id, turn_id) = (chat_id.to_owned(), turn_id.to_owned());
         tokio::spawn(async move {
             if let Err(error) = service
@@ -238,6 +333,12 @@ impl ComputerRuntime {
                 .await
             {
                 tracing::warn!(chat = %chat_id, %error, "computer turn-end release failed");
+            }
+            let left = service.manager.left_open_windows(&chat_id, &turn_id).await;
+            if let Some(sessions) = &sessions {
+                for left in &left {
+                    sessions.write_computer_note(&chat_id, &left_open_note(left), None);
+                }
             }
         });
     }

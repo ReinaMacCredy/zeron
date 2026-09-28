@@ -24,6 +24,34 @@ fn capture(
     })?
 }
 
+fn input_pause(cx: &mut gpui::App, paused: bool) {
+    let Some(store) = computer::preview::store(cx) else {
+        return;
+    };
+    let mut state = json!({
+        "threadId": "computer-fixture",
+        "version": 1,
+        "computerId": "local",
+        "windows": [{ "id": "w1", "title": "Calculator", "appName": "Calculator", "focused": true, "minimized": false, "visible": true }],
+        "screenSize": { "width": 1440, "height": 900 },
+        "agentActive": paused,
+        "controlledByOtherThread": false,
+        "availability": { "kind": "available", "backend": "mac" },
+        "health": { "status": "connected", "consecutiveFailures": 0, "reconnects": 0, "captureAvailable": true },
+        "capabilities": {
+            "windows": true, "windowBounds": true, "stacking": false, "capture": true, "input": true,
+            "clipboard": false, "focus": true, "raise": true, "ghostCursor": true, "visibleDesktop": true
+        }
+    });
+    if paused {
+        state["inputPause"] = json!({ "windowId": "w1", "message": "The screen is locked." });
+    }
+    let event = zeron_proto::computer::ComputerEvent::ThreadState {
+        state: Box::new(serde_json::from_value(state).unwrap()),
+    };
+    computer::preview::update_store(&store, cx, |s| s.apply_event(&event));
+}
+
 fn port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -302,6 +330,7 @@ fn main() -> anyhow::Result<()> {
             composer::init(cx, settings.composer_send_behavior);
             terminal::panel::init(cx);
             app_menus::init(cx);
+            computer::preview::init(cx);
             let state = cx.new(|_| {
                 let mut s = state::AppState::new();
                 s.fixture_attachment_engine(handle);
@@ -363,23 +392,14 @@ fn main() -> anyhow::Result<()> {
                     capture(window.into(), cx, &output, "clipboard-call-card")?;
                     state.update(cx, |s, cx| {
                         s.receive_transcript_frame(reset(refusals), cx).unwrap();
-                        s.computer_input_pauses.insert(
-                            "computer-fixture".into(),
-                            computer::cards::InputPauseNotice {
-                                title: "Input paused — return to Calculator".into(),
-                                body: "Bring the window onto this desktop, or exit the full-screen app. Continue from the current page once input is available.".into(),
-                            },
-                        );
                         cx.notify();
                     });
+                    cx.update(|cx| input_pause(cx, true));
                     pause(cx, 900).await;
                     window.update(cx, |s, _, cx| s.fixture_appshots_transcript_start(cx))?;
                     pause(cx, 400).await;
                     capture(window.into(), cx, &output, "denied-setup-unavailable-escape-pause")?;
-                    state.update(cx, |s, cx| {
-                        s.computer_input_pauses.clear();
-                        cx.notify();
-                    });
+                    cx.update(|cx| input_pause(cx, false));
                     let composer = window.update(cx, |s, _, _| s.fixture_appshots_composer())?;
                     composer.update(cx, |c, cx| c.fixture_type("/comp", cx));
                     pause(cx, 6000).await;

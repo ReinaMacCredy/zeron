@@ -82,6 +82,9 @@ use crate::workspace_host::WorkspaceHost;
 
 const FILE_SEARCH_RPC_TIMEOUT: Duration = Duration::from_secs(6);
 const FILE_SEARCH_FEATURED_PATHS: usize = 32;
+/// Under the 30-minute MCP call ceiling the harnesses are configured with, so
+/// the card settles here instead of outliving a call the harness abandoned.
+const ASK_USER_WAIT: Duration = Duration::from_secs(25 * 60);
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -145,6 +148,14 @@ struct SendThreadMessageParams {
     chat_id: String,
     from_chat_id: String,
     text: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AskUserParams {
+    chat_id: String,
+    run_secret: String,
+    questions: Vec<zeron_proto::UserInputQuestion>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2162,6 +2173,18 @@ impl RpcService for EngineRpc {
                     .collect();
                 RpcReply::value(&serde_json::json!({ "messages": messages }))
             }
+            methods::ASK_USER => {
+                let mut p: AskUserParams = parse_params(params)?;
+                for question in &mut p.questions {
+                    question.kind = None;
+                }
+                let answers = self
+                    .sessions
+                    .ask_user(&p.chat_id, &p.run_secret, p.questions, ASK_USER_WAIT)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({ "answers": answers }))
+            }
             methods::QUEUE_COMMAND => {
                 let p: QueueCommandParams = parse_params(params)?;
                 let command_id = self
@@ -3821,12 +3844,15 @@ impl RpcService for EngineRpc {
             }
             methods::COMPUTER_EMERGENCY_STOP => {
                 let stopped = self.computer()?.emergency_stop().await;
-                for chat_id in &stopped {
-                    if let Err(err) = self.doc_host.stop_for_escape(chat_id).await {
-                        tracing::warn!(chat = %chat_id, error = %err, "escape stop failed");
-                    }
-                }
                 RpcReply::value(&serde_json::json!({ "stoppedChatIds": stopped }))
+            }
+            methods::COMPUTER_REVOKE_DESKTOP => {
+                let p: zeron_proto::computer::ComputerRevokeDesktopParams = parse_params(params)?;
+                let revoked = self
+                    .computer()?
+                    .revoke_desktop(&p.chat_id, crate::computer::runtime::RevokeSource::Stop)
+                    .await;
+                RpcReply::value(&serde_json::json!({ "revoked": revoked }))
             }
             methods::WATCH_COMPUTER_EVENTS => {
                 let events = self.computer()?.subscribe_events();

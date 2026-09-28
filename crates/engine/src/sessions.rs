@@ -166,18 +166,28 @@ pub struct ComputerRun {
     pub permission_mode: PermissionMode,
     pub run_computer_control: bool,
     pub turn_computer_control: bool,
+    pub turn_desktop_revoked: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ComputerTurnForeground {
+    pub declined: bool,
+    pub apps: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 struct TurnMark {
     id: String,
     computer_control: bool,
+    desktop_revoked: bool,
+    foreground: ComputerTurnForeground,
 }
 
 struct RunComputer {
     secret: String,
     revoked: AtomicBool,
     turn: Mutex<Option<TurnMark>>,
+    ended: Mutex<Option<TurnMark>>,
 }
 
 impl RunComputer {
@@ -190,6 +200,7 @@ impl RunComputer {
             ),
             revoked: AtomicBool::new(false),
             turn: Mutex::new(None),
+            ended: Mutex::new(None),
         })
     }
 
@@ -198,14 +209,50 @@ impl RunComputer {
     }
 
     fn begin_turn(&self, id: &str, computer_control: bool) {
-        *lock(&self.turn) = Some(TurnMark {
+        let mut turn = lock(&self.turn);
+        let resumed = turn
+            .take()
+            .or_else(|| lock(&self.ended).take())
+            .filter(|previous| previous.id == id);
+        *turn = Some(TurnMark {
             id: id.to_owned(),
             computer_control,
+            desktop_revoked: resumed.as_ref().is_some_and(|mark| mark.desktop_revoked),
+            foreground: resumed.map(|mark| mark.foreground).unwrap_or_default(),
         });
     }
 
+    fn revoke_turn(&self) -> Option<String> {
+        let mut turn = lock(&self.turn);
+        let turn = turn.as_mut().filter(|turn| !turn.desktop_revoked)?;
+        turn.desktop_revoked = true;
+        Some(turn.id.clone())
+    }
+
+    fn answer_foreground(&self, turn_id: Option<&str>, app: Option<&str>, granted: bool) -> bool {
+        let mut turn = lock(&self.turn);
+        let Some(turn) = turn
+            .as_mut()
+            .filter(|turn| turn_id.is_none_or(|id| id == turn.id))
+        else {
+            return false;
+        };
+        let foreground = &mut turn.foreground;
+        match app {
+            _ if !granted => foreground.declined = true,
+            Some(app) if !foreground.apps.iter().any(|granted| granted == app) => {
+                foreground.apps.push(app.to_owned());
+            }
+            _ => {}
+        }
+        true
+    }
+
     fn end_turn(&self) -> Option<String> {
-        lock(&self.turn).take().map(|turn| turn.id)
+        let ended = lock(&self.turn).take();
+        let id = ended.as_ref().map(|turn| turn.id.clone());
+        *lock(&self.ended) = ended;
+        id
     }
 
     fn turn(&self) -> Option<TurnMark> {
@@ -1687,6 +1734,26 @@ impl SessionsEngine {
         Ok(rx)
     }
 
+    pub async fn ask_user(
+        &self,
+        chat_id: &str,
+        run_secret: &str,
+        questions: Vec<UserInputQuestion>,
+        wait: std::time::Duration,
+    ) -> Result<Vec<UserInputAnswer>, String> {
+        self.computer_run(chat_id, run_secret)
+            .ok_or_else(|| "This chat has no live run to ask in.".to_owned())?;
+        let request_id = new_id();
+        let answers = self.raise_input(chat_id, &request_id, questions)?;
+        match tokio::time::timeout(wait, answers).await {
+            Ok(answers) => Ok(answers.unwrap_or_default()),
+            Err(_) => {
+                self.settle_input(chat_id, &request_id);
+                Ok(Vec::new())
+            }
+        }
+    }
+
     pub fn settle_input(&self, chat_id: &str, request_id: &str) -> bool {
         let runs = lock(&self.inner.runs);
         let Some(run) = runs.get(chat_id) else {
@@ -1711,8 +1778,40 @@ impl SessionsEngine {
             turn_id: turn.as_ref().map(|turn| turn.id.clone()),
             permission_mode: run.runtime_config.permission_mode,
             run_computer_control: run.runtime_config.computer_control,
-            turn_computer_control: turn.is_some_and(|turn| turn.computer_control),
+            turn_computer_control: turn.as_ref().is_some_and(|turn| turn.computer_control),
+            turn_desktop_revoked: turn.is_some_and(|turn| turn.desktop_revoked),
         })
+    }
+
+    pub fn revoke_computer_turn(&self, chat_id: &str) -> Option<String> {
+        lock(&self.inner.runs)
+            .get(chat_id)
+            .and_then(|run| run.computer.revoke_turn())
+    }
+
+    pub fn computer_turn_foreground(
+        &self,
+        chat_id: &str,
+        turn_id: Option<&str>,
+    ) -> ComputerTurnForeground {
+        lock(&self.inner.runs)
+            .get(chat_id)
+            .and_then(|run| run.computer.turn())
+            .filter(|turn| turn_id.is_none_or(|id| id == turn.id))
+            .map(|turn| turn.foreground)
+            .unwrap_or_default()
+    }
+
+    pub fn answer_computer_foreground(
+        &self,
+        chat_id: &str,
+        turn_id: Option<&str>,
+        app: Option<&str>,
+        granted: bool,
+    ) -> bool {
+        lock(&self.inner.runs)
+            .get(chat_id)
+            .is_some_and(|run| run.computer.answer_foreground(turn_id, app, granted))
     }
 
     pub fn computer_turn_live(&self, chat_id: &str) -> bool {
@@ -4409,7 +4508,7 @@ async fn drive_run(
             AgentEvent::InputRequested { questions, .. } => {
                 // Known-id guaranteed: the unknown-id twin was dropped above,
                 // before the parked gate.
-                if !questions.iter().any(UserInputQuestion::is_consent) {
+                if !questions.iter().any(UserInputQuestion::is_computer) {
                     inner.set_status(&chat_id, SessionStatus::AwaitingInput, false);
                 }
             }
@@ -4426,12 +4525,12 @@ async fn drive_run(
                 };
                 let resolved_consent = folded.iter().any(|part| {
                     matches!(part, MessagePart::Input { request_id: rid, questions, .. }
-                        if rid == request_id && questions.iter().any(UserInputQuestion::is_consent))
+                        if rid == request_id && questions.iter().any(UserInputQuestion::is_computer))
                 });
                 let question_open = resolved_consent && folded.iter().any(|part| {
                     matches!(part, MessagePart::Input { request_id: rid, questions, resolved: false, .. }
                         if rid != request_id
-                            && !questions.iter().any(UserInputQuestion::is_consent)
+                            && !questions.iter().any(UserInputQuestion::is_computer)
                             && awaited(rid))
                 });
                 let status = if question_open {
@@ -4676,6 +4775,35 @@ fn dispatched_generation(doc: &SessionDoc, message_id: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_self_continued_turn_keeps_its_revoke_and_foreground_but_a_new_turn_resets_them() {
+        let computer = super::RunComputer::new();
+        computer.begin_turn("t1", true);
+        assert!(computer.answer_foreground(Some("t1"), Some("bundle:a"), true));
+        assert!(computer.answer_foreground(Some("t1"), Some("bundle:b"), false));
+        assert_eq!(computer.revoke_turn().as_deref(), Some("t1"));
+        assert_eq!(computer.end_turn().as_deref(), Some("t1"));
+        computer.begin_turn("t1", true);
+        let resumed = computer.turn().unwrap();
+        assert!(resumed.desktop_revoked, "a parked resume stays revoked");
+        assert_eq!(
+            resumed.foreground,
+            super::ComputerTurnForeground {
+                declined: true,
+                apps: vec!["bundle:a".into()],
+            }
+        );
+        computer.begin_turn("t1", true);
+        assert!(computer.turn().unwrap().desktop_revoked);
+        computer.begin_turn("t2", true);
+        let next = computer.turn().unwrap();
+        assert!(!next.desktop_revoked);
+        assert_eq!(next.foreground, super::ComputerTurnForeground::default());
+        computer.end_turn();
+        computer.begin_turn("t1", true);
+        assert!(!computer.turn().unwrap().desktop_revoked);
+    }
+
     #[test]
     fn cursor_recovery_converts_rich_messages_before_json_encoding() {
         let doc = zeron_doc::SessionDoc::init("cursor-rich-recovery").unwrap();

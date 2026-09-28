@@ -7,7 +7,9 @@ use zeron_proto::computer::{ComputerHealthFailure, ComputerHealthStatus, Compute
 use super::*;
 use crate::computer::approval_gate::ApprovalRequest;
 use crate::computer::backend::ComputerBackendError;
-use crate::computer::manager::{ComputerScrollOptions, ComputerStateRequest};
+use crate::computer::manager::{
+    COMPUTER_USER_PAUSE_NOTE_PREFIX, ComputerScrollOptions, ComputerStateRequest,
+};
 use crate::computer::task_context::with_computer_task;
 
 fn state_of(window_id: &str) -> ComputerStateRequest {
@@ -64,6 +66,7 @@ fn calculator_pause(message: &str) -> ComputerInputPause {
         window_id: Some("fake-calculator".into()),
         pid: None,
         message: message.to_owned(),
+        user_takeover: false,
     }
 }
 
@@ -394,6 +397,109 @@ async fn holds_refused_input_until_a_scoped_observation_establishes_readiness() 
 }
 
 #[tokio::test]
+async fn a_user_takeover_pause_writes_one_paused_note_per_episode() {
+    let backend = Scripted::default_fake();
+    let ready = Arc::new(AtomicBool::new(false));
+    let takeover = ComputerInputPause {
+        user_takeover: true,
+        ..calculator_pause("The user used this window and has stopped.")
+    };
+    backend.hooks().type_text = Some(Arc::new({
+        let ready = ready.clone();
+        move |fake, (text, window, target)| {
+            let refused = (!ready.load(Ordering::SeqCst)).then(|| paused(&takeover));
+            async move {
+                if let Some(error) = refused {
+                    return Err(error);
+                }
+                fake.type_text(&text, window.as_deref(), target.as_ref())
+                    .await
+            }
+            .boxed()
+        }
+    }));
+    backend.hooks().check_input_ready = Some(Arc::new({
+        let ready = ready.clone();
+        move |_, _| {
+            let ready = ready.load(Ordering::SeqCst);
+            async move {
+                if ready {
+                    Ok(())
+                } else {
+                    Err(ComputerBackendError::new("still unavailable").into())
+                }
+            }
+            .boxed()
+        }
+    }));
+    let Built { manager, seams, .. } = manager(backend);
+    manager.list_windows().await.unwrap();
+    assert_eq!(
+        manager.window_app_name("fake-calculator").as_deref(),
+        Some("org.kde.kcalc")
+    );
+    let note = (
+        "thread-a".to_owned(),
+        format!("{COMPUTER_USER_PAUSE_NOTE_PREFIX}Kcalc"),
+    );
+
+    for _ in 0..2 {
+        let error = manager
+            .type_text(Some("thread-a"), "hunter2", None)
+            .await
+            .unwrap_err();
+        assert!(error.input_pause().is_some_and(|pause| pause.user_takeover));
+    }
+    assert_eq!(*seams.notes.lock().unwrap(), vec![note.clone()]);
+
+    ready.store(true, Ordering::SeqCst);
+    manager
+        .get_state(state_of("fake-calculator"))
+        .await
+        .unwrap();
+    manager
+        .type_text(Some("thread-a"), "hunter2", None)
+        .await
+        .unwrap();
+    ready.store(false, Ordering::SeqCst);
+    manager
+        .type_text(Some("thread-a"), "hunter2", None)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        *seams.notes.lock().unwrap(),
+        vec![note.clone(), note],
+        "a second takeover after the resume is a new episode"
+    );
+    assert!(
+        seams
+            .notes
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(_, text)| !text.contains("hunter2") && !text.contains("computer_")),
+    );
+    manager.dispose().await;
+}
+
+#[tokio::test]
+async fn an_unreachable_window_pause_writes_no_note() {
+    let backend = Scripted::default_fake();
+    let pause = calculator_pause("Return this window to the current Space.");
+    backend.hooks().type_text = Some(Arc::new(move |_, _| {
+        let error = paused(&pause);
+        async move { Err(error) }.boxed()
+    }));
+    let Built { manager, seams, .. } = manager(backend);
+    manager
+        .type_text(Some("thread-a"), "hello", None)
+        .await
+        .unwrap_err();
+    assert!(seams.notes.lock().unwrap().is_empty());
+    manager.dispose().await;
+}
+
+#[tokio::test]
 async fn clears_an_app_pause_only_for_the_observing_task_and_a_ready_same_pid_sibling() {
     let mut windows: Vec<ComputerWindow> = covered_calculator_windows()
         .into_iter()
@@ -418,6 +524,7 @@ async fn clears_an_app_pause_only_for_the_observing_task_and_a_ready_same_pid_si
         window_id: Some("fake-calculator".into()),
         pid: Some(10),
         message: "Observe the app again".into(),
+        user_takeover: false,
     };
     backend.hooks().type_text = Some(Arc::new({
         let attempts = attempts.clone();

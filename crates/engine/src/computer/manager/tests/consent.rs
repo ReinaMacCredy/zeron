@@ -46,10 +46,6 @@ fn dismissal(seams: &Seams, request_id: &str) -> Option<ApprovalDecision> {
         .and_then(|(_, decision)| *decision)
 }
 
-fn disclosures(seams: &Seams) -> Vec<(String, Option<String>)> {
-    seams.disclosures.lock().unwrap().clone()
-}
-
 fn authorize(
     manager: &Arc<ComputerManager>,
     tool: &str,
@@ -199,82 +195,6 @@ async fn auto_and_full_raise_no_card_and_return_true() {
 }
 
 #[tokio::test]
-async fn the_control_disclosure_posts_once_per_chat_and_turn_after_an_ask_approval() {
-    let Built { manager, seams, .. } = with_mode(Some(PermissionMode::Ask));
-    let first = authorize(&manager, "computer_click", Some("turn-1"));
-    assert!(disclosures(&seams).is_empty());
-    assert!(
-        answer(&manager, &seams, first, ApprovalDecision::Accept)
-            .await
-            .unwrap()
-    );
-    assert_eq!(
-        disclosures(&seams),
-        [(CHAT.to_owned(), Some("turn-1".to_owned()))]
-    );
-    authorize(&manager, "computer_click", Some("turn-1"))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(disclosures(&seams).len(), 1);
-    let next = authorize(&manager, "computer_click", Some("turn-2"));
-    assert!(
-        answer(&manager, &seams, next, ApprovalDecision::Accept)
-            .await
-            .unwrap()
-    );
-    assert_eq!(
-        disclosures(&seams),
-        [
-            (CHAT.to_owned(), Some("turn-1".to_owned())),
-            (CHAT.to_owned(), Some("turn-2".to_owned())),
-        ]
-    );
-    manager.dispose().await;
-}
-
-#[tokio::test]
-async fn the_control_disclosure_posts_once_per_chat_and_turn_on_auto_and_full_accept() {
-    for mode in [PermissionMode::Auto, PermissionMode::Full] {
-        let Built { manager, seams, .. } = with_mode(Some(mode));
-        for turn in ["turn-1", "turn-1", "turn-2", "turn-2"] {
-            authorize(&manager, "computer_click", Some(turn))
-                .await
-                .unwrap()
-                .unwrap();
-        }
-        assert_eq!(
-            disclosures(&seams),
-            [
-                (CHAT.to_owned(), Some("turn-1".to_owned())),
-                (CHAT.to_owned(), Some("turn-2".to_owned())),
-            ],
-            "{mode:?}"
-        );
-        manager.dispose().await;
-    }
-}
-
-#[tokio::test]
-async fn the_control_disclosure_never_posts_after_a_decline() {
-    let Built { manager, seams, .. } = with_mode(Some(PermissionMode::Ask));
-    let task = authorize(&manager, "computer_click", Some("turn-1"));
-    assert!(
-        !answer(&manager, &seams, task, ApprovalDecision::Decline)
-            .await
-            .unwrap()
-    );
-    let read = authorize(&manager, "computer_read_clipboard", Some("turn-2"));
-    assert!(
-        !answer(&manager, &seams, read, ApprovalDecision::Decline)
-            .await
-            .unwrap()
-    );
-    assert!(disclosures(&seams).is_empty());
-    manager.dispose().await;
-}
-
-#[tokio::test]
 async fn params_display_omits_text_value_and_prompt_text() {
     let Built { manager, seams, .. } = with_mode(Some(PermissionMode::Ask));
     let pending = tokio::spawn({
@@ -289,6 +209,7 @@ async fn params_display_omits_text_value_and_prompt_text() {
                         "prompt_text": "secret prompt",
                         "window_id": "fake-calculator",
                         "x": 1,
+                        "steps": [{ "type": "type_text", "text": "nested secret" }],
                     })),
                     &caller(Some("turn-1")),
                     CancellationToken::new(),
@@ -299,8 +220,11 @@ async fn params_display_omits_text_value_and_prompt_text() {
     settle().await;
     let card = opened(&seams).pop().unwrap();
     let display: Value = serde_json::from_str(&card.params_display).unwrap();
-    assert_eq!(display, json!({ "window_id": "fake-calculator", "x": 1 }));
-    for secret in ["hunter2", "secret value", "secret prompt"] {
+    assert_eq!(
+        display,
+        json!({ "window_id": "fake-calculator", "x": 1, "steps": [{ "type": "type_text" }] })
+    );
+    for secret in ["hunter2", "secret value", "secret prompt", "nested secret"] {
         assert!(!card.params_display.contains(secret), "{secret}");
     }
     assert!(
@@ -345,7 +269,6 @@ async fn a_chat_that_is_gone_is_declined_without_a_card() {
     }
     settle().await;
     assert!(seams.consent.lock().unwrap().is_empty());
-    assert!(disclosures(&seams).is_empty());
     manager.dispose().await;
 }
 
@@ -375,7 +298,6 @@ async fn stop_thread_and_thread_removal_settle_an_open_card_as_declined() {
                     .respond(CHAT, &card.request_id, ApprovalDecision::Accept),
                 "{route} {tool}"
             );
-            assert!(disclosures(&seams).is_empty(), "{route} {tool}");
             manager.dispose().await;
         }
     }
@@ -412,6 +334,5 @@ async fn a_desktop_interrupted_event_revokes_the_task_grant_so_the_next_gated_ca
             .await
             .unwrap()
     );
-    assert_eq!(disclosures(&seams).len(), 1);
     manager.dispose().await;
 }

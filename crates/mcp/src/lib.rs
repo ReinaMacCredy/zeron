@@ -33,6 +33,7 @@ const DEFAULT_TAIL: usize = 30;
 const MAX_TAIL: usize = 200;
 const DEFAULT_WAIT_SECS: u64 = 600;
 const MAX_WAIT_SECS: u64 = 1800;
+const MAX_QUESTIONS: usize = 4;
 /// Outgoing messages (sends and creates) one server process — one turn —
 /// may issue. A ping-pong between two agents ends in a tool error instead of
 /// a silent token burn.
@@ -206,6 +207,34 @@ pub fn tool_list() -> Value {
             }
         },
         {
+            "name": "ask_user",
+            "description": "Ask the person watching this chat one to four questions and wait for their answers. Set `multiSelect` on a question when more than one option may apply: the person ticks any number of them and submits. Options are short labels; the person may type a free-text answer instead, and a question with no options is open-ended. Returns each question's chosen labels, or `answered: false` when nobody answered before the turn ended or 25 minutes passed. Prefer it over a built-in question tool that cannot offer multi-select.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "questions": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": MAX_QUESTIONS,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string", "description": "Stable id for mapping answers; defaults to q1, q2, ..." },
+                                "header": { "type": "string", "description": "Short label shown above the question (12 or fewer chars)." },
+                                "question": { "type": "string" },
+                                "options": { "type": "array", "items": { "type": "string" } },
+                                "multiSelect": { "type": "boolean", "description": "Let the person pick several options instead of one." }
+                            },
+                            "required": ["question"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["questions"],
+                "additionalProperties": false
+            }
+        },
+        {
             "name": "list_projects",
             "description": "List the projects on this device: id, name, folder path, and whether it is a git repository. Pass one as create_thread's `project`.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
@@ -324,6 +353,7 @@ impl ThreadTools {
             "set_thread_archived" => self.set_thread_archived(args).await,
             "interrupt_thread" => self.interrupt_thread(args).await,
             "respond_to_input" => self.respond_to_input(args).await,
+            "ask_user" => self.ask_user(args).await,
             "list_projects" => self.list_projects().await,
             "list_harnesses" => self.list_harnesses().await,
             "list_models" => self.list_models(args).await,
@@ -762,9 +792,10 @@ impl ThreadTools {
             None => format!("thread {thread_id} has no pending question"),
         })?;
         let questions = pending["questions"].as_array().cloned().unwrap_or_default();
-        if questions.iter().any(|q| q["kind"]["type"] == "consent") {
+        if questions.iter().any(|q| !q["kind"].is_null()) {
             return Err(
-                "that is a computer-use consent request; only the person can answer it".into(),
+                "that is a computer-use consent or foreground request; only the person can answer it"
+                    .into(),
             );
         }
         if let Some(answer) = answers
@@ -794,6 +825,77 @@ impl ThreadTools {
             "requestId": request_id,
             "commandId": queued["commandId"],
         }))
+    }
+
+    pub async fn ask_user(&self, args: &Value) -> Result<Value, String> {
+        let secret = self
+            .run_secret
+            .as_deref()
+            .ok_or("ask_user needs a live Zeron run")?;
+        let raw = args["questions"]
+            .as_array()
+            .filter(|questions| (1..=MAX_QUESTIONS).contains(&questions.len()))
+            .ok_or_else(|| format!("questions must be a list of 1 to {MAX_QUESTIONS} questions"))?;
+        let mut questions = Vec::with_capacity(raw.len());
+        for (ix, q) in raw.iter().enumerate() {
+            let text = q["question"]
+                .as_str()
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .ok_or_else(|| format!("question {} has no `question` text", ix + 1))?;
+            let options = match &q["options"] {
+                Value::Null => Vec::new(),
+                Value::Array(options) => options
+                    .iter()
+                    .map(|option| {
+                        option
+                            .as_str()
+                            .map(str::trim)
+                            .filter(|label| !label.is_empty())
+                            .map(str::to_owned)
+                    })
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or_else(|| format!("question {} has an empty option label", ix + 1))?,
+                _ => return Err(format!("question {} options must be a list", ix + 1)),
+            };
+            let id = q["id"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .map_or_else(|| format!("q{}", ix + 1), str::to_owned);
+            if questions.iter().any(|seen: &Value| seen["id"] == id) {
+                return Err(format!("question id {id} is used twice"));
+            }
+            questions.push(json!({
+                "id": id,
+                "header": q["header"].as_str().filter(|h| !h.is_empty()).unwrap_or("Question"),
+                "question": text,
+                "options": options,
+                "multiSelect": q["multiSelect"].as_bool().unwrap_or(false),
+            }));
+        }
+        let reply = self
+            .call_engine(
+                methods::ASK_USER,
+                json!({ "chatId": self.chat_id, "runSecret": secret, "questions": questions }),
+            )
+            .await?;
+        let answers: Vec<UserInputAnswer> =
+            serde_json::from_value(reply["answers"].clone()).unwrap_or_default();
+        if answers.iter().all(|answer| answer.labels.is_empty()) {
+            return Ok(json!({ "answered": false }));
+        }
+        let answers: Vec<Value> = questions
+            .iter()
+            .map(|q| {
+                let labels = answers
+                    .iter()
+                    .find(|answer| q["id"] == answer.question_id)
+                    .map(|answer| answer.labels.clone())
+                    .unwrap_or_default();
+                json!({ "id": q["id"], "question": q["question"], "labels": labels })
+            })
+            .collect();
+        Ok(json!({ "answered": true, "answers": answers }))
     }
 
     pub async fn set_thread_title(&self, args: &Value) -> Result<Value, String> {
@@ -1328,7 +1430,7 @@ mod tests {
 
     use super::*;
 
-    const THREAD_TOOLS: [&str; 12] = [
+    const THREAD_TOOLS: [&str; 13] = [
         "list_threads",
         "read_thread",
         "create_thread",
@@ -1338,6 +1440,7 @@ mod tests {
         "set_thread_archived",
         "interrupt_thread",
         "respond_to_input",
+        "ask_user",
         "list_projects",
         "list_harnesses",
         "list_models",
@@ -1489,6 +1592,31 @@ mod tests {
                         }),
                         _ => json!({}),
                     }))
+                }
+                methods::ASK_USER => {
+                    self.calls
+                        .lock()
+                        .unwrap()
+                        .push((method.to_string(), params.clone()));
+                    let answers: Vec<Value> = if params["runSecret"] == "live" {
+                        params["questions"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|q| {
+                                let options = q["options"].as_array().unwrap();
+                                let labels = if q["multiSelect"] == true {
+                                    options.clone()
+                                } else {
+                                    options[..1].to_vec()
+                                };
+                                json!({ "questionId": q["id"], "labels": labels })
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    Ok(RpcReply::Value(json!({ "answers": answers })))
                 }
                 methods::GET_COMPUTER_CATALOG
                 | methods::COMPUTER_ACTION
@@ -2462,6 +2590,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ask_user_forwards_multi_select_and_maps_answers_by_question_id() {
+        let rig = computer_rig(Some("live"));
+        let out = rig
+            .tools
+            .call(
+                "ask_user",
+                &json!({ "questions": [
+                    { "id": "stack", "header": "Stack", "question": "Which layers?",
+                      "options": ["UI", "Engine", "MCP"], "multiSelect": true },
+                    { "question": "Ship it?", "options": ["Yes", "No"] },
+                ] }),
+            )
+            .await
+            .unwrap();
+        let sent = logged(&rig.calls, methods::ASK_USER);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["chatId"], "a");
+        assert_eq!(sent[0]["runSecret"], "live");
+        assert_eq!(
+            sent[0]["questions"],
+            json!([
+                { "id": "stack", "header": "Stack", "question": "Which layers?",
+                  "options": ["UI", "Engine", "MCP"], "multiSelect": true },
+                { "id": "q2", "header": "Question", "question": "Ship it?",
+                  "options": ["Yes", "No"], "multiSelect": false },
+            ])
+        );
+        assert_eq!(
+            out,
+            json!({ "answered": true, "answers": [
+                { "id": "stack", "question": "Which layers?", "labels": ["UI", "Engine", "MCP"] },
+                { "id": "q2", "question": "Ship it?", "labels": ["Yes"] },
+            ] })
+        );
+    }
+
+    #[tokio::test]
+    async fn ask_user_refuses_bad_questions_and_reports_no_answer() {
+        let one = json!({ "questions": [{ "question": "Ship it?", "options": ["Yes"] }] });
+        assert_eq!(
+            rig(fixture())
+                .tools
+                .call("ask_user", &one)
+                .await
+                .unwrap_err(),
+            "ask_user needs a live Zeron run"
+        );
+        let silent = computer_rig(Some("silent"));
+        assert_eq!(
+            silent.tools.call("ask_user", &one).await.unwrap(),
+            json!({ "answered": false })
+        );
+        let rig = computer_rig(Some("live"));
+        let five: Vec<Value> = (0..5).map(|_| json!({ "question": "Again?" })).collect();
+        for (args, message) in [
+            (
+                json!({ "questions": [] }),
+                "questions must be a list of 1 to 4 questions",
+            ),
+            (
+                json!({ "questions": five }),
+                "questions must be a list of 1 to 4 questions",
+            ),
+            (
+                json!({ "questions": [{ "question": " " }] }),
+                "question 1 has no `question` text",
+            ),
+            (
+                json!({ "questions": [{ "question": "Pick", "options": ["a", ""] }] }),
+                "question 1 has an empty option label",
+            ),
+            (
+                json!({ "questions": [{ "id": "x", "question": "A" }, { "id": "x", "question": "B" }] }),
+                "question id x is used twice",
+            ),
+        ] {
+            assert_eq!(
+                rig.tools.call("ask_user", &args).await.unwrap_err(),
+                message
+            );
+        }
+        assert!(logged(&rig.calls, methods::ASK_USER).is_empty());
+    }
+
+    #[tokio::test]
     async fn a_cancel_for_a_call_that_is_not_an_in_flight_computer_call_stays_local() {
         let rig = computer_rig(Some("live"));
         let mut pipe = Pipe::open(rig.tools);
@@ -3026,6 +3239,18 @@ mod tests {
         )
         .await;
         assert!(err.contains("consent"), "{err}");
+        for kind in [
+            json!({ "type": "foreground", "app": { "name": "Ghostty" } }),
+            json!({ "type": "foreground" }),
+            json!({ "type": "a-kind-this-build-does-not-know" }),
+        ] {
+            let err = refused(
+                pending(Some(kind.clone())),
+                json!({ "threadId": "b", "answers": [{ "questionId": "q1", "labels": ["Allow for this turn"] }] }),
+            )
+            .await;
+            assert!(err.contains("only the person"), "{kind}: {err}");
+        }
 
         let mut resolved = fixture();
         resolved.entries.push(entry(

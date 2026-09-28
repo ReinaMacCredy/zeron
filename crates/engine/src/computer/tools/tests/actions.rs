@@ -996,18 +996,18 @@ async fn refuses_control_off_mutations_even_for_a_gated_provider_without_touchin
 async fn includes_the_control_disclosure_on_the_first_mutation_payload_of_a_turn() {
     let h = harness();
     assert!(
-        super::super::COMPUTER_CONTROL_FIRST_MUTATION_DISCLOSURE.contains("Computer control ON")
+        crate::computer::manager::COMPUTER_CONTROL_ON_DISCLOSURE.contains("Computer control is on")
     );
     let first = h
         .call("computer_press_key", json!({ "key": "enter" }))
         .await;
     assert!(!first.is_error, "{first:?}");
-    assert!(text(&first).contains("Computer control ON"));
+    assert!(text(&first).contains("Computer control is on"));
     let second = h
         .call("computer_press_key", json!({ "key": "enter" }))
         .await;
     assert!(!second.is_error, "{second:?}");
-    assert!(!text(&second).contains("Computer control ON"));
+    assert!(!text(&second).contains("Computer control is on"));
     h.dispose().await;
 }
 

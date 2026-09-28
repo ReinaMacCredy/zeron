@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use zeron_proto::computer::{
     COMPUTER_AUDIT_HISTORY_MAX_LIMIT, ComputerAuditEffect, ComputerAuditHistoryEntry,
     ComputerAuditHistoryStatus, ComputerGetAuditHistoryInput, ComputerGetAuditHistoryResult,
-    is_computer_audit_identifier,
+    is_computer_audit_app, is_computer_audit_identifier,
 };
 
 use super::audit_file::{
@@ -129,6 +129,12 @@ fn project_entry(line: &[u8], position: &AuditPosition) -> Option<ComputerAuditH
             .get("code")
             .and_then(Value::as_str)
             .filter(|code| CODE.is_match(code))
+            .map(str::to_owned),
+        app: record
+            .get("target")
+            .and_then(|target| target.get("app"))
+            .and_then(Value::as_str)
+            .filter(|app| is_computer_audit_app(app))
             .map(str::to_owned),
     })
 }
@@ -369,7 +375,7 @@ mod tests {
                 "effect": "refused",
                 "code": "computer_control_revoked",
                 "args": { "text": "secret", "url": "https://private.test/?token=secret" },
-                "target": { "app": "secret", "windowId": "secret", "path": "/private/secret" },
+                "target": { "app": "Finder", "windowId": "secret", "path": "/private/secret" },
                 "result": "secret",
                 "password": "secret",
             }),
@@ -395,6 +401,7 @@ mod tests {
         assert_eq!(older.gateway_request_id.as_deref(), Some("1"));
         assert_eq!(older.code.as_deref(), Some("computer_control_revoked"));
         assert_eq!(older.effect, ComputerAuditEffect::Refused);
+        assert_eq!(older.app.as_deref(), Some("Finder"));
         let newest = serde_json::to_string(&result.entries[0]).unwrap();
         let keys: Vec<&str> = Regex::new(r#""([A-Za-z]+)":"#)
             .unwrap()
@@ -402,6 +409,22 @@ mod tests {
             .map(|capture| capture.get(1).unwrap().as_str())
             .collect();
         assert_eq!(keys, ["id", "ts", "tool", "effect", "gatewayRequestId"]);
+    }
+
+    #[test]
+    fn projects_the_target_app_only_as_bounded_single_line_text() {
+        let (_dir, path) = fixture();
+        let content = line(1, json!({ "target": { "app": "Calculator", "pid": 42 } }))
+            + &line(2, json!({ "target": { "app": "Calc\nulator" } }))
+            + &line(3, json!({ "target": { "app": "x".repeat(129) } }))
+            + &line(4, json!({ "target": { "app": 7 } }));
+        std::fs::write(&path, content).unwrap();
+        let apps: Vec<_> = read(&path, None, None)
+            .entries
+            .into_iter()
+            .map(|entry| entry.app)
+            .collect();
+        assert_eq!(apps, [None, None, None, Some("Calculator".into())]);
     }
 
     #[test]

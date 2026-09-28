@@ -415,6 +415,7 @@ async fn relay_clients_are_refused_the_host_and_computer_writes() {
 }
 
 async fn stop_until_the_event_arrives(
+    core: &EngineCore,
     client: &RpcClient,
     events: &mut mpsc::Receiver<serde_json::Value>,
 ) {
@@ -422,17 +423,20 @@ async fn stop_until_the_event_arrives(
     loop {
         assert!(
             tokio::time::Instant::now() < deadline,
-            "no input-stopped event"
+            "no thread-state event"
         );
         let stopped = client
             .call(methods::COMPUTER_EMERGENCY_STOP, json!({}))
             .await
             .expect("emergency stop");
         assert_eq!(stopped, json!({ "stoppedChatIds": [] }));
+        core.computer.stop_chat("probe-chat", 0);
         while let Ok(Some(value)) =
             tokio::time::timeout(Duration::from_millis(200), events.recv()).await
         {
-            if value == json!({ "type": "computer.input-stopped", "stopped": true }) {
+            if value["type"] == "computer.thread-state"
+                && value["state"]["threadId"] == "probe-chat"
+            {
                 return;
             }
         }
@@ -453,7 +457,7 @@ async fn computer_events_keep_flowing_across_a_host_rebuild() {
         .subscribe(methods::WATCH_COMPUTER_EVENTS, json!({}))
         .await
         .expect("event stream");
-    stop_until_the_event_arrives(&client, &mut events).await;
+    stop_until_the_event_arrives(&core, &client, &mut events).await;
 
     let mut host = watch_host(&client).await.expect("host registers");
     let Some(ComputerHostStreamItem::Registered { host_token }) = next_item(&mut host).await else {
@@ -485,7 +489,7 @@ async fn computer_events_keep_flowing_across_a_host_rebuild() {
         assert!(tokio::time::Instant::now() < deadline, "no rebuild");
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    stop_until_the_event_arrives(&client, &mut events).await;
+    stop_until_the_event_arrives(&core, &client, &mut events).await;
     core.shutdown().await;
     answering.abort();
 }

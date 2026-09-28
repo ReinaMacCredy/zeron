@@ -32,7 +32,7 @@ use process::{DriverChild, SpawnPlan, spawn_driver};
 pub use seams::{
     ComputerFrameTapHost, ComputerInputMonitorState, ComputerShieldEngagement, ComputerShieldHost,
     CuaDriverHostOptions, HostFuture, HostPermissions, OverviewNormalizer, PermissionCheck,
-    PhysicalComputerInput, PhysicalInputKind,
+    PhysicalComputerInput, PhysicalInputKind, TakeoverEvent,
 };
 use support::*;
 pub use support::{
@@ -57,6 +57,9 @@ const HANDSHAKE_ATTEMPTS: usize = 80;
 const HANDSHAKE_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(200);
 const HANDSHAKE_RETRY_DELAY: Duration = Duration::from_millis(50);
 const EXIT_GRACE: Duration = Duration::from_millis(500);
+const ENGINE_CALL_TIMEOUT: Duration =
+    Duration::from_millis(zeron_engine::computer::cua_backend::CUA_HOST_CALL_TIMEOUT_MS);
+const QUIET_POLL: Duration = Duration::from_millis(50);
 
 const STOPPED_DURING_STARTUP: &str = "Cua Driver stopped during startup.";
 const CANCELLED_BEFORE_DISPATCH: &str = "Cancelled before dispatch.";
@@ -281,6 +284,7 @@ struct State {
     active_foreground_input: bool,
     controlled_targets: Bounded<ControlledTarget>,
     takeover_targets: Bounded<ControlledTarget>,
+    user_input: Bounded<(Instant, Option<String>)>,
     browser_targets: Bounded<ControlledTarget>,
     active_input_task_key: Option<String>,
     monitored_tasks: Bounded<String>,
@@ -325,6 +329,7 @@ impl State {
             active_foreground_input: false,
             controlled_targets: Bounded::default(),
             takeover_targets: Bounded::default(),
+            user_input: Bounded::default(),
             browser_targets: Bounded::default(),
             active_input_task_key: None,
             monitored_tasks: Bounded::default(),
@@ -374,6 +379,44 @@ impl State {
         self.input_interrupt_cooldown_until
             .and_then(|until| until.checked_duration_since(Instant::now()))
             .filter(|remaining| !remaining.is_zero())
+    }
+
+    fn user_paused(&self, task: Option<&CuaComputerTask>) -> bool {
+        match task {
+            Some(task) => self.user_input.contains(&cua_computer_task_key(task)),
+            None => !self.user_input.is_empty(),
+        }
+    }
+
+    fn last_user_input(&self, task: Option<&CuaComputerTask>) -> Option<Instant> {
+        match task {
+            Some(task) => self
+                .user_input
+                .get(&cua_computer_task_key(task))
+                .map(|(at, _)| *at),
+            None => self.user_input.iter().map(|(_, (at, _))| *at).max(),
+        }
+    }
+
+    fn end_user_input(&mut self, keys: &[String]) -> Vec<TakeoverEvent> {
+        let mut ended = Vec::new();
+        for key in keys {
+            if let Some((_, Some(thread))) = self.user_input.remove(key) {
+                ended.push(thread);
+            }
+        }
+        ended.sort();
+        ended.dedup();
+        ended
+            .into_iter()
+            .filter(|thread| {
+                !self
+                    .user_input
+                    .iter()
+                    .any(|(_, (_, other))| other.as_ref() == Some(thread))
+            })
+            .map(|thread_id| TakeoverEvent::Resumed { thread_id })
+            .collect()
     }
 
     fn cancel_permission_checks(&self, owners: Option<&HashSet<String>>) {
@@ -432,6 +475,59 @@ impl Host {
 
     fn input_monitor_unavailable(&self, monitor: Option<ComputerInputMonitorState>) -> CuaReply {
         input_monitor_unavailable_reply(monitor.as_ref().and_then(|m| m.error.as_deref()))
+    }
+
+    fn emit_takeover(&self, events: Vec<TakeoverEvent>) {
+        if let Some(on_takeover) = &self.options.on_takeover {
+            for event in events {
+                on_takeover(event);
+            }
+        }
+    }
+
+    async fn hold_until_quiet(
+        &self,
+        task: Option<&CuaComputerTask>,
+        conn: &Connection,
+        admission: &Admission,
+    ) -> Option<CuaReply> {
+        let quiet = self.options.input_quiet;
+        if quiet.is_zero() {
+            return None;
+        }
+        let started = Instant::now();
+        let cap = started + self.options.input_quiet_cap;
+        let mut held = false;
+        loop {
+            let release = {
+                let state = self.state.borrow();
+                if admission.stopped(&state) {
+                    return Some(task_stopped_reply());
+                }
+                if state.closed || state.suspended || conn.destroyed() {
+                    return Some(not_dispatched(CANCELLED_BEFORE_DISPATCH));
+                }
+                match state.last_user_input(task) {
+                    Some(at) => at + quiet,
+                    None => break,
+                }
+            };
+            let now = Instant::now();
+            if now >= release {
+                break;
+            }
+            if now >= cap {
+                return Some(user_input_pause_reply());
+            }
+            held = true;
+            tokio::time::sleep((release.min(cap) - now).min(QUIET_POLL)).await;
+        }
+        if held {
+            conn.deadline
+                .set(conn.deadline.get().min(started + ENGINE_CALL_TIMEOUT));
+            conn.deadline_moved.notify_one();
+        }
+        None
     }
 
     fn notify_armed(&self, armed: bool) {
@@ -716,6 +812,42 @@ impl Host {
         {
             return Ok(browser_self_target_reply());
         }
+        let (refuse, hold) = {
+            let state = self.state.borrow();
+            let paused = !self.options.input_quiet.is_zero() && state.user_paused(task.as_ref());
+            let read_of_target = name == "get_window_state"
+                && model_observation
+                && task.as_ref().is_some_and(|task| {
+                    state
+                        .takeover_targets
+                        .get(&cua_computer_task_key(task))
+                        .zip(target_from_args(&call.args, None))
+                        .is_some_and(|(held, read)| held.pid == read.pid)
+                });
+            let task_takeover = state.takeover_targets.contains(&task_key(task.as_ref()))
+                || (task.is_none() && !state.takeover_targets.is_empty());
+            let refuse = paused
+                && task_takeover
+                && (CUA_ACTION_TOOLS.contains(&name.as_str()) || name == "check_input_ready");
+            let reply = if !refuse {
+                None
+            } else if admission.stopped(&state) {
+                Some(task_stopped_reply())
+            } else {
+                Some(user_input_pause_reply())
+            };
+            (reply, paused && read_of_target)
+        };
+        if let Some(reply) = refuse {
+            return Ok(reply);
+        }
+        if hold
+            && let Some(reply) = self
+                .hold_until_quiet(task.as_ref(), &conn, &admission)
+                .await
+        {
+            return Ok(reply);
+        }
         let (previous, stopping, epoch) = {
             let state = self.state.borrow();
             if !state.desktop_pauses.is_empty() {
@@ -782,7 +914,10 @@ impl Host {
             if is_mutation_name(&name)
                 && let Some(remaining) = state.cooldown_remaining()
             {
-                return Ok(input_interrupted_reply(remaining));
+                return Ok(input_interrupted_reply(
+                    remaining,
+                    state.user_paused(task.as_ref()),
+                ));
             }
             if admission.stopped(&state) {
                 return Ok(task_stopped_reply());
@@ -804,17 +939,23 @@ impl Host {
             let browser_mutation = CUA_BROWSER_MUTATION_TOOLS.contains(&name.as_str());
             let unrecovered_browser =
                 browser_mutation && !browser_recovery_setup && !browser_recovery_observed;
+            let takeover_gated =
+                task_takeover && (action || unrecovered_browser || name == "check_input_ready");
             let gated = (state.desktop_observation_required
                 && (action || name == "check_input_ready"))
                 || (state.browser_observation_required && unrecovered_browser)
-                || (task_takeover
-                    && (action || unrecovered_browser || name == "check_input_ready"));
+                || takeover_gated;
             if gated {
+                let user_input = takeover_gated && state.user_paused(task.as_ref());
                 drop(state);
                 log(&format!(
                     "refused {name}: fresh desktop observation still required"
                 ));
-                return Ok(desktop_pause_reply(false));
+                return Ok(if user_input {
+                    user_input_pause_reply()
+                } else {
+                    desktop_pause_reply(false)
+                });
             }
             if let Some(task) = &task
                 && (request.model_observation
@@ -1490,12 +1631,15 @@ impl Host {
                     state.browser_recovery_observations.set(key, epoch);
                 }
                 let key = task_key(task);
+                let mut resumed = Vec::new();
                 if let Some(interrupted) = state.takeover_targets.get(&key)
                     && observation_matches_target(name, &request.input, interrupted, result)
                 {
                     state.takeover_targets.remove(&key);
+                    resumed = state.end_user_input(std::slice::from_ref(&key));
                 }
                 drop(state);
+                self.emit_takeover(resumed);
                 log(&format!(
                     "fresh model observation via {name}; matching input gate cleared"
                 ));
@@ -1701,9 +1845,22 @@ impl Host {
         all_turns: bool,
         wait_for_cursor: bool,
     ) -> Result<(), String> {
-        let disarm = {
+        let (disarm, resumed) = {
             let mut state = self.state.borrow_mut();
             let key = cua_computer_task_key(&task);
+            let mut ended = vec![key.clone()];
+            if all_turns {
+                ended.extend(
+                    state
+                        .user_input
+                        .iter()
+                        .filter(|(_, (_, thread))| {
+                            thread.as_deref() == Some(task.thread_id.as_str())
+                        })
+                        .map(|(key, _)| key.to_string()),
+                );
+            }
+            let resumed = state.end_user_input(&ended);
             state.controlled_targets.remove(&key);
             state.takeover_targets.remove(&key);
             state.monitored_tasks.remove(&key);
@@ -1732,8 +1889,9 @@ impl Host {
                     .insert(cua_computer_task_key(&tapped));
                 state.frame_tap_task = None;
             }
-            disarm
+            (disarm, resumed)
         };
+        self.emit_takeover(resumed);
         if disarm {
             self.notify_armed(false);
         }
@@ -2264,10 +2422,16 @@ impl Host {
     }
 
     fn stop(self: &Rc<Self>) -> Fallible {
-        let (was_armed, admitted, previous) = {
+        let (was_armed, admitted, previous, resumed) = {
             let mut state = self.state.borrow_mut();
             state.input_monitor_requested = false;
             let was_armed = std::mem::replace(&mut state.input_monitor_armed, false);
+            let keys: Vec<String> = state
+                .user_input
+                .iter()
+                .map(|(key, _)| key.to_string())
+                .collect();
+            let resumed = state.end_user_input(&keys);
             state.controlled_targets.clear();
             state.takeover_targets.clear();
             state.browser_targets.clear();
@@ -2276,8 +2440,14 @@ impl Host {
             state.epoch += 1;
             state.desktop_epoch += 1;
             state.cancel_permission_checks(None);
-            (was_armed, state.operations.clone(), state.stopping.clone())
+            (
+                was_armed,
+                state.operations.clone(),
+                state.stopping.clone(),
+                resumed,
+            )
         };
+        self.emit_takeover(resumed);
         if was_armed {
             self.notify_armed(false);
         }
@@ -2477,7 +2647,21 @@ impl Host {
             })
             .to_string());
         }
+        let now = Instant::now();
+        let mut paused = Vec::new();
         for (key, target) in &affected {
+            if !state.user_input.contains(key)
+                && let Some(thread_id) = &target.thread_id
+            {
+                paused.push(TakeoverEvent::Paused {
+                    thread_id: thread_id.clone(),
+                    pid: target.pid,
+                    window_id: target.window_id,
+                });
+            }
+            state
+                .user_input
+                .set(key.clone(), (now, target.thread_id.clone()));
             state.takeover_targets.set(key.clone(), target.clone());
         }
         if foreground && affected.is_empty() {
@@ -2492,13 +2676,16 @@ impl Host {
                 .in_flight_input_interrupts
                 .iter()
                 .any(|interrupt| !interrupt.is_aborted());
-        state.input_interrupt_cooldown_until = Some(Instant::now() + ESCAPE_INPUT_COOLDOWN);
+        state.input_interrupt_cooldown_until = Some(now + ESCAPE_INPUT_COOLDOWN);
         if already_paused && !affected_input_in_flight {
             state.epoch += 1;
             state.desktop_epoch += 1;
+            drop(state);
+            self.emit_takeover(paused);
             return true;
         }
         drop(state);
+        self.emit_takeover(paused);
         self.spawn_interrupt("human takeover interrupt failed");
         true
     }

@@ -629,12 +629,24 @@ pub enum UserInputKind {
         scope: crate::computer::ComputerConsentScope,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         app: Option<crate::computer::ComputerConsentApp>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        params: Option<String>,
+    },
+    Foreground {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        app: Option<crate::computer::ComputerConsentApp>,
     },
 }
 
 impl UserInputQuestion {
     pub fn is_consent(&self) -> bool {
         matches!(self.kind, Some(UserInputKind::Consent { .. }))
+    }
+
+    pub fn is_computer(&self) -> bool {
+        self.kind.is_some()
     }
 }
 
@@ -834,6 +846,8 @@ mod tests {
             UserInputKind::Consent {
                 scope: crate::computer::ComputerConsentScope::Task,
                 app: None,
+                tool: None,
+                params: None,
             }
         );
         assert_eq!(serde_json::to_value(&kind).unwrap(), old);
@@ -848,6 +862,42 @@ mod tests {
         };
         assert!(app.verified());
         assert_eq!(serde_json::to_value(&kind).unwrap(), with_app);
+        let with_action = serde_json::json!({
+            "type": "consent",
+            "scope": "task",
+            "tool": "computer_click",
+            "params": "{\"window_id\":\"w1\"}",
+        });
+        let kind: UserInputKind = serde_json::from_value(with_action.clone()).unwrap();
+        let UserInputKind::Consent {
+            tool: Some(tool), ..
+        } = &kind
+        else {
+            panic!("the action survives");
+        };
+        assert_eq!(tool, "computer_click");
+        assert_eq!(serde_json::to_value(&kind).unwrap(), with_action);
+    }
+
+    #[test]
+    fn a_foreground_question_is_a_computer_question_and_keeps_its_shape() {
+        let wire = serde_json::json!({ "type": "foreground", "app": { "name": "Ghostty" } });
+        let kind: UserInputKind = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&kind).unwrap(), wire);
+        let question = UserInputQuestion {
+            id: "foreground".into(),
+            header: "Computer".into(),
+            question: "Ghostty needs to come to the front to type.".into(),
+            options: vec!["Allow for this turn".into(), "No".into()],
+            multi_select: false,
+            kind: Some(kind),
+        };
+        assert!(question.is_computer() && !question.is_consent());
+        let plain = UserInputQuestion {
+            kind: None,
+            ..question
+        };
+        assert!(!plain.is_computer());
     }
 
     #[test]

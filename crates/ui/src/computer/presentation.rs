@@ -48,6 +48,7 @@ pub const COMPUTER_TOOL_TITLES: &[(&str, &str)] = &[
     ("computer_browser_download", "Download a file"),
     ("computer_browser_pointer", "Use the pointer in the browser"),
     ("computer_browser_press", "Press Enter in the browser"),
+    ("computer_zeron_browser", "Use the Zeron browser"),
 ];
 
 fn title(tool: &str) -> &'static str {
@@ -253,7 +254,7 @@ fn keyboard_shortcut(value: &str) -> String {
         .join(" + ")
 }
 
-fn app_name(value: Option<&str>) -> Option<String> {
+pub(crate) fn app_name(value: Option<&str>) -> Option<String> {
     let name = value?.trim();
     if name.is_empty() {
         return None;
@@ -286,6 +287,54 @@ fn app_name(value: Option<&str>) -> Option<String> {
         None => return None,
     };
     Some(truncate(&capitalized, 80))
+}
+
+// The doc keeps only a 160-char prefix of tool output, so this reads possibly truncated JSON.
+fn output_app_name(output: &str) -> Option<String> {
+    use serde::Deserialize;
+    let (mut depth, mut in_string, mut escaped) = (0usize, false, false);
+    for (index, byte) in output.bytes().enumerate() {
+        if in_string {
+            match byte {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match byte {
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => depth = depth.saturating_sub(1),
+            b'"' => {
+                if depth == 1
+                    && let Some(rest) = output[index..].strip_prefix(r#""appName":"#)
+                {
+                    return String::deserialize(&mut serde_json::Deserializer::from_str(rest)).ok();
+                }
+                in_string = true;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+pub fn computer_call_app(
+    tool: &str,
+    args: Option<&Map<String, Value>>,
+    output: Option<&str>,
+) -> Option<String> {
+    let from_args = args.and_then(|args| {
+        app_label(args)
+            .or_else(|| {
+                (tool == "computer_launch_app")
+                    .then(|| text(args, "name"))
+                    .flatten()
+            })
+            .or_else(|| text(args, "bundle_id"))
+    });
+    app_name(from_args).or_else(|| app_name(output.and_then(output_app_name).as_deref()))
 }
 
 fn describe_payload(tool: &str, args: &Map<String, Value>) -> String {
@@ -635,12 +684,33 @@ pub fn computer_call_rows(tool: &str, args: Option<&Map<String, Value>>) -> Vec<
     rows
 }
 
-/// A clipboard read's output is the clipboard itself.
+const TEXT_OUTPUT_TOOLS: [&str; 6] = [
+    "computer_read_clipboard",
+    "computer_type_text",
+    "computer_set_value",
+    "computer_paste",
+    "computer_write_clipboard",
+    "computer_browser_type",
+];
+
+/// A clipboard read's output is the clipboard itself; a typing result echoes what was typed.
 pub fn computer_output_hidden(tool: &str, args: Option<&Map<String, Value>>) -> bool {
-    tool == "computer_read_clipboard"
+    let carries_text = |tool: &str| TEXT_OUTPUT_TOOLS.contains(&tool);
+    carries_text(tool)
         || args
             .and_then(|args| inspect_delegate(tool, args))
-            .is_some_and(|(selected, _)| selected == "computer_read_clipboard")
+            .is_some_and(|(selected, _)| carries_text(selected))
+        || (tool == "computer_run"
+            && args
+                .and_then(|args| args.get("steps"))
+                .and_then(Value::as_array)
+                .is_some_and(|steps| {
+                    steps.iter().any(|step| {
+                        step.get("type")
+                            .and_then(Value::as_str)
+                            .is_some_and(|kind| carries_text(&format!("computer_{kind}")))
+                    })
+                }))
 }
 
 #[cfg(test)]
@@ -861,5 +931,65 @@ mod tests {
             zoom.as_object()
         ));
         assert!(!computer_output_hidden("computer_screenshot", None));
+    }
+
+    #[test]
+    fn typing_results_hide_their_output() {
+        for tool in [
+            "computer_type_text",
+            "computer_set_value",
+            "computer_paste",
+            "computer_write_clipboard",
+            "computer_browser_type",
+        ] {
+            assert!(computer_output_hidden(tool, None), "{tool}");
+        }
+        let typing =
+            json!({ "steps": [{ "type": "click" }, { "type": "type_text", "text": "x" }] });
+        assert!(computer_output_hidden("computer_run", typing.as_object()));
+        let clicks = json!({ "steps": [{ "type": "click" }, { "type": "press_key" }] });
+        assert!(!computer_output_hidden("computer_run", clicks.as_object()));
+        assert!(!computer_output_hidden("computer_click", None));
+    }
+
+    #[test]
+    fn the_zeron_browser_tool_has_a_title() {
+        let call = ToolCall::Unknown {
+            name: "mcp__zeron__computer_zeron_browser".into(),
+            input: Some(json!({ "action": "navigate" })),
+        };
+        assert_eq!(computer_call(&call).unwrap().tool, "computer_zeron_browser");
+        assert_eq!(describe(&call), "Use the Zeron browser");
+    }
+
+    #[test]
+    fn the_app_comes_from_the_args_or_a_truncated_output() {
+        let args = json!({ "window_id": "cua:1:2", "app_name": "com.mitchellh.ghostty" });
+        assert_eq!(
+            computer_call_app("computer_click", args.as_object(), None).as_deref(),
+            Some("Ghostty")
+        );
+        let truncated = r#"{"action":"computer_type_text","appName":"Ghostty","computerId":"desktop","disclosure":"Computer control ON for this turn: the agent is driving the desktop and the user can switch …"#;
+        let window_only = json!({ "window_id": "cua:1:2", "text": "hi" });
+        assert_eq!(
+            computer_call_app(
+                "computer_type_text",
+                window_only.as_object(),
+                Some(truncated)
+            )
+            .as_deref(),
+            Some("Ghostty")
+        );
+        let listing = r#"{"availability":{"backend":"fake","kind":"available"},"computerId":"desktop","windows":[{"appName":"org.kde.konsole","bounds":{"height":720.0,"width":960.0,"x":…"#;
+        assert_eq!(
+            computer_call_app("computer_list_windows", None, Some(listing)),
+            None,
+            "a nested window's app is not the call's app"
+        );
+        let cut_name = r#"{"action":"computer_click","appName":"Ghos…"#;
+        assert_eq!(
+            computer_call_app("computer_click", None, Some(cut_name)),
+            None
+        );
     }
 }

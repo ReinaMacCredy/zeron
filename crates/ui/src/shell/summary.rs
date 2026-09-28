@@ -1,8 +1,10 @@
 //! Astra's sidecar (paseo-fork `Sidecar.tsx` + `sidecar.css`) beside the transcript.
 
 use super::*;
+use crate::computer::{self, presence::PresenceTone, preview};
 use crate::files::client::{FilesRequestContext, WorkspaceFilesClient};
 use std::rc::Rc;
+use zeron_proto::computer::ComputerPreviewPlacement;
 
 pub(super) const SIDECAR_WIDTH: f32 = 260.0;
 pub(super) const SIDECAR_RAIL_WIDTH: f32 = 40.0;
@@ -31,6 +33,7 @@ enum SidecarValue {
     Text(SharedString),
     Mono(SharedString),
     Tone(SharedString, gpui::Hsla),
+    Dot(Option<SharedString>, gpui::Hsla),
     Counts(usize, u32, u32),
 }
 
@@ -41,6 +44,7 @@ struct SidecarEntry {
     label: SharedString,
     value: Option<SidecarValue>,
     action: Option<SidecarAction>,
+    thumbnail: Option<String>,
 }
 
 impl SidecarEntry {
@@ -57,6 +61,7 @@ impl SidecarEntry {
             label: label.into(),
             value: None,
             action: None,
+            thumbnail: None,
         }
     }
 
@@ -75,9 +80,12 @@ impl SidecarEntry {
 
     fn tooltip(&self) -> SharedString {
         match &self.value {
-            Some(SidecarValue::Text(v) | SidecarValue::Mono(v) | SidecarValue::Tone(v, _)) => {
-                format!("{}: {v}", self.label).into()
-            }
+            Some(
+                SidecarValue::Text(v)
+                | SidecarValue::Mono(v)
+                | SidecarValue::Tone(v, _)
+                | SidecarValue::Dot(Some(v), _),
+            ) => format!("{}: {v}", self.label).into(),
             _ => self.label.clone(),
         }
     }
@@ -276,6 +284,39 @@ impl Shell {
         }
     }
 
+    fn toggle_computer_entry(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        let Some(store) = preview::store(cx) else {
+            return;
+        };
+        let view = store.read(cx).view(chat_id);
+        match view.placement {
+            ComputerPreviewPlacement::Rail if view.floating.is_some() => {
+                preview::update_store(&store, cx, |store| store.set_floating(chat_id, None))
+            }
+            ComputerPreviewPlacement::Rail if self.sidecar_collapsed_now == Some(true) => {
+                self.pop_out_computer_preview(chat_id, cx)
+            }
+            ComputerPreviewPlacement::Rail => {
+                preview::update_store(&store, cx, |store| store.toggle_thumbnail(chat_id))
+            }
+            ComputerPreviewPlacement::Card if view.open => {
+                preview::update_store(&store, cx, |store| store.hide_for_task(chat_id))
+            }
+            ComputerPreviewPlacement::Card => {
+                preview::update_store(&store, cx, |store| store.reopen(chat_id))
+            }
+        }
+    }
+
+    fn pop_out_computer_preview(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        if let Some(store) = preview::store(cx) {
+            preview::update_store(&store, cx, |store| store.reopen(chat_id));
+        }
+        if let Some(card) = self.transcript.read(cx).computer_preview_card() {
+            card.update(cx, |card, cx| card.pop_out(cx));
+        }
+    }
+
     /// Look for an instructions file at the chat's checkout root, once per chat.
     fn probe_summary_instructions(&mut self, chat_id: String, cx: &mut Context<Self>) {
         if self.summary_instruction_probes.contains_key(&chat_id)
@@ -452,6 +493,26 @@ impl Shell {
             SidecarEntry::new("files", 0, icons::ASTRA_FILE, "Files")
                 .action(|this, window, cx| this.add_files_surface(window, cx)),
         );
+        let computer = chat
+            .as_ref()
+            .and_then(|chat| computer::presence::rail_entry(&chat.id, cx));
+        if let Some(thumbnail) = &self.computer_thumbnail {
+            let chat_id = computer.as_ref().map(|entry| entry.chat_id.clone());
+            thumbnail.update(cx, |thumbnail, cx| thumbnail.set_chat(chat_id, cx));
+        }
+        if let Some(entry) = computer {
+            let dot = match computer::presence::tone(&entry.chat_id, cx) {
+                Some(PresenceTone::Driving | PresenceTone::NeedsYou) => theme.accent,
+                Some(PresenceTone::Paused) => theme.warning,
+                _ => theme.text_faint,
+            };
+            let chat_id = entry.chat_id.clone();
+            let mut row = SidecarEntry::new("computer", 0, icons::CURSOR, "Computer")
+                .value(Some(SidecarValue::Dot(entry.app.map(Into::into), dot)))
+                .action(move |this, _, cx| this.toggle_computer_entry(&chat_id, cx));
+            row.thumbnail = entry.thumbnail.then_some(entry.chat_id);
+            on.push(row);
+        }
         sections.push(SidecarSection {
             heading: format!("On {}", project.as_deref().unwrap_or("this session")).into(),
             entries: on,
@@ -772,12 +833,33 @@ impl Shell {
                     .truncate()
                     .child(section.heading.clone()),
             )
-            .children(
-                section
-                    .entries
-                    .iter()
-                    .map(|entry| self.sidecar_row(theme, entry, surface, interactive, cx)),
-            )
+            .children(section.entries.iter().flat_map(|entry| {
+                let thumbnail = entry
+                    .thumbnail
+                    .clone()
+                    .filter(|_| surface == SidecarSurface::Panel)
+                    .and_then(|chat| Some((chat, self.computer_thumbnail.clone()?)))
+                    .map(|(chat, thumbnail)| {
+                        div()
+                            .id("sidecar-computer-thumbnail")
+                            .debug_selector(|| "sidecar-computer-thumbnail".into())
+                            .flex_none()
+                            .mx(px(4.0))
+                            .mt(px(4.0))
+                            .mb(px(8.0))
+                            .when(interactive, |el| {
+                                el.cursor_pointer()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.pop_out_computer_preview(&chat, cx);
+                                    }))
+                            })
+                            .child(thumbnail)
+                            .into_any_element()
+                    });
+                std::iter::once(self.sidecar_row(theme, entry, surface, interactive, cx))
+                    .chain(thumbnail)
+            }))
             .into_any_element()
     }
 
@@ -1096,6 +1178,17 @@ fn sidecar_value(theme: &Theme, value: &SidecarValue) -> AnyElement {
             .text_color(*color)
             .child(text.clone())
             .into_any_element(),
+        SidecarValue::Dot(text, color) => div()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(5.0))
+            .max_w(px(120.0))
+            .text_color(theme.text_faint)
+            .children(text.clone().map(|text| div().truncate().child(text)))
+            .child(div().flex_none().size(px(6.0)).rounded_full().bg(*color))
+            .into_any_element(),
         SidecarValue::Counts(files, add, del) => {
             let files = if *files == 1 {
                 "1 file".to_string()
@@ -1184,6 +1277,7 @@ mod sidecar_regressions {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
+            crate::computer::preview::init(cx);
         });
         let (host, cx) = cx.add_window_view(|window, cx| {
             let shell = cx.new(|cx| {
@@ -1354,6 +1448,87 @@ mod sidecar_regressions {
             shell.sidecar_flip.as_mut().unwrap().started = now - Duration::from_millis(400);
             assert_eq!(shell.sidecar_width_now(), SIDECAR_RAIL_WIDTH);
         });
+    }
+
+    #[gpui::test]
+    fn the_computer_entry_appears_after_a_drive_and_toggles_its_thumbnail(cx: &mut TestAppContext) {
+        use crate::computer::preview::tests::{driving, image, thread_state};
+        use zeron_proto::computer::{ComputerEvent, ComputerSettings};
+        let (shell, cx) = setup(cx);
+        let store = cx.update(|_, cx| preview::store(cx).unwrap());
+        let change =
+            |cx: &mut VisualTestContext,
+             change: &dyn Fn(&mut preview::ComputerPreviewStore) -> bool| {
+                cx.update(|_, cx| preview::update_store(&store, cx, change));
+                cx.update(|window, cx| window.draw(cx).clear());
+            };
+        let open =
+            |cx: &mut VisualTestContext| cx.update(|_, cx| store.read(cx).view("parent").open);
+        assert!(cx.debug_bounds("sidecar-panel-computer-0").is_none());
+        change(cx, &|store| {
+            store.set_events_live(true);
+            driving(store, "parent");
+            store.apply_event(&ComputerEvent::Action {
+                window_id: Some("w1".into()),
+                delivery: None,
+                action: "computer_click".into(),
+                ok: true,
+                message: None,
+                thread_id: Some("parent".into()),
+                restored_window_id: None,
+                restore_status: None,
+                masked: false,
+            });
+            store.accept_tap_frame("parent", image(1, 960, 600))
+        });
+        assert!(cx.debug_bounds("sidecar-panel-computer-0").is_some());
+        let thumb = cx
+            .debug_bounds("sidecar-computer-thumbnail")
+            .expect("rail placement shows the thumbnail");
+        assert_eq!(f32::from(thumb.size.height).round(), 118.0);
+        click(cx, "sidecar-panel-computer-0");
+        assert!(cx.debug_bounds("sidecar-computer-thumbnail").is_none());
+        click(cx, "sidecar-panel-computer-0");
+        assert!(cx.debug_bounds("sidecar-computer-thumbnail").is_some());
+
+        change(cx, &|store| {
+            store.apply_event(&ComputerEvent::ThreadState {
+                state: Box::new(thread_state("parent", false)),
+            })
+        });
+        assert!(
+            cx.debug_bounds("sidecar-panel-computer-0").is_some(),
+            "the entry outlives the drive"
+        );
+        assert!(!open(cx));
+        click(cx, "sidecar-computer-thumbnail");
+        assert!(
+            open(cx),
+            "the thumbnail reopens the preview for the pop-out"
+        );
+
+        shell.update(cx, |shell, cx| shell.set_sidecar_user_collapsed(true, cx));
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("sidecar-computer-thumbnail").is_none());
+        assert!(cx.debug_bounds("sidecar-rail-computer-0").is_some());
+        shell.update(cx, |shell, cx| shell.set_sidecar_user_collapsed(false, cx));
+
+        change(cx, &|store| {
+            store.set_settings(ComputerSettings {
+                computer_preview_placement: ComputerPreviewPlacement::Card,
+                ..ComputerSettings::default()
+            })
+        });
+        assert!(cx.debug_bounds("sidecar-panel-computer-0").is_some());
+        assert!(
+            cx.debug_bounds("sidecar-computer-thumbnail").is_none(),
+            "the card placement has no thumbnail"
+        );
+        assert!(open(cx));
+        click(cx, "sidecar-panel-computer-0");
+        assert!(!open(cx), "the entry hides an open card");
+        click(cx, "sidecar-panel-computer-0");
+        assert!(open(cx), "and reopens a hidden one");
     }
 
     #[gpui::test]

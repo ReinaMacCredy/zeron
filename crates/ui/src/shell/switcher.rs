@@ -330,7 +330,13 @@ impl Shell {
                 })
                 .collect()
         };
-        let strip = self.open_tab_ids(cx);
+        // Idle tabs linger dimmed on the strip; only live ones bypass the cap.
+        let idle = self.idle_tab_ids(cx);
+        let strip: Vec<String> = self
+            .open_tab_ids(cx)
+            .into_iter()
+            .filter(|id| !idle.contains(id))
+            .collect();
         let candidates = switcher_candidates(recent, &strip);
         let order = switcher_capped(
             switcher_order(&self.session_mru, &candidates),
