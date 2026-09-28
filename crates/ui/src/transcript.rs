@@ -1130,6 +1130,11 @@ pub enum RowKind {
         detail: SharedString,
         outcome: Option<ConsentOutcome>,
     },
+    ComputerForeground {
+        request_id: SharedString,
+        question_id: SharedString,
+        app: Option<SharedString>,
+    },
     ComputerNotice {
         notice: ComputerNotice,
         text: SharedString,
@@ -1818,9 +1823,10 @@ pub fn rows_for_entry(
                     }
                     MessagePart::Input {
                         id: part_id,
+                        request_id,
                         questions,
+                        resolved,
                         answers,
-                        ..
                     } if questions.iter().any(|question| {
                         matches!(
                             question.kind,
@@ -1828,21 +1834,52 @@ pub fn rows_for_entry(
                         )
                     }) =>
                     {
-                        let Some(text) = crate::computer::cards::foreground_outcome_label(
+                        let (version, kind) = match crate::computer::cards::foreground_outcome_label(
                             questions,
                             answers.as_deref(),
-                        ) else {
-                            continue;
+                        ) {
+                            Some(text) => (
+                                fnv1a(text.as_bytes()),
+                                RowKind::ComputerNotice {
+                                    notice: ComputerNotice::Foreground,
+                                    text: text.into(),
+                                    hint: None,
+                                },
+                            ),
+                            None if *resolved => continue,
+                            None => {
+                                let Some((question, app)) =
+                                    questions.iter().find_map(|question| match &question.kind {
+                                        Some(zeron_proto::UserInputKind::Foreground { app }) => {
+                                            Some((question, app))
+                                        }
+                                        _ => None,
+                                    })
+                                else {
+                                    continue;
+                                };
+                                let app = app.as_ref().map(|app| SharedString::from(&app.name));
+                                (
+                                    fnv1a(
+                                        format!(
+                                            "foreground\0{request_id}\0{}",
+                                            app.as_deref().unwrap_or_default()
+                                        )
+                                        .as_bytes(),
+                                    ),
+                                    RowKind::ComputerForeground {
+                                        request_id: request_id.clone().into(),
+                                        question_id: question.id.clone().into(),
+                                        app,
+                                    },
+                                )
+                            }
                         };
                         rows.push(Row {
                             id: format!("{}#{}", entry.id, part_id).into(),
-                            version: fnv1a(text.as_bytes()),
+                            version,
                             turn_start: false,
-                            kind: RowKind::ComputerNotice {
-                                notice: ComputerNotice::Foreground,
-                                text: text.into(),
-                                hint: None,
-                            },
+                            kind,
                             entry_id: entry_id.clone(),
                             timestamp: None,
                             copy_text: None,
@@ -3639,8 +3676,8 @@ pub struct Transcript {
     copied_message_clear: Option<Task<()>>,
     consent_sent: HashMap<SharedString, ConsentOutcome>,
     consent_failures: HashMap<SharedString, SharedString>,
+    foreground_sent: HashSet<SharedString>,
     strip_pending: Option<String>,
-    strip_answered: HashSet<String>,
     html_files: HashMap<std::path::PathBuf, HtmlFileState>,
     html_apps: Option<Arc<Vec<crate::html_open::AppChoice>>>,
     html_apps_task: Option<Task<()>>,
@@ -3930,8 +3967,8 @@ impl Transcript {
             copied_message_clear: None,
             consent_sent: HashMap::new(),
             consent_failures: HashMap::new(),
+            foreground_sent: HashSet::new(),
             strip_pending: None,
-            strip_answered: HashSet::new(),
             html_files: HashMap::new(),
             html_apps: None,
             html_apps_task: None,
@@ -3960,9 +3997,6 @@ impl Transcript {
                     .and_then(|presence| presence.pending.as_ref())
                     .map(|pending| pending.input_id.clone());
                 if this.strip_pending != pending {
-                    if let Some(previous) = this.strip_pending.take() {
-                        this.strip_answered.insert(previous);
-                    }
                     this.strip_pending = pending;
                     cx.notify();
                 }
@@ -7580,14 +7614,19 @@ impl Transcript {
             return gpui::Empty.into_any_element();
         };
         self.rendered_rows.insert(row.id.clone());
-        if let RowKind::ComputerConsent {
-            request_id,
-            outcome: None,
-            ..
-        } = &row.kind
-            && !self.consent_sent.contains_key(request_id)
-            && (self.strip_answered.contains(request_id.as_ref())
-                || self.consent_on_strip(request_id, cx))
+        let answerable = match &row.kind {
+            RowKind::ComputerConsent {
+                request_id,
+                outcome: None,
+                ..
+            } if !self.consent_sent.contains_key(request_id) => Some(request_id),
+            RowKind::ComputerForeground { request_id, .. } => Some(request_id),
+            _ => None,
+        };
+        if let Some(request_id) = answerable
+            && (self.foreground_sent.contains(request_id)
+                || self.answered_off_card(request_id, cx)
+                || self.pending_on_strip(request_id, cx))
         {
             return gpui::Empty.into_any_element();
         }
@@ -7971,6 +8010,17 @@ impl Transcript {
                 app.as_ref(),
                 detail,
                 *outcome,
+                &theme,
+                cx,
+            ),
+            RowKind::ComputerForeground {
+                request_id,
+                question_id,
+                app,
+            } => self.render_computer_foreground(
+                request_id.clone(),
+                question_id.clone(),
+                app.as_deref(),
                 &theme,
                 cx,
             ),
@@ -9490,13 +9540,110 @@ impl Transcript {
         )
     }
 
-    fn consent_on_strip(&self, request_id: &str, cx: &gpui::App) -> bool {
+    fn answer_foreground(
+        &mut self,
+        request_id: SharedString,
+        question_id: SharedString,
+        allow: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.foreground_sent.contains(&request_id) {
+            return;
+        }
+        let Some(chat_id) = self.chat_id.clone() else {
+            return;
+        };
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        self.foreground_sent.insert(request_id.clone());
+        self.consent_failures.remove(&request_id);
+        cx.notify();
+        let label = if allow {
+            zeron_engine::computer::engine_seams::COMPUTER_FOREGROUND_ALLOW
+        } else {
+            zeron_engine::computer::engine_seams::COMPUTER_FOREGROUND_DECLINE
+        };
+        let answers = vec![zeron_proto::UserInputAnswer {
+            question_id: question_id.to_string(),
+            labels: vec![label.into()],
+        }];
+        cx.spawn(async move |this, cx| {
+            let sent =
+                crate::composer::respond_input(&engine, &chat_id, &request_id, answers).await;
+            if let Err(err) = sent {
+                this.update(cx, |transcript, cx| {
+                    transcript.foreground_sent.remove(&request_id);
+                    transcript
+                        .consent_failures
+                        .insert(request_id, format!("Answer failed: {err}").into());
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    fn render_computer_foreground(
+        &mut self,
+        request_id: SharedString,
+        question_id: SharedString,
+        app: Option<&str>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let actions = [
+            (
+                zeron_engine::computer::engine_seams::COMPUTER_FOREGROUND_ALLOW,
+                true,
+            ),
+            (
+                zeron_engine::computer::engine_seams::COMPUTER_FOREGROUND_DECLINE,
+                false,
+            ),
+        ]
+        .into_iter()
+        .map(|(label, allow)| {
+            let (request_id, question_id) = (request_id.clone(), question_id.clone());
+            CardAction {
+                id: format!("computer-foreground-{request_id}-{label}").into(),
+                label: label.into(),
+                primary: allow,
+                on_click: Box::new(cx.listener(move |this, _, _, cx| {
+                    this.answer_foreground(request_id.clone(), question_id.clone(), allow, cx)
+                })),
+            }
+        })
+        .collect();
+        computer_card(
+            CardTone::Warning,
+            crate::icons::CURSOR,
+            format!(
+                "{} needs to come to the front to type",
+                app.unwrap_or("The app")
+            )
+            .into(),
+            vec!["It will cover your screen; don't type while the agent works".into()],
+            actions,
+            self.consent_failures.get(&request_id).cloned(),
+            theme,
+        )
+    }
+
+    fn answered_off_card(&self, request_id: &str, cx: &gpui::App) -> bool {
+        self.chat_id
+            .as_deref()
+            .is_some_and(|chat_id| crate::computer::presence::answered(chat_id, request_id, cx))
+    }
+
+    fn pending_on_strip(&self, request_id: &str, cx: &gpui::App) -> bool {
         let Some(chat_id) = self.chat_id.as_deref() else {
             return false;
         };
         crate::computer::presence::for_chat(chat_id, cx)
-            .and_then(|presence| crate::computer::strip::consent_request(&presence))
-            .is_some_and(|ask| ask.input_id == request_id)
+            .and_then(|presence| presence.pending)
+            .is_some_and(|pending| pending.input_id == request_id)
     }
 
     fn chat_hosted_here(&self, cx: &gpui::App) -> bool {
@@ -10741,6 +10888,7 @@ fn shows_protected_surface(
             outcome: None,
             ..
         } => !answered.contains_key(request_id),
+        RowKind::ComputerForeground { .. } => true,
         RowKind::InputChip {
             resolved: false, ..
         } => true,
@@ -17250,6 +17398,36 @@ mod computer_tests {
         }
     }
 
+    fn foreground_part(resolved: bool, label: Option<&str>) -> MessagePart {
+        MessagePart::Input {
+            id: "f1".into(),
+            request_id: "f1".into(),
+            questions: vec![UserInputQuestion {
+                id: "foreground".into(),
+                header: "Computer".into(),
+                question:
+                    "Ghostty needs to come to the front to type. Allow for the rest of this turn?"
+                        .into(),
+                options: vec!["Allow for this turn".into(), "No".into()],
+                multi_select: false,
+                kind: Some(UserInputKind::Foreground {
+                    app: Some(zeron_proto::computer::ComputerConsentApp {
+                        name: "Ghostty".into(),
+                        bundle_id: Some("com.mitchellh.ghostty".into()),
+                        pid: Some(4242),
+                    }),
+                }),
+            }],
+            resolved,
+            answers: label.map(|label| {
+                vec![UserInputAnswer {
+                    question_id: "foreground".into(),
+                    labels: vec![label.into()],
+                }]
+            }),
+        }
+    }
+
     fn tool_part(
         id: &str,
         tool: &str,
@@ -17705,49 +17883,32 @@ mod computer_tests {
     }
 
     #[test]
-    fn a_foreground_question_shows_nothing_while_pending_and_its_outcome_after() {
-        let question = zeron_proto::UserInputQuestion {
-            id: "foreground".into(),
-            header: "Computer".into(),
-            question:
-                "Ghostty needs to come to the front to type. Allow for the rest of this turn?"
-                    .into(),
-            options: vec!["Allow for this turn".into(), "No".into()],
-            multi_select: false,
-            kind: Some(zeron_proto::UserInputKind::Foreground {
-                app: Some(zeron_proto::computer::ComputerConsentApp {
-                    name: "Ghostty".into(),
-                    bundle_id: Some("com.mitchellh.ghostty".into()),
-                    pid: Some(4242),
-                }),
-            }),
-        };
+    fn a_foreground_question_is_a_card_while_pending_and_its_outcome_after() {
         let rows = |resolved: bool, label: Option<&str>| {
             rows_for_entry(
                 &entry(
                     MessageRole::Assistant,
-                    vec![MessagePart::Input {
-                        id: "f1".into(),
-                        request_id: "f1".into(),
-                        questions: vec![question.clone()],
-                        resolved,
-                        answers: label.map(|label| {
-                            vec![zeron_proto::UserInputAnswer {
-                                question_id: "foreground".into(),
-                                labels: vec![label.into()],
-                            }]
-                        }),
-                    }],
+                    vec![foreground_part(resolved, label)],
                 ),
                 false,
                 false,
                 &mut parse,
             )
         };
-        assert!(
-            rows(false, None).is_empty(),
-            "the strip asks, not the transcript"
+        let pending = rows(false, None);
+        let RowKind::ComputerForeground {
+            request_id,
+            question_id,
+            app,
+        } = &pending[0].kind
+        else {
+            panic!("expected the foreground card");
+        };
+        assert_eq!(
+            (request_id.as_ref(), question_id.as_ref(), app.as_deref()),
+            ("f1", "foreground", Some("Ghostty"))
         );
+        assert!(shows_protected_surface(&pending, &HashMap::new(), || false));
         assert!(
             rows(true, None).is_empty(),
             "a cancelled question leaves no row"
@@ -17767,6 +17928,7 @@ mod computer_tests {
                 (*notice, text.as_ref()),
                 (ComputerNotice::Foreground, expected)
             );
+            assert_ne!(rows[0].version, pending[0].version);
             for leak in ["com.mitchellh", "4242", "computer_"] {
                 assert!(!text.contains(leak), "{leak}");
             }
@@ -18010,7 +18172,7 @@ mod computer_tests {
         cx.update(|_, cx| {
             preview::update_store(&store, cx, |store| {
                 store.apply_event(&ComputerEvent::ThreadState {
-                    state: Box::new(asking),
+                    state: Box::new(asking.clone()),
                 })
             })
         });
@@ -18025,14 +18187,35 @@ mod computer_tests {
             "no card, no gap"
         );
 
+        let idle = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, cx| {
+                preview::update_store(&store, cx, |store| {
+                    store.apply_event(&ComputerEvent::ThreadState {
+                        state: Box::new(thread_state("chat", false)),
+                    })
+                })
+            });
+            cx.run_until_parked();
+        };
+        idle(cx);
+        assert!(
+            cx.debug_bounds(deny).is_some(),
+            "left the strip unanswered here (displaced, or the turn moved on): the card answers"
+        );
+
         cx.update(|_, cx| {
             preview::update_store(&store, cx, |store| {
                 store.apply_event(&ComputerEvent::ThreadState {
-                    state: Box::new(thread_state("chat", false)),
+                    state: Box::new(asking.clone()),
                 })
             })
         });
         cx.run_until_parked();
+        assert!(cx.debug_bounds(deny).is_none());
+        cx.update(|_, cx| {
+            crate::computer::presence::set_answered("chat", "computer-consent-1", true, cx)
+        });
+        idle(cx);
         assert_eq!(
             cx.debug_bounds("consent-row").unwrap().size.height,
             px(0.0),
@@ -18053,6 +18236,122 @@ mod computer_tests {
         assert!(
             cx.debug_bounds("consent-row").unwrap().size.height > px(0.0),
             "the outcome stays in the transcript"
+        );
+    }
+
+    #[gpui::test]
+    fn a_foreground_question_on_a_viewer_without_presence_is_answerable(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::computer::preview::{self, tests::thread_state};
+        use zeron_proto::computer::ComputerEvent;
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            preview::init(cx);
+        });
+        let (out, mut frames) = tokio::sync::mpsc::channel::<String>(16);
+        let (replies, inbound) = tokio::sync::mpsc::channel::<String>(16);
+        std::mem::forget(replies);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(
+                zeron_rpc::RpcClient::new(out, inbound),
+            ))
+        });
+        let transcript = cx.new(|cx| Transcript::new(state, cx));
+        transcript.update(cx, |transcript, _| {
+            transcript.chat_id = Some("chat".into());
+            transcript.rows = rows_for_entry(
+                &entry(MessageRole::Assistant, vec![foreground_part(false, None)]),
+                false,
+                false,
+                &mut parse,
+            );
+        });
+        struct Fixture(Entity<Transcript>);
+        impl Render for Fixture {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let row = self.0.update(cx, |this, cx| this.render_row(0, window, cx));
+                div()
+                    .w(px(640.0))
+                    .child(div().debug_selector(|| "foreground-row".into()).child(row))
+            }
+        }
+        let (fixture, cx) = cx.add_window_view(|_, _| Fixture(transcript.clone()));
+        let repaint = |cx: &mut gpui::VisualTestContext| {
+            fixture.update(cx, |_, cx| cx.notify());
+            cx.run_until_parked();
+        };
+        let allow = "computer-foreground-f1-Allow for this turn";
+        repaint(cx);
+        assert!(
+            cx.debug_bounds(allow).is_some(),
+            "no presence holds it (a remote or older viewer): the card answers"
+        );
+        assert!(cx.debug_bounds("computer-foreground-f1-No").is_some());
+
+        let store = cx.update(|_, cx| preview::store(cx).unwrap());
+        let publish = |cx: &mut gpui::VisualTestContext, input_id: Option<&str>| {
+            let mut asking = thread_state("chat", false);
+            asking.pending_request = input_id.map(|input_id| {
+                let mut pending =
+                    crate::computer::strip::tests::foreground_pending(Some("Ghostty"));
+                pending.input_id = input_id.into();
+                pending
+            });
+            cx.update(|_, cx| {
+                preview::update_store(&store, cx, |store| {
+                    store.apply_event(&ComputerEvent::ThreadState {
+                        state: Box::new(asking),
+                    })
+                })
+            });
+            cx.run_until_parked();
+        };
+        publish(cx, Some("f1"));
+        assert!(
+            cx.debug_bounds(allow).is_none(),
+            "the strip has the question"
+        );
+        assert_eq!(
+            cx.debug_bounds("foreground-row").unwrap().size.height,
+            px(0.0)
+        );
+        publish(cx, Some("computer-foreground-2"));
+        assert!(
+            cx.debug_bounds(allow).is_some(),
+            "another request heads the strip: this one stays answerable here"
+        );
+
+        publish(cx, None);
+        let bounds = cx.debug_bounds(allow).expect("Allow painted");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        let frame: serde_json::Value = serde_json::from_str(&frames.try_recv().unwrap()).unwrap();
+        assert_eq!(frame["method"], zeron_rpc::methods::QUEUE_COMMAND);
+        assert_eq!(frame["params"]["chatId"], "chat");
+        let command: zeron_doc::SessionCommandPayload =
+            serde_json::from_value(frame["params"]["command"].clone()).unwrap();
+        assert_eq!(
+            command,
+            zeron_doc::SessionCommandPayload::RespondInput {
+                request_id: "f1".into(),
+                answers: vec![UserInputAnswer {
+                    question_id: "foreground".into(),
+                    labels: vec!["Allow for this turn".into()],
+                }],
+            }
+        );
+        repaint(cx);
+        assert!(
+            cx.debug_bounds(allow).is_none(),
+            "answered here: the card waits for its outcome instead of asking again"
         );
     }
 

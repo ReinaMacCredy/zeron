@@ -183,11 +183,13 @@ pub(crate) fn answer_pending(
     let Some(engine) = state.read(cx).engine().cloned() else {
         return;
     };
-    cx.spawn(async move |_| {
+    super::presence::set_answered(&chat_id, &input_id, true, cx);
+    cx.spawn(async move |cx| {
         if let Err(error) =
             crate::composer::respond_input(&engine, &chat_id, &input_id, answers).await
         {
             tracing::warn!(target: "desktop_cua", "answer the pending computer request: {error}");
+            cx.update(|cx| super::presence::set_answered(&chat_id, &input_id, false, cx));
         }
     })
     .detach();
@@ -646,6 +648,19 @@ mod tests {
             .unwrap()
         );
         assert_eq!(*opened.borrow(), vec!["a".to_string()]);
+        cx.update(|cx| {
+            for input in ["computer-foreground-3", "computer-consent-4"] {
+                assert!(
+                    crate::computer::presence::answered("a", input, cx),
+                    "{input}: a menu answer marks the id as answered here"
+                );
+            }
+            assert!(!crate::computer::presence::answered(
+                "b",
+                "computer-consent-4",
+                cx
+            ));
+        });
 
         apply(
             cx,

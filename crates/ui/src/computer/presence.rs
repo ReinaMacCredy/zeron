@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use gpui::{App, Entity};
 use zeron_proto::computer::{ComputerPendingKind, ComputerPendingRequest, ThreadComputerState};
 
@@ -36,7 +38,6 @@ fn window_target(state: &ThreadComputerState, window_id: &str) -> Option<String>
     window
         .app_name
         .clone()
-        .or_else(|| Some(window.title.clone()))
         .filter(|target| !target.trim().is_empty())
 }
 
@@ -45,15 +46,13 @@ pub fn chat_presence(store: &ComputerPreviewStore, chat_id: &str) -> Option<Chat
     let state = chat.state.as_ref();
     let own = state.filter(|state| !state.controlled_by_other_thread);
     let own_pause = own.and_then(|state| state.input_pause.as_ref());
-    let pending = own
-        .and_then(|state| state.pending_request.clone())
-        .filter(|_| !chat.revoked_latched);
-    let tone = if chat.revoked_latched {
+    let pending = own.and_then(|state| state.pending_request.clone());
+    let tone = if pending.is_some() {
+        PresenceTone::NeedsYou
+    } else if chat.revoked_latched {
         PresenceTone::Revoked {
             summing_up: state.is_some_and(|state| state.input_stopped == Some(true)),
         }
-    } else if pending.is_some() {
-        PresenceTone::NeedsYou
     } else if own_pause.is_some() || chat.user_paused {
         PresenceTone::Paused
     } else if state.is_some_and(preview::agent_active) {
@@ -205,10 +204,13 @@ pub fn rail_entries(store: &ComputerPreviewStore) -> Vec<RailEntry> {
     entries
 }
 
+const ANSWERED_LIMIT: usize = 32;
+
 #[derive(Debug, Default)]
 pub struct ComputerPresenceMap {
     chats: Vec<ChatPresence>,
     rail: Vec<RailEntry>,
+    answered: VecDeque<(String, String)>,
 }
 
 impl ComputerPresenceMap {
@@ -241,6 +243,24 @@ impl ComputerPresenceMap {
     pub fn chats(&self) -> &[ChatPresence] {
         &self.chats
     }
+
+    pub fn set_answered(&mut self, chat_id: &str, input_id: &str, answered: bool) {
+        self.answered
+            .retain(|(chat, input)| chat != chat_id || input != input_id);
+        if answered {
+            if self.answered.len() == ANSWERED_LIMIT {
+                self.answered.pop_front();
+            }
+            self.answered
+                .push_back((chat_id.to_owned(), input_id.to_owned()));
+        }
+    }
+
+    pub fn answered(&self, chat_id: &str, input_id: &str) -> bool {
+        self.answered
+            .iter()
+            .any(|(chat, input)| chat == chat_id && input == input_id)
+    }
 }
 
 pub fn map(cx: &App) -> Option<Entity<ComputerPresenceMap>> {
@@ -257,6 +277,16 @@ pub fn tone(chat_id: &str, cx: &App) -> Option<PresenceTone> {
 
 pub fn rail_entry(chat_id: &str, cx: &App) -> Option<RailEntry> {
     map(cx)?.read(cx).rail_entry(chat_id).cloned()
+}
+
+pub fn set_answered(chat_id: &str, input_id: &str, answered: bool, cx: &mut App) {
+    if let Some(map) = map(cx) {
+        map.update(cx, |map, _| map.set_answered(chat_id, input_id, answered));
+    }
+}
+
+pub fn answered(chat_id: &str, input_id: &str, cx: &App) -> bool {
+    map(cx).is_some_and(|map| map.read(cx).answered(chat_id, input_id))
 }
 
 #[cfg(test)]
@@ -661,8 +691,9 @@ mod tests {
         state(&mut store, bystander);
         assert_eq!(chat_presence(&store, "b"), None);
 
-        let mut revoked = asking;
+        let mut revoked = asking.clone();
         revoked.input_stopped = Some(true);
+        revoked.pending_request = None;
         state(&mut store, revoked);
         assert_eq!(
             chat_presence(&store, "a").unwrap(),
@@ -674,12 +705,33 @@ mod tests {
                 tone: PresenceTone::Revoked { summing_up: true },
                 user_takeover: false,
                 pending: None,
-            },
-            "a revoke outranks the question"
+            }
+        );
+        state(&mut store, asking);
+        let presence = chat_presence(&store, "a").unwrap();
+        assert_eq!(
+            (presence.tone, presence.pending.as_ref()),
+            (PresenceTone::NeedsYou, Some(&pending)),
+            "a question never hides behind a stale revoke latch"
         );
         store.clear_revoked("a");
         state(&mut store, thread_state("a", false));
         assert_eq!(chat_presence(&store, "a"), None, "answered, idle");
+    }
+
+    #[test]
+    fn answered_ids_are_per_chat_bounded_and_can_be_withdrawn() {
+        let mut map = ComputerPresenceMap::default();
+        map.set_answered("a", "computer-consent-1", true);
+        assert!(map.answered("a", "computer-consent-1"));
+        assert!(!map.answered("b", "computer-consent-1"));
+        map.set_answered("a", "computer-consent-1", false);
+        assert!(!map.answered("a", "computer-consent-1"), "a failed send");
+        for n in 0..=ANSWERED_LIMIT {
+            map.set_answered("a", &format!("input-{n}"), true);
+        }
+        assert!(!map.answered("a", "input-0"), "the oldest falls out");
+        assert!(map.answered("a", &format!("input-{ANSWERED_LIMIT}")));
     }
 
     #[test]
@@ -699,6 +751,16 @@ mod tests {
         assert!(!presence.user_takeover);
         assert_eq!(presence.app.as_deref(), Some("Calculator"));
         assert_eq!(presence.window_id.as_deref(), Some("w1"));
+        let mut untitled = paused.clone();
+        untitled.windows[0].app_name = None;
+        untitled.windows[0].title = "ssh prod -- rm hunter2".into();
+        state(&mut store, untitled);
+        let presence = chat_presence(&store, "a").unwrap();
+        assert_eq!(presence.app, None, "a window title never names the target");
+        assert_eq!(
+            crate::computer::strip::strip_copy(&presence).text(),
+            "The target window isn't reachable · bring it onto this desktop or exit full screen"
+        );
         paused.input_pause.as_mut().unwrap().window_id = Some("gone".into());
         state(&mut store, paused);
         assert_eq!(chat_presence(&store, "a").unwrap().app, None);

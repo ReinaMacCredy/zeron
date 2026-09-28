@@ -667,7 +667,9 @@ pub fn pending_input_request(
                     questions,
                     resolved: false,
                     ..
-                } if !questions.iter().any(UserInputQuestion::is_computer) => {
+                } if !questions.is_empty()
+                    && !questions.iter().any(UserInputQuestion::is_computer) =>
+                {
                     Some((request_id.clone(), questions.clone()))
                 }
                 _ => None,
@@ -16470,6 +16472,17 @@ mod tests {
             ..question("foreground", &["Allow for this turn", "No"], false)
         };
         assert!(pending_input_request(&[entry(vec![part("f1", foreground)])]).is_none());
+        let undecodable = MessagePart::Input {
+            id: "u1".into(),
+            request_id: "u1".into(),
+            questions: Vec::new(),
+            resolved: false,
+            answers: None,
+        };
+        assert!(
+            pending_input_request(&[entry(vec![undecodable])]).is_none(),
+            "an Input part with no decodable questions never takes the composer"
+        );
         assert_eq!(
             pending_input_request(&[entry(vec![
                 part("c1", consent),
