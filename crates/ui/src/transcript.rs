@@ -3640,6 +3640,7 @@ pub struct Transcript {
     consent_sent: HashMap<SharedString, ConsentOutcome>,
     consent_failures: HashMap<SharedString, SharedString>,
     strip_pending: Option<String>,
+    strip_answered: HashSet<String>,
     html_files: HashMap<std::path::PathBuf, HtmlFileState>,
     html_apps: Option<Arc<Vec<crate::html_open::AppChoice>>>,
     html_apps_task: Option<Task<()>>,
@@ -3930,6 +3931,7 @@ impl Transcript {
             consent_sent: HashMap::new(),
             consent_failures: HashMap::new(),
             strip_pending: None,
+            strip_answered: HashSet::new(),
             html_files: HashMap::new(),
             html_apps: None,
             html_apps_task: None,
@@ -3958,6 +3960,9 @@ impl Transcript {
                     .and_then(|presence| presence.pending.as_ref())
                     .map(|pending| pending.input_id.clone());
                 if this.strip_pending != pending {
+                    if let Some(previous) = this.strip_pending.take() {
+                        this.strip_answered.insert(previous);
+                    }
                     this.strip_pending = pending;
                     cx.notify();
                 }
@@ -7581,7 +7586,8 @@ impl Transcript {
             ..
         } = &row.kind
             && !self.consent_sent.contains_key(request_id)
-            && self.consent_on_strip(request_id, cx)
+            && (self.strip_answered.contains(request_id.as_ref())
+                || self.consent_on_strip(request_id, cx))
         {
             return gpui::Empty.into_any_element();
         }
@@ -18017,6 +18023,20 @@ mod computer_tests {
             cx.debug_bounds("consent-row").unwrap().size.height,
             px(0.0),
             "no card, no gap"
+        );
+
+        cx.update(|_, cx| {
+            preview::update_store(&store, cx, |store| {
+                store.apply_event(&ComputerEvent::ThreadState {
+                    state: Box::new(thread_state("chat", false)),
+                })
+            })
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("consent-row").unwrap().size.height,
+            px(0.0),
+            "answered on the strip: the card never flashes back before the doc settles"
         );
 
         transcript.update(cx, |transcript, _| {
