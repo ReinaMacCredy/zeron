@@ -136,7 +136,6 @@ impl PreviewView {
 #[derive(Default)]
 pub struct ComputerPreviewStore {
     chats: HashMap<String, ChatPreview>,
-    input_stopped: bool,
     events_live: bool,
     settings: ComputerSettings,
     settings_stale: bool,
@@ -159,7 +158,7 @@ pub fn status_label(
     last_action_label: Option<&str>,
 ) -> Option<String> {
     if input_stopped {
-        return Some("Stopped via Escape".into());
+        return Some("Desktop access revoked".into());
     }
     if agent_active {
         return Some(activity.or(last_action_label).unwrap_or("Live").to_owned());
@@ -374,9 +373,6 @@ impl ComputerPreviewStore {
                 }
                 true
             }
-            ComputerEvent::InputStopped { stopped } => {
-                std::mem::replace(&mut self.input_stopped, *stopped) != *stopped
-            }
             _ => false,
         }
     }
@@ -518,8 +514,7 @@ impl ComputerPreviewStore {
                 || (chat.armed_by_still
                     && matches!(phase, Some(PreviewPhase::Armed | PreviewPhase::Live)))
         });
-        let input_stopped =
-            self.input_stopped || state.is_some_and(|state| state.input_stopped == Some(true));
+        let input_stopped = state.is_some_and(|state| state.input_stopped == Some(true));
         let tap = chat
             .and_then(|chat| chat.tap.clone())
             .filter(|_| driving(state));
@@ -1042,6 +1037,26 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_revoke_marks_only_its_own_chat() {
+        let mut store = ComputerPreviewStore::default();
+        driving(&mut store, "a");
+        driving(&mut store, "b");
+        let mut revoked = thread_state("a", true);
+        revoked.input_stopped = Some(true);
+        assert!(store.apply_event(&ComputerEvent::ThreadState {
+            state: Box::new(revoked),
+        }));
+        assert!(!store.apply_event(&ComputerEvent::InputStopped { stopped: true }));
+        assert_eq!(
+            store.view("a").status_label.as_deref(),
+            Some("Desktop access revoked")
+        );
+        assert_eq!(store.view("b").status_label.as_deref(), Some("Live"));
+        driving(&mut store, "a");
+        assert_eq!(store.view("a").status_label.as_deref(), Some("Live"));
+    }
+
+    #[test]
     fn labels_follow_synaras_popover_and_badge() {
         let mut store = ComputerPreviewStore::default();
         driving(&mut store, "a");
@@ -1073,11 +1088,15 @@ pub(crate) mod tests {
             store.view("a").status_label.as_deref(),
             Some("Typing in Calculator")
         );
-        store.apply_event(&ComputerEvent::InputStopped { stopped: true });
+        active.input_stopped = Some(true);
+        store.apply_event(&ComputerEvent::ThreadState {
+            state: Box::new(active.clone()),
+        });
         assert_eq!(
             store.view("a").status_label.as_deref(),
-            Some("Stopped via Escape")
+            Some("Desktop access revoked")
         );
+        active.input_stopped = None;
         assert_eq!(
             status_badge(Some(&active), true, true).unwrap().label,
             "Typing in Calculator"

@@ -5,12 +5,12 @@ use futures::FutureExt;
 use serde_json::{Map, Value};
 use tokio_util::sync::CancellationToken;
 use zeron_proto::PermissionMode;
-use zeron_proto::computer::{ComputerAllowedApp, ComputerEvent, CuaComputerTask};
+use zeron_proto::computer::{ComputerAllowedApp, CuaComputerTask};
 
 use super::{
-    Authority, COMPUTER_CONTROL_TEARDOWN_TIMEOUT_MS, ComputerCaller, ComputerConsent,
-    ComputerConsentCard, ComputerConsentScope, ComputerConsentTarget, ComputerManager,
-    agent_thread_id, lock, with_teardown_timeout,
+    Authority, COMPUTER_CONTROL_TEARDOWN_TIMEOUT_MS, COMPUTER_USER_REVOKED, ComputerCaller,
+    ComputerConsent, ComputerConsentCard, ComputerConsentScope, ComputerConsentTarget,
+    ComputerManager, agent_thread_id, lock, with_teardown_timeout,
 };
 use crate::computer::approval_gate::{AppGrant, ApprovalPublish, ApprovalRequest};
 use crate::computer::backend::{ComputerBackendError, ComputerError};
@@ -22,12 +22,8 @@ use crate::computer::desktop_operation_queue::{
     with_desktop_operation_signal, without_desktop_cancellation,
 };
 
-const REVOKED_IN_FLIGHT: &str =
-    "Computer control was revoked for this conversation; no new input may be dispatched.";
 const REVOKED_ADMISSION: &str =
     "Computer control was revoked for this conversation; no input was dispatched.";
-const ESCAPE_STOPPED: &str =
-    "Computer input was stopped with the Escape key; no new input may be dispatched.";
 
 fn revoked(message: &str) -> ComputerBackendError {
     ComputerBackendError {
@@ -379,7 +375,7 @@ impl ComputerManager {
         thread_id: &str,
     ) -> impl Future<Output = Result<(), ComputerError>> + use<> {
         self.approval_gate.cancel_thread(thread_id, None);
-        let reason = revoked(REVOKED_IN_FLIGHT);
+        let reason = revoked(COMPUTER_USER_REVOKED);
         {
             let mut state = self.state();
             state.revoked_threads.insert(thread_id.to_owned());
@@ -486,8 +482,7 @@ impl ComputerManager {
             threads.dedup();
             threads
         };
-        self.emit(ComputerEvent::InputStopped { stopped: true });
-        let reason = revoked(ESCAPE_STOPPED);
+        let reason = revoked(COMPUTER_USER_REVOKED);
         {
             let state = self.state();
             for authority in state.authority_revocations.values() {
@@ -509,8 +504,37 @@ impl ComputerManager {
             self.seams.generation_bumped(thread_id, generation);
         }
         let result = self.backend.stop_input(None).await;
-        self.emit(ComputerEvent::InputStopped { stopped: false });
         (stopped, result)
+    }
+
+    pub async fn revoke_desktop(&self, thread_id: &str) -> Result<(), ComputerError> {
+        self.set_desktop_revoked(thread_id, true);
+        with_teardown_timeout(self.revoke_control(thread_id)).await
+    }
+
+    pub fn clear_desktop_revoked(&self, thread_id: &str) {
+        self.set_desktop_revoked(thread_id, false);
+    }
+
+    fn set_desktop_revoked(&self, thread_id: &str, revoked: bool) {
+        {
+            let mut state = self.state();
+            if state.disposed || state.suspended_threads.contains(thread_id) {
+                return;
+            }
+            let runtime = if revoked {
+                Some(state.thread_runtime(thread_id))
+            } else {
+                state.thread_mut(thread_id)
+            };
+            match runtime {
+                Some(runtime) if runtime.desktop_revoked != revoked => {
+                    runtime.desktop_revoked = revoked;
+                }
+                _ => return,
+            }
+        }
+        self.publish_cached(thread_id);
     }
 
     pub async fn handle_thread_removed(&self, thread_id: &str) {

@@ -199,6 +199,12 @@ pub struct GetComputerStillFrameParams {
     pub chat_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerRevokeDesktopParams {
+    pub chat_id: String,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ComputerPreviewSize {

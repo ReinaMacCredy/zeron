@@ -112,7 +112,7 @@ async fn revokes_queued_admission_and_aborts_the_active_operation() {
     blocked.resolve();
     assert_eq!(first.await.unwrap().unwrap(), "ended");
     let error = queued.await.unwrap().unwrap_err();
-    assert!(error.to_string().contains("revoked"));
+    assert!(error.control_revoked(), "{error}");
     assert!(!worked.load(Ordering::SeqCst));
     let worked_again = worked.clone();
     assert_eq!(

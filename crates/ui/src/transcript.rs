@@ -47,7 +47,7 @@ use crate::computer::cards::{
     computer_card, computer_event_row, computer_notice, consent_allow_description, consent_answers,
     consent_app, consent_card_title, consent_choices, consent_detail, consent_outcome,
     consent_outcome_label, consent_question, consent_scope, is_control_denied,
-    missing_computer_permissions,
+    missing_computer_permissions, revoked_label,
 };
 use crate::computer::presentation::{
     ComputerCall, computer_call, computer_call_app, computer_call_rows, computer_output_hidden,
@@ -1599,10 +1599,10 @@ pub fn rows_for_entry(
                 ..
             } => {
                 let computer = computer_call(call);
-                let detail = if computer
+                let output_hidden = computer
                     .as_ref()
-                    .is_some_and(|c| computer_output_hidden(c.tool, c.args))
-                {
+                    .is_some_and(|c| computer_output_hidden(c.tool, c.args));
+                let detail = if output_hidden {
                     None
                 } else {
                     tool_detail(output.as_deref(), diff.as_ref(), diff_stats.as_deref())
@@ -1626,8 +1626,11 @@ pub fn rows_for_entry(
                     resolved: *resolved,
                     detail: detail.map(Arc::new),
                     invocation: invocation.map(Arc::new),
-                    output_ref: output_ref.clone().map(SharedString::from),
-                    output_bytes: *output_bytes,
+                    output_ref: output_ref
+                        .clone()
+                        .filter(|_| !output_hidden)
+                        .map(SharedString::from),
+                    output_bytes: output_bytes.filter(|_| !output_hidden),
                     diff_ref: diff_ref.clone().map(SharedString::from),
                     subagent_ref: subagent_ref.clone().map(SharedString::from),
                     subagent_status: *subagent_status,
@@ -9448,9 +9451,13 @@ impl Transcript {
                 None,
                 theme,
             ),
-            ComputerNotice::EscapeStop => {
-                computer_event_row(crate::icons::STOP, text, CardTone::Warning, None, theme)
-            }
+            ComputerNotice::Revoked => computer_event_row(
+                crate::icons::STOP,
+                revoked_label(&text, hint.as_deref()).into(),
+                CardTone::Warning,
+                None,
+                theme,
+            ),
             ComputerNotice::Unavailable => computer_card(
                 CardTone::Warning,
                 icon,
@@ -17326,6 +17333,95 @@ mod computer_tests {
     }
 
     #[test]
+    fn a_typed_value_never_reaches_the_expanded_chip() {
+        let secret = "hunter2-typed-secret";
+        let long_output = format!(
+            r#"{{"action":"computer_type_text","appName":"Ghostty","computerId":"desktop","value":"{secret}","windowId":"cua:7:1","padding":"{}"}}"#,
+            "x".repeat(200)
+        );
+        let with_ref = |part: MessagePart| match part {
+            MessagePart::Tool {
+                id,
+                call,
+                is_error,
+                resolved,
+                output,
+                diff,
+                diff_ref,
+                diff_stats,
+                subagent_ref,
+                subagent_status,
+                subagent_tail,
+                ..
+            } => MessagePart::Tool {
+                id,
+                call,
+                is_error,
+                resolved,
+                output,
+                diff,
+                output_ref: Some("blob-typed".into()),
+                output_bytes: Some(4096),
+                diff_ref,
+                diff_stats,
+                subagent_ref,
+                subagent_status,
+                subagent_tail,
+            },
+            other => other,
+        };
+        let parts = vec![
+            with_ref(tool_part(
+                "p1",
+                "computer_type_text",
+                serde_json::json!({ "window_id": "cua:7:1", "text": secret }),
+                &format!(
+                    r#"{{"action":"computer_type_text","appName":"Ghostty","value":"{secret}"}}"#
+                ),
+                false,
+            )),
+            with_ref(tool_part(
+                "p2",
+                "computer_set_value",
+                serde_json::json!({ "window_id": "cua:7:1", "value": secret }),
+                &long_output,
+                false,
+            )),
+            with_ref(tool_part(
+                "p3",
+                "computer_run",
+                serde_json::json!({ "steps": [
+                    { "type": "type_text", "text": secret },
+                    { "type": "press_key", "key": "return" },
+                ] }),
+                &long_output,
+                false,
+            )),
+        ];
+        let rows = rows_for_entry(
+            &entry(MessageRole::Assistant, parts),
+            false,
+            false,
+            &mut parse,
+        );
+        let RowKind::ToolGroup { tools, summary, .. } = &rows[0].kind else {
+            panic!("expected one computer group");
+        };
+        assert_eq!(tools.len(), 3);
+        assert_eq!(summary.as_ref(), "Used Ghostty · 3 actions");
+        for tool in tools.iter() {
+            assert_eq!(tool.detail, None);
+            assert_eq!(
+                tool.output_ref, None,
+                "no Show full output for a typed value"
+            );
+            assert_eq!(tool.output_bytes, None);
+            let shown = format!("{:?} {:?}", tool.detail, tool.invocation);
+            assert!(!shown.contains(secret), "{shown}");
+        }
+    }
+
+    #[test]
     fn a_single_computer_action_is_singular() {
         let rows = rows_for_entry(
             &entry(
@@ -17464,7 +17560,7 @@ mod computer_tests {
         assert!(matches!(
             escape[0].kind,
             RowKind::ComputerNotice {
-                notice: ComputerNotice::EscapeStop,
+                notice: ComputerNotice::Revoked,
                 ..
             }
         ));

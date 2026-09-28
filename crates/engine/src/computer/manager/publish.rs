@@ -41,6 +41,7 @@ impl State {
             },
             cursor: None,
             pane_surfaced: false,
+            desktop_revoked: false,
         }
     }
 
@@ -159,7 +160,7 @@ impl ComputerManager {
             ),
             health: state.backend_health.clone(),
             capabilities: self.backend.capabilities(),
-            input_stopped: None,
+            input_stopped: runtime.desktop_revoked.then_some(true),
             last_error: runtime
                 .reported_error
                 .clone()

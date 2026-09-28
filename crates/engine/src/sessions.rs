@@ -161,12 +161,14 @@ pub struct ComputerRun {
     pub permission_mode: PermissionMode,
     pub run_computer_control: bool,
     pub turn_computer_control: bool,
+    pub turn_desktop_revoked: bool,
 }
 
 #[derive(Debug, Clone)]
 struct TurnMark {
     id: String,
     computer_control: bool,
+    desktop_revoked: bool,
 }
 
 struct RunComputer {
@@ -196,7 +198,15 @@ impl RunComputer {
         *lock(&self.turn) = Some(TurnMark {
             id: id.to_owned(),
             computer_control,
+            desktop_revoked: false,
         });
+    }
+
+    fn revoke_turn(&self) -> Option<String> {
+        let mut turn = lock(&self.turn);
+        let turn = turn.as_mut().filter(|turn| !turn.desktop_revoked)?;
+        turn.desktop_revoked = true;
+        Some(turn.id.clone())
     }
 
     fn end_turn(&self) -> Option<String> {
@@ -1567,8 +1577,15 @@ impl SessionsEngine {
             turn_id: turn.as_ref().map(|turn| turn.id.clone()),
             permission_mode: run.runtime_config.permission_mode,
             run_computer_control: run.runtime_config.computer_control,
-            turn_computer_control: turn.is_some_and(|turn| turn.computer_control),
+            turn_computer_control: turn.as_ref().is_some_and(|turn| turn.computer_control),
+            turn_desktop_revoked: turn.is_some_and(|turn| turn.desktop_revoked),
         })
+    }
+
+    pub fn revoke_computer_turn(&self, chat_id: &str) -> Option<String> {
+        lock(&self.inner.runs)
+            .get(chat_id)
+            .and_then(|run| run.computer.revoke_turn())
     }
 
     pub fn computer_turn_live(&self, chat_id: &str) -> bool {

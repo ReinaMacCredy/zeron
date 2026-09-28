@@ -380,6 +380,50 @@ async fn the_catalog_follows_the_turn_flag_and_lists_the_advertised_desktop_tool
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_revoked_turn_is_refused_with_user_revoked_not_capability_denied() {
+    let backend = Scripted::default_fake();
+    let rig = Rig::new(Some(backend.clone())).await;
+    rig.settings(true);
+    let secret = rig.run("c1", "type").await;
+    let typed = rig
+        .action(
+            &secret,
+            "computer_type_text",
+            json!({ "text": "a", "window_id": "fake-terminal", "include_screenshot": false }),
+            1,
+        )
+        .await
+        .unwrap();
+    assert!(!typed.is_error, "{typed:?}");
+    let reply = rig
+        .client
+        .call(methods::COMPUTER_REVOKE_DESKTOP, json!({ "chatId": CHAT }))
+        .await
+        .unwrap();
+    assert_eq!(reply, json!({ "revoked": true }));
+    for (id, tool) in [(2, "computer_type_text"), (3, "computer_list_windows")] {
+        let refused = rig
+            .action(
+                &secret,
+                tool,
+                json!({ "text": "b", "window_id": "fake-terminal", "include_screenshot": false }),
+                id,
+            )
+            .await
+            .unwrap();
+        assert!(refused.is_error, "{tool}");
+        assert_eq!(payload(&refused)["error"]["code"], json!("user_revoked"));
+        assert_eq!(
+            payload(&refused)["error"]["message"],
+            json!(crate::computer::manager::COMPUTER_USER_REVOKED)
+        );
+    }
+    assert_eq!(backend.calls_for("typeText").len(), 1);
+    assert!(rig.core.sessions.turn_in_flight(CHAT));
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unsupported_service_lists_nothing_and_refuses_every_call() {
     let rig = Rig::new(None).await;
     rig.settings(true);

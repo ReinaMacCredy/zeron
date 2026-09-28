@@ -684,12 +684,33 @@ pub fn computer_call_rows(tool: &str, args: Option<&Map<String, Value>>) -> Vec<
     rows
 }
 
-/// A clipboard read's output is the clipboard itself.
+const TEXT_OUTPUT_TOOLS: [&str; 6] = [
+    "computer_read_clipboard",
+    "computer_type_text",
+    "computer_set_value",
+    "computer_paste",
+    "computer_write_clipboard",
+    "computer_browser_type",
+];
+
+/// A clipboard read's output is the clipboard itself; a typing result echoes what was typed.
 pub fn computer_output_hidden(tool: &str, args: Option<&Map<String, Value>>) -> bool {
-    tool == "computer_read_clipboard"
+    let carries_text = |tool: &str| TEXT_OUTPUT_TOOLS.contains(&tool);
+    carries_text(tool)
         || args
             .and_then(|args| inspect_delegate(tool, args))
-            .is_some_and(|(selected, _)| selected == "computer_read_clipboard")
+            .is_some_and(|(selected, _)| carries_text(selected))
+        || (tool == "computer_run"
+            && args
+                .and_then(|args| args.get("steps"))
+                .and_then(Value::as_array)
+                .is_some_and(|steps| {
+                    steps.iter().any(|step| {
+                        step.get("type")
+                            .and_then(Value::as_str)
+                            .is_some_and(|kind| carries_text(&format!("computer_{kind}")))
+                    })
+                }))
 }
 
 #[cfg(test)]
@@ -910,6 +931,25 @@ mod tests {
             zoom.as_object()
         ));
         assert!(!computer_output_hidden("computer_screenshot", None));
+    }
+
+    #[test]
+    fn typing_results_hide_their_output() {
+        for tool in [
+            "computer_type_text",
+            "computer_set_value",
+            "computer_paste",
+            "computer_write_clipboard",
+            "computer_browser_type",
+        ] {
+            assert!(computer_output_hidden(tool, None), "{tool}");
+        }
+        let typing =
+            json!({ "steps": [{ "type": "click" }, { "type": "type_text", "text": "x" }] });
+        assert!(computer_output_hidden("computer_run", typing.as_object()));
+        let clicks = json!({ "steps": [{ "type": "click" }, { "type": "press_key" }] });
+        assert!(!computer_output_hidden("computer_run", clicks.as_object()));
+        assert!(!computer_output_hidden("computer_click", None));
     }
 
     #[test]

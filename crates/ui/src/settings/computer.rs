@@ -1652,7 +1652,7 @@ impl Render for ComputerPage {
                     &theme,
                     false,
                     "Desktop abilities",
-                    "The agent shares your Mac desktop and works in the background by default. It can bring a window forward when your task asks to watch. Background input may still affect focus. Use Stop in the chat to interrupt the task. Physical Escape interrupts the current action when Input Monitoring is granted; it does not disable future tasks.",
+                    "The agent shares your Mac desktop and works in the background by default. It can bring a window forward when your task asks to watch. Background input may still affect focus. Press Esc or Stop on the strip to take the desktop back for the rest of the turn; the agent then sums up. Esc needs Input Monitoring. The chat's Stop button ends the turn.",
                     Some(
                         format!(
                             "{backend} · {}",

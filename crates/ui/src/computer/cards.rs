@@ -6,7 +6,9 @@ use zeron_engine::computer::engine_seams::{
     consent_always_label, consent_app_title,
 };
 use zeron_engine::computer::manager::COMPUTER_CONTROL_ON_DISCLOSURE;
-use zeron_engine::computer::runtime::COMPUTER_ESCAPE_STOP_NOTICE;
+use zeron_engine::computer::runtime::{
+    COMPUTER_DESKTOP_REVOKED_NOTE, COMPUTER_ESCAPE_STOP_NOTICE, RevokeSource,
+};
 use zeron_proto::computer::{
     ComputerConsentApp, ComputerConsentScope, ComputerPermission, ThreadComputerState,
 };
@@ -18,11 +20,12 @@ use crate::theme::Theme;
 pub const COMPUTER_SETUP_NOTE: &str = "Computer control needs setup";
 pub const COMPUTER_UNAVAILABLE_NOTE: &str = "Computer is unavailable for this turn";
 const CAPABILITY_DENIED_CODE: &str = "capability_denied";
+const LEGACY_CONTROL_ON_NOTE: &str = "Computer control ON for this turn: the agent is driving the desktop and the user can switch it off in Settings.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComputerNotice {
     Disclosure,
-    EscapeStop,
+    Revoked,
     SetupRequired,
     Unavailable,
     ControlDenied,
@@ -30,12 +33,20 @@ pub enum ComputerNotice {
 
 pub fn computer_notice(note: &str) -> Option<ComputerNotice> {
     match note {
-        COMPUTER_CONTROL_ON_DISCLOSURE => Some(ComputerNotice::Disclosure),
-        COMPUTER_ESCAPE_STOP_NOTICE => Some(ComputerNotice::EscapeStop),
+        COMPUTER_CONTROL_ON_DISCLOSURE | LEGACY_CONTROL_ON_NOTE => Some(ComputerNotice::Disclosure),
+        COMPUTER_DESKTOP_REVOKED_NOTE | COMPUTER_ESCAPE_STOP_NOTICE => {
+            Some(ComputerNotice::Revoked)
+        }
         COMPUTER_SETUP_NOTE => Some(ComputerNotice::SetupRequired),
         COMPUTER_UNAVAILABLE_NOTE => Some(ComputerNotice::Unavailable),
         _ => None,
     }
+}
+
+pub fn revoked_label(text: &str, hint: Option<&str>) -> String {
+    let escape = text == COMPUTER_ESCAPE_STOP_NOTICE || hint == Some(RevokeSource::Escape.hint());
+    let suffix = if escape { " (Esc)" } else { "" };
+    format!("{COMPUTER_DESKTOP_REVOKED_NOTE}{suffix}")
 }
 
 pub fn is_control_denied(is_error: bool, output: Option<&str>) -> bool {
@@ -487,8 +498,16 @@ mod tests {
             Some(ComputerNotice::Disclosure)
         );
         assert_eq!(
+            computer_notice(LEGACY_CONTROL_ON_NOTE),
+            Some(ComputerNotice::Disclosure)
+        );
+        assert_eq!(
             computer_notice(COMPUTER_ESCAPE_STOP_NOTICE),
-            Some(ComputerNotice::EscapeStop)
+            Some(ComputerNotice::Revoked)
+        );
+        assert_eq!(
+            computer_notice(COMPUTER_DESKTOP_REVOKED_NOTE),
+            Some(ComputerNotice::Revoked)
         );
         assert_eq!(
             computer_notice("Computer control needs setup"),
@@ -499,6 +518,22 @@ mod tests {
             Some(ComputerNotice::Unavailable)
         );
         assert_eq!(computer_notice("Context compacted"), None);
+    }
+
+    #[test]
+    fn a_revoke_row_says_who_took_the_desktop_and_how() {
+        assert_eq!(
+            revoked_label(COMPUTER_DESKTOP_REVOKED_NOTE, Some("Esc")),
+            "Desktop access revoked by you (Esc)"
+        );
+        assert_eq!(
+            revoked_label(COMPUTER_DESKTOP_REVOKED_NOTE, Some("Stop")),
+            "Desktop access revoked by you"
+        );
+        assert_eq!(
+            revoked_label(COMPUTER_ESCAPE_STOP_NOTICE, None),
+            "Desktop access revoked by you (Esc)"
+        );
     }
 
     #[test]

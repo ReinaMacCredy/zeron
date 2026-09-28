@@ -29,6 +29,22 @@ const EVENT_BUFFER: usize = 256;
 const SHUTDOWN_BUDGET: Duration = Duration::from_secs(5);
 
 pub const COMPUTER_ESCAPE_STOP_NOTICE: &str = "Computer use stopped: Escape was pressed";
+pub const COMPUTER_DESKTOP_REVOKED_NOTE: &str = "Desktop access revoked by you";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevokeSource {
+    Escape,
+    Stop,
+}
+
+impl RevokeSource {
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::Escape => "Esc",
+            Self::Stop => "Stop",
+        }
+    }
+}
 
 pub struct ComputerRuntime {
     data_dir: PathBuf,
@@ -224,12 +240,29 @@ impl ComputerRuntime {
         stopped
     }
 
+    pub async fn revoke_desktop(&self, chat_id: &str, source: RevokeSource) -> bool {
+        let Some(sessions) = self.engine_seams.sessions() else {
+            return false;
+        };
+        if sessions.revoke_computer_turn(chat_id).is_none() {
+            return false;
+        }
+        if let Some(service) = self.service()
+            && let Err(error) = service.manager.revoke_desktop(chat_id).await
+        {
+            tracing::warn!(chat = %chat_id, %error, "computer desktop revoke failed");
+        }
+        sessions.write_computer_note(chat_id, COMPUTER_DESKTOP_REVOKED_NOTE, Some(source.hint()));
+        true
+    }
+
     pub fn turn_ended(&self, chat_id: &str, turn_id: &str) {
         self.calls.cancel_chat(chat_id, Some(turn_id));
         self.approval_gate.cancel_thread(chat_id, Some(turn_id));
         let Some(service) = self.service() else {
             return;
         };
+        service.manager.clear_desktop_revoked(chat_id);
         let (chat_id, turn_id) = (chat_id.to_owned(), turn_id.to_owned());
         tokio::spawn(async move {
             if let Err(error) = service

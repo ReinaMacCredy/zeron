@@ -12,7 +12,7 @@ use zeron_proto::computer::{
 };
 
 use super::backend::ComputerError;
-use super::manager::ComputerManager;
+use super::manager::{COMPUTER_USER_REVOKED, ComputerManager};
 use super::runtime::ComputerRuntime;
 use super::setup_signal::ComputerSetupSignal;
 use super::space_designation::computer_space_designation_for_messages;
@@ -284,6 +284,9 @@ pub async fn computer_action(
             "capability_denied",
             "Computer control is off for this turn; no input was sent.",
         ));
+    }
+    if run.turn_desktop_revoked {
+        return Ok(denied("user_revoked", COMPUTER_USER_REVOKED));
     }
     let key: CallKey = (params.chat_id.clone(), params.request_id.clone());
     let token = CancellationToken::new();
