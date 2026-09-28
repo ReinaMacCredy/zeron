@@ -17,7 +17,7 @@ use crate::computer::status_menu::{MenuAction, MenuRow, StatusMenu};
 const PULSE: &str = "zeron-pulse";
 
 struct TargetState {
-    actions: RefCell<Vec<MenuAction>>,
+    actions: Vec<MenuAction>,
     sender: UnboundedSender<MenuAction>,
 }
 
@@ -33,10 +33,7 @@ define_class!(
     impl MenuTarget {
         #[unsafe(method(activate:))]
         fn activate(&self, sender: &NSMenuItem) {
-            let action = usize::try_from(sender.tag())
-                .ok()
-                .and_then(|index| self.ivars().actions.borrow().get(index).cloned());
-            if let Some(action) = action {
+            if let Some(action) = action_for_tag(&self.ivars().actions, sender.tag()) {
                 let _ = self.ivars().sender.unbounded_send(action);
             }
         }
@@ -44,18 +41,19 @@ define_class!(
 );
 
 impl MenuTarget {
-    fn new(mtm: MainThreadMarker, sender: UnboundedSender<MenuAction>) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(TargetState {
-            actions: RefCell::default(),
-            sender,
-        });
+    fn new(
+        mtm: MainThreadMarker,
+        actions: Vec<MenuAction>,
+        sender: UnboundedSender<MenuAction>,
+    ) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(TargetState { actions, sender });
         unsafe { msg_send![super(this), init] }
     }
 }
 
 struct Item {
     status: Retained<NSStatusItem>,
-    target: Retained<MenuTarget>,
+    sender: UnboundedSender<MenuAction>,
     pulsing: bool,
 }
 
@@ -75,11 +73,37 @@ fn menu_item(mtm: MainThreadMarker, title: &str, key: &str) -> Retained<NSMenuIt
     }
 }
 
-fn build_menu(mtm: MainThreadMarker, target: &MenuTarget, rows: &[MenuRow]) -> Retained<NSMenu> {
+fn menu_actions(rows: &[MenuRow]) -> (Vec<Option<isize>>, Vec<MenuAction>) {
+    let mut actions = Vec::new();
+    let tags = rows
+        .iter()
+        .map(|row| match row {
+            MenuRow::Action { action, .. } => {
+                actions.push(action.clone());
+                Some(actions.len() as isize - 1)
+            }
+            _ => None,
+        })
+        .collect();
+    (tags, actions)
+}
+
+fn action_for_tag(actions: &[MenuAction], tag: isize) -> Option<MenuAction> {
+    usize::try_from(tag)
+        .ok()
+        .and_then(|index| actions.get(index).cloned())
+}
+
+fn build_menu(
+    mtm: MainThreadMarker,
+    rows: &[MenuRow],
+    sender: &UnboundedSender<MenuAction>,
+) -> Retained<NSMenu> {
     let menu = NSMenu::new(mtm);
     menu.setAutoenablesItems(false);
-    let mut actions = Vec::new();
-    for row in rows {
+    let (tags, actions) = menu_actions(rows);
+    let target = MenuTarget::new(mtm, actions, sender.clone());
+    for (row, tag) in rows.iter().zip(tags) {
         let item = match row {
             MenuRow::Separator => NSMenuItem::separatorItem(mtm),
             MenuRow::Header(text) | MenuRow::Info(text) => {
@@ -87,11 +111,7 @@ fn build_menu(mtm: MainThreadMarker, target: &MenuTarget, rows: &[MenuRow]) -> R
                 item.setEnabled(false);
                 item
             }
-            MenuRow::Action {
-                label,
-                hint,
-                action,
-            } => {
+            MenuRow::Action { label, hint, .. } => {
                 let key = if hint.as_deref() == Some("Esc") {
                     "\u{1b}"
                 } else {
@@ -99,18 +119,18 @@ fn build_menu(mtm: MainThreadMarker, target: &MenuTarget, rows: &[MenuRow]) -> R
                 };
                 let item = menu_item(mtm, label, key);
                 item.setKeyEquivalentModifierMask(NSEventModifierFlags::empty());
+                // NSMenuItem.target is weak; representedObject keeps this menu's own target alive with it.
                 unsafe {
-                    item.setTarget(Some(target));
+                    item.setTarget(Some(&target));
+                    item.setRepresentedObject(Some(&target));
                     item.setAction(Some(sel!(activate:)));
                 }
-                item.setTag(actions.len() as isize);
-                actions.push(action.clone());
+                item.setTag(tag.unwrap_or(-1));
                 item
             }
         };
         menu.addItem(&item);
     }
-    target.ivars().actions.replace(actions);
     menu
 }
 
@@ -167,7 +187,7 @@ fn render(item: &mut Item, mtm: MainThreadMarker, menu: &StatusMenu) {
             button.setImage(Some(&image));
         }
     }
-    let built = build_menu(mtm, &item.target, &menu.rows);
+    let built = build_menu(mtm, &menu.rows, &item.sender);
     item.status.setMenu(Some(&built));
     set_pulse(item, mtm, menu.tone != PresenceTone::Paused);
 }
@@ -193,7 +213,7 @@ pub fn apply(menu: Option<StatusMenu>, sender: &UnboundedSender<MenuAction>) {
             let item = slot.get_or_insert_with(|| Item {
                 status: NSStatusBar::systemStatusBar()
                     .statusItemWithLength(NSVariableStatusItemLength),
-                target: MenuTarget::new(mtm, sender),
+                sender,
                 pulsing: false,
             });
             render(item, mtm, &menu);
@@ -258,4 +278,66 @@ pub fn perform(title: &str) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(label: &str, action: MenuAction) -> MenuRow {
+        MenuRow::Action {
+            label: label.into(),
+            hint: None,
+            action,
+        }
+    }
+
+    fn foreground(allow: bool) -> MenuAction {
+        MenuAction::Foreground {
+            chat_id: "a".into(),
+            input_id: "computer-foreground-1".into(),
+            question_id: "foreground".into(),
+            allow,
+        }
+    }
+
+    #[test]
+    fn a_click_on_an_open_menu_resolves_only_against_that_menus_actions() {
+        let shown = vec![
+            MenuRow::Header("Zeron is controlling this Mac".into()),
+            MenuRow::Separator,
+            MenuRow::Info("Ship it · Ghostty".into()),
+            row("Open chat", MenuAction::OpenChat("a".into())),
+            row("Stop", MenuAction::Stop("a".into())),
+        ];
+        let rebuilt = vec![
+            MenuRow::Header("Zeron is controlling this Mac".into()),
+            MenuRow::Separator,
+            MenuRow::Info("Ship it · Ghostty".into()),
+            row("Allow for this turn", foreground(true)),
+            row("No", foreground(false)),
+            row("Open chat", MenuAction::OpenChat("a".into())),
+            row("Stop", MenuAction::Stop("a".into())),
+        ];
+        let (tags, actions) = menu_actions(&shown);
+        let (_, rebuilt_actions) = menu_actions(&rebuilt);
+        for (row, tag) in shown.iter().zip(&tags) {
+            match row {
+                MenuRow::Action { action, .. } => assert_eq!(
+                    action_for_tag(&actions, tag.expect("an action row has a tag")).as_ref(),
+                    Some(action),
+                    "the shown menu keeps its own actions after a rebuild"
+                ),
+                _ => assert_eq!(*tag, None),
+            }
+        }
+        let open_chat = tags[3].unwrap();
+        assert_eq!(
+            action_for_tag(&rebuilt_actions, open_chat),
+            Some(foreground(true)),
+            "one shared vec would have turned Open chat into Allow"
+        );
+        assert_eq!(action_for_tag(&actions, -1), None);
+        assert_eq!(action_for_tag(&actions, actions.len() as isize), None);
+    }
 }
