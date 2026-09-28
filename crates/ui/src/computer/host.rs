@@ -824,7 +824,10 @@ impl Host {
                         .zip(target_from_args(&call.args, None))
                         .is_some_and(|(held, read)| held.pid == read.pid)
                 });
+            let task_takeover = state.takeover_targets.contains(&task_key(task.as_ref()))
+                || (task.is_none() && !state.takeover_targets.is_empty());
             let refuse = paused
+                && task_takeover
                 && (CUA_ACTION_TOOLS.contains(&name.as_str()) || name == "check_input_ready");
             let reply = if !refuse {
                 None
