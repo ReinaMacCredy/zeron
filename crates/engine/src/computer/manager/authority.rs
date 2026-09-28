@@ -5,16 +5,18 @@ use futures::FutureExt;
 use serde_json::{Map, Value};
 use tokio_util::sync::CancellationToken;
 use zeron_proto::PermissionMode;
-use zeron_proto::computer::{ComputerAllowedApp, ComputerPendingRequest, CuaComputerTask};
+use zeron_proto::computer::{
+    COMPUTER_MESSAGE_MAX_LENGTH, ComputerAllowedApp, ComputerPendingRequest, CuaComputerTask,
+};
 
 use super::{
     Authority, COMPUTER_CONTROL_TEARDOWN_TIMEOUT_MS, COMPUTER_USER_PAUSE_NOTE_PREFIX,
     COMPUTER_USER_REVOKED, ComputerCaller, ComputerConsent, ComputerConsentCard,
-    ComputerConsentScope, ComputerConsentTarget, ComputerManager, agent_thread_id, lock,
-    with_teardown_timeout,
+    ComputerConsentScope, ComputerConsentTarget, ComputerManager, agent_thread_id,
+    display_app_name, lock, with_teardown_timeout,
 };
 use crate::computer::approval_gate::{AppGrant, ApprovalPublish, ApprovalRequest};
-use crate::computer::backend::{ComputerBackendError, ComputerError};
+use crate::computer::backend::{ComputerBackendError, ComputerError, js_slice};
 use crate::computer::call_context::{
     create_computer_call_context, current_computer_call, with_computer_call_context,
 };
@@ -149,7 +151,7 @@ impl ComputerManager {
             let app = pause
                 .window_id
                 .as_deref()
-                .and_then(|window_id| self.window_app_name(window_id));
+                .and_then(|window_id| display_app_name(self.window_app_name(window_id).as_deref()));
             self.seams.note(
                 owner,
                 &format!(
@@ -478,29 +480,38 @@ impl ComputerManager {
         self.emergency_stop().await.1
     }
 
-    pub async fn emergency_stop(&self) -> (Vec<String>, Result<(), ComputerError>) {
-        let bumped = {
-            let state = self.state();
-            if state.disposed {
-                return (Vec::new(), Ok(()));
-            }
-            let mut threads: Vec<String> = state
-                .active_authorities
+    pub fn desktop_holders(&self) -> Vec<String> {
+        let state = self.state();
+        if state.disposed {
+            return Vec::new();
+        }
+        let mut threads: Vec<String> = state
+            .active_authorities
+            .iter()
+            .filter(|(_, live)| !live.is_empty())
+            .map(|(thread, _)| thread.clone())
+            .collect();
+        threads.extend(state.lease.iter().map(|lease| lease.thread_id.clone()));
+        threads.extend(
+            state
+                .background_leases
                 .iter()
-                .filter(|(_, live)| !live.is_empty())
-                .map(|(thread, _)| thread.clone())
-                .collect();
-            threads.extend(state.lease.iter().map(|lease| lease.thread_id.clone()));
-            threads.extend(
-                state
-                    .background_leases
-                    .iter()
-                    .map(|(_, lease)| lease.lease.thread_id.clone()),
-            );
-            threads.sort();
-            threads.dedup();
-            threads
-        };
+                .map(|(_, lease)| lease.lease.thread_id.clone()),
+        );
+        threads.sort();
+        threads.dedup();
+        threads
+            .iter()
+            .filter_map(|thread| agent_thread_id(Some(thread)))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    pub async fn emergency_stop(&self) -> (Vec<String>, Result<(), ComputerError>) {
+        if self.state().disposed {
+            return (Vec::new(), Ok(()));
+        }
+        let stopped = self.desktop_holders();
         let reason = revoked(COMPUTER_USER_REVOKED);
         {
             let state = self.state();
@@ -513,11 +524,6 @@ impl ComputerManager {
                 }
             }
         }
-        let stopped: Vec<String> = bumped
-            .iter()
-            .filter_map(|thread| agent_thread_id(Some(thread)))
-            .map(str::to_owned)
-            .collect();
         for thread_id in &stopped {
             let generation = self.control_state.bump(thread_id);
             self.seams.generation_bumped(thread_id, generation);
@@ -559,46 +565,90 @@ impl ComputerManager {
     pub fn pending_request(&self, thread_id: &str) -> Option<ComputerPendingRequest> {
         self.state()
             .thread(thread_id)
-            .and_then(|runtime| runtime.pending_request.clone())
+            .and_then(|runtime| runtime.pending_requests.front())
+            .map(|(_, request)| request.clone())
     }
 
-    pub fn set_pending_request(&self, thread_id: &str, request: Option<ComputerPendingRequest>) {
+    pub fn pending_requests(&self, thread_id: &str) -> Vec<ComputerPendingRequest> {
+        self.state()
+            .thread(thread_id)
+            .map_or_else(Vec::new, |runtime| {
+                runtime
+                    .pending_requests
+                    .iter()
+                    .map(|(_, request)| request.clone())
+                    .collect()
+            })
+    }
+
+    pub fn push_pending_request(
+        &self,
+        thread_id: &str,
+        turn_id: Option<&str>,
+        request: ComputerPendingRequest,
+    ) {
         {
             let mut state = self.state();
             if state.disposed {
                 return;
             }
-            let runtime = if request.is_some() {
-                Some(state.thread_runtime(thread_id))
-            } else {
-                state.thread_mut(thread_id)
-            };
-            match runtime {
-                Some(runtime) if runtime.pending_request != request => {
-                    runtime.pending_request = request;
-                }
-                _ => return,
+            let queue = &mut state.thread_runtime(thread_id).pending_requests;
+            if queue
+                .iter()
+                .any(|(_, queued)| queued.input_id == request.input_id)
+            {
+                return;
+            }
+            queue.push_back((turn_id.map(str::to_owned), request));
+            if queue.len() > 1 {
+                return;
             }
         }
         self.publish_cached(thread_id);
     }
 
     pub fn clear_pending_request(&self, thread_id: &str, input_id: &str) {
-        {
+        self.take_pending_requests(thread_id, |_, request| request.input_id == input_id);
+    }
+
+    pub fn drain_pending_requests(
+        &self,
+        thread_id: &str,
+        turn_id: Option<&str>,
+    ) -> Vec<ComputerPendingRequest> {
+        self.take_pending_requests(thread_id, |turn, _| {
+            turn_id.is_none_or(|ended| turn.is_none_or(|turn| turn == ended))
+        })
+    }
+
+    fn take_pending_requests(
+        &self,
+        thread_id: &str,
+        matches: impl Fn(Option<&str>, &ComputerPendingRequest) -> bool,
+    ) -> Vec<ComputerPendingRequest> {
+        let (taken, head_changed) = {
             let mut state = self.state();
-            match state.thread_mut(thread_id) {
-                Some(runtime)
-                    if runtime
-                        .pending_request
-                        .as_ref()
-                        .is_some_and(|pending| pending.input_id == input_id) =>
-                {
-                    runtime.pending_request = None;
-                }
-                _ => return,
-            }
+            let Some(runtime) = state.thread_mut(thread_id) else {
+                return Vec::new();
+            };
+            let head = runtime
+                .pending_requests
+                .front()
+                .map(|(_, request)| request.input_id.clone());
+            let (taken, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut runtime.pending_requests)
+                .into_iter()
+                .partition(|(turn, request)| matches(turn.as_deref(), request));
+            runtime.pending_requests = kept.into();
+            let next = runtime
+                .pending_requests
+                .front()
+                .map(|(_, request)| request.input_id.clone());
+            (taken, head != next)
+        };
+        if head_changed {
+            self.publish_cached(thread_id);
         }
-        self.publish_cached(thread_id);
+        taken.into_iter().map(|(_, request)| request).collect()
     }
 
     pub async fn handle_thread_removed(&self, thread_id: &str) {
@@ -673,7 +723,7 @@ impl ComputerManager {
             None => None,
         };
         let app = resolved.as_ref().map(|resolved| resolved.app.clone());
-        let params_display = without_typed_values(&Value::Object(args.clone())).to_string();
+        let params_display = consent_params(args);
         let seams = self.seams.clone();
         let chat_id = caller.chat_id.clone();
         let turn_id = caller.turn_id.clone();
@@ -765,15 +815,73 @@ impl ComputerManager {
     }
 }
 
-fn without_typed_values(value: &Value) -> Value {
-    match value {
-        Value::Object(map) => Value::Object(
-            map.iter()
-                .filter(|(key, _)| !matches!(key.as_str(), "text" | "value" | "prompt_text"))
-                .map(|(key, value)| (key.clone(), without_typed_values(value)))
-                .collect(),
-        ),
-        Value::Array(items) => Value::Array(items.iter().map(without_typed_values).collect()),
-        other => other.clone(),
+const CONSENT_PARAM_TEXT_MAX: usize = 200;
+
+pub(crate) fn consent_params(args: &Map<String, Value>) -> String {
+    let projected = Value::Object(consent_projection(args)).to_string();
+    if projected.encode_utf16().count() <= COMPUTER_MESSAGE_MAX_LENGTH {
+        projected
+    } else {
+        "{}".to_owned()
     }
+}
+
+fn consent_projection(args: &Map<String, Value>) -> Map<String, Value> {
+    let text = |value: &Value| {
+        value
+            .as_str()
+            .map(|text| Value::String(js_slice(text, CONSENT_PARAM_TEXT_MAX).to_owned()))
+    };
+    args.iter()
+        .filter_map(|(key, value)| {
+            let kept = match key.as_str() {
+                "window_id" | "label" | "role" | "key" | "app" | "app_name" | "application"
+                | "name" | "bundle_id" | "action" | "operation" | "topic" | "tool"
+                | "delivery_mode" => text(value),
+                "x" | "y" | "delta_x" | "delta_y" | "width" | "height" | "start" | "length"
+                | "space_id" | "duration_ms" | "pid" => value.is_number().then(|| value.clone()),
+                "minimized" | "hidden" | "allow_launch" | "windowed" | "replace" => {
+                    value.is_boolean().then(|| value.clone())
+                }
+                "keys" | "path" => value
+                    .as_array()
+                    .map(|items| Value::Array(items.iter().filter_map(text).collect())),
+                "from" | "to" | "arguments" => value
+                    .as_object()
+                    .map(|inner| Value::Object(consent_projection(inner))),
+                "steps" => value.as_array().map(|steps| {
+                    Value::Array(
+                        steps
+                            .iter()
+                            .map(|step| {
+                                Value::Object(
+                                    step.get("type")
+                                        .and_then(text)
+                                        .map(|kind| Map::from_iter([("type".to_owned(), kind)]))
+                                        .unwrap_or_default(),
+                                )
+                            })
+                            .collect(),
+                    )
+                }),
+                "url" => value.as_str().and_then(url_origin).map(Value::String),
+                "files" => value
+                    .as_array()
+                    .map(|files| Value::Array(vec![Value::String(String::new()); files.len()])),
+                _ => None,
+            };
+            kept.map(|kept| (key.clone(), kept))
+        })
+        .collect()
+}
+
+fn url_origin(url: &str) -> Option<String> {
+    let (scheme, rest) = url.trim().split_once("://")?;
+    let scheme = scheme.to_ascii_lowercase();
+    if scheme != "http" && scheme != "https" {
+        return None;
+    }
+    let authority = rest.split(['/', '?', '#', '\\']).next()?;
+    let host = authority.rsplit('@').next()?;
+    (!host.is_empty()).then(|| format!("{scheme}://{}", js_slice(host, CONSENT_PARAM_TEXT_MAX)))
 }

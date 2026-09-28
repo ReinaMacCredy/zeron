@@ -151,7 +151,9 @@ impl ComputerTools {
             thread_id: Some(context.chat_id.clone()),
             turn_id: context.turn_id.clone(),
             gateway_request_id: computer_audit_gateway_request_id(&context.request_id),
-            target: computer_audit_target(args, result_window_id),
+            target: computer_audit_target(name, args, result_window_id, |window_id| {
+                self.manager.window_app_name(window_id)
+            }),
             args: Some(summarize_computer_audit_args(args)),
             code: outcome.code,
             diagnostics: outcome.diagnostics,
@@ -387,7 +389,7 @@ impl ComputerTools {
                                 context.mutation_dispatched.store(true, Ordering::SeqCst);
                             }
                             let authorization = if foreground && !raises {
-                                Some(context.seams.foreground_authorization().await)
+                                Some(context.seams.foreground_authorization(Some(args)).await)
                             } else {
                                 None
                             };

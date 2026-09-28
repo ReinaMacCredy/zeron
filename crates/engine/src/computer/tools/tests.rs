@@ -125,7 +125,10 @@ impl ComputerToolSeams for ToolSeams {
         Ok(())
     }
 
-    async fn foreground_authorization(&self) -> ComputerForegroundAuthorization {
+    async fn foreground_authorization(
+        &self,
+        _target: Option<&ToolArgs>,
+    ) -> ComputerForegroundAuthorization {
         self.authorization_reads.fetch_add(1, Ordering::SeqCst);
         *self.authorization.lock().unwrap()
     }

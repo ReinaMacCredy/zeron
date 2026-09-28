@@ -42,7 +42,7 @@ impl State {
             cursor: None,
             pane_surfaced: false,
             desktop_revoked: false,
-            pending_request: None,
+            pending_requests: Default::default(),
         }
     }
 
@@ -86,7 +86,8 @@ impl State {
                 || self.agent_calls_in_flight.contains_key(id)
                 || self.publish_locks.contains_key(id)
                 || candidate.pane_surfaced
-                || candidate.input_pause.is_some();
+                || candidate.input_pause.is_some()
+                || !candidate.pending_requests.is_empty();
             if keep {
                 index += 1;
                 continue;
@@ -166,7 +167,10 @@ impl ComputerManager {
                 .reported_error
                 .clone()
                 .or_else(|| runtime.last_error.clone()),
-            pending_request: runtime.pending_request.clone(),
+            pending_request: runtime
+                .pending_requests
+                .front()
+                .map(|(_, request)| request.clone()),
         }
     }
 

@@ -11,7 +11,7 @@ mod targeting;
 #[cfg(test)]
 pub(crate) mod tests;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
@@ -118,6 +118,8 @@ impl ComputerManagerEnv {
     }
 }
 
+#[cfg(test)]
+pub(crate) use authority::consent_params;
 pub use consent_app::{
     COMPUTER_APP_CONSENT_REQUIRED_CODE, COMPUTER_APP_WINDOW_REQUIRED_CODE,
     COMPUTER_APP_WINDOW_REQUIRED_MESSAGE,
@@ -381,7 +383,7 @@ struct ThreadRuntime {
     cursor: Option<ComputerPoint>,
     pane_surfaced: bool,
     desktop_revoked: bool,
-    pending_request: Option<ComputerPendingRequest>,
+    pending_requests: VecDeque<(Option<String>, ComputerPendingRequest)>,
 }
 
 #[derive(Debug, Clone)]
@@ -1114,6 +1116,44 @@ fn js_number(value: f64) -> String {
     } else {
         format!("{value}")
     }
+}
+
+pub(crate) fn display_app_name(raw: Option<&str>) -> Option<String> {
+    let name = raw?.trim();
+    let basename = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    let basename = match basename.len().checked_sub(4) {
+        Some(end)
+            if basename.is_char_boundary(end) && basename[end..].eq_ignore_ascii_case(".app") =>
+        {
+            &basename[..end]
+        }
+        _ => basename,
+    };
+    let segments: Vec<&str> = basename.split('.').collect();
+    let reverse_dns = segments.len() >= 3
+        && segments[..segments.len() - 1].iter().all(|segment| {
+            segment
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic())
+                && segment
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        });
+    let label = if reverse_dns {
+        segments.last().copied().unwrap_or(basename)
+    } else {
+        basename
+    };
+    let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = label.chars();
+    let first = chars.next()?;
+    let label: String = first.to_uppercase().chain(chars).collect();
+    Some(if label.chars().count() > 80 {
+        label.chars().take(79).chain(['…']).collect()
+    } else {
+        label
+    })
 }
 
 async fn with_teardown_timeout<T>(

@@ -101,12 +101,14 @@ impl ComputerRuntime {
         let weak = Arc::downgrade(&runtime);
         runtime
             .engine_seams
-            .on_pending(Arc::new(move |chat_id, input_id, request| {
+            .on_pending(Arc::new(move |chat_id, turn_id, input_id, request| {
                 let Some(service) = weak.upgrade().and_then(|runtime| runtime.service()) else {
                     return;
                 };
                 match request {
-                    Some(request) => service.manager.set_pending_request(chat_id, Some(request)),
+                    Some(request) => service
+                        .manager
+                        .push_pending_request(chat_id, turn_id, request),
                     None => service.manager.clear_pending_request(chat_id, input_id),
                 }
             }));
@@ -150,6 +152,9 @@ impl ComputerRuntime {
     }
 
     async fn apply_chat_change(&self, change: ChatChange) {
+        if let ChatChange::Removed(chat_id) = &change {
+            self.calls.forget_chat(chat_id);
+        }
         let Some(service) = self.service() else {
             return;
         };
@@ -245,10 +250,33 @@ impl ComputerRuntime {
         let Some(service) = self.service() else {
             return Vec::new();
         };
-        let (stopped, result) = service.manager.emergency_stop().await;
+        let sessions = self.engine_seams.sessions();
+        let latched: Vec<String> = service
+            .manager
+            .desktop_holders()
+            .into_iter()
+            .filter(|chat_id| {
+                sessions
+                    .as_ref()
+                    .is_some_and(|sessions| sessions.revoke_computer_turn(chat_id).is_some())
+            })
+            .collect();
+        let (mut stopped, result) = service.manager.emergency_stop().await;
         if let Err(error) = result {
             tracing::warn!(%error, "computer emergency stop relay failed");
         }
+        if let Some(sessions) = &sessions {
+            for chat_id in &latched {
+                self.finish_revoke(sessions, chat_id, RevokeSource::Escape)
+                    .await;
+            }
+        }
+        for chat_id in stopped.iter().filter(|chat_id| !latched.contains(chat_id)) {
+            self.revoke_desktop(chat_id, RevokeSource::Escape).await;
+        }
+        stopped.extend(latched);
+        stopped.sort();
+        stopped.dedup();
         stopped
     }
 
@@ -259,16 +287,26 @@ impl ComputerRuntime {
         if sessions.revoke_computer_turn(chat_id).is_none() {
             return false;
         }
-        if let Some(service) = self.service() {
-            if let Some(pending) = service.manager.pending_request(chat_id) {
-                sessions.settle_input(chat_id, &pending.input_id);
+        self.finish_revoke(&sessions, chat_id, source).await;
+        true
+    }
+
+    async fn finish_revoke(&self, sessions: &SessionsEngine, chat_id: &str, source: RevokeSource) {
+        match self.service() {
+            Some(service) => {
+                for pending in service.manager.drain_pending_requests(chat_id, None) {
+                    sessions.settle_input(chat_id, &pending.input_id);
+                }
+                if let Err(error) = service.manager.revoke_desktop(chat_id).await {
+                    tracing::warn!(chat = %chat_id, %error, "computer desktop revoke failed");
+                }
             }
-            if let Err(error) = service.manager.revoke_desktop(chat_id).await {
-                tracing::warn!(chat = %chat_id, %error, "computer desktop revoke failed");
-            }
+            None => tracing::warn!(
+                chat = %chat_id,
+                "computer desktop revoke latched the turn with no computer service to drain"
+            ),
         }
         sessions.write_computer_note(chat_id, COMPUTER_DESKTOP_REVOKED_NOTE, Some(source.hint()));
-        true
     }
 
     pub fn turn_ended(&self, chat_id: &str, turn_id: &str) {
@@ -278,22 +316,29 @@ impl ComputerRuntime {
             return;
         };
         service.manager.clear_desktop_revoked(chat_id);
-        service.manager.set_pending_request(chat_id, None);
         let sessions = self.engine_seams.sessions();
+        for pending in service
+            .manager
+            .drain_pending_requests(chat_id, Some(turn_id))
+        {
+            if let Some(sessions) = &sessions {
+                sessions.settle_input(chat_id, &pending.input_id);
+            }
+        }
         let (chat_id, turn_id) = (chat_id.to_owned(), turn_id.to_owned());
         tokio::spawn(async move {
-            let left = service.manager.left_open_windows(&chat_id, &turn_id).await;
-            if let Some(sessions) = &sessions {
-                for left in &left {
-                    sessions.write_computer_note(&chat_id, &left_open_note(left), None);
-                }
-            }
             if let Err(error) = service
                 .manager
                 .release_desktop_control(&chat_id, Some(&turn_id))
                 .await
             {
                 tracing::warn!(chat = %chat_id, %error, "computer turn-end release failed");
+            }
+            let left = service.manager.left_open_windows(&chat_id, &turn_id).await;
+            if let Some(sessions) = &sessions {
+                for left in &left {
+                    sessions.write_computer_note(&chat_id, &left_open_note(left), None);
+                }
             }
         });
     }

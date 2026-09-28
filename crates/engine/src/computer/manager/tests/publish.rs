@@ -434,10 +434,13 @@ async fn a_user_takeover_pause_writes_one_paused_note_per_episode() {
     }));
     let Built { manager, seams, .. } = manager(backend);
     manager.list_windows().await.unwrap();
-    let app = manager.window_app_name("fake-calculator").unwrap();
+    assert_eq!(
+        manager.window_app_name("fake-calculator").as_deref(),
+        Some("org.kde.kcalc")
+    );
     let note = (
         "thread-a".to_owned(),
-        format!("{COMPUTER_USER_PAUSE_NOTE_PREFIX}{app}"),
+        format!("{COMPUTER_USER_PAUSE_NOTE_PREFIX}Kcalc"),
     );
 
     for _ in 0..2 {

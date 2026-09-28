@@ -221,7 +221,10 @@ impl ComputerToolEntry {
 pub trait ComputerToolSeams: Send + Sync {
     fn assert_turn_active(&self) -> Result<(), ComputerError>;
 
-    async fn foreground_authorization(&self) -> ComputerForegroundAuthorization;
+    async fn foreground_authorization(
+        &self,
+        target: Option<&ToolArgs>,
+    ) -> ComputerForegroundAuthorization;
 
     async fn setup_required(&self, _tool: &str, _signal: &ComputerSetupSignal) {}
 

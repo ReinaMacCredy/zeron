@@ -20,7 +20,8 @@ pub const COMPUTER_FOREGROUND_QUESTION_ID: &str = "foreground";
 pub const COMPUTER_FOREGROUND_ALLOW: &str = "Allow for this turn";
 pub const COMPUTER_FOREGROUND_DECLINE: &str = "No";
 
-pub type PendingSink = Arc<dyn Fn(&str, &str, Option<ComputerPendingRequest>) + Send + Sync>;
+pub type PendingSink =
+    Arc<dyn Fn(&str, Option<&str>, &str, Option<ComputerPendingRequest>) + Send + Sync>;
 
 pub struct EngineComputerSeams {
     sessions: Mutex<Option<SessionsEngine>>,
@@ -47,10 +48,16 @@ impl EngineComputerSeams {
         *lock(&self.pending) = Some(sink);
     }
 
-    fn set_pending(&self, chat_id: &str, input_id: &str, request: Option<ComputerPendingRequest>) {
+    fn set_pending(
+        &self,
+        chat_id: &str,
+        turn_id: Option<&str>,
+        input_id: &str,
+        request: Option<ComputerPendingRequest>,
+    ) {
         let sink = lock(&self.pending).clone();
         if let Some(sink) = sink {
-            sink(chat_id, input_id, request);
+            sink(chat_id, turn_id, input_id, request);
         }
     }
 
@@ -208,7 +215,7 @@ impl ComputerManagerSeams for EngineComputerSeams {
         if decision.is_some() {
             if let Some((chat_id, input_id)) = lock(&self.cards).remove(&card.request_id) {
                 sessions.settle_input(&chat_id, &input_id);
-                self.set_pending(&chat_id, &input_id, None);
+                self.set_pending(&chat_id, None, &input_id, None);
             }
             return Ok(());
         }
@@ -224,6 +231,7 @@ impl ComputerManagerSeams for EngineComputerSeams {
             })?;
         self.set_pending(
             &card.chat_id,
+            card.turn_id.as_deref(),
             &input_id,
             Some(consent_pending(&card, &input_id)),
         );
@@ -232,7 +240,7 @@ impl ComputerManagerSeams for EngineComputerSeams {
         tokio::spawn(async move {
             let answers = answers.await;
             if let Some(pending) = pending {
-                pending(&card.chat_id, &input_id, None);
+                pending(&card.chat_id, None, &input_id, None);
             }
             if let Ok(answers) = answers {
                 gate.respond(&card.chat_id, &card.request_id, consent_decision(&answers));
@@ -341,6 +349,87 @@ mod tests {
         };
         assert_eq!(params, None);
         assert_eq!(tool.as_deref(), Some("computer_type_text"));
+    }
+
+    #[test]
+    fn consent_params_keep_only_what_the_sentence_reads_and_never_a_secret() {
+        let args = serde_json::json!({
+            "target_id": "t",
+            "control_token": "ctl-secret-token",
+            "url": "https://user:pw@example.com:8443/cb?code=oauth-secret&token=abc#frag",
+            "script": "document.querySelector('#pw').value='hunter2'",
+            "files": ["/Users/me/private/tax.pdf", "/Users/me/id.png"],
+            "text": "typed secret",
+            "value": "set secret",
+            "arguments": ["--token=launch-secret"],
+            "label": "Send",
+            "window_id": "cua:4242:17",
+            "keys": ["cmd", "v"],
+            "steps": [{ "type": "type_text", "text": "nested secret" }],
+            "from": { "label": "A", "text": "drag secret" },
+        });
+        let params = crate::computer::manager::consent_params(args.as_object().unwrap());
+        let card = ComputerConsentCard {
+            params_display: params,
+            ..card(
+                "computer_browser_navigate",
+                ComputerConsentScope::Task,
+                None,
+            )
+        };
+        let Some(UserInputKind::Consent {
+            params: Some(persisted),
+            ..
+        }) = consent_question(&card).kind
+        else {
+            panic!("a consent kind with params");
+        };
+        let ComputerPendingKind::Consent {
+            params: Some(pending),
+            ..
+        } = consent_pending(&card, "computer-consent-1").kind
+        else {
+            panic!("a pending consent with params");
+        };
+        assert_eq!(persisted, pending, "one projection for both copies");
+        for secret in [
+            "ctl-secret-token",
+            "oauth-secret",
+            "token=abc",
+            "user:pw",
+            "/cb",
+            "hunter2",
+            "querySelector",
+            "tax.pdf",
+            "/Users/me",
+            "typed secret",
+            "set secret",
+            "launch-secret",
+            "nested secret",
+            "drag secret",
+        ] {
+            assert!(!persisted.contains(secret), "{secret}: {persisted}");
+        }
+        let kept: serde_json::Value = serde_json::from_str(&persisted).unwrap();
+        assert_eq!(
+            kept,
+            serde_json::json!({
+                "url": "https://example.com:8443",
+                "files": ["", ""],
+                "label": "Send",
+                "window_id": "cua:4242:17",
+                "keys": ["cmd", "v"],
+                "steps": [{ "type": "type_text" }],
+                "from": { "label": "A" },
+            })
+        );
+        let huge =
+            serde_json::json!({ "steps": vec![serde_json::json!({ "type": "click" }); 400] });
+        assert_eq!(
+            crate::computer::manager::consent_params(huge.as_object().unwrap()),
+            "{}",
+            "an oversized projection is bounded"
+        );
     }
 
     #[test]

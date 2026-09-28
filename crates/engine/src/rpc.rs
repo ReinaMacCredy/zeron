@@ -3580,13 +3580,7 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&history)
             }
             methods::COMPUTER_EMERGENCY_STOP => {
-                let computer = self.computer()?;
-                let stopped = computer.emergency_stop().await;
-                for chat_id in &stopped {
-                    computer
-                        .revoke_desktop(chat_id, crate::computer::runtime::RevokeSource::Escape)
-                        .await;
-                }
+                let stopped = self.computer()?.emergency_stop().await;
                 RpcReply::value(&serde_json::json!({ "stoppedChatIds": stopped }))
             }
             methods::COMPUTER_REVOKE_DESKTOP => {

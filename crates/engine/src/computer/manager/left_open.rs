@@ -1,12 +1,14 @@
 use std::collections::{BTreeMap, HashSet};
+use std::time::Duration;
 
 use zeron_proto::computer::ComputerWindow;
 
-use super::{ComputerManager, State, with_teardown_timeout};
+use super::{ComputerManager, State, display_app_name};
 use crate::computer::cua_backend::parse_cua_window_id;
 
 // Ghostty's tab-bar and titlebar accessory windows list as 1512x33 and 1920x30 strips.
 const LEFT_OPEN_MIN_SIDE: f64 = 48.0;
+const LEFT_OPEN_READ_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub(super) struct TurnWindows {
     turn_id: String,
@@ -33,12 +35,11 @@ pub(super) fn begin_turn(state: &mut State, owner: &str, turn_id: &str) {
     {
         return;
     }
-    let baseline = state.last_known_window_ids.clone();
     state.turn_windows.insert(
         owner.to_owned(),
         TurnWindows {
             turn_id: turn_id.to_owned(),
-            baseline,
+            baseline: None,
             acted_pids: HashSet::new(),
         },
     );
@@ -102,17 +103,25 @@ impl ComputerManager {
         if acted_pids.is_empty() {
             return Vec::new();
         }
-        let Ok(windows) = with_teardown_timeout(self.read_windows()).await else {
-            return Vec::new();
+        let windows = match tokio::time::timeout(LEFT_OPEN_READ_TIMEOUT, self.read_windows()).await
+        {
+            Ok(Ok(windows)) => windows,
+            Ok(Err(error)) => {
+                tracing::warn!(thread = %thread_id, %error, "computer left-open read failed");
+                return Vec::new();
+            }
+            Err(_) => {
+                tracing::warn!(thread = %thread_id, "computer left-open read timed out");
+                return Vec::new();
+            }
         };
         let mut apps: BTreeMap<String, usize> = BTreeMap::new();
         for app in windows
             .iter()
             .filter(|window| is_left_open(window, &baseline, &acted_pids))
-            .filter_map(|window| window.app_name.as_deref().map(str::trim))
-            .filter(|app| !app.is_empty())
+            .filter_map(|window| display_app_name(window.app_name.as_deref()))
         {
-            *apps.entry(app.to_owned()).or_default() += 1;
+            *apps.entry(app).or_default() += 1;
         }
         apps.into_iter()
             .map(|(app, count)| ComputerLeftOpen { app, count })

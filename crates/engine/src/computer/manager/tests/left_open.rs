@@ -219,3 +219,54 @@ async fn a_turn_with_no_listing_before_it_takes_the_baseline_from_its_first_read
     assert_eq!(manager.left_open_windows("a", "t1").await.len(), 1);
     manager.dispose().await;
 }
+
+#[tokio::test]
+async fn a_listing_from_before_the_turn_is_never_the_baseline() {
+    let (manager, _, listing) = setup().await;
+    *listing.lock().unwrap() = Some(desktop_with(vec![editor(
+        "editor-a-user",
+        110,
+        900.0,
+        700.0,
+    )]));
+    press(&manager, "t1").await;
+    assert!(
+        manager.left_open_windows("a", "t1").await.is_empty(),
+        "a window the user opened before the turn is not the agent's"
+    );
+    manager.dispose().await;
+}
+
+#[tokio::test]
+async fn a_failed_turn_end_read_reports_nothing() {
+    let (manager, backend, _) = setup().await;
+    press(&manager, "t1").await;
+    backend.hooks().list_windows = Some(Arc::new(|_, ()| {
+        async { Err(ComputerError::Other("host gone".into())) }.boxed()
+    }));
+    assert!(manager.left_open_windows("a", "t1").await.is_empty());
+    manager.dispose().await;
+}
+
+#[test]
+fn left_open_and_pause_labels_never_carry_a_bundle_id() {
+    use crate::computer::manager::display_app_name;
+    assert_eq!(
+        display_app_name(Some("org.kde.konsole")).as_deref(),
+        Some("Konsole")
+    );
+    assert_eq!(
+        display_app_name(Some("com.mitchellh.ghostty")).as_deref(),
+        Some("Ghostty")
+    );
+    assert_eq!(
+        display_app_name(Some("/Applications/Safari.app")).as_deref(),
+        Some("Safari")
+    );
+    assert_eq!(
+        display_app_name(Some("Visual Studio Code")).as_deref(),
+        Some("Visual Studio Code")
+    );
+    assert_eq!(display_app_name(Some("  ")), None);
+    assert_eq!(display_app_name(None), None);
+}

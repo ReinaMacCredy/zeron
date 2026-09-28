@@ -167,11 +167,12 @@ impl ComputerManager {
     pub async fn foreground_app(
         &self,
         target: &ComputerConsentTarget,
-    ) -> Option<ComputerConsentApp> {
+    ) -> (Option<ComputerConsentApp>, Option<String>) {
         if *target == ComputerConsentTarget::Unscoped {
-            return None;
+            return (None, None);
         }
-        let app = self.resolve_consent_app(target).await.app;
+        let ResolvedConsentApp { app, key } = self.resolve_consent_app(target).await;
+        let key = (key.starts_with("bundle:") || key.starts_with("pid:")).then_some(key);
         let placeholder = match target {
             ComputerConsentTarget::Window(window_id) => app.name == format!("window {window_id}"),
             ComputerConsentTarget::App(_) => app.bundle_id.is_none(),
@@ -181,7 +182,7 @@ impl ComputerManager {
             || app
                 .pid
                 .is_some_and(|pid| app.name == format!("process {pid}"));
-        (!placeholder).then_some(app)
+        ((!placeholder).then_some(app), key)
     }
 
     async fn ask_turn(&self, thread_id: Option<&str>) -> Option<(String, String)> {
