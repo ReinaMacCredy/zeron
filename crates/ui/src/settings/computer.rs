@@ -8,12 +8,13 @@ use gpui::{
     prelude::*, px,
 };
 use zeron_proto::computer::{
-    AgentCursorColorMode, COMPUTER_AUDIT_HISTORY_MAX_LIMIT, CUA_NATIVE_REVISION,
-    ComputerAuditEffect, ComputerAuditHistoryEntry, ComputerAuditHistoryStatus,
-    ComputerAvailability, ComputerBuildSignature, ComputerCapabilities,
+    AgentCursorColorMode, COMPUTER_AUDIT_HISTORY_MAX_LIMIT, CUA_DRIVER_VERSION,
+    CUA_NATIVE_REVISION, ComputerAuditEffect, ComputerAuditHistoryEntry,
+    ComputerAuditHistoryStatus, ComputerAvailability, ComputerBuildSignature, ComputerCapabilities,
     ComputerGetAuditHistoryInput, ComputerGetAuditHistoryResult, ComputerHealthStatus,
-    ComputerHostStatus, ComputerPermission, ComputerPreviewSize, ComputerSettings,
-    computer_permission_setup_message, list_computer_permissions, normalize_cursor_hex_color,
+    ComputerHostStatus, ComputerPermission, ComputerPreviewPlacement, ComputerPreviewSize,
+    ComputerSettings, computer_permission_setup_message, list_computer_permissions,
+    normalize_cursor_hex_color,
 };
 use zeron_rpc::methods;
 
@@ -45,11 +46,7 @@ const COMPUTER_PANES: [(PermissionPane, &str); 3] = [
     ),
 ];
 
-pub const SETUP_ORDER: [ComputerPermission; 3] = [
-    ComputerPermission::Accessibility,
-    ComputerPermission::InputMonitoring,
-    ComputerPermission::ScreenRecording,
-];
+pub const SETUP_ORDER: [ComputerPermission; 3] = crate::computer::cards::COMPUTER_PERMISSION_ORDER;
 
 pub const HISTORY_PAGE_SIZE: u32 = 30;
 
@@ -58,6 +55,14 @@ pub fn next_setup_pane(missing: &[ComputerPermission]) -> Option<PermissionPane>
         .into_iter()
         .find(|permission| missing.contains(permission))
         .map(PermissionPane::from_permission)
+}
+
+pub fn history_title(entry: &ComputerAuditHistoryEntry) -> String {
+    let action = crate::computer::presentation::describe_computer_call(&entry.tool, None);
+    match crate::computer::presentation::app_name(entry.app.as_deref()) {
+        Some(app) => format!("{action} · {app}"),
+        None => action,
+    }
 }
 
 pub fn next_history_page(
@@ -901,13 +906,7 @@ impl ComputerPage {
                                 .min_w_0()
                                 .flex()
                                 .flex_col()
-                                .child(widgets::row_title(
-                                    theme,
-                                    crate::computer::presentation::describe_computer_call(
-                                        &entry.tool,
-                                        None,
-                                    ),
-                                ))
+                                .child(widgets::row_title(theme, history_title(entry)))
                                 .child(
                                     div()
                                         .text_size(crate::typography::ui_rems(12.0))
@@ -1351,6 +1350,7 @@ impl Render for ComputerPage {
         let reset = |id: &'static str, label: &'static str| {
             widgets::ghost_action(&theme)
                 .id(id)
+                .debug_selector(move || id.to_string())
                 .role(gpui::Role::Button)
                 .aria_label(format!("Reset {label} to default"))
                 .tab_index(0)
@@ -1481,6 +1481,49 @@ impl Render for ComputerPage {
             preview_control.into_any_element(),
             None,
         ));
+        let rail = settings.computer_preview_placement == ComputerPreviewPlacement::Rail;
+        let placement_control = div()
+            .flex()
+            .gap(px(6.0))
+            .child(
+                chip("computer-placement-card", "Floating card", !rail).when(editable, |el| {
+                    el.on_click(cx.listener(|this, _, _, cx| {
+                        this.write_settings(cx, |s| {
+                            s.computer_preview_placement = ComputerPreviewPlacement::Card
+                        })
+                    }))
+                }),
+            )
+            .child(
+                chip("computer-placement-rail", "Rail + thumbnail", rail).when(editable, |el| {
+                    el.on_click(cx.listener(|this, _, _, cx| {
+                        this.write_settings(cx, |s| {
+                            s.computer_preview_placement = ComputerPreviewPlacement::Rail
+                        })
+                    }))
+                }),
+            );
+        card = card.child(row(
+            &theme,
+            false,
+            "Placement",
+            "Floating card sits over the transcript. Rail puts a small thumbnail under Computer in the right rail; click it to pop out.",
+            None,
+            (settings.computer_preview_placement != defaults.computer_preview_placement
+                && editable)
+                .then(|| {
+                    reset("computer-placement-reset", "placement")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.write_settings(cx, |s| {
+                                s.computer_preview_placement =
+                                    ComputerSettings::default().computer_preview_placement
+                            })
+                        }))
+                        .into_any_element()
+                }),
+            placement_control.into_any_element(),
+            None,
+        ));
 
         let acknowledged = Self::acknowledged(cx);
         let guide_open = !acknowledged || self.guide_requested;
@@ -1511,7 +1554,7 @@ impl Render for ComputerPage {
                 ),
                 (
                     "Follow and stop",
-                    "Watch the preview while the agent works. Use Stop in the chat to interrupt the task. Closing the preview only hides it.",
+                    "Watch the preview while the agent works. Press Esc or Stop on the strip to take the desktop back; the agent then sums up. The chat's Stop button ends the turn. Closing the preview only hides it.",
                 ),
             ];
             let mut section = div()
@@ -1642,7 +1685,7 @@ impl Render for ComputerPage {
                 let backend = match &status.status.availability {
                     ComputerAvailability::Available {
                         backend: Some(backend),
-                    } if backend == "cua" => "Cua 0.28.2".to_string(),
+                    } if backend == "cua" => format!("Cua {CUA_DRIVER_VERSION}"),
                     ComputerAvailability::Available {
                         backend: Some(backend),
                     } => backend.clone(),
@@ -1652,7 +1695,7 @@ impl Render for ComputerPage {
                     &theme,
                     false,
                     "Desktop abilities",
-                    "The agent shares your Mac desktop and works in the background by default. It can bring a window forward when your task asks to watch. Background input may still affect focus. Use Stop in the chat to interrupt the task. Physical Escape interrupts the current action when Input Monitoring is granted; it does not disable future tasks.",
+                    "The agent shares your Mac desktop and works in the background by default. It can bring a window forward when your task asks to watch. Background input may still affect focus. Press Esc or Stop on the strip to take the desktop back for the rest of the turn; the agent then sums up. Esc needs Input Monitoring. The chat's Stop button ends the turn.",
                     Some(
                         format!(
                             "{backend} · {}",
@@ -1883,20 +1926,48 @@ mod tests {
     }
 
     #[test]
-    fn set_up_order_is_accessibility_then_input_monitoring_then_screen_recording() {
+    fn set_up_order_is_accessibility_then_screen_recording_then_input_monitoring() {
         assert_eq!(
             next_setup_pane(&[Accessibility, ScreenRecording, InputMonitoring]),
             Some(PermissionPane::Accessibility)
         );
         assert_eq!(
             next_setup_pane(&[ScreenRecording, InputMonitoring]),
-            Some(PermissionPane::InputMonitoring)
-        );
-        assert_eq!(
-            next_setup_pane(&[ScreenRecording]),
             Some(PermissionPane::ScreenRecording)
         );
+        assert_eq!(
+            next_setup_pane(&[InputMonitoring]),
+            Some(PermissionPane::InputMonitoring)
+        );
         assert_eq!(next_setup_pane(&[]), None);
+    }
+
+    #[test]
+    fn panes_follow_one_order() {
+        let panes: Vec<_> = COMPUTER_PANES.iter().map(|(pane, _)| *pane).collect();
+        let order: Vec<_> = crate::computer::cards::COMPUTER_PERMISSION_ORDER
+            .into_iter()
+            .map(PermissionPane::from_permission)
+            .collect();
+        assert_eq!(panes, order);
+        assert_eq!(
+            SETUP_ORDER,
+            crate::computer::cards::COMPUTER_PERMISSION_ORDER
+        );
+    }
+
+    #[test]
+    fn history_rows_name_the_app() {
+        let row = |app: Option<&str>| {
+            let mut value = entry(0, "computer_type_text");
+            if let Some(app) = app {
+                value["app"] = json!(app);
+            }
+            history_title(&serde_json::from_value(value).unwrap())
+        };
+        assert_eq!(row(Some("Calculator")), "Type · Calculator");
+        assert_eq!(row(Some("com.apple.calculator")), "Type · Calculator");
+        assert_eq!(row(None), "Type");
     }
 
     #[test]
@@ -2021,10 +2092,10 @@ mod tests {
         assert_eq!(opened(cx), Some(PermissionPane::Accessibility));
         live.set(grants(true, false, false));
         click(cx, "computer-set-up");
-        assert_eq!(opened(cx), Some(PermissionPane::InputMonitoring));
-        live.set(grants(true, false, true));
-        click(cx, "computer-set-up");
         assert_eq!(opened(cx), Some(PermissionPane::ScreenRecording));
+        live.set(grants(true, true, false));
+        click(cx, "computer-set-up");
+        assert_eq!(opened(cx), Some(PermissionPane::InputMonitoring));
         live.set(grants(true, true, true));
         page.update(cx, |_, cx| cx.notify());
         cx.run_until_parked();
@@ -2088,6 +2159,53 @@ mod tests {
             click(cx, "computer-control-toggle");
             assert!(!core.computer.settings().computer_control_enabled);
         }
+        drop(page);
+        runtime.block_on(core.shutdown());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn placement_chips_save_through_the_engine(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        init(cx, dir.path());
+        let core = runtime
+            .block_on(async {
+                zeron_engine::EngineCore::assemble(
+                    &dir.path().join("engine"),
+                    Arc::new(zeron_engine::HarnessRegistry::new()),
+                    zeron_proto::HarnessId::Mock,
+                    None,
+                )
+            })
+            .unwrap();
+        let engine = crate::state::EngineHandle::from_test_client(zeron_rpc::memory_client(
+            core.rpc_service(),
+        ));
+        let (page, cx) = open_page(cx, engine, Rc::new(|| grants(true, true, true)));
+        wait(cx, |cx| {
+            page.read_with(cx, |page, _| page.settings_value().is_some())
+        });
+        let placement = || core.computer.settings().computer_preview_placement;
+        assert_eq!(placement(), ComputerPreviewPlacement::Rail);
+        assert!(cx.debug_bounds("computer-placement-reset").is_none());
+        click(cx, "computer-placement-card");
+        wait(cx, |_| placement() == ComputerPreviewPlacement::Card);
+        let stored: ComputerSettings = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("engine/computer-settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            stored.computer_preview_placement,
+            ComputerPreviewPlacement::Card
+        );
+        click(cx, "computer-placement-reset");
+        wait(cx, |_| placement() == ComputerPreviewPlacement::Rail);
+        click(cx, "computer-placement-card");
+        wait(cx, |_| placement() == ComputerPreviewPlacement::Card);
+        click(cx, "computer-placement-rail");
+        wait(cx, |_| placement() == ComputerPreviewPlacement::Rail);
         drop(page);
         runtime.block_on(core.shutdown());
     }

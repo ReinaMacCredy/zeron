@@ -484,6 +484,8 @@ pub struct ComputerInputPause {
     pub pid: Option<u32>,
     #[serde(deserialize_with = "bounds::text::<_, COMPUTER_MESSAGE_MAX_LENGTH>")]
     pub message: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub user_takeover: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -535,6 +537,50 @@ pub struct ComputerState {
     pub captured_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum ComputerPendingKind {
+    Foreground {
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "bounds::opt_text::<_, 128>"
+        )]
+        app: Option<String>,
+    },
+    Consent {
+        scope: ComputerConsentScope,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        app: Option<ComputerConsentApp>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "bounds::opt_text::<_, 128>"
+        )]
+        tool: Option<String>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "bounds::opt_text::<_, COMPUTER_MESSAGE_MAX_LENGTH>"
+        )]
+        params: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerPendingRequest {
+    #[serde(deserialize_with = "bounds::text::<_, 128>")]
+    pub input_id: String,
+    #[serde(deserialize_with = "bounds::text::<_, 128>")]
+    pub question_id: String,
+    pub kind: ComputerPendingKind,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadComputerState {
@@ -584,6 +630,8 @@ pub struct ThreadComputerState {
         deserialize_with = "bounds::opt_text::<_, COMPUTER_MESSAGE_MAX_LENGTH>"
     )]
     pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_request: Option<ComputerPendingRequest>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1516,6 +1564,58 @@ mod tests {
     }
 
     #[test]
+    fn a_pending_foreground_request_round_trips_on_the_thread_state() {
+        let pending = json!({
+            "inputId": "computer-foreground-1",
+            "questionId": "foreground",
+            "kind": { "type": "foreground", "app": "Ghostty" },
+        });
+        round_trips::<ThreadComputerState>(&merge(
+            &thread_state(),
+            json!({ "pendingRequest": pending }),
+        ));
+        round_trips::<ComputerPendingRequest>(&merge(
+            &pending,
+            json!({ "kind": { "type": "foreground" } }),
+        ));
+        rejects::<ComputerPendingRequest>(&merge(
+            &pending,
+            json!({ "kind": { "type": "foreground", "app": "a".repeat(129) } }),
+        ));
+    }
+
+    #[test]
+    fn a_pending_consent_request_round_trips_on_the_thread_state() {
+        let pending = json!({
+            "inputId": "computer-consent-1",
+            "questionId": "consent",
+            "kind": {
+                "type": "consent",
+                "scope": "task",
+                "app": { "name": "Ghostty", "bundleId": "com.mitchellh.ghostty", "pid": 4242 },
+                "tool": "computer_type_text",
+                "params": "{\"window_id\":\"cua:4242:17\"}",
+            },
+        });
+        round_trips::<ThreadComputerState>(&merge(
+            &thread_state(),
+            json!({ "pendingRequest": pending }),
+        ));
+        round_trips::<ComputerPendingRequest>(&merge(
+            &pending,
+            json!({ "kind": { "type": "consent", "scope": "call" } }),
+        ));
+        rejects::<ComputerPendingRequest>(&merge(
+            &pending,
+            json!({ "kind": { "type": "consent", "scope": "task", "tool": "t".repeat(129) } }),
+        ));
+        rejects::<ComputerPendingRequest>(&merge(
+            &pending,
+            json!({ "kind": { "type": "consent", "scope": "task", "params": "p".repeat(2049) } }),
+        ));
+    }
+
+    #[test]
     fn rejects_unbounded_activity_text() {
         let bounded = merge(&thread_state(), json!({ "activity": "a".repeat(128) }));
         round_trips::<ThreadComputerState>(&bounded);
@@ -1606,6 +1706,7 @@ mod tests {
     fn pause_retains_the_affected_app_and_refuses_invalid_process_identities() {
         let pause = json!({ "windowId": "cua:42:7", "pid": 42, "message": "Observe again" });
         round_trips::<ComputerInputPause>(&pause);
+        round_trips::<ComputerInputPause>(&merge(&pause, json!({ "userTakeover": true })));
         for pid in [json!(0), json!(-1), json!(1.5), json!(0x8000_0000u32)] {
             rejects::<ComputerInputPause>(&merge(&pause, json!({ "pid": pid })));
         }

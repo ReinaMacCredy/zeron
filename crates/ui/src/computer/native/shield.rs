@@ -417,7 +417,7 @@ fn on_main(
     });
 }
 
-fn primary_max_y(mtm: MainThreadMarker) -> Option<f64> {
+pub(super) fn primary_max_y(mtm: MainThreadMarker) -> Option<f64> {
     let screens = NSScreen::screens(mtm);
     let primary = screens
         .iter()
@@ -428,7 +428,12 @@ fn primary_max_y(mtm: MainThreadMarker) -> Option<f64> {
     Some(frame.origin.y + frame.size.height)
 }
 
-fn set_layer(view: &NSView, background: &NSColor, border: Option<&NSColor>, radius: f64) {
+pub(super) fn set_layer(
+    view: &NSView,
+    background: &NSColor,
+    border: Option<&NSColor>,
+    radius: f64,
+) {
     view.setWantsLayer(true);
     let layer: Option<Retained<AnyObject>> = unsafe { msg_send![view, layer] };
     let Some(layer) = layer else {
@@ -447,12 +452,7 @@ fn set_layer(view: &NSView, background: &NSColor, border: Option<&NSColor>, radi
     }
 }
 
-fn build_panel(
-    mtm: MainThreadMarker,
-    frame: &CuaShieldFrame,
-    label: Option<&str>,
-) -> Retained<NSPanel> {
-    let rect = cocoa_rect(frame, primary_max_y(mtm).unwrap_or(frame.y + frame.height));
+pub(super) fn overlay_panel(mtm: MainThreadMarker, rect: NSRect) -> Retained<NSPanel> {
     let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
         NSPanel::alloc(mtm),
         rect,
@@ -471,6 +471,16 @@ fn build_panel(
         NSWindowCollectionBehavior::IgnoresCycle | NSWindowCollectionBehavior::FullScreenAuxiliary,
     );
     unsafe { panel.setReleasedWhenClosed(false) };
+    panel
+}
+
+fn build_panel(
+    mtm: MainThreadMarker,
+    frame: &CuaShieldFrame,
+    label: Option<&str>,
+) -> Retained<NSPanel> {
+    let rect = cocoa_rect(frame, primary_max_y(mtm).unwrap_or(frame.y + frame.height));
+    let panel = overlay_panel(mtm, rect);
 
     let size = rect.size;
     let content = NSView::initWithFrame(

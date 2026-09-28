@@ -41,6 +41,7 @@ pub fn cursor_tool_activity(tool: &str) -> &'static str {
         "computer_read_clipboard" => "Reading clipboard",
         "computer_write_clipboard" => "Writing clipboard",
         "computer_run" => "Running sequence",
+        "computer_zeron_browser" => "Using the browser",
         _ => "Working",
     }
 }
@@ -427,6 +428,7 @@ mod tests {
             ("computer_launch_app", "Opening app"),
             ("computer_activate_window", "Activating window"),
             ("computer_wait", "Waiting for screen"),
+            ("computer_zeron_browser", "Using the browser"),
             ("computer_read_clipboard", "Reading clipboard"),
             ("computer_write_clipboard", "Writing clipboard"),
             ("computer_paste", "Pasting"),

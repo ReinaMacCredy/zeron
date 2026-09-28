@@ -792,9 +792,10 @@ impl ThreadTools {
             None => format!("thread {thread_id} has no pending question"),
         })?;
         let questions = pending["questions"].as_array().cloned().unwrap_or_default();
-        if questions.iter().any(|q| q["kind"]["type"] == "consent") {
+        if questions.iter().any(|q| !q["kind"].is_null()) {
             return Err(
-                "that is a computer-use consent request; only the person can answer it".into(),
+                "that is a computer-use consent or foreground request; only the person can answer it"
+                    .into(),
             );
         }
         if let Some(answer) = answers
@@ -3238,6 +3239,18 @@ mod tests {
         )
         .await;
         assert!(err.contains("consent"), "{err}");
+        for kind in [
+            json!({ "type": "foreground", "app": { "name": "Ghostty" } }),
+            json!({ "type": "foreground" }),
+            json!({ "type": "a-kind-this-build-does-not-know" }),
+        ] {
+            let err = refused(
+                pending(Some(kind.clone())),
+                json!({ "threadId": "b", "answers": [{ "questionId": "q1", "labels": ["Allow for this turn"] }] }),
+            )
+            .await;
+            assert!(err.contains("only the person"), "{kind}: {err}");
+        }
 
         let mut resolved = fixture();
         resolved.entries.push(entry(

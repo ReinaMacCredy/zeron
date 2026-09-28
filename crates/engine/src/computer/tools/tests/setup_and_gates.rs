@@ -897,7 +897,10 @@ async fn refuses_activate_without_the_users_task_text_authorization_and_raises_n
     assert_eq!(payload["error"], json!("foreground_not_requested"));
     assert_eq!(payload["effect"], json!("not-dispatched"));
     assert!(
-        payload["message"].as_str().unwrap().contains("did not ask"),
+        payload["message"]
+            .as_str()
+            .unwrap()
+            .contains("has not allowed"),
         "{payload}"
     );
     assert!(h.backend.calls_for("raiseWindow").is_empty());

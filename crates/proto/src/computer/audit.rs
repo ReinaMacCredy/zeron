@@ -16,6 +16,10 @@ pub fn is_computer_audit_cursor(value: &str) -> bool {
     })
 }
 
+pub fn is_computer_audit_app(value: &str) -> bool {
+    value.trim() == value && chars_in(value, 1, 128, |c| !c.is_control())
+}
+
 fn is_entry_id(value: &str) -> bool {
     chars_in(value, 64, 64, |c| matches!(c, 'a'..='f' | '0'..='9'))
 }
@@ -43,6 +47,10 @@ fn tool<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
 
 fn identifier<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
     bounds::opt_matching(d, is_computer_audit_identifier)
+}
+
+fn app<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    bounds::opt_matching(d, is_computer_audit_app)
 }
 
 fn code<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
@@ -96,6 +104,12 @@ pub struct ComputerAuditHistoryEntry {
         deserialize_with = "code"
     )]
     pub code: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "app"
+    )]
+    pub app: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,6 +216,13 @@ mod tests {
             serde_json::from_value::<ComputerAuditHistoryEntry>(value)
         };
         assert!(decode(json!({ "threadId": "chat-1", "code": "approval_queue_full" })).is_ok());
+        assert_eq!(
+            decode(json!({ "app": "Calculator" }))
+                .unwrap()
+                .app
+                .as_deref(),
+            Some("Calculator")
+        );
         for bad in [
             json!({ "id": "A".repeat(64) }),
             json!({ "id": "a".repeat(63) }),
@@ -210,6 +231,10 @@ mod tests {
             json!({ "threadId": "has space" }),
             json!({ "code": "1bad" }),
             json!({ "code": format!("a{}", "b".repeat(96)) }),
+            json!({ "app": "" }),
+            json!({ "app": "Calc\nulator" }),
+            json!({ "app": " Calculator" }),
+            json!({ "app": "x".repeat(129) }),
         ] {
             assert!(decode(bad.clone()).is_err(), "{bad}");
         }

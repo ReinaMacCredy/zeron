@@ -6,11 +6,12 @@ use futures::StreamExt;
 use futures::channel::mpsc;
 use gpui::{App, AppContext as _, Entity, Global, Point, RenderImage, Task};
 use zeron_proto::computer::{
-    ComputerEvent, ComputerHealth, ComputerHealthStatus, ComputerPreviewSize, ComputerSettings,
-    ThreadComputerState,
+    ComputerEvent, ComputerHealth, ComputerHealthStatus, ComputerPreviewPlacement,
+    ComputerPreviewSize, ComputerSettings, ThreadComputerState,
 };
 use zeron_rpc::{RpcError, methods};
 
+use super::presence::ComputerPresenceMap;
 use crate::state::EngineHandle;
 
 pub const STILL_POLL_INTERVAL: Duration = Duration::from_millis(1_000);
@@ -102,16 +103,23 @@ pub struct StatusBadge {
 }
 
 #[derive(Debug, Default)]
-struct ChatPreview {
-    phase: Option<PreviewPhase>,
+pub(super) struct ChatPreview {
+    pub(super) phase: Option<PreviewPhase>,
     last_action_label: Option<String>,
-    state: Option<ThreadComputerState>,
+    pub(super) last_app: Option<String>,
+    pub(super) last_window_id: Option<String>,
+    pub(super) revoked_latched: bool,
+    pub(super) user_paused: bool,
+    pub(super) user_paused_window: Option<String>,
+    pub(super) state: Option<ThreadComputerState>,
     agent_active: bool,
     tap: Option<PreviewImage>,
     still: Option<PreviewImage>,
     failure: Option<PreviewFailure>,
     armed_by_still: bool,
     floating: Option<Point<f32>>,
+    thumb_closed: bool,
+    user_opened: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -121,6 +129,9 @@ pub struct PreviewView {
     pub frame: Option<PreviewImage>,
     pub source: FrameSource,
     pub failure: Option<PreviewFailure>,
+    pub connecting: bool,
+    pub app: Option<String>,
+    pub placement: ComputerPreviewPlacement,
     pub status_label: Option<String>,
     pub badge: Option<StatusBadge>,
     pub wants_stills: bool,
@@ -129,14 +140,13 @@ pub struct PreviewView {
 
 impl PreviewView {
     pub fn visually_open(&self) -> bool {
-        self.open && (self.frame.is_some() || self.failure.is_some())
+        self.open && (self.frame.is_some() || self.failure.is_some() || self.connecting)
     }
 }
 
 #[derive(Default)]
 pub struct ComputerPreviewStore {
     chats: HashMap<String, ChatPreview>,
-    input_stopped: bool,
     events_live: bool,
     settings: ComputerSettings,
     settings_stale: bool,
@@ -159,7 +169,7 @@ pub fn status_label(
     last_action_label: Option<&str>,
 ) -> Option<String> {
     if input_stopped {
-        return Some("Stopped via Escape".into());
+        return Some("Desktop access revoked".into());
     }
     if agent_active {
         return Some(activity.or(last_action_label).unwrap_or("Live").to_owned());
@@ -263,8 +273,6 @@ pub fn status_badge(
 
 pub fn action_status_label(
     action: &str,
-    ok: bool,
-    message: Option<&str>,
     app: Option<&str>,
     delivery_path: Option<&str>,
 ) -> Option<String> {
@@ -287,11 +295,6 @@ pub fn action_status_label(
             let first = chars.next()?;
             first.to_uppercase().chain(chars).collect()
         }
-    };
-    let label = match (ok, message) {
-        (true, _) => label,
-        (false, Some(message)) => format!("{label} failed: {message}"),
-        (false, None) => format!("{label} failed"),
     };
     let delivery = delivery_path.map(|path| {
         if path.contains("foreground") {
@@ -323,6 +326,12 @@ impl ComputerPreviewStore {
             && !matches!(chat.phase, Some(PreviewPhase::Armed | PreviewPhase::Live));
         chat.phase = phase;
         if fresh_task {
+            chat.last_app = None;
+            chat.last_window_id = None;
+            chat.user_paused = false;
+            chat.user_paused_window = None;
+            chat.thumb_closed = false;
+            chat.user_opened = false;
             self.evicted
                 .extend(chat.tap.take().map(|frame| frame.image));
             self.evicted
@@ -339,7 +348,18 @@ impl ComputerPreviewStore {
                 let active = agent_active(state);
                 let chat = self.chat(&state.thread_id);
                 let was = std::mem::replace(&mut chat.agent_active, active);
+                let stopped = |state: &ThreadComputerState| state.input_stopped == Some(true);
+                if stopped(state) {
+                    chat.revoked_latched |= !chat.state.as_ref().is_some_and(stopped);
+                } else if active && !was {
+                    chat.revoked_latched = false;
+                }
                 chat.state = Some((**state).clone());
+                chat.user_opened &= active || !was;
+                if was && !active {
+                    chat.user_paused = false;
+                    chat.user_paused_window = None;
+                }
                 if active != was {
                     let next = phase_on_agent_edge(chat.phase, active);
                     self.set_phase(&state.thread_id, next);
@@ -355,10 +375,10 @@ impl ComputerPreviewStore {
                 window_id,
                 delivery,
                 action,
-                ok,
-                message,
                 ..
             } => {
+                let mut changed = self.chat(thread_id).phase.is_none()
+                    && self.set_phase(thread_id, Some(PreviewPhase::Armed));
                 let chat = self.chat(thread_id);
                 let app = chat.state.as_ref().and_then(|state| {
                     state
@@ -367,26 +387,27 @@ impl ComputerPreviewStore {
                         .find(|window| Some(&window.id) == window_id.as_ref())
                         .and_then(|window| window.app_name.clone())
                 });
+                if let Some(window_id) = window_id {
+                    let same_window = chat.last_window_id.as_ref() == Some(window_id);
+                    let next_app = app
+                        .clone()
+                        .or_else(|| same_window.then(|| chat.last_app.clone()).flatten());
+                    changed |= !same_window || chat.last_app != next_app;
+                    chat.last_window_id = Some(window_id.clone());
+                    chat.last_app = next_app;
+                }
                 let Some(label) = action_status_label(
                     action,
-                    *ok,
-                    message.as_deref(),
                     app.as_deref(),
                     delivery.as_ref().map(|delivery| delivery.path.as_str()),
                 ) else {
-                    return false;
+                    return changed;
                 };
                 if chat.last_action_label.as_deref() == Some(label.as_str()) {
-                    return false;
+                    return changed;
                 }
                 chat.last_action_label = Some(label);
-                if chat.phase.is_none() {
-                    self.set_phase(thread_id, Some(PreviewPhase::Armed));
-                }
                 true
-            }
-            ComputerEvent::InputStopped { stopped } => {
-                std::mem::replace(&mut self.input_stopped, *stopped) != *stopped
             }
             _ => false,
         }
@@ -494,8 +515,84 @@ impl ComputerPreviewStore {
     }
 
     pub fn hide_for_task(&mut self, chat_id: &str) -> bool {
+        let opened = self
+            .chats
+            .get_mut(chat_id)
+            .is_some_and(|chat| std::mem::take(&mut chat.user_opened));
         let next = phase_on_hide(self.chats.get(chat_id).and_then(|chat| chat.phase));
-        self.set_phase(chat_id, next)
+        self.set_phase(chat_id, next) | opened
+    }
+
+    pub fn reopen(&mut self, chat_id: &str) -> bool {
+        let Some(chat) = self
+            .chats
+            .get_mut(chat_id)
+            .filter(|chat| chat.phase.is_some())
+        else {
+            return false;
+        };
+        let opened = !std::mem::replace(&mut chat.user_opened, true);
+        let hidden = chat.phase == Some(PreviewPhase::HiddenForTask);
+        (hidden && self.set_phase(chat_id, Some(PreviewPhase::Live))) | opened
+    }
+
+    pub fn toggle_thumbnail(&mut self, chat_id: &str) -> bool {
+        let shown = self.thumbnail_shown(chat_id);
+        let Some(chat) = self
+            .chats
+            .get_mut(chat_id)
+            .filter(|chat| chat.phase.is_some())
+        else {
+            return false;
+        };
+        chat.thumb_closed = shown;
+        chat.user_opened |= !shown;
+        true
+    }
+
+    pub fn thumbnail_shown(&self, chat_id: &str) -> bool {
+        self.placement() == ComputerPreviewPlacement::Rail
+            && self.chats.get(chat_id).is_some_and(|chat| {
+                chat.phase.is_some()
+                    && chat.floating.is_none()
+                    && !chat.thumb_closed
+                    && (self.settings.auto_open_computer_pane || chat.user_opened)
+            })
+    }
+
+    pub fn placement(&self) -> ComputerPreviewPlacement {
+        self.settings.computer_preview_placement
+    }
+
+    pub fn set_user_paused(&mut self, chat_id: &str, window_id: Option<String>) -> bool {
+        let Some(chat) = self.chats.get_mut(chat_id).filter(|chat| chat.agent_active) else {
+            return false;
+        };
+        let changed = !chat.user_paused || chat.user_paused_window != window_id;
+        chat.user_paused = true;
+        chat.user_paused_window = window_id;
+        changed
+    }
+
+    pub fn clear_user_paused(&mut self, chat_id: &str) -> bool {
+        self.chats.get_mut(chat_id).is_some_and(|chat| {
+            chat.user_paused_window = None;
+            std::mem::take(&mut chat.user_paused)
+        })
+    }
+
+    pub fn clear_revoked(&mut self, chat_id: &str) -> bool {
+        self.chats
+            .get_mut(chat_id)
+            .is_some_and(|chat| std::mem::take(&mut chat.revoked_latched))
+    }
+
+    pub(super) fn chat_preview(&self, chat_id: &str) -> Option<&ChatPreview> {
+        self.chats.get(chat_id)
+    }
+
+    pub(super) fn chat_ids(&self) -> impl Iterator<Item = &str> {
+        self.chats.keys().map(String::as_str)
     }
 
     pub fn settings(&self) -> &ComputerSettings {
@@ -523,17 +620,24 @@ impl ComputerPreviewStore {
         let chat = self.chats.get(chat_id);
         let state = chat.and_then(|chat| chat.state.as_ref());
         let phase = chat.and_then(|chat| chat.phase);
-        let open = phase == Some(PreviewPhase::Live) && self.settings.auto_open_computer_pane;
+        let user_opened = chat.is_some_and(|chat| chat.user_opened);
+        let shown = self.settings.auto_open_computer_pane || user_opened;
+        let open = match phase {
+            Some(PreviewPhase::Live) => shown,
+            Some(PreviewPhase::Ended) => user_opened,
+            _ => false,
+        };
         let active = chat.is_some_and(|chat| {
             chat.agent_active
                 || (chat.armed_by_still
                     && matches!(phase, Some(PreviewPhase::Armed | PreviewPhase::Live)))
         });
-        let input_stopped =
-            self.input_stopped || state.is_some_and(|state| state.input_stopped == Some(true));
+        let input_stopped = state.is_some_and(|state| state.input_stopped == Some(true));
+        let ended = phase == Some(PreviewPhase::Ended)
+            && state.is_none_or(|state| state.shared_preview_unavailable != Some(true));
         let tap = chat
             .and_then(|chat| chat.tap.clone())
-            .filter(|_| driving(state));
+            .filter(|_| driving(state) || ended);
         let source = if tap.is_some() {
             FrameSource::Tap
         } else {
@@ -543,12 +647,15 @@ impl ComputerPreviewStore {
         let failure = chat
             .and_then(|chat| chat.failure.clone())
             .filter(|_| frame.is_none());
-        let wanted = self.settings.auto_open_computer_pane
-            && (open || (!self.events_live && phase != Some(PreviewPhase::HiddenForTask)));
+        let wanted =
+            shown && (open || (!self.events_live && phase != Some(PreviewPhase::HiddenForTask)));
         PreviewView {
             phase,
             open,
             source,
+            connecting: open && frame.is_none() && failure.is_none() && active,
+            app: chat.and_then(|chat| chat.last_app.clone()),
+            placement: self.placement(),
             failure,
             status_label: status_label(
                 active,
@@ -595,10 +702,18 @@ pub enum TapEvent {
         code: String,
         message: String,
     },
+    UserPaused {
+        thread_id: String,
+        window_id: Option<String>,
+    },
+    UserResumed {
+        thread_id: String,
+    },
 }
 
 pub struct ComputerPreview {
     pub store: Entity<ComputerPreviewStore>,
+    presence: Entity<ComputerPresenceMap>,
     taps: mpsc::UnboundedSender<TapEvent>,
     _pump: Task<()>,
 }
@@ -610,19 +725,48 @@ pub fn store(cx: &App) -> Option<Entity<ComputerPreviewStore>> {
         .map(|preview| preview.store.clone())
 }
 
+pub fn presence_map(cx: &App) -> Option<Entity<ComputerPresenceMap>> {
+    cx.try_global::<ComputerPreview>()
+        .map(|preview| preview.presence.clone())
+}
+
 pub fn update_store(
     store: &Entity<ComputerPreviewStore>,
     cx: &mut App,
     change: impl FnOnce(&mut ComputerPreviewStore) -> bool,
 ) {
-    let evicted = store.update(cx, |store, cx| {
-        if change(store) {
+    let (changed, evicted) = store.update(cx, |store, cx| {
+        let changed = change(store);
+        if changed {
             cx.notify();
         }
-        store.take_evicted()
+        (changed, store.take_evicted())
     });
     for image in evicted {
         gpui::ImageSource::Render(image).evict(None, cx);
+    }
+    if changed
+        && let Some(preview) = cx.try_global::<ComputerPreview>()
+        && preview.store == *store
+    {
+        let map = preview.presence.clone();
+        let next = super::presence::presences(store.read(cx));
+        let rail = super::presence::rail_entries(store.read(cx));
+        super::protected_surfaces::publish(
+            map.entity_id(),
+            next.iter().any(|presence| presence.pending.is_some()),
+        );
+        map.update(cx, |map, cx| {
+            if map.set(next) | map.set_rail(rail) {
+                cx.notify();
+            }
+        });
+    }
+}
+
+pub fn clear_revoked(chat_id: &str, cx: &mut App) {
+    if let Some(store) = store(cx) {
+        update_store(&store, cx, |store| store.clear_revoked(chat_id));
     }
 }
 
@@ -638,7 +782,9 @@ fn coalesce(batch: Vec<TapEvent>) -> Vec<TapEvent> {
         .into_iter()
         .filter(|event| match event {
             TapEvent::Frame { thread_id, seq, .. } => newest.get(thread_id) == Some(seq),
-            TapEvent::Failed { .. } => true,
+            TapEvent::Failed { .. }
+            | TapEvent::UserPaused { .. }
+            | TapEvent::UserResumed { .. } => true,
         })
         .collect()
 }
@@ -648,6 +794,7 @@ pub fn init(cx: &mut App) {
         return;
     }
     let store = cx.new(|_| ComputerPreviewStore::default());
+    let presence = cx.new(|_| ComputerPresenceMap::default());
     let (taps, mut received) = mpsc::unbounded::<TapEvent>();
     let pump_store = store.downgrade();
     let pump = cx.spawn(async move |cx| {
@@ -687,12 +834,24 @@ pub fn init(cx: &mut App) {
                             store.accept_tap_failure(&thread_id, PreviewFailure { code, message })
                         })
                     }),
+                    TapEvent::UserPaused {
+                        thread_id,
+                        window_id,
+                    } => cx.update(|cx| {
+                        update_store(&store, cx, |store| {
+                            store.set_user_paused(&thread_id, window_id)
+                        })
+                    }),
+                    TapEvent::UserResumed { thread_id } => cx.update(|cx| {
+                        update_store(&store, cx, |store| store.clear_user_paused(&thread_id))
+                    }),
                 }
             }
         }
     });
     cx.set_global(ComputerPreview {
         store,
+        presence,
         taps,
         _pump: pump,
     });
@@ -730,6 +889,26 @@ pub fn native_sink(cx: &App) -> super::native::frame_tap::PreviewSink {
         };
         let _ = taps.unbounded_send(event);
     })
+}
+
+#[cfg(target_os = "macos")]
+pub fn takeover_sink(cx: &App) -> Option<Box<dyn Fn(super::host::TakeoverEvent) + Send>> {
+    use super::host::TakeoverEvent;
+    let taps = tap_sender(cx)?;
+    Some(Box::new(move |event| {
+        let event = match event {
+            TakeoverEvent::Paused {
+                thread_id,
+                pid,
+                window_id,
+            } => TapEvent::UserPaused {
+                thread_id,
+                window_id: window_id.map(|window| format!("cua:{pid}:{window}")),
+            },
+            TakeoverEvent::Resumed { thread_id } => TapEvent::UserResumed { thread_id },
+        };
+        let _ = taps.unbounded_send(event);
+    }))
 }
 
 pub fn watch_events(engine: EngineHandle, cx: &mut App) -> Option<Task<()>> {
@@ -1053,6 +1232,109 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn reopen_brings_a_hidden_preview_back() {
+        let mut store = ComputerPreviewStore::default();
+        assert!(
+            !store.reopen("a"),
+            "a chat that never drove has nothing to reopen"
+        );
+        driving(&mut store, "a");
+        store.mark_live("a");
+        store.hide_for_task("a");
+        assert!(!store.view("a").open);
+        assert!(store.reopen("a"));
+        assert_eq!(store.view("a").phase, Some(PreviewPhase::Live));
+        assert!(store.view("a").open);
+        store.apply_event(&ComputerEvent::ThreadState {
+            state: Box::new(thread_state("a", false)),
+        });
+        assert_eq!(store.view("a").phase, Some(PreviewPhase::Ended));
+        assert!(!store.view("a").open, "the drive's end closes it");
+        assert!(store.reopen("a"), "an ended drive reopens too");
+        assert!(store.view("a").open);
+        assert!(store.hide_for_task("a"));
+        assert!(!store.view("a").open, "hiding undoes the reopen");
+
+        store.set_settings(ComputerSettings {
+            auto_open_computer_pane: false,
+            ..ComputerSettings::default()
+        });
+        driving(&mut store, "a");
+        store.mark_live("a");
+        assert!(!store.view("a").open, "a new task forgets the reopen");
+        assert!(store.reopen("a"));
+        let view = store.view("a");
+        assert!(view.open, "a click opens it even with auto-open off");
+        assert!(view.connecting, "open and driving with no frame yet");
+        store.accept_tap_frame("a", image(1, 960, 600));
+        assert!(!store.view("a").connecting);
+    }
+
+    #[test]
+    fn the_thumbnail_toggles_per_chat() {
+        let mut store = ComputerPreviewStore::default();
+        assert_eq!(store.placement(), ComputerPreviewPlacement::Rail);
+        assert!(!store.thumbnail_shown("a"));
+        assert!(!store.toggle_thumbnail("a"));
+        driving(&mut store, "a");
+        driving(&mut store, "b");
+        assert!(store.thumbnail_shown("a") && store.thumbnail_shown("b"));
+        assert!(store.toggle_thumbnail("a"));
+        assert!(!store.thumbnail_shown("a"));
+        assert!(store.thumbnail_shown("b"), "b keeps its own thumbnail");
+        store.toggle_thumbnail("a");
+        assert!(store.thumbnail_shown("a"));
+        store.set_floating("a", Some(gpui::point(10.0, 10.0)));
+        assert!(!store.thumbnail_shown("a"), "a popped-out card replaces it");
+        store.set_floating("a", None);
+        store.toggle_thumbnail("a");
+        store.apply_event(&ComputerEvent::ThreadState {
+            state: Box::new(thread_state("a", false)),
+        });
+        driving(&mut store, "a");
+        assert!(store.thumbnail_shown("a"), "a new task shows it again");
+
+        store.set_settings(ComputerSettings {
+            auto_open_computer_pane: false,
+            ..ComputerSettings::default()
+        });
+        assert!(!store.thumbnail_shown("a"));
+        store.toggle_thumbnail("a");
+        assert!(
+            store.thumbnail_shown("a"),
+            "a click shows it with auto-open off"
+        );
+        store.set_settings(ComputerSettings {
+            computer_preview_placement: ComputerPreviewPlacement::Card,
+            ..ComputerSettings::default()
+        });
+        assert!(
+            !store.thumbnail_shown("a"),
+            "the card placement has no thumbnail"
+        );
+    }
+
+    #[test]
+    fn a_revoke_marks_only_its_own_chat() {
+        let mut store = ComputerPreviewStore::default();
+        driving(&mut store, "a");
+        driving(&mut store, "b");
+        let mut revoked = thread_state("a", true);
+        revoked.input_stopped = Some(true);
+        assert!(store.apply_event(&ComputerEvent::ThreadState {
+            state: Box::new(revoked),
+        }));
+        assert!(!store.apply_event(&ComputerEvent::InputStopped { stopped: true }));
+        assert_eq!(
+            store.view("a").status_label.as_deref(),
+            Some("Desktop access revoked")
+        );
+        assert_eq!(store.view("b").status_label.as_deref(), Some("Live"));
+        driving(&mut store, "a");
+        assert_eq!(store.view("a").status_label.as_deref(), Some("Live"));
+    }
+
+    #[test]
     fn labels_follow_synaras_popover_and_badge() {
         let mut store = ComputerPreviewStore::default();
         driving(&mut store, "a");
@@ -1084,11 +1366,15 @@ pub(crate) mod tests {
             store.view("a").status_label.as_deref(),
             Some("Typing in Calculator")
         );
-        store.apply_event(&ComputerEvent::InputStopped { stopped: true });
+        active.input_stopped = Some(true);
+        store.apply_event(&ComputerEvent::ThreadState {
+            state: Box::new(active.clone()),
+        });
         assert_eq!(
             store.view("a").status_label.as_deref(),
-            Some("Stopped via Escape")
+            Some("Desktop access revoked")
         );
+        active.input_stopped = None;
         assert_eq!(
             status_badge(Some(&active), true, true).unwrap().label,
             "Typing in Calculator"
@@ -1102,6 +1388,7 @@ pub(crate) mod tests {
             window_id: None,
             pid: None,
             message: "Screen locked".into(),
+            user_takeover: false,
         });
         let badge = status_badge(Some(&active), true, true).unwrap();
         assert_eq!(
@@ -1131,9 +1418,9 @@ pub(crate) mod tests {
             None
         );
         assert_eq!(
-            action_status_label("computer_press_key", false, Some("no window"), None, None)
+            action_status_label("computer_press_key", Some("Ghostty"), Some("foreground"))
                 .as_deref(),
-            Some("Press a key failed: no window")
+            Some("Press a key · Ghostty · Temporary foreground")
         );
     }
 

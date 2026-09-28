@@ -43,6 +43,7 @@ mod emergency_stop;
 mod foreground;
 mod gateway;
 mod lease;
+mod left_open;
 mod observe;
 mod provision;
 mod publish;
@@ -681,10 +682,10 @@ pub(crate) struct Seams {
     pub mode: Mutex<Option<PermissionMode>>,
     pub turn_inactive: AtomicBool,
     pub consent: Mutex<Vec<(ComputerConsentCard, Option<ApprovalDecision>)>>,
-    pub disclosures: Mutex<Vec<(String, Option<String>)>>,
     pub bumps: Mutex<Vec<(String, u64)>>,
     pub leases: Mutex<Vec<ComputerLeaseRecord>>,
     pub warnings: Mutex<Vec<(String, Value)>>,
+    pub notes: Mutex<Vec<(String, String)>>,
 }
 
 #[async_trait]
@@ -709,13 +710,6 @@ impl ComputerManagerSeams for Seams {
         Ok(())
     }
 
-    async fn disclose_control(&self, chat_id: &str, turn_id: Option<&str>) {
-        self.disclosures
-            .lock()
-            .unwrap()
-            .push((chat_id.to_owned(), turn_id.map(str::to_owned)));
-    }
-
     fn generation_bumped(&self, chat_id: &str, generation: u64) {
         self.bumps
             .lock()
@@ -732,6 +726,13 @@ impl ComputerManagerSeams for Seams {
             .lock()
             .unwrap()
             .push((message.to_owned(), detail));
+    }
+
+    fn note(&self, chat_id: &str, text: &str) {
+        self.notes
+            .lock()
+            .unwrap()
+            .push((chat_id.to_owned(), text.to_owned()));
     }
 }
 

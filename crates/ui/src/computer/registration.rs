@@ -223,6 +223,7 @@ pub fn install_desktop_host(cx: &mut gpui::App) {
                     .clone()
             }
         })),
+        on_takeover: super::preview::takeover_sink(cx),
     };
     match super::native::start_native_host(config) {
         Ok((driver, link)) => cx.set_global(DesktopHost {
@@ -300,6 +301,8 @@ pub fn apply_cursor_colors(
 #[cfg(target_os = "macos")]
 pub fn retire_desktop_host(cx: &mut gpui::App) -> Option<gpui::Task<()>> {
     cx.try_global::<DesktopHost>()?;
+    super::native::target_ring::release_all();
+    super::native::status_item::remove();
     let desktop = cx.remove_global::<DesktopHost>();
     let disposing = desktop.driver.dispose();
     let budget = cx.background_executor().timer(DESKTOP_HOST_RETIRE_BUDGET);

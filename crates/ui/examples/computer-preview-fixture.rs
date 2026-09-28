@@ -334,6 +334,44 @@ fn main() -> anyhow::Result<()> {
                         pause(cx, 66).await;
                     }
                     pause(cx, 600).await;
+                    capture(window.into(), cx, &output, "rail-thumbnail")?;
+                    if !cx.update(|cx| store.read(cx).thumbnail_shown(CHAT)) {
+                        anyhow::bail!("the default placement shows no rail thumbnail");
+                    }
+                    let thumbnail = window
+                        .update(cx, |s, _, _| s.fixture_computer_thumbnail())?
+                        .expect("thumbnail entity");
+                    let Some(thumb) = cx.update(|cx| thumbnail.read(cx).fixture_bounds()) else {
+                        anyhow::bail!("the rail thumbnail never painted");
+                    };
+                    pointer(window.into(), cx, vec![hover(thumb.center(), None)])?;
+                    pause(cx, 100).await;
+                    pointer(window.into(), cx, press(thumb.center()))?;
+                    pointer(window.into(), cx, vec![hover(gpui::point(px(300.), px(500.)), None)])?;
+                    pause(cx, 800).await;
+                    capture(window.into(), cx, &output, "rail-popped-out")?;
+                    let popped = cx.update(|cx| store.read(cx).view(CHAT).floating);
+                    eprintln!("rail thumbnail {thumb:?} popped out at {popped:?}");
+                    if popped.is_none() {
+                        anyhow::bail!("clicking the thumbnail did not pop the card out");
+                    }
+                    cx.update(|cx| preview::update_store(&store, cx, |s| s.set_floating(CHAT, None)));
+
+                    let card = zeron_proto::computer::ComputerSettings {
+                        computer_preview_placement: zeron_proto::computer::ComputerPreviewPlacement::Card,
+                        ..Default::default()
+                    };
+                    settings_client
+                        .client()
+                        .call(zeron_rpc::methods::SET_COMPUTER_SETTINGS, serde_json::to_value(&card)?)
+                        .await?;
+                    rearm(cx);
+                    pause(cx, 800).await;
+                    for seq in 20..=30u64 {
+                        taps.unbounded_send(frame(seq, (seq % 20) as u32))?;
+                        pause(cx, 66).await;
+                    }
+                    pause(cx, 600).await;
                     capture(window.into(), cx, &output, "compact-live")?;
 
                     window.update(cx, |_, w, cx| {
@@ -357,7 +395,7 @@ fn main() -> anyhow::Result<()> {
 
                     let large = zeron_proto::computer::ComputerSettings {
                         computer_preview_size: zeron_proto::computer::ComputerPreviewSize::Large,
-                        ..Default::default()
+                        ..card.clone()
                     };
                     settings_client
                         .client()
@@ -376,7 +414,7 @@ fn main() -> anyhow::Result<()> {
                         .client()
                         .call(
                             zeron_rpc::methods::SET_COMPUTER_SETTINGS,
-                            serde_json::to_value(zeron_proto::computer::ComputerSettings::default())?,
+                            serde_json::to_value(&card)?,
                         )
                         .await?;
                     rearm(cx);
@@ -419,21 +457,40 @@ fn main() -> anyhow::Result<()> {
                         .expect("decoded still");
                     cx.update(|cx| preview::update_store(&store, cx, |s| s.accept_still(CHAT, Some(decoded))));
                     event(cx, ComputerEvent::ThreadState { state: Box::new(thread_state(true, true)) });
-                    state.update(cx, |s, cx| {
-                        s.computer_input_pauses.insert(
-                            CHAT.into(),
-                            computer::cards::input_pause_notice(&thread_state(true, true))
-                                .expect("pause notice"),
-                        );
-                        cx.notify();
-                    });
                     pause(cx, 800).await;
                     capture(window.into(), cx, &output, "still-fallback-input-paused")?;
+
+                    let mut asking = thread_state(false, false);
+                    asking.pending_request = serde_json::from_value(json!({
+                        "inputId": "computer-foreground-fixture",
+                        "questionId": "foreground",
+                        "kind": { "type": "foreground", "app": "Calculator" },
+                    }))
+                    .ok();
+                    event(cx, ComputerEvent::ThreadState { state: Box::new(asking) });
+                    pause(cx, 800).await;
+                    capture(window.into(), cx, &output, "foreground-request")?;
+
+                    let mut consent = thread_state(false, false);
+                    consent.pending_request = serde_json::from_value(json!({
+                        "inputId": "computer-consent-fixture",
+                        "questionId": "consent",
+                        "kind": {
+                            "type": "consent",
+                            "scope": "task",
+                            "app": { "name": "Calculator", "bundleId": "com.apple.calculator", "pid": 4242 },
+                            "tool": "computer_type_text",
+                            "params": "{\"window_id\":\"cua:4242:17\"}",
+                        },
+                    }))
+                    .ok();
+                    event(cx, ComputerEvent::ThreadState { state: Box::new(consent) });
+                    pause(cx, 800).await;
+                    capture(window.into(), cx, &output, "consent-request")?;
 
                     if let Some(p45) = &p45_output {
                         std::fs::create_dir_all(p45)?;
                         state.update(cx, |s, cx| {
-                            s.computer_input_pauses.remove(CHAT);
                             s.receive_transcript_frame(reset(long_transcript.clone()), cx).unwrap();
                             cx.notify();
                         });
@@ -512,6 +569,19 @@ fn main() -> anyhow::Result<()> {
                         let docked = cx.update(|cx| store.read(cx).view(CHAT).floating);
                         eprintln!("p4-5 after dock: {docked:?}");
                     }
+
+                    settings_client
+                        .client()
+                        .call(
+                            zeron_rpc::methods::SET_COMPUTER_SETTINGS,
+                            serde_json::to_value(zeron_proto::computer::ComputerSettings::default())?,
+                        )
+                        .await?;
+                    window.update(cx, |s, _, cx| {
+                        s.fixture_computer_settings(cx);
+                    })?;
+                    pause(cx, 1200).await;
+                    capture(window.into(), cx, &output, "settings-placement")?;
                     Ok(())
                 }
                 .await;

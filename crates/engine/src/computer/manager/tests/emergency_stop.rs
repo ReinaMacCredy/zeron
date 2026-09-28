@@ -14,13 +14,11 @@ fn count_stops(backend: &Scripted) -> Arc<AtomicUsize> {
     stops
 }
 
-fn input_stopped(events: &Events, stopped: bool) -> usize {
+fn input_stopped(events: &Events) -> usize {
     events
         .all()
         .iter()
-        .filter(|event| {
-            matches!(**event, ComputerEvent::InputStopped { stopped: seen } if seen == stopped)
-        })
+        .filter(|event| matches!(**event, ComputerEvent::InputStopped { .. }))
         .count()
 }
 
@@ -69,8 +67,7 @@ async fn interrupts_live_work_once_and_the_next_action_succeeds_without_a_re_arm
     assert_eq!(stops.load(Ordering::SeqCst), 1);
     let error = live.await.unwrap().unwrap_err();
     assert!(error.control_revoked(), "{error}");
-    assert_eq!(input_stopped(&events, true), 1);
-    assert_eq!(input_stopped(&events, false), 1);
+    assert_eq!(input_stopped(&events), 0, "no store-wide stop event");
     manager
         .click(
             Some("esc-thread"),
@@ -138,7 +135,7 @@ async fn fails_queued_work_at_its_wait_then_admits_the_next_call() {
     manager.emergency_stop_input().await.unwrap();
     release.resolve();
     let error = queued.await.unwrap().unwrap_err();
-    assert!(error.to_string().contains("Escape"), "{error}");
+    assert!(error.control_revoked(), "{error}");
     assert_eq!(active.await.unwrap().unwrap(), "active-finished");
     assert!(!worked.load(Ordering::SeqCst));
     assert!(backend.calls_for("click").is_empty());
@@ -193,10 +190,7 @@ async fn treats_a_pane_escape_as_ordinary_input_never_as_a_stop() {
         .collect();
     assert_eq!(keys, vec![json!("escape")]);
     assert_eq!(stops.load(Ordering::SeqCst), 0);
-    assert_eq!(
-        input_stopped(&events, true) + input_stopped(&events, false),
-        0
-    );
+    assert_eq!(input_stopped(&events), 0);
     manager.dispose().await;
 }
 

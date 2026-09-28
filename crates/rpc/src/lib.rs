@@ -289,6 +289,7 @@ pub mod methods {
     pub const GET_COMPUTER_STILL_FRAME: &str = "GetComputerStillFrame";
     /// Physical Escape from the desktop host. No params → `{stoppedChatIds}`.
     pub const COMPUTER_EMERGENCY_STOP: &str = "ComputerEmergencyStop";
+    pub const COMPUTER_REVOKE_DESKTOP: &str = "ComputerRevokeDesktop";
     /// No params → stream of `ComputerEvent`, across desktop host changes.
     pub const WATCH_COMPUTER_EVENTS: &str = "WatchComputerEvents";
 }

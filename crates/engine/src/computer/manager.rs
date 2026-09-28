@@ -3,6 +3,7 @@ mod authority;
 mod consent_app;
 mod foreground;
 mod lease;
+mod left_open;
 mod observe;
 mod publish;
 mod stream;
@@ -25,8 +26,8 @@ use tokio_util::sync::CancellationToken;
 use zeron_proto::PermissionMode;
 use zeron_proto::computer::{
     ComputerApp, ComputerAvailability, ComputerEvent, ComputerHealth, ComputerHealthStatus,
-    ComputerInputModifier, ComputerInputPause, ComputerPoint, ComputerRect, ComputerScreenSize,
-    ComputerScreenshot, ComputerWindow, CuaEffect,
+    ComputerInputModifier, ComputerInputPause, ComputerPendingRequest, ComputerPoint, ComputerRect,
+    ComputerScreenSize, ComputerScreenshot, ComputerWindow, CuaEffect,
 };
 
 use super::approval_gate::{ApprovalDecision, ComputerApprovalGate};
@@ -64,9 +65,10 @@ pub const SCROLL_PROBE_TRIGGER_PX: f64 = SCROLL_PROBE_PX;
 pub const SCROLL_SETTLE_ARRIVAL_TOLERANCE: f64 = 0.15;
 pub const SCROLL_SETTLE_ARRIVAL_MIN_PX: f64 = 4.0;
 pub const COMPUTER_ERROR_REPUBLISH_DEBOUNCE_MS: u64 = 250;
-pub const COMPUTER_CONTROL_ON_DISCLOSURE: &str = "Computer control ON for this turn: the agent is driving the desktop and the user can switch it off in Settings.";
+pub const COMPUTER_CONTROL_ON_DISCLOSURE: &str = "Computer control is on for this turn. The user can take the desktop back with Stop or Escape; if a computer tool returns user_revoked, stop using computer tools and summarize.";
+pub const COMPUTER_USER_PAUSE_NOTE_PREFIX: &str = "Paused while you used ";
+pub const COMPUTER_USER_REVOKED: &str = "The user took back desktop control for the rest of this turn; no input was sent. Do not call computer tools again this turn. Tell the user what you finished and what is left.";
 const COMPUTER_DENYLIST_APP_CACHE_MS: u64 = 30_000;
-const SURFACED_CONTROL_DISCLOSURES_MAX: usize = 512;
 const THREAD_RECORD_LIMIT: usize = 256;
 const OBSERVED_APP_NAME_LIMIT: usize = 256;
 
@@ -116,10 +118,13 @@ impl ComputerManagerEnv {
     }
 }
 
+#[cfg(test)]
+pub(crate) use authority::consent_params;
 pub use consent_app::{
     COMPUTER_APP_CONSENT_REQUIRED_CODE, COMPUTER_APP_WINDOW_REQUIRED_CODE,
     COMPUTER_APP_WINDOW_REQUIRED_MESSAGE,
 };
+pub use left_open::{ComputerLeftOpen, left_open_note};
 pub use zeron_proto::computer::{ComputerConsentApp, ComputerConsentScope};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -195,8 +200,6 @@ pub trait ComputerManagerSeams: Send + Sync {
         Ok(())
     }
 
-    async fn disclose_control(&self, _chat_id: &str, _turn_id: Option<&str>) {}
-
     fn generation_bumped(&self, _chat_id: &str, _generation: u64) {}
 
     fn lease_lifecycle(&self, record: &ComputerLeaseRecord) {
@@ -214,6 +217,8 @@ pub trait ComputerManagerSeams: Send + Sync {
     fn warn(&self, message: &str, detail: Value) {
         tracing::warn!(%detail, "{message}");
     }
+
+    fn note(&self, _chat_id: &str, _text: &str) {}
 }
 
 pub struct DefaultComputerManagerSeams;
@@ -377,6 +382,8 @@ struct ThreadRuntime {
     availability: ComputerAvailability,
     cursor: Option<ComputerPoint>,
     pane_surfaced: bool,
+    desktop_revoked: bool,
+    pending_requests: VecDeque<(Option<String>, ComputerPendingRequest)>,
 }
 
 #[derive(Debug, Clone)]
@@ -482,6 +489,7 @@ struct State {
     authority_revocations: HashMap<String, Authority>,
     active_authorities: HashMap<String, Vec<Authority>>,
     authority_turns: HashMap<String, String>,
+    turn_windows: HashMap<String, left_open::TurnWindows>,
     pending_stops: HashMap<String, PendingStop>,
     physical_state: Option<PhysicalState>,
     physical_read: Option<Shared<BoxFuture<'static, ()>>>,
@@ -493,7 +501,6 @@ struct State {
     windows_publish_timer: Option<JoinHandle<()>>,
     error_republish_timer: Option<JoinHandle<()>>,
     publish_locks: HashMap<String, (Arc<tokio::sync::Mutex<()>>, usize)>,
-    surfaced_disclosures: VecDeque<String>,
     stream: StreamState,
     stream_tail: Option<Shared<BoxFuture<'static, ()>>>,
     frame_subscribers: Vec<(u64, ComputerFrameSubscriber)>,
@@ -664,6 +671,7 @@ impl ComputerManager {
                     authority_revocations: HashMap::new(),
                     active_authorities: HashMap::new(),
                     authority_turns: HashMap::new(),
+                    turn_windows: HashMap::new(),
                     pending_stops: HashMap::new(),
                     physical_state: None,
                     physical_read: None,
@@ -675,7 +683,6 @@ impl ComputerManager {
                     windows_publish_timer: None,
                     error_republish_timer: None,
                     publish_locks: HashMap::new(),
-                    surfaced_disclosures: VecDeque::new(),
                     stream: StreamState::default(),
                     stream_tail: None,
                     frame_subscribers: Vec::new(),
@@ -755,6 +762,15 @@ impl ComputerManager {
         &self.cursor_activity
     }
 
+    pub fn window_app_name(&self, window_id: &str) -> Option<String> {
+        self.state()
+            .last_known_windows
+            .get(window_id)?
+            .app_name
+            .clone()
+            .filter(|name| !name.trim().is_empty())
+    }
+
     pub fn observed_app_names(&self) -> Vec<String> {
         self.state().known_app_names.clone()
     }
@@ -778,6 +794,7 @@ impl ComputerManager {
     fn remember_windows(state: &mut State, windows: &[ComputerWindow]) {
         state.last_known_window_ids =
             Some(windows.iter().map(|window| window.id.clone()).collect());
+        left_open::fill_baselines(state);
         state.last_known_windows = windows
             .iter()
             .map(|window| (window.id.clone(), window.clone()))
@@ -1099,6 +1116,44 @@ fn js_number(value: f64) -> String {
     } else {
         format!("{value}")
     }
+}
+
+pub(crate) fn display_app_name(raw: Option<&str>) -> Option<String> {
+    let name = raw?.trim();
+    let basename = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    let basename = match basename.len().checked_sub(4) {
+        Some(end)
+            if basename.is_char_boundary(end) && basename[end..].eq_ignore_ascii_case(".app") =>
+        {
+            &basename[..end]
+        }
+        _ => basename,
+    };
+    let segments: Vec<&str> = basename.split('.').collect();
+    let reverse_dns = segments.len() >= 3
+        && segments[..segments.len() - 1].iter().all(|segment| {
+            segment
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic())
+                && segment
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        });
+    let label = if reverse_dns {
+        segments.last().copied().unwrap_or(basename)
+    } else {
+        basename
+    };
+    let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = label.chars();
+    let first = chars.next()?;
+    let label: String = first.to_uppercase().chain(chars).collect();
+    Some(if label.chars().count() > 80 {
+        label.chars().take(79).chain(['…']).collect()
+    } else {
+        label
+    })
 }
 
 async fn with_teardown_timeout<T>(

@@ -279,7 +279,7 @@ impl ComputerTools {
                     ToolInputError::new("Step \"activate_window\" requires \"window_id\".")
                 })?;
                 async move {
-                    let authorization = context.seams.foreground_authorization().await;
+                    let authorization = context.seams.foreground_authorization(Some(step)).await;
                     let noted = with_desktop_delivery_mode(
                         ComputerDeliveryMode::Foreground,
                         manager.foreground_with_restore(who, &window_id, None, Some(authorization)),
@@ -355,7 +355,7 @@ impl ComputerTools {
                 let target = read_menu_target_arg(step)?;
                 let path = read_menu_path_arg(step, "Step \"invoke_menu\"")?;
                 async move {
-                    let authorization = context.seams.foreground_authorization().await;
+                    let authorization = context.seams.foreground_authorization(Some(step)).await;
                     Ok(action(
                         manager
                             .invoke_menu(who, target, &path, Some(authorization))

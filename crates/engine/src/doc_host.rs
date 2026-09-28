@@ -5570,7 +5570,7 @@ impl DocHost {
                     ));
                 };
                 // Consent binds only the turn that asked; a new turn must ask again.
-                if questions.iter().any(UserInputQuestion::is_consent) {
+                if questions.iter().any(UserInputQuestion::is_computer) {
                     if let Err(err) = handle.doc.resolve_input(request_id, None) {
                         tracing::warn!(chat = %chat_id, request = %request_id, error = %err,
                             "expired consent resolve failed");
@@ -5821,20 +5821,6 @@ impl DocHost {
             && sessions
                 .live_computer_control(chat_id)
                 .is_some_and(|live| live != computer_control)
-    }
-
-    pub(crate) async fn stop_for_escape(&self, chat_id: &str) -> Result<(), EngineError> {
-        let Some(sessions) = self.sessions() else {
-            return Err(EngineError::Other("sessions engine not wired".into()));
-        };
-        let handle = self.open(chat_id)?;
-        self.interrupt_and_pause_queue(&sessions, &handle).await?;
-        sessions.write_computer_note(
-            chat_id,
-            crate::computer::runtime::COMPUTER_ESCAPE_STOP_NOTICE,
-            None,
-        );
-        Ok(())
     }
 
     async fn capture_source_context(&self, cwd: &str) -> Option<ConversationSourceContext> {

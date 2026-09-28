@@ -673,6 +673,24 @@ pub(super) fn icon_for_bundle(bundle: &str) -> Option<Vec<u8>> {
     })
 }
 
+pub(super) fn activate_app_named(name: &str) -> bool {
+    autoreleasepool(|| unsafe {
+        let workspace: *mut Object = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let apps: *mut Object = msg_send![workspace, runningApplications];
+        let count: usize = msg_send![apps, count];
+        let mut activated = false;
+        for index in 0..count {
+            let app: *mut Object = msg_send![apps, objectAtIndex: index];
+            let localized: *mut Object = msg_send![app, localizedName];
+            if nsstring(localized).as_deref() == Some(name) {
+                let _: objc::runtime::BOOL = msg_send![app, activateWithOptions: 1usize];
+                activated = true;
+            }
+        }
+        activated
+    })
+}
+
 pub(super) fn icon_for_path(path: &str) -> Option<Vec<u8>> {
     autoreleasepool(|| unsafe {
         let workspace: *mut Object = msg_send![class!(NSWorkspace), sharedWorkspace];

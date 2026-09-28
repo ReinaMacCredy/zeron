@@ -319,13 +319,29 @@ fn split_tab_chip(
                         cx.new(|_| TabGhost { title, brand })
                     },
                 )
-                .when(!harness.is_empty(), |el| {
-                    el.child(crate::pickers::harness_mark_stack(
-                        &harness,
+                .map(|el| {
+                    match crate::computer::strip::chat_glyph(
+                        "session-tab",
+                        &id,
                         14.0,
-                        theme.text_muted,
                         0.9,
-                    ))
+                        theme,
+                        cx,
+                    ) {
+                        Some(glyph) => el.child(glyph),
+                        None => el.when(!harness.is_empty(), |el| {
+                            let selector = format!("session-tab-harness-{id}");
+                            el.child(
+                                crate::pickers::harness_mark_stack(
+                                    &harness,
+                                    14.0,
+                                    theme.text_muted,
+                                    0.9,
+                                )
+                                .debug_selector(move || selector),
+                            )
+                        }),
+                    }
                 })
                 .child(div().flex_1().min_w_0().truncate().child(title))
                 .child(trailing),
@@ -1198,13 +1214,29 @@ impl Shell {
                                 cx.new(|_| TabGhost { title, brand })
                             },
                         )
-                        .when(!harness.is_empty(), |el| {
-                            el.child(crate::pickers::harness_mark_stack(
-                                &harness,
+                        .map(|el| {
+                            match crate::computer::strip::chat_glyph(
+                                "session-tab",
+                                &id,
                                 14.0,
-                                theme.text_muted,
                                 glyph_alpha,
-                            ))
+                                &theme,
+                                cx,
+                            ) {
+                                Some(glyph) => el.child(glyph),
+                                None => el.when(!harness.is_empty(), |el| {
+                                    let selector = format!("session-tab-harness-{id}");
+                                    el.child(
+                                        crate::pickers::harness_mark_stack(
+                                            &harness,
+                                            14.0,
+                                            theme.text_muted,
+                                            glyph_alpha,
+                                        )
+                                        .debug_selector(move || selector),
+                                    )
+                                }),
+                            }
                         })
                         // A draft wears the amber pen where a session wears
                         // its harness brand (d18); a session with unsent
@@ -1899,6 +1931,73 @@ mod strip_regressions {
         });
         cx.update(|window, cx| window.draw(cx).clear());
         assert!(cx.debug_bounds("session-tab-a").is_none());
+    }
+
+    #[gpui::test]
+    fn a_driving_chat_wears_the_cursor_glyph_and_gets_its_harness_mark_back_after(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::computer::preview::{self, tests::thread_state};
+        use zeron_proto::computer::{ComputerEvent, ComputerInputPause};
+
+        cx.update(preview::init);
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                let mut driven = chat("a");
+                driven.config = serde_json::from_value(serde_json::json!({
+                    "harness": "claude-code", "sandbox": "workspace-write"
+                }))
+                .ok();
+                state.chats = vec![driven, chat("b")];
+                state.chats_synced = true;
+                state.spaces_synced = true;
+                state.apply_sessions(vec![working("a"), working("b")]);
+                state.select_chat(Some("a".into()), cx);
+            });
+            shell.on_state_changed(&shell.state.clone(), cx);
+            shell.open_chat("b".into(), cx);
+            shell.on_state_changed(&shell.state.clone(), cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("session-tab-harness-a").is_some());
+        let store = cx.update(|_, cx| preview::store(cx).unwrap());
+        let mut apply = |state: zeron_proto::computer::ThreadComputerState| {
+            cx.update(|window, cx| {
+                preview::update_store(&store, cx, |store| {
+                    store.apply_event(&ComputerEvent::ThreadState {
+                        state: Box::new(state),
+                    })
+                });
+                window.draw(cx).clear();
+            });
+            (
+                cx.debug_bounds("session-tab-computer-a").is_some(),
+                cx.debug_bounds("session-tab-harness-a").is_some(),
+                cx.debug_bounds("session-tab-computer-b").is_some(),
+            )
+        };
+        assert_eq!(apply(thread_state("a", true)), (true, false, false));
+        let mut paused = thread_state("a", true);
+        paused.input_pause = Some(ComputerInputPause {
+            window_id: Some("w1".into()),
+            pid: None,
+            message: "Screen locked".into(),
+            user_takeover: false,
+        });
+        assert_eq!(
+            apply(paused),
+            (true, false, false),
+            "paused still holds the desktop"
+        );
+        let mut revoked = thread_state("a", false);
+        revoked.input_stopped = Some(true);
+        assert_eq!(
+            apply(revoked),
+            (false, true, false),
+            "revoked wears the harness mark"
+        );
+        assert_eq!(apply(thread_state("a", false)), (false, true, false));
     }
 
     fn invest(id: &str, text: &str, cx: &mut gpui::App) {

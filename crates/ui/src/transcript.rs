@@ -44,12 +44,14 @@ use zeron_proto::ToolCall;
 
 use crate::computer::cards::{
     CardAction, CardTone, ComputerNotice, ComputerRequest, ConsentChoice, ConsentOutcome,
-    computer_card, computer_notice, consent_allow_description, consent_answers, consent_app,
-    consent_card_title, consent_choices, consent_detail, consent_outcome, consent_outcome_label,
-    consent_question, consent_scope, is_control_denied, missing_computer_permissions,
+    computer_card, computer_event_row, computer_notice, consent_allow_description, consent_answers,
+    consent_app, consent_card_title, consent_choices, consent_detail, consent_event_label,
+    consent_outcome, consent_question, consent_scope, is_control_denied, left_open_app,
+    missing_computer_permissions, revoked_label,
 };
 use crate::computer::presentation::{
-    ComputerCall, computer_call, computer_call_rows, computer_output_hidden, describe_computer_call,
+    ComputerCall, computer_call, computer_call_app, computer_call_rows, computer_output_hidden,
+    describe_computer_call,
 };
 use crate::markdown::parser::{
     Block, BlockTree, IncrementalParser, InlineRun, InlineStyle, parse_full,
@@ -383,6 +385,7 @@ pub struct ToolItem {
     /// per-delta header rewrites read as noise). Never rendered; still
     /// fingerprinted so an old doc's chips re-splice correctly.
     pub subagent_tail: Option<SharedString>,
+    pub app: Option<SharedString>,
     /// `Call` is a real doc tool invocation; `Thought` (a reasoning part
     /// riding the tool group — the thought process belongs inside the
     /// combined "Ran N commands" accordion, opening/closing with the same
@@ -408,6 +411,23 @@ fn is_agent_call(call: &ToolCall) -> bool {
 /// that opened empty, never-created subagent docs.
 fn is_agent_tool(item: &ToolItem) -> bool {
     is_agent_call(&item.call)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolGenus {
+    Agent,
+    Computer,
+    Other,
+}
+
+fn tool_genus(item: &ToolItem) -> ToolGenus {
+    if is_agent_tool(item) {
+        ToolGenus::Agent
+    } else if item.kind == ToolItemKind::Call && computer_call(&item.call).is_some() {
+        ToolGenus::Computer
+    } else {
+        ToolGenus::Other
+    }
 }
 
 /// A chip renders as the spawn LINK (whole-card click → subagent tab) only
@@ -727,6 +747,7 @@ fn thought_item(part_id: &str, tree: &BlockTree, live: bool) -> ToolItem {
         subagent_ref: None,
         subagent_status: None,
         subagent_tail: None,
+        app: None,
         kind: ToolItemKind::Thought,
     }
 }
@@ -1106,8 +1127,13 @@ pub enum RowKind {
         question_id: SharedString,
         scope: zeron_proto::computer::ComputerConsentScope,
         app: Option<zeron_proto::computer::ComputerConsentApp>,
-        question: SharedString,
+        detail: SharedString,
         outcome: Option<ConsentOutcome>,
+    },
+    ComputerForeground {
+        request_id: SharedString,
+        question_id: SharedString,
+        app: Option<SharedString>,
     },
     ComputerNotice {
         notice: ComputerNotice,
@@ -1198,6 +1224,8 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
         acc.extend_from_slice(label.as_bytes());
         acc.extend_from_slice(&(detail.len() as u32).to_le_bytes());
         acc.push(t.is_error as u8 | (t.resolved as u8) << 1);
+        acc.extend_from_slice(t.app.as_deref().unwrap_or_default().as_bytes());
+        acc.push(0);
         // Thought/note chips share `ToolCall::Unknown` — the kind is the
         // label/icon discriminator, so a flip must re-splice.
         acc.push(t.kind as u8);
@@ -1459,6 +1487,9 @@ pub fn rows_for_entry(
             .next()
             .map(|hint| SharedString::from(hint.to_string()));
         if let Some(notice) = computer_notice(&text) {
+            if notice == ComputerNotice::Disclosure {
+                return Vec::new();
+            }
             return vec![Row {
                 id: entry.id.clone().into(),
                 version: fnv1a(text.as_bytes()),
@@ -1573,10 +1604,10 @@ pub fn rows_for_entry(
                 ..
             } => {
                 let computer = computer_call(call);
-                let detail = if computer
+                let output_hidden = computer
                     .as_ref()
-                    .is_some_and(|c| computer_output_hidden(c.tool, c.args))
-                {
+                    .is_some_and(|c| computer_output_hidden(c.tool, c.args));
+                let detail = if output_hidden {
                     None
                 } else {
                     tool_detail(output.as_deref(), diff.as_ref(), diff_stats.as_deref())
@@ -1600,12 +1631,19 @@ pub fn rows_for_entry(
                     resolved: *resolved,
                     detail: detail.map(Arc::new),
                     invocation: invocation.map(Arc::new),
-                    output_ref: output_ref.clone().map(SharedString::from),
-                    output_bytes: *output_bytes,
+                    output_ref: output_ref
+                        .clone()
+                        .filter(|_| !output_hidden)
+                        .map(SharedString::from),
+                    output_bytes: output_bytes.filter(|_| !output_hidden),
                     diff_ref: diff_ref.clone().map(SharedString::from),
                     subagent_ref: subagent_ref.clone().map(SharedString::from),
                     subagent_status: *subagent_status,
                     subagent_tail: subagent_tail.clone().map(SharedString::from),
+                    app: computer
+                        .as_ref()
+                        .and_then(|c| computer_call_app(c.tool, c.args, output.as_deref()))
+                        .map(SharedString::from),
                     kind: ToolItemKind::Call,
                 };
                 if compact {
@@ -1615,10 +1653,10 @@ pub fn rows_for_entry(
                     compact_group_pos.get_or_insert(rows.len());
                 } else if pending_group
                     .first()
-                    .is_some_and(|head| is_agent_tool(head) != is_agent_tool(&item))
+                    .is_some_and(|head| tool_genus(head) != tool_genus(&item))
                 {
-                    // Agent chips don't share a fold with ordinary tools:
-                    // flush whenever the genus flips so each group is uniform.
+                    // Agent and computer chips don't share a fold with ordinary
+                    // tools: flush whenever the genus flips so each group is uniform.
                     flush_group(
                         &mut rows,
                         &mut pending_group,
@@ -1647,7 +1685,7 @@ pub fn rows_for_entry(
                         turn_start: false,
                         kind: RowKind::ComputerNotice {
                             notice: ComputerNotice::ControlDenied,
-                            text: "Computer control is off".into(),
+                            text: "Computer is off for ordinary turns".into(),
                             hint: None,
                         },
                         entry_id: entry_id.clone(),
@@ -1674,9 +1712,12 @@ pub fn rows_for_entry(
                 let item = thought_item(part_id, &tree, live);
                 if compact {
                     compact_group_pos.get_or_insert(rows.len());
-                } else if pending_group.first().is_some_and(is_agent_tool) {
+                } else if pending_group
+                    .first()
+                    .is_some_and(|head| tool_genus(head) != ToolGenus::Other)
+                {
                     // Thoughts join ordinary tool groups; agent (spawn-link)
-                    // groups stay pure, exactly like the tool genus rule.
+                    // and computer groups stay pure, exactly like the tool genus rule.
                     flush_group(
                         &mut rows,
                         &mut pending_group,
@@ -1786,6 +1827,71 @@ pub fn rows_for_entry(
                         questions,
                         resolved,
                         answers,
+                    } if questions.iter().any(|question| {
+                        matches!(
+                            question.kind,
+                            Some(zeron_proto::UserInputKind::Foreground { .. })
+                        )
+                    }) =>
+                    {
+                        let (version, kind) = match crate::computer::cards::foreground_outcome_label(
+                            questions,
+                            answers.as_deref(),
+                        ) {
+                            Some(text) => (
+                                fnv1a(text.as_bytes()),
+                                RowKind::ComputerNotice {
+                                    notice: ComputerNotice::Foreground,
+                                    text: text.into(),
+                                    hint: None,
+                                },
+                            ),
+                            None if *resolved => continue,
+                            None => {
+                                let Some((question, app)) =
+                                    questions.iter().find_map(|question| match &question.kind {
+                                        Some(zeron_proto::UserInputKind::Foreground { app }) => {
+                                            Some((question, app))
+                                        }
+                                        _ => None,
+                                    })
+                                else {
+                                    continue;
+                                };
+                                let app = app.as_ref().map(|app| SharedString::from(&app.name));
+                                (
+                                    fnv1a(
+                                        format!(
+                                            "foreground\0{request_id}\0{}",
+                                            app.as_deref().unwrap_or_default()
+                                        )
+                                        .as_bytes(),
+                                    ),
+                                    RowKind::ComputerForeground {
+                                        request_id: request_id.clone().into(),
+                                        question_id: question.id.clone().into(),
+                                        app,
+                                    },
+                                )
+                            }
+                        };
+                        rows.push(Row {
+                            id: format!("{}#{}", entry.id, part_id).into(),
+                            version,
+                            turn_start: false,
+                            kind,
+                            entry_id: entry_id.clone(),
+                            timestamp: None,
+                            copy_text: None,
+                            compact_fold: None,
+                        });
+                    }
+                    MessagePart::Input {
+                        id: part_id,
+                        request_id,
+                        questions,
+                        resolved,
+                        answers,
                     } if consent_question(questions).is_some() => {
                         let question = consent_question(questions).expect("guarded");
                         let outcome = consent_outcome(*resolved, answers.as_deref());
@@ -1805,7 +1911,7 @@ pub fn rows_for_entry(
                                 question_id: question.id.clone().into(),
                                 scope: consent_scope(question),
                                 app: consent_app(question),
-                                question: question.question.clone().into(),
+                                detail: consent_detail(question).into(),
                                 outcome,
                             },
                             entry_id: entry_id.clone(),
@@ -2186,9 +2292,23 @@ pub fn tool_group_summary(tools: &[ToolItem]) -> String {
     #[cfg(test)]
     FORBID_ROW_PREPARATION
         .with(|forbidden| assert!(!forbidden.get(), "tool summary formatting ran on UI thread"));
+    let mut computer_apps: Vec<&str> = Vec::new();
+    let mut computer_actions = 0usize;
     let pairs: Vec<(ToolCall, bool)> = tools
         .iter()
         .filter(|t| t.kind == ToolItemKind::Call)
+        .filter(|t| {
+            if computer_call(&t.call).is_none() {
+                return true;
+            }
+            computer_actions += 1;
+            if let Some(app) = t.app.as_deref()
+                && !computer_apps.contains(&app)
+            {
+                computer_apps.push(app);
+            }
+            false
+        })
         .map(|t| (t.call.clone(), t.is_error))
         .collect();
     let thoughts = tools
@@ -2223,6 +2343,19 @@ pub fn tool_group_summary(tools: &[ToolItem]) -> String {
         0 => {}
         1 => segments.push("wrote a note".into()),
         n => segments.push(format!("wrote {n} notes")),
+    }
+    if computer_actions > 0 {
+        let apps = if computer_apps.is_empty() {
+            "the desktop".to_owned()
+        } else {
+            computer_apps.join(", ")
+        };
+        let actions = if computer_actions == 1 {
+            "1 action".to_owned()
+        } else {
+            format!("{computer_actions} actions")
+        };
+        segments.push(format!("used {apps} · {actions}"));
     }
     if !base.is_empty() {
         segments.push(base);
@@ -3543,6 +3676,8 @@ pub struct Transcript {
     copied_message_clear: Option<Task<()>>,
     consent_sent: HashMap<SharedString, ConsentOutcome>,
     consent_failures: HashMap<SharedString, SharedString>,
+    foreground_sent: HashSet<SharedString>,
+    strip_pending: Option<String>,
     html_files: HashMap<std::path::PathBuf, HtmlFileState>,
     html_apps: Option<Arc<Vec<crate::html_open::AppChoice>>>,
     html_apps_task: Option<Task<()>>,
@@ -3738,7 +3873,20 @@ impl Transcript {
         let pinned = follow;
         let computer_preview = crate::computer::preview::store(cx).map(|store| {
             let state = state.clone();
-            cx.new(|cx| crate::computer::preview_card::ComputerPreviewCard::new(state, store, cx))
+            let card = cx.new(|cx| {
+                crate::computer::preview_card::ComputerPreviewCard::new(state, store, cx)
+            });
+            cx.subscribe(&card, |_, _, event, cx| match event {
+                crate::computer::preview_card::PreviewCardEvent::OpenSetup => {
+                    cx.emit(TranscriptEvent::Computer {
+                        request: ComputerRequest::OpenSetup(vec![
+                            zeron_proto::computer::ComputerPermission::ScreenRecording,
+                        ]),
+                    })
+                }
+            })
+            .detach();
+            card
         });
         let mut this = Self {
             state,
@@ -3819,6 +3967,8 @@ impl Transcript {
             copied_message_clear: None,
             consent_sent: HashMap::new(),
             consent_failures: HashMap::new(),
+            foreground_sent: HashSet::new(),
+            strip_pending: None,
             html_files: HashMap::new(),
             html_apps: None,
             html_apps_task: None,
@@ -3838,6 +3988,21 @@ impl Transcript {
         let view = cx.entity_id();
         cx.on_release(move |_, _| crate::computer::protected_surfaces::publish(view, false))
             .detach();
+        if let Some(presence) = crate::computer::presence::map(cx) {
+            cx.observe(&presence, |this: &mut Self, map, cx| {
+                let pending = this
+                    .chat_id
+                    .as_deref()
+                    .and_then(|chat_id| map.read(cx).get(chat_id))
+                    .and_then(|presence| presence.pending.as_ref())
+                    .map(|pending| pending.input_id.clone());
+                if this.strip_pending != pending {
+                    this.strip_pending = pending;
+                    cx.notify();
+                }
+            })
+            .detach();
+        }
         this.sync(cx);
         this
     }
@@ -4225,6 +4390,12 @@ impl Transcript {
             cx.notify();
         });
         cx.notify();
+    }
+
+    pub fn computer_preview_card(
+        &self,
+    ) -> Option<Entity<crate::computer::preview_card::ComputerPreviewCard>> {
+        self.computer_preview.clone()
     }
 
     fn computer_preview_slot(&self, window: &Window) -> gpui::Size<Pixels> {
@@ -7443,6 +7614,22 @@ impl Transcript {
             return gpui::Empty.into_any_element();
         };
         self.rendered_rows.insert(row.id.clone());
+        let answerable = match &row.kind {
+            RowKind::ComputerConsent {
+                request_id,
+                outcome: None,
+                ..
+            } if !self.consent_sent.contains_key(request_id) => Some(request_id),
+            RowKind::ComputerForeground { request_id, .. } => Some(request_id),
+            _ => None,
+        };
+        if let Some(request_id) = answerable
+            && (self.foreground_sent.contains(request_id)
+                || self.answered_off_card(request_id, cx)
+                || self.pending_on_strip(request_id, cx))
+        {
+            return gpui::Empty.into_any_element();
+        }
         let theme = Theme::of(cx).clone();
         let workspace_root = {
             let state = self.state.read(cx);
@@ -7814,15 +8001,26 @@ impl Transcript {
                 question_id,
                 scope,
                 app,
-                question,
+                detail,
                 outcome,
             } => self.render_computer_consent(
                 request_id.clone(),
                 question_id.clone(),
                 *scope,
                 app.as_ref(),
-                question,
+                detail,
                 *outcome,
+                &theme,
+                cx,
+            ),
+            RowKind::ComputerForeground {
+                request_id,
+                question_id,
+                app,
+            } => self.render_computer_foreground(
+                request_id.clone(),
+                question_id.clone(),
+                app.as_deref(),
                 &theme,
                 cx,
             ),
@@ -9293,67 +9491,159 @@ impl Transcript {
         question_id: SharedString,
         scope: zeron_proto::computer::ComputerConsentScope,
         app: Option<&zeron_proto::computer::ComputerConsentApp>,
-        question: &str,
+        detail: &str,
         outcome: Option<ConsentOutcome>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let settled = outcome.or_else(|| self.consent_sent.get(&request_id).copied());
-        let mut lines: Vec<SharedString> = Vec::new();
-        let detail = consent_detail(scope, app, question);
-        if !detail.is_empty() {
-            lines.push(detail.into());
+        if let Some(outcome) = outcome.or_else(|| self.consent_sent.get(&request_id).copied()) {
+            return computer_event_row(
+                crate::icons::CURSOR,
+                consent_event_label(outcome, scope, app).into(),
+                CardTone::Info,
+                None,
+                theme,
+            );
         }
-        let (tone, status, actions) = match settled {
-            Some(outcome) => (
-                if matches!(
-                    outcome,
-                    ConsentOutcome::Allowed | ConsentOutcome::AlwaysAllowed
-                ) {
-                    CardTone::Success
-                } else {
-                    CardTone::Info
-                },
-                Some(SharedString::from(consent_outcome_label(outcome))),
-                Vec::new(),
-            ),
-            None => {
-                lines.push(consent_allow_description(scope, app).into());
-                let actions = consent_choices(scope, app)
-                    .into_iter()
-                    .map(|(choice, label)| {
-                        let (request_id, question_id) = (request_id.clone(), question_id.clone());
-                        CardAction {
-                            id: format!("computer-consent-{}-{}", request_id, label).into(),
-                            label: label.into(),
-                            primary: choice == ConsentChoice::Allow,
-                            on_click: Box::new(cx.listener(move |this, _, _, cx| {
-                                this.answer_consent(
-                                    request_id.clone(),
-                                    question_id.clone(),
-                                    choice.clone(),
-                                    cx,
-                                )
-                            })),
-                        }
-                    })
-                    .collect();
-                (
-                    CardTone::Warning,
-                    self.consent_failures.get(&request_id).cloned(),
-                    actions,
-                )
-            }
-        };
+        let mut lines: Vec<SharedString> = Vec::new();
+        if !detail.is_empty() {
+            lines.push(detail.to_owned().into());
+        }
+        lines.push(consent_allow_description(scope, app).into());
+        let actions = consent_choices(scope, app)
+            .into_iter()
+            .map(|(choice, label)| {
+                let (request_id, question_id) = (request_id.clone(), question_id.clone());
+                CardAction {
+                    id: format!("computer-consent-{}-{}", request_id, label).into(),
+                    label: label.into(),
+                    primary: choice == ConsentChoice::Allow,
+                    on_click: Box::new(cx.listener(move |this, _, _, cx| {
+                        this.answer_consent(
+                            request_id.clone(),
+                            question_id.clone(),
+                            choice.clone(),
+                            cx,
+                        )
+                    })),
+                }
+            })
+            .collect();
         computer_card(
-            tone,
-            crate::icons::MONITOR,
+            CardTone::Warning,
+            crate::icons::CURSOR,
             consent_card_title(scope, app).into(),
             lines,
             actions,
-            status,
+            self.consent_failures.get(&request_id).cloned(),
             theme,
         )
+    }
+
+    fn answer_foreground(
+        &mut self,
+        request_id: SharedString,
+        question_id: SharedString,
+        allow: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.foreground_sent.contains(&request_id) {
+            return;
+        }
+        let Some(chat_id) = self.chat_id.clone() else {
+            return;
+        };
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        self.foreground_sent.insert(request_id.clone());
+        self.consent_failures.remove(&request_id);
+        cx.notify();
+        let label = if allow {
+            zeron_engine::computer::engine_seams::COMPUTER_FOREGROUND_ALLOW
+        } else {
+            zeron_engine::computer::engine_seams::COMPUTER_FOREGROUND_DECLINE
+        };
+        let answers = vec![zeron_proto::UserInputAnswer {
+            question_id: question_id.to_string(),
+            labels: vec![label.into()],
+        }];
+        cx.spawn(async move |this, cx| {
+            let sent =
+                crate::composer::respond_input(&engine, &chat_id, &request_id, answers).await;
+            if let Err(err) = sent {
+                this.update(cx, |transcript, cx| {
+                    transcript.foreground_sent.remove(&request_id);
+                    transcript
+                        .consent_failures
+                        .insert(request_id, format!("Answer failed: {err}").into());
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    fn render_computer_foreground(
+        &mut self,
+        request_id: SharedString,
+        question_id: SharedString,
+        app: Option<&str>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let actions = [
+            (
+                zeron_engine::computer::engine_seams::COMPUTER_FOREGROUND_ALLOW,
+                true,
+            ),
+            (
+                zeron_engine::computer::engine_seams::COMPUTER_FOREGROUND_DECLINE,
+                false,
+            ),
+        ]
+        .into_iter()
+        .map(|(label, allow)| {
+            let (request_id, question_id) = (request_id.clone(), question_id.clone());
+            CardAction {
+                id: format!("computer-foreground-{request_id}-{label}").into(),
+                label: label.into(),
+                primary: allow,
+                on_click: Box::new(cx.listener(move |this, _, _, cx| {
+                    this.answer_foreground(request_id.clone(), question_id.clone(), allow, cx)
+                })),
+            }
+        })
+        .collect();
+        computer_card(
+            CardTone::Warning,
+            crate::icons::CURSOR,
+            format!(
+                "{} needs to come to the front to type",
+                app.unwrap_or("The app")
+            )
+            .into(),
+            vec!["It will cover your screen; don't type while the agent works".into()],
+            actions,
+            self.consent_failures.get(&request_id).cloned(),
+            theme,
+        )
+    }
+
+    fn answered_off_card(&self, request_id: &str, cx: &gpui::App) -> bool {
+        self.chat_id
+            .as_deref()
+            .is_some_and(|chat_id| crate::computer::presence::answered(chat_id, request_id, cx))
+    }
+
+    fn pending_on_strip(&self, request_id: &str, cx: &gpui::App) -> bool {
+        let Some(chat_id) = self.chat_id.as_deref() else {
+            return false;
+        };
+        crate::computer::presence::for_chat(chat_id, cx)
+            .and_then(|presence| presence.pending)
+            .is_some_and(|pending| pending.input_id == request_id)
     }
 
     fn chat_hosted_here(&self, cx: &gpui::App) -> bool {
@@ -9378,7 +9668,7 @@ impl Transcript {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let icon = crate::icons::MONITOR;
+        let icon = crate::icons::CURSOR;
         match notice {
             ComputerNotice::Disclosure => computer_card(
                 CardTone::Info,
@@ -9389,15 +9679,35 @@ impl Transcript {
                 None,
                 theme,
             ),
-            ComputerNotice::EscapeStop => computer_card(
-                CardTone::Warning,
+            ComputerNotice::Revoked => computer_event_row(
                 crate::icons::STOP,
-                text,
-                Vec::new(),
-                Vec::new(),
+                revoked_label(&text, hint.as_deref()).into(),
+                CardTone::Warning,
                 None,
                 theme,
             ),
+            ComputerNotice::Paused | ComputerNotice::Foreground => {
+                computer_event_row(crate::icons::CURSOR, text, CardTone::Info, None, theme)
+            }
+            ComputerNotice::LeftOpen => {
+                let show = left_open_app(&text)
+                    .filter(|_| cfg!(target_os = "macos") && self.chat_hosted_here(cx))
+                    .map(|app| {
+                        let app = app.to_owned();
+                        CardAction {
+                            id: format!("{row_id}-show").into(),
+                            label: "Show".into(),
+                            primary: false,
+                            on_click: Box::new(move |_, _, _| {
+                                #[cfg(target_os = "macos")]
+                                crate::appshots::activate_app_named(&app);
+                                #[cfg(not(target_os = "macos"))]
+                                let _ = &app;
+                            }),
+                        }
+                    });
+                computer_event_row(crate::icons::CURSOR, text, CardTone::Info, show, theme)
+            }
             ComputerNotice::Unavailable => computer_card(
                 CardTone::Warning,
                 icon,
@@ -9411,10 +9721,13 @@ impl Transcript {
                 CardTone::Warning,
                 icon,
                 text,
-                vec!["Turn it on in Settings to let the agent use the desktop.".into()],
+                vec![
+                    "Send this request with /computer-use to let the agent use the desktop once."
+                        .into(),
+                ],
                 vec![CardAction {
                     id: format!("{row_id}-enable").into(),
-                    label: "Enable".into(),
+                    label: "Use for this request".into(),
                     primary: false,
                     on_click: Box::new(cx.listener(|_, _, _, cx| {
                         cx.emit(TranscriptEvent::Computer {
@@ -10575,6 +10888,7 @@ fn shows_protected_surface(
             outcome: None,
             ..
         } => !answered.contains_key(request_id),
+        RowKind::ComputerForeground { .. } => true,
         RowKind::InputChip {
             resolved: false, ..
         } => true,
@@ -12522,6 +12836,12 @@ mod tests {
             preview::init(cx);
         });
         let store = cx.update(|cx| preview::store(cx).unwrap());
+        store.update(cx, |store, _| {
+            store.set_settings(zeron_proto::computer::ComputerSettings {
+                computer_preview_placement: zeron_proto::computer::ComputerPreviewPlacement::Card,
+                ..Default::default()
+            })
+        });
         let state = cx.new(|_| AppState::new());
         let transcript = cx.new(|cx| Transcript::new(state, cx));
         transcript.update(cx, |transcript, _| transcript.chat_id = Some("chat".into()));
@@ -12569,6 +12889,17 @@ mod tests {
         assert_eq!(inset(cx), 424.0);
         cx.update(|_, cx| preview::update_store(&store, cx, |store| store.hide_for_task("chat")));
         assert_eq!(inset(cx), 0.0, "a hidden card reserves nothing");
+        cx.update(|_, cx| preview::update_store(&store, cx, |store| store.reopen("chat")));
+        assert_eq!(inset(cx), 424.0, "the rail entry reopens it");
+        cx.update(|_, cx| {
+            preview::update_store(&store, cx, |store| store.set_settings(Default::default()))
+        });
+        assert_eq!(
+            inset(cx),
+            0.0,
+            "the rail placement leaves the transcript full width"
+        );
+        assert!(cx.debug_bounds("computer-preview-card").is_none());
     }
 
     #[cfg(target_os = "macos")]
@@ -12917,6 +13248,7 @@ mod tests {
                     subagent_ref: None,
                     subagent_status: None,
                     subagent_tail: None,
+                    app: None,
                     kind: ToolItemKind::Call,
                 };
                 let transcript = self.transcript.clone();
@@ -13022,6 +13354,7 @@ mod tests {
                     subagent_ref: None,
                     subagent_status: None,
                     subagent_tail: None,
+                    app: None,
                     kind: ToolItemKind::Call,
                 }]);
                 let group = self.0.update(cx, |this, cx| {
@@ -16269,6 +16602,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            app: None,
             kind: ToolItemKind::Call,
         };
         let edit = |p: &str| ToolItem {
@@ -16288,6 +16622,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            app: None,
             kind: ToolItemKind::Call,
         };
         let tools = vec![
@@ -16323,6 +16658,7 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
+                app: None,
                 kind: ToolItemKind::Call,
             },
             ToolItem {
@@ -16340,6 +16676,7 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
+                app: None,
                 kind: ToolItemKind::Call,
             },
             ToolItem {
@@ -16355,6 +16692,7 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
+                app: None,
                 kind: ToolItemKind::Call,
             },
         ];
@@ -16519,6 +16857,7 @@ mod tests {
                         subagent_ref: None,
                         subagent_status: None,
                         subagent_tail: None,
+                        app: None,
                         kind: ToolItemKind::Call,
                     }),
                     _ => None,
@@ -17044,16 +17383,48 @@ mod computer_tests {
             questions: vec![UserInputQuestion {
                 id: "consent".into(),
                 header: "Computer".into(),
-                question: "Allow Computer for this task? The agent wants to run computer_click and will drive this Mac's apps until the turn ends.".into(),
+                question: "Allow Computer for this task? The agent will use this Mac's apps until this response ends.".into(),
                 options: vec!["Allow".into(), "Decline".into()],
                 multi_select: false,
                 kind: Some(UserInputKind::Consent {
                     scope: ComputerConsentScope::Task,
                     app: None,
+                    tool: Some("computer_click".into()),
+                    params: Some(r#"{"x":1,"y":2}"#.into()),
                 }),
             }],
             resolved,
             answers,
+        }
+    }
+
+    fn foreground_part(resolved: bool, label: Option<&str>) -> MessagePart {
+        MessagePart::Input {
+            id: "f1".into(),
+            request_id: "f1".into(),
+            questions: vec![UserInputQuestion {
+                id: "foreground".into(),
+                header: "Computer".into(),
+                question:
+                    "Ghostty needs to come to the front to type. Allow for the rest of this turn?"
+                        .into(),
+                options: vec!["Allow for this turn".into(), "No".into()],
+                multi_select: false,
+                kind: Some(UserInputKind::Foreground {
+                    app: Some(zeron_proto::computer::ComputerConsentApp {
+                        name: "Ghostty".into(),
+                        bundle_id: Some("com.mitchellh.ghostty".into()),
+                        pid: Some(4242),
+                    }),
+                }),
+            }],
+            resolved,
+            answers: label.map(|label| {
+                vec![UserInputAnswer {
+                    question_id: "foreground".into(),
+                    labels: vec![label.into()],
+                }]
+            }),
         }
     }
 
@@ -17086,6 +17457,7 @@ mod computer_tests {
         let RowKind::ComputerConsent {
             request_id,
             scope,
+            detail,
             outcome,
             ..
         } = &rows[0].kind
@@ -17094,6 +17466,7 @@ mod computer_tests {
         };
         assert_eq!(request_id.as_ref(), "computer-consent-1");
         assert_eq!(*scope, ComputerConsentScope::Task);
+        assert_eq!(detail.as_ref(), "Click at (1, 2)");
         assert_eq!(*outcome, None);
         let allowed = rows_for_entry(
             &entry(
@@ -17189,7 +17562,7 @@ mod computer_tests {
     }
 
     #[test]
-    fn engine_computer_notes_render_as_cards_not_dividers() {
+    fn the_on_disclosure_note_renders_no_row() {
         let disclosure = rows_for_entry(
             &entry(
                 MessageRole::System,
@@ -17202,13 +17575,251 @@ mod computer_tests {
             false,
             &mut parse,
         );
-        assert!(matches!(
-            disclosure[0].kind,
-            RowKind::ComputerNotice {
-                notice: ComputerNotice::Disclosure,
+        assert!(disclosure.is_empty());
+    }
+
+    fn group_summaries(rows: &[Row]) -> Vec<String> {
+        rows.iter()
+            .filter_map(|row| match &row.kind {
+                RowKind::ToolGroup { summary, .. } => Some(summary.to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    const GHOSTTY_TYPED: &str = r#"{"action":"computer_type_text","appName":"Ghostty","computerId":"desktop","disclosure":"Computer control ON for this turn: the agent is driving the desktop and the user can switch …"#;
+
+    #[test]
+    fn computer_calls_fold_into_one_used_app_group() {
+        let rows = rows_for_entry(
+            &entry(
+                MessageRole::Assistant,
+                vec![
+                    tool_part(
+                        "p1",
+                        "computer_get_state",
+                        serde_json::json!({ "window_id": "cua:7:1" }),
+                        r#"{"appName":"Ghostty","availability":{"backend":"cua","kind":"available"},"capturedAt":"2026-09-28T06:22:13.438Z","computerId":"desktop","elementWindowId":"cua:7:1","elements":[{"label":"Calcul…"#,
+                        false,
+                    ),
+                    tool_part(
+                        "p2",
+                        "computer_type_text",
+                        serde_json::json!({ "window_id": "cua:7:1", "text": "hunter2" }),
+                        GHOSTTY_TYPED,
+                        false,
+                    ),
+                    tool_part(
+                        "p3",
+                        "computer_press_key",
+                        serde_json::json!({ "window_id": "cua:7:1", "key": "enter" }),
+                        r#"{"action":"computer_press_key","appName":"Ghostty"}"#,
+                        false,
+                    ),
+                ],
+            ),
+            false,
+            false,
+            &mut parse,
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(group_summaries(&rows), ["Used Ghostty · 3 actions"]);
+        let summary = &group_summaries(&rows)[0];
+        for leak in ["computer_", "hunter2"] {
+            assert!(!summary.contains(leak), "{leak}: {summary}");
+        }
+    }
+
+    #[test]
+    fn a_typed_value_never_reaches_the_expanded_chip() {
+        let secret = "hunter2-typed-secret";
+        let long_output = format!(
+            r#"{{"action":"computer_type_text","appName":"Ghostty","computerId":"desktop","value":"{secret}","windowId":"cua:7:1","padding":"{}"}}"#,
+            "x".repeat(200)
+        );
+        let with_ref = |part: MessagePart| match part {
+            MessagePart::Tool {
+                id,
+                call,
+                is_error,
+                resolved,
+                output,
+                diff,
+                diff_ref,
+                diff_stats,
+                subagent_ref,
+                subagent_status,
+                subagent_tail,
                 ..
-            }
-        ));
+            } => MessagePart::Tool {
+                id,
+                call,
+                is_error,
+                resolved,
+                output,
+                diff,
+                output_ref: Some("blob-typed".into()),
+                output_bytes: Some(4096),
+                diff_ref,
+                diff_stats,
+                subagent_ref,
+                subagent_status,
+                subagent_tail,
+            },
+            other => other,
+        };
+        let parts = vec![
+            with_ref(tool_part(
+                "p1",
+                "computer_type_text",
+                serde_json::json!({ "window_id": "cua:7:1", "text": secret }),
+                &format!(
+                    r#"{{"action":"computer_type_text","appName":"Ghostty","value":"{secret}"}}"#
+                ),
+                false,
+            )),
+            with_ref(tool_part(
+                "p2",
+                "computer_set_value",
+                serde_json::json!({ "window_id": "cua:7:1", "value": secret }),
+                &long_output,
+                false,
+            )),
+            with_ref(tool_part(
+                "p3",
+                "computer_run",
+                serde_json::json!({ "steps": [
+                    { "type": "type_text", "text": secret },
+                    { "type": "press_key", "key": "return" },
+                ] }),
+                &long_output,
+                false,
+            )),
+        ];
+        let rows = rows_for_entry(
+            &entry(MessageRole::Assistant, parts),
+            false,
+            false,
+            &mut parse,
+        );
+        let RowKind::ToolGroup { tools, summary, .. } = &rows[0].kind else {
+            panic!("expected one computer group");
+        };
+        assert_eq!(tools.len(), 3);
+        assert_eq!(summary.as_ref(), "Used Ghostty · 3 actions");
+        for tool in tools.iter() {
+            assert_eq!(tool.detail, None);
+            assert_eq!(
+                tool.output_ref, None,
+                "no Show full output for a typed value"
+            );
+            assert_eq!(tool.output_bytes, None);
+            let shown = format!("{:?} {:?}", tool.detail, tool.invocation);
+            assert!(!shown.contains(secret), "{shown}");
+        }
+    }
+
+    #[test]
+    fn a_single_computer_action_is_singular() {
+        let rows = rows_for_entry(
+            &entry(
+                MessageRole::Assistant,
+                vec![tool_part(
+                    "p1",
+                    "computer_launch_app",
+                    serde_json::json!({ "app": "com.apple.Safari" }),
+                    "{}",
+                    false,
+                )],
+            ),
+            false,
+            false,
+            &mut parse,
+        );
+        assert_eq!(group_summaries(&rows), ["Used Safari · 1 action"]);
+    }
+
+    #[test]
+    fn computer_and_ordinary_tools_never_share_a_group() {
+        let read: MessagePart = serde_json::from_value(serde_json::json!({
+            "kind": "tool",
+            "id": "r1",
+            "call": { "kind": "readFile", "path": "/w/a.rs" },
+            "resolved": true,
+        }))
+        .expect("read part");
+        let thought = MessagePart::Reasoning {
+            id: "th".into(),
+            text: "check the window".into(),
+        };
+        let rows = rows_for_entry(
+            &entry(
+                MessageRole::Assistant,
+                vec![
+                    read,
+                    tool_part(
+                        "p1",
+                        "computer_type_text",
+                        serde_json::json!({ "window_id": "cua:7:1", "text": "x" }),
+                        GHOSTTY_TYPED,
+                        false,
+                    ),
+                    thought,
+                    tool_part(
+                        "p2",
+                        "computer_press_key",
+                        serde_json::json!({ "window_id": "cua:7:1", "key": "enter" }),
+                        r#"{"action":"computer_press_key","appName":"Ghostty"}"#,
+                        false,
+                    ),
+                ],
+            ),
+            false,
+            false,
+            &mut parse,
+        );
+        assert_eq!(
+            group_summaries(&rows),
+            [
+                "Read 1 file",
+                "Used Ghostty · 1 action",
+                "Thought process",
+                "Used Ghostty · 1 action"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_app_less_computer_group_says_the_desktop() {
+        let rows = rows_for_entry(
+            &entry(
+                MessageRole::Assistant,
+                vec![
+                    tool_part(
+                        "p1",
+                        "computer_screenshot",
+                        serde_json::json!({}),
+                        "{}",
+                        false,
+                    ),
+                    tool_part(
+                        "p2",
+                        "computer_click",
+                        serde_json::json!({ "x": 1, "y": 2 }),
+                        r#"{"error":{"code":"computer_target_invalid"}}"#,
+                        true,
+                    ),
+                ],
+            ),
+            false,
+            false,
+            &mut parse,
+        );
+        assert_eq!(group_summaries(&rows), ["Used the desktop · 2 actions"]);
+    }
+
+    #[test]
+    fn engine_computer_notes_render_as_cards_not_dividers() {
         let setup = rows_for_entry(
             &entry(
                 MessageRole::System,
@@ -17247,10 +17858,81 @@ mod computer_tests {
         assert!(matches!(
             escape[0].kind,
             RowKind::ComputerNotice {
-                notice: ComputerNotice::EscapeStop,
+                notice: ComputerNotice::Revoked,
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_takeover_note_renders_as_a_paused_event_row() {
+        let rows = rows_for_entry(
+            &entry(
+                MessageRole::System,
+                vec![text("t0", "Paused while you used Ghostty")],
+            ),
+            false,
+            false,
+            &mut parse,
+        );
+        let RowKind::ComputerNotice { notice, text, .. } = &rows[0].kind else {
+            panic!("expected an event row");
+        };
+        assert_eq!(*notice, ComputerNotice::Paused);
+        assert_eq!(text.as_ref(), "Paused while you used Ghostty");
+    }
+
+    #[test]
+    fn a_foreground_question_is_a_card_while_pending_and_its_outcome_after() {
+        let rows = |resolved: bool, label: Option<&str>| {
+            rows_for_entry(
+                &entry(
+                    MessageRole::Assistant,
+                    vec![foreground_part(resolved, label)],
+                ),
+                false,
+                false,
+                &mut parse,
+            )
+        };
+        let pending = rows(false, None);
+        let RowKind::ComputerForeground {
+            request_id,
+            question_id,
+            app,
+        } = &pending[0].kind
+        else {
+            panic!("expected the foreground card");
+        };
+        assert_eq!(
+            (request_id.as_ref(), question_id.as_ref(), app.as_deref()),
+            ("f1", "foreground", Some("Ghostty"))
+        );
+        assert!(shows_protected_surface(&pending, &HashMap::new(), || false));
+        assert!(
+            rows(true, None).is_empty(),
+            "a cancelled question leaves no row"
+        );
+        for (label, expected) in [
+            (
+                "Allow for this turn",
+                "You allowed Ghostty to come to the front",
+            ),
+            ("No", "You kept Ghostty in the background"),
+        ] {
+            let rows = rows(true, Some(label));
+            let RowKind::ComputerNotice { notice, text, .. } = &rows[0].kind else {
+                panic!("expected an event row");
+            };
+            assert_eq!(
+                (*notice, text.as_ref()),
+                (ComputerNotice::Foreground, expected)
+            );
+            assert_ne!(rows[0].version, pending[0].version);
+            for leak in ["com.mitchellh", "4242", "computer_"] {
+                assert!(!text.contains(leak), "{leak}");
+            }
+        }
     }
 
     #[test]
@@ -17388,7 +18070,7 @@ mod computer_tests {
                         "consent".into(),
                         ComputerConsentScope::Task,
                         None,
-                        "Allow Computer for this task? The agent wants to run computer_click.",
+                        "Click",
                         None,
                         &theme,
                         cx,
@@ -17434,6 +18116,246 @@ mod computer_tests {
     }
 
     #[gpui::test]
+    fn a_pending_consent_on_this_mac_renders_only_after_it_settles(cx: &mut gpui::TestAppContext) {
+        use crate::computer::preview::{self, tests::thread_state};
+        use zeron_proto::computer::ComputerEvent;
+
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            preview::init(cx);
+        });
+        let state = cx.new(|_| AppState::new());
+        let transcript = cx.new(|cx| Transcript::new(state, cx));
+        let rows = |parts: Vec<MessagePart>| {
+            rows_for_entry(
+                &entry(MessageRole::Assistant, parts),
+                false,
+                false,
+                &mut parse,
+            )
+        };
+        transcript.update(cx, |transcript, _| {
+            transcript.chat_id = Some("chat".into());
+            transcript.rows = rows(vec![consent_part(false, None)]);
+        });
+        struct Fixture(Entity<Transcript>);
+        impl Render for Fixture {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let row = self.0.update(cx, |this, cx| this.render_row(0, window, cx));
+                div()
+                    .w(px(640.0))
+                    .child(div().debug_selector(|| "consent-row".into()).child(row))
+            }
+        }
+        let (fixture, cx) = cx.add_window_view(|_, _| Fixture(transcript.clone()));
+        let repaint = |cx: &mut gpui::VisualTestContext| {
+            fixture.update(cx, |_, cx| cx.notify());
+            cx.run_until_parked();
+        };
+        let deny = "computer-consent-computer-consent-1-Deny";
+        repaint(cx);
+        assert!(
+            cx.debug_bounds(deny).is_some(),
+            "no strip holds it (a remote viewer): the card answers"
+        );
+
+        let store = cx.update(|_, cx| preview::store(cx).unwrap());
+        let mut asking = thread_state("chat", false);
+        asking.pending_request = Some(crate::computer::strip::tests::consent_pending(
+            ComputerConsentScope::Task,
+            None,
+            false,
+        ));
+        cx.update(|_, cx| {
+            preview::update_store(&store, cx, |store| {
+                store.apply_event(&ComputerEvent::ThreadState {
+                    state: Box::new(asking.clone()),
+                })
+            })
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds(deny).is_none(),
+            "the strip has the question"
+        );
+        assert_eq!(
+            cx.debug_bounds("consent-row").unwrap().size.height,
+            px(0.0),
+            "no card, no gap"
+        );
+
+        let idle = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, cx| {
+                preview::update_store(&store, cx, |store| {
+                    store.apply_event(&ComputerEvent::ThreadState {
+                        state: Box::new(thread_state("chat", false)),
+                    })
+                })
+            });
+            cx.run_until_parked();
+        };
+        idle(cx);
+        assert!(
+            cx.debug_bounds(deny).is_some(),
+            "left the strip unanswered here (displaced, or the turn moved on): the card answers"
+        );
+
+        cx.update(|_, cx| {
+            preview::update_store(&store, cx, |store| {
+                store.apply_event(&ComputerEvent::ThreadState {
+                    state: Box::new(asking.clone()),
+                })
+            })
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(deny).is_none());
+        cx.update(|_, cx| {
+            crate::computer::presence::set_answered("chat", "computer-consent-1", true, cx)
+        });
+        idle(cx);
+        assert_eq!(
+            cx.debug_bounds("consent-row").unwrap().size.height,
+            px(0.0),
+            "answered on the strip: the card never flashes back before the doc settles"
+        );
+
+        transcript.update(cx, |transcript, _| {
+            transcript.rows = rows(vec![consent_part(
+                true,
+                Some(vec![UserInputAnswer {
+                    question_id: "consent".into(),
+                    labels: vec!["Allow".into()],
+                }]),
+            )]);
+        });
+        repaint(cx);
+        assert!(cx.debug_bounds(deny).is_none());
+        assert!(
+            cx.debug_bounds("consent-row").unwrap().size.height > px(0.0),
+            "the outcome stays in the transcript"
+        );
+    }
+
+    #[gpui::test]
+    fn a_foreground_question_on_a_viewer_without_presence_is_answerable(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::computer::preview::{self, tests::thread_state};
+        use zeron_proto::computer::ComputerEvent;
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            preview::init(cx);
+        });
+        let (out, mut frames) = tokio::sync::mpsc::channel::<String>(16);
+        let (replies, inbound) = tokio::sync::mpsc::channel::<String>(16);
+        std::mem::forget(replies);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(
+                zeron_rpc::RpcClient::new(out, inbound),
+            ))
+        });
+        let transcript = cx.new(|cx| Transcript::new(state, cx));
+        transcript.update(cx, |transcript, _| {
+            transcript.chat_id = Some("chat".into());
+            transcript.rows = rows_for_entry(
+                &entry(MessageRole::Assistant, vec![foreground_part(false, None)]),
+                false,
+                false,
+                &mut parse,
+            );
+        });
+        struct Fixture(Entity<Transcript>);
+        impl Render for Fixture {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let row = self.0.update(cx, |this, cx| this.render_row(0, window, cx));
+                div()
+                    .w(px(640.0))
+                    .child(div().debug_selector(|| "foreground-row".into()).child(row))
+            }
+        }
+        let (fixture, cx) = cx.add_window_view(|_, _| Fixture(transcript.clone()));
+        let repaint = |cx: &mut gpui::VisualTestContext| {
+            fixture.update(cx, |_, cx| cx.notify());
+            cx.run_until_parked();
+        };
+        let allow = "computer-foreground-f1-Allow for this turn";
+        repaint(cx);
+        assert!(
+            cx.debug_bounds(allow).is_some(),
+            "no presence holds it (a remote or older viewer): the card answers"
+        );
+        assert!(cx.debug_bounds("computer-foreground-f1-No").is_some());
+
+        let store = cx.update(|_, cx| preview::store(cx).unwrap());
+        let publish = |cx: &mut gpui::VisualTestContext, input_id: Option<&str>| {
+            let mut asking = thread_state("chat", false);
+            asking.pending_request = input_id.map(|input_id| {
+                let mut pending =
+                    crate::computer::strip::tests::foreground_pending(Some("Ghostty"));
+                pending.input_id = input_id.into();
+                pending
+            });
+            cx.update(|_, cx| {
+                preview::update_store(&store, cx, |store| {
+                    store.apply_event(&ComputerEvent::ThreadState {
+                        state: Box::new(asking),
+                    })
+                })
+            });
+            cx.run_until_parked();
+        };
+        publish(cx, Some("f1"));
+        assert!(
+            cx.debug_bounds(allow).is_none(),
+            "the strip has the question"
+        );
+        assert_eq!(
+            cx.debug_bounds("foreground-row").unwrap().size.height,
+            px(0.0)
+        );
+        publish(cx, Some("computer-foreground-2"));
+        assert!(
+            cx.debug_bounds(allow).is_some(),
+            "another request heads the strip: this one stays answerable here"
+        );
+
+        publish(cx, None);
+        let bounds = cx.debug_bounds(allow).expect("Allow painted");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        let frame: serde_json::Value = serde_json::from_str(&frames.try_recv().unwrap()).unwrap();
+        assert_eq!(frame["method"], zeron_rpc::methods::QUEUE_COMMAND);
+        assert_eq!(frame["params"]["chatId"], "chat");
+        let command: zeron_doc::SessionCommandPayload =
+            serde_json::from_value(frame["params"]["command"].clone()).unwrap();
+        assert_eq!(
+            command,
+            zeron_doc::SessionCommandPayload::RespondInput {
+                request_id: "f1".into(),
+                answers: vec![UserInputAnswer {
+                    question_id: "foreground".into(),
+                    labels: vec!["Allow for this turn".into()],
+                }],
+            }
+        );
+        repaint(cx);
+        assert!(
+            cx.debug_bounds(allow).is_none(),
+            "answered here: the card waits for its outcome instead of asking again"
+        );
+    }
+
+    #[gpui::test]
     fn clicking_always_allow_on_an_app_card_answers_with_the_always_label(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -17471,7 +18393,7 @@ mod computer_tests {
                         "consent".into(),
                         ComputerConsentScope::Task,
                         Some(&app),
-                        "Allow Computer to use Safari (com.apple.Safari)? The agent wants to run computer_click.",
+                        "Click in Safari",
                         None,
                         &theme,
                         cx,
@@ -17507,6 +18429,81 @@ mod computer_tests {
     }
 
     #[gpui::test]
+    fn a_left_open_note_is_an_event_row_with_show_only_on_the_host_mac(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let rows = rows_for_entry(
+            &entry(
+                MessageRole::System,
+                vec![text("t0", "Left 1 Ghostty window open")],
+            ),
+            false,
+            false,
+            &mut parse,
+        );
+        let RowKind::ComputerNotice { notice, text, hint } = rows[0].kind.clone() else {
+            panic!("expected an event row");
+        };
+        assert_eq!(
+            (notice, text.as_ref(), hint),
+            (ComputerNotice::LeftOpen, "Left 1 Ghostty window open", None)
+        );
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.chats = vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "chat",
+                    "deviceId": "mac",
+                    "archived": false,
+                    "createdAt": "2026-09-28T00:00:00Z"
+                }))
+                .unwrap(),
+            ];
+            state.local_device_id = Some("other-mac".into());
+        });
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        transcript.update(cx, |transcript, _| transcript.chat_id = Some("chat".into()));
+        struct Fixture(Entity<Transcript>, SharedString);
+        impl Render for Fixture {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let theme = Theme::of(cx).clone();
+                let text = self.1.clone();
+                let row = self.0.update(cx, |this, cx| {
+                    this.render_computer_notice(
+                        &"row".into(),
+                        ComputerNotice::LeftOpen,
+                        text,
+                        None,
+                        &theme,
+                        cx,
+                    )
+                });
+                div().w(px(520.0)).child(row)
+            }
+        }
+        let (fixture, cx) = cx.add_window_view(|_, _| Fixture(transcript.clone(), text));
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("row-show").is_none(),
+            "a viewer on another Mac has nothing to raise"
+        );
+        state.update(cx, |state, _| state.local_device_id = Some("mac".into()));
+        fixture.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("row-show").is_some(),
+            cfg!(target_os = "macos"),
+            "the host Mac can bring the app forward"
+        );
+    }
+
+    #[gpui::test]
     fn the_denied_cards_enable_asks_the_shell_for_computer_use(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
@@ -17538,7 +18535,7 @@ mod computer_tests {
                     this.render_computer_notice(
                         &"row".into(),
                         ComputerNotice::ControlDenied,
-                        "Computer control is off".into(),
+                        "Computer is off for ordinary turns".into(),
                         None,
                         &theme,
                         cx,

@@ -11,11 +11,12 @@ use zeron_doc::{
     SessionCommandStatus, SessionMessageEntry,
 };
 use zeron_engine::computer::manager::{COMPUTER_CONTROL_ON_DISCLOSURE, ComputerCaller};
-use zeron_engine::computer::runtime::COMPUTER_ESCAPE_STOP_NOTICE;
+use zeron_engine::computer::runtime::{COMPUTER_DESKTOP_REVOKED_NOTE, COMPUTER_ESCAPE_STOP_NOTICE};
 use zeron_engine::{EngineCore, HarnessRegistry, SteerOutcome};
 use zeron_harness::{CancellationToken, Harness, HarnessError, RunControls};
 use zeron_proto::computer::{
-    ComputerConsentScope, ComputerHostMethod, ComputerHostStreamItem, ComputerSettings,
+    ComputerConsentScope, ComputerHostMethod, ComputerHostStreamItem, ComputerPendingKind,
+    ComputerSettings,
 };
 use zeron_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, PermissionMode, ReasoningLevel, RunRequest,
@@ -392,6 +393,18 @@ impl Rig {
             .collect()
     }
 
+    fn revoked_notes(&self) -> Vec<(String, Option<String>)> {
+        self.system_notes()
+            .into_iter()
+            .filter_map(|note| {
+                let mut lines = note.splitn(2, '\n');
+                let text = lines.next()?.to_owned();
+                (text == COMPUTER_DESKTOP_REVOKED_NOTE)
+                    .then(|| (text, lines.next().map(str::to_owned)))
+            })
+            .collect()
+    }
+
     fn consent_cards(&self) -> Vec<(String, ComputerConsentScope, bool)> {
         self.entries(CHAT)
             .iter()
@@ -406,7 +419,7 @@ impl Rig {
                     Some(UserInputKind::Consent { scope, .. }) => {
                         Some((request_id, scope, resolved))
                     }
-                    None => None,
+                    _ => None,
                 },
                 _ => None,
             })
@@ -765,6 +778,31 @@ fn authorize(
     })
 }
 
+async fn pending_consent(
+    manager: &zeron_engine::computer::manager::ComputerManager,
+    input_id: &str,
+) -> (ComputerConsentScope, Option<String>) {
+    wait_for(
+        || {
+            manager
+                .pending_request(CHAT)
+                .is_some_and(|pending| pending.input_id == input_id)
+        },
+        "the pending consent request",
+    )
+    .await;
+    let pending = manager.pending_request(CHAT).unwrap();
+    assert_eq!(pending.question_id, "consent");
+    match pending.kind {
+        ComputerPendingKind::Consent { scope, tool, .. } => (scope, tool),
+        other => panic!("a consent request, got {other:?}"),
+    }
+}
+
+async fn no_pending(manager: &zeron_engine::computer::manager::ComputerManager, what: &str) {
+    wait_for(|| manager.pending_request(CHAT).is_none(), what).await;
+}
+
 fn answer(rig: &Rig, id: &str, request_id: &str, label: &str) {
     rig.command(
         id,
@@ -780,7 +818,7 @@ fn answer(rig: &Rig, id: &str, request_id: &str, label: &str) {
 }
 
 #[tokio::test]
-async fn ask_mode_raises_one_task_card_a_clipboard_card_and_discloses_once() {
+async fn ask_mode_raises_one_task_card_a_clipboard_card_and_never_discloses_in_the_transcript() {
     let rig = rig();
     rig.run("c1", "plain", PermissionMode::Ask, None);
     rig.saw(1).await;
@@ -797,8 +835,14 @@ async fn ask_mode_raises_one_task_card_a_clipboard_card_and_discloses_once() {
         SessionStatus::Working,
         "a consent card never parks the composer as awaiting input"
     );
+    assert_eq!(
+        pending_consent(&manager, &card).await,
+        (ComputerConsentScope::Task, Some("computer_click".into())),
+        "the strip and menu bar get the card's request"
+    );
     answer(&rig, "allow", &card, "Allow");
     assert!(click.await.unwrap());
+    no_pending(&manager, "an answer clears the pending request").await;
     let answered = || {
         rig.entries(CHAT)
             .iter()
@@ -827,21 +871,29 @@ async fn ask_mode_raises_one_task_card_a_clipboard_card_and_discloses_once() {
     wait_for(|| rig.consent_cards().len() == 2, "the clipboard card").await;
     let (clip_card, clip_scope, _) = rig.consent_cards()[1].clone();
     assert_eq!(clip_scope, ComputerConsentScope::Call);
+    assert_eq!(
+        pending_consent(&manager, &clip_card).await,
+        (
+            ComputerConsentScope::Call,
+            Some("computer_read_clipboard".into())
+        )
+    );
     answer(&rig, "decline", &clip_card, "Decline");
     assert!(!clipboard.await.unwrap());
+    no_pending(&manager, "a decline clears the pending request").await;
 
-    let disclosures = rig
-        .system_notes()
-        .iter()
-        .filter(|note| note.as_str() == COMPUTER_CONTROL_ON_DISCLOSURE)
-        .count();
-    assert_eq!(disclosures, 1);
+    assert!(
+        !rig.system_notes()
+            .iter()
+            .any(|note| note.as_str() == COMPUTER_CONTROL_ON_DISCLOSURE),
+        "the ON disclosure rides the first tool result, never a transcript note"
+    );
     rig.finish_turn().await;
     rig.core.shutdown().await;
 }
 
 #[tokio::test]
-async fn auto_and_full_raise_no_card_and_disclose_once_per_turn() {
+async fn auto_and_full_raise_no_card_and_never_disclose_in_the_transcript() {
     for mode in [PermissionMode::Auto, PermissionMode::Full] {
         let rig = rig();
         rig.run("c1", "plain", mode, None);
@@ -859,12 +911,10 @@ async fn auto_and_full_raise_no_card_and_disclose_once_per_turn() {
                 .unwrap()
         );
         assert!(rig.consent_cards().is_empty(), "{mode:?}");
-        assert_eq!(
-            rig.system_notes()
+        assert!(
+            !rig.system_notes()
                 .iter()
-                .filter(|note| note.as_str() == COMPUTER_CONTROL_ON_DISCLOSURE)
-                .count(),
-            1,
+                .any(|note| note.as_str() == COMPUTER_CONTROL_ON_DISCLOSURE),
             "{mode:?}"
         );
         rig.finish_turn().await;
@@ -884,6 +934,8 @@ async fn a_consent_card_left_open_by_a_dead_run_is_never_answered_as_a_new_turn(
         kind: Some(UserInputKind::Consent {
             scope: ComputerConsentScope::Task,
             app: None,
+            tool: None,
+            params: None,
         }),
     };
     let visible = UserInputQuestion {
@@ -970,10 +1022,11 @@ async fn a_consent_card_left_open_by_a_dead_run_is_never_answered_as_a_new_turn(
 }
 
 #[tokio::test]
-async fn a_physical_escape_bumps_stops_and_notes_every_chat_it_interrupted() {
+async fn a_physical_escape_revokes_the_desktop_and_the_turn_keeps_running() {
     let rig = rig();
+    rig.settings(true);
     rig.run("c1", "plain", PermissionMode::Full, None);
-    rig.saw(1).await;
+    let secret = rig.saw(1).await.secret.unwrap();
     let manager = manager(&rig).await;
     let (release, released) = tokio::sync::oneshot::channel::<()>();
     let (entered_tx, entered) = tokio::sync::oneshot::channel::<()>();
@@ -1003,15 +1056,82 @@ async fn a_physical_escape_bumps_stops_and_notes_every_chat_it_interrupted() {
         .await
         .unwrap();
     assert_eq!(reply, json!({ "stoppedChatIds": [CHAT] }));
-    assert!(!rig.in_flight());
+    assert!(rig.in_flight(), "the turn keeps running to sum up");
+    assert!(rig.core.sessions.computer_turn_live(CHAT));
     assert_eq!(rig.generation(), 1);
+    assert_eq!(
+        rig.revoked_notes(),
+        vec![(COMPUTER_DESKTOP_REVOKED_NOTE.to_owned(), Some("Esc".into()))]
+    );
     assert!(
-        rig.system_notes()
+        !rig.system_notes()
             .iter()
             .any(|note| note == COMPUTER_ESCAPE_STOP_NOTICE)
     );
+    let run = rig.core.sessions.computer_run(CHAT, &secret).unwrap();
+    assert!(run.turn_desktop_revoked);
     let _ = release.send(());
     let _ = activity.await;
+
+    rig.run("c2", "next", PermissionMode::Full, None);
+    assert!(rig.saw(2).await.steer);
+    caller_for(&rig, "m-c2").await;
+    let run = rig.core.sessions.computer_run(CHAT, &secret).unwrap();
+    assert!(
+        !run.turn_desktop_revoked,
+        "the next message clears the latch"
+    );
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_strip_stop_revokes_only_its_chat() {
+    let rig = rig();
+    rig.settings(true);
+    rig.run("c1", "plain", PermissionMode::Full, None);
+    let secret = rig.saw(1).await.secret.unwrap();
+    manager(&rig).await;
+    let client = zeron_rpc::memory_client(rig.core.rpc_service());
+    let reply = client
+        .call(methods::COMPUTER_REVOKE_DESKTOP, json!({ "chatId": LEAD }))
+        .await
+        .unwrap();
+    assert_eq!(reply, json!({ "revoked": false }));
+    assert!(
+        !rig.core
+            .sessions
+            .computer_run(CHAT, &secret)
+            .unwrap()
+            .turn_desktop_revoked
+    );
+    let reply = client
+        .call(methods::COMPUTER_REVOKE_DESKTOP, json!({ "chatId": CHAT }))
+        .await
+        .unwrap();
+    assert_eq!(reply, json!({ "revoked": true }));
+    assert!(rig.in_flight());
+    assert!(
+        rig.core
+            .sessions
+            .computer_run(CHAT, &secret)
+            .unwrap()
+            .turn_desktop_revoked
+    );
+    assert_eq!(rig.generation(), 0, "the strip Stop never fences the chat");
+    assert_eq!(
+        rig.revoked_notes(),
+        vec![(
+            COMPUTER_DESKTOP_REVOKED_NOTE.to_owned(),
+            Some("Stop".into())
+        )]
+    );
+    let again = client
+        .call(methods::COMPUTER_REVOKE_DESKTOP, json!({ "chatId": CHAT }))
+        .await
+        .unwrap();
+    assert_eq!(again, json!({ "revoked": false }));
+    assert_eq!(rig.revoked_notes().len(), 1, "one note per revoke");
+    rig.finish_turn().await;
     rig.core.shutdown().await;
 }
 
@@ -1068,8 +1188,10 @@ async fn a_decline_holds_for_the_turn_and_turn_end_and_stop_cancel_an_open_card(
     let click = authorize(&manager, "computer_click", &second);
     wait_for(|| rig.consent_cards().len() == 2, "a new turn asks again").await;
     let open_at_turn_end = rig.consent_cards()[1].0.clone();
+    pending_consent(&manager, &open_at_turn_end).await;
     rig.finish_turn().await;
     assert!(!click.await.unwrap(), "turn end cancels the open card");
+    no_pending(&manager, "turn end clears the pending request").await;
     wait_for(
         || card_resolved(&rig, &open_at_turn_end),
         "the turn-end card to settle",
@@ -1082,9 +1204,11 @@ async fn a_decline_holds_for_the_turn_and_turn_end_and_stop_cancel_an_open_card(
     let click = authorize(&manager, "computer_click", &third);
     wait_for(|| rig.consent_cards().len() == 3, "the third card").await;
     let open_at_stop = rig.consent_cards()[2].0.clone();
+    pending_consent(&manager, &open_at_stop).await;
     rig.command("stop", SessionCommandPayload::Interrupt {}, None);
     rig.applied("stop").await;
     assert!(!click.await.unwrap(), "Stop cancels the open card");
+    no_pending(&manager, "Stop clears the pending request").await;
     wait_for(
         || card_resolved(&rig, &open_at_stop),
         "the stopped card to settle",

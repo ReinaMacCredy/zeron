@@ -63,9 +63,9 @@ async fn a_stop_revokes_queued_admission_aborts_the_active_operation_and_lands_n
     manager.stop_thread("revoke-thread").await.unwrap();
     release.resolve();
     let queued = queued.await.unwrap().unwrap_err();
-    assert!(queued.to_string().contains("revoked"), "{queued}");
+    assert!(queued.control_revoked(), "{queued}");
     let active = active.await.unwrap().unwrap_err();
-    assert!(active.to_string().contains("revoked"), "{active}");
+    assert!(active.control_revoked(), "{active}");
     assert!(!worked.load(Ordering::SeqCst));
     assert!(backend.calls_for("click").is_empty());
     manager.dispose().await;
@@ -167,7 +167,7 @@ async fn a_stop_still_stops_input_while_the_first_of_two_overlapping_calls_is_ac
     assert_eq!(stops.load(Ordering::SeqCst), 1);
     release.resolve();
     let error = first.await.unwrap().unwrap_err();
-    assert!(error.to_string().contains("revoked"), "{error}");
+    assert!(error.control_revoked(), "{error}");
     assert!(backend.calls_for("click").is_empty());
     manager.dispose().await;
 }
@@ -264,5 +264,74 @@ async fn a_stop_aborts_live_work_with_a_control_revoked_reason_not_a_bare_abort(
     let error = active.await.unwrap().unwrap_err();
     assert!(matches!(error, ComputerError::Backend(_)), "{error:?}");
     assert!(error.control_revoked());
+    manager.dispose().await;
+}
+
+#[tokio::test]
+async fn a_desktop_revoke_drains_input_and_publishes_input_stopped_until_turn_end() {
+    let Built {
+        manager, backend, ..
+    } = settled(Scripted::default_fake());
+    let thread_id = "revoke-desktop-thread";
+    let events = events(&manager);
+    let stops = Arc::new(AtomicUsize::new(0));
+    let counted = stops.clone();
+    backend.hooks().stop_input = Some(Arc::new(move |_, _| {
+        counted.fetch_add(1, Ordering::SeqCst);
+        async { Ok(()) }.boxed()
+    }));
+    let entered = deferred();
+    let release = deferred();
+    let active = {
+        let (manager, entered, release) = (manager.clone(), entered.clone(), release.clone());
+        tokio::spawn(async move {
+            let inner = manager.clone();
+            manager
+                .with_agent_activity(
+                    thread_id,
+                    move || async move {
+                        entered.resolve();
+                        release.wait().await;
+                        inner
+                            .click(Some(thread_id), point(1.0, 1.0), &[], Default::default())
+                            .await?;
+                        Ok(())
+                    },
+                    None,
+                    None,
+                    None,
+                )
+                .await
+        })
+    };
+    entered.wait().await;
+    manager.revoke_desktop(thread_id).await.unwrap();
+    assert_eq!(stops.load(Ordering::SeqCst), 1);
+    release.resolve();
+    let error = active.await.unwrap().unwrap_err();
+    assert!(error.control_revoked(), "{error}");
+    assert_eq!(error.to_string(), super::super::COMPUTER_USER_REVOKED);
+    assert!(backend.calls_for("click").is_empty());
+    assert_eq!(
+        manager.get_thread_state(thread_id).await.input_stopped,
+        Some(true),
+        "the revoke's own release keeps the flag"
+    );
+    assert_eq!(
+        events.states_for(thread_id).last().unwrap().input_stopped,
+        Some(true)
+    );
+    assert_eq!(
+        manager
+            .get_thread_state("another-thread")
+            .await
+            .input_stopped,
+        None
+    );
+    manager.clear_desktop_revoked(thread_id);
+    assert_eq!(
+        events.states_for(thread_id).last().unwrap().input_stopped,
+        None
+    );
     manager.dispose().await;
 }

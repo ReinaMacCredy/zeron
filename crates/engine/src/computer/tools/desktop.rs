@@ -732,7 +732,7 @@ impl ComputerTools {
             && hidden == Some(false)
             && !context
                 .seams
-                .foreground_authorization()
+                .foreground_authorization(None)
                 .await
                 .user_requested_visible_use
         {
@@ -842,7 +842,7 @@ impl ComputerTools {
     async fn invoke_menu(&self, args: &ToolArgs, context: &ComputerToolContext) -> Handled {
         let target = read_menu_target_arg(args)?;
         let path = read_menu_path_arg(args, "computer_invoke_menu")?;
-        let authorization = context.seams.foreground_authorization().await;
+        let authorization = context.seams.foreground_authorization(Some(args)).await;
         let result = self
             .manager
             .invoke_menu(Some(&context.chat_id), target, &path, Some(authorization))
@@ -894,7 +894,7 @@ impl ComputerTools {
     async fn activate_window(&self, args: &ToolArgs, context: &ComputerToolContext) -> Handled {
         let window_id = read_window_id_arg(args)?
             .ok_or_else(|| ToolInputError::new("Missing required argument \"window_id\"."))?;
-        let authorization = context.seams.foreground_authorization().await;
+        let authorization = context.seams.foreground_authorization(Some(args)).await;
         let noted = self
             .manager
             .foreground_with_restore(Some(&context.chat_id), &window_id, None, Some(authorization))

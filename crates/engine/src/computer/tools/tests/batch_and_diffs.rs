@@ -161,7 +161,10 @@ impl ComputerToolSeams for DyingTurn {
         }
     }
 
-    async fn foreground_authorization(&self) -> ComputerForegroundAuthorization {
+    async fn foreground_authorization(
+        &self,
+        _target: Option<&ToolArgs>,
+    ) -> ComputerForegroundAuthorization {
         ComputerForegroundAuthorization {
             user_requested_visible_use: true,
         }

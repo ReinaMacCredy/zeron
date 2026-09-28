@@ -703,6 +703,9 @@ impl SettingsSection {
                 ("Computer control", &["computer use", "desktop"]),
                 ("Cursor colors", &["cursor", "color"]),
                 ("Preview", &["compact", "large"]),
+                ("Placement", &["rail", "floating"]),
+                ("Developer access", &["javascript", "browser"]),
+                ("Always-allowed apps", &["consent", "allow"]),
                 ("Getting started", &[]),
                 ("Recent Computer actions", &["history", "audit"]),
                 ("Advanced", &["permission", "driver"]),
@@ -1920,6 +1923,7 @@ pub struct Shell {
     sidecar_flip: Option<summary::SidecarFlip>,
     sidecar_popover: Option<summary::PopoverFade>,
     sidecar_press_found_popover: bool,
+    computer_thumbnail: Option<Entity<crate::computer::thumbnail::ComputerThumbnail>>,
     /// Per chat: the instructions file found at the checkout root (`AGENTS.md`
     /// / `CLAUDE.md`), `None` once checked and absent. Probed once per chat;
     /// the in-flight probe is keyed the same way.
@@ -2255,6 +2259,9 @@ impl Shell {
             this.on_state_changed(&state, cx);
             cx.notify();
         });
+        if let Some(presence) = crate::computer::presence::map(cx) {
+            cx.observe(&presence, |_, _, cx| cx.notify()).detach();
+        }
         // A reopened window reuses AppState, so the engine may already be
         // ready. Only show the boot splash while it is actually connecting.
         let splash = match &state.read(cx).connection {
@@ -2500,6 +2507,9 @@ impl Shell {
             sidecar_flip: None,
             sidecar_popover: None,
             sidecar_press_found_popover: false,
+            computer_thumbnail: crate::computer::preview::store(cx).map(|store| {
+                cx.new(|cx| crate::computer::thumbnail::ComputerThumbnail::new(store, cx))
+            }),
             summary_instructions: std::collections::HashMap::new(),
             summary_instruction_probes: std::collections::HashMap::new(),
             project_actions: crate::project_actions::ProjectActionsController::default(),
@@ -8197,13 +8207,26 @@ impl Shell {
                         SIDEBAR_ACTIVE_HARNESS_TITLE_GAP
                     }))
                     .children(compact_status)
-                    .when(!harnesses.is_empty(), |el| {
-                        el.child(crate::pickers::harness_mark_stack(
-                            &harnesses,
+                    .map(|el| {
+                        let alpha = if archived_muted { 0.4 } else { 0.8 };
+                        match crate::computer::strip::chat_glyph(
+                            "chat-row",
+                            &id,
                             SIDEBAR_ACTIVE_HARNESS_ICON_SIZE,
-                            subline,
-                            if archived_muted { 0.4 } else { 0.8 },
-                        ))
+                            alpha,
+                            theme,
+                            cx,
+                        ) {
+                            Some(glyph) => el.child(glyph),
+                            None => el.when(!harnesses.is_empty(), |el| {
+                                el.child(crate::pickers::harness_mark_stack(
+                                    &harnesses,
+                                    SIDEBAR_ACTIVE_HARNESS_ICON_SIZE,
+                                    subline,
+                                    alpha,
+                                ))
+                            }),
+                        }
                     })
                     // Unsent text in this chat's composer (t3code's amber pen).
                     .when(unsent, |el| {
@@ -14029,6 +14052,18 @@ mod tests {
             SettingsSection::General.matching_rows("steer"),
             vec!["Follow-up behavior"]
         );
+        assert_eq!(
+            SettingsSection::Computer.matching_rows("rail"),
+            vec!["Placement"]
+        );
+        assert_eq!(
+            SettingsSection::Computer.matching_rows("javascript"),
+            vec!["Developer access"]
+        );
+        assert_eq!(
+            SettingsSection::Computer.matching_rows("consent"),
+            vec!["Always-allowed apps"]
+        );
         // A label-only hit expands nothing; the section row stands alone.
         assert!(
             SettingsSection::Archived
@@ -17070,6 +17105,11 @@ impl Shell {
                 cx.new(|cx| ComputerPage::new(state, cx))
             })
             .clone()
+    }
+    pub fn fixture_computer_thumbnail(
+        &self,
+    ) -> Option<Entity<crate::computer::thumbnail::ComputerThumbnail>> {
+        self.computer_thumbnail.clone()
     }
     pub fn fixture_appshots_composer(&self) -> Entity<Composer> {
         self.composer.clone()

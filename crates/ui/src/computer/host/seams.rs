@@ -5,11 +5,15 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::future::LocalBoxFuture;
+use zeron_engine::computer::visible_use::COMPUTER_USER_INTERACTION_QUIET_MS;
 use zeron_proto::computer::{CuaComputerTask, CuaPreviewTarget, CuaShieldFrame, CuaToolResult};
 
 use super::support::CuaCursorStyle;
 
 pub type HostFuture<T> = LocalBoxFuture<'static, T>;
+
+// The engine gives up on a host call after 35 s (CUA_HOST_CALL_TIMEOUT_MS); a held read still needs time to run.
+const QUIET_WAIT_CAP: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HostPermissions {
@@ -57,6 +61,18 @@ pub struct PhysicalComputerInput {
     pub kind: PhysicalInputKind,
     pub pid: Option<u32>,
     pub window_id: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TakeoverEvent {
+    Paused {
+        thread_id: String,
+        pid: u32,
+        window_id: Option<u32>,
+    },
+    Resumed {
+        thread_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -112,6 +128,9 @@ pub struct CuaDriverHostOptions {
     pub protected_surface: Option<Box<dyn Fn() -> bool + Send>>,
     pub cursor_style: Option<Box<dyn Fn() -> Option<CuaCursorStyle> + Send>>,
     pub warm_on_first_touch: bool,
+    pub input_quiet: Duration,
+    pub input_quiet_cap: Duration,
+    pub on_takeover: Option<Box<dyn Fn(TakeoverEvent) + Send>>,
 }
 
 impl CuaDriverHostOptions {
@@ -138,6 +157,9 @@ impl CuaDriverHostOptions {
             protected_surface: None,
             cursor_style: None,
             warm_on_first_touch: warm_on_first_touch_from_env(),
+            input_quiet: Duration::from_millis(COMPUTER_USER_INTERACTION_QUIET_MS),
+            input_quiet_cap: QUIET_WAIT_CAP,
+            on_takeover: None,
         }
     }
 }

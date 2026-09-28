@@ -41,6 +41,8 @@ impl State {
             },
             cursor: None,
             pane_surfaced: false,
+            desktop_revoked: false,
+            pending_requests: Default::default(),
         }
     }
 
@@ -84,7 +86,8 @@ impl State {
                 || self.agent_calls_in_flight.contains_key(id)
                 || self.publish_locks.contains_key(id)
                 || candidate.pane_surfaced
-                || candidate.input_pause.is_some();
+                || candidate.input_pause.is_some()
+                || !candidate.pending_requests.is_empty();
             if keep {
                 index += 1;
                 continue;
@@ -159,11 +162,15 @@ impl ComputerManager {
             ),
             health: state.backend_health.clone(),
             capabilities: self.backend.capabilities(),
-            input_stopped: None,
+            input_stopped: runtime.desktop_revoked.then_some(true),
             last_error: runtime
                 .reported_error
                 .clone()
                 .or_else(|| runtime.last_error.clone()),
+            pending_request: runtime
+                .pending_requests
+                .front()
+                .map(|(_, request)| request.clone()),
         }
     }
 
@@ -525,6 +532,9 @@ impl ComputerManager {
         let attributed = agent_thread_id(thread_id);
         if let Some(attributed) = attributed {
             self.surface_pane_for_agent(attributed);
+            if let Some(window_id) = result.and_then(|result| result.window_id.as_deref()) {
+                self.record_acted_window(attributed, window_id);
+            }
         }
         self.emit(ComputerEvent::Action {
             window_id: result.and_then(|result| result.window_id.clone()),
