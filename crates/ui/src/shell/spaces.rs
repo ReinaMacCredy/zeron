@@ -1674,6 +1674,130 @@ mod pinned_session_tests {
         });
     }
 
+    #[gpui::test]
+    fn archive_pill_follows_a_still_pointer_down_the_list(cx: &mut gpui::TestAppContext) {
+        use super::*;
+
+        struct SidebarHost(Entity<Shell>);
+        impl Render for SidebarHost {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.update(cx, |shell, cx| {
+                    div()
+                        .w(px(280.0))
+                        .h(px(800.0))
+                        .child(shell.render_chat_sidebar(&Theme::default(), cx))
+                })
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+        });
+        let (host, cx) = cx.add_window_view(|_, cx| {
+            SidebarHost(cx.new(|cx| {
+                let state = cx.new(|_| AppState::new());
+                let mut shell = Shell::new(
+                    state,
+                    EngineBootConfig {
+                        data_dir: dir.path().into(),
+                        ipc_port: 0,
+                        edge_url: "http://127.0.0.1:1".into(),
+                        edge_token: None,
+                        org_id: None,
+                        workos_client_id: None,
+                        default_harness: zeron_proto::HarnessId::Mock,
+                    },
+                    cx,
+                );
+                shell.settings.sidebar_organization = SidebarOrganization::InOneList;
+                shell.reduced_motion = true;
+                shell.state.update(cx, |state, _| {
+                    state.workspace_scope = Some(WorkspaceScope::Local);
+                    state.local_device_id = Some("local".into());
+                    state.chats = ["a", "b", "c"]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(ix, id)| {
+                            serde_json::from_value(serde_json::json!({
+                                "id": id, "title": id, "deviceId": "local", "archived": false,
+                                "createdAt": Utc::now() - chrono::Duration::minutes(ix as i64),
+                            }))
+                            .unwrap()
+                        })
+                        .collect();
+                });
+                shell
+            }))
+        });
+        let shell = host.read_with(cx, |host, _| host.0.clone());
+        let order = shell.update(cx, |shell, cx| shell.sidebar_visible_order(cx));
+        assert_eq!(order, ids(&["a", "b", "c"]));
+        let state = shell.read_with(cx, |shell, _| shell.state.clone());
+
+        let row = cx.debug_bounds("chat-a").unwrap();
+        cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::default());
+        let pointer = cx.debug_bounds("chat-a-corner").unwrap().center();
+        cx.simulate_mouse_move(pointer, None, gpui::Modifiers::default());
+        for (archived, next) in [
+            ("a", Some(("b", "chat-b-corner"))),
+            ("b", Some(("c", "chat-c-corner"))),
+            ("c", None),
+        ] {
+            cx.simulate_click(pointer, gpui::Modifiers::default());
+            shell.read_with(cx, |shell, _| {
+                assert!(shell.chat_hover_resync);
+                assert_eq!(
+                    shell.chat_status_hover.as_deref(),
+                    Some(format!("chat-{archived}").as_str())
+                );
+            });
+            // The engine round-trip lands; the next row slides up under the
+            // unmoved pointer.
+            state.update(cx, |state, cx| {
+                state
+                    .chats
+                    .iter_mut()
+                    .find(|chat| chat.id == archived)
+                    .unwrap()
+                    .archived = true;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            shell.update(cx, |shell, cx| {
+                shell.sidebar_resort.clear();
+                shell.sidebar_new_keys.clear();
+                cx.notify();
+            });
+            cx.run_until_parked();
+            // Its Archived-section copy shares the row key and must not stay lit.
+            assert_eq!(
+                crate::motion::hover_t(&format!("chat-{archived}-hover")),
+                0.0
+            );
+            let expected = next.map(|(next, _)| format!("chat-{next}"));
+            shell.read_with(cx, |shell, _| {
+                assert_eq!(shell.chat_status_hover, expected);
+            });
+            if let Some((_, corner)) = next {
+                assert!(cx.debug_bounds(corner).unwrap().contains(&pointer));
+            }
+        }
+
+        // Real pointer movement hands hover back to gpui's own tracking.
+        let row = cx.debug_bounds("chat-c").unwrap();
+        cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, _| assert!(!shell.chat_hover_resync));
+    }
+
     #[test]
     fn missing_duplicate_and_archived_pins_do_not_disturb_regular_rows() {
         let recency = ids(&["b", "a", "c"]);
