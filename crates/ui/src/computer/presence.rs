@@ -91,6 +91,9 @@ pub fn chat_presence(store: &ComputerPreviewStore, chat_id: &str) -> Option<Chat
         _ => {
             let pending_app = pending.as_ref().and_then(|pending| match &pending.kind {
                 ComputerPendingKind::Foreground { app } => app.clone(),
+                ComputerPendingKind::Consent { app, .. } => {
+                    app.as_ref().map(|app| app.name.clone())
+                }
             });
             (
                 pending_app.or_else(|| chat.last_app.clone()),
@@ -638,6 +641,19 @@ mod tests {
         );
         assert!(presence.holds_desktop());
         assert_eq!(ring_specs(&[presence])[0].label, "Zeron · Waiting for you");
+
+        let mut consent = asking.clone();
+        consent.pending_request = Some(crate::computer::strip::tests::consent_pending(
+            zeron_proto::computer::ComputerConsentScope::Task,
+            Some("Calculator"),
+            true,
+        ));
+        state(&mut store, consent);
+        let presence = chat_presence(&store, "a").unwrap();
+        assert_eq!(
+            (presence.tone, presence.app.as_deref()),
+            (PresenceTone::NeedsYou, Some("Calculator"))
+        );
 
         let mut bystander = asking.clone();
         bystander.thread_id = "b".into();

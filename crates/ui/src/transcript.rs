@@ -45,8 +45,8 @@ use zeron_proto::ToolCall;
 use crate::computer::cards::{
     CardAction, CardTone, ComputerNotice, ComputerRequest, ConsentChoice, ConsentOutcome,
     computer_card, computer_event_row, computer_notice, consent_allow_description, consent_answers,
-    consent_app, consent_card_title, consent_choices, consent_detail, consent_outcome,
-    consent_outcome_label, consent_question, consent_scope, is_control_denied,
+    consent_app, consent_card_title, consent_choices, consent_detail, consent_event_label,
+    consent_outcome, consent_question, consent_scope, is_control_denied,
     missing_computer_permissions, revoked_label,
 };
 use crate::computer::presentation::{
@@ -3639,6 +3639,7 @@ pub struct Transcript {
     copied_message_clear: Option<Task<()>>,
     consent_sent: HashMap<SharedString, ConsentOutcome>,
     consent_failures: HashMap<SharedString, SharedString>,
+    strip_pending: Option<String>,
     html_files: HashMap<std::path::PathBuf, HtmlFileState>,
     html_apps: Option<Arc<Vec<crate::html_open::AppChoice>>>,
     html_apps_task: Option<Task<()>>,
@@ -3928,6 +3929,7 @@ impl Transcript {
             copied_message_clear: None,
             consent_sent: HashMap::new(),
             consent_failures: HashMap::new(),
+            strip_pending: None,
             html_files: HashMap::new(),
             html_apps: None,
             html_apps_task: None,
@@ -3947,6 +3949,21 @@ impl Transcript {
         let view = cx.entity_id();
         cx.on_release(move |_, _| crate::computer::protected_surfaces::publish(view, false))
             .detach();
+        if let Some(presence) = crate::computer::presence::map(cx) {
+            cx.observe(&presence, |this: &mut Self, map, cx| {
+                let pending = this
+                    .chat_id
+                    .as_deref()
+                    .and_then(|chat_id| map.read(cx).get(chat_id))
+                    .and_then(|presence| presence.pending.as_ref())
+                    .map(|pending| pending.input_id.clone());
+                if this.strip_pending != pending {
+                    this.strip_pending = pending;
+                    cx.notify();
+                }
+            })
+            .detach();
+        }
         this.sync(cx);
         this
     }
@@ -7558,6 +7575,16 @@ impl Transcript {
             return gpui::Empty.into_any_element();
         };
         self.rendered_rows.insert(row.id.clone());
+        if let RowKind::ComputerConsent {
+            request_id,
+            outcome: None,
+            ..
+        } = &row.kind
+            && !self.consent_sent.contains_key(request_id)
+            && self.consent_on_strip(request_id, cx)
+        {
+            return gpui::Empty.into_any_element();
+        }
         let theme = Theme::of(cx).clone();
         let workspace_root = {
             let state = self.state.read(cx);
@@ -9413,61 +9440,57 @@ impl Transcript {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let settled = outcome.or_else(|| self.consent_sent.get(&request_id).copied());
+        if let Some(outcome) = outcome.or_else(|| self.consent_sent.get(&request_id).copied()) {
+            return computer_event_row(
+                crate::icons::CURSOR,
+                consent_event_label(outcome, scope, app).into(),
+                CardTone::Info,
+                None,
+                theme,
+            );
+        }
         let mut lines: Vec<SharedString> = Vec::new();
         if !detail.is_empty() {
             lines.push(detail.to_owned().into());
         }
-        let (tone, status, actions) = match settled {
-            Some(outcome) => (
-                if matches!(
-                    outcome,
-                    ConsentOutcome::Allowed | ConsentOutcome::AlwaysAllowed
-                ) {
-                    CardTone::Success
-                } else {
-                    CardTone::Info
-                },
-                Some(SharedString::from(consent_outcome_label(outcome))),
-                Vec::new(),
-            ),
-            None => {
-                lines.push(consent_allow_description(scope, app).into());
-                let actions = consent_choices(scope, app)
-                    .into_iter()
-                    .map(|(choice, label)| {
-                        let (request_id, question_id) = (request_id.clone(), question_id.clone());
-                        CardAction {
-                            id: format!("computer-consent-{}-{}", request_id, label).into(),
-                            label: label.into(),
-                            primary: choice == ConsentChoice::Allow,
-                            on_click: Box::new(cx.listener(move |this, _, _, cx| {
-                                this.answer_consent(
-                                    request_id.clone(),
-                                    question_id.clone(),
-                                    choice.clone(),
-                                    cx,
-                                )
-                            })),
-                        }
-                    })
-                    .collect();
-                (
-                    CardTone::Warning,
-                    self.consent_failures.get(&request_id).cloned(),
-                    actions,
-                )
-            }
-        };
+        lines.push(consent_allow_description(scope, app).into());
+        let actions = consent_choices(scope, app)
+            .into_iter()
+            .map(|(choice, label)| {
+                let (request_id, question_id) = (request_id.clone(), question_id.clone());
+                CardAction {
+                    id: format!("computer-consent-{}-{}", request_id, label).into(),
+                    label: label.into(),
+                    primary: choice == ConsentChoice::Allow,
+                    on_click: Box::new(cx.listener(move |this, _, _, cx| {
+                        this.answer_consent(
+                            request_id.clone(),
+                            question_id.clone(),
+                            choice.clone(),
+                            cx,
+                        )
+                    })),
+                }
+            })
+            .collect();
         computer_card(
-            tone,
+            CardTone::Warning,
             crate::icons::CURSOR,
             consent_card_title(scope, app).into(),
             lines,
             actions,
-            status,
+            self.consent_failures.get(&request_id).cloned(),
             theme,
         )
+    }
+
+    fn consent_on_strip(&self, request_id: &str, cx: &gpui::App) -> bool {
+        let Some(chat_id) = self.chat_id.as_deref() else {
+            return false;
+        };
+        crate::computer::presence::for_chat(chat_id, cx)
+            .and_then(|presence| crate::computer::strip::consent_request(&presence))
+            .is_some_and(|ask| ask.input_id == request_id)
     }
 
     fn chat_hosted_here(&self, cx: &gpui::App) -> bool {
@@ -17902,6 +17925,95 @@ mod computer_tests {
             cx.debug_bounds("computer-consent-computer-consent-1-Deny")
                 .is_none(),
             "an answered card settles instead of offering the choice again"
+        );
+    }
+
+    #[gpui::test]
+    fn a_pending_consent_on_this_mac_renders_only_after_it_settles(cx: &mut gpui::TestAppContext) {
+        use crate::computer::preview::{self, tests::thread_state};
+        use zeron_proto::computer::ComputerEvent;
+
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            preview::init(cx);
+        });
+        let state = cx.new(|_| AppState::new());
+        let transcript = cx.new(|cx| Transcript::new(state, cx));
+        let rows = |parts: Vec<MessagePart>| {
+            rows_for_entry(
+                &entry(MessageRole::Assistant, parts),
+                false,
+                false,
+                &mut parse,
+            )
+        };
+        transcript.update(cx, |transcript, _| {
+            transcript.chat_id = Some("chat".into());
+            transcript.rows = rows(vec![consent_part(false, None)]);
+        });
+        struct Fixture(Entity<Transcript>);
+        impl Render for Fixture {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let row = self.0.update(cx, |this, cx| this.render_row(0, window, cx));
+                div()
+                    .w(px(640.0))
+                    .child(div().debug_selector(|| "consent-row".into()).child(row))
+            }
+        }
+        let (fixture, cx) = cx.add_window_view(|_, _| Fixture(transcript.clone()));
+        let repaint = |cx: &mut gpui::VisualTestContext| {
+            fixture.update(cx, |_, cx| cx.notify());
+            cx.run_until_parked();
+        };
+        let deny = "computer-consent-computer-consent-1-Deny";
+        repaint(cx);
+        assert!(
+            cx.debug_bounds(deny).is_some(),
+            "no strip holds it (a remote viewer): the card answers"
+        );
+
+        let store = cx.update(|_, cx| preview::store(cx).unwrap());
+        let mut asking = thread_state("chat", false);
+        asking.pending_request = Some(crate::computer::strip::tests::consent_pending(
+            ComputerConsentScope::Task,
+            None,
+            false,
+        ));
+        cx.update(|_, cx| {
+            preview::update_store(&store, cx, |store| {
+                store.apply_event(&ComputerEvent::ThreadState {
+                    state: Box::new(asking),
+                })
+            })
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds(deny).is_none(),
+            "the strip has the question"
+        );
+        assert_eq!(
+            cx.debug_bounds("consent-row").unwrap().size.height,
+            px(0.0),
+            "no card, no gap"
+        );
+
+        transcript.update(cx, |transcript, _| {
+            transcript.rows = rows(vec![consent_part(
+                true,
+                Some(vec![UserInputAnswer {
+                    question_id: "consent".into(),
+                    labels: vec!["Allow".into()],
+                }]),
+            )]);
+        });
+        repaint(cx);
+        assert!(cx.debug_bounds(deny).is_none());
+        assert!(
+            cx.debug_bounds("consent-row").unwrap().size.height > px(0.0),
+            "the outcome stays in the transcript"
         );
     }
 

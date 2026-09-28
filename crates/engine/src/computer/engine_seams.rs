@@ -1,8 +1,11 @@
 use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
-use zeron_proto::computer::{ComputerConsentApp, ComputerConsentScope};
+use zeron_proto::computer::{
+    COMPUTER_MESSAGE_MAX_LENGTH, ComputerConsentApp, ComputerConsentScope, ComputerPendingKind,
+    ComputerPendingRequest,
+};
 use zeron_proto::{PermissionMode, UserInputAnswer, UserInputKind, UserInputQuestion};
 
 use super::approval_gate::{ApprovalDecision, ComputerApprovalGate};
@@ -17,10 +20,13 @@ pub const COMPUTER_FOREGROUND_QUESTION_ID: &str = "foreground";
 pub const COMPUTER_FOREGROUND_ALLOW: &str = "Allow for this turn";
 pub const COMPUTER_FOREGROUND_DECLINE: &str = "No";
 
+pub type PendingSink = Arc<dyn Fn(&str, &str, Option<ComputerPendingRequest>) + Send + Sync>;
+
 pub struct EngineComputerSeams {
     sessions: Mutex<Option<SessionsEngine>>,
     gate: ComputerApprovalGate,
     cards: Mutex<HashMap<String, (String, String)>>,
+    pending: Mutex<Option<PendingSink>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -33,6 +39,18 @@ impl EngineComputerSeams {
             sessions: Mutex::new(None),
             gate,
             cards: Mutex::default(),
+            pending: Mutex::default(),
+        }
+    }
+
+    pub fn on_pending(&self, sink: PendingSink) {
+        *lock(&self.pending) = Some(sink);
+    }
+
+    fn set_pending(&self, chat_id: &str, input_id: &str, request: Option<ComputerPendingRequest>) {
+        let sink = lock(&self.pending).clone();
+        if let Some(sink) = sink {
+            sink(chat_id, input_id, request);
         }
     }
 
@@ -98,6 +116,21 @@ pub fn consent_question(card: &ComputerConsentCard) -> UserInputQuestion {
             tool: Some(card.tool_name.clone()),
             params: Some(card.params_display.clone()),
         }),
+    }
+}
+
+pub fn consent_pending(card: &ComputerConsentCard, input_id: &str) -> ComputerPendingRequest {
+    let question = consent_question(card);
+    ComputerPendingRequest {
+        input_id: input_id.to_owned(),
+        question_id: question.id,
+        kind: ComputerPendingKind::Consent {
+            scope: card.scope,
+            app: card.app.clone(),
+            tool: Some(card.tool_name.clone()).filter(|tool| tool.encode_utf16().count() <= 128),
+            params: Some(card.params_display.clone())
+                .filter(|params| params.encode_utf16().count() <= COMPUTER_MESSAGE_MAX_LENGTH),
+        },
     }
 }
 
@@ -175,6 +208,7 @@ impl ComputerManagerSeams for EngineComputerSeams {
         if decision.is_some() {
             if let Some((chat_id, input_id)) = lock(&self.cards).remove(&card.request_id) {
                 sessions.settle_input(&chat_id, &input_id);
+                self.set_pending(&chat_id, &input_id, None);
             }
             return Ok(());
         }
@@ -188,9 +222,19 @@ impl ComputerManagerSeams for EngineComputerSeams {
             .inspect_err(|_| {
                 lock(&self.cards).remove(&card.request_id);
             })?;
+        self.set_pending(
+            &card.chat_id,
+            &input_id,
+            Some(consent_pending(&card, &input_id)),
+        );
         let gate = self.gate.clone();
+        let pending = lock(&self.pending).clone();
         tokio::spawn(async move {
-            if let Ok(answers) = answers.await {
+            let answers = answers.await;
+            if let Some(pending) = pending {
+                pending(&card.chat_id, &input_id, None);
+            }
+            if let Ok(answers) = answers {
                 gate.respond(&card.chat_id, &card.request_id, consent_decision(&answers));
             }
         });
@@ -265,6 +309,38 @@ mod tests {
         assert_eq!(answer(&["No"]), Some(false));
         assert_eq!(answer(&["something typed"]), Some(false));
         assert_eq!(answer(&[]), None);
+    }
+
+    #[test]
+    fn the_consent_pending_request_carries_the_card_and_drops_oversized_params() {
+        let task = card(
+            "computer_type_text",
+            ComputerConsentScope::Task,
+            Some(ghostty(Some("com.mitchellh.ghostty"))),
+        );
+        let pending = consent_pending(&task, "computer-consent-1");
+        assert_eq!(pending.input_id, "computer-consent-1");
+        assert_eq!(pending.question_id, "consent");
+        assert_eq!(
+            pending.kind,
+            ComputerPendingKind::Consent {
+                scope: ComputerConsentScope::Task,
+                app: task.app.clone(),
+                tool: Some("computer_type_text".into()),
+                params: Some(task.params_display.clone()),
+            }
+        );
+        let huge = ComputerConsentCard {
+            params_display: format!(r#"{{"steps":"{}"}}"#, "s".repeat(4096)),
+            ..task
+        };
+        let ComputerPendingKind::Consent { params, tool, .. } =
+            consent_pending(&huge, "computer-consent-2").kind
+        else {
+            panic!("a consent request");
+        };
+        assert_eq!(params, None);
+        assert_eq!(tool.as_deref(), Some("computer_type_text"));
     }
 
     #[test]

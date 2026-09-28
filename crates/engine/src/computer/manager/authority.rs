@@ -582,6 +582,24 @@ impl ComputerManager {
         self.publish_cached(thread_id);
     }
 
+    pub fn clear_pending_request(&self, thread_id: &str, input_id: &str) {
+        {
+            let mut state = self.state();
+            match state.thread_mut(thread_id) {
+                Some(runtime)
+                    if runtime
+                        .pending_request
+                        .as_ref()
+                        .is_some_and(|pending| pending.input_id == input_id) =>
+                {
+                    runtime.pending_request = None;
+                }
+                _ => return,
+            }
+        }
+        self.publish_cached(thread_id);
+    }
+
     pub async fn handle_thread_removed(&self, thread_id: &str) {
         self.space_broker.release(thread_id, None);
         self.approval_gate.cancel_thread(thread_id, None);

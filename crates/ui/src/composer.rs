@@ -9350,21 +9350,22 @@ impl Composer {
             )
             .contains(&zeron_proto::computer::ComputerPermission::InputMonitoring);
         let state = self.state.clone();
-        let on_foreground = {
+        let on_answer = {
             let (state, chat_id) = (state.clone(), chat_id.clone());
-            let pending = crate::computer::strip::foreground_request(&presence).cloned();
-            Box::new(move |allow: bool, _: &mut Window, cx: &mut App| {
-                if let Some(pending) = &pending {
-                    crate::computer::status_menu::answer_foreground(
+            Box::new(
+                move |input_id: String,
+                      answers: Vec<UserInputAnswer>,
+                      _: &mut Window,
+                      cx: &mut App| {
+                    crate::computer::status_menu::answer_pending(
                         &state,
                         chat_id.clone(),
-                        pending.input_id.clone(),
-                        pending.question_id.clone(),
-                        allow,
+                        input_id,
+                        answers,
                         cx,
                     );
-                }
-            })
+                },
+            )
         };
         let on_stop = Box::new(move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
             let Some(engine) = state.read(cx).engine().cloned() else {
@@ -9390,11 +9391,7 @@ impl Composer {
                 .mx(px(14.0))
                 .mb(px(-(Theme::SPACE_SM + 1.0)))
                 .child(crate::computer::strip::computer_strip(
-                    &presence,
-                    show_esc,
-                    on_stop,
-                    on_foreground,
-                    theme,
+                    &presence, show_esc, on_stop, on_answer, theme,
                 ))
                 .into_any_element(),
         )
@@ -17167,6 +17164,103 @@ mod computer_use_tests {
             },
         );
         assert!(cx.debug_bounds("computer-strip-allow-foreground").is_none());
+        assert!(!crate::computer::protected_surfaces::any_showing());
+    }
+
+    #[gpui::test]
+    fn the_strip_consent_is_a_protected_surface(cx: &mut TestAppContext) {
+        use crate::computer::preview::{self, tests::thread_state};
+        use zeron_proto::computer::{ComputerConsentScope, ComputerEvent};
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            preview::init(cx);
+        });
+        let (out, frames) = tokio::sync::mpsc::channel::<String>(16);
+        let (replies, inbound) = tokio::sync::mpsc::channel::<String>(16);
+        std::mem::forget(replies);
+        let mut wire = Wire { frames };
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(
+                zeron_rpc::RpcClient::new(out, inbound),
+            ));
+            state.chats = vec![chat("mac")];
+            state.selected_chat = Some("c".into());
+            state.local_device_id = Some("mac".into());
+        });
+        let (_composer, cx) = cx.add_window_view(|_, cx| Composer::new(state, cx));
+        let store = cx.update(|_, cx| preview::store(cx).unwrap());
+        let apply = |cx: &mut gpui::VisualTestContext, event: ComputerEvent| {
+            cx.update(|_, cx| preview::update_store(&store, cx, |store| store.apply_event(&event)));
+            cx.run_until_parked();
+        };
+
+        let mut asking = thread_state("c", false);
+        asking.pending_request = Some(crate::computer::strip::tests::consent_pending(
+            ComputerConsentScope::Task,
+            Some("Ghostty"),
+            true,
+        ));
+        apply(
+            cx,
+            ComputerEvent::ThreadState {
+                state: Box::new(asking),
+            },
+        );
+        assert!(cx.debug_bounds("computer-strip").is_some());
+        assert!(cx.debug_bounds("computer-strip-stop").is_none());
+        assert!(cx.debug_bounds("computer-strip-allow-consent").is_some());
+        assert!(cx.debug_bounds("computer-strip-decline-consent").is_some());
+        assert!(
+            crate::computer::protected_surfaces::any_showing(),
+            "the agent can never click its own Allow"
+        );
+        wire.methods(cx);
+        let always = cx
+            .debug_bounds("computer-strip-always-consent")
+            .expect("Always allow Ghostty");
+        cx.simulate_click(always.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        let mut answers = Vec::new();
+        while let Ok(frame) = wire.frames.try_recv() {
+            let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+            if frame["method"] == methods::QUEUE_COMMAND {
+                answers.push(frame["params"].clone());
+            }
+        }
+        assert_eq!(answers.len(), 1, "{answers:?}");
+        assert_eq!(answers[0]["chatId"], serde_json::json!("c"));
+        let command = serde_json::to_value(SessionCommandPayload::RespondInput {
+            request_id: "computer-consent-1".into(),
+            answers: vec![UserInputAnswer {
+                question_id: "consent".into(),
+                labels: vec!["Always allow Ghostty".into()],
+            }],
+        })
+        .unwrap();
+        assert_eq!(answers[0]["command"], command);
+
+        apply(
+            cx,
+            ComputerEvent::ThreadState {
+                state: Box::new(thread_state("c", true)),
+            },
+        );
+        assert!(cx.debug_bounds("computer-strip-allow-consent").is_none());
         assert!(!crate::computer::protected_surfaces::any_showing());
     }
 

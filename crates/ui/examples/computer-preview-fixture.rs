@@ -471,6 +471,23 @@ fn main() -> anyhow::Result<()> {
                     pause(cx, 800).await;
                     capture(window.into(), cx, &output, "foreground-request")?;
 
+                    let mut consent = thread_state(false, false);
+                    consent.pending_request = serde_json::from_value(json!({
+                        "inputId": "computer-consent-fixture",
+                        "questionId": "consent",
+                        "kind": {
+                            "type": "consent",
+                            "scope": "task",
+                            "app": { "name": "Calculator", "bundleId": "com.apple.calculator", "pid": 4242 },
+                            "tool": "computer_type_text",
+                            "params": "{\"window_id\":\"cua:4242:17\"}",
+                        },
+                    }))
+                    .ok();
+                    event(cx, ComputerEvent::ThreadState { state: Box::new(consent) });
+                    pause(cx, 800).await;
+                    capture(window.into(), cx, &output, "consent-request")?;
+
                     if let Some(p45) = &p45_output {
                         std::fs::create_dir_all(p45)?;
                         state.update(cx, |s, cx| {

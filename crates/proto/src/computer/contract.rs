@@ -552,6 +552,23 @@ pub enum ComputerPendingKind {
         )]
         app: Option<String>,
     },
+    Consent {
+        scope: ComputerConsentScope,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        app: Option<ComputerConsentApp>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "bounds::opt_text::<_, 128>"
+        )]
+        tool: Option<String>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "bounds::opt_text::<_, COMPUTER_MESSAGE_MAX_LENGTH>"
+        )]
+        params: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1564,6 +1581,37 @@ mod tests {
         rejects::<ComputerPendingRequest>(&merge(
             &pending,
             json!({ "kind": { "type": "foreground", "app": "a".repeat(129) } }),
+        ));
+    }
+
+    #[test]
+    fn a_pending_consent_request_round_trips_on_the_thread_state() {
+        let pending = json!({
+            "inputId": "computer-consent-1",
+            "questionId": "consent",
+            "kind": {
+                "type": "consent",
+                "scope": "task",
+                "app": { "name": "Ghostty", "bundleId": "com.mitchellh.ghostty", "pid": 4242 },
+                "tool": "computer_type_text",
+                "params": "{\"window_id\":\"cua:4242:17\"}",
+            },
+        });
+        round_trips::<ThreadComputerState>(&merge(
+            &thread_state(),
+            json!({ "pendingRequest": pending }),
+        ));
+        round_trips::<ComputerPendingRequest>(&merge(
+            &pending,
+            json!({ "kind": { "type": "consent", "scope": "call" } }),
+        ));
+        rejects::<ComputerPendingRequest>(&merge(
+            &pending,
+            json!({ "kind": { "type": "consent", "scope": "task", "tool": "t".repeat(129) } }),
+        ));
+        rejects::<ComputerPendingRequest>(&merge(
+            &pending,
+            json!({ "kind": { "type": "consent", "scope": "task", "params": "p".repeat(2049) } }),
         ));
     }
 

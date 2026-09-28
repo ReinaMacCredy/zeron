@@ -26,6 +26,12 @@ pub enum MenuAction {
         question_id: String,
         allow: bool,
     },
+    Consent {
+        chat_id: String,
+        input_id: String,
+        question_id: String,
+        label: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +65,9 @@ fn short_title(title: Option<String>) -> String {
 }
 
 fn activity(presence: &ChatPresence) -> String {
+    if let Some(ask) = strip::consent_request(presence) {
+        return ask.sentence;
+    }
     if strip::foreground_request(presence).is_some() {
         return format!(
             "{} needs to come to the front",
@@ -96,6 +105,22 @@ pub fn status_menu(
             presence.app.as_deref().unwrap_or("Desktop")
         )));
         rows.push(MenuRow::Info(activity(presence)));
+        if let Some(ask) = strip::consent_request(presence) {
+            for (_, label, answers) in strip::consent_buttons(&ask) {
+                for answer in answers {
+                    rows.push(MenuRow::Action {
+                        label: label.clone(),
+                        hint: None,
+                        action: MenuAction::Consent {
+                            chat_id: presence.chat_id.clone(),
+                            input_id: ask.input_id.clone(),
+                            question_id: answer.question_id,
+                            label: answer.labels.concat(),
+                        },
+                    });
+                }
+            }
+        }
         if let Some(pending) = strip::foreground_request(presence) {
             for (label, allow) in [
                 (COMPUTER_FOREGROUND_ALLOW, true),
@@ -148,7 +173,27 @@ fn revoke_desktop(state: &Entity<AppState>, chat_id: String, cx: &mut App) {
     .detach();
 }
 
-pub(crate) fn answer_foreground(
+pub(crate) fn answer_pending(
+    state: &Entity<AppState>,
+    chat_id: String,
+    input_id: String,
+    answers: Vec<UserInputAnswer>,
+    cx: &mut App,
+) {
+    let Some(engine) = state.read(cx).engine().cloned() else {
+        return;
+    };
+    cx.spawn(async move |_| {
+        if let Err(error) =
+            crate::composer::respond_input(&engine, &chat_id, &input_id, answers).await
+        {
+            tracing::warn!(target: "desktop_cua", "answer the pending computer request: {error}");
+        }
+    })
+    .detach();
+}
+
+fn answer_foreground(
     state: &Entity<AppState>,
     chat_id: String,
     input_id: String,
@@ -156,9 +201,6 @@ pub(crate) fn answer_foreground(
     allow: bool,
     cx: &mut App,
 ) {
-    let Some(engine) = state.read(cx).engine().cloned() else {
-        return;
-    };
     let label = if allow {
         COMPUTER_FOREGROUND_ALLOW
     } else {
@@ -168,14 +210,7 @@ pub(crate) fn answer_foreground(
         question_id,
         labels: vec![label.into()],
     }];
-    cx.spawn(async move |_| {
-        if let Err(error) =
-            crate::composer::respond_input(&engine, &chat_id, &input_id, answers).await
-        {
-            tracing::warn!(target: "desktop_cua", "answer the foreground request: {error}");
-        }
-    })
-    .detach();
+    answer_pending(state, chat_id, input_id, answers, cx);
 }
 
 pub fn drive(
@@ -221,6 +256,21 @@ pub fn drive(
                     question_id,
                     allow,
                 } => answer_foreground(&state, chat_id, input_id, question_id, allow, cx),
+                MenuAction::Consent {
+                    chat_id,
+                    input_id,
+                    question_id,
+                    label,
+                } => answer_pending(
+                    &state,
+                    chat_id,
+                    input_id,
+                    vec![UserInputAnswer {
+                        question_id,
+                        labels: vec![label],
+                    }],
+                    cx,
+                ),
             });
         }
     })
@@ -387,6 +437,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_consent_request_offers_the_strip_choices_with_its_ids() {
+        use zeron_proto::computer::ComputerConsentScope;
+        let asking = ChatPresence {
+            pending: Some(crate::computer::strip::tests::consent_pending(
+                ComputerConsentScope::Task,
+                Some("Ghostty"),
+                true,
+            )),
+            ..presence("b", PresenceTone::NeedsYou)
+        };
+        let menu = status_menu(&[asking], titles).unwrap();
+        assert_eq!(menu.tone, PresenceTone::NeedsYou);
+        let answer = |label: &str, engine: &str| MenuRow::Action {
+            label: label.into(),
+            hint: None,
+            action: MenuAction::Consent {
+                chat_id: "b".into(),
+                input_id: "computer-consent-1".into(),
+                question_id: "consent".into(),
+                label: engine.into(),
+            },
+        };
+        assert_eq!(
+            &menu.rows[1..],
+            &[
+                MenuRow::Separator,
+                info("Fix the build · Ghostty"),
+                info("Type in Ghostty"),
+                answer("Allow for this task", "Allow"),
+                answer("Always allow Ghostty", "Always allow Ghostty"),
+                answer("No", "Deny"),
+                open("b"),
+            ]
+        );
+    }
+
     #[gpui::test]
     fn the_menu_follows_presence_and_titles_and_its_actions_reach_the_engine(
         cx: &mut gpui::TestAppContext,
@@ -514,6 +601,14 @@ mod tests {
                 allow: false,
             })
             .unwrap();
+        actions
+            .unbounded_send(MenuAction::Consent {
+                chat_id: "a".into(),
+                input_id: "computer-consent-4".into(),
+                question_id: "consent".into(),
+                label: "Always allow Ghostty".into(),
+            })
+            .unwrap();
         cx.run_until_parked();
         let mut revokes = Vec::new();
         let mut answers = Vec::new();
@@ -527,7 +622,7 @@ mod tests {
             }
         }
         assert_eq!(revokes, vec![serde_json::json!({ "chatId": "a" })]);
-        assert_eq!(answers.len(), 1, "{answers:?}");
+        assert_eq!(answers.len(), 2, "{answers:?}");
         assert_eq!(
             answers[0]["command"],
             serde_json::to_value(zeron_doc::SessionCommandPayload::RespondInput {
@@ -535,6 +630,17 @@ mod tests {
                 answers: vec![UserInputAnswer {
                     question_id: "foreground".into(),
                     labels: vec!["No".into()],
+                }],
+            })
+            .unwrap()
+        );
+        assert_eq!(
+            answers[1]["command"],
+            serde_json::to_value(zeron_doc::SessionCommandPayload::RespondInput {
+                request_id: "computer-consent-4".into(),
+                answers: vec![UserInputAnswer {
+                    question_id: "consent".into(),
+                    labels: vec!["Always allow Ghostty".into()],
                 }],
             })
             .unwrap()
@@ -601,13 +707,35 @@ mod tests {
                 }
                 MenuRow::Separator => None,
             }));
+            all[0].pending = (tone == PresenceTone::NeedsYou).then(|| {
+                crate::computer::strip::tests::consent_pending(
+                    zeron_proto::computer::ComputerConsentScope::Task,
+                    Some("Calculator"),
+                    true,
+                )
+            });
+            let menu = status_menu(&all, |_| Some("Ship it".into())).unwrap();
+            texts.extend(menu.rows.into_iter().filter_map(|row| match row {
+                MenuRow::Header(text) | MenuRow::Info(text) => Some(text),
+                MenuRow::Action { label, hint, .. } => {
+                    Some(format!("{label} {}", hint.unwrap_or_default()))
+                }
+                MenuRow::Separator => None,
+            }));
         }
         assert!(
             texts.contains(&"Ship it · Desktop".to_string()),
             "{texts:?}"
         );
         for text in texts {
-            for secret in ["computer_", "hunter2", "4242", "9191", "cua:"] {
+            for secret in [
+                "computer_",
+                "hunter2",
+                "4242",
+                "9191",
+                "cua:",
+                "com.mitchellh",
+            ] {
                 assert!(!text.contains(secret), "{text} carries {secret}");
             }
         }

@@ -15,7 +15,8 @@ use zeron_engine::computer::runtime::{COMPUTER_DESKTOP_REVOKED_NOTE, COMPUTER_ES
 use zeron_engine::{EngineCore, HarnessRegistry, SteerOutcome};
 use zeron_harness::{CancellationToken, Harness, HarnessError, RunControls};
 use zeron_proto::computer::{
-    ComputerConsentScope, ComputerHostMethod, ComputerHostStreamItem, ComputerSettings,
+    ComputerConsentScope, ComputerHostMethod, ComputerHostStreamItem, ComputerPendingKind,
+    ComputerSettings,
 };
 use zeron_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, PermissionMode, ReasoningLevel, RunRequest,
@@ -777,6 +778,31 @@ fn authorize(
     })
 }
 
+async fn pending_consent(
+    manager: &zeron_engine::computer::manager::ComputerManager,
+    input_id: &str,
+) -> (ComputerConsentScope, Option<String>) {
+    wait_for(
+        || {
+            manager
+                .pending_request(CHAT)
+                .is_some_and(|pending| pending.input_id == input_id)
+        },
+        "the pending consent request",
+    )
+    .await;
+    let pending = manager.pending_request(CHAT).unwrap();
+    assert_eq!(pending.question_id, "consent");
+    match pending.kind {
+        ComputerPendingKind::Consent { scope, tool, .. } => (scope, tool),
+        other => panic!("a consent request, got {other:?}"),
+    }
+}
+
+async fn no_pending(manager: &zeron_engine::computer::manager::ComputerManager, what: &str) {
+    wait_for(|| manager.pending_request(CHAT).is_none(), what).await;
+}
+
 fn answer(rig: &Rig, id: &str, request_id: &str, label: &str) {
     rig.command(
         id,
@@ -809,8 +835,14 @@ async fn ask_mode_raises_one_task_card_a_clipboard_card_and_never_discloses_in_t
         SessionStatus::Working,
         "a consent card never parks the composer as awaiting input"
     );
+    assert_eq!(
+        pending_consent(&manager, &card).await,
+        (ComputerConsentScope::Task, Some("computer_click".into())),
+        "the strip and menu bar get the card's request"
+    );
     answer(&rig, "allow", &card, "Allow");
     assert!(click.await.unwrap());
+    no_pending(&manager, "an answer clears the pending request").await;
     let answered = || {
         rig.entries(CHAT)
             .iter()
@@ -839,8 +871,16 @@ async fn ask_mode_raises_one_task_card_a_clipboard_card_and_never_discloses_in_t
     wait_for(|| rig.consent_cards().len() == 2, "the clipboard card").await;
     let (clip_card, clip_scope, _) = rig.consent_cards()[1].clone();
     assert_eq!(clip_scope, ComputerConsentScope::Call);
+    assert_eq!(
+        pending_consent(&manager, &clip_card).await,
+        (
+            ComputerConsentScope::Call,
+            Some("computer_read_clipboard".into())
+        )
+    );
     answer(&rig, "decline", &clip_card, "Decline");
     assert!(!clipboard.await.unwrap());
+    no_pending(&manager, "a decline clears the pending request").await;
 
     assert!(
         !rig.system_notes()
@@ -1148,8 +1188,10 @@ async fn a_decline_holds_for_the_turn_and_turn_end_and_stop_cancel_an_open_card(
     let click = authorize(&manager, "computer_click", &second);
     wait_for(|| rig.consent_cards().len() == 2, "a new turn asks again").await;
     let open_at_turn_end = rig.consent_cards()[1].0.clone();
+    pending_consent(&manager, &open_at_turn_end).await;
     rig.finish_turn().await;
     assert!(!click.await.unwrap(), "turn end cancels the open card");
+    no_pending(&manager, "turn end clears the pending request").await;
     wait_for(
         || card_resolved(&rig, &open_at_turn_end),
         "the turn-end card to settle",
@@ -1162,9 +1204,11 @@ async fn a_decline_holds_for_the_turn_and_turn_end_and_stop_cancel_an_open_card(
     let click = authorize(&manager, "computer_click", &third);
     wait_for(|| rig.consent_cards().len() == 3, "the third card").await;
     let open_at_stop = rig.consent_cards()[2].0.clone();
+    pending_consent(&manager, &open_at_stop).await;
     rig.command("stop", SessionCommandPayload::Interrupt {}, None);
     rig.applied("stop").await;
     assert!(!click.await.unwrap(), "Stop cancels the open card");
+    no_pending(&manager, "Stop clears the pending request").await;
     wait_for(
         || card_resolved(&rig, &open_at_stop),
         "the stopped card to settle",

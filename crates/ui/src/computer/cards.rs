@@ -134,20 +134,36 @@ pub fn foreground_outcome_label(
     })
 }
 
-fn consent_action(question: &UserInputQuestion) -> Option<(&str, Option<serde_json::Value>)> {
+fn consent_action(question: &UserInputQuestion) -> Option<(&str, Option<&str>)> {
     match &question.kind {
         Some(zeron_proto::UserInputKind::Consent {
             tool: Some(tool),
             params,
             ..
-        }) => Some((
-            tool.as_str(),
-            params
-                .as_deref()
-                .and_then(|params| serde_json::from_str(params).ok()),
-        )),
+        }) => Some((tool.as_str(), params.as_deref())),
         _ => None,
     }
+}
+
+pub fn consent_action_sentence(
+    tool: &str,
+    params: Option<&str>,
+    app: Option<&ComputerConsentApp>,
+) -> String {
+    let params: Option<serde_json::Value> =
+        params.and_then(|params| serde_json::from_str(params).ok());
+    let tool = super::presentation::computer_tool_name(tool).unwrap_or(tool);
+    let mut sentence = super::presentation::describe_computer_call(
+        tool,
+        params.as_ref().and_then(serde_json::Value::as_object),
+    );
+    if let Some(app) = app
+        && !sentence.contains(app.name.as_str())
+    {
+        sentence.push_str(" in ");
+        sentence.push_str(&app.name);
+    }
+    sentence
 }
 
 pub fn consent_outcome(
@@ -183,20 +199,8 @@ pub fn consent_answers(question_id: &str, choice: &ConsentChoice) -> Vec<UserInp
 }
 
 pub fn consent_detail(question: &UserInputQuestion) -> String {
-    let app = consent_app(question);
     if let Some((tool, params)) = consent_action(question) {
-        let tool = super::presentation::computer_tool_name(tool).unwrap_or(tool);
-        let mut sentence = super::presentation::describe_computer_call(
-            tool,
-            params.as_ref().and_then(serde_json::Value::as_object),
-        );
-        if let Some(app) = &app
-            && !sentence.contains(app.name.as_str())
-        {
-            sentence.push_str(" in ");
-            sentence.push_str(&app.name);
-        }
-        return sentence;
+        return consent_action_sentence(tool, params, consent_app(question).as_ref());
     }
     let text = question.question.trim();
     match consent_scope(question) {
@@ -264,12 +268,46 @@ pub fn consent_choices(
     choices
 }
 
-pub fn consent_outcome_label(outcome: ConsentOutcome) -> &'static str {
-    match outcome {
-        ConsentOutcome::Allowed => "Allowed",
-        ConsentOutcome::AlwaysAllowed => "Always allowed",
-        ConsentOutcome::Declined => "Declined",
-        ConsentOutcome::Cancelled => "Cancelled",
+pub fn strip_consent_choices(
+    scope: ComputerConsentScope,
+    app: Option<&ComputerConsentApp>,
+) -> Vec<(ConsentChoice, String)> {
+    consent_choices(scope, app)
+        .into_iter()
+        .map(|(choice, label)| {
+            let label = match (&choice, scope) {
+                (ConsentChoice::Allow, ComputerConsentScope::Task) => "Allow for this task".into(),
+                (ConsentChoice::Allow, ComputerConsentScope::Call) => "Allow once".into(),
+                (ConsentChoice::AlwaysAllow(_), _) => label,
+                (ConsentChoice::Decline, _) => "No".into(),
+            };
+            (choice, label)
+        })
+        .collect()
+}
+
+pub fn consent_event_label(
+    outcome: ConsentOutcome,
+    scope: ComputerConsentScope,
+    app: Option<&ComputerConsentApp>,
+) -> String {
+    let name = app.map(|app| app.name.as_str());
+    match (outcome, scope, name) {
+        (ConsentOutcome::Allowed, ComputerConsentScope::Task, Some(name)) => {
+            format!("Allowed {name} for this task")
+        }
+        (ConsentOutcome::Allowed, ComputerConsentScope::Task, None) => {
+            "Allowed Computer for this task".into()
+        }
+        (ConsentOutcome::Allowed, ComputerConsentScope::Call, Some(name)) => {
+            format!("Allowed {name} once")
+        }
+        (ConsentOutcome::Allowed, ComputerConsentScope::Call, None) => "Allowed once".into(),
+        (ConsentOutcome::AlwaysAllowed, _, Some(name)) => format!("Always allowed {name}"),
+        (ConsentOutcome::AlwaysAllowed, _, None) => "Always allowed".into(),
+        (ConsentOutcome::Declined, _, Some(name)) => format!("Declined {name}"),
+        (ConsentOutcome::Declined, _, None) => "Declined".into(),
+        (ConsentOutcome::Cancelled, _, _) => "Cancelled".into(),
     }
 }
 
@@ -599,6 +637,91 @@ mod tests {
             consent_outcome(true, Some(&answer(&["Always allow Safari"]))),
             Some(ConsentOutcome::AlwaysAllowed)
         );
+    }
+
+    #[test]
+    fn strip_consent_labels_map_to_engine_answers() {
+        use zeron_engine::computer::approval_gate::ApprovalDecision;
+        use zeron_engine::computer::engine_seams::consent_decision;
+        let verified = safari(Some("com.apple.Safari"));
+        let task = strip_consent_choices(ComputerConsentScope::Task, Some(&verified));
+        assert_eq!(
+            task.iter()
+                .map(|(_, label)| label.as_str())
+                .collect::<Vec<_>>(),
+            ["Allow for this task", "Always allow Safari", "No"]
+        );
+        let decisions: Vec<_> = task
+            .iter()
+            .map(|(choice, _)| consent_decision(&consent_answers("consent", choice)))
+            .collect();
+        assert_eq!(
+            decisions,
+            [
+                ApprovalDecision::Accept,
+                ApprovalDecision::AcceptForSession,
+                ApprovalDecision::Decline
+            ]
+        );
+        assert_eq!(
+            strip_consent_choices(ComputerConsentScope::Task, Some(&safari(None)))
+                .into_iter()
+                .map(|(_, label)| label)
+                .collect::<Vec<_>>(),
+            ["Allow for this task", "No"],
+            "Always only for a verified bundle"
+        );
+        assert_eq!(
+            strip_consent_choices(ComputerConsentScope::Call, None)
+                .into_iter()
+                .map(|(_, label)| label)
+                .collect::<Vec<_>>(),
+            ["Allow once", "No"]
+        );
+    }
+
+    #[test]
+    fn a_settled_consent_reads_as_its_outcome() {
+        let app = safari(Some("com.apple.Safari"));
+        let task = ComputerConsentScope::Task;
+        let call = ComputerConsentScope::Call;
+        let cases = [
+            (
+                ConsentOutcome::Allowed,
+                task,
+                Some(&app),
+                "Allowed Safari for this task",
+            ),
+            (
+                ConsentOutcome::Allowed,
+                task,
+                None,
+                "Allowed Computer for this task",
+            ),
+            (ConsentOutcome::Allowed, call, None, "Allowed once"),
+            (
+                ConsentOutcome::AlwaysAllowed,
+                task,
+                Some(&app),
+                "Always allowed Safari",
+            ),
+            (
+                ConsentOutcome::Declined,
+                task,
+                Some(&app),
+                "Declined Safari",
+            ),
+            (ConsentOutcome::Declined, call, None, "Declined"),
+            (ConsentOutcome::Cancelled, task, Some(&app), "Cancelled"),
+        ];
+        for (outcome, scope, app, expected) in cases {
+            let label = consent_event_label(outcome, scope, app);
+            assert_eq!(label, expected);
+            assert!(
+                !label.contains("com.apple") && !label.contains("42"),
+                "{label}"
+            );
+        }
     }
 
     fn safari(bundle_id: Option<&str>) -> ComputerConsentApp {

@@ -98,6 +98,18 @@ impl ComputerRuntime {
                     tracing::warn!(%error, "computer always-allowed app not saved");
                 }
             }));
+        let weak = Arc::downgrade(&runtime);
+        runtime
+            .engine_seams
+            .on_pending(Arc::new(move |chat_id, input_id, request| {
+                let Some(service) = weak.upgrade().and_then(|runtime| runtime.service()) else {
+                    return;
+                };
+                match request {
+                    Some(request) => service.manager.set_pending_request(chat_id, Some(request)),
+                    None => service.manager.clear_pending_request(chat_id, input_id),
+                }
+            }));
         tokio::spawn(runtime.clone().rebuild(None));
         runtime
     }

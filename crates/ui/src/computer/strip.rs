@@ -1,9 +1,17 @@
-use gpui::{AnyElement, App, ClickEvent, FontWeight, Hsla, Window, div, prelude::*, px};
+use gpui::{
+    AnyElement, App, ClickEvent, FontWeight, Hsla, SharedString, Window, div, prelude::*, px,
+};
 use zeron_engine::computer::engine_seams::{
     COMPUTER_FOREGROUND_ALLOW, COMPUTER_FOREGROUND_DECLINE,
 };
-use zeron_proto::computer::{ComputerPendingKind, ComputerPendingRequest};
+use zeron_proto::UserInputAnswer;
+use zeron_proto::computer::{
+    ComputerConsentApp, ComputerConsentScope, ComputerPendingKind, ComputerPendingRequest,
+};
 
+use super::cards::{
+    ConsentChoice, consent_action_sentence, consent_answers, strip_consent_choices,
+};
 use super::presence::{ChatPresence, PresenceTone};
 use crate::theme::Theme;
 
@@ -31,7 +39,62 @@ pub fn foreground_request(presence: &ChatPresence) -> Option<&ComputerPendingReq
         .filter(|pending| matches!(pending.kind, ComputerPendingKind::Foreground { .. }))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsentAsk {
+    pub input_id: String,
+    pub question_id: String,
+    pub scope: ComputerConsentScope,
+    pub app: Option<ComputerConsentApp>,
+    pub sentence: String,
+}
+
+pub fn consent_request(presence: &ChatPresence) -> Option<ConsentAsk> {
+    let pending = presence.pending.as_ref()?;
+    let ComputerPendingKind::Consent {
+        scope,
+        app,
+        tool,
+        params,
+    } = &pending.kind
+    else {
+        return None;
+    };
+    let sentence = match tool {
+        Some(tool) => consent_action_sentence(tool, params.as_deref(), app.as_ref()),
+        None => match app {
+            Some(app) => format!("Use {}", app.name),
+            None => "Use this Mac".into(),
+        },
+    };
+    Some(ConsentAsk {
+        input_id: pending.input_id.clone(),
+        question_id: pending.question_id.clone(),
+        scope: *scope,
+        app: app.clone(),
+        sentence,
+    })
+}
+
+pub fn consent_buttons(ask: &ConsentAsk) -> Vec<(ConsentChoice, String, Vec<UserInputAnswer>)> {
+    strip_consent_choices(ask.scope, ask.app.as_ref())
+        .into_iter()
+        .map(|(choice, label)| {
+            let answers = consent_answers(&ask.question_id, &choice);
+            (choice, label, answers)
+        })
+        .collect()
+}
+
 pub fn strip_copy(presence: &ChatPresence) -> StripCopy {
+    if let Some(ask) = consent_request(presence) {
+        return StripCopy {
+            lead: Some(
+                ask.app
+                    .map_or_else(|| "This Mac".to_owned(), |app| app.name),
+            ),
+            detail: ask.sentence,
+        };
+    }
     if foreground_request(presence).is_some() {
         return StripCopy {
             lead: Some(format!(
@@ -115,17 +178,19 @@ pub fn chat_glyph(
     )
 }
 
-type OnForeground = Box<dyn Fn(bool, &mut Window, &mut App)>;
+pub type OnAnswer = Box<dyn Fn(String, Vec<UserInputAnswer>, &mut Window, &mut App)>;
 
 fn strip_button(
     id: &'static str,
-    label: &'static str,
+    label: SharedString,
     primary: bool,
-    on_foreground: &std::rc::Rc<OnForeground>,
-    allow: bool,
+    input_id: &str,
+    answers: Vec<UserInputAnswer>,
+    on_answer: &std::rc::Rc<OnAnswer>,
     theme: &Theme,
 ) -> AnyElement {
-    let on_foreground = on_foreground.clone();
+    let on_answer = on_answer.clone();
+    let input_id = input_id.to_owned();
     div()
         .id(id)
         .debug_selector(move || id.into())
@@ -154,22 +219,104 @@ fn strip_button(
         })
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
-            on_foreground(allow, window, cx)
+            on_answer(input_id.clone(), answers.clone(), window, cx)
         })
         .child(label)
         .into_any_element()
+}
+
+fn foreground_answers(question_id: &str, label: &str) -> Vec<UserInputAnswer> {
+    vec![UserInputAnswer {
+        question_id: question_id.to_owned(),
+        labels: vec![label.to_owned()],
+    }]
+}
+
+fn answer_buttons(
+    presence: &ChatPresence,
+    on_answer: &std::rc::Rc<OnAnswer>,
+    theme: &Theme,
+) -> Vec<AnyElement> {
+    if let Some(ask) = consent_request(presence) {
+        return consent_buttons(&ask)
+            .into_iter()
+            .map(|(choice, label, answers)| {
+                let (id, primary) = match choice {
+                    ConsentChoice::Allow => ("computer-strip-allow-consent", true),
+                    ConsentChoice::AlwaysAllow(_) => ("computer-strip-always-consent", false),
+                    ConsentChoice::Decline => ("computer-strip-decline-consent", false),
+                };
+                strip_button(
+                    id,
+                    label.into(),
+                    primary,
+                    &ask.input_id,
+                    answers,
+                    on_answer,
+                    theme,
+                )
+            })
+            .collect();
+    }
+    let Some(pending) = foreground_request(presence) else {
+        return Vec::new();
+    };
+    [
+        (
+            "computer-strip-allow-foreground",
+            COMPUTER_FOREGROUND_ALLOW,
+            true,
+        ),
+        (
+            "computer-strip-decline-foreground",
+            COMPUTER_FOREGROUND_DECLINE,
+            false,
+        ),
+    ]
+    .into_iter()
+    .map(|(id, label, primary)| {
+        strip_button(
+            id,
+            label.into(),
+            primary,
+            &pending.input_id,
+            foreground_answers(&pending.question_id, label),
+            on_answer,
+            theme,
+        )
+    })
+    .collect()
+}
+
+fn strip_glyph(presence: &ChatPresence, color: Hsla) -> AnyElement {
+    let icon = consent_request(presence)
+        .and_then(|ask| ask.app?.bundle_id)
+        .and_then(|bundle| crate::appshots::bundle_icon(&bundle));
+    match icon {
+        Some(icon) => gpui::img(icon)
+            .flex_none()
+            .size(px(16.0))
+            .into_any_element(),
+        None => crate::icons::icon(crate::icons::CURSOR)
+            .flex_none()
+            .size(px(14.0))
+            .text_color(color)
+            .into_any_element(),
+    }
 }
 
 pub fn computer_strip(
     presence: &ChatPresence,
     show_esc: bool,
     on_stop: Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>,
-    on_foreground: OnForeground,
+    on_answer: OnAnswer,
     theme: &Theme,
 ) -> AnyElement {
     let copy = strip_copy(presence);
     let tint = tone_color(presence.tone, theme);
-    let asking = foreground_request(presence).is_some();
+    let on_answer = std::rc::Rc::new(on_answer);
+    let buttons = answer_buttons(presence, &on_answer, theme);
+    let asking = !buttons.is_empty();
     let (bg, border, glyph) = match tint {
         Some(tint) => (
             tint.opacity(if asking { 0.16 } else { 0.13 }),
@@ -183,7 +330,6 @@ pub fn computer_strip(
         ),
     };
     let stop = shows_stop(presence);
-    let on_foreground = std::rc::Rc::new(on_foreground);
     div()
         .id("computer-strip")
         .debug_selector(|| "computer-strip".into())
@@ -209,12 +355,7 @@ pub fn computer_strip(
         .overflow_hidden()
         .text_size(px(12.5))
         .text_color(theme.text)
-        .child(
-            crate::icons::icon(crate::icons::CURSOR)
-                .flex_none()
-                .size(px(14.0))
-                .text_color(glyph),
-        )
+        .child(strip_glyph(presence, glyph))
         .child(
             div()
                 .flex_1()
@@ -224,7 +365,7 @@ pub fn computer_strip(
                 .items_center()
                 .map(|row| {
                     if asking {
-                        row.flex_wrap()
+                        row.flex_wrap().gap_x(px(6.0))
                     } else {
                         row.whitespace_nowrap()
                     }
@@ -248,24 +389,7 @@ pub fn computer_strip(
                         .child(copy.detail),
                 ),
         )
-        .when(asking, |row| {
-            row.child(strip_button(
-                "computer-strip-allow-foreground",
-                COMPUTER_FOREGROUND_ALLOW,
-                true,
-                &on_foreground,
-                true,
-                theme,
-            ))
-            .child(strip_button(
-                "computer-strip-decline-foreground",
-                COMPUTER_FOREGROUND_DECLINE,
-                false,
-                &on_foreground,
-                false,
-                theme,
-            ))
-        })
+        .children(buttons)
         .when(stop && show_esc, |row| {
             row.child(
                 div()
@@ -375,6 +499,80 @@ pub(crate) mod tests {
         }
     }
 
+    pub(crate) fn consent_pending(
+        scope: ComputerConsentScope,
+        app: Option<&str>,
+        verified: bool,
+    ) -> ComputerPendingRequest {
+        ComputerPendingRequest {
+            input_id: "computer-consent-1".into(),
+            question_id: "consent".into(),
+            kind: ComputerPendingKind::Consent {
+                scope,
+                app: app.map(|name| ComputerConsentApp {
+                    name: name.into(),
+                    bundle_id: verified.then(|| "com.mitchellh.ghostty".into()),
+                    pid: Some(4242),
+                }),
+                tool: Some("computer_type_text".into()),
+                params: Some(r#"{"window_id":"cua:4242:17","text":"hunter2"}"#.into()),
+            },
+        }
+    }
+
+    #[test]
+    fn a_consent_request_names_the_app_and_its_first_action_and_offers_no_stop() {
+        let asking = ChatPresence {
+            pending: Some(consent_pending(
+                ComputerConsentScope::Task,
+                Some("Ghostty"),
+                true,
+            )),
+            ..presence(PresenceTone::NeedsYou)
+        };
+        assert_eq!(strip_copy(&asking).text(), "Ghostty · Type in Ghostty");
+        assert!(!shows_stop(&asking));
+        assert!(foreground_request(&asking).is_none());
+        let ask = consent_request(&asking).expect("a consent ask");
+        assert_eq!(ask.input_id, "computer-consent-1");
+        let buttons = consent_buttons(&ask);
+        assert_eq!(
+            buttons
+                .iter()
+                .map(|(_, label, answers)| (label.as_str(), answers[0].labels[0].as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("Allow for this task", "Allow"),
+                ("Always allow Ghostty", "Always allow Ghostty"),
+                ("No", "Deny"),
+            ]
+        );
+        assert!(
+            buttons
+                .iter()
+                .all(|(_, _, answers)| answers[0].question_id == "consent")
+        );
+        let unverified = ChatPresence {
+            pending: Some(consent_pending(
+                ComputerConsentScope::Task,
+                Some("Ghostty"),
+                false,
+            )),
+            ..asking.clone()
+        };
+        assert_eq!(
+            consent_buttons(&consent_request(&unverified).unwrap()).len(),
+            2,
+            "no Always for an unverified app"
+        );
+        let bare = ChatPresence {
+            pending: Some(consent_pending(ComputerConsentScope::Call, None, false)),
+            app: None,
+            ..asking
+        };
+        assert_eq!(strip_copy(&bare).text(), "This Mac · Type");
+    }
+
     #[test]
     fn a_foreground_request_asks_to_bring_the_app_forward_and_offers_no_stop() {
         let asking = ChatPresence {
@@ -442,11 +640,29 @@ pub(crate) mod tests {
         asking.tone = PresenceTone::NeedsYou;
         asking.pending = Some(foreground_pending(Some("Calculator")));
         texts.push(strip_copy(&asking).text());
+        asking.pending = Some(consent_pending(
+            ComputerConsentScope::Task,
+            Some("Calculator"),
+            true,
+        ));
+        texts.push(strip_copy(&asking).text());
+        texts.extend(
+            consent_buttons(&consent_request(&asking).unwrap())
+                .into_iter()
+                .map(|(_, label, _)| label),
+        );
         assert_eq!(texts[0], "Calculator · Typing");
         for text in texts {
-            assert!(!text.contains("computer_"), "{text}");
-            assert!(!text.contains("hunter2"), "{text}");
-            assert!(!text.contains("w1"), "{text}");
+            for leak in [
+                "computer_",
+                "hunter2",
+                "w1",
+                "4242",
+                "cua:",
+                "com.mitchellh",
+            ] {
+                assert!(!text.contains(leak), "{text} carries {leak}");
+            }
         }
     }
 }

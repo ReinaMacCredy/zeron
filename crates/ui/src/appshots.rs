@@ -935,12 +935,15 @@ pub(crate) fn app_icon_png(app_path: &str) -> Option<Vec<u8>> {
 }
 
 pub fn presentation_icon(presentation: &AppshotPresentation) -> Option<Arc<gpui::Image>> {
+    bundle_icon(presentation.bundle_identifier.as_deref()?)
+}
+
+pub fn bundle_icon(bundle: &str) -> Option<Arc<gpui::Image>> {
     #[cfg(target_os = "macos")]
     {
         static ICONS: std::sync::OnceLock<
             std::sync::Mutex<HashMap<String, Option<Arc<gpui::Image>>>>,
         > = std::sync::OnceLock::new();
-        let bundle = presentation.bundle_identifier.as_deref()?;
         let mut icons = ICONS.get_or_init(Default::default).lock().ok()?;
         if let Some(icon) = icons.get(bundle) {
             return icon.clone();
@@ -959,7 +962,7 @@ pub fn presentation_icon(presentation: &AppshotPresentation) -> Option<Arc<gpui:
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = presentation;
+        let _ = bundle;
         None
     }
 }
