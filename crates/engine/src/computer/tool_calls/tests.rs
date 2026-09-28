@@ -1523,3 +1523,73 @@ async fn escape_latches_the_holding_turn_before_the_host_stop() {
     assert_eq!(payload(&refused)["error"]["code"], json!("user_revoked"));
     rig.core.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_foreground_run_is_covered_only_when_every_app_it_reaches_is_granted() {
+    let backend = Scripted::default_fake();
+    let rig = Arc::new(Rig::new(Some(backend.clone())).await);
+    rig.settings(true);
+    let secret = rig.run("c1", "press enter in the terminal").await;
+    let call = spawn_action(&rig, &secret, foreground_key(), 1);
+    let terminal = rig.pending_foreground().await;
+    rig.answer_foreground("allow", &terminal.input_id, "Allow for this turn");
+    assert!(!call.await.unwrap().is_error);
+    assert_eq!(backend.calls_for("pressKey").len(), 1);
+
+    let press = |window: &str| json!({ "type": "press_key", "key": "enter", "window_id": window });
+    let run = rig
+        .action(
+            &secret,
+            "computer_run",
+            json!({ "delivery_mode": "foreground", "steps": [press("fake-terminal")] }),
+            2,
+        )
+        .await
+        .unwrap();
+    assert!(
+        !run.is_error,
+        "a run on the allowed app is covered: {run:?}"
+    );
+    assert_eq!(backend.calls_for("pressKey").len(), 2);
+
+    let mixed = rig
+        .action(
+            &secret,
+            "computer_run",
+            json!({
+                "delivery_mode": "foreground",
+                "steps": [press("fake-terminal"), press("fake-calculator")],
+            }),
+            3,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        payload(&mixed)["error"],
+        json!(COMPUTER_FOREGROUND_NOT_REQUESTED_CODE),
+        "a run that also reaches another app is not covered"
+    );
+    assert_eq!(backend.calls_for("pressKey").len(), 2);
+
+    let (rig2, secret2) = (rig.clone(), secret.clone());
+    let call = tokio::spawn(async move {
+        rig2.action(
+            &secret2,
+            "computer_run",
+            json!({ "steps": [{ "type": "activate_window", "window_id": "fake-calculator" }] }),
+            4,
+        )
+        .await
+        .unwrap()
+    });
+    let calculator = rig.pending_foreground().await;
+    assert_ne!(calculator.input_id, terminal.input_id);
+    rig.answer_foreground(
+        "allow-calculator",
+        &calculator.input_id,
+        "Allow for this turn",
+    );
+    let raised = call.await.unwrap();
+    assert!(!raised.is_error, "the step's replay lands: {raised:?}");
+    rig.core.shutdown().await;
+}

@@ -147,6 +147,44 @@ struct RunToolSeams {
     call_grant: Arc<AtomicBool>,
 }
 
+impl RunToolSeams {
+    async fn granted(&self, manager: &ComputerManager, target: Option<&ToolArgs>) -> bool {
+        let apps = self
+            .sessions
+            .computer_turn_foreground(&self.chat_id, self.turn_id.as_deref())
+            .apps;
+        let call_grant = self.call_grant.load(Ordering::SeqCst);
+        if apps.is_empty() && !call_grant {
+            return false;
+        }
+        let steps = target
+            .and_then(|args| args.get("steps"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_object);
+        let targets: Vec<ComputerConsentTarget> = target
+            .into_iter()
+            .chain(steps)
+            .map(consent_target)
+            .filter(|target| *target != ComputerConsentTarget::Unscoped)
+            .collect();
+        if targets.is_empty() {
+            return call_grant;
+        }
+        for target in &targets {
+            let covered = match manager.foreground_app(target).await.1 {
+                Some(key) => apps.contains(&key),
+                None => call_grant,
+            };
+            if !covered {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 #[async_trait]
 impl ComputerToolSeams for RunToolSeams {
     fn assert_turn_active(&self) -> Result<(), ComputerError> {
@@ -169,20 +207,10 @@ impl ComputerToolSeams for RunToolSeams {
         const GRANTED: ComputerForegroundAuthorization = ComputerForegroundAuthorization {
             user_requested_visible_use: true,
         };
-        if self.call_grant.load(Ordering::SeqCst) {
-            return GRANTED;
-        }
         let Some(manager) = self.manager.upgrade() else {
             return COMPUTER_FOREGROUND_NOT_AUTHORIZED;
         };
-        let granted = self
-            .sessions
-            .computer_turn_foreground(&self.chat_id, self.turn_id.as_deref())
-            .apps;
-        if let Some(args) = target.filter(|_| !granted.is_empty())
-            && let (_, Some(key)) = manager.foreground_app(&consent_target(args)).await
-            && granted.contains(&key)
-        {
+        if self.granted(&manager, target).await {
             return GRANTED;
         }
         let Ok(entries) = self.sessions.computer_visible_use_entries(&self.chat_id) else {
@@ -392,8 +420,8 @@ pub async fn computer_action(
             let app = app.as_ref();
             result = match outcome {
                 _ if revoked => denied("user_revoked", COMPUTER_USER_REVOKED),
-                ForegroundOutcome::Granted { per_call } => {
-                    call_grant.store(per_call, Ordering::SeqCst);
+                ForegroundOutcome::Granted => {
+                    call_grant.store(true, Ordering::SeqCst);
                     tools.call(&tool, args, &context).await
                 }
                 ForegroundOutcome::Declined => denied(
@@ -433,7 +461,7 @@ pub const COMPUTER_FOREGROUND_UNANSWERED_CODE: &str = "foreground_unanswered";
 const FOREGROUND_APP_MAX: usize = 128;
 
 enum ForegroundOutcome {
-    Granted { per_call: bool },
+    Granted,
     Declined,
     Unanswered,
     Expired,
@@ -536,7 +564,7 @@ async fn ask_foreground(
         return (ForegroundOutcome::Declined, app);
     }
     if key.as_ref().is_some_and(|key| turn.apps.contains(key)) {
-        return (ForegroundOutcome::Granted { per_call: false }, app);
+        return (ForegroundOutcome::Granted, app);
     }
     if sessions
         .computer_run(chat_id, run_secret)
@@ -578,9 +606,7 @@ async fn ask_foreground(
         tracing::warn!(chat = %chat_id, "computer foreground answer arrived after its turn ended");
     }
     let outcome = if granted {
-        ForegroundOutcome::Granted {
-            per_call: key.is_none(),
-        }
+        ForegroundOutcome::Granted
     } else {
         ForegroundOutcome::Declined
     };
