@@ -95,7 +95,7 @@ async fn a_takeover_refuses_the_next_action_at_once_with_requery() {
     assert_user_input_refusal(&reply);
     let refusal = structured(&reply);
     let message = refusal["message"].as_str().unwrap();
-    assert!(message.contains("has stopped"), "{message}");
+    assert!(message.contains("input goes quiet"), "{message}");
     assert!(message.contains("Do not ask the user"), "{message}");
     assert_eq!(
         f.count("key"),

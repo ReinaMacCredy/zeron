@@ -460,7 +460,7 @@ pub(super) fn input_monitor_unavailable_reply(monitor_error: Option<&str>) -> Cu
 pub(super) const USER_INPUT_CAUSE: &str = "user_input";
 
 pub(super) fn user_input_pause_reply() -> CuaReply {
-    let message = "The user used this window and has stopped. Call computer_get_state on this window now and continue the task from what it shows. Do not ask the user and do not replay the interrupted action.";
+    let message = "The user is using this window. Call computer_get_state on this window; it returns once the user's input goes quiet. Then continue the task from what it shows. Do not ask the user and do not replay the interrupted action.";
     refusal(
         message,
         json!({
