@@ -742,7 +742,7 @@ async fn asks_the_gate_once_per_mutating_call_and_dispatches_the_mapped_driver_n
     let text = text_of(&result);
     assert!(!text.contains("disclosure"), "{text}");
     assert!(
-        !text.contains(crate::computer::tools::COMPUTER_CONTROL_FIRST_MUTATION_DISCLOSURE),
+        !text.contains(crate::computer::manager::COMPUTER_CONTROL_ON_DISCLOSURE),
         "{text}"
     );
     let cards: Vec<String> = h

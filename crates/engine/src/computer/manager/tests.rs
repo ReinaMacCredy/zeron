@@ -681,7 +681,6 @@ pub(crate) struct Seams {
     pub mode: Mutex<Option<PermissionMode>>,
     pub turn_inactive: AtomicBool,
     pub consent: Mutex<Vec<(ComputerConsentCard, Option<ApprovalDecision>)>>,
-    pub disclosures: Mutex<Vec<(String, Option<String>)>>,
     pub bumps: Mutex<Vec<(String, u64)>>,
     pub leases: Mutex<Vec<ComputerLeaseRecord>>,
     pub warnings: Mutex<Vec<(String, Value)>>,
@@ -707,13 +706,6 @@ impl ComputerManagerSeams for Seams {
     ) -> Result<(), String> {
         self.consent.lock().unwrap().push((card, decision));
         Ok(())
-    }
-
-    async fn disclose_control(&self, chat_id: &str, turn_id: Option<&str>) {
-        self.disclosures
-            .lock()
-            .unwrap()
-            .push((chat_id.to_owned(), turn_id.map(str::to_owned)));
     }
 
     fn generation_bumped(&self, chat_id: &str, generation: u64) {

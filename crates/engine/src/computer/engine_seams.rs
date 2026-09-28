@@ -7,7 +7,7 @@ use zeron_proto::{PermissionMode, UserInputAnswer, UserInputKind, UserInputQuest
 
 use super::approval_gate::{ApprovalDecision, ComputerApprovalGate};
 use super::backend::ComputerError;
-use super::manager::{COMPUTER_CONTROL_ON_DISCLOSURE, ComputerConsentCard, ComputerManagerSeams};
+use super::manager::{ComputerConsentCard, ComputerManagerSeams};
 use crate::sessions::SessionsEngine;
 
 pub const COMPUTER_CONSENT_ALLOW: &str = "Allow";
@@ -47,10 +47,7 @@ impl EngineComputerSeams {
 }
 
 pub fn consent_app_title(app: &ComputerConsentApp) -> String {
-    match &app.bundle_id {
-        Some(bundle_id) => format!("Allow Computer to use {} ({bundle_id})?", app.name),
-        None => format!("Allow Computer to use {} (unverified app)?", app.name),
-    }
+    format!("Allow Computer to use {}?", app.name)
 }
 
 pub fn consent_always_label(app: &ComputerConsentApp) -> Option<String> {
@@ -66,29 +63,21 @@ pub fn consent_question(card: &ComputerConsentCard) -> UserInputQuestion {
         .and_then(consent_always_label);
     let question = match (&card.app, card.scope) {
         (Some(app), ComputerConsentScope::Task) if app.verified() => format!(
-            "{} The agent wants to run {} and will drive {} until the turn ends.",
+            "{} The agent will use {} until this response ends.",
             consent_app_title(app),
-            card.tool_name,
             app.name
         ),
         (Some(app), ComputerConsentScope::Task) => format!(
-            "{} Zeron could not verify this app's bundle id{}, so this grant lasts for this turn only and cannot be saved. The agent wants to run {}.",
-            consent_app_title(app),
-            app.pid
-                .map(|pid| format!(" (process {pid})"))
-                .unwrap_or_default(),
-            card.tool_name
+            "{} Zeron could not confirm which app this is, so this permission lasts for this response only.",
+            consent_app_title(app)
         ),
-        (_, ComputerConsentScope::Task) => format!(
-            "Allow Computer for this task? The agent wants to run {} and will drive this Mac's apps until the turn ends.",
-            card.tool_name
-        ),
+        (_, ComputerConsentScope::Task) => "Allow Computer for this task? The agent will use this Mac's apps until this response ends.".to_owned(),
+        (_, ComputerConsentScope::Call) if card.tool_name == "computer_read_clipboard" => {
+            "Allow the agent to read the clipboard once?".to_owned()
+        }
         (app, ComputerConsentScope::Call) => format!(
-            "Allow the agent to run {} once{}?",
-            card.tool_name,
-            app.as_ref()
-                .map(|app| format!(" in {}", app.name))
-                .unwrap_or_default()
+            "Allow the agent to use {} once?",
+            app.as_ref().map_or("the desktop", |app| app.name.as_str())
         ),
     };
     let mut options = vec![COMPUTER_CONSENT_ALLOW.to_owned()];
@@ -103,6 +92,8 @@ pub fn consent_question(card: &ComputerConsentCard) -> UserInputQuestion {
         kind: Some(UserInputKind::Consent {
             scope: card.scope,
             app: card.app.clone(),
+            tool: Some(card.tool_name.clone()),
+            params: Some(card.params_display.clone()),
         }),
     }
 }
@@ -174,16 +165,87 @@ impl ComputerManagerSeams for EngineComputerSeams {
         Ok(())
     }
 
-    async fn disclose_control(&self, chat_id: &str, _turn_id: Option<&str>) {
-        let Some(sessions) = self.sessions() else {
-            return;
-        };
-        sessions.write_computer_note(chat_id, COMPUTER_CONTROL_ON_DISCLOSURE, None);
-    }
-
     fn generation_bumped(&self, chat_id: &str, generation: u64) {
         if let Some(sessions) = self.sessions() {
             sessions.record_computer_generation(chat_id, generation);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn card(
+        tool: &str,
+        scope: ComputerConsentScope,
+        app: Option<ComputerConsentApp>,
+    ) -> ComputerConsentCard {
+        ComputerConsentCard {
+            request_id: "r1".into(),
+            chat_id: "chat".into(),
+            turn_id: Some("turn".into()),
+            tool_name: tool.into(),
+            params_display: r#"{"window_id":"cua:4242:17"}"#.into(),
+            scope,
+            app,
+        }
+    }
+
+    fn ghostty(bundle_id: Option<&str>) -> ComputerConsentApp {
+        ComputerConsentApp {
+            name: "Ghostty".into(),
+            bundle_id: bundle_id.map(str::to_owned),
+            pid: Some(4242),
+        }
+    }
+
+    #[test]
+    fn consent_question_names_no_tool_bundle_or_pid() {
+        let task = ComputerConsentScope::Task;
+        let call = ComputerConsentScope::Call;
+        let cases = [
+            (
+                card(
+                    "computer_type_text",
+                    task,
+                    Some(ghostty(Some("com.mitchellh.ghostty"))),
+                ),
+                "Allow Computer to use Ghostty? The agent will use Ghostty until this response ends.",
+            ),
+            (
+                card("computer_type_text", task, Some(ghostty(None))),
+                "Allow Computer to use Ghostty? Zeron could not confirm which app this is, so this permission lasts for this response only.",
+            ),
+            (
+                card("computer_click", task, None),
+                "Allow Computer for this task? The agent will use this Mac's apps until this response ends.",
+            ),
+            (
+                card("computer_read_clipboard", call, None),
+                "Allow the agent to read the clipboard once?",
+            ),
+            (
+                card("computer_click", call, Some(ghostty(None))),
+                "Allow the agent to use Ghostty once?",
+            ),
+        ];
+        for (card, expected) in cases {
+            let question = consent_question(&card);
+            assert_eq!(question.question, expected);
+            assert_eq!(question.header, "Computer");
+            for leak in ["computer_", "com.mitchellh", "4242", "process"] {
+                assert!(
+                    !question.question.contains(leak),
+                    "{leak}: {}",
+                    question.question
+                );
+            }
+            let Some(UserInputKind::Consent { tool, params, .. }) = question.kind else {
+                panic!("a consent kind");
+            };
+            assert_eq!(tool.as_deref(), Some(card.tool_name.as_str()));
+            assert_eq!(params.as_deref(), Some(card.params_display.as_str()));
         }
     }
 }

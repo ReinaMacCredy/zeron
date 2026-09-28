@@ -489,6 +489,10 @@ pub enum UserInputKind {
         scope: crate::computer::ComputerConsentScope,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         app: Option<crate::computer::ComputerConsentApp>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        params: Option<String>,
     },
 }
 
@@ -694,6 +698,8 @@ mod tests {
             UserInputKind::Consent {
                 scope: crate::computer::ComputerConsentScope::Task,
                 app: None,
+                tool: None,
+                params: None,
             }
         );
         assert_eq!(serde_json::to_value(&kind).unwrap(), old);
@@ -708,6 +714,21 @@ mod tests {
         };
         assert!(app.verified());
         assert_eq!(serde_json::to_value(&kind).unwrap(), with_app);
+        let with_action = serde_json::json!({
+            "type": "consent",
+            "scope": "task",
+            "tool": "computer_click",
+            "params": "{\"window_id\":\"w1\"}",
+        });
+        let kind: UserInputKind = serde_json::from_value(with_action.clone()).unwrap();
+        let UserInputKind::Consent {
+            tool: Some(tool), ..
+        } = &kind
+        else {
+            panic!("the action survives");
+        };
+        assert_eq!(tool, "computer_click");
+        assert_eq!(serde_json::to_value(&kind).unwrap(), with_action);
     }
 
     #[test]

@@ -1511,7 +1511,7 @@ impl Render for ComputerPage {
                 ),
                 (
                     "Follow and stop",
-                    "Watch the preview while the agent works. Use Stop in the chat to interrupt the task. Closing the preview only hides it.",
+                    "Watch the preview while the agent works. Press Esc or Stop on the strip to take the desktop back; the agent then sums up. The chat's Stop button ends the turn. Closing the preview only hides it.",
                 ),
             ];
             let mut section = div()

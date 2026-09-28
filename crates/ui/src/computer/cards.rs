@@ -99,6 +99,22 @@ pub fn consent_scope(question: &UserInputQuestion) -> ComputerConsentScope {
     }
 }
 
+fn consent_action(question: &UserInputQuestion) -> Option<(&str, Option<serde_json::Value>)> {
+    match &question.kind {
+        Some(zeron_proto::UserInputKind::Consent {
+            tool: Some(tool),
+            params,
+            ..
+        }) => Some((
+            tool.as_str(),
+            params
+                .as_deref()
+                .and_then(|params| serde_json::from_str(params).ok()),
+        )),
+        _ => None,
+    }
+}
+
 pub fn consent_outcome(
     resolved: bool,
     answers: Option<&[UserInputAnswer]>,
@@ -131,19 +147,29 @@ pub fn consent_answers(question_id: &str, choice: &ConsentChoice) -> Vec<UserInp
     }]
 }
 
-/// The engine's task question opens with the card's own title; drop it.
-pub fn consent_detail(
-    scope: ComputerConsentScope,
-    app: Option<&ComputerConsentApp>,
-    question: &str,
-) -> String {
-    let question = question.trim();
-    match scope {
-        ComputerConsentScope::Task => question
-            .strip_prefix(consent_card_title(scope, app).as_str())
-            .map_or(question, str::trim_start)
+pub fn consent_detail(question: &UserInputQuestion) -> String {
+    let app = consent_app(question);
+    if let Some((tool, params)) = consent_action(question) {
+        let tool = super::presentation::computer_tool_name(tool).unwrap_or(tool);
+        let mut sentence = super::presentation::describe_computer_call(
+            tool,
+            params.as_ref().and_then(serde_json::Value::as_object),
+        );
+        if let Some(app) = &app
+            && !sentence.contains(app.name.as_str())
+        {
+            sentence.push_str(" in ");
+            sentence.push_str(&app.name);
+        }
+        return sentence;
+    }
+    let text = question.question.trim();
+    match consent_scope(question) {
+        ComputerConsentScope::Task => text
+            .split_once("? ")
+            .map_or(text, |(_, rest)| rest.trim_start())
             .to_owned(),
-        ComputerConsentScope::Call => question.to_owned(),
+        ComputerConsentScope::Call => text.to_owned(),
     }
 }
 
@@ -254,13 +280,10 @@ pub fn input_pause_notice(state: &ThreadComputerState) -> Option<InputPauseNotic
         .and_then(|window| window.app_name.clone())
         .or_else(|| window.map(|window| window.title.clone()))
         .filter(|target| !target.trim().is_empty())
-        .unwrap_or_else(|| "the target window".into());
+        .unwrap_or_else(|| "The target window".into());
     Some(InputPauseNotice {
-        title: format!("Input paused — return to {target}"),
-        body: Some(pause.message.trim())
-            .filter(|message| !message.is_empty())
-            .unwrap_or("Bring the window onto this desktop, or exit the full-screen app. Continue from the current page once input is available.")
-            .into(),
+        title: format!("{target} isn't reachable"),
+        body: "Bring it onto this desktop or exit full screen. The agent continues once it can see the window.".into(),
     })
 }
 
@@ -284,6 +307,51 @@ fn tone_color(tone: CardTone, theme: &Theme) -> Hsla {
         CardTone::Success => theme.success,
         CardTone::Warning => theme.warning,
     }
+}
+
+pub fn computer_event_row(
+    icon: &'static str,
+    text: SharedString,
+    tone: CardTone,
+    action: Option<CardAction>,
+    theme: &Theme,
+) -> AnyElement {
+    let color = tone_color(tone, theme);
+    div()
+        .h(px(26.0))
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .text_size(px(12.5))
+        .text_color(color)
+        .child(
+            crate::icons::icon(icon)
+                .flex_none()
+                .size(px(13.0))
+                .text_color(color),
+        )
+        .child(div().min_w_0().truncate().child(text))
+        .when_some(action, |row, action| {
+            let on_click = action.on_click;
+            let selector = action.id.to_string();
+            row.child(
+                div()
+                    .id(action.id)
+                    .debug_selector(move || selector)
+                    .flex_none()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text.opacity(0.9))
+                    .cursor_pointer()
+                    .hover(|s| s.opacity(0.8))
+                    .on_click(move |event, window, cx| {
+                        cx.stop_propagation();
+                        on_click(event, window, cx)
+                    })
+                    .child(action.label),
+            )
+        })
+        .into_any_element()
 }
 
 pub fn computer_card(
@@ -500,7 +568,7 @@ mod tests {
         let task = ComputerConsentScope::Task;
         assert_eq!(
             consent_card_title(task, Some(&verified)),
-            "Allow Computer to use Safari (com.apple.Safari)?"
+            "Allow Computer to use Safari?"
         );
         assert_eq!(
             consent_choices(task, Some(&verified))
@@ -512,7 +580,7 @@ mod tests {
         let unverified = safari(None);
         assert_eq!(
             consent_card_title(task, Some(&unverified)),
-            "Allow Computer to use Safari (unverified app)?"
+            "Allow Computer to use Safari?"
         );
         assert_eq!(
             consent_choices(task, Some(&unverified))
@@ -530,32 +598,91 @@ mod tests {
         );
     }
 
+    fn consent(
+        scope: ComputerConsentScope,
+        app: Option<ComputerConsentApp>,
+        tool: Option<&str>,
+        params: Option<&str>,
+        question: &str,
+    ) -> UserInputQuestion {
+        UserInputQuestion {
+            id: "consent".into(),
+            header: "Computer".into(),
+            question: question.into(),
+            options: vec!["Allow".into(), "Deny".into()],
+            multi_select: false,
+            kind: Some(zeron_proto::UserInputKind::Consent {
+                scope,
+                app,
+                tool: tool.map(str::to_owned),
+                params: params.map(str::to_owned),
+            }),
+        }
+    }
+
     #[test]
     fn the_task_question_drops_its_title_sentence() {
+        let task = ComputerConsentScope::Task;
         assert_eq!(
-            consent_detail(
-                ComputerConsentScope::Task,
+            consent_detail(&consent(
+                task,
                 None,
-                "Allow Computer for this task? The agent wants to run computer_click."
-            ),
-            "The agent wants to run computer_click."
+                None,
+                None,
+                "Allow Computer for this task? The agent will use this Mac's apps until this response ends."
+            )),
+            "The agent will use this Mac's apps until this response ends."
         );
         assert_eq!(
-            consent_detail(
-                ComputerConsentScope::Task,
-                Some(&safari(Some("com.apple.Safari"))),
+            consent_detail(&consent(
+                task,
+                Some(safari(Some("com.apple.Safari"))),
+                None,
+                None,
                 "Allow Computer to use Safari (com.apple.Safari)? The agent wants to run computer_click."
-            ),
-            "The agent wants to run computer_click."
+            )),
+            "The agent wants to run computer_click.",
+            "an old doc's title sentence drops even with its bundle id"
         );
         assert_eq!(
-            consent_detail(
+            consent_detail(&consent(
                 ComputerConsentScope::Call,
                 None,
-                "Allow the agent to run x once?"
-            ),
-            "Allow the agent to run x once?"
+                None,
+                None,
+                "Allow the agent to read the clipboard once?"
+            )),
+            "Allow the agent to read the clipboard once?"
         );
+    }
+
+    #[test]
+    fn consent_body_names_the_action_never_the_tool_or_typed_text() {
+        let ghostty = ComputerConsentApp {
+            name: "Ghostty".into(),
+            bundle_id: Some("com.mitchellh.ghostty".into()),
+            pid: Some(4242),
+        };
+        let question = consent(
+            ComputerConsentScope::Task,
+            Some(ghostty.clone()),
+            Some("computer_type_text"),
+            Some(r#"{"window_id":"cua:4242:17","text":"hunter2"}"#),
+            "Allow Computer to use Ghostty? The agent will use Ghostty until this response ends.",
+        );
+        let detail = consent_detail(&question);
+        assert_eq!(detail, "Type in Ghostty");
+        for leak in ["computer_", "hunter2", "com.mitchellh", "4242"] {
+            assert!(!detail.contains(leak), "{leak}: {detail}");
+        }
+        let launch = consent(
+            ComputerConsentScope::Task,
+            Some(ghostty),
+            Some("mcp__zeron__computer_launch_app"),
+            Some(r#"{"app":"Ghostty"}"#),
+            "",
+        );
+        assert_eq!(consent_detail(&launch), "Open Ghostty");
     }
 
     #[test]
@@ -593,13 +720,16 @@ mod tests {
         });
         assert_eq!(
             input_pause_notice(&state).unwrap().title,
-            "Input paused — return to Numbers"
+            "Numbers isn't reachable"
         );
-        assert_eq!(input_pause_notice(&state).unwrap().body, "Screen locked");
+        assert_eq!(
+            input_pause_notice(&state).unwrap().body,
+            "Bring it onto this desktop or exit full screen. The agent continues once it can see the window."
+        );
         state.input_pause.as_mut().unwrap().window_id = Some("gone".into());
         assert_eq!(
             input_pause_notice(&state).unwrap().title,
-            "Input paused — return to the target window"
+            "The target window isn't reachable"
         );
     }
 

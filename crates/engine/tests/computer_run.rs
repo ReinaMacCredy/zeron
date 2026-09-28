@@ -780,7 +780,7 @@ fn answer(rig: &Rig, id: &str, request_id: &str, label: &str) {
 }
 
 #[tokio::test]
-async fn ask_mode_raises_one_task_card_a_clipboard_card_and_discloses_once() {
+async fn ask_mode_raises_one_task_card_a_clipboard_card_and_never_discloses_in_the_transcript() {
     let rig = rig();
     rig.run("c1", "plain", PermissionMode::Ask, None);
     rig.saw(1).await;
@@ -830,18 +830,18 @@ async fn ask_mode_raises_one_task_card_a_clipboard_card_and_discloses_once() {
     answer(&rig, "decline", &clip_card, "Decline");
     assert!(!clipboard.await.unwrap());
 
-    let disclosures = rig
-        .system_notes()
-        .iter()
-        .filter(|note| note.as_str() == COMPUTER_CONTROL_ON_DISCLOSURE)
-        .count();
-    assert_eq!(disclosures, 1);
+    assert!(
+        !rig.system_notes()
+            .iter()
+            .any(|note| note.as_str() == COMPUTER_CONTROL_ON_DISCLOSURE),
+        "the ON disclosure rides the first tool result, never a transcript note"
+    );
     rig.finish_turn().await;
     rig.core.shutdown().await;
 }
 
 #[tokio::test]
-async fn auto_and_full_raise_no_card_and_disclose_once_per_turn() {
+async fn auto_and_full_raise_no_card_and_never_disclose_in_the_transcript() {
     for mode in [PermissionMode::Auto, PermissionMode::Full] {
         let rig = rig();
         rig.run("c1", "plain", mode, None);
@@ -859,12 +859,10 @@ async fn auto_and_full_raise_no_card_and_disclose_once_per_turn() {
                 .unwrap()
         );
         assert!(rig.consent_cards().is_empty(), "{mode:?}");
-        assert_eq!(
-            rig.system_notes()
+        assert!(
+            !rig.system_notes()
                 .iter()
-                .filter(|note| note.as_str() == COMPUTER_CONTROL_ON_DISCLOSURE)
-                .count(),
-            1,
+                .any(|note| note.as_str() == COMPUTER_CONTROL_ON_DISCLOSURE),
             "{mode:?}"
         );
         rig.finish_turn().await;
@@ -884,6 +882,8 @@ async fn a_consent_card_left_open_by_a_dead_run_is_never_answered_as_a_new_turn(
         kind: Some(UserInputKind::Consent {
             scope: ComputerConsentScope::Task,
             app: None,
+            tool: None,
+            params: None,
         }),
     };
     let visible = UserInputQuestion {

@@ -15,14 +15,13 @@ use super::progress_guard::{ComputerProgressAction, ComputerProgressOutcome, Com
 use super::results::{
     AuditOutcome, ToolFailure, ToolValue, computer_audit_error_outcome,
     computer_audit_result_window_id, computer_audit_success_effect, computer_audit_target,
-    failure_result, mcp_json, mcp_json_error, result_availability, with_disclosure_on_result,
-    with_guidance_on_result, with_setup_note, with_setup_note_on_result,
+    failure_result, mcp_json, mcp_json_error, result_availability, with_app_on_result,
+    with_disclosure_on_result, with_guidance_on_result, with_setup_note, with_setup_note_on_result,
 };
 use super::tool_input::{ToolArgs, ToolInputError};
 use super::{
-    COMPUTER_CONTROL_FIRST_MUTATION_DISCLOSURE, COMPUTER_TOOL_REFRESH_GUIDANCE,
-    ComputerToolContext, ComputerTools, DISCLOSED_FIRST_MUTATIONS_MAX,
-    computer_tool_requires_approval, is_mutating_tool_call,
+    COMPUTER_TOOL_REFRESH_GUIDANCE, ComputerToolContext, ComputerTools,
+    DISCLOSED_FIRST_MUTATIONS_MAX, computer_tool_requires_approval, is_mutating_tool_call,
 };
 use crate::computer::audit_log::{
     ComputerAuditEntry, computer_audit_gateway_request_id, summarize_computer_audit_args,
@@ -33,7 +32,7 @@ use crate::computer::desktop_operation_queue::{
     DesktopOperationError, OperationSignal, with_desktop_delivery_mode,
     with_desktop_operation_signal,
 };
-use crate::computer::manager::ComputerCaller;
+use crate::computer::manager::{COMPUTER_CONTROL_ON_DISCLOSURE, ComputerCaller};
 use crate::computer::model_desktop_observation::with_model_desktop_observation;
 use crate::computer::setup_signal::{ComputerSetupInput, ComputerSetupSignal, computer_setup_signal};
 use crate::computer::task_context::with_computer_task;
@@ -421,6 +420,10 @@ impl ComputerTools {
         };
         let value = value?;
         let result_window_id = computer_audit_result_window_id(&value);
+        let result_app = result_window_id
+            .as_deref()
+            .or_else(|| args.get("window_id").and_then(Value::as_str))
+            .and_then(|window_id| self.manager.window_app_name(window_id));
         let success = computer_audit_success_effect(name, &value);
         let availability = result_availability(&value);
         if let Some(finish) = finish_timing {
@@ -485,6 +488,9 @@ impl ComputerTools {
             ToolValue::Result(result) => with_setup_note_on_result(result, signal.as_ref()),
             ToolValue::Json(value) => mcp_json(&with_setup_note(value, signal.as_ref())),
         };
+        if let Some(app) = result_app {
+            result = with_app_on_result(result, &app);
+        }
         if computer_tool_requires_approval(name) {
             let key = format!(
                 "{}:{}",
@@ -503,7 +509,7 @@ impl ComputerTools {
                 first
             };
             if first {
-                result = with_disclosure_on_result(result, COMPUTER_CONTROL_FIRST_MUTATION_DISCLOSURE);
+                result = with_disclosure_on_result(result, COMPUTER_CONTROL_ON_DISCLOSURE);
             }
         }
         self.setup_card(name, context, signal.as_ref()).await;

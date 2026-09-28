@@ -10,7 +10,7 @@ mod targeting;
 #[cfg(test)]
 pub(crate) mod tests;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
@@ -66,7 +66,6 @@ pub const SCROLL_SETTLE_ARRIVAL_MIN_PX: f64 = 4.0;
 pub const COMPUTER_ERROR_REPUBLISH_DEBOUNCE_MS: u64 = 250;
 pub const COMPUTER_CONTROL_ON_DISCLOSURE: &str = "Computer control ON for this turn: the agent is driving the desktop and the user can switch it off in Settings.";
 const COMPUTER_DENYLIST_APP_CACHE_MS: u64 = 30_000;
-const SURFACED_CONTROL_DISCLOSURES_MAX: usize = 512;
 const THREAD_RECORD_LIMIT: usize = 256;
 const OBSERVED_APP_NAME_LIMIT: usize = 256;
 
@@ -194,8 +193,6 @@ pub trait ComputerManagerSeams: Send + Sync {
     ) -> Result<(), String> {
         Ok(())
     }
-
-    async fn disclose_control(&self, _chat_id: &str, _turn_id: Option<&str>) {}
 
     fn generation_bumped(&self, _chat_id: &str, _generation: u64) {}
 
@@ -493,7 +490,6 @@ struct State {
     windows_publish_timer: Option<JoinHandle<()>>,
     error_republish_timer: Option<JoinHandle<()>>,
     publish_locks: HashMap<String, (Arc<tokio::sync::Mutex<()>>, usize)>,
-    surfaced_disclosures: VecDeque<String>,
     stream: StreamState,
     stream_tail: Option<Shared<BoxFuture<'static, ()>>>,
     frame_subscribers: Vec<(u64, ComputerFrameSubscriber)>,
@@ -675,7 +671,6 @@ impl ComputerManager {
                     windows_publish_timer: None,
                     error_republish_timer: None,
                     publish_locks: HashMap::new(),
-                    surfaced_disclosures: VecDeque::new(),
                     stream: StreamState::default(),
                     stream_tail: None,
                     frame_subscribers: Vec::new(),
@@ -753,6 +748,15 @@ impl ComputerManager {
 
     pub fn cursor_activity(&self) -> &CursorActivity {
         &self.cursor_activity
+    }
+
+    pub fn window_app_name(&self, window_id: &str) -> Option<String> {
+        self.state()
+            .last_known_windows
+            .get(window_id)?
+            .app_name
+            .clone()
+            .filter(|name| !name.trim().is_empty())
     }
 
     pub fn observed_app_names(&self) -> Vec<String> {

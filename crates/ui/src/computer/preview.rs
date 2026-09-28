@@ -263,8 +263,6 @@ pub fn status_badge(
 
 pub fn action_status_label(
     action: &str,
-    ok: bool,
-    message: Option<&str>,
     app: Option<&str>,
     delivery_path: Option<&str>,
 ) -> Option<String> {
@@ -287,11 +285,6 @@ pub fn action_status_label(
             let first = chars.next()?;
             first.to_uppercase().chain(chars).collect()
         }
-    };
-    let label = match (ok, message) {
-        (true, _) => label,
-        (false, Some(message)) => format!("{label} failed: {message}"),
-        (false, None) => format!("{label} failed"),
     };
     let delivery = delivery_path.map(|path| {
         if path.contains("foreground") {
@@ -355,8 +348,6 @@ impl ComputerPreviewStore {
                 window_id,
                 delivery,
                 action,
-                ok,
-                message,
                 ..
             } => {
                 let chat = self.chat(thread_id);
@@ -369,8 +360,6 @@ impl ComputerPreviewStore {
                 });
                 let Some(label) = action_status_label(
                     action,
-                    *ok,
-                    message.as_deref(),
                     app.as_deref(),
                     delivery.as_ref().map(|delivery| delivery.path.as_str()),
                 ) else {
@@ -1131,9 +1120,9 @@ pub(crate) mod tests {
             None
         );
         assert_eq!(
-            action_status_label("computer_press_key", false, Some("no window"), None, None)
+            action_status_label("computer_press_key", Some("Ghostty"), Some("foreground"))
                 .as_deref(),
-            Some("Press a key failed: no window")
+            Some("Press a key · Ghostty · Temporary foreground")
         );
     }
 

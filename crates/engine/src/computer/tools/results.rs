@@ -200,6 +200,19 @@ pub fn with_disclosure_on_result(mut result: McpToolResult, disclosure: &str) ->
     result
 }
 
+pub fn with_app_on_result(mut result: McpToolResult, app: &str) -> McpToolResult {
+    let Some(index) = first_text_index(&result) else {
+        return result;
+    };
+    if let Ok(Value::Object(mut map)) = serde_json::from_str::<Value>(text_at(&result, index))
+        && !map.contains_key("appName")
+    {
+        map.insert("appName".into(), Value::String(app.to_owned()));
+        replace_text(&mut result, index, Value::Object(map).to_string());
+    }
+    result
+}
+
 pub fn with_guidance_on_result(mut result: McpToolResult, guidance: Option<&str>) -> McpToolResult {
     let Some(guidance) = guidance else {
         return result;

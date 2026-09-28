@@ -44,12 +44,14 @@ use zeron_proto::ToolCall;
 
 use crate::computer::cards::{
     CardAction, CardTone, ComputerNotice, ComputerRequest, ConsentChoice, ConsentOutcome,
-    computer_card, computer_notice, consent_allow_description, consent_answers, consent_app,
-    consent_card_title, consent_choices, consent_detail, consent_outcome, consent_outcome_label,
-    consent_question, consent_scope, is_control_denied, missing_computer_permissions,
+    computer_card, computer_event_row, computer_notice, consent_allow_description, consent_answers,
+    consent_app, consent_card_title, consent_choices, consent_detail, consent_outcome,
+    consent_outcome_label, consent_question, consent_scope, is_control_denied,
+    missing_computer_permissions,
 };
 use crate::computer::presentation::{
-    ComputerCall, computer_call, computer_call_rows, computer_output_hidden, describe_computer_call,
+    ComputerCall, computer_call, computer_call_app, computer_call_rows, computer_output_hidden,
+    describe_computer_call,
 };
 use crate::markdown::parser::{
     Block, BlockTree, IncrementalParser, InlineRun, InlineStyle, parse_full,
@@ -383,6 +385,7 @@ pub struct ToolItem {
     /// per-delta header rewrites read as noise). Never rendered; still
     /// fingerprinted so an old doc's chips re-splice correctly.
     pub subagent_tail: Option<SharedString>,
+    pub app: Option<SharedString>,
     /// `Call` is a real doc tool invocation; `Thought` (a reasoning part
     /// riding the tool group — the thought process belongs inside the
     /// combined "Ran N commands" accordion, opening/closing with the same
@@ -408,6 +411,23 @@ fn is_agent_call(call: &ToolCall) -> bool {
 /// that opened empty, never-created subagent docs.
 fn is_agent_tool(item: &ToolItem) -> bool {
     is_agent_call(&item.call)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolGenus {
+    Agent,
+    Computer,
+    Other,
+}
+
+fn tool_genus(item: &ToolItem) -> ToolGenus {
+    if is_agent_tool(item) {
+        ToolGenus::Agent
+    } else if item.kind == ToolItemKind::Call && computer_call(&item.call).is_some() {
+        ToolGenus::Computer
+    } else {
+        ToolGenus::Other
+    }
 }
 
 /// A chip renders as the spawn LINK (whole-card click → subagent tab) only
@@ -727,6 +747,7 @@ fn thought_item(part_id: &str, tree: &BlockTree, live: bool) -> ToolItem {
         subagent_ref: None,
         subagent_status: None,
         subagent_tail: None,
+        app: None,
         kind: ToolItemKind::Thought,
     }
 }
@@ -1106,7 +1127,7 @@ pub enum RowKind {
         question_id: SharedString,
         scope: zeron_proto::computer::ComputerConsentScope,
         app: Option<zeron_proto::computer::ComputerConsentApp>,
-        question: SharedString,
+        detail: SharedString,
         outcome: Option<ConsentOutcome>,
     },
     ComputerNotice {
@@ -1198,6 +1219,8 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
         acc.extend_from_slice(label.as_bytes());
         acc.extend_from_slice(&(detail.len() as u32).to_le_bytes());
         acc.push(t.is_error as u8 | (t.resolved as u8) << 1);
+        acc.extend_from_slice(t.app.as_deref().unwrap_or_default().as_bytes());
+        acc.push(0);
         // Thought/note chips share `ToolCall::Unknown` — the kind is the
         // label/icon discriminator, so a flip must re-splice.
         acc.push(t.kind as u8);
@@ -1459,6 +1482,9 @@ pub fn rows_for_entry(
             .next()
             .map(|hint| SharedString::from(hint.to_string()));
         if let Some(notice) = computer_notice(&text) {
+            if notice == ComputerNotice::Disclosure {
+                return Vec::new();
+            }
             return vec![Row {
                 id: entry.id.clone().into(),
                 version: fnv1a(text.as_bytes()),
@@ -1606,6 +1632,10 @@ pub fn rows_for_entry(
                     subagent_ref: subagent_ref.clone().map(SharedString::from),
                     subagent_status: *subagent_status,
                     subagent_tail: subagent_tail.clone().map(SharedString::from),
+                    app: computer
+                        .as_ref()
+                        .and_then(|c| computer_call_app(c.tool, c.args, output.as_deref()))
+                        .map(SharedString::from),
                     kind: ToolItemKind::Call,
                 };
                 if compact {
@@ -1615,10 +1645,10 @@ pub fn rows_for_entry(
                     compact_group_pos.get_or_insert(rows.len());
                 } else if pending_group
                     .first()
-                    .is_some_and(|head| is_agent_tool(head) != is_agent_tool(&item))
+                    .is_some_and(|head| tool_genus(head) != tool_genus(&item))
                 {
-                    // Agent chips don't share a fold with ordinary tools:
-                    // flush whenever the genus flips so each group is uniform.
+                    // Agent and computer chips don't share a fold with ordinary
+                    // tools: flush whenever the genus flips so each group is uniform.
                     flush_group(
                         &mut rows,
                         &mut pending_group,
@@ -1647,7 +1677,7 @@ pub fn rows_for_entry(
                         turn_start: false,
                         kind: RowKind::ComputerNotice {
                             notice: ComputerNotice::ControlDenied,
-                            text: "Computer control is off".into(),
+                            text: "Computer is off for ordinary turns".into(),
                             hint: None,
                         },
                         entry_id: entry_id.clone(),
@@ -1674,9 +1704,12 @@ pub fn rows_for_entry(
                 let item = thought_item(part_id, &tree, live);
                 if compact {
                     compact_group_pos.get_or_insert(rows.len());
-                } else if pending_group.first().is_some_and(is_agent_tool) {
+                } else if pending_group
+                    .first()
+                    .is_some_and(|head| tool_genus(head) != ToolGenus::Other)
+                {
                     // Thoughts join ordinary tool groups; agent (spawn-link)
-                    // groups stay pure, exactly like the tool genus rule.
+                    // and computer groups stay pure, exactly like the tool genus rule.
                     flush_group(
                         &mut rows,
                         &mut pending_group,
@@ -1805,7 +1838,7 @@ pub fn rows_for_entry(
                                 question_id: question.id.clone().into(),
                                 scope: consent_scope(question),
                                 app: consent_app(question),
-                                question: question.question.clone().into(),
+                                detail: consent_detail(question).into(),
                                 outcome,
                             },
                             entry_id: entry_id.clone(),
@@ -2186,9 +2219,23 @@ pub fn tool_group_summary(tools: &[ToolItem]) -> String {
     #[cfg(test)]
     FORBID_ROW_PREPARATION
         .with(|forbidden| assert!(!forbidden.get(), "tool summary formatting ran on UI thread"));
+    let mut computer_apps: Vec<&str> = Vec::new();
+    let mut computer_actions = 0usize;
     let pairs: Vec<(ToolCall, bool)> = tools
         .iter()
         .filter(|t| t.kind == ToolItemKind::Call)
+        .filter(|t| {
+            if computer_call(&t.call).is_none() {
+                return true;
+            }
+            computer_actions += 1;
+            if let Some(app) = t.app.as_deref()
+                && !computer_apps.contains(&app)
+            {
+                computer_apps.push(app);
+            }
+            false
+        })
         .map(|t| (t.call.clone(), t.is_error))
         .collect();
     let thoughts = tools
@@ -2223,6 +2270,19 @@ pub fn tool_group_summary(tools: &[ToolItem]) -> String {
         0 => {}
         1 => segments.push("wrote a note".into()),
         n => segments.push(format!("wrote {n} notes")),
+    }
+    if computer_actions > 0 {
+        let apps = if computer_apps.is_empty() {
+            "the desktop".to_owned()
+        } else {
+            computer_apps.join(", ")
+        };
+        let actions = if computer_actions == 1 {
+            "1 action".to_owned()
+        } else {
+            format!("{computer_actions} actions")
+        };
+        segments.push(format!("used {apps} · {actions}"));
     }
     if !base.is_empty() {
         segments.push(base);
@@ -7814,14 +7874,14 @@ impl Transcript {
                 question_id,
                 scope,
                 app,
-                question,
+                detail,
                 outcome,
             } => self.render_computer_consent(
                 request_id.clone(),
                 question_id.clone(),
                 *scope,
                 app.as_ref(),
-                question,
+                detail,
                 *outcome,
                 &theme,
                 cx,
@@ -9293,16 +9353,15 @@ impl Transcript {
         question_id: SharedString,
         scope: zeron_proto::computer::ComputerConsentScope,
         app: Option<&zeron_proto::computer::ComputerConsentApp>,
-        question: &str,
+        detail: &str,
         outcome: Option<ConsentOutcome>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let settled = outcome.or_else(|| self.consent_sent.get(&request_id).copied());
         let mut lines: Vec<SharedString> = Vec::new();
-        let detail = consent_detail(scope, app, question);
         if !detail.is_empty() {
-            lines.push(detail.into());
+            lines.push(detail.to_owned().into());
         }
         let (tone, status, actions) = match settled {
             Some(outcome) => (
@@ -9347,7 +9406,7 @@ impl Transcript {
         };
         computer_card(
             tone,
-            crate::icons::MONITOR,
+            crate::icons::CURSOR,
             consent_card_title(scope, app).into(),
             lines,
             actions,
@@ -9378,7 +9437,7 @@ impl Transcript {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let icon = crate::icons::MONITOR;
+        let icon = crate::icons::CURSOR;
         match notice {
             ComputerNotice::Disclosure => computer_card(
                 CardTone::Info,
@@ -9389,15 +9448,9 @@ impl Transcript {
                 None,
                 theme,
             ),
-            ComputerNotice::EscapeStop => computer_card(
-                CardTone::Warning,
-                crate::icons::STOP,
-                text,
-                Vec::new(),
-                Vec::new(),
-                None,
-                theme,
-            ),
+            ComputerNotice::EscapeStop => {
+                computer_event_row(crate::icons::STOP, text, CardTone::Warning, None, theme)
+            }
             ComputerNotice::Unavailable => computer_card(
                 CardTone::Warning,
                 icon,
@@ -9411,10 +9464,13 @@ impl Transcript {
                 CardTone::Warning,
                 icon,
                 text,
-                vec!["Turn it on in Settings to let the agent use the desktop.".into()],
+                vec![
+                    "Send this request with /computer-use to let the agent use the desktop once."
+                        .into(),
+                ],
                 vec![CardAction {
                     id: format!("{row_id}-enable").into(),
-                    label: "Enable".into(),
+                    label: "Use for this request".into(),
                     primary: false,
                     on_click: Box::new(cx.listener(|_, _, _, cx| {
                         cx.emit(TranscriptEvent::Computer {
@@ -12917,6 +12973,7 @@ mod tests {
                     subagent_ref: None,
                     subagent_status: None,
                     subagent_tail: None,
+                    app: None,
                     kind: ToolItemKind::Call,
                 };
                 let transcript = self.transcript.clone();
@@ -13022,6 +13079,7 @@ mod tests {
                     subagent_ref: None,
                     subagent_status: None,
                     subagent_tail: None,
+                    app: None,
                     kind: ToolItemKind::Call,
                 }]);
                 let group = self.0.update(cx, |this, cx| {
@@ -16269,6 +16327,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            app: None,
             kind: ToolItemKind::Call,
         };
         let edit = |p: &str| ToolItem {
@@ -16288,6 +16347,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            app: None,
             kind: ToolItemKind::Call,
         };
         let tools = vec![
@@ -16323,6 +16383,7 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
+                app: None,
                 kind: ToolItemKind::Call,
             },
             ToolItem {
@@ -16340,6 +16401,7 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
+                app: None,
                 kind: ToolItemKind::Call,
             },
             ToolItem {
@@ -16355,6 +16417,7 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
+                app: None,
                 kind: ToolItemKind::Call,
             },
         ];
@@ -16519,6 +16582,7 @@ mod tests {
                         subagent_ref: None,
                         subagent_status: None,
                         subagent_tail: None,
+                        app: None,
                         kind: ToolItemKind::Call,
                     }),
                     _ => None,
@@ -17044,12 +17108,14 @@ mod computer_tests {
             questions: vec![UserInputQuestion {
                 id: "consent".into(),
                 header: "Computer".into(),
-                question: "Allow Computer for this task? The agent wants to run computer_click and will drive this Mac's apps until the turn ends.".into(),
+                question: "Allow Computer for this task? The agent will use this Mac's apps until this response ends.".into(),
                 options: vec!["Allow".into(), "Decline".into()],
                 multi_select: false,
                 kind: Some(UserInputKind::Consent {
                     scope: ComputerConsentScope::Task,
                     app: None,
+                    tool: Some("computer_click".into()),
+                    params: Some(r#"{"x":1,"y":2}"#.into()),
                 }),
             }],
             resolved,
@@ -17086,6 +17152,7 @@ mod computer_tests {
         let RowKind::ComputerConsent {
             request_id,
             scope,
+            detail,
             outcome,
             ..
         } = &rows[0].kind
@@ -17094,6 +17161,7 @@ mod computer_tests {
         };
         assert_eq!(request_id.as_ref(), "computer-consent-1");
         assert_eq!(*scope, ComputerConsentScope::Task);
+        assert_eq!(detail.as_ref(), "Click at (1, 2)");
         assert_eq!(*outcome, None);
         let allowed = rows_for_entry(
             &entry(
@@ -17189,7 +17257,7 @@ mod computer_tests {
     }
 
     #[test]
-    fn engine_computer_notes_render_as_cards_not_dividers() {
+    fn the_on_disclosure_note_renders_no_row() {
         let disclosure = rows_for_entry(
             &entry(
                 MessageRole::System,
@@ -17202,13 +17270,162 @@ mod computer_tests {
             false,
             &mut parse,
         );
-        assert!(matches!(
-            disclosure[0].kind,
-            RowKind::ComputerNotice {
-                notice: ComputerNotice::Disclosure,
-                ..
-            }
-        ));
+        assert!(disclosure.is_empty());
+    }
+
+    fn group_summaries(rows: &[Row]) -> Vec<String> {
+        rows.iter()
+            .filter_map(|row| match &row.kind {
+                RowKind::ToolGroup { summary, .. } => Some(summary.to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    const GHOSTTY_TYPED: &str = r#"{"action":"computer_type_text","appName":"Ghostty","computerId":"desktop","disclosure":"Computer control ON for this turn: the agent is driving the desktop and the user can switch …"#;
+
+    #[test]
+    fn computer_calls_fold_into_one_used_app_group() {
+        let rows = rows_for_entry(
+            &entry(
+                MessageRole::Assistant,
+                vec![
+                    tool_part(
+                        "p1",
+                        "computer_get_state",
+                        serde_json::json!({ "window_id": "cua:7:1" }),
+                        r#"{"appName":"Ghostty","availability":{"backend":"cua","kind":"available"},"capturedAt":"2026-09-28T06:22:13.438Z","computerId":"desktop","elementWindowId":"cua:7:1","elements":[{"label":"Calcul…"#,
+                        false,
+                    ),
+                    tool_part(
+                        "p2",
+                        "computer_type_text",
+                        serde_json::json!({ "window_id": "cua:7:1", "text": "hunter2" }),
+                        GHOSTTY_TYPED,
+                        false,
+                    ),
+                    tool_part(
+                        "p3",
+                        "computer_press_key",
+                        serde_json::json!({ "window_id": "cua:7:1", "key": "enter" }),
+                        r#"{"action":"computer_press_key","appName":"Ghostty"}"#,
+                        false,
+                    ),
+                ],
+            ),
+            false,
+            false,
+            &mut parse,
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(group_summaries(&rows), ["Used Ghostty · 3 actions"]);
+        let summary = &group_summaries(&rows)[0];
+        for leak in ["computer_", "hunter2"] {
+            assert!(!summary.contains(leak), "{leak}: {summary}");
+        }
+    }
+
+    #[test]
+    fn a_single_computer_action_is_singular() {
+        let rows = rows_for_entry(
+            &entry(
+                MessageRole::Assistant,
+                vec![tool_part(
+                    "p1",
+                    "computer_launch_app",
+                    serde_json::json!({ "app": "com.apple.Safari" }),
+                    "{}",
+                    false,
+                )],
+            ),
+            false,
+            false,
+            &mut parse,
+        );
+        assert_eq!(group_summaries(&rows), ["Used Safari · 1 action"]);
+    }
+
+    #[test]
+    fn computer_and_ordinary_tools_never_share_a_group() {
+        let read: MessagePart = serde_json::from_value(serde_json::json!({
+            "kind": "tool",
+            "id": "r1",
+            "call": { "kind": "readFile", "path": "/w/a.rs" },
+            "resolved": true,
+        }))
+        .expect("read part");
+        let thought = MessagePart::Reasoning {
+            id: "th".into(),
+            text: "check the window".into(),
+        };
+        let rows = rows_for_entry(
+            &entry(
+                MessageRole::Assistant,
+                vec![
+                    read,
+                    tool_part(
+                        "p1",
+                        "computer_type_text",
+                        serde_json::json!({ "window_id": "cua:7:1", "text": "x" }),
+                        GHOSTTY_TYPED,
+                        false,
+                    ),
+                    thought,
+                    tool_part(
+                        "p2",
+                        "computer_press_key",
+                        serde_json::json!({ "window_id": "cua:7:1", "key": "enter" }),
+                        r#"{"action":"computer_press_key","appName":"Ghostty"}"#,
+                        false,
+                    ),
+                ],
+            ),
+            false,
+            false,
+            &mut parse,
+        );
+        assert_eq!(
+            group_summaries(&rows),
+            [
+                "Read 1 file",
+                "Used Ghostty · 1 action",
+                "Thought process",
+                "Used Ghostty · 1 action"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_app_less_computer_group_says_the_desktop() {
+        let rows = rows_for_entry(
+            &entry(
+                MessageRole::Assistant,
+                vec![
+                    tool_part(
+                        "p1",
+                        "computer_screenshot",
+                        serde_json::json!({}),
+                        "{}",
+                        false,
+                    ),
+                    tool_part(
+                        "p2",
+                        "computer_click",
+                        serde_json::json!({ "x": 1, "y": 2 }),
+                        r#"{"error":{"code":"computer_target_invalid"}}"#,
+                        true,
+                    ),
+                ],
+            ),
+            false,
+            false,
+            &mut parse,
+        );
+        assert_eq!(group_summaries(&rows), ["Used the desktop · 2 actions"]);
+    }
+
+    #[test]
+    fn engine_computer_notes_render_as_cards_not_dividers() {
         let setup = rows_for_entry(
             &entry(
                 MessageRole::System,
@@ -17388,7 +17605,7 @@ mod computer_tests {
                         "consent".into(),
                         ComputerConsentScope::Task,
                         None,
-                        "Allow Computer for this task? The agent wants to run computer_click.",
+                        "Click",
                         None,
                         &theme,
                         cx,
@@ -17471,7 +17688,7 @@ mod computer_tests {
                         "consent".into(),
                         ComputerConsentScope::Task,
                         Some(&app),
-                        "Allow Computer to use Safari (com.apple.Safari)? The agent wants to run computer_click.",
+                        "Click in Safari",
                         None,
                         &theme,
                         cx,
@@ -17538,7 +17755,7 @@ mod computer_tests {
                     this.render_computer_notice(
                         &"row".into(),
                         ComputerNotice::ControlDenied,
-                        "Computer control is off".into(),
+                        "Computer is off for ordinary turns".into(),
                         None,
                         &theme,
                         cx,

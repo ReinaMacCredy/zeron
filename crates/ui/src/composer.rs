@@ -10959,7 +10959,7 @@ impl Render for Composer {
                         .mx(px(4.0))
                         .child(crate::computer::cards::computer_card(
                             crate::computer::cards::CardTone::Info,
-                            crate::icons::MONITOR,
+                            crate::icons::CURSOR,
                             "Desktop actions are faster at Medium effort".into(),
                             Vec::new(),
                             vec![
@@ -16388,6 +16388,8 @@ mod tests {
             kind: Some(zeron_proto::UserInputKind::Consent {
                 scope: zeron_proto::computer::ComputerConsentScope::Task,
                 app: None,
+                tool: None,
+                params: None,
             }),
             ..question("consent", &["Allow", "Decline"], false)
         };

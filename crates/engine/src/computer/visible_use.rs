@@ -962,6 +962,8 @@ mod tests {
         let consent = Some(zeron_proto::UserInputKind::Consent {
             scope: zeron_proto::computer::ComputerConsentScope::Task,
             app: None,
+            tool: None,
+            params: None,
         });
         let walk = visible_use_entries(&[
             doc_entry(MessageRole::User, vec![text("show me the browser")]),

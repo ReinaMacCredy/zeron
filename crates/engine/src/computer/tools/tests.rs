@@ -299,7 +299,7 @@ async fn a_first_mutation_carries_the_disclosure_once_per_turn() {
     assert!(!first.is_error, "{first:?}");
     assert_eq!(
         result_json(&first)["disclosure"],
-        json!(super::COMPUTER_CONTROL_FIRST_MUTATION_DISCLOSURE)
+        json!(crate::computer::manager::COMPUTER_CONTROL_ON_DISCLOSURE)
     );
     let second = h
         .call(
@@ -358,5 +358,39 @@ async fn a_run_executes_its_steps_in_order_and_closes_with_fresh_state() {
     assert_eq!(payload["completed"], json!(2));
     assert_eq!(payload["stopped"], json!(false));
     assert!(payload["state"]["elements"].is_array());
+    h.dispose().await;
+}
+
+#[tokio::test]
+async fn a_window_result_names_its_app_inside_the_transcript_summary() {
+    let h = harness();
+    h.call("computer_list_windows", json!({})).await;
+    for (tool, args) in [
+        (
+            "computer_get_state",
+            json!({ "window_id": "fake-calculator" }),
+        ),
+        (
+            "computer_type_text",
+            json!({ "window_id": "fake-calculator", "text": "hi" }),
+        ),
+        (
+            "computer_press_key",
+            json!({ "window_id": "fake-calculator", "key": "enter" }),
+        ),
+    ] {
+        let result = h.call(tool, args).await;
+        assert!(!result.is_error, "{tool} {result:?}");
+        assert_eq!(
+            result_json(&result)["appName"],
+            json!("org.kde.kcalc"),
+            "{tool}"
+        );
+        let summary = zeron_doc::summarize_tool_output(result.first_text().unwrap()).unwrap();
+        assert!(
+            summary.contains(r#""appName":"org.kde.kcalc""#),
+            "{tool}: {summary}"
+        );
+    }
     h.dispose().await;
 }

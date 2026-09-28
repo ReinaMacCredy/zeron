@@ -10,7 +10,7 @@ use zeron_proto::computer::{ComputerAllowedApp, ComputerEvent, CuaComputerTask};
 use super::{
     Authority, COMPUTER_CONTROL_TEARDOWN_TIMEOUT_MS, ComputerCaller, ComputerConsent,
     ComputerConsentCard, ComputerConsentScope, ComputerConsentTarget, ComputerManager,
-    SURFACED_CONTROL_DISCLOSURES_MAX, agent_thread_id, lock, with_teardown_timeout,
+    agent_thread_id, lock, with_teardown_timeout,
 };
 use crate::computer::approval_gate::{AppGrant, ApprovalPublish, ApprovalRequest};
 use crate::computer::backend::{ComputerBackendError, ComputerError};
@@ -573,8 +573,6 @@ impl ComputerManager {
             return Ok(ComputerConsent::Denied(None));
         };
         if mode != PermissionMode::Ask {
-            self.surface_control_disclosure(&caller.chat_id, caller.turn_id.as_deref())
-                .await;
             return Ok(ComputerConsent::Granted);
         }
         if target == Some(&ComputerConsentTarget::Unscoped) {
@@ -586,13 +584,7 @@ impl ComputerManager {
             None => None,
         };
         let app = resolved.as_ref().map(|resolved| resolved.app.clone());
-        let params_display = Value::Object(
-            args.iter()
-                .filter(|(key, _)| !matches!(key.as_str(), "text" | "value" | "prompt_text"))
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect(),
-        )
-        .to_string();
+        let params_display = without_typed_values(&Value::Object(args.clone())).to_string();
         let seams = self.seams.clone();
         let chat_id = caller.chat_id.clone();
         let turn_id = caller.turn_id.clone();
@@ -644,24 +636,7 @@ impl ComputerManager {
         if !approved {
             return Ok(ComputerConsent::Denied(app));
         }
-        self.surface_control_disclosure(&caller.chat_id, caller.turn_id.as_deref())
-            .await;
         Ok(ComputerConsent::Granted)
-    }
-
-    async fn surface_control_disclosure(&self, chat_id: &str, turn_id: Option<&str>) {
-        let key = format!("{chat_id}:{}", turn_id.unwrap_or("no-turn"));
-        {
-            let mut state = self.state();
-            if state.surfaced_disclosures.contains(&key) {
-                return;
-            }
-            while state.surfaced_disclosures.len() >= SURFACED_CONTROL_DISCLOSURES_MAX {
-                state.surfaced_disclosures.pop_front();
-            }
-            state.surfaced_disclosures.push_back(key);
-        }
-        self.seams.disclose_control(chat_id, turn_id).await;
     }
 
     pub async fn dispose(&self) {
@@ -698,5 +673,18 @@ impl ComputerManager {
         self.backend.dispose().await;
         lock(&self.listeners).clear();
         self.audit_log.flush().await;
+    }
+}
+
+fn without_typed_values(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .filter(|(key, _)| !matches!(key.as_str(), "text" | "value" | "prompt_text"))
+                .map(|(key, value)| (key.clone(), without_typed_values(value)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(without_typed_values).collect()),
+        other => other.clone(),
     }
 }
