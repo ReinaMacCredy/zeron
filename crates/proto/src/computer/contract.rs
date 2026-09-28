@@ -484,6 +484,8 @@ pub struct ComputerInputPause {
     pub pid: Option<u32>,
     #[serde(deserialize_with = "bounds::text::<_, COMPUTER_MESSAGE_MAX_LENGTH>")]
     pub message: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub user_takeover: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1606,6 +1608,7 @@ mod tests {
     fn pause_retains_the_affected_app_and_refuses_invalid_process_identities() {
         let pause = json!({ "windowId": "cua:42:7", "pid": 42, "message": "Observe again" });
         round_trips::<ComputerInputPause>(&pause);
+        round_trips::<ComputerInputPause>(&merge(&pause, json!({ "userTakeover": true })));
         for pid in [json!(0), json!(-1), json!(1.5), json!(0x8000_0000u32)] {
             rejects::<ComputerInputPause>(&merge(&pause, json!({ "pid": pid })));
         }

@@ -175,6 +175,7 @@ mod tests {
             window_id: Some("cua:42:7".into()),
             activity: Some("Typing".into()),
             tone,
+            user_takeover: false,
         }
     }
 
@@ -245,11 +246,24 @@ mod tests {
                 open("b"),
             ]
         );
-        let menu = status_menu(&[paused], titles).unwrap();
+        let menu = status_menu(&[paused.clone()], titles).unwrap();
         assert_eq!(
             menu.tone,
             PresenceTone::Paused,
             "only paused chats: warning"
+        );
+        let taken = ChatPresence {
+            user_takeover: true,
+            ..paused
+        };
+        assert_eq!(
+            status_menu(&[taken], titles).unwrap().rows[2..],
+            [
+                info("Fix the build · Calculator"),
+                info("You're using Calculator"),
+                open("b"),
+            ],
+            "no Stop while the user holds the window"
         );
         let bare = ChatPresence {
             app: None,
@@ -434,6 +448,7 @@ mod tests {
             window_id: Some("cua:4242:9191".into()),
             pid: Some(4242),
             message: "computer_type_text refused for hunter2-secret".into(),
+            user_takeover: false,
         });
         store.apply_event(&ComputerEvent::ThreadState {
             state: Box::new(typing),
@@ -441,12 +456,14 @@ mod tests {
         let mut all = presences(&store);
         assert_eq!(all[0].tone, PresenceTone::Paused);
         let mut texts = Vec::new();
-        for tone in [
-            PresenceTone::Paused,
-            PresenceTone::Driving,
-            PresenceTone::NeedsYou,
+        for (tone, user_takeover) in [
+            (PresenceTone::Paused, false),
+            (PresenceTone::Paused, true),
+            (PresenceTone::Driving, false),
+            (PresenceTone::NeedsYou, false),
         ] {
             all[0].tone = tone;
+            all[0].user_takeover = user_takeover;
             let menu = status_menu(&all, |_| Some("Ship it".into())).unwrap();
             texts.extend(menu.rows.into_iter().filter_map(|row| match row {
                 MenuRow::Header(text) | MenuRow::Info(text) => Some(text),

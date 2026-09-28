@@ -223,6 +223,7 @@ pub fn install_desktop_host(cx: &mut gpui::App) {
                     .clone()
             }
         })),
+        on_takeover: super::preview::takeover_sink(cx),
     };
     match super::native::start_native_host(config) {
         Ok((driver, link)) => cx.set_global(DesktopHost {

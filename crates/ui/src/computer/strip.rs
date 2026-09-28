@@ -29,6 +29,13 @@ pub fn strip_copy(presence: &ChatPresence) -> StripCopy {
                 .clone()
                 .unwrap_or_else(|| "Working".into()),
         },
+        PresenceTone::Paused if presence.user_takeover => StripCopy {
+            lead: Some(format!(
+                "You're using {}",
+                presence.app.as_deref().unwrap_or("the target window")
+            )),
+            detail: "the agent will re-read the screen when you stop".into(),
+        },
         PresenceTone::Paused => StripCopy {
             lead: Some(format!(
                 "{} isn't reachable",
@@ -207,6 +214,7 @@ mod tests {
             window_id: Some("cua:42:7".into()),
             activity: Some("Typing".into()),
             tone,
+            user_takeover: false,
         }
     }
 
@@ -227,6 +235,19 @@ mod tests {
             "Ghostty isn't reachable · bring it onto this desktop or exit full screen"
         );
         assert!(!shows_stop(&paused));
+        let taken = ChatPresence {
+            user_takeover: true,
+            ..paused.clone()
+        };
+        assert_eq!(
+            strip_copy(&taken).text(),
+            "You're using Ghostty · the agent will re-read the screen when you stop"
+        );
+        assert!(!shows_stop(&taken));
+        assert_eq!(
+            strip_copy(&ChatPresence { app: None, ..taken }).text(),
+            "You're using the target window · the agent will re-read the screen when you stop"
+        );
         let summing = presence(PresenceTone::Revoked { summing_up: true });
         assert_eq!(
             strip_copy(&summing).text(),
@@ -266,14 +287,16 @@ mod tests {
             state: Box::new(typing),
         });
         let mut texts = Vec::new();
-        for tone in [
-            PresenceTone::Driving,
-            PresenceTone::Paused,
-            PresenceTone::NeedsYou,
-            PresenceTone::Revoked { summing_up: true },
+        for (tone, user_takeover) in [
+            (PresenceTone::Driving, false),
+            (PresenceTone::Paused, false),
+            (PresenceTone::Paused, true),
+            (PresenceTone::NeedsYou, false),
+            (PresenceTone::Revoked { summing_up: true }, false),
         ] {
             let mut presence = presences(&store).remove(0);
             presence.tone = tone;
+            presence.user_takeover = user_takeover;
             texts.push(strip_copy(&presence).text());
         }
         assert_eq!(texts[0], "Calculator · Typing");

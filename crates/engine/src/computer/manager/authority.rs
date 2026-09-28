@@ -8,9 +8,10 @@ use zeron_proto::PermissionMode;
 use zeron_proto::computer::{ComputerAllowedApp, CuaComputerTask};
 
 use super::{
-    Authority, COMPUTER_CONTROL_TEARDOWN_TIMEOUT_MS, COMPUTER_USER_REVOKED, ComputerCaller,
-    ComputerConsent, ComputerConsentCard, ComputerConsentScope, ComputerConsentTarget,
-    ComputerManager, agent_thread_id, lock, with_teardown_timeout,
+    Authority, COMPUTER_CONTROL_TEARDOWN_TIMEOUT_MS, COMPUTER_USER_PAUSE_NOTE_PREFIX,
+    COMPUTER_USER_REVOKED, ComputerCaller, ComputerConsent, ComputerConsentCard,
+    ComputerConsentScope, ComputerConsentTarget, ComputerManager, agent_thread_id, lock,
+    with_teardown_timeout,
 };
 use crate::computer::approval_gate::{AppGrant, ApprovalPublish, ApprovalRequest};
 use crate::computer::backend::{ComputerBackendError, ComputerError};
@@ -130,7 +131,7 @@ impl ComputerManager {
         let (Some(owner), Some(pause)) = (owner, error.input_pause()) else {
             return;
         };
-        {
+        let episode = {
             let mut state = self.state();
             if state.disposed
                 || state.suspended_threads.contains(owner)
@@ -138,7 +139,24 @@ impl ComputerManager {
             {
                 return;
             }
-            state.thread_runtime(owner).input_pause = Some(pause.clone());
+            let held = state
+                .thread_runtime(owner)
+                .input_pause
+                .replace(pause.clone());
+            pause.user_takeover && !held.is_some_and(|held| held.user_takeover)
+        };
+        if episode {
+            let app = pause
+                .window_id
+                .as_deref()
+                .and_then(|window_id| self.window_app_name(window_id));
+            self.seams.note(
+                owner,
+                &format!(
+                    "{COMPUTER_USER_PAUSE_NOTE_PREFIX}{}",
+                    app.as_deref().unwrap_or("the target window")
+                ),
+            );
         }
         self.publish_cached(owner);
     }

@@ -109,6 +109,8 @@ pub(super) struct ChatPreview {
     pub(super) last_app: Option<String>,
     pub(super) last_window_id: Option<String>,
     pub(super) revoked_latched: bool,
+    pub(super) user_paused: bool,
+    pub(super) user_paused_window: Option<String>,
     pub(super) state: Option<ThreadComputerState>,
     agent_active: bool,
     tap: Option<PreviewImage>,
@@ -326,6 +328,8 @@ impl ComputerPreviewStore {
         if fresh_task {
             chat.last_app = None;
             chat.last_window_id = None;
+            chat.user_paused = false;
+            chat.user_paused_window = None;
             chat.thumb_closed = false;
             chat.user_opened = false;
             self.evicted
@@ -352,6 +356,10 @@ impl ComputerPreviewStore {
                 }
                 chat.state = Some((**state).clone());
                 chat.user_opened &= active || !was;
+                if was && !active {
+                    chat.user_paused = false;
+                    chat.user_paused_window = None;
+                }
                 if active != was {
                     let next = phase_on_agent_edge(chat.phase, active);
                     self.set_phase(&state.thread_id, next);
@@ -556,6 +564,23 @@ impl ComputerPreviewStore {
         self.settings.computer_preview_placement
     }
 
+    pub fn set_user_paused(&mut self, chat_id: &str, window_id: Option<String>) -> bool {
+        let Some(chat) = self.chats.get_mut(chat_id).filter(|chat| chat.agent_active) else {
+            return false;
+        };
+        let changed = !chat.user_paused || chat.user_paused_window != window_id;
+        chat.user_paused = true;
+        chat.user_paused_window = window_id;
+        changed
+    }
+
+    pub fn clear_user_paused(&mut self, chat_id: &str) -> bool {
+        self.chats.get_mut(chat_id).is_some_and(|chat| {
+            chat.user_paused_window = None;
+            std::mem::take(&mut chat.user_paused)
+        })
+    }
+
     pub fn clear_revoked(&mut self, chat_id: &str) -> bool {
         self.chats
             .get_mut(chat_id)
@@ -677,6 +702,13 @@ pub enum TapEvent {
         code: String,
         message: String,
     },
+    UserPaused {
+        thread_id: String,
+        window_id: Option<String>,
+    },
+    UserResumed {
+        thread_id: String,
+    },
 }
 
 pub struct ComputerPreview {
@@ -746,7 +778,9 @@ fn coalesce(batch: Vec<TapEvent>) -> Vec<TapEvent> {
         .into_iter()
         .filter(|event| match event {
             TapEvent::Frame { thread_id, seq, .. } => newest.get(thread_id) == Some(seq),
-            TapEvent::Failed { .. } => true,
+            TapEvent::Failed { .. }
+            | TapEvent::UserPaused { .. }
+            | TapEvent::UserResumed { .. } => true,
         })
         .collect()
 }
@@ -796,6 +830,17 @@ pub fn init(cx: &mut App) {
                             store.accept_tap_failure(&thread_id, PreviewFailure { code, message })
                         })
                     }),
+                    TapEvent::UserPaused {
+                        thread_id,
+                        window_id,
+                    } => cx.update(|cx| {
+                        update_store(&store, cx, |store| {
+                            store.set_user_paused(&thread_id, window_id)
+                        })
+                    }),
+                    TapEvent::UserResumed { thread_id } => cx.update(|cx| {
+                        update_store(&store, cx, |store| store.clear_user_paused(&thread_id))
+                    }),
                 }
             }
         }
@@ -840,6 +885,26 @@ pub fn native_sink(cx: &App) -> super::native::frame_tap::PreviewSink {
         };
         let _ = taps.unbounded_send(event);
     })
+}
+
+#[cfg(target_os = "macos")]
+pub fn takeover_sink(cx: &App) -> Option<Box<dyn Fn(super::host::TakeoverEvent) + Send>> {
+    use super::host::TakeoverEvent;
+    let taps = tap_sender(cx)?;
+    Some(Box::new(move |event| {
+        let event = match event {
+            TakeoverEvent::Paused {
+                thread_id,
+                pid,
+                window_id,
+            } => TapEvent::UserPaused {
+                thread_id,
+                window_id: window_id.map(|window| format!("cua:{pid}:{window}")),
+            },
+            TakeoverEvent::Resumed { thread_id } => TapEvent::UserResumed { thread_id },
+        };
+        let _ = taps.unbounded_send(event);
+    }))
 }
 
 pub fn watch_events(engine: EngineHandle, cx: &mut App) -> Option<Task<()>> {
@@ -1319,6 +1384,7 @@ pub(crate) mod tests {
             window_id: None,
             pid: None,
             message: "Screen locked".into(),
+            user_takeover: false,
         });
         let badge = status_badge(Some(&active), true, true).unwrap();
         assert_eq!(

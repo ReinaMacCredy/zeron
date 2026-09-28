@@ -1037,6 +1037,7 @@ mod tests {
             window_id: Some("cua:1:2".into()),
             pid: Some(1),
             message: "paused".into(),
+            user_takeover: false,
         };
         let refused: ComputerBackendError =
             CuaActionError::new("Desktop is locked.", CuaEffect::NotDispatched)

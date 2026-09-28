@@ -318,6 +318,7 @@ impl ComputerManager {
                         window_id: result.window.as_ref().map(|window| window.id.clone()),
                         pid: result.pid,
                         message: "The app changed desktop focus while launching. The launch already happened; do not replay it. Observe the app's exact window before continuing background input.".into(),
+                        user_takeover: false,
                     });
                 self.publish_cached(owner);
             }

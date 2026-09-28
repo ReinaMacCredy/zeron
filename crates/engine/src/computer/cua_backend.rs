@@ -1047,6 +1047,9 @@ impl CuaInner {
                 "target_not_on_active_space" | "computer_input_paused" | "auth_sheet_focused"
             ))
             || code == "focus_restore_failed";
+        let user_takeover = refused
+            && code == "computer_input_paused"
+            && structured.get("cause").and_then(Value::as_str) == Some("user_input");
         let input_pause = match (pausing, pid, window) {
             (true, Some(pid), Some(window)) => Some(ComputerInputPause {
                 window_id: Some(format!("cua:{pid}:{window}")),
@@ -1057,6 +1060,7 @@ impl CuaInner {
                 .then(|| u32::try_from(pid).ok())
                 .flatten(),
                 message: message.clone(),
+                user_takeover,
             }),
             _ => None,
         };
@@ -2353,6 +2357,7 @@ impl CuaInner {
                     window_id: Some(window.id.clone()),
                     pid: None,
                     message: message.into(),
+                    user_takeover: false,
                 }))
                 .into());
         }

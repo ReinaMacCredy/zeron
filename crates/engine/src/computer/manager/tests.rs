@@ -684,6 +684,7 @@ pub(crate) struct Seams {
     pub bumps: Mutex<Vec<(String, u64)>>,
     pub leases: Mutex<Vec<ComputerLeaseRecord>>,
     pub warnings: Mutex<Vec<(String, Value)>>,
+    pub notes: Mutex<Vec<(String, String)>>,
 }
 
 #[async_trait]
@@ -724,6 +725,13 @@ impl ComputerManagerSeams for Seams {
             .lock()
             .unwrap()
             .push((message.to_owned(), detail));
+    }
+
+    fn note(&self, chat_id: &str, text: &str) {
+        self.notes
+            .lock()
+            .unwrap()
+            .push((chat_id.to_owned(), text.to_owned()));
     }
 }
 

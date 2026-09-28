@@ -457,19 +457,37 @@ pub(super) fn input_monitor_unavailable_reply(monitor_error: Option<&str>) -> Cu
     refusal(message, structured)
 }
 
-pub(super) fn input_interrupted_reply(wait: Duration) -> CuaReply {
-    let message = "Computer input was interrupted by physical input. After wait_seconds, read fresh state with computer_get_state on the affected window, then continue from what it shows. Do not replay an uncertain action.";
+pub(super) const USER_INPUT_CAUSE: &str = "user_input";
+
+pub(super) fn user_input_pause_reply() -> CuaReply {
+    let message = "The user used this window and has stopped. Call computer_get_state on this window now and continue the task from what it shows. Do not ask the user and do not replay the interrupted action.";
     refusal(
         message,
         json!({
             "effect": "refused",
             "code": "computer_input_paused",
+            "cause": USER_INPUT_CAUSE,
             "layer": "driver-host",
             "message": message,
-            "wait_seconds": wait.as_secs_f64(),
-            "requery_hint": "Wait wait_seconds, then call computer_get_state on the affected window; that read resumes input. Waiting alone does not.",
+            "requery_hint": "Call computer_get_state with the affected window_id now; that read resumes input. Then continue the task. Do not replay the interrupted action.",
         }),
     )
+}
+
+pub(super) fn input_interrupted_reply(wait: Duration, user_input: bool) -> CuaReply {
+    let message = "Computer input was interrupted by physical input. After wait_seconds, read fresh state with computer_get_state on the affected window, then continue from what it shows. Do not replay an uncertain action.";
+    let mut structured = json!({
+        "effect": "refused",
+        "code": "computer_input_paused",
+        "layer": "driver-host",
+        "message": message,
+        "wait_seconds": wait.as_secs_f64(),
+        "requery_hint": "Wait wait_seconds, then call computer_get_state on the affected window; that read resumes input. Waiting alone does not.",
+    });
+    if user_input {
+        structured["cause"] = json!(USER_INPUT_CAUSE);
+    }
+    refusal(message, structured)
 }
 
 pub(super) fn task_stopped_reply() -> CuaReply {

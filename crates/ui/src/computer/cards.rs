@@ -5,7 +5,9 @@ use zeron_engine::computer::engine_seams::{
     COMPUTER_CONSENT_ALLOW, COMPUTER_CONSENT_ALWAYS_PREFIX, COMPUTER_CONSENT_DECLINE,
     consent_always_label, consent_app_title,
 };
-use zeron_engine::computer::manager::COMPUTER_CONTROL_ON_DISCLOSURE;
+use zeron_engine::computer::manager::{
+    COMPUTER_CONTROL_ON_DISCLOSURE, COMPUTER_USER_PAUSE_NOTE_PREFIX,
+};
 use zeron_engine::computer::runtime::{
     COMPUTER_DESKTOP_REVOKED_NOTE, COMPUTER_ESCAPE_STOP_NOTICE, RevokeSource,
 };
@@ -24,12 +26,19 @@ const LEGACY_CONTROL_ON_NOTE: &str = "Computer control ON for this turn: the age
 pub enum ComputerNotice {
     Disclosure,
     Revoked,
+    Paused,
     SetupRequired,
     Unavailable,
     ControlDenied,
 }
 
 pub fn computer_notice(note: &str) -> Option<ComputerNotice> {
+    if note
+        .strip_prefix(COMPUTER_USER_PAUSE_NOTE_PREFIX)
+        .is_some_and(|app| !app.is_empty())
+    {
+        return Some(ComputerNotice::Paused);
+    }
     match note {
         COMPUTER_CONTROL_ON_DISCLOSURE | LEGACY_CONTROL_ON_NOTE => Some(ComputerNotice::Disclosure),
         COMPUTER_DESKTOP_REVOKED_NOTE | COMPUTER_ESCAPE_STOP_NOTICE => {
@@ -492,6 +501,18 @@ mod tests {
             Some(ComputerNotice::Unavailable)
         );
         assert_eq!(computer_notice("Context compacted"), None);
+    }
+
+    #[test]
+    fn a_takeover_note_is_a_paused_event_whatever_the_app() {
+        use zeron_engine::computer::manager::COMPUTER_USER_PAUSE_NOTE_PREFIX;
+        for app in ["Ghostty", "the target window"] {
+            assert_eq!(
+                computer_notice(&format!("{COMPUTER_USER_PAUSE_NOTE_PREFIX}{app}")),
+                Some(ComputerNotice::Paused)
+            );
+        }
+        assert_eq!(computer_notice("Paused"), None);
     }
 
     #[test]

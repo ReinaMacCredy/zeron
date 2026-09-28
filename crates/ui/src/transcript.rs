@@ -9477,6 +9477,9 @@ impl Transcript {
                 None,
                 theme,
             ),
+            ComputerNotice::Paused => {
+                computer_event_row(crate::icons::CURSOR, text, CardTone::Info, None, theme)
+            }
             ComputerNotice::Unavailable => computer_card(
                 CardTone::Warning,
                 icon,
@@ -17600,6 +17603,24 @@ mod computer_tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_takeover_note_renders_as_a_paused_event_row() {
+        let rows = rows_for_entry(
+            &entry(
+                MessageRole::System,
+                vec![text("t0", "Paused while you used Ghostty")],
+            ),
+            false,
+            false,
+            &mut parse,
+        );
+        let RowKind::ComputerNotice { notice, text, .. } = &rows[0].kind else {
+            panic!("expected an event row");
+        };
+        assert_eq!(*notice, ComputerNotice::Paused);
+        assert_eq!(text.as_ref(), "Paused while you used Ghostty");
     }
 
     #[test]

@@ -18,6 +18,7 @@ pub struct ChatPresence {
     pub window_id: Option<String>,
     pub activity: Option<String>,
     pub tone: PresenceTone,
+    pub user_takeover: bool,
 }
 
 impl ChatPresence {
@@ -29,8 +30,7 @@ impl ChatPresence {
     }
 }
 
-fn pause_target(state: &ThreadComputerState) -> Option<String> {
-    let window_id = state.input_pause.as_ref()?.window_id.as_deref()?;
+fn window_target(state: &ThreadComputerState, window_id: &str) -> Option<String> {
     let window = state.windows.iter().find(|window| window.id == window_id)?;
     window
         .app_name
@@ -42,29 +42,48 @@ fn pause_target(state: &ThreadComputerState) -> Option<String> {
 pub fn chat_presence(store: &ComputerPreviewStore, chat_id: &str) -> Option<ChatPresence> {
     let chat = store.chat_preview(chat_id)?;
     let state = chat.state.as_ref();
-    let own_pause =
-        state.filter(|state| state.input_pause.is_some() && !state.controlled_by_other_thread);
+    let own_pause = state
+        .filter(|state| !state.controlled_by_other_thread)
+        .and_then(|state| state.input_pause.as_ref());
     let tone = if chat.revoked_latched {
         PresenceTone::Revoked {
             summing_up: state.is_some_and(|state| state.input_stopped == Some(true)),
         }
-    } else if own_pause.is_some() {
+    } else if own_pause.is_some() || chat.user_paused {
         PresenceTone::Paused
     } else if state.is_some_and(preview::agent_active) {
         PresenceTone::Driving
     } else {
         return None;
     };
-    let (app, window_id) = match own_pause.filter(|_| tone == PresenceTone::Paused) {
-        Some(state) => (
-            pause_target(state),
-            state
-                .input_pause
-                .as_ref()
-                .and_then(|pause| pause.window_id.clone())
+    let paused = tone == PresenceTone::Paused;
+    let (app, window_id) = match (own_pause.filter(|_| paused), state) {
+        (Some(pause), Some(state)) => (
+            pause
+                .window_id
+                .as_deref()
+                .and_then(|window_id| window_target(state, window_id)),
+            pause
+                .window_id
+                .clone()
                 .or_else(|| chat.last_window_id.clone()),
         ),
-        None => (chat.last_app.clone(), chat.last_window_id.clone()),
+        _ if paused => {
+            let window_id = chat
+                .user_paused_window
+                .clone()
+                .or_else(|| chat.last_window_id.clone());
+            let app = window_id
+                .as_deref()
+                .and_then(|window_id| state.and_then(|state| window_target(state, window_id)))
+                .or_else(|| {
+                    (window_id == chat.last_window_id)
+                        .then(|| chat.last_app.clone())
+                        .flatten()
+                });
+            (app, window_id)
+        }
+        _ => (chat.last_app.clone(), chat.last_window_id.clone()),
     };
     Some(ChatPresence {
         chat_id: chat_id.to_owned(),
@@ -72,6 +91,8 @@ pub fn chat_presence(store: &ComputerPreviewStore, chat_id: &str) -> Option<Chat
         window_id,
         activity: state.and_then(|state| state.activity.clone()),
         tone,
+        user_takeover: paused
+            && (chat.user_paused || own_pause.is_some_and(|pause| pause.user_takeover)),
     })
 }
 
@@ -124,6 +145,9 @@ pub fn ring_specs(presences: &[ChatPresence]) -> Vec<RingSpec> {
                     false,
                     presence.activity.as_deref().unwrap_or("Working").to_owned(),
                 ),
+                PresenceTone::Paused if presence.user_takeover => {
+                    (RingTone::Warning, false, "You're using it".to_owned())
+                }
                 PresenceTone::Paused => (RingTone::Warning, false, "Paused".to_owned()),
                 PresenceTone::NeedsYou => (RingTone::Accent, true, "Waiting for you".to_owned()),
                 PresenceTone::Revoked { .. } => return None,
@@ -265,6 +289,7 @@ mod tests {
                 window_id: Some("w1".into()),
                 activity: Some("Typing".into()),
                 tone: PresenceTone::Driving,
+                user_takeover: false,
             })
         );
         assert!(
@@ -293,6 +318,7 @@ mod tests {
             window_id: Some("w1".into()),
             pid: None,
             message: "Screen locked".into(),
+            user_takeover: false,
         });
         state(&mut store, bystander);
         assert_eq!(chat_presence(&store, "b"), None);
@@ -491,6 +517,7 @@ mod tests {
             window_id: Some("cua:42:7".into()),
             pid: Some(42),
             message: "Screen locked".into(),
+            user_takeover: false,
         });
         state(&mut store, paused);
         let specs = ring_specs(&presences(&store));
@@ -509,6 +536,68 @@ mod tests {
     }
 
     #[test]
+    fn a_takeover_event_turns_the_chat_paused_and_resumed_clears_it() {
+        let mut store = ComputerPreviewStore::default();
+        driving(&mut store, "a");
+        action(&mut store, "a", "w1", "computer_type_text");
+        assert!(store.set_user_paused("a", Some("w1".into())));
+        assert!(
+            !store.set_user_paused("a", Some("w1".into())),
+            "more keys in the same episode change nothing"
+        );
+        let presence = chat_presence(&store, "a").unwrap();
+        assert_eq!(
+            (
+                presence.tone,
+                presence.user_takeover,
+                presence.app.as_deref(),
+                presence.window_id.as_deref()
+            ),
+            (PresenceTone::Paused, true, Some("Calculator"), Some("w1"))
+        );
+        assert!(store.set_user_paused("a", Some("cua:42:7".into())));
+        let ring = ring_specs(&presences(&store));
+        assert_eq!(
+            (ring[0].tone, ring[0].label.as_str(), ring[0].window),
+            (RingTone::Warning, "Zeron · You're using it", 7)
+        );
+        assert!(store.clear_user_paused("a"));
+        assert!(!store.clear_user_paused("a"));
+        let presence = chat_presence(&store, "a").unwrap();
+        assert_eq!(
+            (presence.tone, presence.user_takeover),
+            (PresenceTone::Driving, false)
+        );
+
+        let mut engine_paused = thread_state("a", true);
+        engine_paused.input_pause = Some(ComputerInputPause {
+            window_id: Some("w1".into()),
+            pid: None,
+            message: "The user used this window and has stopped.".into(),
+            user_takeover: true,
+        });
+        state(&mut store, engine_paused);
+        let presence = chat_presence(&store, "a").unwrap();
+        assert_eq!(
+            (presence.tone, presence.user_takeover),
+            (PresenceTone::Paused, true),
+            "the engine's takeover pause also reads as the user's"
+        );
+
+        driving(&mut store, "b");
+        store.set_user_paused("b", None);
+        state(&mut store, thread_state("b", false));
+        assert_eq!(chat_presence(&store, "b"), None);
+        driving(&mut store, "b");
+        assert_eq!(
+            chat_presence(&store, "b").unwrap().tone,
+            PresenceTone::Driving,
+            "the drive ending cleared the held pause"
+        );
+        assert!(!store.set_user_paused("nobody", None), "no drive, no pause");
+    }
+
+    #[test]
     fn an_unreachable_window_pauses_and_names_its_app() {
         let mut store = ComputerPreviewStore::default();
         driving(&mut store, "a");
@@ -517,10 +606,12 @@ mod tests {
             window_id: Some("w1".into()),
             pid: None,
             message: "Screen locked".into(),
+            user_takeover: false,
         });
         state(&mut store, paused.clone());
         let presence = chat_presence(&store, "a").unwrap();
         assert_eq!(presence.tone, PresenceTone::Paused);
+        assert!(!presence.user_takeover);
         assert_eq!(presence.app.as_deref(), Some("Calculator"));
         assert_eq!(presence.window_id.as_deref(), Some("w1"));
         paused.input_pause.as_mut().unwrap().window_id = Some("gone".into());

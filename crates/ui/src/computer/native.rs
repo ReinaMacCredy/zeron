@@ -33,6 +33,7 @@ pub struct NativeHostConfig {
     pub on_emergency_stop: Option<Arc<dyn Fn() + Send + Sync>>,
     pub(crate) browser_admission: Arc<crate::browser::control_admission::Admission>,
     pub cursor_style: Option<Box<dyn Fn() -> Option<super::host::CuaCursorStyle> + Send>>,
+    pub on_takeover: Option<Box<dyn Fn(super::host::TakeoverEvent) + Send>>,
 }
 
 struct HostEvents {
@@ -136,6 +137,7 @@ pub fn native_host_options(
         Box::new(|| Box::pin(async { permissions::start_permission_setup().map(|_| ()) })),
     );
     options.cursor_style = config.cursor_style;
+    options.on_takeover = config.on_takeover;
     options.protected_surface = Some(Box::new(super::protected_surfaces::any_showing));
     options.check_permissions = Some(Box::new({
         let events = events.clone();

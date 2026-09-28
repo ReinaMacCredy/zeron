@@ -1983,6 +1983,7 @@ mod strip_regressions {
             window_id: Some("w1".into()),
             pid: None,
             message: "Screen locked".into(),
+            user_takeover: false,
         });
         assert_eq!(
             apply(paused),

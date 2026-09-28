@@ -170,6 +170,12 @@ impl ComputerManagerSeams for EngineComputerSeams {
             sessions.record_computer_generation(chat_id, generation);
         }
     }
+
+    fn note(&self, chat_id: &str, text: &str) {
+        if let Some(sessions) = self.sessions() {
+            sessions.write_computer_note(chat_id, text, None);
+        }
+    }
 }
 
 #[cfg(test)]
