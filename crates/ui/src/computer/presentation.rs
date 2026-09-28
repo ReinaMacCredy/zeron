@@ -254,7 +254,7 @@ fn keyboard_shortcut(value: &str) -> String {
         .join(" + ")
 }
 
-fn app_name(value: Option<&str>) -> Option<String> {
+pub(crate) fn app_name(value: Option<&str>) -> Option<String> {
     let name = value?.trim();
     if name.is_empty() {
         return None;

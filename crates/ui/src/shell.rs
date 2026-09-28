@@ -703,6 +703,9 @@ impl SettingsSection {
                 ("Computer control", &["computer use", "desktop"]),
                 ("Cursor colors", &["cursor", "color"]),
                 ("Preview", &["compact", "large"]),
+                ("Placement", &["rail", "floating"]),
+                ("Developer access", &["javascript", "browser"]),
+                ("Always-allowed apps", &["consent", "allow"]),
                 ("Getting started", &[]),
                 ("Recent Computer actions", &["history", "audit"]),
                 ("Advanced", &["permission", "driver"]),
@@ -14048,6 +14051,18 @@ mod tests {
         assert_eq!(
             SettingsSection::General.matching_rows("steer"),
             vec!["Follow-up behavior"]
+        );
+        assert_eq!(
+            SettingsSection::Computer.matching_rows("rail"),
+            vec!["Placement"]
+        );
+        assert_eq!(
+            SettingsSection::Computer.matching_rows("javascript"),
+            vec!["Developer access"]
+        );
+        assert_eq!(
+            SettingsSection::Computer.matching_rows("consent"),
+            vec!["Always-allowed apps"]
         );
         // A label-only hit expands nothing; the section row stands alone.
         assert!(

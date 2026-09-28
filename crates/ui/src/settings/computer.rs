@@ -8,9 +8,9 @@ use gpui::{
     prelude::*, px,
 };
 use zeron_proto::computer::{
-    AgentCursorColorMode, COMPUTER_AUDIT_HISTORY_MAX_LIMIT, CUA_NATIVE_REVISION,
-    ComputerAuditEffect, ComputerAuditHistoryEntry, ComputerAuditHistoryStatus,
-    ComputerAvailability, ComputerBuildSignature, ComputerCapabilities,
+    AgentCursorColorMode, COMPUTER_AUDIT_HISTORY_MAX_LIMIT, CUA_DRIVER_VERSION,
+    CUA_NATIVE_REVISION, ComputerAuditEffect, ComputerAuditHistoryEntry,
+    ComputerAuditHistoryStatus, ComputerAvailability, ComputerBuildSignature, ComputerCapabilities,
     ComputerGetAuditHistoryInput, ComputerGetAuditHistoryResult, ComputerHealthStatus,
     ComputerHostStatus, ComputerPermission, ComputerPreviewPlacement, ComputerPreviewSize,
     ComputerSettings, computer_permission_setup_message, list_computer_permissions,
@@ -46,11 +46,7 @@ const COMPUTER_PANES: [(PermissionPane, &str); 3] = [
     ),
 ];
 
-pub const SETUP_ORDER: [ComputerPermission; 3] = [
-    ComputerPermission::Accessibility,
-    ComputerPermission::InputMonitoring,
-    ComputerPermission::ScreenRecording,
-];
+pub const SETUP_ORDER: [ComputerPermission; 3] = crate::computer::cards::COMPUTER_PERMISSION_ORDER;
 
 pub const HISTORY_PAGE_SIZE: u32 = 30;
 
@@ -59,6 +55,14 @@ pub fn next_setup_pane(missing: &[ComputerPermission]) -> Option<PermissionPane>
         .into_iter()
         .find(|permission| missing.contains(permission))
         .map(PermissionPane::from_permission)
+}
+
+pub fn history_title(entry: &ComputerAuditHistoryEntry) -> String {
+    let action = crate::computer::presentation::describe_computer_call(&entry.tool, None);
+    match crate::computer::presentation::app_name(entry.app.as_deref()) {
+        Some(app) => format!("{action} · {app}"),
+        None => action,
+    }
 }
 
 pub fn next_history_page(
@@ -902,13 +906,7 @@ impl ComputerPage {
                                 .min_w_0()
                                 .flex()
                                 .flex_col()
-                                .child(widgets::row_title(
-                                    theme,
-                                    crate::computer::presentation::describe_computer_call(
-                                        &entry.tool,
-                                        None,
-                                    ),
-                                ))
+                                .child(widgets::row_title(theme, history_title(entry)))
                                 .child(
                                     div()
                                         .text_size(crate::typography::ui_rems(12.0))
@@ -1687,7 +1685,7 @@ impl Render for ComputerPage {
                 let backend = match &status.status.availability {
                     ComputerAvailability::Available {
                         backend: Some(backend),
-                    } if backend == "cua" => "Cua 0.28.2".to_string(),
+                    } if backend == "cua" => format!("Cua {CUA_DRIVER_VERSION}"),
                     ComputerAvailability::Available {
                         backend: Some(backend),
                     } => backend.clone(),
@@ -1928,20 +1926,48 @@ mod tests {
     }
 
     #[test]
-    fn set_up_order_is_accessibility_then_input_monitoring_then_screen_recording() {
+    fn set_up_order_is_accessibility_then_screen_recording_then_input_monitoring() {
         assert_eq!(
             next_setup_pane(&[Accessibility, ScreenRecording, InputMonitoring]),
             Some(PermissionPane::Accessibility)
         );
         assert_eq!(
             next_setup_pane(&[ScreenRecording, InputMonitoring]),
-            Some(PermissionPane::InputMonitoring)
-        );
-        assert_eq!(
-            next_setup_pane(&[ScreenRecording]),
             Some(PermissionPane::ScreenRecording)
         );
+        assert_eq!(
+            next_setup_pane(&[InputMonitoring]),
+            Some(PermissionPane::InputMonitoring)
+        );
         assert_eq!(next_setup_pane(&[]), None);
+    }
+
+    #[test]
+    fn panes_follow_one_order() {
+        let panes: Vec<_> = COMPUTER_PANES.iter().map(|(pane, _)| *pane).collect();
+        let order: Vec<_> = crate::computer::cards::COMPUTER_PERMISSION_ORDER
+            .into_iter()
+            .map(PermissionPane::from_permission)
+            .collect();
+        assert_eq!(panes, order);
+        assert_eq!(
+            SETUP_ORDER,
+            crate::computer::cards::COMPUTER_PERMISSION_ORDER
+        );
+    }
+
+    #[test]
+    fn history_rows_name_the_app() {
+        let row = |app: Option<&str>| {
+            let mut value = entry(0, "computer_type_text");
+            if let Some(app) = app {
+                value["app"] = json!(app);
+            }
+            history_title(&serde_json::from_value(value).unwrap())
+        };
+        assert_eq!(row(Some("Calculator")), "Type · Calculator");
+        assert_eq!(row(Some("com.apple.calculator")), "Type · Calculator");
+        assert_eq!(row(None), "Type");
     }
 
     #[test]
@@ -2066,10 +2092,10 @@ mod tests {
         assert_eq!(opened(cx), Some(PermissionPane::Accessibility));
         live.set(grants(true, false, false));
         click(cx, "computer-set-up");
-        assert_eq!(opened(cx), Some(PermissionPane::InputMonitoring));
-        live.set(grants(true, false, true));
-        click(cx, "computer-set-up");
         assert_eq!(opened(cx), Some(PermissionPane::ScreenRecording));
+        live.set(grants(true, true, false));
+        click(cx, "computer-set-up");
+        assert_eq!(opened(cx), Some(PermissionPane::InputMonitoring));
         live.set(grants(true, true, true));
         page.update(cx, |_, cx| cx.notify());
         cx.run_until_parked();
