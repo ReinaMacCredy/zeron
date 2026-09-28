@@ -25,13 +25,25 @@ fn pointer(pid: u32, window_id: u32) -> PhysicalComputerInput {
 }
 
 fn quiet_fixture() -> (Fixture, Events) {
+    capped_fixture(Duration::from_secs(20))
+}
+
+fn capped_fixture(cap: Duration) -> (Fixture, Events) {
     let events = Events::default();
     let sink = events.clone();
     let f = fixture_with(Driver::default(), |o| {
         o.input_quiet = QUIET;
+        o.input_quiet_cap = cap;
         o.on_takeover = Some(Box::new(move |event| sink.lock().unwrap().push(event)));
     });
     (f, events)
+}
+
+fn assert_user_input_refusal(reply: &CuaReply) {
+    assert_paused(reply);
+    let refusal = structured(reply);
+    assert_eq!(refusal["cause"], json!("user_input"), "{refusal}");
+    assert!(refusal.get("wait_seconds").is_none(), "{refusal}");
 }
 
 fn act(owner: &CuaComputerTask) -> ComputerHostCall {
@@ -68,36 +80,27 @@ fn resumed(thread: &str) -> TakeoverEvent {
 }
 
 #[tokio::test]
-async fn a_takeover_holds_the_next_action_until_quiet_then_refuses_with_requery() {
+async fn a_takeover_refuses_the_next_action_at_once_with_requery() {
     let (f, events) = quiet_fixture();
     let owner = task("takeover", Some("turn"));
     take_over(&f, &owner).await;
-    let held = f.spawn(act(&owner));
-    sleep_ms(700).await;
     assert!(f.host.physical_input(keyboard(700)).await);
-    let last_input = Instant::now();
-    sleep_ms(1_000).await;
+    let asked = Instant::now();
+    let reply = f.send(act(&owner)).await;
     assert!(
-        !held.handle.is_finished(),
-        "the action waits while the user keeps typing"
+        asked.elapsed() < Duration::from_millis(500),
+        "a mutation never waits inside the engine's desktop operation: {:?}",
+        asked.elapsed()
     );
-    let reply = held.reply().await;
-    assert!(
-        last_input.elapsed() + LATE >= QUIET,
-        "released {:?} after the last input",
-        last_input.elapsed()
-    );
-    assert_paused(&reply);
+    assert_user_input_refusal(&reply);
     let refusal = structured(&reply);
-    assert_eq!(refusal["cause"], json!("user_input"), "{refusal}");
-    assert!(refusal.get("wait_seconds").is_none(), "{refusal}");
     let message = refusal["message"].as_str().unwrap();
     assert!(message.contains("has stopped"), "{message}");
     assert!(message.contains("Do not ask the user"), "{message}");
     assert_eq!(
         f.count("key"),
         1,
-        "the held action never reached the driver"
+        "the refused action never reached the driver"
     );
     assert_eq!(*events.lock().unwrap(), vec![paused("takeover")]);
 
@@ -143,7 +146,7 @@ async fn a_stop_during_the_quiet_wait_returns_task_stopped() {
     let (f, _) = quiet_fixture();
     let owner = task("stopper", Some("turn"));
     take_over(&f, &owner).await;
-    let held = f.spawn(act(&owner));
+    let held = f.spawn(read(&owner));
     sleep_ms(300).await;
     let stopped_at = Instant::now();
     assert!(
@@ -165,5 +168,44 @@ async fn a_stop_during_the_quiet_wait_returns_task_stopped() {
             .is_some_and(|error| error.contains("stopped computer use")),
         "{reply:?}"
     );
+    assert!(!f.has("observe"));
     assert_eq!(f.count("key"), 1);
+}
+
+#[tokio::test]
+async fn typing_past_the_cap_refuses_the_read_and_keeps_the_pause() {
+    let cap = Duration::from_millis(800);
+    let (f, events) = capped_fixture(cap);
+    let owner = task("typist", Some("turn"));
+    take_over(&f, &owner).await;
+    let started = Instant::now();
+    let reading = f.spawn(read(&owner));
+    sleep_ms(300).await;
+    assert!(f.host.physical_input(keyboard(700)).await);
+    let last_input = Instant::now();
+    let reply = reading.reply().await;
+    assert!(
+        started.elapsed() + LATE >= cap && last_input.elapsed() < QUIET,
+        "released at the cap, {:?} after the call, while input was {:?} old",
+        started.elapsed(),
+        last_input.elapsed()
+    );
+    assert_user_input_refusal(&reply);
+    assert!(!f.has("observe"), "the held read never ran");
+    assert_eq!(
+        *events.lock().unwrap(),
+        vec![paused("typist")],
+        "no Resumed while the user is still typing"
+    );
+    assert_user_input_refusal(&f.send(act(&owner)).await);
+    assert_eq!(f.count("key"), 1, "the pause still holds");
+
+    sleep_ms(QUIET.saturating_sub(last_input.elapsed()).as_millis() as u64 + 100).await;
+    assert_clean_ok(&f.send(read(&owner)).await);
+    assert_clean_ok(&f.send(act(&owner)).await);
+    assert_eq!(f.count("key"), 2);
+    assert_eq!(
+        *events.lock().unwrap(),
+        vec![paused("typist"), resumed("typist")]
+    );
 }

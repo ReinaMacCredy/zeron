@@ -57,8 +57,8 @@ const HANDSHAKE_ATTEMPTS: usize = 80;
 const HANDSHAKE_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(200);
 const HANDSHAKE_RETRY_DELAY: Duration = Duration::from_millis(50);
 const EXIT_GRACE: Duration = Duration::from_millis(500);
-// The engine gives up on a host call after 35 s (CUA_HOST_CALL_TIMEOUT_MS); a held read still needs time to run.
-const QUIET_WAIT_CAP: Duration = Duration::from_secs(20);
+const ENGINE_CALL_TIMEOUT: Duration =
+    Duration::from_millis(zeron_engine::computer::cua_backend::CUA_HOST_CALL_TIMEOUT_MS);
 const QUIET_POLL: Duration = Duration::from_millis(50);
 
 const STOPPED_DURING_STARTUP: &str = "Cua Driver stopped during startup.";
@@ -495,7 +495,8 @@ impl Host {
         if quiet.is_zero() {
             return None;
         }
-        let cap = Instant::now() + QUIET_WAIT_CAP;
+        let started = Instant::now();
+        let cap = started + self.options.input_quiet_cap;
         let mut held = false;
         loop {
             let release = {
@@ -507,7 +508,7 @@ impl Host {
                     return Some(not_dispatched(CANCELLED_BEFORE_DISPATCH));
                 }
                 match state.last_user_input(task) {
-                    Some(at) => (at + quiet).min(cap),
+                    Some(at) => at + quiet,
                     None => break,
                 }
             };
@@ -515,11 +516,16 @@ impl Host {
             if now >= release {
                 break;
             }
+            if now >= cap {
+                return Some(user_input_pause_reply());
+            }
             held = true;
-            tokio::time::sleep((release - now).min(QUIET_POLL)).await;
+            tokio::time::sleep((release.min(cap) - now).min(QUIET_POLL)).await;
         }
         if held {
-            conn.set_timeout(REQUEST_IDLE_TIMEOUT);
+            conn.deadline
+                .set(conn.deadline.get().min(started + ENGINE_CALL_TIMEOUT));
+            conn.deadline_moved.notify_one();
         }
         None
     }
@@ -806,8 +812,9 @@ impl Host {
         {
             return Ok(browser_self_target_reply());
         }
-        let hold = {
+        let (refuse, hold) = {
             let state = self.state.borrow();
+            let paused = state.user_paused(task.as_ref());
             let read_of_target = name == "get_window_state"
                 && model_observation
                 && task.as_ref().is_some_and(|task| {
@@ -817,9 +824,20 @@ impl Host {
                         .zip(target_from_args(&call.args, None))
                         .is_some_and(|(held, read)| held.pid == read.pid)
                 });
-            state.user_paused(task.as_ref())
-                && (is_mutation_name(&name) || name == "check_input_ready" || read_of_target)
+            let refuse = paused
+                && (CUA_ACTION_TOOLS.contains(&name.as_str()) || name == "check_input_ready");
+            let reply = if !refuse {
+                None
+            } else if admission.stopped(&state) {
+                Some(task_stopped_reply())
+            } else {
+                Some(user_input_pause_reply())
+            };
+            (reply, paused && read_of_target)
         };
+        if let Some(reply) = refuse {
+            return Ok(reply);
+        }
         if hold
             && let Some(reply) = self
                 .hold_until_quiet(task.as_ref(), &conn, &admission)
