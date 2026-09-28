@@ -988,12 +988,11 @@ fn auto_update_enabled() -> bool {
         .unwrap_or(false)
 }
 
-/// `ZERON_AUTO_UPDATE=0|false|no` — the desktop app then only reports: no
-/// background download and no install on quit. Unset means on.
+/// `ZERON_AUTO_UPDATE=1|true|yes` — the desktop app downloads in the
+/// background and installs on quit. Unset means report-only: an upstream
+/// release must never replace a fork build unasked.
 pub fn desktop_auto_update_enabled() -> bool {
-    std::env::var("ZERON_AUTO_UPDATE")
-        .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no"))
-        .unwrap_or(true)
+    auto_update_enabled()
 }
 
 /// "Nothing would be interrupted by a restart right now" — wired by the engine

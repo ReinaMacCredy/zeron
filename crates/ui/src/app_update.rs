@@ -11,7 +11,7 @@
 //! release downloads in the background and is verified, the strip offers
 //! "restart to apply", and a staged update the user never restarts for is
 //! installed when the app quits — so nobody stays on a stale version just
-//! because they never clicked. `ZERON_AUTO_UPDATE=0` keeps it report-only.
+//! because they never clicked. Only with `ZERON_AUTO_UPDATE=1`; unset reports only.
 
 use std::path::{Path, PathBuf};
 
@@ -66,7 +66,7 @@ pub enum StripAction {
 pub struct AppUpdate {
     install: InstallKind,
     blocker: Option<UpdateBlocker>,
-    /// Background download + install on quit (`ZERON_AUTO_UPDATE` unset or on).
+    /// Background download + install on quit (`ZERON_AUTO_UPDATE=1`).
     automatic: bool,
     edge_url: String,
     data_dir: PathBuf,
