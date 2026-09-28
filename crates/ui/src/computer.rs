@@ -20,6 +20,7 @@ pub mod protected_surfaces;
 pub mod registration;
 #[cfg(target_os = "macos")]
 pub mod runtime_ownership;
+pub mod status_menu;
 #[cfg(target_os = "macos")]
 pub mod stop_native_helper;
 pub mod strip;

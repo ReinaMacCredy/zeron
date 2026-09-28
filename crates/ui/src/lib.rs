@@ -233,6 +233,16 @@ pub fn run_app(config: UiConfig) {
                     }
                 })
                 .detach();
+                #[cfg(target_os = "macos")]
+                {
+                    let open_state = state.clone();
+                    computer::status_menu::drive(
+                        state.clone(),
+                        move |chat_id, cx| open_notified_chat(chat_id, &open_state, cx),
+                        computer::native::status_item::apply,
+                        cx,
+                    );
+                }
                 state::AppState::bootstrap(state.clone(), config.boot(), cx);
 
                 // Graceful teardown: an in-process engine drains live runs and flushes

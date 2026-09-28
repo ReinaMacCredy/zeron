@@ -6,6 +6,7 @@ pub mod permissions;
 mod probe;
 pub mod release_held_input;
 pub mod shield;
+pub mod status_item;
 pub mod target_ring;
 pub mod window_frame_stream;
 mod window_info;
