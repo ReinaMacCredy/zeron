@@ -814,7 +814,7 @@ impl Host {
         }
         let (refuse, hold) = {
             let state = self.state.borrow();
-            let paused = state.user_paused(task.as_ref());
+            let paused = !self.options.input_quiet.is_zero() && state.user_paused(task.as_ref());
             let read_of_target = name == "get_window_state"
                 && model_observation
                 && task.as_ref().is_some_and(|task| {
