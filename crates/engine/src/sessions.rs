@@ -1543,6 +1543,26 @@ impl SessionsEngine {
         Ok(rx)
     }
 
+    pub async fn ask_user(
+        &self,
+        chat_id: &str,
+        run_secret: &str,
+        questions: Vec<UserInputQuestion>,
+        wait: std::time::Duration,
+    ) -> Result<Vec<UserInputAnswer>, String> {
+        self.computer_run(chat_id, run_secret)
+            .ok_or_else(|| "This chat has no live run to ask in.".to_owned())?;
+        let request_id = new_id();
+        let answers = self.raise_input(chat_id, &request_id, questions)?;
+        match tokio::time::timeout(wait, answers).await {
+            Ok(answers) => Ok(answers.unwrap_or_default()),
+            Err(_) => {
+                self.settle_input(chat_id, &request_id);
+                Ok(Vec::new())
+            }
+        }
+    }
+
     pub fn settle_input(&self, chat_id: &str, request_id: &str) -> bool {
         let runs = lock(&self.inner.runs);
         let Some(run) = runs.get(chat_id) else {

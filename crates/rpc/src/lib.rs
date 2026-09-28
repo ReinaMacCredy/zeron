@@ -81,6 +81,11 @@ pub mod methods {
     /// transcript, for an agent that asked for them mid-turn.
     /// `{chatId}` → `{messages: [{id, fromChatId, text}]}`.
     pub const TAKE_THREAD_MESSAGES: &str = "TakeThreadMessages";
+    /// Ask the person in `chatId`'s own transcript and wait for the answer,
+    /// authenticated by the run secret. `{chatId, runSecret, questions:
+    /// [UserInputQuestion]}` → `{answers: [UserInputAnswer]}`; empty when the
+    /// turn ended or nobody answered in time.
+    pub const ASK_USER: &str = "AskUser";
     /// Fork `sourceChatId` after the assistant entry `entryId` into the
     /// client-minted `chatId`, replying with the created `Chat` row.
     pub const FORK_CHAT: &str = "ForkChat";

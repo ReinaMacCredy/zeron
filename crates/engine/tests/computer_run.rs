@@ -1570,3 +1570,86 @@ async fn a_question_the_agent_withdrew_does_not_hold_awaiting_input() {
     rig.finish_turn().await;
     rig.core.shutdown().await;
 }
+
+#[tokio::test]
+async fn ask_user_parks_a_multi_select_card_and_returns_every_picked_label() {
+    let rig = rig();
+    rig.run("c1", "plain", PermissionMode::Ask, None);
+    let secret = rig.saw(1).await.secret.expect("the run carries a secret");
+    assert_eq!(
+        rig.core
+            .sessions
+            .ask_user(
+                CHAT,
+                "forged",
+                vec![plain_question("q1")],
+                Duration::from_secs(5)
+            )
+            .await
+            .unwrap_err(),
+        "This chat has no live run to ask in."
+    );
+
+    let mut question = plain_question("layers");
+    question.options = vec!["UI".into(), "Engine".into(), "MCP".into()];
+    question.multi_select = true;
+    let asked = tokio::spawn({
+        let (sessions, secret) = (rig.core.sessions.clone(), secret.clone());
+        async move {
+            sessions
+                .ask_user(CHAT, &secret, vec![question], Duration::from_secs(10))
+                .await
+        }
+    });
+    let open = || {
+        rig.entries(CHAT)
+            .iter()
+            .flat_map(|e| e.parts.clone())
+            .find_map(|part| match part {
+                MessagePart::Input {
+                    request_id,
+                    questions,
+                    resolved: false,
+                    ..
+                } => Some((request_id, questions)),
+                _ => None,
+            })
+    };
+    wait_for(|| open().is_some(), "the question card").await;
+    let (request_id, questions) = open().unwrap();
+    assert!(questions[0].multi_select);
+    wait_for(
+        || rig.core.sessions.session_status(CHAT).unwrap().status == SessionStatus::AwaitingInput,
+        "the composer to await input",
+    )
+    .await;
+    rig.command(
+        "pick",
+        SessionCommandPayload::RespondInput {
+            request_id,
+            answers: vec![UserInputAnswer {
+                question_id: "layers".into(),
+                labels: vec!["UI".into(), "MCP".into()],
+            }],
+        },
+        None,
+    );
+    let answers = asked.await.unwrap().unwrap();
+    assert_eq!(answers[0].labels, vec!["UI".to_string(), "MCP".to_string()]);
+
+    let unanswered = rig
+        .core
+        .sessions
+        .ask_user(
+            CHAT,
+            &secret,
+            vec![plain_question("late")],
+            Duration::from_millis(50),
+        )
+        .await
+        .unwrap();
+    assert!(unanswered.is_empty());
+    wait_for(|| open().is_none(), "the timed-out card to settle").await;
+    rig.finish_turn().await;
+    rig.core.shutdown().await;
+}
