@@ -9,9 +9,7 @@ use zeron_engine::computer::manager::COMPUTER_CONTROL_ON_DISCLOSURE;
 use zeron_engine::computer::runtime::{
     COMPUTER_DESKTOP_REVOKED_NOTE, COMPUTER_ESCAPE_STOP_NOTICE, RevokeSource,
 };
-use zeron_proto::computer::{
-    ComputerConsentApp, ComputerConsentScope, ComputerPermission, ThreadComputerState,
-};
+use zeron_proto::computer::{ComputerConsentApp, ComputerConsentScope, ComputerPermission};
 use zeron_proto::{UserInputAnswer, UserInputQuestion};
 
 use crate::appshots::{AppshotCapabilities, CapabilityState};
@@ -272,30 +270,6 @@ pub fn missing_computer_permissions(capabilities: AppshotCapabilities) -> Vec<Co
             })
         })
         .collect()
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InputPauseNotice {
-    pub title: String,
-    pub body: String,
-}
-
-/// No "Check again": Zeron has no UI-facing readiness read; the next state clears it.
-pub fn input_pause_notice(state: &ThreadComputerState) -> Option<InputPauseNotice> {
-    let pause = state.input_pause.as_ref()?;
-    let window = pause
-        .window_id
-        .as_deref()
-        .and_then(|id| state.windows.iter().find(|window| window.id == id));
-    let target = window
-        .and_then(|window| window.app_name.clone())
-        .or_else(|| window.map(|window| window.title.clone()))
-        .filter(|target| !target.trim().is_empty())
-        .unwrap_or_else(|| "The target window".into());
-    Some(InputPauseNotice {
-        title: format!("{target} isn't reachable"),
-        body: "Bring it onto this desktop or exit full screen. The agent continues once it can see the window.".into(),
-    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -727,45 +701,6 @@ mod tests {
         assert!(!is_control_denied(false, Some(output)));
         assert!(!is_control_denied(true, Some("approval_denied")));
         assert!(!is_control_denied(true, None));
-    }
-
-    #[test]
-    fn an_input_pause_names_its_window_and_clears_with_the_pause() {
-        let mut state: ThreadComputerState = serde_json::from_value(serde_json::json!({
-            "threadId": "chat-1",
-            "version": 1,
-            "computerId": "local",
-            "windows": [{ "id": "w1", "title": "Invoices", "appName": "Numbers", "focused": false, "minimized": false, "visible": true }],
-            "screenSize": { "width": 100, "height": 100 },
-            "agentActive": true,
-            "controlledByOtherThread": false,
-            "availability": { "kind": "available", "backend": "mac" },
-            "health": { "status": "connected", "consecutiveFailures": 0, "reconnects": 0, "captureAvailable": true },
-            "capabilities": {
-                "windows": true, "windowBounds": true, "stacking": false, "capture": true, "input": true,
-                "clipboard": false, "focus": true, "raise": true, "ghostCursor": true, "visibleDesktop": true
-            }
-        }))
-        .expect("thread state");
-        assert_eq!(input_pause_notice(&state), None);
-        state.input_pause = Some(zeron_proto::computer::ComputerInputPause {
-            window_id: Some("w1".into()),
-            pid: None,
-            message: "Screen locked".into(),
-        });
-        assert_eq!(
-            input_pause_notice(&state).unwrap().title,
-            "Numbers isn't reachable"
-        );
-        assert_eq!(
-            input_pause_notice(&state).unwrap().body,
-            "Bring it onto this desktop or exit full screen. The agent continues once it can see the window."
-        );
-        state.input_pause.as_mut().unwrap().window_id = Some("gone".into());
-        assert_eq!(
-            input_pause_notice(&state).unwrap().title,
-            "The target window isn't reachable"
-        );
     }
 
     #[test]

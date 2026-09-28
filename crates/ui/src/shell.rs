@@ -2255,6 +2255,9 @@ impl Shell {
             this.on_state_changed(&state, cx);
             cx.notify();
         });
+        if let Some(presence) = crate::computer::presence::map(cx) {
+            cx.observe(&presence, |_, _, cx| cx.notify()).detach();
+        }
         // A reopened window reuses AppState, so the engine may already be
         // ready. Only show the boot splash while it is actually connecting.
         let splash = match &state.read(cx).connection {
@@ -8197,13 +8200,26 @@ impl Shell {
                         SIDEBAR_ACTIVE_HARNESS_TITLE_GAP
                     }))
                     .children(compact_status)
-                    .when(!harnesses.is_empty(), |el| {
-                        el.child(crate::pickers::harness_mark_stack(
-                            &harnesses,
+                    .map(|el| {
+                        let alpha = if archived_muted { 0.4 } else { 0.8 };
+                        match crate::computer::strip::chat_glyph(
+                            "chat-row",
+                            &id,
                             SIDEBAR_ACTIVE_HARNESS_ICON_SIZE,
-                            subline,
-                            if archived_muted { 0.4 } else { 0.8 },
-                        ))
+                            alpha,
+                            theme,
+                            cx,
+                        ) {
+                            Some(glyph) => el.child(glyph),
+                            None => el.when(!harnesses.is_empty(), |el| {
+                                el.child(crate::pickers::harness_mark_stack(
+                                    &harnesses,
+                                    SIDEBAR_ACTIVE_HARNESS_ICON_SIZE,
+                                    subline,
+                                    alpha,
+                                ))
+                            }),
+                        }
                     })
                     // Unsent text in this chat's composer (t3code's amber pen).
                     .when(unsent, |el| {

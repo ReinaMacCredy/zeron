@@ -419,21 +419,12 @@ fn main() -> anyhow::Result<()> {
                         .expect("decoded still");
                     cx.update(|cx| preview::update_store(&store, cx, |s| s.accept_still(CHAT, Some(decoded))));
                     event(cx, ComputerEvent::ThreadState { state: Box::new(thread_state(true, true)) });
-                    state.update(cx, |s, cx| {
-                        s.computer_input_pauses.insert(
-                            CHAT.into(),
-                            computer::cards::input_pause_notice(&thread_state(true, true))
-                                .expect("pause notice"),
-                        );
-                        cx.notify();
-                    });
                     pause(cx, 800).await;
                     capture(window.into(), cx, &output, "still-fallback-input-paused")?;
 
                     if let Some(p45) = &p45_output {
                         std::fs::create_dir_all(p45)?;
                         state.update(cx, |s, cx| {
-                            s.computer_input_pauses.remove(CHAT);
                             s.receive_transcript_frame(reset(long_transcript.clone()), cx).unwrap();
                             cx.notify();
                         });

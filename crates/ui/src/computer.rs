@@ -12,6 +12,7 @@ pub mod host;
 pub mod host_socket;
 #[cfg(target_os = "macos")]
 pub mod native;
+pub mod presence;
 pub mod presentation;
 pub mod preview;
 pub mod preview_card;
@@ -21,6 +22,7 @@ pub mod registration;
 pub mod runtime_ownership;
 #[cfg(target_os = "macos")]
 pub mod stop_native_helper;
+pub mod strip;
 
 /// Proof knob (`ZERON_CUA_PROBE=<file>`): spawn the bundled driver through the
 /// host, run one grant-requiring read, retire it, and write the replies to

@@ -11,6 +11,7 @@ use zeron_proto::computer::{
 };
 use zeron_rpc::{RpcError, methods};
 
+use super::presence::ComputerPresenceMap;
 use crate::state::EngineHandle;
 
 pub const STILL_POLL_INTERVAL: Duration = Duration::from_millis(1_000);
@@ -102,10 +103,13 @@ pub struct StatusBadge {
 }
 
 #[derive(Debug, Default)]
-struct ChatPreview {
+pub(super) struct ChatPreview {
     phase: Option<PreviewPhase>,
     last_action_label: Option<String>,
-    state: Option<ThreadComputerState>,
+    pub(super) last_app: Option<String>,
+    pub(super) last_window_id: Option<String>,
+    pub(super) revoked_latched: bool,
+    pub(super) state: Option<ThreadComputerState>,
     agent_active: bool,
     tap: Option<PreviewImage>,
     still: Option<PreviewImage>,
@@ -315,6 +319,8 @@ impl ComputerPreviewStore {
             && !matches!(chat.phase, Some(PreviewPhase::Armed | PreviewPhase::Live));
         chat.phase = phase;
         if fresh_task {
+            chat.last_app = None;
+            chat.last_window_id = None;
             self.evicted
                 .extend(chat.tap.take().map(|frame| frame.image));
             self.evicted
@@ -331,6 +337,12 @@ impl ComputerPreviewStore {
                 let active = agent_active(state);
                 let chat = self.chat(&state.thread_id);
                 let was = std::mem::replace(&mut chat.agent_active, active);
+                let stopped = |state: &ThreadComputerState| state.input_stopped == Some(true);
+                if stopped(state) {
+                    chat.revoked_latched |= !chat.state.as_ref().is_some_and(stopped);
+                } else if active && !was {
+                    chat.revoked_latched = false;
+                }
                 chat.state = Some((**state).clone());
                 if active != was {
                     let next = phase_on_agent_edge(chat.phase, active);
@@ -349,6 +361,8 @@ impl ComputerPreviewStore {
                 action,
                 ..
             } => {
+                let mut changed = self.chat(thread_id).phase.is_none()
+                    && self.set_phase(thread_id, Some(PreviewPhase::Armed));
                 let chat = self.chat(thread_id);
                 let app = chat.state.as_ref().and_then(|state| {
                     state
@@ -357,20 +371,26 @@ impl ComputerPreviewStore {
                         .find(|window| Some(&window.id) == window_id.as_ref())
                         .and_then(|window| window.app_name.clone())
                 });
+                if let Some(window_id) = window_id {
+                    let same_window = chat.last_window_id.as_ref() == Some(window_id);
+                    let next_app = app
+                        .clone()
+                        .or_else(|| same_window.then(|| chat.last_app.clone()).flatten());
+                    changed |= !same_window || chat.last_app != next_app;
+                    chat.last_window_id = Some(window_id.clone());
+                    chat.last_app = next_app;
+                }
                 let Some(label) = action_status_label(
                     action,
                     app.as_deref(),
                     delivery.as_ref().map(|delivery| delivery.path.as_str()),
                 ) else {
-                    return false;
+                    return changed;
                 };
                 if chat.last_action_label.as_deref() == Some(label.as_str()) {
-                    return false;
+                    return changed;
                 }
                 chat.last_action_label = Some(label);
-                if chat.phase.is_none() {
-                    self.set_phase(thread_id, Some(PreviewPhase::Armed));
-                }
                 true
             }
             _ => false,
@@ -483,6 +503,20 @@ impl ComputerPreviewStore {
         self.set_phase(chat_id, next)
     }
 
+    pub fn clear_revoked(&mut self, chat_id: &str) -> bool {
+        self.chats
+            .get_mut(chat_id)
+            .is_some_and(|chat| std::mem::take(&mut chat.revoked_latched))
+    }
+
+    pub(super) fn chat_preview(&self, chat_id: &str) -> Option<&ChatPreview> {
+        self.chats.get(chat_id)
+    }
+
+    pub(super) fn chat_ids(&self) -> impl Iterator<Item = &str> {
+        self.chats.keys().map(String::as_str)
+    }
+
     pub fn settings(&self) -> &ComputerSettings {
         &self.settings
     }
@@ -583,6 +617,7 @@ pub enum TapEvent {
 
 pub struct ComputerPreview {
     pub store: Entity<ComputerPreviewStore>,
+    presence: Entity<ComputerPresenceMap>,
     taps: mpsc::UnboundedSender<TapEvent>,
     _pump: Task<()>,
 }
@@ -594,19 +629,43 @@ pub fn store(cx: &App) -> Option<Entity<ComputerPreviewStore>> {
         .map(|preview| preview.store.clone())
 }
 
+pub fn presence_map(cx: &App) -> Option<Entity<ComputerPresenceMap>> {
+    cx.try_global::<ComputerPreview>()
+        .map(|preview| preview.presence.clone())
+}
+
 pub fn update_store(
     store: &Entity<ComputerPreviewStore>,
     cx: &mut App,
     change: impl FnOnce(&mut ComputerPreviewStore) -> bool,
 ) {
-    let evicted = store.update(cx, |store, cx| {
-        if change(store) {
+    let (changed, evicted) = store.update(cx, |store, cx| {
+        let changed = change(store);
+        if changed {
             cx.notify();
         }
-        store.take_evicted()
+        (changed, store.take_evicted())
     });
     for image in evicted {
         gpui::ImageSource::Render(image).evict(None, cx);
+    }
+    if changed
+        && let Some(preview) = cx.try_global::<ComputerPreview>()
+        && preview.store == *store
+    {
+        let map = preview.presence.clone();
+        let next = super::presence::presences(store.read(cx));
+        map.update(cx, |map, cx| {
+            if map.set(next) {
+                cx.notify();
+            }
+        });
+    }
+}
+
+pub fn clear_revoked(chat_id: &str, cx: &mut App) {
+    if let Some(store) = store(cx) {
+        update_store(&store, cx, |store| store.clear_revoked(chat_id));
     }
 }
 
@@ -632,6 +691,7 @@ pub fn init(cx: &mut App) {
         return;
     }
     let store = cx.new(|_| ComputerPreviewStore::default());
+    let presence = cx.new(|_| ComputerPresenceMap::default());
     let (taps, mut received) = mpsc::unbounded::<TapEvent>();
     let pump_store = store.downgrade();
     let pump = cx.spawn(async move |cx| {
@@ -677,6 +737,7 @@ pub fn init(cx: &mut App) {
     });
     cx.set_global(ComputerPreview {
         store,
+        presence,
         taps,
         _pump: pump,
     });
