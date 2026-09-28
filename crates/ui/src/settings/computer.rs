@@ -523,7 +523,10 @@ impl ComputerPage {
                 match reply {
                     Ok(_) => {
                         #[cfg(target_os = "macos")]
-                        crate::browser::control_host::set_developer_blocked(!next.browser_developer_access, cx);
+                        crate::browser::control_host::set_developer_blocked(
+                            !next.browser_developer_access,
+                            cx,
+                        );
                         page.state
                             .update(cx, |state, _| state.computer_settings = Some(next.clone()));
                         if next.agent_cursor_colors() != previous.agent_cursor_colors() {
@@ -540,7 +543,10 @@ impl ComputerPage {
                     Err(error) => {
                         if page.settings.as_ref() == Some(&next) {
                             #[cfg(target_os = "macos")]
-                            crate::browser::control_host::set_developer_blocked(!previous.browser_developer_access, cx);
+                            crate::browser::control_host::set_developer_blocked(
+                                !previous.browser_developer_access,
+                                cx,
+                            );
                             page.adopt_settings(previous, cx);
                         }
                         page.settings_error = Some(format!("Could not save: {error}").into());
@@ -2069,7 +2075,8 @@ mod tests {
             wait(cx, |_| core.computer.settings().browser_developer_access);
             let stored: ComputerSettings = serde_json::from_str(
                 &std::fs::read_to_string(dir.path().join("engine/computer-settings.json")).unwrap(),
-            ).unwrap();
+            )
+            .unwrap();
             assert!(stored.browser_developer_access);
             click(cx, "browser-developer-access");
             wait(cx, |_| !core.computer.settings().browser_developer_access);

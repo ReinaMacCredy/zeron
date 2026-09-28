@@ -10,9 +10,9 @@ use macos as native;
 #[cfg(target_os = "macos")]
 pub(crate) mod automation;
 #[cfg(target_os = "macos")]
-pub(crate) mod control_host;
-#[cfg(target_os = "macos")]
 pub(crate) mod control_admission;
+#[cfg(target_os = "macos")]
+pub(crate) mod control_host;
 pub mod model;
 mod view;
 

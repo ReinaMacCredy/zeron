@@ -229,7 +229,7 @@ define_class!(
 impl Observer {
     fn new(tx: Sender, mtm: MainThreadMarker) -> Retained<Self> {
         let object = mtm.alloc().set_ivars(ObserverState {
-                navigation_epoch: Cell::new(0),
+            navigation_epoch: Cell::new(0),
             tx,
             pending: Cell::new(false),
             error: RefCell::new(None),
@@ -864,7 +864,8 @@ impl NativePage {
 impl NativePage {
     pub(super) fn automation_snapshot(&self) {
         let host = self.0.borrow();
-        host.automation_snapshot_epoch.set(Some(host.observer.ivars().navigation_epoch.get()));
+        host.automation_snapshot_epoch
+            .set(Some(host.observer.ivars().navigation_epoch.get()));
     }
     pub(super) fn automation_refs_current(&self) -> bool {
         let host = self.0.borrow();

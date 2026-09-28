@@ -148,7 +148,9 @@ pub async fn exercise(
     );
     let before_route = value(call(window, action(&fresh, "state"), false, cx).await?)?;
     let mut route = action(&fresh, "evaluate");
-    route["script"] = json!("var oldUrl = location.href; history.pushState({}, '', '#new-route'); history.replaceState({}, '', oldUrl); null");
+    route["script"] = json!(
+        "var oldUrl = location.href; history.pushState({}, '', '#new-route'); history.replaceState({}, '', oldUrl); null"
+    );
     value(call(window, route, true, cx).await?)?;
     let mut old_route = action(&fresh, "type");
     old_route["ref"] = before_route["elements"][0]["ref"].clone();

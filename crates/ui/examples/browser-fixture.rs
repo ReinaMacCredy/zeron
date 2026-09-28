@@ -143,7 +143,10 @@ fn main() -> anyhow::Result<()> {
             let n = stream.read(&mut request).unwrap_or(0);
             let request = String::from_utf8_lossy(&request[..n]);
             let (title, html) = if request.starts_with("GET /control ") {
-                ("Browser control fixture", "<label>Name<input aria-label='Name'></label><button onclick=\"document.querySelector('output').textContent='Hello '+document.querySelector('input').value\">Submit</button><output></output>")
+                (
+                    "Browser control fixture",
+                    "<label>Name<input aria-label='Name'></label><button onclick=\"document.querySelector('output').textContent='Hello '+document.querySelector('input').value\">Submit</button><output></output>",
+                )
             } else if request.starts_with("GET /two ") {
                 (
                     "Details",

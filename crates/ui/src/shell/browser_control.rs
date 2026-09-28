@@ -166,7 +166,10 @@ impl Shell {
                 return;
             };
             self.set_surfaces_open(true, cx);
-            browser.update(cx, |browser, cx| browser.navigate(&url, window, cx));
+            browser.update(cx, |browser, cx| {
+                browser.control.used = true;
+                browser.navigate(&url, window, cx)
+            });
             let _ = envelope
                 .reply
                 .send(success(browser.read(cx).automation_description()));
@@ -202,7 +205,10 @@ impl Shell {
                     .send(failure("navigate requires an http(s) URL."));
                 return;
             };
-            browser.update(cx, |browser, cx| browser.navigate(&url, window, cx));
+            browser.update(cx, |browser, cx| {
+                browser.control.used = true;
+                browser.navigate(&url, window, cx)
+            });
             let mut value = browser.read(cx).automation_description();
             value["effect"] = json!("dispatched-unknown");
             let _ = envelope.reply.send(success(value));
