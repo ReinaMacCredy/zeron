@@ -29,10 +29,12 @@ pub struct NativeHostConfig {
     pub bundle_id: String,
     pub preview: PreviewSink,
     pub on_emergency_stop: Option<Arc<dyn Fn() + Send + Sync>>,
+    pub(crate) browser_admission: Arc<crate::browser::control_admission::Admission>,
     pub cursor_style: Option<Box<dyn Fn() -> Option<super::host::CuaCursorStyle> + Send>>,
 }
 
 struct HostEvents {
+    browser_admission: Arc<crate::browser::control_admission::Admission>,
     host: OnceLock<CuaDriverHost>,
     on_emergency_stop: Option<Arc<dyn Fn() + Send + Sync>>,
 }
@@ -42,12 +44,18 @@ impl EscapeMonitorSink for HostEvents {
         let Some(host) = self.host.get() else {
             return;
         };
+        let native_stopped = self.browser_admission.stop(None);
+        if native_stopped {
+            if let Some(notice) = &self.on_emergency_stop {
+                notice();
+            }
+        }
         let stopped = host.emergency_stop_input();
         if let Some(notice) = self.on_emergency_stop.clone() {
             let _ = std::thread::Builder::new()
                 .name("zeron-cua-escape-notice".into())
                 .spawn(move || {
-                    if futures::executor::block_on(stopped) {
+                    if futures::executor::block_on(stopped) && !native_stopped {
                         notice();
                     }
                 });
@@ -61,6 +69,9 @@ impl EscapeMonitorSink for HostEvents {
     }
 
     fn state_changed(&self, state: ComputerInputMonitorState) {
+        if !state.ready && !matches!(state.error.as_deref(), Some("input_monitor_starting")) {
+            self.browser_admission.stop(None);
+        }
         if let Some(host) = self.host.get() {
             host.input_monitor_state_changed(state);
         }
@@ -92,7 +103,10 @@ impl NativeHostLink {
     ) -> Option<DesktopLifecycleWatch> {
         let host = self.events.host.get()?.clone();
         Some(DesktopLifecycleWatch::start(
-            Arc::new(host),
+            Arc::new(BrowserLifecycle {
+                driver: host,
+                admission: self.events.browser_admission.clone(),
+            }),
             runtime,
             Arc::new(|error| {
                 tracing::warn!(target: "desktop_cua", "computer input pause failed: {error}");
@@ -105,6 +119,7 @@ pub fn native_host_options(
     config: NativeHostConfig,
 ) -> std::io::Result<(CuaDriverHostOptions, NativeHostLink)> {
     let events = Arc::new(HostEvents {
+        browser_admission: config.browser_admission,
         host: OnceLock::new(),
         on_emergency_stop: config.on_emergency_stop,
     });
@@ -159,7 +174,8 @@ pub fn native_host_options(
     }));
     options.on_input_monitor_armed_change = Some(Box::new({
         let monitor = monitor.clone();
-        move |armed| monitor.set_armed(armed)
+        let admission = events.browser_admission.clone();
+        move |armed| monitor.set_armed(armed || admission.active())
     }));
     options.frame_tap = Some(Arc::new(ComputerFrameTap::new(
         ScreenCaptureFrames,
@@ -176,4 +192,25 @@ pub fn start_native_host(
     let host = CuaDriverHost::new(options)?;
     link.attach(host.clone());
     Ok((host, link))
+}
+
+struct BrowserLifecycle {
+    driver: CuaDriverHost,
+    admission: Arc<crate::browser::control_admission::Admission>,
+}
+impl super::desktop_lifecycle::ComputerDesktopLifecycleHost for BrowserLifecycle {
+    fn pause_desktop(
+        &self,
+        reason: &'static str,
+    ) -> futures::future::BoxFuture<'static, Result<(), String>> {
+        self.admission.pause(reason);
+        super::desktop_lifecycle::ComputerDesktopLifecycleHost::pause_desktop(&self.driver, reason)
+    }
+    fn resume_desktop(&self, reason: &'static str) {
+        self.admission.resume(reason);
+        super::desktop_lifecycle::ComputerDesktopLifecycleHost::resume_desktop(
+            &self.driver,
+            reason,
+        );
+    }
 }

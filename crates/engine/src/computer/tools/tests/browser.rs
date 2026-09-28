@@ -1304,3 +1304,41 @@ async fn labels_the_bind_key_on_a_prepare_result_and_leaves_tab_id_optional_on_t
     }
     h.dispose().await;
 }
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn native_browser_uses_live_task_identity_and_preserves_host_errors() {
+    let (browser, calls) = seeing(|_| ComputerBrowserCallResult {
+        is_error: Some(true),
+        ..with_text(json!({"status":"refused"}), "The user took over this tab.")
+    });
+    let result = browser
+        .h
+        .call(
+            "computer_zeron_browser",
+            json!({"action":"state", "tab_id":"native-tab", "control_token":"token"}),
+        )
+        .await;
+    assert!(result.is_error);
+    assert!(text_of(&result).contains("took over"));
+    let seen = recorded(&calls);
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].name, "zeron_browser");
+    assert_eq!(seen[0].task.thread_id, THREAD);
+    assert_eq!(seen[0].args["tab_id"], "native-tab");
+    browser.h.seams.turn_inactive.store(true, Ordering::SeqCst);
+    let stale = browser
+        .h
+        .call(
+            "computer_zeron_browser",
+            json!({"action":"open", "url":"http://localhost:3000"}),
+        )
+        .await;
+    assert!(stale.is_error);
+    assert_eq!(
+        recorded(&calls).len(),
+        1,
+        "ended turn must not reach native host"
+    );
+    browser.h.dispose().await;
+}

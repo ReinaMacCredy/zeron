@@ -7,6 +7,7 @@ mod desktop;
 mod elements;
 pub mod guidance;
 mod help;
+mod native_browser;
 mod pipeline;
 pub mod progress_guard;
 pub mod results;
@@ -271,6 +272,8 @@ pub fn computer_tool_families(manager: &ComputerManager) -> Vec<Arc<dyn Computer
         vec![Arc::new(self::spaces::ComputerSpaceTools::default())];
     if manager.supports_browser() {
         families.push(Arc::new(self::browser::ComputerBrowserTools::default()));
+        #[cfg(target_os = "macos")]
+        families.push(Arc::new(self::native_browser::NativeBrowserTools));
     }
     families
 }

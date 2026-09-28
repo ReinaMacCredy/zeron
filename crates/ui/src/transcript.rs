@@ -1028,8 +1028,18 @@ pub fn diff_to_file(diff: &zeron_proto::ToolDiff) -> crate::changes::FileDiff {
     }
 }
 
+#[derive(Clone, PartialEq)]
+enum HtmlFileState {
+    Loading,
+    Missing,
+    Ready(Option<SharedString>),
+}
+
 #[derive(Clone)]
 pub enum RowKind {
+    HtmlFiles {
+        targets: Arc<Vec<String>>,
+    },
     GeneratedImage {
         owner: String,
         path: String,
@@ -1957,6 +1967,27 @@ pub fn rows_for_entry(
 
     if let Some(first) = rows.first_mut() {
         first.turn_start = true;
+    }
+    if !streaming && cfg!(target_os = "macos") {
+        let targets =
+            crate::html_open::html_link_targets(entry.parts.iter().filter_map(|part| match part {
+                MessagePart::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            }));
+        if !targets.is_empty() {
+            rows.push(Row {
+                id: format!("{}#html-files", entry.id).into(),
+                version: fnv1a(targets.join("\0").as_bytes()),
+                turn_start: false,
+                entry_id: entry_id.clone(),
+                timestamp: None,
+                copy_text: None,
+                compact_fold: None,
+                kind: RowKind::HtmlFiles {
+                    targets: Arc::new(targets),
+                },
+            });
+        }
     }
     // Timestamp strip under the entry's LAST row once the turn has settled
     // (chat-view.tsx: "No timestamp hover mid-stream"). The version bit keeps
@@ -3541,6 +3572,11 @@ pub struct Transcript {
     copied_message_clear: Option<Task<()>>,
     consent_sent: HashMap<SharedString, ConsentOutcome>,
     consent_failures: HashMap<SharedString, SharedString>,
+    html_files: HashMap<std::path::PathBuf, HtmlFileState>,
+    html_apps: Option<Arc<Vec<crate::html_open::AppChoice>>>,
+    html_apps_task: Option<Task<()>>,
+    html_menu: Option<SharedString>,
+    html_menu_dismissed: Option<SharedString>,
     /// Transcript attachment being viewed full-size (click a user thumbnail).
     attachment_preview: Option<crate::attachments::PreviewImage>,
     /// Focused while the lightbox is open so Escape reaches it.
@@ -3633,6 +3669,8 @@ pub enum TranscriptEvent {
     OpenFile { chat_id: String, path: String },
     /// A peer message's "From <thread>" header: open that thread.
     OpenChat { chat_id: String },
+    /// `path` is workspace-relative; the shell re-resolves it.
+    OpenHtml { chat_id: String, path: String },
     /// A Computer card's button: Enable on a denied card, Set up on a setup card.
     Computer { request: ComputerRequest },
 }
@@ -3810,6 +3848,11 @@ impl Transcript {
             copied_message_clear: None,
             consent_sent: HashMap::new(),
             consent_failures: HashMap::new(),
+            html_files: HashMap::new(),
+            html_apps: None,
+            html_apps_task: None,
+            html_menu: None,
+            html_menu_dismissed: None,
             attachment_preview: None,
             attachment_preview_focus: cx.focus_handle(),
             attachment_preview_return_focus: None,
@@ -6426,6 +6469,486 @@ impl Transcript {
         }
     }
 
+    fn render_html_files(
+        &mut self,
+        row_id: &SharedString,
+        targets: &[String],
+        root: Option<&str>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.html_menu_dismissed = None;
+        let Some(root) = root else {
+            return gpui::Empty.into_any_element();
+        };
+        let mut files: Vec<(String, std::path::PathBuf)> = Vec::new();
+        for target in targets {
+            if let Some(link) = crate::workspace_links::resolve_workspace_file_link(target, root)
+                && crate::html_open::is_html_path(&link.path)
+                && !files.iter().any(|(path, _)| *path == link.path)
+            {
+                let absolute = std::path::Path::new(root).join(&link.path);
+                files.push((link.path, absolute));
+            }
+        }
+        files.truncate(crate::html_open::MAX_CARDS);
+        if files.is_empty() {
+            return gpui::Empty.into_any_element();
+        }
+        let remote = self.html_chat_is_remote(cx);
+        if !remote {
+            for (_, absolute) in &files {
+                self.load_html_file(absolute, cx);
+            }
+        }
+        let cards: Vec<AnyElement> = files
+            .into_iter()
+            .enumerate()
+            .map(|(ix, (path, absolute))| {
+                self.render_html_card(row_id, ix, path, absolute, remote, theme, cx)
+            })
+            .collect();
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .children(cards)
+            .into_any_element()
+    }
+
+    fn html_chat_is_remote(&self, cx: &gpui::App) -> bool {
+        let state = self.state.read(cx);
+        self.chat_id
+            .as_deref()
+            .and_then(|id| state.chats.iter().find(|chat| chat.id == id))
+            .or_else(|| state.selected_chat_row())
+            .is_some_and(|chat| Some(chat.device_id.as_str()) != state.local_device_id.as_deref())
+    }
+
+    fn load_html_file(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        if self.html_files.contains_key(path) {
+            return;
+        }
+        self.html_files
+            .insert(path.to_path_buf(), HtmlFileState::Loading);
+        let path = path.to_path_buf();
+        let read = cx.background_executor().spawn({
+            let path = path.clone();
+            async move { crate::html_open::read_title(&path) }
+        });
+        cx.spawn(async move |this, cx| {
+            let state = match read.await {
+                Ok(title) => HtmlFileState::Ready(title.map(SharedString::from)),
+                Err(()) => HtmlFileState::Missing,
+            };
+            let _ = this.update(cx, |this, cx| {
+                if state != HtmlFileState::Missing {
+                    this.load_html_apps(&path, cx);
+                }
+                this.html_files.insert(path, state);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn load_html_apps(&mut self, sample: &std::path::Path, cx: &mut Context<Self>) {
+        if self.html_apps.is_some() || self.html_apps_task.is_some() {
+            return;
+        }
+        let sample = sample.to_path_buf();
+        let apps = cx
+            .background_executor()
+            .spawn(async move { crate::html_open::apps_for(&sample) });
+        self.html_apps_task = Some(cx.spawn(async move |this, cx| {
+            let apps = apps.await;
+            let _ = this.update(cx, |this, cx| {
+                this.html_apps = Some(Arc::new(apps));
+                this.html_apps_task = None;
+                cx.notify();
+            });
+        }));
+    }
+
+    fn html_app_icon(&self, app: &crate::html_open::HtmlOpenApp) -> Option<AnyElement> {
+        use crate::html_open::HtmlOpenApp;
+        if *app == HtmlOpenApp::Zeron {
+            return Some(
+                crate::icons::icon(crate::icons::ZERON_LOGO)
+                    .size(px(16.0))
+                    .into_any_element(),
+            );
+        }
+        let apps = self.html_apps.as_ref()?;
+        let choice = apps.iter().find(|choice| match app {
+            HtmlOpenApp::App { path } => choice.path == *path,
+            _ => choice.is_default,
+        })?;
+        let icon = choice.icon.clone()?;
+        Some(gpui::img(icon).size(px(16.0)).into_any_element())
+    }
+
+    fn open_html(
+        &mut self,
+        absolute: &std::path::Path,
+        path: &str,
+        app: &crate::html_open::HtmlOpenApp,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::html_open::{HtmlOpenApp, open_with};
+        self.html_menu = None;
+        if !absolute.is_file() {
+            self.html_files
+                .insert(absolute.to_path_buf(), HtmlFileState::Missing);
+            cx.notify();
+            return;
+        }
+        match app {
+            HtmlOpenApp::SystemDefault => {
+                open_with(absolute, crate::html_open::default_browser().as_deref())
+            }
+            HtmlOpenApp::App { path: app } => open_with(
+                absolute,
+                std::path::Path::new(app).exists().then_some(app.as_str()),
+            ),
+            HtmlOpenApp::Zeron => {
+                let chat_id = self
+                    .chat_id
+                    .clone()
+                    .or_else(|| self.state.read(cx).selected_chat.clone());
+                if let Some(chat_id) = chat_id {
+                    cx.emit(TranscriptEvent::OpenHtml {
+                        chat_id,
+                        path: path.to_string(),
+                    });
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_html_card(
+        &mut self,
+        row_id: &SharedString,
+        ix: usize,
+        path: String,
+        absolute: std::path::PathBuf,
+        remote: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use crate::html_open::HtmlOpenApp;
+        let state = self
+            .html_files
+            .get(&absolute)
+            .cloned()
+            .unwrap_or(HtmlFileState::Loading);
+        let missing = state == HtmlFileState::Missing;
+        let disabled = remote || missing;
+        let title: SharedString = match &state {
+            HtmlFileState::Ready(Some(title)) => title.clone(),
+            _ => absolute
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.clone())
+                .into(),
+        };
+        let detail: SharedString = if remote {
+            "Website · on another device".into()
+        } else if missing {
+            "Website · no longer on disk".into()
+        } else {
+            format!("Website · {path}").into()
+        };
+        let key: SharedString = format!("{row_id}-{ix}").into();
+        let menu_open = !disabled && self.html_menu.as_ref() == Some(&key);
+        let choice = crate::settings::current(cx).html_open_app;
+        let absolute = Arc::new(absolute);
+        let path: Arc<str> = path.into();
+
+        let primary = div()
+            .id(SharedString::from(format!("{key}-open")))
+            .h(px(30.0))
+            .pl(px(9.0))
+            .pr(px(10.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .text_size(crate::typography::ui_rems(13.0))
+            .text_color(theme.text)
+            .children(if disabled {
+                None
+            } else {
+                self.html_app_icon(&choice)
+            })
+            .child("Open in")
+            .role(gpui::Role::Button)
+            .aria_label("Open in")
+            .when(!disabled, |el| {
+                let absolute = absolute.clone();
+                let path = path.clone();
+                el.cursor_pointer()
+                    .hover(|s| s.bg(crate::theme::ink(0.05)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let app = crate::settings::current(cx).html_open_app;
+                        this.open_html(&absolute, &path, &app, cx);
+                    }))
+            });
+        let chevron = div()
+            .id(SharedString::from(format!("{key}-chevron")))
+            .debug_selector(move || format!("html-card-chevron-{ix}"))
+            .h(px(30.0))
+            .px(px(8.0))
+            .flex()
+            .items_center()
+            .border_l_1()
+            .border_color(theme.border)
+            .child(
+                crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
+                    .size(px(14.0))
+                    .text_color(theme.text_muted),
+            )
+            .role(gpui::Role::Button)
+            .aria_label("Choose an app")
+            .when(menu_open, |el| el.bg(crate::theme::ink(0.08)))
+            .when(!disabled, |el| {
+                let key = key.clone();
+                el.cursor_pointer()
+                    .hover(|s| s.bg(crate::theme::ink(0.05)))
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            if this.html_menu_dismissed.take().as_ref() == Some(&key) {
+                                return;
+                            }
+                            this.html_menu =
+                                (this.html_menu.as_ref() != Some(&key)).then(|| key.clone());
+                            cx.notify();
+                        }),
+                    )
+            });
+
+        let menu = menu_open.then(|| {
+            let row = |id: String, label: SharedString, icon: AnyElement, checked: bool| {
+                crate::popover::menu_row(theme, false, format!("{key}-{id}"))
+                    .id(SharedString::from(format!("{key}-{id}")))
+                    .child(
+                        div()
+                            .size(px(18.0))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(icon),
+                    )
+                    .child(div().flex_1().min_w_0().truncate().child(label))
+                    .when(checked, |el| {
+                        el.child(
+                            crate::icons::icon(crate::icons::CHECK)
+                                .size(px(14.0))
+                                .text_color(theme.text_muted),
+                        )
+                    })
+                    .role(gpui::Role::Button)
+            };
+            let pick = |app: HtmlOpenApp, absolute: Arc<std::path::PathBuf>, path: Arc<str>| {
+                cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                    let app = app.clone();
+                    crate::settings::update(crate::settings::SavePolicy::Immediate, cx, {
+                        let app = app.clone();
+                        move |settings| settings.html_open_app = app
+                    });
+                    this.open_html(&absolute, &path, &app, cx);
+                })
+            };
+            let mut content = crate::popover::popover_card(theme)
+                .w(px(240.0))
+                .flex()
+                .flex_col()
+                .on_mouse_down_out(cx.listener({
+                    let key = key.clone();
+                    move |this, _, _, cx| {
+                        this.html_menu = None;
+                        this.html_menu_dismissed = Some(key.clone());
+                        cx.notify();
+                    }
+                }))
+                .child(
+                    row(
+                        "zeron".into(),
+                        "Zeron".into(),
+                        crate::icons::icon(crate::icons::ZERON_LOGO)
+                            .size(px(16.0))
+                            .text_color(theme.text)
+                            .into_any_element(),
+                        choice == HtmlOpenApp::Zeron,
+                    )
+                    .debug_selector(|| "html-card-open-in-zeron".into())
+                    .on_click(pick(
+                        HtmlOpenApp::Zeron,
+                        absolute.clone(),
+                        path.clone(),
+                    )),
+                );
+            match &self.html_apps {
+                Some(apps) => {
+                    for (app_ix, app) in apps.iter().enumerate() {
+                        let icon = match &app.icon {
+                            Some(icon) => gpui::img(icon.clone()).size(px(18.0)).into_any_element(),
+                            None => crate::icons::icon(crate::icons::GLOBE)
+                                .size(px(16.0))
+                                .text_color(theme.text_muted)
+                                .into_any_element(),
+                        };
+                        let checked = match &choice {
+                            HtmlOpenApp::App { path } => *path == app.path,
+                            HtmlOpenApp::SystemDefault => app.is_default,
+                            HtmlOpenApp::Zeron => false,
+                        };
+                        content = content.child(
+                            row(
+                                format!("app-{app_ix}"),
+                                app.name.clone().into(),
+                                icon,
+                                checked,
+                            )
+                            .on_click(pick(
+                                HtmlOpenApp::App {
+                                    path: app.path.clone(),
+                                },
+                                absolute.clone(),
+                                path.clone(),
+                            )),
+                        );
+                    }
+                }
+                None => {
+                    content = content.child(
+                        div()
+                            .px(px(8.0))
+                            .py(px(6.0))
+                            .text_size(crate::typography::ui_rems(13.0))
+                            .text_color(theme.text_muted)
+                            .child("Finding apps…"),
+                    );
+                }
+            }
+            let reveal = absolute.clone();
+            let copy = absolute.clone();
+            content = content
+                .child(crate::popover::menu_separator())
+                .child(
+                    row(
+                        "reveal".into(),
+                        "Reveal in Finder".into(),
+                        crate::icons::icon(crate::icons::FOLDER)
+                            .size(px(16.0))
+                            .text_color(theme.text_muted)
+                            .into_any_element(),
+                        false,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        crate::html_open::reveal(&reveal);
+                        this.html_menu = None;
+                        cx.notify();
+                    })),
+                )
+                .child(
+                    row(
+                        "copy".into(),
+                        "Copy path".into(),
+                        crate::icons::icon(crate::icons::COPY)
+                            .size(px(16.0))
+                            .text_color(theme.text_muted)
+                            .into_any_element(),
+                        false,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                            copy.to_string_lossy().into_owned(),
+                        ));
+                        this.html_menu = None;
+                        cx.notify();
+                    })),
+                );
+            crate::popover::anchored_menu_below_end(
+                format!("{key}-apps"),
+                content.into_any_element(),
+                None,
+            )
+        });
+
+        let button = div()
+            .relative()
+            .flex_none()
+            .child(
+                div()
+                    .flex()
+                    .rounded(px(9.0))
+                    .border_1()
+                    .border_color(theme.border)
+                    .overflow_hidden()
+                    .when(disabled, |el| el.opacity(0.45))
+                    .child(primary)
+                    .child(chevron),
+            )
+            .children(menu);
+        div()
+            .id(SharedString::from(format!("{key}-card")))
+            .debug_selector(move || format!("html-card-{ix}"))
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(px(12.0))
+            .p(px(12.0))
+            .rounded(px(14.0))
+            .bg(crate::theme::ink(0.035))
+            .border_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .size(px(40.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(10.0))
+                    .bg(crate::theme::ink(0.06))
+                    .when(disabled, |el| el.opacity(0.5))
+                    .child(
+                        crate::icons::icon(crate::icons::GLOBE)
+                            .size(px(22.0))
+                            .text_color(theme.accent),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(crate::typography::ui_rems(14.0))
+                            .text_color(theme.text)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(crate::typography::ui_rems(12.5))
+                            .text_color(theme.text_muted)
+                            .child(detail),
+                    ),
+            )
+            .child(button)
+            .into_any_element()
+    }
+
     /// The right-aligned thumbnail strip above a user bubble.
     fn render_user_attachments(
         &mut self,
@@ -7311,6 +7834,9 @@ impl Transcript {
                 name,
                 mime_type,
             } => self.render_generated_image(&row.id, owner, path, name, mime_type, cx),
+            RowKind::HtmlFiles { targets } => {
+                self.render_html_files(&row.id, targets, workspace_root.as_deref(), &theme, cx)
+            }
             RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
             RowKind::ComputerConsent {
                 request_id,
@@ -12173,6 +12699,134 @@ mod tests {
         assert_eq!(inset(cx), 0.0, "a hidden card reserves nothing");
     }
 
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn html_card_reads_the_title_and_opens_in_zeron_from_the_menu(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::write(
+            ws.path().join("demo.html"),
+            "<html><head><title>Demo đơn giản</title></head></html>",
+        )
+        .unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let state = cx.new(|_| AppState::new());
+        let root = ws.path().to_string_lossy().into_owned();
+        state.update(cx, |state, _| {
+            state.local_device_id = Some("local".into());
+            state.chats = vec![zeron_proto::Chat {
+                id: "chat".into(),
+                device_id: "local".into(),
+                title: None,
+                archived: false,
+                cwd: Some(root.clone()),
+                branch: None,
+                checkout_id: None,
+                source_context: None,
+                config: None,
+                last_message_preview: None,
+                last_message_at: None,
+                created_at: chrono::Utc::now(),
+                harness_session_id: None,
+                harness_session_cwd: None,
+                space_id: None,
+                last_seen_at: None,
+                room_gen: None,
+                sidechat_source_chat_id: None,
+                created_by_chat_id: None,
+                previous_harnesses: Vec::new(),
+            }];
+            state.selected_chat = Some("chat".into());
+            state.transcript_replayed = true;
+            state.transcript = vec![assistant(
+                "reply",
+                MessageStatus::Complete,
+                vec![text_part("text", "Made [demo.html](demo.html).")],
+            )];
+            state.transcript_revision += 1;
+        });
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        let events = Rc::new(RefCell::new(Vec::new()));
+        cx.update(|cx| {
+            let events = events.clone();
+            cx.subscribe(&transcript, move |_, event: &TranscriptEvent, _| {
+                if let TranscriptEvent::OpenHtml { chat_id, path } = event {
+                    events.borrow_mut().push((chat_id.clone(), path.clone()));
+                }
+            })
+            .detach();
+        });
+        transcript.update(cx, |this, cx| {
+            this.chat_id = Some("chat".into());
+            this.sync(cx);
+        });
+        struct Fixture(Entity<Transcript>);
+        impl Render for Fixture {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+        let (_fixture, cx) = cx.add_window_view(|_, _| Fixture(transcript.clone()));
+        cx.simulate_resize(size(px(1000.0), px(800.0)));
+        let frame = |cx: &mut gpui::VisualTestContext| {
+            for _ in 0..3 {
+                cx.run_until_parked();
+                cx.update(|window, _| window.refresh());
+            }
+            cx.run_until_parked();
+        };
+        let click = |selector: &'static str, cx: &mut gpui::VisualTestContext| {
+            let bounds = cx.debug_bounds(selector).expect(selector);
+            cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+            frame(cx);
+        };
+        let menu_open = |cx: &mut gpui::VisualTestContext| {
+            transcript.read_with(cx, |this, _| this.html_menu.is_some())
+        };
+        frame(cx);
+
+        let file = ws.path().join("demo.html");
+        transcript.read_with(cx, |this, _| {
+            assert!(
+                this.html_files.get(&file)
+                    == Some(&HtmlFileState::Ready(Some("Demo đơn giản".into())))
+            );
+        });
+        assert!(cx.debug_bounds("html-card-0").is_some());
+
+        click("html-card-chevron-0", cx);
+        assert!(menu_open(cx));
+        let card = cx.debug_bounds("html-card-0").unwrap();
+        cx.simulate_click(
+            card.origin + point(px(80.0), px(20.0)),
+            gpui::Modifiers::none(),
+        );
+        frame(cx);
+        assert!(!menu_open(cx), "a click outside closes the menu");
+        click("html-card-chevron-0", cx);
+        assert!(menu_open(cx), "the next chevron click reopens it");
+        click("html-card-chevron-0", cx);
+        assert!(!menu_open(cx), "the chevron toggles an open menu closed");
+
+        click("html-card-chevron-0", cx);
+        click("html-card-open-in-zeron", cx);
+        assert!(!menu_open(cx));
+        assert_eq!(
+            *events.borrow(),
+            vec![("chat".to_string(), "demo.html".to_string())]
+        );
+        cx.update(|_, cx| {
+            assert_eq!(
+                crate::settings::current(cx).html_open_app,
+                crate::html_open::HtmlOpenApp::Zeron
+            )
+        });
+    }
+
     #[gpui::test]
     fn queued_steer_in_a_long_followed_chat_stays_near_the_tail(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -12702,6 +13356,51 @@ mod tests {
         assert_eq!(rows.len(), 4);
         assert!(matches!(rows[1].kind, RowKind::ToolGroup { .. }));
         assert!(matches!(rows[2].kind, RowKind::GeneratedImage { .. }));
+    }
+
+    #[test]
+    fn settled_html_links_end_the_entry_with_one_card_row() {
+        let parts = vec![
+            text_part("t", "Made [demo](demo.html) and [notes](notes.md)."),
+            tool_part("i", "write"),
+            text_part("t2", "Also [site/index.html](site/index.html#top)."),
+        ];
+        let entry = assistant("a", MessageStatus::Complete, parts.clone());
+        let rows = rows_for_entry(&entry, false, false, &mut parse);
+        let last = rows.last().unwrap();
+        assert!(matches!(&last.kind, RowKind::HtmlFiles { targets }
+                if **targets == ["demo.html", "site/index.html#top"]));
+        assert!(last.timestamp.is_some());
+        assert!(last.copy_text.is_some());
+        assert_eq!(
+            rows.iter()
+                .filter(|row| matches!(row.kind, RowKind::HtmlFiles { .. }))
+                .count(),
+            1
+        );
+
+        let streaming = assistant("a", MessageStatus::Streaming, parts);
+        let rows = rows_for_entry(&streaming, false, false, &mut parse);
+        assert!(
+            !rows
+                .iter()
+                .any(|row| matches!(row.kind, RowKind::HtmlFiles { .. }))
+        );
+
+        let plain = assistant(
+            "b",
+            MessageStatus::Complete,
+            vec![text_part(
+                "t",
+                "See `demo.html` and [web](https://x.dev/a.html).",
+            )],
+        );
+        let rows = rows_for_entry(&plain, false, false, &mut parse);
+        assert!(
+            !rows
+                .iter()
+                .any(|row| matches!(row.kind, RowKind::HtmlFiles { .. }))
+        );
     }
 
     #[test]

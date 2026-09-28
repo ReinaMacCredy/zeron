@@ -119,9 +119,10 @@ fn close_active_window(cx: &mut App) {
             window
                 .update(cx, |shell, window, cx| {
                     // ⌘W closes the right pane's active surface first (the tab
-                    // the user just opened); an empty or closed pane falls
-                    // through to the window close, unsaved-file gate and all.
-                    if shell.close_active_surface(window, cx) {
+                    // the user just opened), then the focused session tab;
+                    // with neither it falls through to the window close,
+                    // unsaved-file gate and all.
+                    if shell.close_active_surface(window, cx) || shell.close_focused_tab(cx) {
                         return;
                     }
                     if shell.prepare_window_close(cx) {

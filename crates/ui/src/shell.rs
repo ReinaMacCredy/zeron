@@ -11,6 +11,9 @@
 //! ghost view + `on_drag_move::<Marker>` on the root), the same idiom as Zed's
 //! dock. Double-clicking a handle resets that pane to its default width.
 
+#[cfg(target_os = "macos")]
+mod browser_control;
+
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -1370,7 +1373,10 @@ impl Render for SessionRowGhost {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let lifted = self.shell.upgrade().is_some_and(|shell| {
             let shell = shell.read(cx);
-            shell.sidebar_session_transfer.is_some()
+            shell
+                .sidebar_session_transfer
+                .as_ref()
+                .is_some_and(|transfer| transfer.row_height > 0.0)
                 && f32::from(window.mouse_position().x) <= shell.settings.sidebar_width
         });
         if lifted {
@@ -2400,6 +2406,7 @@ impl Shell {
                     staged,
                 } => this.open_sidechat(source_chat_id.clone(), prompt.clone(), staged.clone(), cx),
                 ComposerEvent::UnsentChanged => cx.notify(),
+                ComposerEvent::ThreadMentionDropped => this.accept_command_palette_drop(),
                 ComposerEvent::BackgroundStarted => {
                     this.freeze_draft_row(cx);
                     this.focus_composer(cx);
@@ -3847,8 +3854,25 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.active_chat.is_empty() {
+        let Some(browser) = self.new_browser_surface(window, cx) else {
             return;
+        };
+        browser.update(cx, |browser, cx| {
+            if let Some(url) = url {
+                browser.navigate(&url, window, cx);
+            } else {
+                browser.focus_address(window, cx);
+            }
+        });
+    }
+
+    fn new_browser_surface(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<crate::browser::BrowserSurface>> {
+        if self.active_chat.is_empty() {
+            return None;
         }
         let key = self.panel_key(cx);
         let remote = {
@@ -3892,11 +3916,32 @@ impl Shell {
             .or_default()
             .push(RightSurface::Browser(id));
         self.set_right_active(RightSurface::Browser(id), cx);
-        browser.update(cx, |browser, cx| {
-            if let Some(url) = url {
-                browser.navigate(&url, window, cx);
-            } else {
-                browser.focus_address(window, cx);
+        Some(browser)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn open_html_in_browser(&mut self, chat_id: &str, path: &str, cx: &mut Context<Self>) {
+        let Some(root) = self.chat_cwd(chat_id, cx) else {
+            return;
+        };
+        let Some(link) = resolve_workspace_file_link(path, &root) else {
+            return;
+        };
+        let Ok(root) = std::path::Path::new(&root).canonicalize() else {
+            return;
+        };
+        let Ok(file) = root.join(link.path).canonicalize() else {
+            return;
+        };
+        if !file.starts_with(&root) {
+            return;
+        }
+        self.defer_in_active_window(cx, move |shell, window, cx| {
+            shell.set_surfaces_open(true, cx);
+            if let Some(browser) = shell.new_browser_surface(window, cx) {
+                browser.update(cx, |browser, cx| {
+                    browser.open_workspace_file(file, root, window, cx)
+                });
             }
         });
     }
@@ -4239,6 +4284,12 @@ impl Shell {
             }
             TranscriptEvent::OpenFile { chat_id, path } => self.open_tool_file(chat_id, path, cx),
             TranscriptEvent::OpenChat { chat_id } => self.open_chat(chat_id.clone(), cx),
+            #[cfg(target_os = "macos")]
+            TranscriptEvent::OpenHtml { chat_id, path } => {
+                self.open_html_in_browser(chat_id, path, cx)
+            }
+            #[cfg(not(target_os = "macos"))]
+            TranscriptEvent::OpenHtml { .. } => {}
             TranscriptEvent::Computer {
                 request: ComputerRequest::EnableControl,
             } => {
@@ -4708,6 +4759,7 @@ impl Shell {
                 | ComposerEvent::WorktreeSetup { .. }
                 | ComposerEvent::OpenSubagent { .. } => {}
                 ComposerEvent::UnsentChanged => cx.notify(),
+                ComposerEvent::ThreadMentionDropped => _this.accept_command_palette_drop(),
                 ComposerEvent::OpenComputerSetup { missing } => {
                     _this.open_computer_permission_guide(missing.clone(), cx)
                 }
@@ -5002,9 +5054,10 @@ impl Shell {
     /// when the close was consumed by the pane.
     ///
     /// The pane's empty picker state and a closed pane both yield false, so the
-    /// caller falls through to [`Self::prepare_window_close`] and the window
-    /// closes — the same cascade browsers use. The native traffic-light close
-    /// deliberately skips this rung: it always closes the window.
+    /// caller falls through to [`Self::close_focused_tab`], then to
+    /// [`Self::prepare_window_close`] — the same cascade browsers use. The
+    /// native traffic-light close deliberately skips these rungs: it always
+    /// closes the window.
     pub fn close_active_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some(surface) = self.closable_right_surface(cx) else {
             return false;
@@ -5810,6 +5863,7 @@ impl Shell {
                     let follow_up_behavior = self.settings.follow_up_behavior;
                     let switcher_window = self.settings.switcher_window;
                     let switcher_limit = self.settings.switcher_limit;
+                    let switcher_cycles_tabs = self.settings.switcher_cycles_tabs;
                     let reasoning_shortcut_modifier = self.settings.reasoning_shortcut_modifier;
                     let appshots_enabled = self.settings.appshots_enabled;
                     let appshot_sound_enabled = self.settings.appshot_sound_enabled;
@@ -5824,6 +5878,7 @@ impl Shell {
                             reasoning_shortcut_modifier,
                             switcher_window,
                             switcher_limit,
+                            switcher_cycles_tabs,
                             appshots_enabled,
                             appshot_sound_enabled,
                             appshot_destination,
@@ -5855,6 +5910,9 @@ impl Shell {
                                 }
                                 ShortcutsEvent::SwitcherLimitChanged(limit) => {
                                     this.settings.switcher_limit = *limit;
+                                }
+                                ShortcutsEvent::SwitcherCyclesTabsChanged(enabled) => {
+                                    this.settings.switcher_cycles_tabs = *enabled;
                                 }
                                 ShortcutsEvent::AppshotsChanged {
                                     enabled,
@@ -10283,7 +10341,9 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.note_appshot_interaction(cx);
-        if event.keystroke.key == "escape" && self.sidebar_session_transfer.is_some() {
+        if event.keystroke.key == "escape"
+            && (self.sidebar_session_transfer.is_some() || self.command_palette_lifted())
+        {
             cx.stop_active_drag(window);
             self.cancel_sidebar_session_transfer(cx);
             cx.stop_propagation();
@@ -13432,6 +13492,8 @@ impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.navigation_focus
             .remember(&self.shortcut_focus, window, cx);
+        #[cfg(target_os = "macos")]
+        crate::browser::control_host::register(cx.weak_entity(), window.window_handle(), cx);
         if let Some(command) = self.pending_workspace_command.take() {
             use crate::composer::WorkspaceCommand;
             match command {
@@ -17094,6 +17156,7 @@ mod exit_regressions {
                     assert!(!shell.all_file_edits_flushed(cx));
                     shell.cancel_file_close(RightSurface::File(0), cx);
                     assert!(shell.pending_exit.is_none());
+                    shell.route = Route::Settings(SettingsSection::default());
                 })
                 .unwrap();
             cx.update(|cx| cx.dispatch_action(&crate::app_menus::CloseWindow));

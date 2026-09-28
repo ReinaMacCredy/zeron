@@ -64,6 +64,7 @@ pub enum ShortcutsEvent {
     SwitcherWindowChanged(SwitcherWindow),
     /// The switcher's card cap changed — persist it locally.
     SwitcherLimitChanged(u32),
+    SwitcherCyclesTabsChanged(bool),
     AppshotsChanged {
         enabled: bool,
         sound_enabled: bool,
@@ -84,6 +85,7 @@ pub struct ShortcutsPage {
     reasoning_shortcut_modifier: ReasoningShortcutModifier,
     switcher_window: SwitcherWindow,
     switcher_limit: u32,
+    switcher_cycles_tabs: bool,
     recording: Option<ShortcutId>,
     recording_blur: Option<gpui::Subscription>,
     recording_interceptor: Option<gpui::Subscription>,
@@ -114,6 +116,7 @@ impl ShortcutsPage {
         reasoning_shortcut_modifier: ReasoningShortcutModifier,
         switcher_window: SwitcherWindow,
         switcher_limit: u32,
+        switcher_cycles_tabs: bool,
         appshots_enabled: bool,
         appshot_sound_enabled: bool,
         appshot_destination: AppshotDestination,
@@ -133,6 +136,7 @@ impl ShortcutsPage {
             reasoning_shortcut_modifier,
             switcher_window,
             switcher_limit,
+            switcher_cycles_tabs,
             recording: None,
             recording_blur: None,
             recording_interceptor: None,
@@ -259,6 +263,14 @@ impl ShortcutsPage {
         if self.switcher_limit != limit {
             self.switcher_limit = limit;
             cx.emit(ShortcutsEvent::SwitcherLimitChanged(limit));
+            cx.notify();
+        }
+    }
+
+    fn set_switcher_cycles_tabs(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.switcher_cycles_tabs != enabled {
+            self.switcher_cycles_tabs = enabled;
+            cx.emit(ShortcutsEvent::SwitcherCyclesTabsChanged(enabled));
             cx.notify();
         }
     }
@@ -593,6 +605,7 @@ impl Render for ShortcutsPage {
         let reasoning_modifier = self.reasoning_shortcut_modifier;
         let switcher_window = self.switcher_window;
         let switcher_limit = self.switcher_limit;
+        let switcher_cycles_tabs = self.switcher_cycles_tabs;
         let compact_mode = crate::settings::transcript_compact_mode(cx);
         let customized = self.keymap != KeymapConfig::default()
             || escape_stops_active_agent
@@ -600,7 +613,8 @@ impl Render for ShortcutsPage {
             || follow_up_behavior != FollowUpBehavior::default()
             || reasoning_modifier != ReasoningShortcutModifier::default()
             || switcher_window != SwitcherWindow::default()
-            || switcher_limit != 0;
+            || switcher_limit != 0
+            || switcher_cycles_tabs;
         let modifier_label = modifier_send_label(cfg!(target_os = "macos"));
 
         let send_behaviors = [
@@ -961,6 +975,38 @@ impl Render for ShortcutsPage {
                             },
                         )),
                 );
+        let cycle_tabs_row = widgets::card_row(&theme, false)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(160.0))
+                    .child(widgets::row_title(&theme, "Ctrl+Tab cycles tabs"))
+                    .child(widgets::meta_line(
+                        &theme,
+                        vec![
+                            div()
+                                .child("Move straight to the next tab instead of opening the switcher.")
+                                .into_any_element(),
+                        ],
+                    )),
+            )
+            .child(
+                widgets::toggle_switch(&theme, switcher_cycles_tabs, "switcher-cycles-tabs")
+                    .id("switcher-cycles-tabs-toggle")
+                    .tab_index(0)
+                    .role(gpui::Role::Switch)
+                    .aria_label("Ctrl+Tab cycles tabs")
+                    .aria_toggled(if switcher_cycles_tabs {
+                        gpui::Toggled::True
+                    } else {
+                        gpui::Toggled::False
+                    })
+                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.set_switcher_cycles_tabs(!switcher_cycles_tabs, cx);
+                    })),
+            );
         let escape_behavior_row = widgets::card_row(&theme, false)
             .child(
                 div()
@@ -1031,7 +1077,8 @@ impl Render for ShortcutsPage {
                                     .child(
                                         widgets::section_card(&theme)
                                             .child(switcher_row)
-                                            .child(switcher_limit_row),
+                                            .child(switcher_limit_row)
+                                            .child(cycle_tabs_row),
                                     )
                                     .child(self.thread_naming.clone()),
                             ),
@@ -1148,6 +1195,7 @@ impl Render for ShortcutsPage {
                                                             cx,
                                                         );
                                                         this.set_switcher_limit(0, cx);
+                                                        this.set_switcher_cycles_tabs(false, cx);
                                                     }),
                                                 )
                                             })
@@ -1207,6 +1255,7 @@ mod tests {
                 0,
                 false,
                 false,
+                false,
                 AppshotDestination::Automatic,
                 cx,
             );
@@ -1264,6 +1313,7 @@ mod tests {
                 ReasoningShortcutModifier::default(),
                 SwitcherWindow::default(),
                 0,
+                false,
                 false,
                 false,
                 AppshotDestination::Automatic,
@@ -1376,6 +1426,7 @@ mod tests {
                 SwitcherWindow::default(),
                 0,
                 false,
+                false,
                 true,
                 AppshotDestination::Automatic,
                 cx,
@@ -1431,6 +1482,7 @@ mod tests {
                 ReasoningShortcutModifier::default(),
                 SwitcherWindow::default(),
                 0,
+                false,
                 false,
                 true,
                 AppshotDestination::Automatic,
@@ -1608,6 +1660,7 @@ mod tests {
                 ReasoningShortcutModifier::default(),
                 SwitcherWindow::default(),
                 0,
+                false,
                 false,
                 true,
                 AppshotDestination::Automatic,

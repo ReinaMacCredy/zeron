@@ -5,6 +5,7 @@ use super::bounds::{self, MAX_SAFE_INTEGER};
 use super::driver::CuaEffect;
 
 pub const ZERON_COMPUTER_TOOL_NAMES: &[&str] = &[
+    "computer_zeron_browser",
     "computer_activate_window",
     "computer_click",
     "computer_drag",

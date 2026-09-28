@@ -137,6 +137,16 @@ pub fn allowed_navigation(address: &str) -> bool {
     })
 }
 
+/// `root` must already be canonical.
+pub fn allowed_file_navigation(address: &str, root: &std::path::Path) -> bool {
+    url::Url::parse(address)
+        .ok()
+        .filter(|u| u.scheme() == "file" && u.host_str().is_none_or(str::is_empty))
+        .and_then(|u| u.to_file_path().ok())
+        .and_then(|path| path.canonicalize().ok())
+        .is_some_and(|path| path.starts_with(root))
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Presentation {
     #[default]
@@ -191,6 +201,45 @@ mod tests {
         }
         assert!(!allowed_navigation("javascript:alert(1)"));
         assert!(!allowed_navigation("https://user@example.com/"));
+    }
+    #[test]
+    fn file_navigation_stays_inside_the_workspace_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let root = base.join("ws");
+        std::fs::create_dir_all(root.join("site")).unwrap();
+        std::fs::write(root.join("site/index.html"), "").unwrap();
+        std::fs::write(base.join("outside.html"), "").unwrap();
+        std::os::unix::fs::symlink(base.join("outside.html"), root.join("link.html")).unwrap();
+        let url = |path: &std::path::Path| url::Url::from_file_path(path).unwrap().to_string();
+
+        assert!(allowed_file_navigation(
+            &url(&root.join("site/index.html")),
+            &root
+        ));
+        assert!(allowed_file_navigation(
+            &format!("{}#top", url(&root.join("site/index.html"))),
+            &root
+        ));
+        assert!(!allowed_file_navigation(
+            &url(&base.join("outside.html")),
+            &root
+        ));
+        assert!(!allowed_file_navigation(
+            &url(&root.join("link.html")),
+            &root
+        ));
+        assert!(!allowed_file_navigation(
+            &format!("file://{}/site/../../outside.html", root.display()),
+            &root
+        ));
+        assert!(!allowed_file_navigation(
+            &url(&root.join("missing.html")),
+            &root
+        ));
+        assert!(!allowed_file_navigation("https://example.com/", &root));
+        assert!(!allowed_file_navigation("file://host/etc/passwd", &root));
+        assert!(normalize_address(&url(&root.join("site/index.html"))).is_err());
     }
     #[test]
     fn native_visibility_never_outlives_its_surface() {

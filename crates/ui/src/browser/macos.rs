@@ -1,7 +1,7 @@
 //! AppKit boundary for the browser. Wry owns the native child and its UI
 //! delegate; our navigation delegate supplies browser policy and state. All
 //! callbacks enqueue events, never re-enter GPUI. No page-to-engine IPC.
-use super::model::{PageState, Presentation, allowed_navigation};
+use super::model::{PageState, Presentation, allowed_file_navigation, allowed_navigation};
 use gpui::{Bounds, Pixels, Window};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
@@ -13,7 +13,7 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{
     NSDictionary, NSError, NSKeyValueChangeKey, NSKeyValueObservingOptions, NSObject,
-    NSObjectNSKeyValueObserverRegistration, NSObjectProtocol, NSString,
+    NSObjectNSKeyValueObserverRegistration, NSObjectProtocol, NSString, NSURL,
 };
 use objc2_web_kit::{
     WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate,
@@ -152,10 +152,12 @@ pub(super) enum NativeEvent {
 }
 
 struct ObserverState {
+    navigation_epoch: Cell<u64>,
     tx: Sender,
     pending: Cell<bool>,
     error: RefCell<Option<String>>,
     requested_url: RefCell<Option<String>>,
+    file_root: RefCell<Option<std::path::PathBuf>>,
 }
 
 define_class!(
@@ -168,6 +170,9 @@ define_class!(
     impl Observer {
         #[unsafe(method(observeValueForKeyPath:ofObject:change:context:))]
         fn observe(&self, _key: Option<&NSString>, _object: Option<&AnyObject>, _change: Option<&NSDictionary<NSKeyValueChangeKey, AnyObject>>, _context: *mut std::ffi::c_void) {
+            if _key.is_some_and(|key| key.to_string() == "URL") {
+                self.ivars().navigation_epoch.set(self.ivars().navigation_epoch.get().wrapping_add(1));
+            }
             self.changed();
         }
     }
@@ -175,10 +180,12 @@ define_class!(
         #[unsafe(method(webView:decidePolicyForNavigationAction:decisionHandler:))]
         fn policy(&self, _view: &WKWebView, action: &WKNavigationAction, decision: &block2::Block<dyn Fn(WKNavigationActionPolicy)>) {
             let url = unsafe { action.request().URL() }.and_then(|u| u.absoluteString()).map(|u| u.to_string()).unwrap_or_default();
-            if allowed_navigation(&url) && unsafe { action.targetFrame() }.is_some_and(|frame| unsafe { frame.isMainFrame() }) {
+            let allowed = allowed_navigation(&url)
+                || self.ivars().file_root.borrow().as_deref().is_some_and(|root| allowed_file_navigation(&url, root));
+            if allowed && unsafe { action.targetFrame() }.is_some_and(|frame| unsafe { frame.isMainFrame() }) {
                 *self.ivars().requested_url.borrow_mut() = Some(url.clone());
             }
-            decision.call((if allowed_navigation(&url) { WKNavigationActionPolicy::Allow } else { WKNavigationActionPolicy::Cancel },));
+            decision.call((if allowed { WKNavigationActionPolicy::Allow } else { WKNavigationActionPolicy::Cancel },));
         }
         #[unsafe(method(webView:decidePolicyForNavigationResponse:decisionHandler:))]
         fn response(&self, _view: &WKWebView, response: &WKNavigationResponse, decision: &block2::Block<dyn Fn(WKNavigationResponsePolicy)>) {
@@ -222,10 +229,12 @@ define_class!(
 impl Observer {
     fn new(tx: Sender, mtm: MainThreadMarker) -> Retained<Self> {
         let object = mtm.alloc().set_ivars(ObserverState {
+            navigation_epoch: Cell::new(0),
             tx,
             pending: Cell::new(false),
             error: RefCell::new(None),
             requested_url: RefCell::new(None),
+            file_root: RefCell::new(None),
         });
         unsafe { msg_send![super(object), init] }
     }
@@ -272,6 +281,7 @@ define_class!(
 pub(super) struct NativePage(Rc<RefCell<Host>>);
 
 pub(super) struct Host {
+    automation_snapshot_epoch: Cell<Option<u64>>,
     web: WebView,
     data: BrowserData,
     view: Retained<WKWebView>,
@@ -414,6 +424,7 @@ impl NativePage {
             NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &callback)
         };
         Ok(Self(Rc::new(RefCell::new(Host {
+            automation_snapshot_epoch: Cell::new(None),
             data: data.clone(),
             web,
             view,
@@ -448,8 +459,31 @@ impl NativePage {
         let host = self.0.borrow();
         host.data.register_preview(url);
         host.observer.ivars().error.borrow_mut().take();
+        host.observer.ivars().file_root.borrow_mut().take();
         *host.observer.ivars().requested_url.borrow_mut() = Some(url.into());
         host.web.load_url(url).map_err(|e| e.to_string())
+    }
+    pub fn load_file(
+        &self,
+        file: &std::path::Path,
+        root: &std::path::Path,
+    ) -> Result<String, String> {
+        let host = self.0.borrow();
+        let url = NSURL::fileURLWithPath(&NSString::from_str(&file.to_string_lossy()));
+        let read_access =
+            NSURL::fileURLWithPath_isDirectory(&NSString::from_str(&root.to_string_lossy()), true);
+        let address = url
+            .absoluteString()
+            .map(|url| url.to_string())
+            .ok_or("Invalid file path")?;
+        host.observer.ivars().error.borrow_mut().take();
+        *host.observer.ivars().file_root.borrow_mut() = Some(root.to_path_buf());
+        *host.observer.ivars().requested_url.borrow_mut() = Some(address.clone());
+        unsafe {
+            host.view
+                .loadFileURL_allowingReadAccessToURL(&url, &read_access)
+        };
+        Ok(address)
     }
     pub fn reload(&self) {
         let host = self.0.borrow();
@@ -824,5 +858,109 @@ impl NativePage {
                 .view
                 .evaluateJavaScript_completionHandler(&NSString::from_str(script), None);
         }
+    }
+}
+
+impl NativePage {
+    pub(super) fn automation_snapshot(&self) {
+        let host = self.0.borrow();
+        host.automation_snapshot_epoch
+            .set(Some(host.observer.ivars().navigation_epoch.get()));
+    }
+    pub(super) fn automation_refs_current(&self) -> bool {
+        let host = self.0.borrow();
+        host.automation_snapshot_epoch.get() == Some(host.observer.ivars().navigation_epoch.get())
+    }
+
+    pub(super) fn automation_eval(
+        &self,
+        script: &str,
+        page_world: bool,
+    ) -> futures::channel::oneshot::Receiver<Result<serde_json::Value, String>> {
+        let (tx, rx) = futures::channel::oneshot::channel();
+        let tx = RefCell::new(Some(tx));
+        let completion = block2::RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
+            let result = if let Some(error) = unsafe { error.as_ref() } {
+                Err(error.localizedDescription().to_string())
+            } else {
+                unsafe { value.as_ref() }
+                    .and_then(|value| value.downcast_ref::<NSString>())
+                    .ok_or_else(|| "JavaScript did not return JSON text.".to_string())
+                    .and_then(|text| {
+                        let text = text.to_string();
+                        if text.len() > 1024 * 1024 {
+                            return Err("Browser result exceeds 1 MiB.".into());
+                        }
+                        serde_json::from_str(&text).map_err(|e| e.to_string())
+                    })
+            };
+            if let Some(tx) = tx.borrow_mut().take() {
+                let _ = tx.send(result);
+            }
+        });
+        let host = self.0.borrow();
+        let mtm = MainThreadMarker::new().expect("browser runs on main thread");
+        unsafe {
+            let world = if page_world {
+                objc2_web_kit::WKContentWorld::pageWorld(mtm)
+            } else {
+                objc2_web_kit::WKContentWorld::defaultClientWorld(mtm)
+            };
+            host.view
+                .callAsyncJavaScript_arguments_inFrame_inContentWorld_completionHandler(
+                    &NSString::from_str(&format!("return {script};")),
+                    None,
+                    None,
+                    &world,
+                    Some(&completion),
+                );
+        }
+        rx
+    }
+
+    pub(super) fn automation_screenshot(
+        &self,
+    ) -> futures::channel::oneshot::Receiver<Result<serde_json::Value, String>> {
+        let (tx, rx) = futures::channel::oneshot::channel();
+        let tx = RefCell::new(Some(tx));
+        let completion = block2::RcBlock::new(
+            move |image: *mut objc2_app_kit::NSImage, error: *mut NSError| {
+                let Some(tx) = tx.borrow_mut().take() else {
+                    return;
+                };
+                let tiff = (|| {
+                    if let Some(error) = unsafe { error.as_ref() } {
+                        return Err(error.localizedDescription().to_string());
+                    }
+                    let image = unsafe { image.as_ref() }.ok_or("Snapshot returned no image")?;
+                    let data = image
+                        .TIFFRepresentation()
+                        .ok_or("Snapshot returned no image data")?;
+                    Ok(unsafe { data.as_bytes_unchecked() }.to_vec())
+                })();
+                std::thread::spawn(move || {
+                    let result = tiff.and_then(|tiff| {
+                        let image = image::load_from_memory(&tiff).map_err(|e| e.to_string())?;
+                        let image = image.thumbnail(1600, 1600);
+                        let mut png = std::io::Cursor::new(Vec::new());
+                        image
+                            .write_to(&mut png, image::ImageFormat::Png)
+                            .map_err(|e| e.to_string())?;
+                        use base64::Engine;
+                        Ok(
+                            serde_json::json!({"image":base64::engine::general_purpose::STANDARD.encode(png.into_inner())}),
+                        )
+                    });
+                    let _ = tx.send(result);
+                });
+            },
+        );
+        unsafe {
+            self.0
+                .borrow()
+                .view
+                .takeSnapshotWithConfiguration_completionHandler(None, &completion);
+        }
+        rx
     }
 }

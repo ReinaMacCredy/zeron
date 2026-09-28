@@ -690,8 +690,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let runtime = ComputerRuntime::start(dir.path());
         assert!(!runtime.settings().computer_control_enabled);
+        assert!(!runtime.settings().browser_developer_access);
         let on = ComputerSettings {
             computer_control_enabled: true,
+            browser_developer_access: true,
             agent_cursor_fill_color: "#a1b2c3".into(),
             ..ComputerSettings::default()
         };

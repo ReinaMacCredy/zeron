@@ -214,7 +214,7 @@ fn browser_refusal_result(refusal: BrowserRefusal) -> McpToolResult {
     }
 }
 
-fn browser_result_to_mcp(result: ComputerBrowserCallResult) -> McpToolResult {
+pub(super) fn browser_result_to_mcp(result: ComputerBrowserCallResult) -> McpToolResult {
     let mut content = Vec::new();
     for part in result.content.unwrap_or_default() {
         match (part.kind.as_str(), part.text, part.data, part.mime_type) {

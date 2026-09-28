@@ -198,6 +198,12 @@ impl Harness for MockHarness {
         // Dev/testing knob: `ZERON_MOCK_CODE=1` appends rust + ts code blocks
         // (keywords, strings, numbers, comments) plus inline code — for
         // syntax-palette and inline-code styling checks against the reference.
+        let reply_event = std::env::var("ZERON_MOCK_REPLY")
+            .ok()
+            .filter(|text| !text.is_empty())
+            .map(|text| AgentEvent::TextDelta {
+                text: format!("\n\n{text}"),
+            });
         let mock_code = std::env::var("ZERON_MOCK_CODE")
             .ok()
             .is_some_and(|v| !v.is_empty() && v != "0");
@@ -600,6 +606,7 @@ impl Harness for MockHarness {
             .chain(write_events)
             .chain(subagent_events)
             .chain(read_file_events)
+            .chain(reply_event)
             .chain(code_event)
             .chain(table_event)
             .chain(mend_event)
