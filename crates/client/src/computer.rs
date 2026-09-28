@@ -55,14 +55,14 @@ pub fn consent_question(questions: &[UserInputQuestion]) -> Option<&UserInputQue
 pub fn consent_scope(question: &UserInputQuestion) -> ComputerConsentScope {
     match &question.kind {
         Some(UserInputKind::Consent { scope, .. }) => *scope,
-        None => ComputerConsentScope::Task,
+        _ => ComputerConsentScope::Task,
     }
 }
 
 pub fn consent_app(question: &UserInputQuestion) -> Option<&ComputerConsentApp> {
     match &question.kind {
         Some(UserInputKind::Consent { app, .. }) => app.as_ref(),
-        None => None,
+        _ => None,
     }
 }
 

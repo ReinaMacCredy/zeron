@@ -623,7 +623,12 @@ fn consent(
                 computer::CONSENT_DECLINE.into(),
             ],
             multi_select: false,
-            kind: Some(UserInputKind::Consent { scope, app: None }),
+            kind: Some(UserInputKind::Consent {
+                scope,
+                app: None,
+                tool: None,
+                params: None,
+            }),
         }],
         resolved: answer.is_some(),
         answers: answer.map(|label| {

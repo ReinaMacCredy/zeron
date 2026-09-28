@@ -359,7 +359,7 @@ fn consent_part(request_id: &str) -> MessagePart {
             question: "Allow Computer for this task? The agent wants to run computer_click and will drive this Mac's apps until the turn ends.".into(),
             options: vec!["Allow".into(), "Deny".into()],
             multi_select: false,
-            kind: Some(zeron_proto::UserInputKind::Consent { scope: zeron_proto::computer::ComputerConsentScope::Task, app: None }),
+            kind: Some(zeron_proto::UserInputKind::Consent { scope: zeron_proto::computer::ComputerConsentScope::Task, app: None, tool: None, params: None }),
         }],
         resolved: false,
         answers: None,

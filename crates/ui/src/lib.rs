@@ -240,7 +240,7 @@ pub fn run_app(config: UiConfig) {
                     let open_state = state.clone();
                     computer::status_menu::drive(
                         state.clone(),
-                        move |chat_id, cx| open_notified_chat(chat_id, &open_state, cx),
+                        move |chat_id, cx| open_notification_target(chat_id, &open_state, cx),
                         computer::native::status_item::apply,
                         cx,
                     );

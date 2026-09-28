@@ -44,6 +44,8 @@ fn question(id: &str, consent: bool) -> UserInputQuestion {
         kind: consent.then_some(UserInputKind::Consent {
             scope: zeron_proto::computer::ComputerConsentScope::Task,
             app: None,
+            tool: None,
+            params: None,
         }),
     }
 }
