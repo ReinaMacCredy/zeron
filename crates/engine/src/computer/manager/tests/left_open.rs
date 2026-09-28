@@ -138,7 +138,8 @@ async fn a_window_opened_without_any_event_is_found_by_the_turn_end_read() {
 }
 
 #[tokio::test]
-async fn accessory_strips_and_other_apps_are_not_reported_but_a_minimized_window_is() {
+async fn accessory_strips_and_other_apps_are_not_reported_but_minimized_and_other_space_windows_are()
+ {
     let (manager, _, listing) = setup().await;
     press(&manager, "t1").await;
     let hidden = |id: &str, width, height| ComputerWindow {
@@ -151,22 +152,33 @@ async fn accessory_strips_and_other_apps_are_not_reported_but_a_minimized_window
         minimized: true,
         ..editor("editor-a-min", 110, 900.0, 700.0)
     };
+    let strip_with_spaces = ComputerWindow {
+        minimized: true,
+        ..hidden("strip-spaces", 1512.0, 33.0)
+    };
+    let other_space = ComputerWindow {
+        visible: false,
+        on_current_space: Some(false),
+        ..editor("editor-a-space", 110, 900.0, 700.0)
+    };
     *listing.lock().unwrap() = Some(desktop_with(vec![
         hidden("strip-1512", 1512.0, 33.0),
         hidden("strip-1920", 1920.0, 30.0),
         hidden("hidden-real", 900.0, 700.0),
         editor("stray-66x20", 110, 66.0, 20.0),
         editor("editor-b-new", 220, 900.0, 700.0),
+        strip_with_spaces,
         minimized,
+        other_space,
     ]));
     let left = manager.left_open_windows("a", "t1").await;
     assert_eq!(
         left,
         vec![ComputerLeftOpen {
             app: "Editor A".into(),
-            count: 1,
+            count: 2,
         }],
-        "only the minimized real window: strips, the 66x20 stray, the hidden one and an app the agent never touched are left out"
+        "the minimized window and the one on another Space; strips (even one the driver reads as minimized), the 66x20 stray, the hidden one and an app the agent never touched are left out"
     );
     manager.dispose().await;
 }

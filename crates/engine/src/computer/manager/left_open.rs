@@ -4,7 +4,9 @@ use zeron_proto::computer::ComputerWindow;
 
 use super::{ComputerManager, State, with_teardown_timeout};
 use crate::computer::cua_backend::parse_cua_window_id;
-use crate::computer::wait_for_window::MIN_USABLE_WINDOW_SIDE;
+
+// Ghostty's tab-bar and titlebar accessory windows list as 1512x33 and 1920x30 strips.
+const LEFT_OPEN_MIN_SIDE: f64 = 48.0;
 
 pub(super) struct TurnWindows {
     turn_id: String,
@@ -53,9 +55,9 @@ pub(super) fn fill_baselines(state: &mut State) {
 fn is_left_open(window: &ComputerWindow, baseline: &HashSet<String>, acted: &HashSet<u32>) -> bool {
     window.pid.is_some_and(|pid| acted.contains(&pid))
         && !baseline.contains(&window.id)
-        && (window.visible || window.minimized)
+        && (window.visible || window.minimized || window.on_current_space == Some(false))
         && window.bounds.is_some_and(|bounds| {
-            bounds.width >= MIN_USABLE_WINDOW_SIDE && bounds.height >= MIN_USABLE_WINDOW_SIDE
+            bounds.width >= LEFT_OPEN_MIN_SIDE && bounds.height >= LEFT_OPEN_MIN_SIDE
         })
 }
 
