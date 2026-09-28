@@ -528,6 +528,9 @@ impl ComputerManager {
         let attributed = agent_thread_id(thread_id);
         if let Some(attributed) = attributed {
             self.surface_pane_for_agent(attributed);
+            if let Some(window_id) = result.and_then(|result| result.window_id.as_deref()) {
+                self.record_acted_window(attributed, window_id);
+            }
         }
         self.emit(ComputerEvent::Action {
             window_id: result.and_then(|result| result.window_id.clone()),

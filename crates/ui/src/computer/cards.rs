@@ -31,9 +31,22 @@ pub enum ComputerNotice {
     Unavailable,
     ControlDenied,
     Foreground,
+    LeftOpen,
+}
+
+pub fn left_open_app(note: &str) -> Option<&str> {
+    let rest = note.strip_prefix("Left ")?;
+    let rest = rest
+        .strip_suffix(" windows open")
+        .or_else(|| rest.strip_suffix(" window open"))?;
+    let (count, app) = rest.split_once(' ')?;
+    (count.parse::<usize>().is_ok_and(|count| count > 0) && !app.trim().is_empty()).then_some(app)
 }
 
 pub fn computer_notice(note: &str) -> Option<ComputerNotice> {
+    if left_open_app(note).is_some() {
+        return Some(ComputerNotice::LeftOpen);
+    }
     if note
         .strip_prefix(COMPUTER_USER_PAUSE_NOTE_PREFIX)
         .is_some_and(|app| !app.is_empty())
@@ -556,6 +569,33 @@ mod tests {
             Some(ComputerNotice::Unavailable)
         );
         assert_eq!(computer_notice("Context compacted"), None);
+    }
+
+    #[test]
+    fn a_left_open_note_names_its_app_in_the_singular_and_the_plural() {
+        use zeron_engine::computer::manager::{ComputerLeftOpen, left_open_note};
+        for (count, app) in [(1, "Ghostty"), (3, "Google Chrome")] {
+            let note = left_open_note(&ComputerLeftOpen {
+                app: app.into(),
+                count,
+            });
+            assert_eq!(computer_notice(&note), Some(ComputerNotice::LeftOpen));
+            assert_eq!(left_open_app(&note), Some(app));
+        }
+        assert_eq!(left_open_app("Left 1 Ghostty window open"), Some("Ghostty"));
+        assert_eq!(
+            left_open_app("Left 2 Ghostty windows open"),
+            Some("Ghostty")
+        );
+        for other in [
+            "Left the chat",
+            "Left 0 Ghostty windows open",
+            "Left two Ghostty windows open",
+            "Left 1  window open",
+            "Left 1 Ghostty window open now",
+        ] {
+            assert_eq!(computer_notice(other), None, "{other}");
+        }
     }
 
     #[test]

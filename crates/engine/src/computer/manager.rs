@@ -3,6 +3,7 @@ mod authority;
 mod consent_app;
 mod foreground;
 mod lease;
+mod left_open;
 mod observe;
 mod publish;
 mod stream;
@@ -121,6 +122,7 @@ pub use consent_app::{
     COMPUTER_APP_CONSENT_REQUIRED_CODE, COMPUTER_APP_WINDOW_REQUIRED_CODE,
     COMPUTER_APP_WINDOW_REQUIRED_MESSAGE,
 };
+pub use left_open::{ComputerLeftOpen, left_open_note};
 pub use zeron_proto::computer::{ComputerConsentApp, ComputerConsentScope};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -485,6 +487,7 @@ struct State {
     authority_revocations: HashMap<String, Authority>,
     active_authorities: HashMap<String, Vec<Authority>>,
     authority_turns: HashMap<String, String>,
+    turn_windows: HashMap<String, left_open::TurnWindows>,
     pending_stops: HashMap<String, PendingStop>,
     physical_state: Option<PhysicalState>,
     physical_read: Option<Shared<BoxFuture<'static, ()>>>,
@@ -666,6 +669,7 @@ impl ComputerManager {
                     authority_revocations: HashMap::new(),
                     active_authorities: HashMap::new(),
                     authority_turns: HashMap::new(),
+                    turn_windows: HashMap::new(),
                     pending_stops: HashMap::new(),
                     physical_state: None,
                     physical_read: None,
@@ -788,6 +792,7 @@ impl ComputerManager {
     fn remember_windows(state: &mut State, windows: &[ComputerWindow]) {
         state.last_known_window_ids =
             Some(windows.iter().map(|window| window.id.clone()).collect());
+        left_open::fill_baselines(state);
         state.last_known_windows = windows
             .iter()
             .map(|window| (window.id.clone(), window.clone()))

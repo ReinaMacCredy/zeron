@@ -322,6 +322,9 @@ impl ComputerManager {
                     });
                 self.publish_cached(owner);
             }
+            if let Some(owner) = owner {
+                self.record_acted_pid(owner, result.pid);
+            }
             self.emit_action(thread_id, "computer_launch_app", None);
             if result.window.is_none()
                 && result.window_status != Some(ComputerLaunchWindowStatus::NoUsableWindow)

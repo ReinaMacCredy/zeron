@@ -934,6 +934,11 @@ pub(crate) fn app_icon_png(app_path: &str) -> Option<Vec<u8>> {
     macos::icon_for_path(app_path)
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn activate_app_named(name: &str) -> bool {
+    macos::activate_app_named(name)
+}
+
 pub fn presentation_icon(presentation: &AppshotPresentation) -> Option<Arc<gpui::Image>> {
     bundle_icon(presentation.bundle_identifier.as_deref()?)
 }

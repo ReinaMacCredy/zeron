@@ -46,7 +46,7 @@ use crate::computer::cards::{
     CardAction, CardTone, ComputerNotice, ComputerRequest, ConsentChoice, ConsentOutcome,
     computer_card, computer_event_row, computer_notice, consent_allow_description, consent_answers,
     consent_app, consent_card_title, consent_choices, consent_detail, consent_event_label,
-    consent_outcome, consent_question, consent_scope, is_control_denied,
+    consent_outcome, consent_question, consent_scope, is_control_denied, left_open_app,
     missing_computer_permissions, revoked_label,
 };
 use crate::computer::presentation::{
@@ -9536,6 +9536,25 @@ impl Transcript {
             ComputerNotice::Paused | ComputerNotice::Foreground => {
                 computer_event_row(crate::icons::CURSOR, text, CardTone::Info, None, theme)
             }
+            ComputerNotice::LeftOpen => {
+                let show = left_open_app(&text)
+                    .filter(|_| cfg!(target_os = "macos") && self.chat_hosted_here(cx))
+                    .map(|app| {
+                        let app = app.to_owned();
+                        CardAction {
+                            id: format!("{row_id}-show").into(),
+                            label: "Show".into(),
+                            primary: false,
+                            on_click: Box::new(move |_, _, _| {
+                                #[cfg(target_os = "macos")]
+                                crate::appshots::activate_app_named(&app);
+                                #[cfg(not(target_os = "macos"))]
+                                let _ = &app;
+                            }),
+                        }
+                    });
+                computer_event_row(crate::icons::CURSOR, text, CardTone::Info, show, theme)
+            }
             ComputerNotice::Unavailable => computer_card(
                 CardTone::Warning,
                 icon,
@@ -18087,6 +18106,81 @@ mod computer_tests {
                     labels: vec!["Always allow Safari".into()],
                 }],
             }
+        );
+    }
+
+    #[gpui::test]
+    fn a_left_open_note_is_an_event_row_with_show_only_on_the_host_mac(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let rows = rows_for_entry(
+            &entry(
+                MessageRole::System,
+                vec![text("t0", "Left 1 Ghostty window open")],
+            ),
+            false,
+            false,
+            &mut parse,
+        );
+        let RowKind::ComputerNotice { notice, text, hint } = rows[0].kind.clone() else {
+            panic!("expected an event row");
+        };
+        assert_eq!(
+            (notice, text.as_ref(), hint),
+            (ComputerNotice::LeftOpen, "Left 1 Ghostty window open", None)
+        );
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.chats = vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "chat",
+                    "deviceId": "mac",
+                    "archived": false,
+                    "createdAt": "2026-09-28T00:00:00Z"
+                }))
+                .unwrap(),
+            ];
+            state.local_device_id = Some("other-mac".into());
+        });
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        transcript.update(cx, |transcript, _| transcript.chat_id = Some("chat".into()));
+        struct Fixture(Entity<Transcript>, SharedString);
+        impl Render for Fixture {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let theme = Theme::of(cx).clone();
+                let text = self.1.clone();
+                let row = self.0.update(cx, |this, cx| {
+                    this.render_computer_notice(
+                        &"row".into(),
+                        ComputerNotice::LeftOpen,
+                        text,
+                        None,
+                        &theme,
+                        cx,
+                    )
+                });
+                div().w(px(520.0)).child(row)
+            }
+        }
+        let (fixture, cx) = cx.add_window_view(|_, _| Fixture(transcript.clone(), text));
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("row-show").is_none(),
+            "a viewer on another Mac has nothing to raise"
+        );
+        state.update(cx, |state, _| state.local_device_id = Some("mac".into()));
+        fixture.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("row-show").is_some(),
+            cfg!(target_os = "macos"),
+            "the host Mac can bring the app forward"
         );
     }
 

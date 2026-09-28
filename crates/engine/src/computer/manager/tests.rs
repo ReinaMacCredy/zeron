@@ -43,6 +43,7 @@ mod emergency_stop;
 mod foreground;
 mod gateway;
 mod lease;
+mod left_open;
 mod observe;
 mod provision;
 mod publish;

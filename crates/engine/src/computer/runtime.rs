@@ -19,7 +19,7 @@ use super::approval_gate::ComputerApprovalGate;
 use super::control_state::ComputerControlState;
 use super::engine_seams::EngineComputerSeams;
 use super::host_wire::{HostRegistration, HostSlot};
-use super::manager::{ComputerManagerSeams, ComputerManagerSubscription};
+use super::manager::{ComputerManagerSeams, ComputerManagerSubscription, left_open_note};
 use super::service::{ComputerService, ComputerServiceOptions};
 use super::tool_calls::ComputerCalls;
 use crate::sessions::SessionsEngine;
@@ -279,8 +279,15 @@ impl ComputerRuntime {
         };
         service.manager.clear_desktop_revoked(chat_id);
         service.manager.set_pending_request(chat_id, None);
+        let sessions = self.engine_seams.sessions();
         let (chat_id, turn_id) = (chat_id.to_owned(), turn_id.to_owned());
         tokio::spawn(async move {
+            let left = service.manager.left_open_windows(&chat_id, &turn_id).await;
+            if let Some(sessions) = &sessions {
+                for left in &left {
+                    sessions.write_computer_note(&chat_id, &left_open_note(left), None);
+                }
+            }
             if let Err(error) = service
                 .manager
                 .release_desktop_control(&chat_id, Some(&turn_id))

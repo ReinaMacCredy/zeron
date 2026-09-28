@@ -277,6 +277,7 @@ impl ComputerManager {
                         state
                             .authority_turns
                             .insert(owner.clone(), turn_id.to_owned());
+                        super::left_open::begin_turn(&mut state, owner, turn_id);
                     }
                     let depth = state
                         .agent_calls_in_flight
@@ -610,6 +611,7 @@ impl ComputerManager {
             state.remove_thread(thread_id);
             state.thread_labels.retain(|(id, _)| id != thread_id);
             state.authority_turns.remove(thread_id);
+            state.turn_windows.remove(thread_id);
             state.authority_revocations.remove(thread_id);
             state.active_authorities.remove(thread_id);
         }
