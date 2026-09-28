@@ -506,6 +506,10 @@ impl ComputerPage {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
+        #[cfg(target_os = "macos")]
+        if !next.browser_developer_access {
+            crate::browser::control_host::set_developer_blocked(true, cx);
+        }
         self.settings = Some(next.clone());
         self.settings_error = None;
         let params = serde_json::to_value(&next).unwrap_or_default();
@@ -518,6 +522,8 @@ impl ComputerPage {
                 page.save = None;
                 match reply {
                     Ok(_) => {
+                        #[cfg(target_os = "macos")]
+                        crate::browser::control_host::set_developer_blocked(!next.browser_developer_access, cx);
                         page.state
                             .update(cx, |state, _| state.computer_settings = Some(next.clone()));
                         if next.agent_cursor_colors() != previous.agent_cursor_colors() {
@@ -533,6 +539,8 @@ impl ComputerPage {
                     }
                     Err(error) => {
                         if page.settings.as_ref() == Some(&next) {
+                            #[cfg(target_os = "macos")]
+                            crate::browser::control_host::set_developer_blocked(!previous.browser_developer_access, cx);
                             page.adopt_settings(previous, cx);
                         }
                         page.settings_error = Some(format!("Could not save: {error}").into());
@@ -1216,6 +1224,29 @@ impl Render for ComputerPage {
                 }))
             });
 
+        let developer_toggle = widgets::toggle_switch(
+            &theme,
+            settings.browser_developer_access,
+            "browser-developer-access",
+        )
+        .id("browser-developer-access")
+        .debug_selector(|| "browser-developer-access".into())
+        .role(gpui::Role::Switch)
+        .aria_label("Developer access for Zeron browser")
+        .aria_toggled(if settings.browser_developer_access {
+            gpui::Toggled::True
+        } else {
+            gpui::Toggled::False
+        })
+        .when(!editable, |el| el.opacity(0.4))
+        .when(editable, |el| {
+            el.cursor_pointer().on_click(cx.listener(|this, _, _, cx| {
+                this.write_settings(cx, |settings| {
+                    settings.browser_developer_access = !settings.browser_developer_access
+                });
+            }))
+        });
+
         let dot = match view.kind {
             ViewKind::Ready => theme.success,
             ViewKind::Checking => theme.warning,
@@ -1687,6 +1718,8 @@ impl Render for ComputerPage {
                                     .map(|error| widgets::error_strip(&theme, error)),
                             )
                             .child(card)
+                            .child(section_header(&theme, "Developer access", Some(developer_toggle.into_any_element())))
+                            .child(muted_line(&theme, "Allow all tasks to run JavaScript and collect partial page diagnostics in their Zeron browser tabs. Page scripts can access sensitive site data. This does not enable full CDP."))
                             .child(section_header(&theme, "Always-allowed apps", None))
                             .child(muted_line(
                                 &theme,
@@ -2031,6 +2064,15 @@ mod tests {
             )
             .unwrap();
             assert!(stored.computer_control_enabled);
+            assert!(!stored.browser_developer_access);
+            click(cx, "browser-developer-access");
+            wait(cx, |_| core.computer.settings().browser_developer_access);
+            let stored: ComputerSettings = serde_json::from_str(
+                &std::fs::read_to_string(dir.path().join("engine/computer-settings.json")).unwrap(),
+            ).unwrap();
+            assert!(stored.browser_developer_access);
+            click(cx, "browser-developer-access");
+            wait(cx, |_| !core.computer.settings().browser_developer_access);
             click(cx, "computer-control-toggle");
             wait(cx, |_| !core.computer.settings().computer_control_enabled);
             page.update(cx, |page, cx| page.refresh(cx));

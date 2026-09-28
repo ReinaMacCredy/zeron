@@ -7,6 +7,12 @@ mod macos;
 use linux as native;
 #[cfg(target_os = "macos")]
 use macos as native;
+#[cfg(target_os = "macos")]
+pub(crate) mod automation;
+#[cfg(target_os = "macos")]
+pub(crate) mod control_host;
+#[cfg(target_os = "macos")]
+pub(crate) mod control_admission;
 pub mod model;
 mod view;
 
@@ -75,6 +81,8 @@ pub struct BrowserContext {
 }
 
 pub struct BrowserSurface {
+    #[cfg(target_os = "macos")]
+    pub(crate) control: automation::Control,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     context: BrowserContext,
     address: Entity<ComposerInput>,
@@ -155,6 +163,8 @@ impl BrowserSurface {
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         let _ = (window, context);
         Self {
+            #[cfg(target_os = "macos")]
+            control: Default::default(),
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             context,
             address,

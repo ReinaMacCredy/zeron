@@ -507,6 +507,32 @@ impl Render for BrowserSurface {
             .child(address)
             .child(open);
 
+        #[cfg(target_os = "macos")]
+        let toolbar = toolbar.child(
+            div()
+                .id("browser-agent-control")
+                .px(px(8.0))
+                .cursor_pointer()
+                .role(gpui::Role::Button)
+                .aria_label(if self.control.paused {
+                    "Resume agent control"
+                } else {
+                    "Take over browser"
+                })
+                .child(if self.control.paused {
+                    "Resume agent"
+                } else {
+                    "Take over"
+                })
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if this.control.paused {
+                        this.resume_control(cx);
+                    } else {
+                        this.take_over(cx);
+                    }
+                })),
+        );
+
         let body = div()
             .id("browser-page")
             .relative()

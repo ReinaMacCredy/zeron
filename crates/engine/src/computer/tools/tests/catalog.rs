@@ -298,7 +298,7 @@ const SYNARA_REGISTERED: &[&str] = &[
 ];
 
 #[tokio::test]
-async fn registers_synaras_43_tools_with_28_advertised_when_the_backend_has_a_browser() {
+async fn registers_synara_tools_plus_the_macos_native_browser_when_the_backend_has_a_browser() {
     let h = super::harness_with(super::HarnessOptions {
         backend: super::fake_with(crate::computer::fake_backend::FakeComputerBackendOptions {
             browser: crate::computer::fake_backend::FakeComputerOptIn::BuiltIn,
@@ -312,9 +312,10 @@ async fn registers_synaras_43_tools_with_28_advertised_when_the_backend_has_a_br
         .iter()
         .map(|entry| entry.name().to_owned())
         .collect();
-    assert_eq!(registered.len(), 43);
     registered.sort();
     let mut expected: Vec<&str> = SYNARA_REGISTERED.to_vec();
+    #[cfg(target_os = "macos")]
+    expected.push("computer_zeron_browser");
     expected.sort_unstable();
     assert_eq!(registered, expected);
     let catalog: Vec<String> = h
@@ -325,7 +326,8 @@ async fn registers_synaras_43_tools_with_28_advertised_when_the_backend_has_a_br
         .collect();
     let mut advertised: Vec<&str> = ADVERTISED.to_vec();
     advertised.extend_from_slice(&crate::computer::tools::browser::COMPUTER_BROWSER_TOOL_NAMES);
-    assert_eq!(catalog.len(), 28);
+    #[cfg(target_os = "macos")]
+    advertised.push("computer_zeron_browser");
     assert_eq!(catalog, advertised);
     let hidden: Vec<String> = h
         .tools

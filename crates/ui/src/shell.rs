@@ -11,6 +11,9 @@
 //! ghost view + `on_drag_move::<Marker>` on the root), the same idiom as Zed's
 //! dock. Double-clicking a handle resets that pane to its default width.
 
+#[cfg(target_os = "macos")]
+mod browser_control;
+
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -12998,6 +13001,8 @@ fn header_icon_button(
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(target_os = "macos")]
+        crate::browser::control_host::register(cx.weak_entity(), window.window_handle(), cx);
         if let Some(command) = self.pending_workspace_command.take() {
             use crate::composer::WorkspaceCommand;
             match command {

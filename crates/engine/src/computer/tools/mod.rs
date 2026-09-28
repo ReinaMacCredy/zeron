@@ -2,6 +2,7 @@ mod args;
 mod batch;
 pub mod browser;
 mod browser_effect;
+mod native_browser;
 pub mod consent;
 mod desktop;
 mod elements;
@@ -271,6 +272,8 @@ pub fn computer_tool_families(manager: &ComputerManager) -> Vec<Arc<dyn Computer
         vec![Arc::new(self::spaces::ComputerSpaceTools::default())];
     if manager.supports_browser() {
         families.push(Arc::new(self::browser::ComputerBrowserTools::default()));
+        #[cfg(target_os = "macos")]
+        families.push(Arc::new(self::native_browser::NativeBrowserTools));
     }
     families
 }

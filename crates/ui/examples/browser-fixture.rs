@@ -1,3 +1,6 @@
+#[cfg(target_os = "macos")]
+#[path = "browser-fixture/native_control.rs"]
+mod native_control;
 #[path = "browser-fixture/transcript_links.rs"]
 mod transcript_links;
 #[cfg(target_os = "linux")]
@@ -139,7 +142,9 @@ fn main() -> anyhow::Result<()> {
             let mut request = [0; 4096];
             let n = stream.read(&mut request).unwrap_or(0);
             let request = String::from_utf8_lossy(&request[..n]);
-            let (title, html) = if request.starts_with("GET /two ") {
+            let (title, html) = if request.starts_with("GET /control ") {
+                ("Browser control fixture", "<label>Name<input aria-label='Name'></label><button onclick=\"document.querySelector('output').textContent='Hello '+document.querySelector('input').value\">Submit</button><output></output>")
+            } else if request.starts_with("GET /two ") {
                 (
                     "Details",
                     "<a href='/'>Back to overview</a><h1>A closer look.</h1><p>Independent navigation, right beside your work.</p>",
@@ -198,6 +203,10 @@ fn main() -> anyhow::Result<()> {
         cx.spawn(async move |cx| {
             let run: anyhow::Result<()> = async {
                 pause(cx, 1200).await;
+                #[cfg(target_os = "macos")]
+                if std::env::var_os("ZERON_NATIVE_CONTROL_FIXTURE_ONLY").is_some() {
+                    return native_control::exercise(window, &_origin, &output, cx).await;
+                }
                 if std::env::var_os("ZERON_TRANSCRIPT_LINK_FIXTURE_ONLY").is_some() {
                     return transcript_links::exercise(window, state.clone(), &_origin, &output, cx).await;
                 }

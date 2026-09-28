@@ -22,6 +22,25 @@ pub async fn run_host_registration(
     host: Arc<dyn ComputerHost>,
     bundle_id: String,
 ) {
+    run_host_registration_with_reset(engine, host, bundle_id, None).await;
+}
+
+struct RegistrationReset(Option<Arc<dyn Fn() + Send + Sync>>);
+impl Drop for RegistrationReset {
+    fn drop(&mut self) {
+        if let Some(reset) = &self.0 {
+            reset();
+        }
+    }
+}
+
+async fn run_host_registration_with_reset(
+    engine: EngineHandle,
+    host: Arc<dyn ComputerHost>,
+    bundle_id: String,
+    reset: Option<Arc<dyn Fn() + Send + Sync>>,
+) {
+    let reset = RegistrationReset(reset);
     let mut backoff = RETRY_MIN;
     loop {
         let subscribed = engine
@@ -31,21 +50,24 @@ pub async fn run_host_registration(
                 json!({ "bundleId": bundle_id }),
             )
             .await;
-        let wait = match subscribed {
+        let (wait, served) = match subscribed {
             Ok(mut items) => match serve(&engine, &host, &mut items).await {
-                Served::Refused(wait) => wait,
+                Served::Refused(wait) => (wait, false),
                 Served::Lost => {
                     backoff = RETRY_MIN;
-                    RETRY_MIN
+                    (RETRY_MIN, true)
                 }
-                Served::Ended => backoff,
+                Served::Ended => (backoff, false),
             },
             Err(RpcError::UnknownMethod(_) | RpcError::Closed) => return,
             Err(error) => {
                 tracing::warn!(target: "desktop_cua", %error, "computer host registration failed");
-                backoff
+                (backoff, false)
             }
         };
+        if served && let Some(reset) = &reset.0 {
+            reset();
+        }
         tokio::time::sleep(wait).await;
         backoff = (backoff * 2).min(RETRY_MAX);
     }
@@ -144,6 +166,8 @@ pub const DESKTOP_HOST_RETIRE_BUDGET: Duration = Duration::from_secs(5);
 
 #[cfg(target_os = "macos")]
 pub struct DesktopHost {
+    browser_admission: Arc<crate::browser::control_admission::Admission>,
+    browser_sender: tokio::sync::mpsc::UnboundedSender<crate::browser::control_host::Message>,
     host: Arc<dyn ComputerHost>,
     driver: super::host::CuaDriverHost,
     bundle_id: String,
@@ -167,10 +191,14 @@ pub fn install_desktop_host(cx: &mut gpui::App) {
     let runtime = gpui_tokio::Tokio::handle(cx);
     let engine: Arc<Mutex<Option<EngineHandle>>> = Arc::default();
     let cursor_style: Arc<Mutex<Option<super::host::CuaCursorStyle>>> = Arc::default();
+    let browser_sender = crate::browser::control_host::install(cx);
+    let browser_admission = Arc::new(crate::browser::control_admission::Admission::default());
     let on_emergency_stop: Arc<dyn Fn() + Send + Sync> = Arc::new({
+        let browser_sender = browser_sender.clone();
         let engine = engine.clone();
         let runtime = runtime.clone();
         move || {
+            let _ = browser_sender.send(crate::browser::control_host::Message::Revoke(None));
             let current = engine
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -185,6 +213,7 @@ pub fn install_desktop_host(cx: &mut gpui::App) {
         bundle_id: bundle_id.clone(),
         preview: super::preview::native_sink(cx),
         on_emergency_stop: Some(on_emergency_stop),
+        browser_admission: browser_admission.clone(),
         cursor_style: Some(Box::new({
             let cursor_style = cursor_style.clone();
             move || {
@@ -197,7 +226,17 @@ pub fn install_desktop_host(cx: &mut gpui::App) {
     };
     match super::native::start_native_host(config) {
         Ok((driver, link)) => cx.set_global(DesktopHost {
-            host: Arc::new(driver.clone()),
+            browser_admission: browser_admission.clone(),
+            browser_sender: browser_sender.clone(),
+            host: Arc::new(crate::browser::control_host::Host {
+                driver: Arc::new(driver.clone()),
+                admission: browser_admission,
+                monitor: link.monitor().clone(),
+                sender: browser_sender,
+                engine: engine.clone(),
+                pending: Mutex::default(),
+                cancelled: Mutex::default(),
+            }),
             driver,
             bundle_id,
             engine,
@@ -218,9 +257,20 @@ pub fn spawn_host_registration(engine: EngineHandle, cx: &gpui::App) -> Option<g
         .engine
         .lock()
         .unwrap_or_else(PoisonError::into_inner) = Some(engine.clone());
+    let admission = desktop.browser_admission.clone();
+    let sender = desktop.browser_sender.clone();
+    let reset = Arc::new(move || {
+        admission.stop(None);
+        let _ = sender.send(crate::browser::control_host::Message::Revoke(None));
+    });
     let registration = gpui_tokio::Tokio::spawn(
         cx,
-        run_host_registration(engine, desktop.host.clone(), desktop.bundle_id.clone()),
+        run_host_registration_with_reset(
+            engine,
+            desktop.host.clone(),
+            desktop.bundle_id.clone(),
+            Some(reset),
+        ),
     );
     Some(cx.background_executor().spawn(async move {
         let _ = registration.await;

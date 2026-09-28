@@ -219,6 +219,7 @@ pub enum AgentCursorColorMode {
 #[serde(rename_all = "camelCase", default)]
 pub struct ComputerSettings {
     pub computer_control_enabled: bool,
+    pub browser_developer_access: bool,
     pub auto_open_computer_pane: bool,
     pub computer_preview_size: ComputerPreviewSize,
     pub agent_cursor_color_mode: AgentCursorColorMode,
@@ -240,6 +241,7 @@ impl Default for ComputerSettings {
     fn default() -> Self {
         Self {
             computer_control_enabled: false,
+            browser_developer_access: false,
             auto_open_computer_pane: true,
             computer_preview_size: ComputerPreviewSize::Compact,
             agent_cursor_color_mode: AgentCursorColorMode::Stock,
@@ -391,6 +393,7 @@ mod tests {
             serde_json::to_value(ComputerSettings::default()).unwrap(),
             json!({
                 "computerControlEnabled": false,
+                "browserDeveloperAccess": false,
                 "autoOpenComputerPane": true,
                 "computerPreviewSize": "compact",
                 "agentCursorColorMode": "stock",
@@ -405,7 +408,9 @@ mod tests {
         let old: ComputerSettings =
             serde_json::from_value(json!({ "computerControlEnabled": true })).unwrap();
         assert!(old.always_allowed_apps.is_empty());
+        assert!(!old.browser_developer_access);
         let wire = json!({
+            "browserDeveloperAccess": true,
             "computerControlEnabled": true,
             "autoOpenComputerPane": true,
             "computerPreviewSize": "compact",
