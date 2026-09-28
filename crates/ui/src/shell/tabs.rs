@@ -661,7 +661,7 @@ impl Shell {
 
     /// Tabs the "Close idle tabs" menu row would close: idle sessions that
     /// are neither focused, a split member, nor a draft.
-    fn idle_tab_ids(&self, cx: &App) -> Vec<String> {
+    pub(super) fn idle_tab_ids(&self, cx: &App) -> Vec<String> {
         let state = self.state.read(cx);
         let now = Utc::now();
         let focused = state.focused_id();
@@ -2311,6 +2311,39 @@ mod strip_regressions {
             shell.settings.open_tabs = Some(["a", "b", "c", "d"].map(String::from).to_vec());
             shell.close_idle_tabs(cx);
             assert_eq!(shell.open_tab_ids(cx), ["a", "c"]);
+        });
+    }
+
+    #[gpui::test]
+    fn switcher_cap_holds_against_idle_strip_tabs(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            let ids = ["a", "b", "c", "d", "e", "f"];
+            shell.state.update(cx, |state, cx| {
+                state.chats = ids
+                    .map(|id| {
+                        let mut chat = chat(id);
+                        chat.space_id = None;
+                        chat.last_message_at = Some(Utc::now());
+                        chat.last_seen_at = chat.last_message_at;
+                        chat
+                    })
+                    .to_vec();
+                state.chats_synced = true;
+                state.spaces_synced = true;
+                state.apply_sessions(vec![working("c")]);
+                state.select_chat(Some("a".into()), cx);
+            });
+            shell.on_state_changed(&shell.state.clone(), cx);
+            assert_eq!(shell.sidebar_visible_order(cx).len(), 6);
+            shell.settings.open_tabs = Some(ids.map(String::from).to_vec());
+            shell.touch_session_mru("a");
+            shell.settings.switcher_limit = 2;
+            shell.switcher_step(true, cx);
+            let order = &shell.switcher.as_ref().unwrap().order;
+            assert_eq!(order[0], "a");
+            assert!(order.contains(&"c".to_string()));
+            assert!(order.len() <= 3, "{order:?}");
         });
     }
 
