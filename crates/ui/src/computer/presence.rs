@@ -84,9 +84,33 @@ pub fn presences(store: &ComputerPreviewStore) -> Vec<ChatPresence> {
     presences
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RailEntry {
+    pub chat_id: String,
+    pub app: Option<String>,
+    pub thumbnail: bool,
+}
+
+pub fn rail_entries(store: &ComputerPreviewStore) -> Vec<RailEntry> {
+    let mut entries: Vec<_> = store
+        .chat_ids()
+        .filter_map(|chat_id| {
+            let chat = store.chat_preview(chat_id)?;
+            chat.phase.is_some().then(|| RailEntry {
+                chat_id: chat_id.to_owned(),
+                app: chat.last_app.clone(),
+                thumbnail: store.thumbnail_shown(chat_id),
+            })
+        })
+        .collect();
+    entries.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+    entries
+}
+
 #[derive(Debug, Default)]
 pub struct ComputerPresenceMap {
     chats: Vec<ChatPresence>,
+    rail: Vec<RailEntry>,
 }
 
 impl ComputerPresenceMap {
@@ -96,6 +120,18 @@ impl ComputerPresenceMap {
         }
         self.chats = next;
         true
+    }
+
+    pub fn set_rail(&mut self, next: Vec<RailEntry>) -> bool {
+        if self.rail == next {
+            return false;
+        }
+        self.rail = next;
+        true
+    }
+
+    pub fn rail_entry(&self, chat_id: &str) -> Option<&RailEntry> {
+        self.rail.iter().find(|entry| entry.chat_id == chat_id)
     }
 
     pub fn get(&self, chat_id: &str) -> Option<&ChatPresence> {
@@ -119,6 +155,10 @@ pub fn for_chat(chat_id: &str, cx: &App) -> Option<ChatPresence> {
 
 pub fn tone(chat_id: &str, cx: &App) -> Option<PresenceTone> {
     map(cx)?.read(cx).get(chat_id).map(|presence| presence.tone)
+}
+
+pub fn rail_entry(chat_id: &str, cx: &App) -> Option<RailEntry> {
+    map(cx)?.read(cx).rail_entry(chat_id).cloned()
 }
 
 #[cfg(test)]
@@ -263,6 +303,39 @@ mod tests {
         assert!(store.remove_chat("a"));
         assert!(map.set(presences(&store)));
         assert!(map.chats().is_empty());
+    }
+
+    #[test]
+    fn the_rail_keeps_every_chat_that_drove_and_ignores_frames() {
+        let mut store = ComputerPreviewStore::default();
+        let mut map = ComputerPresenceMap::default();
+        assert!(!map.set_rail(rail_entries(&store)));
+        driving(&mut store, "a");
+        action(&mut store, "a", "w1", "computer_click");
+        assert!(map.set_rail(rail_entries(&store)));
+        let entry = RailEntry {
+            chat_id: "a".into(),
+            app: Some("Calculator".into()),
+            thumbnail: true,
+        };
+        assert_eq!(map.rail_entry("a"), Some(&entry));
+        for seq in 1..=3 {
+            store.accept_tap_frame("a", image(seq, 960, 600));
+            assert!(!map.set_rail(rail_entries(&store)));
+        }
+        state(&mut store, thread_state("a", false));
+        assert!(
+            !map.set_rail(rail_entries(&store)),
+            "the entry outlives the drive"
+        );
+        assert_eq!(chat_presence(&store, "a"), None);
+        store.toggle_thumbnail("a");
+        assert!(map.set_rail(rail_entries(&store)));
+        assert!(!map.rail_entry("a").unwrap().thumbnail);
+        assert!(map.rail_entry("b").is_none());
+        store.remove_chat("a");
+        assert!(map.set_rail(rail_entries(&store)));
+        assert!(map.rail_entry("a").is_none());
     }
 
     #[test]

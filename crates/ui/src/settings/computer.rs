@@ -12,8 +12,9 @@ use zeron_proto::computer::{
     ComputerAuditEffect, ComputerAuditHistoryEntry, ComputerAuditHistoryStatus,
     ComputerAvailability, ComputerBuildSignature, ComputerCapabilities,
     ComputerGetAuditHistoryInput, ComputerGetAuditHistoryResult, ComputerHealthStatus,
-    ComputerHostStatus, ComputerPermission, ComputerPreviewSize, ComputerSettings,
-    computer_permission_setup_message, list_computer_permissions, normalize_cursor_hex_color,
+    ComputerHostStatus, ComputerPermission, ComputerPreviewPlacement, ComputerPreviewSize,
+    ComputerSettings, computer_permission_setup_message, list_computer_permissions,
+    normalize_cursor_hex_color,
 };
 use zeron_rpc::methods;
 
@@ -1351,6 +1352,7 @@ impl Render for ComputerPage {
         let reset = |id: &'static str, label: &'static str| {
             widgets::ghost_action(&theme)
                 .id(id)
+                .debug_selector(move || id.to_string())
                 .role(gpui::Role::Button)
                 .aria_label(format!("Reset {label} to default"))
                 .tab_index(0)
@@ -1479,6 +1481,49 @@ impl Render for ComputerPage {
                     .into_any_element()
             }),
             preview_control.into_any_element(),
+            None,
+        ));
+        let rail = settings.computer_preview_placement == ComputerPreviewPlacement::Rail;
+        let placement_control = div()
+            .flex()
+            .gap(px(6.0))
+            .child(
+                chip("computer-placement-card", "Floating card", !rail).when(editable, |el| {
+                    el.on_click(cx.listener(|this, _, _, cx| {
+                        this.write_settings(cx, |s| {
+                            s.computer_preview_placement = ComputerPreviewPlacement::Card
+                        })
+                    }))
+                }),
+            )
+            .child(
+                chip("computer-placement-rail", "Rail + thumbnail", rail).when(editable, |el| {
+                    el.on_click(cx.listener(|this, _, _, cx| {
+                        this.write_settings(cx, |s| {
+                            s.computer_preview_placement = ComputerPreviewPlacement::Rail
+                        })
+                    }))
+                }),
+            );
+        card = card.child(row(
+            &theme,
+            false,
+            "Placement",
+            "Floating card sits over the transcript. Rail puts a small thumbnail under Computer in the right rail; click it to pop out.",
+            None,
+            (settings.computer_preview_placement != defaults.computer_preview_placement
+                && editable)
+                .then(|| {
+                    reset("computer-placement-reset", "placement")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.write_settings(cx, |s| {
+                                s.computer_preview_placement =
+                                    ComputerSettings::default().computer_preview_placement
+                            })
+                        }))
+                        .into_any_element()
+                }),
+            placement_control.into_any_element(),
             None,
         ));
 
@@ -2088,6 +2133,53 @@ mod tests {
             click(cx, "computer-control-toggle");
             assert!(!core.computer.settings().computer_control_enabled);
         }
+        drop(page);
+        runtime.block_on(core.shutdown());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn placement_chips_save_through_the_engine(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        init(cx, dir.path());
+        let core = runtime
+            .block_on(async {
+                zeron_engine::EngineCore::assemble(
+                    &dir.path().join("engine"),
+                    Arc::new(zeron_engine::HarnessRegistry::new()),
+                    zeron_proto::HarnessId::Mock,
+                    None,
+                )
+            })
+            .unwrap();
+        let engine = crate::state::EngineHandle::from_test_client(zeron_rpc::memory_client(
+            core.rpc_service(),
+        ));
+        let (page, cx) = open_page(cx, engine, Rc::new(|| grants(true, true, true)));
+        wait(cx, |cx| {
+            page.read_with(cx, |page, _| page.settings_value().is_some())
+        });
+        let placement = || core.computer.settings().computer_preview_placement;
+        assert_eq!(placement(), ComputerPreviewPlacement::Rail);
+        assert!(cx.debug_bounds("computer-placement-reset").is_none());
+        click(cx, "computer-placement-card");
+        wait(cx, |_| placement() == ComputerPreviewPlacement::Card);
+        let stored: ComputerSettings = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("engine/computer-settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            stored.computer_preview_placement,
+            ComputerPreviewPlacement::Card
+        );
+        click(cx, "computer-placement-reset");
+        wait(cx, |_| placement() == ComputerPreviewPlacement::Rail);
+        click(cx, "computer-placement-card");
+        wait(cx, |_| placement() == ComputerPreviewPlacement::Card);
+        click(cx, "computer-placement-rail");
+        wait(cx, |_| placement() == ComputerPreviewPlacement::Rail);
         drop(page);
         runtime.block_on(core.shutdown());
     }

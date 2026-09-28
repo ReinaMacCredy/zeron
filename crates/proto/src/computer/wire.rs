@@ -215,6 +215,14 @@ pub enum ComputerPreviewSize {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+pub enum ComputerPreviewPlacement {
+    Card,
+    #[default]
+    Rail,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum AgentCursorColorMode {
     #[default]
     Stock,
@@ -228,6 +236,7 @@ pub struct ComputerSettings {
     pub browser_developer_access: bool,
     pub auto_open_computer_pane: bool,
     pub computer_preview_size: ComputerPreviewSize,
+    pub computer_preview_placement: ComputerPreviewPlacement,
     pub agent_cursor_color_mode: AgentCursorColorMode,
     pub agent_cursor_fill_color: String,
     pub agent_cursor_rim_color: String,
@@ -250,6 +259,7 @@ impl Default for ComputerSettings {
             browser_developer_access: false,
             auto_open_computer_pane: true,
             computer_preview_size: ComputerPreviewSize::Compact,
+            computer_preview_placement: ComputerPreviewPlacement::Rail,
             agent_cursor_color_mode: AgentCursorColorMode::Stock,
             agent_cursor_fill_color: String::new(),
             agent_cursor_rim_color: String::new(),
@@ -402,10 +412,33 @@ mod tests {
                 "browserDeveloperAccess": false,
                 "autoOpenComputerPane": true,
                 "computerPreviewSize": "compact",
+                "computerPreviewPlacement": "rail",
                 "agentCursorColorMode": "stock",
                 "agentCursorFillColor": "",
                 "agentCursorRimColor": "",
             })
+        );
+    }
+
+    #[test]
+    fn settings_without_placement_read_as_rail() {
+        let old: ComputerSettings = serde_json::from_value(
+            json!({ "computerControlEnabled": true, "computerPreviewSize": "large" }),
+        )
+        .unwrap();
+        assert_eq!(
+            old.computer_preview_placement,
+            ComputerPreviewPlacement::Rail
+        );
+        let card: ComputerSettings =
+            serde_json::from_value(json!({ "computerPreviewPlacement": "card" })).unwrap();
+        assert_eq!(
+            card.computer_preview_placement,
+            ComputerPreviewPlacement::Card
+        );
+        assert_eq!(
+            serde_json::to_value(&card).unwrap()["computerPreviewPlacement"],
+            "card"
         );
     }
 
@@ -420,6 +453,7 @@ mod tests {
             "computerControlEnabled": true,
             "autoOpenComputerPane": true,
             "computerPreviewSize": "compact",
+            "computerPreviewPlacement": "rail",
             "agentCursorColorMode": "stock",
             "agentCursorFillColor": "",
             "agentCursorRimColor": "",

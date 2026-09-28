@@ -3801,7 +3801,20 @@ impl Transcript {
         let pinned = follow;
         let computer_preview = crate::computer::preview::store(cx).map(|store| {
             let state = state.clone();
-            cx.new(|cx| crate::computer::preview_card::ComputerPreviewCard::new(state, store, cx))
+            let card = cx.new(|cx| {
+                crate::computer::preview_card::ComputerPreviewCard::new(state, store, cx)
+            });
+            cx.subscribe(&card, |_, _, event, cx| match event {
+                crate::computer::preview_card::PreviewCardEvent::OpenSetup => {
+                    cx.emit(TranscriptEvent::Computer {
+                        request: ComputerRequest::OpenSetup(vec![
+                            zeron_proto::computer::ComputerPermission::ScreenRecording,
+                        ]),
+                    })
+                }
+            })
+            .detach();
+            card
         });
         let mut this = Self {
             state,
@@ -4288,6 +4301,12 @@ impl Transcript {
             cx.notify();
         });
         cx.notify();
+    }
+
+    pub fn computer_preview_card(
+        &self,
+    ) -> Option<Entity<crate::computer::preview_card::ComputerPreviewCard>> {
+        self.computer_preview.clone()
     }
 
     fn computer_preview_slot(&self, window: &Window) -> gpui::Size<Pixels> {
@@ -12585,6 +12604,12 @@ mod tests {
             preview::init(cx);
         });
         let store = cx.update(|cx| preview::store(cx).unwrap());
+        store.update(cx, |store, _| {
+            store.set_settings(zeron_proto::computer::ComputerSettings {
+                computer_preview_placement: zeron_proto::computer::ComputerPreviewPlacement::Card,
+                ..Default::default()
+            })
+        });
         let state = cx.new(|_| AppState::new());
         let transcript = cx.new(|cx| Transcript::new(state, cx));
         transcript.update(cx, |transcript, _| transcript.chat_id = Some("chat".into()));
@@ -12632,6 +12657,17 @@ mod tests {
         assert_eq!(inset(cx), 424.0);
         cx.update(|_, cx| preview::update_store(&store, cx, |store| store.hide_for_task("chat")));
         assert_eq!(inset(cx), 0.0, "a hidden card reserves nothing");
+        cx.update(|_, cx| preview::update_store(&store, cx, |store| store.reopen("chat")));
+        assert_eq!(inset(cx), 424.0, "the rail entry reopens it");
+        cx.update(|_, cx| {
+            preview::update_store(&store, cx, |store| store.set_settings(Default::default()))
+        });
+        assert_eq!(
+            inset(cx),
+            0.0,
+            "the rail placement leaves the transcript full width"
+        );
+        assert!(cx.debug_bounds("computer-preview-card").is_none());
     }
 
     #[cfg(target_os = "macos")]

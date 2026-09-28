@@ -6,8 +6,8 @@ use futures::StreamExt;
 use futures::channel::mpsc;
 use gpui::{App, AppContext as _, Entity, Global, Point, RenderImage, Task};
 use zeron_proto::computer::{
-    ComputerEvent, ComputerHealth, ComputerHealthStatus, ComputerPreviewSize, ComputerSettings,
-    ThreadComputerState,
+    ComputerEvent, ComputerHealth, ComputerHealthStatus, ComputerPreviewPlacement,
+    ComputerPreviewSize, ComputerSettings, ThreadComputerState,
 };
 use zeron_rpc::{RpcError, methods};
 
@@ -104,7 +104,7 @@ pub struct StatusBadge {
 
 #[derive(Debug, Default)]
 pub(super) struct ChatPreview {
-    phase: Option<PreviewPhase>,
+    pub(super) phase: Option<PreviewPhase>,
     last_action_label: Option<String>,
     pub(super) last_app: Option<String>,
     pub(super) last_window_id: Option<String>,
@@ -116,6 +116,8 @@ pub(super) struct ChatPreview {
     failure: Option<PreviewFailure>,
     armed_by_still: bool,
     floating: Option<Point<f32>>,
+    thumb_closed: bool,
+    user_opened: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -125,6 +127,9 @@ pub struct PreviewView {
     pub frame: Option<PreviewImage>,
     pub source: FrameSource,
     pub failure: Option<PreviewFailure>,
+    pub connecting: bool,
+    pub app: Option<String>,
+    pub placement: ComputerPreviewPlacement,
     pub status_label: Option<String>,
     pub badge: Option<StatusBadge>,
     pub wants_stills: bool,
@@ -133,7 +138,7 @@ pub struct PreviewView {
 
 impl PreviewView {
     pub fn visually_open(&self) -> bool {
-        self.open && (self.frame.is_some() || self.failure.is_some())
+        self.open && (self.frame.is_some() || self.failure.is_some() || self.connecting)
     }
 }
 
@@ -321,6 +326,8 @@ impl ComputerPreviewStore {
         if fresh_task {
             chat.last_app = None;
             chat.last_window_id = None;
+            chat.thumb_closed = false;
+            chat.user_opened = false;
             self.evicted
                 .extend(chat.tap.take().map(|frame| frame.image));
             self.evicted
@@ -344,6 +351,7 @@ impl ComputerPreviewStore {
                     chat.revoked_latched = false;
                 }
                 chat.state = Some((**state).clone());
+                chat.user_opened &= active || !was;
                 if active != was {
                     let next = phase_on_agent_edge(chat.phase, active);
                     self.set_phase(&state.thread_id, next);
@@ -499,8 +507,53 @@ impl ComputerPreviewStore {
     }
 
     pub fn hide_for_task(&mut self, chat_id: &str) -> bool {
+        let opened = self
+            .chats
+            .get_mut(chat_id)
+            .is_some_and(|chat| std::mem::take(&mut chat.user_opened));
         let next = phase_on_hide(self.chats.get(chat_id).and_then(|chat| chat.phase));
-        self.set_phase(chat_id, next)
+        self.set_phase(chat_id, next) | opened
+    }
+
+    pub fn reopen(&mut self, chat_id: &str) -> bool {
+        let Some(chat) = self
+            .chats
+            .get_mut(chat_id)
+            .filter(|chat| chat.phase.is_some())
+        else {
+            return false;
+        };
+        let opened = !std::mem::replace(&mut chat.user_opened, true);
+        let hidden = chat.phase == Some(PreviewPhase::HiddenForTask);
+        (hidden && self.set_phase(chat_id, Some(PreviewPhase::Live))) | opened
+    }
+
+    pub fn toggle_thumbnail(&mut self, chat_id: &str) -> bool {
+        let shown = self.thumbnail_shown(chat_id);
+        let Some(chat) = self
+            .chats
+            .get_mut(chat_id)
+            .filter(|chat| chat.phase.is_some())
+        else {
+            return false;
+        };
+        chat.thumb_closed = shown;
+        chat.user_opened |= !shown;
+        true
+    }
+
+    pub fn thumbnail_shown(&self, chat_id: &str) -> bool {
+        self.placement() == ComputerPreviewPlacement::Rail
+            && self.chats.get(chat_id).is_some_and(|chat| {
+                chat.phase.is_some()
+                    && chat.floating.is_none()
+                    && !chat.thumb_closed
+                    && (self.settings.auto_open_computer_pane || chat.user_opened)
+            })
+    }
+
+    pub fn placement(&self) -> ComputerPreviewPlacement {
+        self.settings.computer_preview_placement
     }
 
     pub fn clear_revoked(&mut self, chat_id: &str) -> bool {
@@ -542,16 +595,24 @@ impl ComputerPreviewStore {
         let chat = self.chats.get(chat_id);
         let state = chat.and_then(|chat| chat.state.as_ref());
         let phase = chat.and_then(|chat| chat.phase);
-        let open = phase == Some(PreviewPhase::Live) && self.settings.auto_open_computer_pane;
+        let user_opened = chat.is_some_and(|chat| chat.user_opened);
+        let shown = self.settings.auto_open_computer_pane || user_opened;
+        let open = match phase {
+            Some(PreviewPhase::Live) => shown,
+            Some(PreviewPhase::Ended) => user_opened,
+            _ => false,
+        };
         let active = chat.is_some_and(|chat| {
             chat.agent_active
                 || (chat.armed_by_still
                     && matches!(phase, Some(PreviewPhase::Armed | PreviewPhase::Live)))
         });
         let input_stopped = state.is_some_and(|state| state.input_stopped == Some(true));
+        let ended = phase == Some(PreviewPhase::Ended)
+            && state.is_none_or(|state| state.shared_preview_unavailable != Some(true));
         let tap = chat
             .and_then(|chat| chat.tap.clone())
-            .filter(|_| driving(state));
+            .filter(|_| driving(state) || ended);
         let source = if tap.is_some() {
             FrameSource::Tap
         } else {
@@ -561,12 +622,15 @@ impl ComputerPreviewStore {
         let failure = chat
             .and_then(|chat| chat.failure.clone())
             .filter(|_| frame.is_none());
-        let wanted = self.settings.auto_open_computer_pane
-            && (open || (!self.events_live && phase != Some(PreviewPhase::HiddenForTask)));
+        let wanted =
+            shown && (open || (!self.events_live && phase != Some(PreviewPhase::HiddenForTask)));
         PreviewView {
             phase,
             open,
             source,
+            connecting: open && frame.is_none() && failure.is_none() && active,
+            app: chat.and_then(|chat| chat.last_app.clone()),
+            placement: self.placement(),
             failure,
             status_label: status_label(
                 active,
@@ -655,8 +719,9 @@ pub fn update_store(
     {
         let map = preview.presence.clone();
         let next = super::presence::presences(store.read(cx));
+        let rail = super::presence::rail_entries(store.read(cx));
         map.update(cx, |map, cx| {
-            if map.set(next) {
+            if map.set(next) | map.set_rail(rail) {
                 cx.notify();
             }
         });
@@ -1095,6 +1160,89 @@ pub(crate) mod tests {
         assert!(!view.open);
         assert!(!view.visually_open());
         assert!(!view.wants_stills);
+    }
+
+    #[test]
+    fn reopen_brings_a_hidden_preview_back() {
+        let mut store = ComputerPreviewStore::default();
+        assert!(
+            !store.reopen("a"),
+            "a chat that never drove has nothing to reopen"
+        );
+        driving(&mut store, "a");
+        store.mark_live("a");
+        store.hide_for_task("a");
+        assert!(!store.view("a").open);
+        assert!(store.reopen("a"));
+        assert_eq!(store.view("a").phase, Some(PreviewPhase::Live));
+        assert!(store.view("a").open);
+        store.apply_event(&ComputerEvent::ThreadState {
+            state: Box::new(thread_state("a", false)),
+        });
+        assert_eq!(store.view("a").phase, Some(PreviewPhase::Ended));
+        assert!(!store.view("a").open, "the drive's end closes it");
+        assert!(store.reopen("a"), "an ended drive reopens too");
+        assert!(store.view("a").open);
+        assert!(store.hide_for_task("a"));
+        assert!(!store.view("a").open, "hiding undoes the reopen");
+
+        store.set_settings(ComputerSettings {
+            auto_open_computer_pane: false,
+            ..ComputerSettings::default()
+        });
+        driving(&mut store, "a");
+        store.mark_live("a");
+        assert!(!store.view("a").open, "a new task forgets the reopen");
+        assert!(store.reopen("a"));
+        let view = store.view("a");
+        assert!(view.open, "a click opens it even with auto-open off");
+        assert!(view.connecting, "open and driving with no frame yet");
+        store.accept_tap_frame("a", image(1, 960, 600));
+        assert!(!store.view("a").connecting);
+    }
+
+    #[test]
+    fn the_thumbnail_toggles_per_chat() {
+        let mut store = ComputerPreviewStore::default();
+        assert_eq!(store.placement(), ComputerPreviewPlacement::Rail);
+        assert!(!store.thumbnail_shown("a"));
+        assert!(!store.toggle_thumbnail("a"));
+        driving(&mut store, "a");
+        driving(&mut store, "b");
+        assert!(store.thumbnail_shown("a") && store.thumbnail_shown("b"));
+        assert!(store.toggle_thumbnail("a"));
+        assert!(!store.thumbnail_shown("a"));
+        assert!(store.thumbnail_shown("b"), "b keeps its own thumbnail");
+        store.toggle_thumbnail("a");
+        assert!(store.thumbnail_shown("a"));
+        store.set_floating("a", Some(gpui::point(10.0, 10.0)));
+        assert!(!store.thumbnail_shown("a"), "a popped-out card replaces it");
+        store.set_floating("a", None);
+        store.toggle_thumbnail("a");
+        store.apply_event(&ComputerEvent::ThreadState {
+            state: Box::new(thread_state("a", false)),
+        });
+        driving(&mut store, "a");
+        assert!(store.thumbnail_shown("a"), "a new task shows it again");
+
+        store.set_settings(ComputerSettings {
+            auto_open_computer_pane: false,
+            ..ComputerSettings::default()
+        });
+        assert!(!store.thumbnail_shown("a"));
+        store.toggle_thumbnail("a");
+        assert!(
+            store.thumbnail_shown("a"),
+            "a click shows it with auto-open off"
+        );
+        store.set_settings(ComputerSettings {
+            computer_preview_placement: ComputerPreviewPlacement::Card,
+            ..ComputerSettings::default()
+        });
+        assert!(
+            !store.thumbnail_shown("a"),
+            "the card placement has no thumbnail"
+        );
     }
 
     #[test]

@@ -1920,6 +1920,7 @@ pub struct Shell {
     sidecar_flip: Option<summary::SidecarFlip>,
     sidecar_popover: Option<summary::PopoverFade>,
     sidecar_press_found_popover: bool,
+    computer_thumbnail: Option<Entity<crate::computer::thumbnail::ComputerThumbnail>>,
     /// Per chat: the instructions file found at the checkout root (`AGENTS.md`
     /// / `CLAUDE.md`), `None` once checked and absent. Probed once per chat;
     /// the in-flight probe is keyed the same way.
@@ -2503,6 +2504,9 @@ impl Shell {
             sidecar_flip: None,
             sidecar_popover: None,
             sidecar_press_found_popover: false,
+            computer_thumbnail: crate::computer::preview::store(cx).map(|store| {
+                cx.new(|cx| crate::computer::thumbnail::ComputerThumbnail::new(store, cx))
+            }),
             summary_instructions: std::collections::HashMap::new(),
             summary_instruction_probes: std::collections::HashMap::new(),
             project_actions: crate::project_actions::ProjectActionsController::default(),
@@ -17086,6 +17090,11 @@ impl Shell {
                 cx.new(|cx| ComputerPage::new(state, cx))
             })
             .clone()
+    }
+    pub fn fixture_computer_thumbnail(
+        &self,
+    ) -> Option<Entity<crate::computer::thumbnail::ComputerThumbnail>> {
+        self.computer_thumbnail.clone()
     }
     pub fn fixture_appshots_composer(&self) -> Entity<Composer> {
         self.composer.clone()
