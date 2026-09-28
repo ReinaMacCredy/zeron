@@ -2444,6 +2444,38 @@ mod computer_marker_tests {
     }
 
     #[test]
+    fn an_input_question_kind_this_build_does_not_know_keeps_the_entry_and_the_part() {
+        let raw = serde_json::json!({
+            "id": "a1",
+            "role": "assistant",
+            "createdAt": 1,
+            "deviceId": "dev-a",
+            "parts": [
+                { "id": "t0", "kind": "text", "text": "Working" },
+                {
+                    "id": "r1",
+                    "kind": "input",
+                    "resolved": false,
+                    "questions": [{
+                        "id": "future",
+                        "header": "Computer",
+                        "question": "?",
+                        "options": ["Yes"],
+                        "kind": { "type": "futureKind" },
+                    }],
+                },
+            ],
+        });
+        let entry = entry_from_json(raw).unwrap();
+        assert_eq!(entry.parts.len(), 2);
+        assert!(matches!(
+            &entry.parts[1],
+            MessagePart::Input { request_id, questions, resolved: false, .. }
+                if request_id == "r1" && questions.is_empty()
+        ));
+    }
+
+    #[test]
     fn input_answers_persist_through_the_live_fold_and_the_dead_run_resolve() {
         let doc = SessionDoc::init("answers").unwrap();
         let mut writer = SegmentWriter::begin(&doc, "a1", "dev-a", 1).unwrap();

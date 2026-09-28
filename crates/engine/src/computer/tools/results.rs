@@ -258,10 +258,13 @@ pub fn computer_audit_target(
         .and_then(Value::as_f64)
         .filter(|pid| pid.fract() == 0.0 && *pid > 0.0 && *pid <= f64::from(u32::MAX))
         .map(|pid| pid as u32);
-    let app = args
-        .get("app")
-        .and_then(Value::as_str)
-        .filter(|app| !app.trim().is_empty())
+    let app = ["app", "app_name", "appName"]
+        .into_iter()
+        .find_map(|key| {
+            args.get(key)
+                .and_then(Value::as_str)
+                .filter(|app| !app.trim().is_empty())
+        })
         .map(str::to_owned);
     if window_id.is_none() && pid.is_none() && app.is_none() {
         return None;
@@ -607,6 +610,26 @@ mod tests {
             tool_result_payload(&guided).unwrap()["toolGuidance"],
             json!("first second")
         );
+    }
+
+    #[test]
+    fn the_audit_target_names_the_app_from_app_or_app_name() {
+        let target = |args: Value| {
+            computer_audit_target(args.as_object().unwrap(), None).and_then(|target| target.app)
+        };
+        assert_eq!(
+            target(json!({ "app": "Finder" })).as_deref(),
+            Some("Finder")
+        );
+        assert_eq!(
+            target(json!({ "window_id": "cua:1:2", "app_name": "Ghostty" })).as_deref(),
+            Some("Ghostty")
+        );
+        assert_eq!(
+            target(json!({ "appName": "Calculator" })).as_deref(),
+            Some("Calculator")
+        );
+        assert_eq!(target(json!({ "window_id": "w1", "app_name": " " })), None);
     }
 
     #[test]

@@ -7,19 +7,24 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use zeron_proto::computer::{
-    CancelComputerActionParams, ComputerActionParams, ComputerCatalog, GetComputerCatalogParams,
-    McpRequestId, McpToolResult, list_computer_permissions,
+    CancelComputerActionParams, ComputerActionParams, ComputerCatalog, ComputerConsentApp,
+    ComputerPendingKind, ComputerPendingRequest, GetComputerCatalogParams, McpRequestId,
+    McpToolResult, list_computer_permissions,
 };
 
 use super::backend::ComputerError;
-use super::manager::{COMPUTER_USER_REVOKED, ComputerManager};
+use super::engine_seams::{
+    COMPUTER_FOREGROUND_QUESTION_ID, foreground_allowed, foreground_question,
+};
+use super::manager::{COMPUTER_USER_REVOKED, ComputerConsentTarget, ComputerManager};
 use super::runtime::ComputerRuntime;
 use super::setup_signal::ComputerSetupSignal;
 use super::space_designation::computer_space_designation_for_messages;
 use super::tools::results::{mcp_json_error, tool_result_payload};
 use super::tools::{ComputerToolContext, ComputerToolSeams, ToolArgs};
 use super::visible_use::{
-    COMPUTER_FOREGROUND_NOT_AUTHORIZED, ComputerForegroundAuthorization, ComputerForegroundContext,
+    COMPUTER_FOREGROUND_NOT_AUTHORIZED, COMPUTER_FOREGROUND_NOT_REQUESTED_CODE,
+    ComputerForegroundAuthorization, ComputerForegroundContext,
     computer_foreground_authorization_for_messages,
 };
 use crate::sessions::{ComputerRun, SessionsEngine};
@@ -42,6 +47,7 @@ struct InFlight {
 pub struct ComputerCalls {
     in_flight: Mutex<HashMap<CallKey, InFlight>>,
     setup_prompts: Mutex<VecDeque<String>>,
+    foreground_asks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -88,6 +94,13 @@ impl ComputerCalls {
         lock(&self.in_flight).len()
     }
 
+    fn foreground_ask(&self, chat_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        lock(&self.foreground_asks)
+            .entry(chat_id.to_owned())
+            .or_default()
+            .clone()
+    }
+
     fn first_setup_prompt(&self, key: String) -> bool {
         let mut prompts = lock(&self.setup_prompts);
         if prompts.contains(&key) {
@@ -125,6 +138,15 @@ impl ComputerToolSeams for RunToolSeams {
     }
 
     async fn foreground_authorization(&self) -> ComputerForegroundAuthorization {
+        if self
+            .sessions
+            .computer_turn_foreground(&self.chat_id, self.turn_id.as_deref())
+            == Some(true)
+        {
+            return ComputerForegroundAuthorization {
+                user_requested_visible_use: true,
+            };
+        }
         let Some(manager) = self.manager.upgrade() else {
             return COMPUTER_FOREGROUND_NOT_AUTHORIZED;
         };
@@ -320,8 +342,26 @@ pub async fn computer_action(
     };
     let (reply, answer) = tokio::sync::oneshot::channel();
     let tool = params.tool;
+    let (sessions, manager, run_secret) =
+        (sessions.clone(), service.manager.clone(), params.run_secret);
     tokio::spawn(async move {
-        let result = tools.call(&tool, args, &context).await;
+        let mut result = tools.call(&tool, args.clone(), &context).await;
+        if let Some(target) = foreground_refusal(&tool, &args, &result) {
+            let (answer, app) =
+                ask_foreground(&sessions, &manager, &calls, &context, &target).await;
+            let revoked = sessions
+                .computer_run(&context.chat_id, &run_secret)
+                .is_some_and(|run| run.turn_desktop_revoked);
+            result = match answer {
+                _ if revoked => denied("user_revoked", COMPUTER_USER_REVOKED),
+                Some(true) => tools.call(&tool, args, &context).await,
+                Some(false) => denied(
+                    COMPUTER_FOREGROUND_DECLINED_CODE,
+                    &foreground_declined_message(app.as_ref()),
+                ),
+                None => result,
+            };
+        }
         calls.finish(&key);
         let _ = reply.send(result);
     });
@@ -330,6 +370,114 @@ pub async fn computer_action(
     result
         .map(finished)
         .map_err(|_| "The computer action ended without a result.".to_owned())
+}
+
+pub const COMPUTER_FOREGROUND_DECLINED_CODE: &str = "foreground_declined";
+
+fn foreground_declined_message(app: Option<&ComputerConsentApp>) -> String {
+    format!(
+        "The user declined bringing {} to the front for this turn. Continue with background actions only; if the task cannot be finished in the background, tell the user what is left.",
+        app.map_or("the app", |app| app.name.as_str())
+    )
+}
+
+fn raises_foreground(tool_or_step: &str, args: &ToolArgs) -> bool {
+    matches!(
+        tool_or_step,
+        "computer_activate_window" | "computer_invoke_menu" | "activate_window" | "invoke_menu"
+    ) || args.get("delivery_mode").and_then(Value::as_str) == Some("foreground")
+}
+
+fn consent_target(args: &ToolArgs) -> ComputerConsentTarget {
+    let text = |key: &str| {
+        args.get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
+    };
+    if let Some(window_id) = text("window_id") {
+        return ComputerConsentTarget::Window(window_id);
+    }
+    if let Some(pid) = args
+        .get("pid")
+        .and_then(Value::as_u64)
+        .and_then(|pid| u32::try_from(pid).ok())
+    {
+        return ComputerConsentTarget::Pid(pid);
+    }
+    text("app").map_or(ComputerConsentTarget::Unscoped, ComputerConsentTarget::App)
+}
+
+fn foreground_refusal(
+    tool: &str,
+    args: &ToolArgs,
+    result: &McpToolResult,
+) -> Option<ComputerConsentTarget> {
+    let payload = tool_result_payload(result)?;
+    let not_requested = |code: Option<&Value>, effect: Option<&Value>| {
+        code.and_then(Value::as_str) == Some(COMPUTER_FOREGROUND_NOT_REQUESTED_CODE)
+            && effect.and_then(Value::as_str) == Some("not-dispatched")
+    };
+    if tool != "computer_run" {
+        return (not_requested(payload.get("error"), payload.get("effect"))
+            && raises_foreground(tool, args))
+        .then(|| consent_target(args));
+    }
+    let error = payload.get("steps")?.get(0)?.get("error")?;
+    let step = args.get("steps")?.get(0)?.as_object()?;
+    let step_type = step.get("type").and_then(Value::as_str).unwrap_or_default();
+    (payload.get("completed").and_then(Value::as_u64) == Some(0)
+        && not_requested(error.get("code"), error.get("effect"))
+        && (raises_foreground(step_type, step) || raises_foreground(tool, args)))
+    .then(|| consent_target(step))
+}
+
+async fn ask_foreground(
+    sessions: &SessionsEngine,
+    manager: &ComputerManager,
+    calls: &ComputerCalls,
+    context: &ComputerToolContext,
+    target: &ComputerConsentTarget,
+) -> (Option<bool>, Option<ComputerConsentApp>) {
+    let (chat_id, turn_id) = (context.chat_id.as_str(), context.turn_id.as_deref());
+    let ask = calls.foreground_ask(chat_id);
+    let _asking = tokio::select! {
+        guard = ask.lock() => guard,
+        () = context.signal.cancelled() => return (None, None),
+    };
+    let app = manager.foreground_app(target).await;
+    if let Some(answer) = sessions.computer_turn_foreground(chat_id, turn_id) {
+        return (Some(answer), app);
+    }
+    let input_id = format!("computer-foreground-{}", uuid::Uuid::new_v4());
+    let Ok(answers) =
+        sessions.raise_input(chat_id, &input_id, vec![foreground_question(app.as_ref())])
+    else {
+        return (None, app);
+    };
+    manager.set_pending_request(
+        chat_id,
+        Some(ComputerPendingRequest {
+            input_id: input_id.clone(),
+            question_id: COMPUTER_FOREGROUND_QUESTION_ID.into(),
+            kind: ComputerPendingKind::Foreground {
+                app: app.as_ref().map(|app| app.name.clone()),
+            },
+        }),
+    );
+    let answer = tokio::select! {
+        answers = answers => answers.ok().as_deref().and_then(foreground_allowed),
+        () = context.signal.cancelled() => {
+            sessions.settle_input(chat_id, &input_id);
+            None
+        }
+    };
+    manager.set_pending_request(chat_id, None);
+    if let Some(granted) = answer {
+        sessions.answer_computer_foreground(chat_id, turn_id, granted);
+    }
+    (answer, app)
 }
 
 fn unavailable_message(availability: &zeron_proto::computer::ComputerAvailability) -> String {

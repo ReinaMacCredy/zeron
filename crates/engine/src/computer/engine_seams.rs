@@ -13,6 +13,9 @@ use crate::sessions::SessionsEngine;
 pub const COMPUTER_CONSENT_ALLOW: &str = "Allow";
 pub const COMPUTER_CONSENT_DECLINE: &str = "Deny";
 pub const COMPUTER_CONSENT_ALWAYS_PREFIX: &str = "Always allow ";
+pub const COMPUTER_FOREGROUND_QUESTION_ID: &str = "foreground";
+pub const COMPUTER_FOREGROUND_ALLOW: &str = "Allow for this turn";
+pub const COMPUTER_FOREGROUND_DECLINE: &str = "No";
 
 pub struct EngineComputerSeams {
     sessions: Mutex<Option<SessionsEngine>>,
@@ -95,6 +98,35 @@ pub fn consent_question(card: &ComputerConsentCard) -> UserInputQuestion {
             tool: Some(card.tool_name.clone()),
             params: Some(card.params_display.clone()),
         }),
+    }
+}
+
+pub fn foreground_question(app: Option<&ComputerConsentApp>) -> UserInputQuestion {
+    UserInputQuestion {
+        id: COMPUTER_FOREGROUND_QUESTION_ID.into(),
+        header: "Computer".into(),
+        question: format!(
+            "{} needs to come to the front to type. Allow for the rest of this turn?",
+            app.map_or("The app", |app| app.name.as_str())
+        ),
+        options: vec![
+            COMPUTER_FOREGROUND_ALLOW.into(),
+            COMPUTER_FOREGROUND_DECLINE.into(),
+        ],
+        multi_select: false,
+        kind: Some(UserInputKind::Foreground { app: app.cloned() }),
+    }
+}
+
+pub fn foreground_allowed(answers: &[UserInputAnswer]) -> Option<bool> {
+    let labels: Vec<&str> = answers
+        .iter()
+        .flat_map(|answer| answer.labels.iter().map(String::as_str))
+        .collect();
+    if labels.is_empty() {
+        None
+    } else {
+        Some(labels.contains(&COMPUTER_FOREGROUND_ALLOW))
     }
 }
 
@@ -204,6 +236,35 @@ mod tests {
             bundle_id: bundle_id.map(str::to_owned),
             pid: Some(4242),
         }
+    }
+
+    #[test]
+    fn the_foreground_question_names_the_app_only_and_maps_its_labels() {
+        let app = ghostty(Some("com.mitchellh.ghostty"));
+        let question = foreground_question(Some(&app));
+        assert_eq!(
+            question.question,
+            "Ghostty needs to come to the front to type. Allow for the rest of this turn?"
+        );
+        assert_eq!(question.options, ["Allow for this turn", "No"]);
+        for leak in ["computer_", "com.mitchellh", "4242"] {
+            assert!(!question.question.contains(leak), "{leak}");
+        }
+        assert!(
+            foreground_question(None)
+                .question
+                .starts_with("The app needs")
+        );
+        let answer = |labels: &[&str]| {
+            foreground_allowed(&[UserInputAnswer {
+                question_id: COMPUTER_FOREGROUND_QUESTION_ID.into(),
+                labels: labels.iter().map(|label| (*label).to_owned()).collect(),
+            }])
+        };
+        assert_eq!(answer(&["Allow for this turn"]), Some(true));
+        assert_eq!(answer(&["No"]), Some(false));
+        assert_eq!(answer(&["something typed"]), Some(false));
+        assert_eq!(answer(&[]), None);
     }
 
     #[test]

@@ -3,7 +3,7 @@ use gpui::{
 };
 use zeron_engine::computer::engine_seams::{
     COMPUTER_CONSENT_ALLOW, COMPUTER_CONSENT_ALWAYS_PREFIX, COMPUTER_CONSENT_DECLINE,
-    consent_always_label, consent_app_title,
+    consent_always_label, consent_app_title, foreground_allowed,
 };
 use zeron_engine::computer::manager::{
     COMPUTER_CONTROL_ON_DISCLOSURE, COMPUTER_USER_PAUSE_NOTE_PREFIX,
@@ -30,6 +30,7 @@ pub enum ComputerNotice {
     SetupRequired,
     Unavailable,
     ControlDenied,
+    Foreground,
 }
 
 pub fn computer_notice(note: &str) -> Option<ComputerNotice> {
@@ -106,15 +107,31 @@ pub fn consent_question(questions: &[UserInputQuestion]) -> Option<&UserInputQue
 pub fn consent_app(question: &UserInputQuestion) -> Option<ComputerConsentApp> {
     match &question.kind {
         Some(zeron_proto::UserInputKind::Consent { app, .. }) => app.clone(),
-        None => None,
+        _ => None,
     }
 }
 
 pub fn consent_scope(question: &UserInputQuestion) -> ComputerConsentScope {
     match &question.kind {
         Some(zeron_proto::UserInputKind::Consent { scope, .. }) => *scope,
-        None => ComputerConsentScope::Task,
+        _ => ComputerConsentScope::Task,
     }
+}
+
+pub fn foreground_outcome_label(
+    questions: &[UserInputQuestion],
+    answers: Option<&[UserInputAnswer]>,
+) -> Option<String> {
+    let app = questions.iter().find_map(|question| match &question.kind {
+        Some(zeron_proto::UserInputKind::Foreground { app }) => Some(app.as_ref()),
+        _ => None,
+    })?;
+    let app = app.map_or("the app", |app| app.name.as_str());
+    Some(if foreground_allowed(answers?)? {
+        format!("You allowed {app} to come to the front")
+    } else {
+        format!("You kept {app} in the background")
+    })
 }
 
 fn consent_action(question: &UserInputQuestion) -> Option<(&str, Option<serde_json::Value>)> {

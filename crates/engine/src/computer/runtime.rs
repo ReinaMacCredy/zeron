@@ -247,10 +247,13 @@ impl ComputerRuntime {
         if sessions.revoke_computer_turn(chat_id).is_none() {
             return false;
         }
-        if let Some(service) = self.service()
-            && let Err(error) = service.manager.revoke_desktop(chat_id).await
-        {
-            tracing::warn!(chat = %chat_id, %error, "computer desktop revoke failed");
+        if let Some(service) = self.service() {
+            if let Some(pending) = service.manager.pending_request(chat_id) {
+                sessions.settle_input(chat_id, &pending.input_id);
+            }
+            if let Err(error) = service.manager.revoke_desktop(chat_id).await {
+                tracing::warn!(chat = %chat_id, %error, "computer desktop revoke failed");
+            }
         }
         sessions.write_computer_note(chat_id, COMPUTER_DESKTOP_REVOKED_NOTE, Some(source.hint()));
         true
@@ -263,6 +266,7 @@ impl ComputerRuntime {
             return;
         };
         service.manager.clear_desktop_revoked(chat_id);
+        service.manager.set_pending_request(chat_id, None);
         let (chat_id, turn_id) = (chat_id.to_owned(), turn_id.to_owned());
         tokio::spawn(async move {
             if let Err(error) = service

@@ -460,6 +460,17 @@ fn main() -> anyhow::Result<()> {
                     pause(cx, 800).await;
                     capture(window.into(), cx, &output, "still-fallback-input-paused")?;
 
+                    let mut asking = thread_state(false, false);
+                    asking.pending_request = serde_json::from_value(json!({
+                        "inputId": "computer-foreground-fixture",
+                        "questionId": "foreground",
+                        "kind": { "type": "foreground", "app": "Calculator" },
+                    }))
+                    .ok();
+                    event(cx, ComputerEvent::ThreadState { state: Box::new(asking) });
+                    pause(cx, 800).await;
+                    capture(window.into(), cx, &output, "foreground-request")?;
+
                     if let Some(p45) = &p45_output {
                         std::fs::create_dir_all(p45)?;
                         state.update(cx, |s, cx| {

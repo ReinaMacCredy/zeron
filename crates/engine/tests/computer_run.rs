@@ -418,7 +418,7 @@ impl Rig {
                     Some(UserInputKind::Consent { scope, .. }) => {
                         Some((request_id, scope, resolved))
                     }
-                    None => None,
+                    _ => None,
                 },
                 _ => None,
             })

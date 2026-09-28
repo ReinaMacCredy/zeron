@@ -721,3 +721,394 @@ async fn run_seams_bound_browser_files_to_the_run_cwd_and_read_space_designation
     assert_eq!(payload(&reserved)["reservation"]["spaceId"], json!(2));
     rig.core.shutdown().await;
 }
+
+impl Rig {
+    fn manager(&self) -> Arc<ComputerManager> {
+        self.core.computer.service().unwrap().manager.clone()
+    }
+
+    fn foreground_inputs(&self) -> Vec<(String, bool)> {
+        self.core
+            .doc_host
+            .open(CHAT)
+            .unwrap()
+            .doc()
+            .read_entries()
+            .unwrap()
+            .iter()
+            .flat_map(|entry| entry.parts.iter())
+            .filter_map(|part| match part {
+                zeron_doc::MessagePart::Input {
+                    request_id,
+                    questions,
+                    resolved,
+                    ..
+                } if questions.iter().any(|question| {
+                    matches!(
+                        question.kind,
+                        Some(zeron_proto::UserInputKind::Foreground { .. })
+                    )
+                }) =>
+                {
+                    Some((request_id.clone(), *resolved))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    async fn pending_foreground(&self) -> zeron_proto::computer::ComputerPendingRequest {
+        let manager = self.manager();
+        wait_for(
+            || manager.pending_request(CHAT).is_some(),
+            "the foreground question",
+        )
+        .await;
+        let pending = manager.pending_request(CHAT).unwrap();
+        wait_for(
+            || {
+                self.foreground_inputs()
+                    .iter()
+                    .any(|(id, resolved)| *id == pending.input_id && !resolved)
+            },
+            "the question in the transcript",
+        )
+        .await;
+        pending
+    }
+
+    fn answer_foreground(&self, id: &str, input_id: &str, label: &str) {
+        self.command(
+            id,
+            SessionCommandPayload::RespondInput {
+                request_id: input_id.into(),
+                answers: vec![zeron_proto::UserInputAnswer {
+                    question_id: "foreground".into(),
+                    labels: vec![label.into()],
+                }],
+            },
+        );
+    }
+
+    async fn finish_turn(&self) {
+        self.probe
+            .finishes
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .notify_one();
+        wait_for(
+            || !self.core.sessions.turn_in_flight(CHAT),
+            "the turn to end",
+        )
+        .await;
+    }
+}
+
+fn foreground_key() -> Value {
+    json!({ "key": "enter", "window_id": "fake-terminal", "delivery_mode": "foreground", "include_screenshot": false })
+}
+
+fn spawn_action(
+    rig: &Arc<Rig>,
+    secret: &str,
+    arguments: Value,
+    request_id: i64,
+) -> tokio::task::JoinHandle<McpToolResult> {
+    let (rig, secret) = (rig.clone(), secret.to_owned());
+    tokio::spawn(async move {
+        rig.action(&secret, "computer_press_key", arguments, request_id)
+            .await
+            .unwrap()
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_foreground_refusal_asks_once_and_allow_authorizes_the_rest_of_the_turn() {
+    let backend = Scripted::default_fake();
+    let rig = Arc::new(Rig::new(Some(backend.clone())).await);
+    rig.settings(true);
+    let secret = rig.run("c1", "press enter in the terminal").await;
+    let call = spawn_action(&rig, &secret, foreground_key(), 1);
+    let pending = rig.pending_foreground().await;
+    assert_eq!(pending.question_id, "foreground");
+    assert!(!call.is_finished(), "the call waits for the user");
+    assert!(backend.calls_for("pressKey").is_empty());
+    assert_eq!(
+        rig.core.sessions.computer_turn_foreground(CHAT, None),
+        None,
+        "Full access does not grant foreground by itself"
+    );
+
+    rig.answer_foreground("allow", &pending.input_id, "Allow for this turn");
+    let allowed = call.await.unwrap();
+    assert!(!allowed.is_error, "{allowed:?}");
+    assert_eq!(backend.calls_for("pressKey").len(), 1);
+    assert_eq!(rig.manager().pending_request(CHAT), None);
+
+    let again = rig
+        .action(&secret, "computer_press_key", foreground_key(), 2)
+        .await
+        .unwrap();
+    assert!(!again.is_error, "{again:?}");
+    assert_eq!(backend.calls_for("pressKey").len(), 2);
+    wait_for(
+        || rig.foreground_inputs() == vec![(pending.input_id.clone(), true)],
+        "one resolved question for the turn",
+    )
+    .await;
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_foreground_no_returns_foreground_declined_and_never_asks_again_this_turn() {
+    let backend = Scripted::default_fake();
+    let rig = Arc::new(Rig::new(Some(backend.clone())).await);
+    rig.settings(true);
+    let secret = rig.run("c1", "press enter in the terminal").await;
+    let call = spawn_action(&rig, &secret, foreground_key(), 1);
+    let pending = rig.pending_foreground().await;
+    rig.answer_foreground("no", &pending.input_id, "No");
+    let declined = call.await.unwrap();
+    assert!(declined.is_error);
+    assert_eq!(
+        payload(&declined)["error"]["code"],
+        json!(COMPUTER_FOREGROUND_DECLINED_CODE)
+    );
+    let message = payload(&declined)["error"]["message"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(message.contains("tell the user what is left"), "{message}");
+    let again = rig
+        .action(&secret, "computer_press_key", foreground_key(), 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        payload(&again)["error"]["code"],
+        json!(COMPUTER_FOREGROUND_DECLINED_CODE)
+    );
+    assert_eq!(rig.foreground_inputs().len(), 1, "never asked again");
+    assert!(backend.calls_for("pressKey").is_empty());
+    let background = rig
+        .action(
+            &secret,
+            "computer_type_text",
+            json!({ "text": "a", "window_id": "fake-terminal", "include_screenshot": false }),
+            3,
+        )
+        .await
+        .unwrap();
+    assert!(
+        !background.is_error,
+        "background input still works: {background:?}"
+    );
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_delegated_thread_is_authorized_by_the_click() {
+    let backend = Scripted::default_fake();
+    let rig = Arc::new(Rig::new(Some(backend.clone())).await);
+    rig.settings(true);
+    let secret = rig.run("c1", "wait for the lead").await;
+    rig.core
+        .doc_host
+        .open(CHAT)
+        .unwrap()
+        .write_user_message_from(
+            "m-lead",
+            "Show me the terminal window.",
+            chrono::Utc::now().timestamp_millis(),
+            Some("lead-chat"),
+        )
+        .unwrap();
+    let call = spawn_action(&rig, &secret, foreground_key(), 1);
+    let pending = rig.pending_foreground().await;
+    assert!(
+        backend.calls_for("pressKey").is_empty(),
+        "another thread's words never authorize"
+    );
+    rig.answer_foreground("allow", &pending.input_id, "Allow for this turn");
+    let allowed = call.await.unwrap();
+    assert!(!allowed.is_error, "{allowed:?}");
+    assert_eq!(backend.calls_for("pressKey").len(), 1);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_foreground_grant_ends_with_the_turn_and_a_turn_end_settles_an_open_question() {
+    let backend = Scripted::default_fake();
+    let rig = Arc::new(Rig::new(Some(backend.clone())).await);
+    rig.settings(true);
+    let secret = rig.run("c1", "press enter in the terminal").await;
+    let call = spawn_action(&rig, &secret, foreground_key(), 1);
+    let pending = rig.pending_foreground().await;
+    rig.answer_foreground("allow", &pending.input_id, "Allow for this turn");
+    assert!(!call.await.unwrap().is_error);
+    rig.finish_turn().await;
+
+    let secret = rig.run("c2", "press enter again").await;
+    assert_eq!(rig.core.sessions.computer_turn_foreground(CHAT, None), None);
+    let call = spawn_action(&rig, &secret, foreground_key(), 2);
+    let next = rig.pending_foreground().await;
+    assert_ne!(next.input_id, pending.input_id, "a new turn asks again");
+    rig.finish_turn().await;
+    let unanswered = call.await.unwrap();
+    assert!(unanswered.is_error);
+    assert_eq!(rig.manager().pending_request(CHAT), None);
+    wait_for(
+        || {
+            rig.foreground_inputs()
+                .iter()
+                .any(|(id, resolved)| *id == next.input_id && *resolved)
+        },
+        "the open question to settle with the turn",
+    )
+    .await;
+    assert_eq!(backend.calls_for("pressKey").len(), 1);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_revoke_while_foreground_is_asked_settles_the_question_and_returns_user_revoked() {
+    let backend = Scripted::default_fake();
+    let rig = Arc::new(Rig::new(Some(backend.clone())).await);
+    rig.settings(true);
+    let secret = rig.run("c1", "press enter in the terminal").await;
+    let call = spawn_action(&rig, &secret, foreground_key(), 1);
+    let pending = rig.pending_foreground().await;
+    rig.client
+        .call(methods::COMPUTER_REVOKE_DESKTOP, json!({ "chatId": CHAT }))
+        .await
+        .unwrap();
+    let revoked = call.await.unwrap();
+    assert_eq!(payload(&revoked)["error"]["code"], json!("user_revoked"));
+    assert_eq!(rig.manager().pending_request(CHAT), None);
+    wait_for(
+        || {
+            rig.foreground_inputs()
+                .iter()
+                .any(|(id, resolved)| *id == pending.input_id && *resolved)
+        },
+        "the question to settle",
+    )
+    .await;
+    assert!(backend.calls_for("pressKey").is_empty());
+    rig.core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_granted_turn_authorizes_before_the_message_walk() {
+    let rig = Rig::new(Some(fake())).await;
+    rig.settings(true);
+    let secret = rig.run("c1", "keep the terminal in the background").await;
+    let run = rig.core.sessions.computer_run(CHAT, &secret).unwrap();
+    let seams = RunToolSeams {
+        sessions: rig.core.sessions.clone(),
+        calls: rig.core.computer.calls().clone(),
+        manager: Arc::downgrade(&rig.manager()),
+        chat_id: CHAT.into(),
+        turn_id: run.turn_id.clone(),
+    };
+    assert!(
+        !seams
+            .foreground_authorization()
+            .await
+            .user_requested_visible_use
+    );
+    assert!(
+        !rig.core
+            .sessions
+            .answer_computer_foreground(CHAT, Some("another-turn"), true)
+    );
+    assert!(
+        !seams
+            .foreground_authorization()
+            .await
+            .user_requested_visible_use
+    );
+    assert!(
+        rig.core
+            .sessions
+            .answer_computer_foreground(CHAT, run.turn_id.as_deref(), true)
+    );
+    assert!(
+        seams
+            .foreground_authorization()
+            .await
+            .user_requested_visible_use
+    );
+    rig.core.shutdown().await;
+}
+
+#[test]
+fn only_a_refused_foreground_raise_with_nothing_dispatched_asks() {
+    let refused = |error: &str| {
+        crate::computer::tools::results::mcp_json_error(
+            &json!({ "error": error, "effect": "not-dispatched" }),
+        )
+    };
+    let args = |value: Value| value.as_object().unwrap().clone();
+    let key = args(foreground_key());
+    assert_eq!(
+        foreground_refusal(
+            "computer_press_key",
+            &key,
+            &refused("foreground_not_requested")
+        ),
+        Some(ComputerConsentTarget::Window("fake-terminal".into()))
+    );
+    assert_eq!(
+        foreground_refusal(
+            "computer_press_key",
+            &key,
+            &refused("same_pid_keyboard_ambiguity")
+        ),
+        None
+    );
+    let background = args(json!({ "key": "enter", "window_id": "w" }));
+    assert_eq!(
+        foreground_refusal(
+            "computer_launch_app",
+            &args(json!({ "app": "Ghostty", "hidden": false })),
+            &refused("foreground_not_requested")
+        ),
+        None,
+        "a visible launch is not a keyboard raise"
+    );
+    assert_eq!(
+        foreground_refusal(
+            "computer_press_key",
+            &background,
+            &refused("foreground_not_requested")
+        ),
+        None
+    );
+    assert_eq!(
+        foreground_refusal(
+            "computer_invoke_menu",
+            &args(json!({ "pid": 42, "path": ["File"] })),
+            &refused("foreground_not_requested")
+        ),
+        Some(ComputerConsentTarget::Pid(42))
+    );
+    let run = |completed: u64| {
+        crate::computer::tools::results::mcp_json(&json!({
+            "completed": completed,
+            "stopped": true,
+            "steps": [{ "ok": false, "error": { "code": "foreground_not_requested", "effect": "not-dispatched" } }],
+        }))
+    };
+    let steps = args(json!({ "steps": [{ "type": "activate_window", "window_id": "w9" }] }));
+    assert_eq!(
+        foreground_refusal("computer_run", &steps, &run(0)),
+        Some(ComputerConsentTarget::Window("w9".into()))
+    );
+    assert_eq!(
+        foreground_refusal("computer_run", &steps, &run(1)),
+        None,
+        "a run that already dispatched a step is never replayed"
+    );
+}

@@ -1,4 +1,8 @@
 use gpui::{AnyElement, App, ClickEvent, FontWeight, Hsla, Window, div, prelude::*, px};
+use zeron_engine::computer::engine_seams::{
+    COMPUTER_FOREGROUND_ALLOW, COMPUTER_FOREGROUND_DECLINE,
+};
+use zeron_proto::computer::{ComputerPendingKind, ComputerPendingRequest};
 
 use super::presence::{ChatPresence, PresenceTone};
 use crate::theme::Theme;
@@ -20,7 +24,23 @@ impl StripCopy {
     }
 }
 
+pub fn foreground_request(presence: &ChatPresence) -> Option<&ComputerPendingRequest> {
+    presence
+        .pending
+        .as_ref()
+        .filter(|pending| matches!(pending.kind, ComputerPendingKind::Foreground { .. }))
+}
+
 pub fn strip_copy(presence: &ChatPresence) -> StripCopy {
+    if foreground_request(presence).is_some() {
+        return StripCopy {
+            lead: Some(format!(
+                "{} needs to come to the front to type",
+                presence.app.as_deref().unwrap_or("The app")
+            )),
+            detail: "It will cover your screen; don't type while the agent works".into(),
+        };
+    }
     match presence.tone {
         PresenceTone::Driving | PresenceTone::NeedsYou => StripCopy {
             lead: Some(presence.app.clone().unwrap_or_else(|| "Desktop".into())),
@@ -95,16 +115,67 @@ pub fn chat_glyph(
     )
 }
 
+type OnForeground = Box<dyn Fn(bool, &mut Window, &mut App)>;
+
+fn strip_button(
+    id: &'static str,
+    label: &'static str,
+    primary: bool,
+    on_foreground: &std::rc::Rc<OnForeground>,
+    allow: bool,
+    theme: &Theme,
+) -> AnyElement {
+    let on_foreground = on_foreground.clone();
+    div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .flex_none()
+        .h(px(24.0))
+        .px(px(10.0))
+        .flex()
+        .items_center()
+        .rounded(px(7.0))
+        .border_1()
+        .text_size(px(12.0))
+        .cursor_pointer()
+        .map(|button| {
+            if primary {
+                button
+                    .border_color(theme.accent)
+                    .bg(theme.accent)
+                    .text_color(gpui::white())
+                    .hover(|s| s.opacity(0.9))
+            } else {
+                button
+                    .border_color(crate::theme::hairline(0.11))
+                    .bg(crate::theme::ink(0.09))
+                    .hover(|s| s.bg(crate::theme::ink(0.14)))
+            }
+        })
+        .on_click(move |_, window, cx| {
+            cx.stop_propagation();
+            on_foreground(allow, window, cx)
+        })
+        .child(label)
+        .into_any_element()
+}
+
 pub fn computer_strip(
     presence: &ChatPresence,
     show_esc: bool,
     on_stop: Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>,
+    on_foreground: OnForeground,
     theme: &Theme,
 ) -> AnyElement {
     let copy = strip_copy(presence);
     let tint = tone_color(presence.tone, theme);
+    let asking = foreground_request(presence).is_some();
     let (bg, border, glyph) = match tint {
-        Some(tint) => (tint.opacity(0.13), tint.opacity(0.38), tint),
+        Some(tint) => (
+            tint.opacity(if asking { 0.16 } else { 0.13 }),
+            tint.opacity(0.38),
+            tint,
+        ),
         None => (
             crate::theme::ink(0.05),
             crate::theme::hairline(0.11),
@@ -112,10 +183,17 @@ pub fn computer_strip(
         ),
     };
     let stop = shows_stop(presence);
+    let on_foreground = std::rc::Rc::new(on_foreground);
     div()
         .id("computer-strip")
         .debug_selector(|| "computer-strip".into())
-        .h(px(STRIP_HEIGHT))
+        .map(|strip| {
+            if asking {
+                strip.min_h(px(STRIP_HEIGHT)).py(px(7.0))
+            } else {
+                strip.h(px(STRIP_HEIGHT))
+            }
+        })
         .flex()
         .flex_row()
         .items_center()
@@ -144,7 +222,13 @@ pub fn computer_strip(
                 .flex()
                 .flex_row()
                 .items_center()
-                .whitespace_nowrap()
+                .map(|row| {
+                    if asking {
+                        row.flex_wrap()
+                    } else {
+                        row.whitespace_nowrap()
+                    }
+                })
                 .when_some(copy.lead, |row, lead| {
                     row.child(
                         div()
@@ -152,16 +236,36 @@ pub fn computer_strip(
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(lead),
                     )
-                    .child(div().flex_none().child("\u{a0}·\u{a0}"))
+                    .when(!asking, |row| {
+                        row.child(div().flex_none().child("\u{a0}·\u{a0}"))
+                    })
                 })
                 .child(
                     div()
                         .min_w_0()
-                        .truncate()
+                        .when(!asking, |detail| detail.truncate())
                         .text_color(theme.text.opacity(0.74))
                         .child(copy.detail),
                 ),
         )
+        .when(asking, |row| {
+            row.child(strip_button(
+                "computer-strip-allow-foreground",
+                COMPUTER_FOREGROUND_ALLOW,
+                true,
+                &on_foreground,
+                true,
+                theme,
+            ))
+            .child(strip_button(
+                "computer-strip-decline-foreground",
+                COMPUTER_FOREGROUND_DECLINE,
+                false,
+                &on_foreground,
+                false,
+                theme,
+            ))
+        })
         .when(stop && show_esc, |row| {
             row.child(
                 div()
@@ -204,7 +308,7 @@ pub fn computer_strip(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn presence(tone: PresenceTone) -> ChatPresence {
@@ -215,6 +319,7 @@ mod tests {
             activity: Some("Typing".into()),
             tone,
             user_takeover: false,
+            pending: None,
         }
     }
 
@@ -260,6 +365,40 @@ mod tests {
         );
     }
 
+    pub(crate) fn foreground_pending(app: Option<&str>) -> ComputerPendingRequest {
+        ComputerPendingRequest {
+            input_id: "computer-foreground-1".into(),
+            question_id: "foreground".into(),
+            kind: ComputerPendingKind::Foreground {
+                app: app.map(Into::into),
+            },
+        }
+    }
+
+    #[test]
+    fn a_foreground_request_asks_to_bring_the_app_forward_and_offers_no_stop() {
+        let asking = ChatPresence {
+            pending: Some(foreground_pending(Some("Ghostty"))),
+            ..presence(PresenceTone::NeedsYou)
+        };
+        assert_eq!(
+            strip_copy(&asking).text(),
+            "Ghostty needs to come to the front to type · It will cover your screen; don't type while the agent works"
+        );
+        assert!(!shows_stop(&asking));
+        assert!(foreground_request(&asking).is_some());
+        assert!(foreground_request(&presence(PresenceTone::NeedsYou)).is_none());
+        assert_eq!(
+            strip_copy(&ChatPresence {
+                app: None,
+                ..asking
+            })
+            .lead
+            .as_deref(),
+            Some("The app needs to come to the front to type")
+        );
+    }
+
     #[test]
     fn strip_labels_never_carry_tool_ids_typed_text_or_pids() {
         use zeron_proto::computer::ComputerEvent;
@@ -299,6 +438,10 @@ mod tests {
             presence.user_takeover = user_takeover;
             texts.push(strip_copy(&presence).text());
         }
+        let mut asking = presences(&store).remove(0);
+        asking.tone = PresenceTone::NeedsYou;
+        asking.pending = Some(foreground_pending(Some("Calculator")));
+        texts.push(strip_copy(&asking).text());
         assert_eq!(texts[0], "Calculator · Typing");
         for text in texts {
             assert!(!text.contains("computer_"), "{text}");

@@ -5570,7 +5570,7 @@ impl DocHost {
                     ));
                 };
                 // Consent binds only the turn that asked; a new turn must ask again.
-                if questions.iter().any(UserInputQuestion::is_consent) {
+                if questions.iter().any(UserInputQuestion::is_computer) {
                     if let Err(err) = handle.doc.resolve_input(request_id, None) {
                         tracing::warn!(chat = %chat_id, request = %request_id, error = %err,
                             "expired consent resolve failed");

@@ -537,6 +537,33 @@ pub struct ComputerState {
     pub captured_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum ComputerPendingKind {
+    Foreground {
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "bounds::opt_text::<_, 128>"
+        )]
+        app: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerPendingRequest {
+    #[serde(deserialize_with = "bounds::text::<_, 128>")]
+    pub input_id: String,
+    #[serde(deserialize_with = "bounds::text::<_, 128>")]
+    pub question_id: String,
+    pub kind: ComputerPendingKind,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadComputerState {
@@ -586,6 +613,8 @@ pub struct ThreadComputerState {
         deserialize_with = "bounds::opt_text::<_, COMPUTER_MESSAGE_MAX_LENGTH>"
     )]
     pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_request: Option<ComputerPendingRequest>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1515,6 +1544,27 @@ mod tests {
             json!({ "windowId": format!("{window_id}w") }),
         ));
         round_trips::<ComputerInputPause>(&json!({ "message": "Paused" }));
+    }
+
+    #[test]
+    fn a_pending_foreground_request_round_trips_on_the_thread_state() {
+        let pending = json!({
+            "inputId": "computer-foreground-1",
+            "questionId": "foreground",
+            "kind": { "type": "foreground", "app": "Ghostty" },
+        });
+        round_trips::<ThreadComputerState>(&merge(
+            &thread_state(),
+            json!({ "pendingRequest": pending }),
+        ));
+        round_trips::<ComputerPendingRequest>(&merge(
+            &pending,
+            json!({ "kind": { "type": "foreground" } }),
+        ));
+        rejects::<ComputerPendingRequest>(&merge(
+            &pending,
+            json!({ "kind": { "type": "foreground", "app": "a".repeat(129) } }),
+        ));
     }
 
     #[test]

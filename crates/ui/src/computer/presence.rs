@@ -1,5 +1,5 @@
 use gpui::{App, Entity};
-use zeron_proto::computer::ThreadComputerState;
+use zeron_proto::computer::{ComputerPendingKind, ComputerPendingRequest, ThreadComputerState};
 
 use super::preview::{self, ComputerPreviewStore};
 
@@ -19,6 +19,7 @@ pub struct ChatPresence {
     pub activity: Option<String>,
     pub tone: PresenceTone,
     pub user_takeover: bool,
+    pub pending: Option<ComputerPendingRequest>,
 }
 
 impl ChatPresence {
@@ -42,13 +43,17 @@ fn window_target(state: &ThreadComputerState, window_id: &str) -> Option<String>
 pub fn chat_presence(store: &ComputerPreviewStore, chat_id: &str) -> Option<ChatPresence> {
     let chat = store.chat_preview(chat_id)?;
     let state = chat.state.as_ref();
-    let own_pause = state
-        .filter(|state| !state.controlled_by_other_thread)
-        .and_then(|state| state.input_pause.as_ref());
+    let own = state.filter(|state| !state.controlled_by_other_thread);
+    let own_pause = own.and_then(|state| state.input_pause.as_ref());
+    let pending = own
+        .and_then(|state| state.pending_request.clone())
+        .filter(|_| !chat.revoked_latched);
     let tone = if chat.revoked_latched {
         PresenceTone::Revoked {
             summing_up: state.is_some_and(|state| state.input_stopped == Some(true)),
         }
+    } else if pending.is_some() {
+        PresenceTone::NeedsYou
     } else if own_pause.is_some() || chat.user_paused {
         PresenceTone::Paused
     } else if state.is_some_and(preview::agent_active) {
@@ -83,7 +88,15 @@ pub fn chat_presence(store: &ComputerPreviewStore, chat_id: &str) -> Option<Chat
                 });
             (app, window_id)
         }
-        _ => (chat.last_app.clone(), chat.last_window_id.clone()),
+        _ => {
+            let pending_app = pending.as_ref().and_then(|pending| match &pending.kind {
+                ComputerPendingKind::Foreground { app } => app.clone(),
+            });
+            (
+                pending_app.or_else(|| chat.last_app.clone()),
+                chat.last_window_id.clone(),
+            )
+        }
     };
     Some(ChatPresence {
         chat_id: chat_id.to_owned(),
@@ -93,6 +106,7 @@ pub fn chat_presence(store: &ComputerPreviewStore, chat_id: &str) -> Option<Chat
         tone,
         user_takeover: paused
             && (chat.user_paused || own_pause.is_some_and(|pause| pause.user_takeover)),
+        pending,
     })
 }
 
@@ -290,6 +304,7 @@ mod tests {
                 activity: Some("Typing".into()),
                 tone: PresenceTone::Driving,
                 user_takeover: false,
+                pending: None,
             })
         );
         assert!(
@@ -595,6 +610,60 @@ mod tests {
             "the drive ending cleared the held pause"
         );
         assert!(!store.set_user_paused("nobody", None), "no drive, no pause");
+    }
+
+    #[test]
+    fn a_pending_request_needs_you_and_names_its_app() {
+        let mut store = ComputerPreviewStore::default();
+        driving(&mut store, "a");
+        action(&mut store, "a", "cua:42:7", "computer_click");
+        let pending = crate::computer::strip::tests::foreground_pending(Some("Ghostty"));
+        let mut asking = thread_state("a", false);
+        asking.pending_request = Some(pending.clone());
+        state(&mut store, asking.clone());
+        let presence = chat_presence(&store, "a").expect("waiting for the user");
+        assert_eq!(
+            (
+                presence.tone,
+                presence.app.as_deref(),
+                presence.window_id.as_deref(),
+                presence.pending.as_ref()
+            ),
+            (
+                PresenceTone::NeedsYou,
+                Some("Ghostty"),
+                Some("cua:42:7"),
+                Some(&pending)
+            )
+        );
+        assert!(presence.holds_desktop());
+        assert_eq!(ring_specs(&[presence])[0].label, "Zeron · Waiting for you");
+
+        let mut bystander = asking.clone();
+        bystander.thread_id = "b".into();
+        bystander.controlled_by_other_thread = true;
+        state(&mut store, bystander);
+        assert_eq!(chat_presence(&store, "b"), None);
+
+        let mut revoked = asking;
+        revoked.input_stopped = Some(true);
+        state(&mut store, revoked);
+        assert_eq!(
+            chat_presence(&store, "a").unwrap(),
+            ChatPresence {
+                chat_id: "a".into(),
+                app: None,
+                window_id: Some("cua:42:7".into()),
+                activity: None,
+                tone: PresenceTone::Revoked { summing_up: true },
+                user_takeover: false,
+                pending: None,
+            },
+            "a revoke outranks the question"
+        );
+        store.clear_revoked("a");
+        state(&mut store, thread_state("a", false));
+        assert_eq!(chat_presence(&store, "a"), None, "answered, idle");
     }
 
     #[test]

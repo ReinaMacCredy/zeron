@@ -752,6 +752,10 @@ pub fn update_store(
         let map = preview.presence.clone();
         let next = super::presence::presences(store.read(cx));
         let rail = super::presence::rail_entries(store.read(cx));
+        super::protected_surfaces::publish(
+            map.entity_id(),
+            next.iter().any(|presence| presence.pending.is_some()),
+        );
         map.update(cx, |map, cx| {
             if map.set(next) | map.set_rail(rail) {
                 cx.notify();

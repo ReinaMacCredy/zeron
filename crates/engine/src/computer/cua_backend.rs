@@ -1023,7 +1023,7 @@ impl CuaInner {
             native_code.clone()
         };
         if code == "same_pid_keyboard_ambiguity" {
-            message.push_str(" Inspect computer_get_state for this exact window_id, then use computer_type_text with an observed ref (or label and role), or computer_set_value to replace the field. These semantic writes do not send keydown/keyup events. Do not retry physical keys or activate the app without the user's visible-use request.");
+            message.push_str(" Inspect computer_get_state for this exact window_id, then use computer_type_text with an observed ref (or label and role), or computer_set_value to replace the field. These semantic writes do not send keydown/keyup events. Do not retry physical keys in the background. If background input cannot reach this window safely, retry this call with delivery_mode:\"foreground\"; Zeron will ask the user to allow it (only the user's click or their own request authorizes foreground). If the user declines (foreground_declined), continue in the background or tell the user what is left.");
         }
         if refused
             && ["stale_element_token", "stale_geometry", "stale_target"].contains(&code.as_str())

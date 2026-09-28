@@ -25,8 +25,8 @@ use tokio_util::sync::CancellationToken;
 use zeron_proto::PermissionMode;
 use zeron_proto::computer::{
     ComputerApp, ComputerAvailability, ComputerEvent, ComputerHealth, ComputerHealthStatus,
-    ComputerInputModifier, ComputerInputPause, ComputerPoint, ComputerRect, ComputerScreenSize,
-    ComputerScreenshot, ComputerWindow, CuaEffect,
+    ComputerInputModifier, ComputerInputPause, ComputerPendingRequest, ComputerPoint, ComputerRect,
+    ComputerScreenSize, ComputerScreenshot, ComputerWindow, CuaEffect,
 };
 
 use super::approval_gate::{ApprovalDecision, ComputerApprovalGate};
@@ -379,6 +379,7 @@ struct ThreadRuntime {
     cursor: Option<ComputerPoint>,
     pane_surfaced: bool,
     desktop_revoked: bool,
+    pending_request: Option<ComputerPendingRequest>,
 }
 
 #[derive(Debug, Clone)]

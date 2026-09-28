@@ -42,6 +42,7 @@ impl State {
             cursor: None,
             pane_surfaced: false,
             desktop_revoked: false,
+            pending_request: None,
         }
     }
 
@@ -165,6 +166,7 @@ impl ComputerManager {
                 .reported_error
                 .clone()
                 .or_else(|| runtime.last_error.clone()),
+            pending_request: runtime.pending_request.clone(),
         }
     }
 

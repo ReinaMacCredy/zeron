@@ -5,7 +5,7 @@ use futures::FutureExt;
 use serde_json::{Map, Value};
 use tokio_util::sync::CancellationToken;
 use zeron_proto::PermissionMode;
-use zeron_proto::computer::{ComputerAllowedApp, CuaComputerTask};
+use zeron_proto::computer::{ComputerAllowedApp, ComputerPendingRequest, CuaComputerTask};
 
 use super::{
     Authority, COMPUTER_CONTROL_TEARDOWN_TIMEOUT_MS, COMPUTER_USER_PAUSE_NOTE_PREFIX,
@@ -548,6 +548,33 @@ impl ComputerManager {
             match runtime {
                 Some(runtime) if runtime.desktop_revoked != revoked => {
                     runtime.desktop_revoked = revoked;
+                }
+                _ => return,
+            }
+        }
+        self.publish_cached(thread_id);
+    }
+
+    pub fn pending_request(&self, thread_id: &str) -> Option<ComputerPendingRequest> {
+        self.state()
+            .thread(thread_id)
+            .and_then(|runtime| runtime.pending_request.clone())
+    }
+
+    pub fn set_pending_request(&self, thread_id: &str, request: Option<ComputerPendingRequest>) {
+        {
+            let mut state = self.state();
+            if state.disposed {
+                return;
+            }
+            let runtime = if request.is_some() {
+                Some(state.thread_runtime(thread_id))
+            } else {
+                state.thread_mut(thread_id)
+            };
+            match runtime {
+                Some(runtime) if runtime.pending_request != request => {
+                    runtime.pending_request = request;
                 }
                 _ => return,
             }

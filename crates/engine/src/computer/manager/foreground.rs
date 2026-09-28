@@ -43,7 +43,7 @@ impl ComputerManager {
         }
         if !authorization.is_some_and(|authorization| authorization.user_requested_visible_use) {
             return Err(CuaActionError::new(
-                "The user's task did not ask for this app or window to be shown. Stay in the background: keep observing and acting through background input, or ask the user to confirm they want to watch — their reply that asks to see the screen authorizes the raise.",
+                "The user has not allowed this app or window to come to the front in this turn. If background input cannot reach it safely, retry this call on its own (not after other computer_run steps); Zeron will ask the user to allow it. Only the user's click or their own request authorizes foreground. If the user declines, continue in the background or tell the user what is left.",
                 CuaEffect::NotDispatched,
             )
             .code(COMPUTER_FOREGROUND_NOT_REQUESTED_CODE)

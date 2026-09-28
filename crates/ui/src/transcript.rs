@@ -1818,6 +1818,39 @@ pub fn rows_for_entry(
                     }
                     MessagePart::Input {
                         id: part_id,
+                        questions,
+                        answers,
+                        ..
+                    } if questions.iter().any(|question| {
+                        matches!(
+                            question.kind,
+                            Some(zeron_proto::UserInputKind::Foreground { .. })
+                        )
+                    }) =>
+                    {
+                        let Some(text) = crate::computer::cards::foreground_outcome_label(
+                            questions,
+                            answers.as_deref(),
+                        ) else {
+                            continue;
+                        };
+                        rows.push(Row {
+                            id: format!("{}#{}", entry.id, part_id).into(),
+                            version: fnv1a(text.as_bytes()),
+                            turn_start: false,
+                            kind: RowKind::ComputerNotice {
+                                notice: ComputerNotice::Foreground,
+                                text: text.into(),
+                                hint: None,
+                            },
+                            entry_id: entry_id.clone(),
+                            timestamp: None,
+                            copy_text: None,
+                            compact_fold: None,
+                        });
+                    }
+                    MessagePart::Input {
+                        id: part_id,
                         request_id,
                         questions,
                         resolved,
@@ -9477,7 +9510,7 @@ impl Transcript {
                 None,
                 theme,
             ),
-            ComputerNotice::Paused => {
+            ComputerNotice::Paused | ComputerNotice::Foreground => {
                 computer_event_row(crate::icons::CURSOR, text, CardTone::Info, None, theme)
             }
             ComputerNotice::Unavailable => computer_card(
@@ -17621,6 +17654,75 @@ mod computer_tests {
         };
         assert_eq!(*notice, ComputerNotice::Paused);
         assert_eq!(text.as_ref(), "Paused while you used Ghostty");
+    }
+
+    #[test]
+    fn a_foreground_question_shows_nothing_while_pending_and_its_outcome_after() {
+        let question = zeron_proto::UserInputQuestion {
+            id: "foreground".into(),
+            header: "Computer".into(),
+            question:
+                "Ghostty needs to come to the front to type. Allow for the rest of this turn?"
+                    .into(),
+            options: vec!["Allow for this turn".into(), "No".into()],
+            multi_select: false,
+            kind: Some(zeron_proto::UserInputKind::Foreground {
+                app: Some(zeron_proto::computer::ComputerConsentApp {
+                    name: "Ghostty".into(),
+                    bundle_id: Some("com.mitchellh.ghostty".into()),
+                    pid: Some(4242),
+                }),
+            }),
+        };
+        let rows = |resolved: bool, label: Option<&str>| {
+            rows_for_entry(
+                &entry(
+                    MessageRole::Assistant,
+                    vec![MessagePart::Input {
+                        id: "f1".into(),
+                        request_id: "f1".into(),
+                        questions: vec![question.clone()],
+                        resolved,
+                        answers: label.map(|label| {
+                            vec![zeron_proto::UserInputAnswer {
+                                question_id: "foreground".into(),
+                                labels: vec![label.into()],
+                            }]
+                        }),
+                    }],
+                ),
+                false,
+                false,
+                &mut parse,
+            )
+        };
+        assert!(
+            rows(false, None).is_empty(),
+            "the strip asks, not the transcript"
+        );
+        assert!(
+            rows(true, None).is_empty(),
+            "a cancelled question leaves no row"
+        );
+        for (label, expected) in [
+            (
+                "Allow for this turn",
+                "You allowed Ghostty to come to the front",
+            ),
+            ("No", "You kept Ghostty in the background"),
+        ] {
+            let rows = rows(true, Some(label));
+            let RowKind::ComputerNotice { notice, text, .. } = &rows[0].kind else {
+                panic!("expected an event row");
+            };
+            assert_eq!(
+                (*notice, text.as_ref()),
+                (ComputerNotice::Foreground, expected)
+            );
+            for leak in ["com.mitchellh", "4242", "computer_"] {
+                assert!(!text.contains(leak), "{leak}");
+            }
+        }
     }
 
     #[test]

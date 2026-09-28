@@ -169,6 +169,7 @@ struct TurnMark {
     id: String,
     computer_control: bool,
     desktop_revoked: bool,
+    foreground: Option<bool>,
 }
 
 struct RunComputer {
@@ -199,6 +200,7 @@ impl RunComputer {
             id: id.to_owned(),
             computer_control,
             desktop_revoked: false,
+            foreground: None,
         });
     }
 
@@ -207,6 +209,20 @@ impl RunComputer {
         let turn = turn.as_mut().filter(|turn| !turn.desktop_revoked)?;
         turn.desktop_revoked = true;
         Some(turn.id.clone())
+    }
+
+    fn answer_foreground(&self, turn_id: Option<&str>, granted: bool) -> bool {
+        let mut turn = lock(&self.turn);
+        match turn
+            .as_mut()
+            .filter(|turn| turn_id.is_none_or(|id| id == turn.id))
+        {
+            Some(turn) => {
+                turn.foreground = Some(granted);
+                true
+            }
+            None => false,
+        }
     }
 
     fn end_turn(&self) -> Option<String> {
@@ -1586,6 +1602,25 @@ impl SessionsEngine {
         lock(&self.inner.runs)
             .get(chat_id)
             .and_then(|run| run.computer.revoke_turn())
+    }
+
+    pub fn computer_turn_foreground(&self, chat_id: &str, turn_id: Option<&str>) -> Option<bool> {
+        lock(&self.inner.runs)
+            .get(chat_id)
+            .and_then(|run| run.computer.turn())
+            .filter(|turn| turn_id.is_none_or(|id| id == turn.id))
+            .and_then(|turn| turn.foreground)
+    }
+
+    pub fn answer_computer_foreground(
+        &self,
+        chat_id: &str,
+        turn_id: Option<&str>,
+        granted: bool,
+    ) -> bool {
+        lock(&self.inner.runs)
+            .get(chat_id)
+            .is_some_and(|run| run.computer.answer_foreground(turn_id, granted))
     }
 
     pub fn computer_turn_live(&self, chat_id: &str) -> bool {
@@ -4086,7 +4121,7 @@ async fn drive_run(
             AgentEvent::InputRequested { questions, .. } => {
                 // Known-id guaranteed: the unknown-id twin was dropped above,
                 // before the parked gate.
-                if !questions.iter().any(UserInputQuestion::is_consent) {
+                if !questions.iter().any(UserInputQuestion::is_computer) {
                     inner.set_status(&chat_id, SessionStatus::AwaitingInput, false);
                 }
             }
@@ -4103,12 +4138,12 @@ async fn drive_run(
                 };
                 let resolved_consent = folded.iter().any(|part| {
                     matches!(part, MessagePart::Input { request_id: rid, questions, .. }
-                        if rid == request_id && questions.iter().any(UserInputQuestion::is_consent))
+                        if rid == request_id && questions.iter().any(UserInputQuestion::is_computer))
                 });
                 let question_open = resolved_consent && folded.iter().any(|part| {
                     matches!(part, MessagePart::Input { request_id: rid, questions, resolved: false, .. }
                         if rid != request_id
-                            && !questions.iter().any(UserInputQuestion::is_consent)
+                            && !questions.iter().any(UserInputQuestion::is_computer)
                             && awaited(rid))
                 });
                 let status = if question_open {

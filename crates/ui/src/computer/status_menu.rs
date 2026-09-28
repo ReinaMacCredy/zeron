@@ -4,6 +4,10 @@ use std::rc::Rc;
 use futures::StreamExt;
 use futures::channel::mpsc;
 use gpui::{App, Entity};
+use zeron_engine::computer::engine_seams::{
+    COMPUTER_FOREGROUND_ALLOW, COMPUTER_FOREGROUND_DECLINE,
+};
+use zeron_proto::UserInputAnswer;
 use zeron_rpc::methods;
 
 use super::presence::{ChatPresence, PresenceTone};
@@ -16,6 +20,12 @@ const TITLE_LIMIT: usize = 32;
 pub enum MenuAction {
     OpenChat(String),
     Stop(String),
+    Foreground {
+        chat_id: String,
+        input_id: String,
+        question_id: String,
+        allow: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +59,12 @@ fn short_title(title: Option<String>) -> String {
 }
 
 fn activity(presence: &ChatPresence) -> String {
+    if strip::foreground_request(presence).is_some() {
+        return format!(
+            "{} needs to come to the front",
+            presence.app.as_deref().unwrap_or("The app")
+        );
+    }
     let copy = strip::strip_copy(presence);
     match presence.tone {
         PresenceTone::Paused => copy.lead.unwrap_or(copy.detail),
@@ -80,6 +96,23 @@ pub fn status_menu(
             presence.app.as_deref().unwrap_or("Desktop")
         )));
         rows.push(MenuRow::Info(activity(presence)));
+        if let Some(pending) = strip::foreground_request(presence) {
+            for (label, allow) in [
+                (COMPUTER_FOREGROUND_ALLOW, true),
+                (COMPUTER_FOREGROUND_DECLINE, false),
+            ] {
+                rows.push(MenuRow::Action {
+                    label: label.into(),
+                    hint: None,
+                    action: MenuAction::Foreground {
+                        chat_id: presence.chat_id.clone(),
+                        input_id: pending.input_id.clone(),
+                        question_id: pending.question_id.clone(),
+                        allow,
+                    },
+                });
+            }
+        }
         rows.push(MenuRow::Action {
             label: "Open chat".into(),
             hint: None,
@@ -110,6 +143,36 @@ fn revoke_desktop(state: &Entity<AppState>, chat_id: String, cx: &mut App) {
             .await
         {
             tracing::warn!(target: "desktop_cua", "revoke desktop from the menu bar: {error}");
+        }
+    })
+    .detach();
+}
+
+pub(crate) fn answer_foreground(
+    state: &Entity<AppState>,
+    chat_id: String,
+    input_id: String,
+    question_id: String,
+    allow: bool,
+    cx: &mut App,
+) {
+    let Some(engine) = state.read(cx).engine().cloned() else {
+        return;
+    };
+    let label = if allow {
+        COMPUTER_FOREGROUND_ALLOW
+    } else {
+        COMPUTER_FOREGROUND_DECLINE
+    };
+    let answers = vec![UserInputAnswer {
+        question_id,
+        labels: vec![label.into()],
+    }];
+    cx.spawn(async move |_| {
+        if let Err(error) =
+            crate::composer::respond_input(&engine, &chat_id, &input_id, answers).await
+        {
+            tracing::warn!(target: "desktop_cua", "answer the foreground request: {error}");
         }
     })
     .detach();
@@ -152,6 +215,12 @@ pub fn drive(
             cx.update(|cx| match action {
                 MenuAction::OpenChat(chat_id) => open_chat(chat_id, cx),
                 MenuAction::Stop(chat_id) => revoke_desktop(&state, chat_id, cx),
+                MenuAction::Foreground {
+                    chat_id,
+                    input_id,
+                    question_id,
+                    allow,
+                } => answer_foreground(&state, chat_id, input_id, question_id, allow, cx),
             });
         }
     })
@@ -176,6 +245,7 @@ mod tests {
             activity: Some("Typing".into()),
             tone,
             user_takeover: false,
+            pending: None,
         }
     }
 
@@ -281,6 +351,39 @@ mod tests {
                 open("z"),
             ],
             "no Stop while a chat waits for the user"
+        );
+    }
+
+    #[test]
+    fn a_foreground_request_offers_allow_and_no_with_its_ids() {
+        let asking = ChatPresence {
+            pending: Some(crate::computer::strip::tests::foreground_pending(Some(
+                "Ghostty",
+            ))),
+            ..presence("b", PresenceTone::NeedsYou)
+        };
+        let menu = status_menu(&[presence("a", PresenceTone::Driving), asking], titles).unwrap();
+        assert_eq!(menu.tone, PresenceTone::NeedsYou);
+        let answer = |label: &str, allow| MenuRow::Action {
+            label: label.into(),
+            hint: None,
+            action: MenuAction::Foreground {
+                chat_id: "b".into(),
+                input_id: "computer-foreground-1".into(),
+                question_id: "foreground".into(),
+                allow,
+            },
+        };
+        assert_eq!(
+            &menu.rows[6..],
+            &[
+                MenuRow::Separator,
+                info("Fix the build · Ghostty"),
+                info("Ghostty needs to come to the front"),
+                answer("Allow for this turn", true),
+                answer("No", false),
+                open("b"),
+            ]
         );
     }
 
@@ -403,15 +506,39 @@ mod tests {
         actions
             .unbounded_send(MenuAction::OpenChat("a".into()))
             .unwrap();
+        actions
+            .unbounded_send(MenuAction::Foreground {
+                chat_id: "a".into(),
+                input_id: "computer-foreground-3".into(),
+                question_id: "foreground".into(),
+                allow: false,
+            })
+            .unwrap();
         cx.run_until_parked();
         let mut revokes = Vec::new();
+        let mut answers = Vec::new();
         while let Ok(frame) = frames.try_recv() {
             let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
             if frame["method"] == methods::COMPUTER_REVOKE_DESKTOP {
                 revokes.push(frame["params"].clone());
             }
+            if frame["method"] == methods::QUEUE_COMMAND {
+                answers.push(frame["params"].clone());
+            }
         }
         assert_eq!(revokes, vec![serde_json::json!({ "chatId": "a" })]);
+        assert_eq!(answers.len(), 1, "{answers:?}");
+        assert_eq!(
+            answers[0]["command"],
+            serde_json::to_value(zeron_doc::SessionCommandPayload::RespondInput {
+                request_id: "computer-foreground-3".into(),
+                answers: vec![UserInputAnswer {
+                    question_id: "foreground".into(),
+                    labels: vec!["No".into()],
+                }],
+            })
+            .unwrap()
+        );
         assert_eq!(*opened.borrow(), vec!["a".to_string()]);
 
         apply(
@@ -464,6 +591,8 @@ mod tests {
         ] {
             all[0].tone = tone;
             all[0].user_takeover = user_takeover;
+            all[0].pending = (tone == PresenceTone::NeedsYou)
+                .then(|| crate::computer::strip::tests::foreground_pending(Some("Calculator")));
             let menu = status_menu(&all, |_| Some("Ship it".into())).unwrap();
             texts.extend(menu.rows.into_iter().filter_map(|row| match row {
                 MenuRow::Header(text) | MenuRow::Info(text) => Some(text),
