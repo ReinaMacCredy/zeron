@@ -491,10 +491,16 @@ impl Shell {
             if !state.chats_synced || state.selected_chat.is_some() || state.auto_selected {
                 return;
             }
-            state
-                .overview_chats(Utc::now())
-                .first()
-                .map(|(_, c)| c.id.clone())
+            // Capture knob: `ZERON_OPEN_CHAT=<id>` lands on that chat instead of the most recent.
+            std::env::var("ZERON_OPEN_CHAT")
+                .ok()
+                .filter(|id| state.chats.iter().any(|c| c.id == *id))
+                .or_else(|| {
+                    state
+                        .overview_chats(Utc::now())
+                        .first()
+                        .map(|(_, c)| c.id.clone())
+                })
         };
         if let Some(first) = first {
             self.focus_composer(cx);

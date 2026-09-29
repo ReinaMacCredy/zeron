@@ -1059,7 +1059,7 @@ enum HtmlFileState {
 #[derive(Clone)]
 pub enum RowKind {
     HtmlFiles {
-        targets: Arc<Vec<String>>,
+        targets: Arc<Vec<crate::html_open::HtmlTarget>>,
     },
     GeneratedImage {
         owner: String,
@@ -2083,7 +2083,14 @@ pub fn rows_for_entry(
         if !targets.is_empty() {
             rows.push(Row {
                 id: format!("{}#html-files", entry.id).into(),
-                version: fnv1a(targets.join("\0").as_bytes()),
+                version: fnv1a(
+                    targets
+                        .iter()
+                        .map(|target| format!("{}{}", u8::from(target.linked), target.dest))
+                        .collect::<Vec<_>>()
+                        .join("\0")
+                        .as_bytes(),
+                ),
                 turn_start: false,
                 entry_id: entry_id.clone(),
                 timestamp: None,
@@ -6643,7 +6650,7 @@ impl Transcript {
     fn render_html_files(
         &mut self,
         row_id: &SharedString,
-        targets: &[String],
+        targets: &[crate::html_open::HtmlTarget],
         root: Option<&str>,
         theme: &Theme,
         cx: &mut Context<Self>,
@@ -6652,21 +6659,38 @@ impl Transcript {
         let Some(root) = root else {
             return gpui::Empty.into_any_element();
         };
+        let remote = self.html_chat_is_remote(cx);
         let mut files: Vec<(String, std::path::PathBuf)> = Vec::new();
         for target in targets {
-            if let Some(link) = crate::workspace_links::resolve_workspace_file_link(target, root)
-                && crate::html_open::is_html_path(&link.path)
-                && !files.iter().any(|(path, _)| *path == link.path)
+            let Some(link) =
+                crate::workspace_links::resolve_workspace_file_link(&target.dest, root)
+            else {
+                continue;
+            };
+            if !crate::html_open::is_html_path(&link.path)
+                || files.iter().any(|(path, _)| *path == link.path)
             {
-                let absolute = std::path::Path::new(root).join(&link.path);
-                files.push((link.path, absolute));
+                continue;
             }
+            let absolute = std::path::Path::new(root).join(&link.path);
+            if !target.linked {
+                if remote {
+                    continue;
+                }
+                self.load_html_file(&absolute, cx);
+                if !matches!(
+                    self.html_files.get(&absolute),
+                    Some(HtmlFileState::Ready(_))
+                ) {
+                    continue;
+                }
+            }
+            files.push((link.path, absolute));
         }
         files.truncate(crate::html_open::MAX_CARDS);
         if files.is_empty() {
             return gpui::Empty.into_any_element();
         }
-        let remote = self.html_chat_is_remote(cx);
         if !remote {
             for (_, absolute) in &files {
                 self.load_html_file(absolute, cx);
@@ -13156,6 +13180,34 @@ mod tests {
                 crate::html_open::HtmlOpenApp::Zeron
             )
         });
+
+        std::fs::write(ws.path().join("late.html"), "<title>Late</title>").unwrap();
+        state.update(cx, |state, _| {
+            state.transcript = vec![assistant(
+                "reply",
+                MessageStatus::Complete,
+                vec![text_part(
+                    "text",
+                    "Wrote `gone.html`, `late.html` and `demo.html`.",
+                )],
+            )];
+            state.transcript_revision += 1;
+        });
+        transcript.update(cx, |this, cx| this.sync(cx));
+        frame(cx);
+        transcript.read_with(cx, |this, _| {
+            assert!(
+                this.html_files.get(&ws.path().join("gone.html")) == Some(&HtmlFileState::Missing)
+            );
+        });
+        assert!(
+            cx.debug_bounds("html-card-0").is_some() && cx.debug_bounds("html-card-1").is_some(),
+            "inline-code paths to present files get a card once their read lands"
+        );
+        assert!(
+            cx.debug_bounds("html-card-2").is_none(),
+            "an inline-code path to a missing file gets no card"
+        );
     }
 
     #[gpui::test]
@@ -13702,7 +13754,10 @@ mod tests {
         let rows = rows_for_entry(&entry, false, false, &mut parse);
         let last = rows.last().unwrap();
         assert!(matches!(&last.kind, RowKind::HtmlFiles { targets }
-                if **targets == ["demo.html", "site/index.html#top"]));
+        if targets.iter().map(|t| (t.dest.as_str(), t.linked)).eq([
+            ("demo.html", true),
+            ("site/index.html#top", true),
+        ])));
         assert!(last.timestamp.is_some());
         assert!(last.copy_text.is_some());
         assert_eq!(
@@ -13720,12 +13775,26 @@ mod tests {
                 .any(|row| matches!(row.kind, RowKind::HtmlFiles { .. }))
         );
 
-        let plain = assistant(
+        let code = assistant(
             "b",
             MessageStatus::Complete,
             vec![text_part(
                 "t",
                 "See `demo.html` and [web](https://x.dev/a.html).",
+            )],
+        );
+        let rows = rows_for_entry(&code, false, false, &mut parse);
+        assert!(
+            matches!(&rows.last().unwrap().kind, RowKind::HtmlFiles { targets }
+                if targets.iter().map(|t| (t.dest.as_str(), t.linked)).eq([("demo.html", false)]))
+        );
+
+        let plain = assistant(
+            "c",
+            MessageStatus::Complete,
+            vec![text_part(
+                "t",
+                "See demo.html and [web](https://x.dev/a.html).",
             )],
         );
         let rows = rows_for_entry(&plain, false, false, &mut parse);

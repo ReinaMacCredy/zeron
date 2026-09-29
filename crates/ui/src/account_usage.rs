@@ -283,6 +283,7 @@ impl AccountUsage {
             return card;
         };
         let reason = composer.read(cx).compact_disabled_reason(cx);
+        let resume = composer.read(cx).resume_compaction(cx);
         card.child(
             div()
                 .px(px(8.0))
@@ -290,6 +291,17 @@ impl AccountUsage {
                 .flex()
                 .flex_col()
                 .gap(px(6.0))
+                .when_some(resume, |col, offer| {
+                    col.child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(theme.warning)
+                            .child(format!(
+                                "Idle for {}; the prompt cache has expired.",
+                                offer.idle_label()
+                            )),
+                    )
+                })
                 .child(
                     div()
                         .id("compact-context")

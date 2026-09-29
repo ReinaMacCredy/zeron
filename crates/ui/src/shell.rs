@@ -9756,13 +9756,7 @@ impl Shell {
             .tab_index(0)
             .focus_visible(|s| s.border_2().border_color(theme.accent))
             .relative()
-            .map(|el| {
-                if sidebar_accounts.is_empty() {
-                    el.h(px(SIDEBAR_FOOTER_BUTTON_SIZE))
-                } else {
-                    el.min_h(px(SIDEBAR_FOOTER_BUTTON_SIZE)).py(px(4.0))
-                }
-            })
+            .h(px(SIDEBAR_FOOTER_BUTTON_SIZE))
             .min_w_0()
             .flex_shrink_1()
             .rounded(px(8.0))
@@ -9833,12 +9827,7 @@ impl Shell {
                         "user-menu-label".into(),
                         false,
                         div().line_height(px(17.0)).child(user_line),
-                    ))
-                    // The usage mini sits under the name once a probe has
-                    // landed (docs/research/usage-mini, placement A).
-                    .when(!sidebar_accounts.is_empty(), |identity| {
-                        identity.child(self.render_usage_mini(&sidebar_accounts, theme))
-                    }),
+                    )),
             );
         if self.user_menu.get().is_some() {
             let closing = self.user_menu.closing_since();
@@ -10014,53 +10003,6 @@ impl Shell {
                             }),
                     ),
             )
-            .into_any_element()
-    }
-
-    /// The user row's subline: one "dot · bar · NN%" segment per provider,
-    /// showing the active account's most-used window.
-    fn render_usage_mini(
-        &self,
-        accounts: &[zeron_proto::AgentAccount],
-        theme: &Theme,
-    ) -> AnyElement {
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(8.0))
-            .h(px(15.0))
-            .children(accounts.iter().map(|account| {
-                let fraction = accounts::worst_fraction(account);
-                let level = accounts::usage_level(fraction);
-                let pct_color = match level {
-                    accounts::UsageLevel::Normal => theme.text_muted,
-                    _ => accounts::usage_color(level, theme),
-                };
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(4.0))
-                    .child(
-                        div()
-                            .size(px(6.0))
-                            .flex_none()
-                            .rounded(px(1.5))
-                            .bg(accounts::provider_tint(account.harness, theme)),
-                    )
-                    .child(accounts::usage_bar(fraction, theme).w(px(34.0)).h(px(4.0)))
-                    .child(
-                        div()
-                            .text_size(crate::typography::ui_rems(10.0))
-                            .line_height(px(15.0))
-                            .text_color(pct_color)
-                            .child(SharedString::from(format!(
-                                "{}%",
-                                (fraction * 100.0).round() as u32
-                            ))),
-                    )
-            }))
             .into_any_element()
     }
 

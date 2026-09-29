@@ -5410,6 +5410,48 @@ pub(crate) fn harness_display_name(harness: HarnessId) -> &'static str {
     }
 }
 
+// Claude's prompt cache lives at most an hour; the thresholds match Claude's own resume dialog.
+const RESUME_COMPACTION_TOKENS: u64 = 100_000;
+const RESUME_COMPACTION_IDLE_MINUTES: i64 = 70;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ResumeCompaction {
+    pub tokens: u64,
+    pub idle_minutes: i64,
+}
+
+impl ResumeCompaction {
+    pub(crate) fn idle_label(self) -> String {
+        let minutes = self.idle_minutes;
+        if minutes >= 24 * 60 {
+            format!("{}d", minutes / (24 * 60))
+        } else if minutes >= 60 && minutes % 60 != 0 {
+            format!("{}h {}m", minutes / 60, minutes % 60)
+        } else if minutes >= 60 {
+            format!("{}h", minutes / 60)
+        } else {
+            format!("{minutes}m")
+        }
+    }
+}
+
+fn resume_compaction_due(
+    harness: HarnessId,
+    tokens: Option<u64>,
+    last_message_at: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<ResumeCompaction> {
+    if harness != HarnessId::ClaudeCode {
+        return None;
+    }
+    let tokens = tokens.filter(|tokens| *tokens >= RESUME_COMPACTION_TOKENS)?;
+    let idle_minutes = (now - last_message_at?).num_minutes();
+    (idle_minutes >= RESUME_COMPACTION_IDLE_MINUTES).then_some(ResumeCompaction {
+        tokens,
+        idle_minutes,
+    })
+}
+
 /// Pasted prose is eligible only at completion boundaries, never inside
 /// Markdown code/links. Catalog matching below decides whether it is a reference.
 fn pasted_reference_tokens(text: &str, pasted: Range<usize>) -> Vec<(char, MentionToken)> {
@@ -5987,6 +6029,7 @@ pub struct Composer {
     /// under their own chat — a blanket clear-on-switch erased the one
     /// visible trace of a failed send (2026-08-19).
     failure_key: Option<String>,
+    resume_compaction_kept: Option<(String, Option<chrono::DateTime<chrono::Utc>>)>,
     wizard: Option<Wizard>,
     wizard_focus: FocusHandle,
     /// Requests already answered locally (suppresses the panel until the doc
@@ -6266,6 +6309,7 @@ impl Composer {
             wizard_focus: cx.focus_handle(),
             answered_requests: HashSet::new(),
             failure_key: None,
+            resume_compaction_kept: None,
             action_task: None,
             computer_preflight: None,
             advance_task: None,
@@ -8448,6 +8492,34 @@ impl Composer {
             return Some("Wait for the current turn to finish".into());
         }
         self.unsupported_compaction(cx)
+    }
+
+    pub(crate) fn resume_compaction(&self, cx: &App) -> Option<ResumeCompaction> {
+        if self.compact_disabled_reason(cx).is_some() {
+            return None;
+        }
+        let chat = self.bound_chat_row(cx)?;
+        if self
+            .resume_compaction_kept
+            .as_ref()
+            .is_some_and(|(id, at)| *id == chat.id && *at == chat.last_message_at)
+        {
+            return None;
+        }
+        let harness = self.pickers.read(cx).resolved(cx).harness?;
+        let tokens = self
+            .state
+            .read(cx)
+            .context_usage
+            .and_then(|usage| usage.tokens);
+        resume_compaction_due(harness, tokens, chat.last_message_at, chrono::Utc::now())
+    }
+
+    fn keep_full_history(&mut self, cx: &mut Context<Self>) {
+        self.resume_compaction_kept = self
+            .bound_chat_row(cx)
+            .map(|chat| (chat.id.clone(), chat.last_message_at));
+        cx.notify();
     }
 
     fn set_chat_failure(&mut self, message: SharedString, cx: &mut Context<Self>) {
@@ -11001,6 +11073,7 @@ impl Render for Composer {
             })
         };
         let effort_hint = self.computer_effort_hint(cx);
+        let resume_compaction = self.resume_compaction(cx);
         // The shell owns the width and its route animation. A route-dependent
         // cap here would cut a wide composer before its return glide finishes.
         let container = div()
@@ -11057,6 +11130,54 @@ impl Render for Composer {
                             cx,
                         ))
                         .child("Compacting context…"),
+                )
+            })
+            .when_some(resume_compaction, |el, offer| {
+                let compact = cx.entity().downgrade();
+                let keep = compact.clone();
+                el.child(
+                    div()
+                        .mx(px(4.0))
+                        .child(crate::computer::cards::computer_card(
+                            crate::computer::cards::CardTone::Info,
+                            crate::icons::COLLAPSE_ARROWS,
+                            "Resume with less context".into(),
+                            vec![
+                                format!(
+                                    "{} tokens from {} ago \u{b7} cache expired",
+                                    crate::pickers::compact_tokens(offer.tokens),
+                                    offer.idle_label()
+                                )
+                                .into(),
+                            ],
+                            vec![
+                                crate::computer::cards::CardAction {
+                                    id: "composer-resume-compact".into(),
+                                    label: "Compact".into(),
+                                    primary: true,
+                                    on_click: Box::new(move |_, _, cx| {
+                                        compact
+                                            .update(cx, |composer, cx| {
+                                                composer.request_compaction(None, cx)
+                                            })
+                                            .ok();
+                                    }),
+                                },
+                                crate::computer::cards::CardAction {
+                                    id: "composer-resume-keep".into(),
+                                    label: "Keep full history".into(),
+                                    primary: false,
+                                    on_click: Box::new(move |_, _, cx| {
+                                        keep.update(cx, |composer, cx| {
+                                            composer.keep_full_history(cx)
+                                        })
+                                        .ok();
+                                    }),
+                                },
+                            ],
+                            None,
+                            &theme,
+                        )),
                 )
             })
             .when(effort_hint, |el| {
@@ -15165,6 +15286,88 @@ mod tests {
                 assert!(!composer.compacting(cx));
                 assert!(!composer.send_blocked(cx));
                 assert!(composer.compact_disabled_reason(cx).is_none());
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn resume_compaction_is_due_only_for_a_large_idle_claude_chat() {
+        let now = chrono::Utc::now();
+        let ago = |minutes| Some(now - chrono::Duration::minutes(minutes));
+        let due = |harness, tokens, at| resume_compaction_due(harness, tokens, at, now);
+        assert_eq!(
+            due(HarnessId::ClaudeCode, Some(184_312), ago(145)),
+            Some(ResumeCompaction {
+                tokens: 184_312,
+                idle_minutes: 145
+            })
+        );
+        assert!(due(HarnessId::ClaudeCode, Some(100_000), ago(70)).is_some());
+        assert!(due(HarnessId::ClaudeCode, Some(99_999), ago(145)).is_none());
+        assert!(due(HarnessId::ClaudeCode, Some(184_312), ago(69)).is_none());
+        assert!(due(HarnessId::ClaudeCode, None, ago(145)).is_none());
+        assert!(due(HarnessId::ClaudeCode, Some(184_312), None).is_none());
+        assert!(due(HarnessId::Codex, Some(184_312), ago(145)).is_none());
+    }
+
+    #[test]
+    fn resume_compaction_idle_label_reads_in_hours_and_days() {
+        let label = |idle_minutes| {
+            ResumeCompaction {
+                tokens: 0,
+                idle_minutes,
+            }
+            .idle_label()
+        };
+        assert_eq!(label(45), "45m");
+        assert_eq!(label(120), "2h");
+        assert_eq!(label(145), "2h 25m");
+        assert_eq!(label(3 * 24 * 60 + 5), "3d");
+    }
+
+    #[gpui::test]
+    fn keeping_full_history_hides_the_offer_until_the_chat_moves_on(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        handle
+            .update(cx, |composer, _, cx| {
+                let set_last_message =
+                    |composer: &mut Composer, minutes: i64, cx: &mut Context<Composer>| {
+                        composer.state.update(cx, |state, _| {
+                            let mut chat = chat_row("c1", None);
+                            chat.config = Some(zeron_proto::ChatConfig {
+                                harness: HarnessId::ClaudeCode,
+                                model: None,
+                                reasoning: None,
+                                model_options: serde_json::Map::new(),
+                                sandbox: SandboxLevel::WorkspaceWrite,
+                                permission_mode: zeron_proto::PermissionMode::Full,
+                            });
+                            chat.last_message_at =
+                                Some(chrono::Utc::now() - chrono::Duration::minutes(minutes));
+                            state.chats = vec![chat];
+                            state.selected_chat = Some("c1".into());
+                            state.context_usage = Some(zeron_proto::ContextUsage {
+                                tokens: Some(184_312),
+                                window: Some(1_000_000),
+                            });
+                        });
+                    };
+                set_last_message(composer, 145, cx);
+                let offer = composer
+                    .resume_compaction(cx)
+                    .expect("offer for an idle chat");
+                assert_eq!(offer.tokens, 184_312);
+
+                composer.keep_full_history(cx);
+                assert!(composer.resume_compaction(cx).is_none());
+
+                set_last_message(composer, 90, cx);
+                assert!(composer.resume_compaction(cx).is_some());
+
+                composer.state.update(cx, |state, _| {
+                    state.compacting_chat = Some("c1".into());
+                });
+                assert!(composer.resume_compaction(cx).is_none());
             })
             .unwrap();
     }
