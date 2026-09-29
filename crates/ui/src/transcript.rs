@@ -5583,6 +5583,11 @@ impl Transcript {
             if !self.compact_mode && !compact_shell && !tool_group_collapses(tools) {
                 continue;
             }
+            // Outside compact mode a fold body belongs to a settled turn, so
+            // its regrouped chips are never arrivals.
+            if !self.compact_mode && row.compact_fold.is_some() {
+                continue;
+            }
             live_tool_groups.insert(row.id.clone());
             let historical = historical_tools.get(&row.entry_id);
             let whole_group_historical =
@@ -12058,7 +12063,11 @@ mod tests {
     #[gpui::test]
     fn settling_turn_closes_its_work_fold_from_the_live_rows(cx: &mut gpui::TestAppContext) {
         with_tool_group_navigation(cx, |state, transcript, cx| {
-            let parts = vec![tool_part("call", "pwd"), text_part("reply", "All set.")];
+            let parts = vec![
+                tool_part("call-a", "pwd"),
+                text_part("reply", "All set."),
+                tool_part("call-b", "ls"),
+            ];
             state.update(cx, |state, _| {
                 state.transcript = vec![assistant("turn", MessageStatus::Streaming, parts.clone())];
                 state.transcript_revision += 1;
@@ -12081,6 +12090,14 @@ mod tests {
                     .map(|row| row.id.clone())
                     .collect();
                 assert!(!body.is_empty());
+                for id in &body {
+                    assert!(
+                        this.tool_group_reveals
+                            .get(id)
+                            .is_none_or(|reveal| reveal.starts.iter().all(Option::is_none)),
+                        "settled body row {id} replays its arrival"
+                    );
+                }
                 for id in body {
                     this.compact_fold_heights
                         .insert(id, Rc::new(Cell::new(40.0)));
