@@ -695,12 +695,12 @@ pub(crate) fn route_child_notification(method: &str) -> ChildRoute {
         | "turn/failed"
         | "turn/aborted"
         | "error"
-        | "thread/closed" => ChildRoute::Subagent,
+        | "thread/closed"
+        | "thread/tokenUsage/updated" => ChildRoute::Subagent,
         // Child status bookkeeping with no subagent meaning: consumed
         // so it can never settle the PARENT turn (the exact bug class the
         // explicit table exists for).
         "thread/status/changed"
-        | "thread/tokenUsage/updated"
         // Child chatter with no consumer on this wire.
         | "item/commandExecution/outputDelta"
         | "item/fileChange/outputDelta"
@@ -1029,6 +1029,7 @@ mod tests {
             "item/reasoning/textDelta",
             "error",
             "thread/closed",
+            "thread/tokenUsage/updated",
         ] {
             assert_eq!(route_child_notification(m), ChildRoute::Subagent, "{m}");
         }

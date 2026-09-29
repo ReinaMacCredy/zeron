@@ -440,7 +440,7 @@ impl Normalizer {
                 // no tagged frame follows; the subagent's stream just stops).
                 // Surface it as the subagent's tagged Done so the chip flips
                 // done/failed and the transcript freezes.
-                if f.subtype == "task_notification" {
+                if matches!(f.subtype.as_str(), "task_notification" | "task_progress") {
                     let Some(parent) = f.tool_use_id.as_deref().filter(|t| !t.is_empty()) else {
                         return Vec::new();
                     };
@@ -455,6 +455,25 @@ impl Normalizer {
                     if !self.agent_spawn_tools.contains(parent) {
                         return Vec::new();
                     }
+                    // `total_tokens` is the latest message's context size, not a cumulative sum.
+                    let mut out: Vec<AgentEvent> = f
+                        .usage
+                        .as_ref()
+                        .and_then(|usage| usage.get("total_tokens")?.as_u64())
+                        .map(|tokens| {
+                            tag(
+                                parent,
+                                AgentEvent::ContextUsage {
+                                    tokens: Some(tokens),
+                                    window: None,
+                                },
+                            )
+                        })
+                        .into_iter()
+                        .collect();
+                    if f.subtype == "task_progress" {
+                        return out;
+                    }
                     let status = match f.status.as_deref().unwrap_or("") {
                         "completed" | "complete" | "succeeded" | "success" => DoneStatus::Completed,
                         "failed" | "errored" | "error" => DoneStatus::Errored,
@@ -462,9 +481,9 @@ impl Normalizer {
                             DoneStatus::Interrupted
                         }
                         // Non-terminal notification shapes: nothing to close.
-                        _ => return Vec::new(),
+                        _ => return out,
                     };
-                    return vec![tag(
+                    out.push(tag(
                         parent,
                         AgentEvent::Done {
                             status,
@@ -472,7 +491,8 @@ impl Normalizer {
                             error: None,
                             session_id: None,
                         },
-                    )];
+                    ));
+                    return out;
                 }
                 // An AGENT task starting (subagent_type present — subagent-
                 // owned shell tasks carry the same subtype without it):
@@ -1962,6 +1982,64 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn task_progress_and_notification_report_the_subagent_token_total() {
+        let mut norm = Normalizer::new();
+        for raw in [
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01M7i3dSGYTXzwUwKSAcFyDa","name":"Agent","input":{"description":"Run pwd and ls commands"}}]}}"#,
+            r#"{"type":"system","subtype":"task_started","task_id":"aaf98d7c2bcbdc1b6","tool_use_id":"toolu_01M7i3dSGYTXzwUwKSAcFyDa","description":"Run pwd and ls commands","subagent_type":"general-purpose","is_backgrounded":true,"spawn_depth":1,"task_type":"local_agent"}"#,
+        ] {
+            norm.normalize(
+                crate::claude::wire::parse_frame(raw).expect("parses"),
+                false,
+            );
+        }
+        let usage = |ev: &AgentEvent| match ev {
+            AgentEvent::Subagent {
+                parent_tool_use_id,
+                event,
+            } if parent_tool_use_id == "toolu_01M7i3dSGYTXzwUwKSAcFyDa" => match event.as_ref() {
+                AgentEvent::ContextUsage {
+                    tokens,
+                    window: None,
+                } => *tokens,
+                _ => None,
+            },
+            _ => None,
+        };
+        let progress = norm.normalize(
+            crate::claude::wire::parse_frame(
+                r#"{"type":"system","subtype":"task_progress","task_id":"aaf98d7c2bcbdc1b6","tool_use_id":"toolu_01M7i3dSGYTXzwUwKSAcFyDa","description":"Running Print current working directory","subagent_type":"general-purpose","usage":{"total_tokens":26429,"tool_uses":1,"duration_ms":2172},"last_tool_name":"Bash"}"#,
+            )
+            .expect("parses"),
+            false,
+        );
+        assert_eq!(progress.len(), 1);
+        assert_eq!(usage(&progress[0]), Some(26429));
+        let settled = norm.normalize(
+            crate::claude::wire::parse_frame(
+                r#"{"type":"system","subtype":"task_notification","task_id":"aaf98d7c2bcbdc1b6","tool_use_id":"toolu_01M7i3dSGYTXzwUwKSAcFyDa","status":"completed","summary":"done","usage":{"total_tokens":29216,"tool_uses":2,"duration_ms":5034}}"#,
+            )
+            .expect("parses"),
+            false,
+        );
+        assert_eq!(settled.len(), 2);
+        assert_eq!(usage(&settled[0]), Some(29216));
+        assert!(matches!(
+            &settled[1],
+            AgentEvent::Subagent { event, .. }
+                if matches!(event.as_ref(), AgentEvent::Done { status: DoneStatus::Completed, .. })
+        ));
+        let shell = norm.normalize(
+            crate::claude::wire::parse_frame(
+                r#"{"type":"system","subtype":"task_progress","tool_use_id":"toolu_bash","usage":{"total_tokens":5}}"#,
+            )
+            .expect("parses"),
+            false,
+        );
+        assert!(shell.is_empty());
     }
 
     #[test]
