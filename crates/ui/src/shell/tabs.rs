@@ -1264,15 +1264,13 @@ impl Shell {
 
         // Overflow: the tab region scrolls horizontally; edge fades appear on
         // whichever side has hidden tabs (offset from the LAST frame — a
-        // one-frame lag is invisible). On GLASS the fades are an EdgeFade
-        // scope (per-glyph gradient); painted overlays only exist on opaque
-        // platforms, in the SHELL surface tone the strip sits on.
+        // one-frame lag is invisible). The fades are an EdgeFade scope on
+        // every theme: a painted surface-tone overlay shows as a dark block
+        // over a chat background image.
         let scrolled = -f32::from(self.tabs_scroll.offset().x);
         let max_scroll = f32::from(self.tabs_scroll.max_offset().x);
         let fade_left = scrolled > 1.0;
         let fade_right = scrolled < max_scroll - 1.0;
-        let glass = theme.is_glass();
-        let bar_bg = theme.surface;
         let scroll_for_drag = self.tabs_scroll.clone();
         let tab_region = div()
             .relative()
@@ -1315,45 +1313,11 @@ impl Shell {
                         },
                     ))
                     .children(tab_elements),
-            )
-            .when(fade_left && !glass, |el| {
-                el.child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .top_0()
-                        .bottom_0()
-                        .w(px(FADE_WIDTH))
-                        .bg(gpui::linear_gradient(
-                            90.0,
-                            gpui::linear_color_stop(bar_bg, 0.0),
-                            gpui::linear_color_stop(bar_bg.opacity(0.0), 1.0),
-                        )),
-                )
-            })
-            .when(fade_right && !glass, |el| {
-                el.child(
-                    div()
-                        .absolute()
-                        .right_0()
-                        .top_0()
-                        .bottom_0()
-                        .w(px(FADE_WIDTH))
-                        .bg(gpui::linear_gradient(
-                            270.0,
-                            gpui::linear_color_stop(bar_bg, 0.0),
-                            gpui::linear_color_stop(bar_bg.opacity(0.0), 1.0),
-                        )),
-                )
-            });
-        if glass {
-            crate::edge_fade::edge_faded(FADE_WIDTH, false, false, tab_region)
-                .fade_left(fade_left)
-                .fade_right(fade_right)
-                .into_any_element()
-        } else {
-            tab_region.into_any_element()
-        }
+            );
+        crate::edge_fade::edge_faded(FADE_WIDTH, false, false, tab_region)
+            .fade_left(fade_left)
+            .fade_right(fade_right)
+            .into_any_element()
     }
 
     /// The unified titlebar in chat mode:
