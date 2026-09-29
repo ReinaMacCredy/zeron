@@ -1086,13 +1086,10 @@ impl Pickers {
             .or_else(|| self.state.read(cx).selected_chat.clone())
     }
 
-    // AppState::context_usage tracks only the selection's watch.
     fn chat_context_usage(&self, cx: &App) -> Option<zeron_proto::ContextUsage> {
         let state = self.state.read(cx);
-        let selected = state.selected_chat.as_deref()?;
-        (self.chat_override.as_deref().unwrap_or(selected) == selected)
-            .then_some(state.context_usage)
-            .flatten()
+        state.selected_chat.as_deref()?;
+        state.context_usage_for(self.chat_override.as_deref())
     }
 
     fn chat_row<'a>(&self, cx: &'a App) -> Option<&'a zeron_proto::Chat> {

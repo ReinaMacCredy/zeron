@@ -7697,8 +7697,9 @@ impl Shell {
         created_by: Option<SharedString>,
         status: zeron_proto::ChatIndicator,
         selected: bool,
-        // The side this row's session fills while the split is open; the
-        // unselected member wears a softer wash and both wear a side glyph.
+        // The side this row's session fills in the pair; both members wear a
+        // side glyph, and while the split is open the unselected one wears a
+        // softer wash.
         split_side: Option<split::SplitSide>,
         archived: bool,
         preview: bool,
@@ -8022,7 +8023,7 @@ impl Shell {
                 .child(corner_body)
                 .into_any_element()
         };
-        let secondary = split_side.is_some() && !selected;
+        let secondary = split_side.is_some() && !selected && self.split.is_some();
         let (hover, text) = (theme.glass_hover(), theme.text);
         let selected_wash = crate::theme::glass_selected_bg();
         let subline = if search_query.is_some() {
@@ -13675,6 +13676,15 @@ impl Render for Shell {
                 let split_side = self.split.as_ref().map(|s| s.side).filter(|_| on_chat);
                 let main_veil = split_side
                     .and_then(|side| self.render_split_size_veil(main_content_width, side, cx));
+                let main_header = split_side
+                    .and_then(|_| self.state.read(cx).selected_chat.clone())
+                    .map(|chat_id| {
+                        self.render_split_header(&chat_id, true, cx)
+                            .absolute()
+                            .top(px(Theme::TITLEBAR_HEIGHT))
+                            .left_0()
+                            .right_0()
+                    });
                 let main = if main_transition.is_some() || split_open {
                     div()
                         .h_full()
@@ -13682,7 +13692,14 @@ impl Render for Shell {
                         .flex_none()
                         .relative()
                         .flex()
+                        // The transcript keeps its own titlebar inset and
+                        // fade, so pushing the column down by the header
+                        // parks both below the header.
+                        .when(main_header.is_some(), |el| {
+                            el.pt(px(split::SPLIT_HEADER_HEIGHT))
+                        })
                         .child(main)
+                        .children(main_header)
                         .children(main_veil)
                         .into_any_element()
                 } else {

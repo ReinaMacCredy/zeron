@@ -4771,7 +4771,7 @@ impl Shell {
         }
 
         let selected = self.state.read(cx).selected_chat.clone();
-        let split_pair = self.split.as_ref().and(self.split_pair.clone());
+        let split_pair = self.split_pair.clone();
         // Re-checked at render so the chips drop the FRAME a popover opens,
         // not on the next modifier event — the jumps are suppressed under it.
         let jump_hints = self.jump_hints && !self.overlay_owns_keyboard(cx);
@@ -7208,12 +7208,14 @@ mod tests {
                 assert_eq!(keys(shell, cx), ["c:a1", "c:a2"]);
                 assert_eq!(shell.sidebar_visible_order(cx), ["a1", "b1", "a2"]);
 
-                // Selecting outside the pair parks it: rows fall back apart.
+                // Selecting outside the pair parks it; its card stays.
                 shell
                     .state
                     .update(cx, |state, cx| state.select_chat(Some("a2".into()), cx));
                 shell.reconcile_split_with_selection(Some("a2"), cx);
-                assert_eq!(keys(shell, cx), ["c:a1", "c:b1", "c:a2"]);
+                assert!(shell.split.is_none());
+                assert_eq!(keys(shell, cx), ["c:a1", "c:a2"]);
+                assert_eq!(shell.sidebar_visible_order(cx), ["a1", "b1", "a2"]);
             })
             .unwrap();
     }

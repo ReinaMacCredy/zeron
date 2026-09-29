@@ -801,6 +801,7 @@ pub struct AppState {
     /// the engine LRU — closing a tab MUST go through
     /// [`Self::unwatch_subagent_doc`].
     sub_watch_tasks: HashMap<String, Task<()>>,
+    sub_context_usage: HashMap<String, zeron_proto::ContextUsage>,
 }
 
 /// Text/reasoning growth changes the transcript without changing session
@@ -876,6 +877,7 @@ impl AppState {
             change_requests_visible: true,
             sub_transcripts: HashMap::new(),
             sub_watch_tasks: HashMap::new(),
+            sub_context_usage: HashMap::new(),
             auto_selected: false,
             chats_synced: false,
             spaces_synced: false,
@@ -1514,8 +1516,18 @@ impl AppState {
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         self.sub_watch_tasks.remove(doc_id);
         self.sub_transcripts.remove(doc_id);
+        self.sub_context_usage.remove(doc_id);
         self.prepared_transcripts.remove(doc_id);
         self.transcript_baselines.remove(doc_id);
+    }
+
+    pub fn context_usage_for(&self, chat_id: Option<&str>) -> Option<zeron_proto::ContextUsage> {
+        match chat_id {
+            Some(id) if self.selected_chat.as_deref() != Some(id) => {
+                self.sub_context_usage.get(id).copied()
+            }
+            _ => self.context_usage,
+        }
     }
 
     /// Frozen-blob path: the finished subagent's uploaded transcript, no
@@ -3183,8 +3195,14 @@ fn spawn_subagent_watch(
                 let alive = this.update(cx, |state, cx| {
                     // A stale pump racing a snapshot/unwatch finds no key.
                     if let Some(rows) = state.sub_transcripts.get_mut(&doc_id) {
+                        let usage_changed = match update.context_usage {
+                            Some(usage) => {
+                                state.sub_context_usage.insert(doc_id.clone(), usage) != Some(usage)
+                            }
+                            None => state.sub_context_usage.remove(&doc_id).is_some(),
+                        };
                         let frame = update.frame;
-                        let text_only = is_text_append(&frame);
+                        let text_only = is_text_append(&frame) && !usage_changed;
                         state.transcript_revision = state.transcript_revision.wrapping_add(1);
                         if let Err(err) = zeron_doc::apply_transcript_frame(rows, frame) {
                             tracing::warn!(%doc_id, error = %err, "resubscribing subagent watch");
@@ -4033,6 +4051,24 @@ mod tests {
                 "byte budget applies even to one whale"
             );
         });
+    }
+
+    #[test]
+    fn context_usage_reads_the_asked_chat_not_the_selection() {
+        let usage = |tokens| zeron_proto::ContextUsage {
+            tokens: Some(tokens),
+            window: Some(200_000),
+        };
+        let mut state = AppState::new();
+        state.selected_chat = Some("a".into());
+        state.context_usage = Some(usage(10));
+        state.sub_context_usage.insert("b".into(), usage(20));
+        assert_eq!(state.context_usage_for(None), Some(usage(10)));
+        assert_eq!(state.context_usage_for(Some("a")), Some(usage(10)));
+        assert_eq!(state.context_usage_for(Some("b")), Some(usage(20)));
+        assert_eq!(state.context_usage_for(Some("c")), None);
+        state.unwatch_subagent_doc("b");
+        assert_eq!(state.context_usage_for(Some("b")), None);
     }
 
     #[test]
