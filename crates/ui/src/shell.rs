@@ -8049,8 +8049,9 @@ impl Shell {
         created_by: Option<SharedString>,
         status: zeron_proto::ChatIndicator,
         selected: bool,
-        // The side this row's session fills while the split is open; the
-        // unselected member wears a softer wash and both wear a side glyph.
+        // The side this row's session fills in the pair; both members wear a
+        // side glyph, and while the split is open the unselected one wears a
+        // softer wash.
         split_side: Option<split::SplitSide>,
         archived: bool,
         preview: bool,
@@ -8379,7 +8380,7 @@ impl Shell {
                 .child(corner_body)
                 .into_any_element()
         };
-        let secondary = split_side.is_some() && !selected;
+        let secondary = split_side.is_some() && !selected && self.split.is_some();
         let (hover, text) = (theme.glass_hover(), theme.text);
         let selected_wash = crate::theme::glass_selected_bg();
         let subline = if search_query.is_some() {
@@ -11653,20 +11654,34 @@ impl Shell {
                     // status strip above it is empty air), zero at the
                     // underlay's bottom edge.
                     let bottom_band = (stack_h - Theme::STATUS_STRIP_HEIGHT).max(1.0);
-                    div().absolute().inset_0().bottom(px(term_h)).child(
-                        crate::edge_fade::edge_faded(
-                            Theme::TRANSCRIPT_FADE_BAND,
-                            true,
-                            true,
-                            div().size_full().child(outlet),
+                    // The split's primary header sits under the titlebar;
+                    // starting the underlay below it moves the transcript's
+                    // own titlebar inset and fade down with it, while the
+                    // backgrounds above stay put.
+                    let header_inset = if self.split.is_some() && has_selection {
+                        split::SPLIT_HEADER_HEIGHT
+                    } else {
+                        0.0
+                    };
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .top(px(header_inset))
+                        .bottom(px(term_h))
+                        .child(
+                            crate::edge_fade::edge_faded(
+                                Theme::TRANSCRIPT_FADE_BAND,
+                                true,
+                                true,
+                                div().size_full().child(outlet),
+                            )
+                            // Fully faded BY the titlebar's bottom edge (the
+                            // title text is opaque — overlap read as collision),
+                            // ramping in the band just below it.
+                            .inset_top(Theme::TITLEBAR_HEIGHT)
+                            .band_top(Theme::TRANSCRIPT_FADE_BAND)
+                            .band_bottom(bottom_band),
                         )
-                        // Fully faded BY the titlebar's bottom edge (the
-                        // title text is opaque — overlap read as collision),
-                        // ramping in the band just below it.
-                        .inset_top(Theme::TITLEBAR_HEIGHT)
-                        .band_top(Theme::TRANSCRIPT_FADE_BAND)
-                        .band_bottom(bottom_band),
-                    )
                 },
             )
             // The glass chrome stack, floating over the transcript's bottom:
@@ -14434,6 +14449,15 @@ impl Render for Shell {
                 let split_side = self.split.as_ref().map(|s| s.side).filter(|_| on_chat);
                 let main_veil = split_side
                     .and_then(|side| self.render_split_size_veil(main_content_width, side, cx));
+                let main_header = split_side
+                    .and_then(|_| self.state.read(cx).selected_chat.clone())
+                    .map(|chat_id| {
+                        self.render_split_header(&chat_id, true, cx)
+                            .absolute()
+                            .top(px(Theme::TITLEBAR_HEIGHT))
+                            .left_0()
+                            .right_0()
+                    });
                 let main = if main_transition.is_some() || split_open {
                     div()
                         .h_full()
@@ -14442,6 +14466,7 @@ impl Render for Shell {
                         .relative()
                         .flex()
                         .child(main)
+                        .children(main_header)
                         .children(main_veil)
                         .into_any_element()
                 } else {

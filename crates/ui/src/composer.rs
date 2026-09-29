@@ -8510,7 +8510,7 @@ impl Composer {
         let tokens = self
             .state
             .read(cx)
-            .context_usage
+            .context_usage_for(Some(&chat.id))
             .and_then(|usage| usage.tokens);
         resume_compaction_due(harness, tokens, chat.last_message_at, chrono::Utc::now())
     }
@@ -11891,15 +11891,13 @@ impl Render for Composer {
                 let harness = (!self.side_chat)
                     .then(|| self.pickers.read(cx).resolved(cx).harness)
                     .flatten();
-                let target = {
-                    let state = self.state.read(cx);
-                    state
-                        .selected_chat_row()
-                        .map(|chat| chat.device_id.clone())
-                        .filter(|device| state.local_device_id.as_ref() != Some(device))
-                };
+                let target = self
+                    .bound_chat_row(cx)
+                    .map(|chat| chat.device_id.clone())
+                    .filter(|device| self.state.read(cx).local_device_id.as_ref() != Some(device));
+                let chat = self.bound_chat_id(cx);
                 self.account_usage
-                    .update(cx, |usage, cx| usage.track(harness, target, cx));
+                    .update(cx, |usage, cx| usage.track(harness, target, chat, cx));
             }
             container.child(
                 div()
@@ -11944,10 +11942,7 @@ impl Render for Composer {
                                         .gap(px(4.0))
                                         .children(sidechat_pill)
                                         .children(permission_chip)
-                                        // Context usage is tracked for the selected chat's watch only.
-                                        .when(self.chat_override.is_none(), |row| {
-                                            row.child(self.account_usage.clone())
-                                        }),
+                                        .child(self.account_usage.clone()),
                                 ),
                         )
                     }),

@@ -4094,6 +4094,12 @@ async fn drive_run(
                     sink.push_user(&device_id, text);
                     continue;
                 }
+                if let AgentEvent::ContextUsage { tokens, window } = sub_event.as_ref() {
+                    if let Err(err) = sink.doc.update_context_usage(*tokens, *window) {
+                        tracing::warn!(doc = %sink.doc_id, error = %err, "subagent usage write failed");
+                    }
+                    continue;
+                }
                 zeron_doc::fold_event_into_parts(&mut sink.folded, sub_event);
                 sink.dirty = true;
                 if !chip_streaming && done {

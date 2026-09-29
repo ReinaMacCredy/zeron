@@ -207,6 +207,7 @@ pub(super) fn split_drop(
 /// The sidebar pair card's caption strip and its inset around the rows.
 const SPLIT_CARD_CAPTION: f32 = 20.0;
 const SPLIT_CARD_INSET: f32 = 2.0;
+pub(super) const SPLIT_HEADER_HEIGHT: f32 = 32.0;
 
 impl Shell {
     /// The chat shown in the secondary pane right now.
@@ -214,11 +215,10 @@ impl Shell {
         self.split.as_ref().map(|s| s.chat_id.as_str())
     }
 
-    /// The open split's pair, once [`SplitPair::adjoin`] has put its rows
+    /// The pair, open or waiting, once [`SplitPair::adjoin`] has put its rows
     /// side by side in the sidebar; a pinned member keeps its pin slot, so
     /// the rows then stay apart and wear only their side glyphs.
     pub(super) fn sidebar_split_card(&self, pinned: &[String]) -> Option<SplitPair> {
-        self.split.as_ref()?;
         self.split_pair
             .clone()
             .filter(|pair| !pinned.contains(&pair.left) && !pinned.contains(&pair.right))
@@ -582,6 +582,120 @@ impl Shell {
         )
     }
 
+    /// Close the selected pane of an open split: the pair goes and the
+    /// partner takes the whole column.
+    pub(super) fn close_primary_split(&mut self, cx: &mut Context<Self>) {
+        let Some(partner) = self.split_chat_id().map(str::to_string) else {
+            return;
+        };
+        self.dissolve_split_pair(cx);
+        self.open_chat(partner, cx);
+    }
+
+    /// A pane's header, the same on both sides of an open split: brand,
+    /// title, the split glyph (on the secondary, a click focuses it) and a
+    /// close that removes that pane.
+    pub(super) fn render_split_header(
+        &self,
+        chat_id: &str,
+        primary: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let theme = Theme::of(cx).clone();
+        let (title, brand) = {
+            let state = self.state.read(cx);
+            let chat = state.chats.iter().find(|c| c.id == chat_id);
+            (
+                SharedString::from(transcript::single_line(
+                    chat.and_then(|c| c.title.as_deref())
+                        .unwrap_or("New session"),
+                )),
+                chat.and_then(|c| c.config.as_ref().map(|c| c.harness))
+                    .map(crate::pickers::harness_brand_icon),
+            )
+        };
+        let (focus_id, close_id) = if primary {
+            ("split-primary-focus", "split-primary-close")
+        } else {
+            ("split-pane-focus", "split-pane-close")
+        };
+        let focus_chat = chat_id.to_string();
+        div()
+            .flex_none()
+            .h(px(SPLIT_HEADER_HEIGHT))
+            .px(px(12.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .border_b_1()
+            .border_color(theme.border)
+            .text_size(crate::typography::ui_rems(12.0))
+            .text_color(theme.text_muted)
+            .when_some(brand, |el, (path, tint)| {
+                el.child(
+                    icon(path)
+                        .size(px(14.0))
+                        .flex_none()
+                        .text_color(tint.unwrap_or(theme.text_muted)),
+                )
+            })
+            .child(div().flex_1().min_w_0().truncate().child(title))
+            .child(
+                div()
+                    .id(focus_id)
+                    .debug_selector(move || focus_id.into())
+                    .flex_none()
+                    .size(px(20.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(6.0))
+                    .when(!primary, |el| {
+                        el.cursor_pointer()
+                            .hover(|s| s.bg(crate::theme::wash(0.14)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.open_chat(focus_chat.clone(), cx);
+                            }))
+                    })
+                    .child(
+                        icon(icons::SPLIT_COLUMNS)
+                            .size(px(12.0))
+                            .text_color(if primary {
+                                theme.accent
+                            } else {
+                                theme.text_muted
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .id(close_id)
+                    .debug_selector(move || close_id.into())
+                    .flex_none()
+                    .size(px(20.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(6.0))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(crate::theme::wash(0.14)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        if primary {
+                            this.close_primary_split(cx);
+                        } else {
+                            this.dissolve_split_pair(cx);
+                        }
+                    }))
+                    .child(
+                        icon(icons::CLOSE)
+                            .size(px(12.0))
+                            .text_color(theme.text_muted),
+                    ),
+            )
+    }
+
     /// The secondary pane: a header (brand, title, close) under the
     /// titlebar band, the live transcript, its own composer. `width` is the
     /// pane's laid-out width, for the resize badge.
@@ -603,81 +717,7 @@ impl Shell {
             SplitSide::Right => SplitSide::Left,
         };
         let veil = self.render_split_size_veil(width, seam_edge, cx);
-        let (title, brand) = {
-            let state = self.state.read(cx);
-            let chat = state.chats.iter().find(|c| c.id == chat_id);
-            (
-                SharedString::from(transcript::single_line(
-                    chat.and_then(|c| c.title.as_deref())
-                        .unwrap_or("New session"),
-                )),
-                chat.and_then(|c| c.config.as_ref().map(|c| c.harness))
-                    .map(crate::pickers::harness_brand_icon),
-            )
-        };
-        let focus_id = chat_id.clone();
-        let header = div()
-            .flex_none()
-            .h(px(32.0))
-            .px(px(12.0))
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .border_b_1()
-            .border_color(theme.border)
-            .text_size(crate::typography::ui_rems(12.0))
-            .text_color(theme.text_muted)
-            .when_some(brand, |el, (path, tint)| {
-                el.child(
-                    icon(path)
-                        .size(px(14.0))
-                        .flex_none()
-                        .text_color(tint.unwrap_or(theme.text_muted)),
-                )
-            })
-            .child(div().flex_1().min_w_0().truncate().child(title))
-            .child(
-                div()
-                    .id("split-pane-focus")
-                    .flex_none()
-                    .size(px(20.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(6.0))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(crate::theme::wash(0.14)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.open_chat(focus_id.clone(), cx);
-                    }))
-                    .child(
-                        icon(icons::SPLIT_COLUMNS)
-                            .size(px(12.0))
-                            .text_color(theme.text_muted),
-                    ),
-            )
-            .child(
-                div()
-                    .id("split-pane-close")
-                    .flex_none()
-                    .size(px(20.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(6.0))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(crate::theme::wash(0.14)))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.dissolve_split_pair(cx);
-                    }))
-                    .child(
-                        icon(icons::CLOSE)
-                            .size(px(12.0))
-                            .text_color(theme.text_muted),
-                    ),
-            );
+        let header = self.render_split_header(&chat_id, false, cx);
         Some(
             div()
                 .id("split-pane")
@@ -1292,6 +1332,32 @@ mod drag_regressions {
         cx.update(|window, cx| window.draw(cx).clear());
         assert!(cx.debug_bounds("split-size-veil-left").is_none());
         assert!(cx.debug_bounds("split-size-veil-right").is_none());
+    }
+
+    /// Both panes of an open split wear the same header row, each with its
+    /// own close, level with each other under the titlebar.
+    #[gpui::test]
+    fn both_panes_wear_a_header_with_a_close(cx: &mut TestAppContext) {
+        init(cx);
+        let dir = tempfile::tempdir().unwrap();
+        let (_shell, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            let mut shell = Shell::new(state, boot_config(&dir), cx);
+            shell.debug_gate = Some(GatePhase::Ready);
+            seed(&shell, cx);
+            shell.open_split("b".into(), SplitSide::Right, cx);
+            std::mem::forget(dir);
+            shell
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        let primary = cx
+            .debug_bounds("split-primary-close")
+            .expect("primary pane close");
+        let secondary = cx
+            .debug_bounds("split-pane-close")
+            .expect("secondary pane close");
+        assert_eq!(primary.top(), secondary.top());
+        assert!(primary.right() < secondary.left());
     }
 }
 

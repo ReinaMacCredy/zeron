@@ -2296,6 +2296,58 @@ mod strip_regressions {
         });
     }
 
+    /// Each pane's close removes that pane: the selected one hands the
+    /// column to its partner, the secondary leaves the selection full.
+    #[gpui::test]
+    fn closing_the_selected_pane_hands_the_column_to_its_partner(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                state.chats = vec![chat("a"), chat("b")];
+                state.chats_synced = true;
+                state.spaces_synced = true;
+                state.select_chat(Some("a".into()), cx);
+            });
+            shell.on_state_changed(&shell.state.clone(), cx);
+            shell.drop_session_on_side("b".into(), split::SplitSide::Right, cx);
+            shell.on_state_changed(&shell.state.clone(), cx);
+            assert_eq!(shell.split_chat_id(), Some("b"));
+            shell.close_primary_split(cx);
+            shell.on_state_changed(&shell.state.clone(), cx);
+            assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("b"));
+            assert_eq!(shell.split_pair, None);
+            assert_eq!(shell.split_chat_id(), None);
+        });
+    }
+
+    /// The sidebar keeps the pair's card while another session is shown.
+    #[gpui::test]
+    fn the_sidebar_card_outlives_leaving_the_split(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                state.chats = vec![chat("a"), chat("b"), chat("c")];
+                state.chats_synced = true;
+                state.spaces_synced = true;
+                state.select_chat(Some("a".into()), cx);
+            });
+            shell.on_state_changed(&shell.state.clone(), cx);
+            shell.drop_session_on_side("b".into(), split::SplitSide::Right, cx);
+            shell.on_state_changed(&shell.state.clone(), cx);
+            shell.open_chat("c".into(), cx);
+            shell.on_state_changed(&shell.state.clone(), cx);
+            assert_eq!(shell.split_chat_id(), None);
+            assert_eq!(
+                shell.sidebar_split_card(&[]),
+                Some(split::SplitPair {
+                    left: "a".into(),
+                    right: "b".into(),
+                })
+            );
+            assert_eq!(shell.sidebar_split_card(&["a".into()]), None);
+        });
+    }
+
     #[gpui::test]
     fn background_start_keeps_the_tab_and_mints_the_next_draft(cx: &mut TestAppContext) {
         let (shell, cx) = setup(cx);

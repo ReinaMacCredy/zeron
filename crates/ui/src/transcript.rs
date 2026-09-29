@@ -2107,7 +2107,7 @@ pub fn rows_for_entry(
     // the diff key honest for last-row kinds whose own version wouldn't
     // change when streaming flips off (chips).
     if !streaming
-        && let Some(last) = rows.last_mut()
+        && let Some(last) = rows.iter_mut().rev().find(|row| row.compact_fold.is_none())
         && !matches!(last.kind, RowKind::ForkMarker { .. })
     {
         last.timestamp = Some(entry.created_at);
@@ -2962,16 +2962,21 @@ impl TranscriptPreparation {
                 rows.clone()
             } else {
                 let streaming = entry.status == Some(MessageStatus::Streaming);
-                let built = Arc::new(rows_for_entry(entry, false, false, &mut |key, text| {
-                    parse_for_row(
-                        streaming,
-                        key,
-                        text,
-                        &mut self.live_parsers,
-                        &mut self.tree_cache,
-                    )
-                    .0
-                }));
+                let built = Arc::new(rows_for_entry(
+                    entry,
+                    false,
+                    !streaming,
+                    &mut |key, text| {
+                        parse_for_row(
+                            streaming,
+                            key,
+                            text,
+                            &mut self.live_parsers,
+                            &mut self.tree_cache,
+                        )
+                        .0
+                    },
+                ));
                 self.cache.insert(entry.id.clone(), built.clone());
                 built
             };
@@ -3641,6 +3646,12 @@ pub struct Transcript {
     compact_fold_heights: HashMap<SharedString, Rc<Cell<f32>>>,
     /// Post-tween sweep that drops a closed work fold's retained body rows.
     compact_fold_settle: Option<Task<()>>,
+    /// Work-fold ids of assistant entries seen streaming outside compact
+    /// mode; their settle folds the plain rows away with a close tween.
+    settling_work: HashSet<SharedString>,
+    /// Settled work folds mounted open, closed once their body rows have
+    /// been measured.
+    settle_close: HashSet<SharedString>,
     highlights: HighlightStore,
     show_jump_button: bool,
     /// Distance from the bottom at the last observation (wheel event or spring
@@ -3973,6 +3984,8 @@ impl Transcript {
             compact_worked_fade_at: HashMap::new(),
             compact_fold_heights: HashMap::new(),
             compact_fold_settle: None,
+            settling_work: HashSet::new(),
+            settle_close: HashSet::new(),
             highlights: HighlightStore::default(),
             show_jump_button: false,
             last_scroll_distance: 0.0,
@@ -5333,6 +5346,8 @@ impl Transcript {
             self.user_heights.clear();
             self.compact_fold_heights.clear();
             self.compact_fold_settle = None;
+            self.settling_work.clear();
+            self.settle_close.clear();
             self.user_hold_token = self.user_hold_token.wrapping_add(1);
             self.user_hold_task = None;
             self.user_collapse_scroll = None;
@@ -5384,6 +5399,7 @@ impl Transcript {
         }
 
         let mut new_rows: Vec<Row> = Vec::new();
+        let animate_settle = !self.compact_mode && !motion::reduced_motion(cx);
         // Borrow the transcript only while deriving rows. Cloning the entity
         // handle lets rows_for mutate our caches without copying every text
         // and tool payload on each app-state notification.
@@ -5394,6 +5410,20 @@ impl Transcript {
                 Some(doc_id) => state.sub_transcript(doc_id),
                 None => state.transcript.as_slice(),
             };
+            for entry in entries.iter().filter(|e| e.role == MessageRole::Assistant) {
+                let work_id: SharedString = format!("{}#work", entry.id).into();
+                if entry.status == Some(MessageStatus::Streaming) {
+                    if animate_settle {
+                        self.settling_work.insert(work_id);
+                    }
+                } else if self.settling_work.remove(&work_id) {
+                    // Mount the settled fold open over the rows the live
+                    // frame showed, so the close tween starts from them.
+                    self.folds.entry(work_id.clone()).or_default().open = Some(true);
+                    self.compact_live_entries.insert(work_id.clone());
+                    self.settle_close.insert(work_id);
+                }
+            }
             let prepared = self
                 .chat_id
                 .as_ref()
@@ -5402,7 +5432,11 @@ impl Transcript {
                 if !self.compact_mode
                     && let Some(rows) = prepared.and_then(|p| p.rows.get(&entry.id))
                 {
-                    new_rows.extend(rows.iter().cloned());
+                    new_rows.extend(
+                        rows.iter()
+                            .filter(|row| self.fold_row_mounted(row))
+                            .cloned(),
+                    );
                 } else {
                     new_rows.extend(self.rows_for(entry, false));
                 }
@@ -5419,6 +5453,16 @@ impl Transcript {
                     .is_some_and(|e| e.status == Some(MessageStatus::Streaming)),
             )
         };
+        let workless: Vec<SharedString> = self
+            .settle_close
+            .iter()
+            .filter(|id| !new_rows.iter().any(|row| &row.id == *id))
+            .cloned()
+            .collect();
+        for id in workless {
+            self.settle_close.remove(&id);
+            self.compact_live_entries.remove(&id);
+        }
 
         let baseline = self
             .chat_id
@@ -5555,12 +5599,22 @@ impl Transcript {
         let now = Instant::now();
         let mut live_tool_groups = HashSet::new();
         for row in &new_rows {
-            let RowKind::ToolGroup { tools, .. } = &row.kind else {
+            let RowKind::ToolGroup {
+                tools,
+                compact_shell,
+                ..
+            } = &row.kind
+            else {
                 continue;
             };
             // Agent/spawn groups are standalone cards, not task trees —
-            // except under compact mode, where they collapse like the rest.
-            if !self.compact_mode && !tool_group_collapses(tools) {
+            // except under a work fold, where they collapse like the rest.
+            if !self.compact_mode && !compact_shell && !tool_group_collapses(tools) {
+                continue;
+            }
+            // Outside compact mode a fold body belongs to a settled turn, so
+            // its regrouped chips are never arrivals.
+            if !self.compact_mode && row.compact_fold.is_some() {
                 continue;
             }
             live_tool_groups.insert(row.id.clone());
@@ -5780,7 +5834,7 @@ impl Transcript {
     }
 
     fn compact_worked_secs_for(&self, entry: &SessionMessageEntry) -> Option<i64> {
-        if !self.compact_mode || entry.role != MessageRole::Assistant {
+        if entry.role != MessageRole::Assistant {
             return None;
         }
         if entry.status == Some(MessageStatus::Streaming) {
@@ -5821,7 +5875,7 @@ impl Transcript {
                 // rows whose content hash changed are spliced — the reparsed tail).
                 parse_for_row(streaming, key, text, live_parsers, tree_cache).0
             };
-            rows_for_entry(entry, pending, self.compact_mode, &mut parse)
+            rows_for_entry(entry, pending, self.compact_mode || !streaming, &mut parse)
         };
         if let Some(secs) = self.compact_worked_secs_for(entry) {
             for row in &mut rows {
@@ -5845,7 +5899,12 @@ impl Transcript {
                 },
             );
         }
-        rows.retain(|row| match &row.compact_fold {
+        rows.retain(|row| self.fold_row_mounted(row));
+        rows
+    }
+
+    fn fold_row_mounted(&self, row: &Row) -> bool {
+        match &row.compact_fold {
             None => true,
             // A closing fold keeps its body mounted through the TOOL_FOLD
             // tween; the shell's settle sweep drops the rows afterwards.
@@ -5855,8 +5914,7 @@ impl Transcript {
                         .toggled_at
                         .is_some_and(|at| at.elapsed() < FOLD_TWEEN_WINDOW)
             }),
-        });
-        rows
+        }
     }
 
     /// The ref a chip's full diff is fetched by. A doc carrying only stats
@@ -7572,7 +7630,7 @@ impl Transcript {
             };
             (sending, queued, elapsed, flavour_seed(&chat_id))
         };
-        if self.compact_mode && !sending && !queued && elapsed_secs > 0 {
+        if !sending && !queued && elapsed_secs > 0 {
             let entry_id = if let Some(doc_id) = &self.doc_override {
                 self.state
                     .read(cx)
@@ -8661,12 +8719,20 @@ impl Transcript {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if compact_shell
+            && self.settle_close.contains(row_id)
+            && let Some(ix) = self.rows.iter().position(|row| &row.id == row_id)
+            && self.compact_fold_total(row_id, ix) > 0.0
+        {
+            self.settle_close.remove(row_id);
+            self.toggle_fold(row_id.clone(), 0.0, false, cx);
+        }
         let mut fold = self.folds.get(row_id).copied().unwrap_or_default();
         // Agent/spawn chips never fold: they are their own row, always open,
         // no "Called N tools" header — a running subagent stays visible.
         // Compact mode is the exception: EVERYTHING sits under the one work
         // accordion, spawn chips included.
-        let collapses = self.compact_mode || tool_group_collapses(tools);
+        let collapses = self.compact_mode || compact_shell || tool_group_collapses(tools);
         let arrival_pending = !cx.reduce_motion()
             && self.tool_group_reveals.get(row_id).is_some_and(|reveal| {
                 reveal.starts.iter().flatten().any(|start| {
@@ -8678,7 +8744,8 @@ impl Transcript {
             });
         // Compact mode never auto-opens — not for the streaming tail, and not
         // to show chips arriving mid-reveal. Collapsed-by-default is the mode.
-        let effective_auto_open = auto_open || (arrival_pending && !self.compact_mode);
+        let effective_auto_open =
+            auto_open || (arrival_pending && !self.compact_mode && !compact_shell);
         let open = !collapses || fold.open.unwrap_or(effective_auto_open);
         // Compact shells only change `open` through `toggle_fold`, which
         // already seeds `from` with the body's measured height — the
@@ -8706,7 +8773,7 @@ impl Transcript {
         if self.compact_mode && active {
             self.compact_live_entries.insert(row_id.clone());
         }
-        let worked_secs = worked_secs.filter(|_| self.compact_mode);
+        let worked_secs = worked_secs.filter(|_| compact_shell);
         if worked_secs.is_some() && self.compact_live_entries.remove(row_id) {
             self.compact_worked_fade_at
                 .insert(row_id.clone(), Instant::now());
@@ -9036,7 +9103,17 @@ impl Transcript {
                         ),
                         None => tool_group_title(summary.clone(), shimmer_phase, theme),
                     }),
-            );
+            )
+            .when(worked_secs.is_some(), |header| {
+                header.child(
+                    div().flex_1().min_w_0().h(px(1.0)).ml(px(4.0)).child(
+                        div()
+                            .h_full()
+                            .w(gpui::relative(worked_fade_t))
+                            .bg(theme.border_strong),
+                    ),
+                )
+            });
 
         if compact_shell {
             let view = cx.entity_id();
@@ -9055,18 +9132,21 @@ impl Transcript {
                 .flex_col()
                 .font_family(theme.font_sans_fixed.clone())
                 .child(header)
-                .when(motion_active || animate_worked, |group| {
-                    group.child(
-                        canvas(
-                            |_, _, _| (),
-                            move |_, _, window, _| {
-                                window.on_next_frame(move |_, cx| cx.notify(view));
-                            },
+                .when(
+                    motion_active || animate_worked || self.settle_close.contains(row_id),
+                    |group| {
+                        group.child(
+                            canvas(
+                                |_, _, _| (),
+                                move |_, _, window, _| {
+                                    window.on_next_frame(move |_, cx| cx.notify(view));
+                                },
+                            )
+                            .absolute()
+                            .inset_0(),
                         )
-                        .absolute()
-                        .inset_0(),
-                    )
-                })
+                    },
+                )
                 .into_any_element();
         }
 
@@ -11989,20 +12069,27 @@ mod tests {
     fn tool_group_navigation_keeps_user_pins_and_new_arrivals(cx: &mut gpui::TestAppContext) {
         with_tool_group_navigation(cx, |state, transcript, cx| {
             transcript.update(cx, |this, _| {
-                this.folds.insert(
-                    "tools#g0".into(),
-                    FoldState {
-                        open: Some(true),
-                        ..Default::default()
-                    },
-                );
+                for id in ["tools#work", "tools#g0"] {
+                    this.folds.insert(
+                        id.into(),
+                        FoldState {
+                            open: Some(true),
+                            ..Default::default()
+                        },
+                    );
+                }
             });
             state.update(cx, |state, cx| state.select_chat(None, cx));
             transcript.update(cx, |this, cx| this.sync(cx));
             // Cached replay can land without an intervening pending frame.
             replay_tool_group(&state, &transcript, "chat-a", cx);
             transcript.update(cx, |this, cx| {
-                let row = this.rows[0].clone();
+                let row = this
+                    .rows
+                    .iter()
+                    .find(|row| row.id.as_ref() == "tools#g0")
+                    .unwrap()
+                    .clone();
                 let RowKind::ToolGroup {
                     tools,
                     auto_open,
@@ -12068,6 +12155,133 @@ mod tests {
                 assert_eq!(reveal.rendered_open, Some(true));
             });
         });
+    }
+
+    #[gpui::test]
+    fn settled_turn_folds_work_under_worked_for(cx: &mut gpui::TestAppContext) {
+        with_tool_group_navigation(cx, |state, transcript, cx| {
+            state.update(cx, |state, _| {
+                let mut done = assistant(
+                    "done",
+                    MessageStatus::Complete,
+                    vec![tool_part("call", "pwd"), text_part("reply", "All set.")],
+                );
+                done.duration_ms = Some(74_000);
+                state.transcript = vec![done];
+                state.transcript_revision += 1;
+            });
+            transcript.update(cx, |this, cx| {
+                this.sync(cx);
+                assert!(!this.compact_mode);
+                let ids: Vec<&str> = this.rows.iter().map(|row| row.id.as_ref()).collect();
+                assert!(!ids.contains(&"done#g0"), "{ids:?}");
+                assert!(matches!(
+                    this.rows[0].kind,
+                    RowKind::ToolGroup {
+                        compact_shell: true,
+                        worked_secs: Some(74),
+                        ..
+                    }
+                ));
+                assert_eq!(this.rows.last().unwrap().timestamp, Some(0));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn settling_turn_closes_its_work_fold_from_the_live_rows(cx: &mut gpui::TestAppContext) {
+        with_tool_group_navigation(cx, |state, transcript, cx| {
+            let parts = vec![
+                tool_part("call-a", "pwd"),
+                text_part("reply", "All set."),
+                tool_part("call-b", "ls"),
+            ];
+            state.update(cx, |state, _| {
+                state.transcript = vec![assistant("turn", MessageStatus::Streaming, parts.clone())];
+                state.transcript_revision += 1;
+            });
+            transcript.update(cx, |this, cx| this.sync(cx));
+            state.update(cx, |state, _| {
+                let mut done = assistant("turn", MessageStatus::Complete, parts);
+                done.duration_ms = Some(5_000);
+                state.transcript = vec![done];
+                state.transcript_revision += 1;
+            });
+            transcript.update(cx, |this, cx| {
+                this.sync(cx);
+                let work: SharedString = "turn#work".into();
+                assert_eq!(this.folds[&work].open, Some(true));
+                let body: Vec<SharedString> = this
+                    .rows
+                    .iter()
+                    .filter(|row| row.compact_fold.as_ref() == Some(&work))
+                    .map(|row| row.id.clone())
+                    .collect();
+                assert!(!body.is_empty());
+                for id in &body {
+                    assert!(
+                        this.tool_group_reveals
+                            .get(id)
+                            .is_none_or(|reveal| reveal.starts.iter().all(Option::is_none)),
+                        "settled body row {id} replays its arrival"
+                    );
+                }
+                for id in body {
+                    this.compact_fold_heights
+                        .insert(id, Rc::new(Cell::new(40.0)));
+                }
+                let row = this.rows[0].clone();
+                let RowKind::ToolGroup {
+                    tools,
+                    auto_open,
+                    summary,
+                    worked_secs,
+                    compact_shell,
+                } = &row.kind
+                else {
+                    panic!("expected the work shell")
+                };
+                let _ = this.render_tool_group(
+                    &row.id,
+                    tools,
+                    summary,
+                    *auto_open,
+                    *worked_secs,
+                    *compact_shell,
+                    &Theme::dark(),
+                    cx,
+                );
+                assert_eq!(this.folds[&work].open, Some(false));
+                assert!(this.folds[&work].toggled_at.is_some());
+                assert!(this.settle_close.is_empty());
+            });
+        });
+    }
+
+    #[test]
+    fn settled_work_only_turn_keeps_its_strip_on_the_shell() {
+        let entry = assistant(
+            "work",
+            MessageStatus::Complete,
+            vec![tool_part("call", "pwd")],
+        );
+        let rows = rows_for_entry(&entry, false, true, &mut |_, text| {
+            Arc::new(parse_full(text))
+        });
+        let shell = rows.iter().find(|row| row.compact_fold.is_none()).unwrap();
+        assert!(matches!(
+            shell.kind,
+            RowKind::ToolGroup {
+                compact_shell: true,
+                ..
+            }
+        ));
+        assert_eq!(shell.timestamp, Some(0));
+        assert!(
+            rows.iter()
+                .filter(|row| row.compact_fold.is_some())
+                .all(|row| row.timestamp.is_none())
+        );
     }
 
     #[test]

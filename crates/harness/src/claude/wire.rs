@@ -57,6 +57,8 @@ pub(crate) struct SystemFrame {
     /// change (the CLI's replace semantics).
     #[serde(default)]
     pub tasks: Option<Vec<BackgroundTaskFrame>>,
+    #[serde(default)]
+    pub usage: Option<Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]

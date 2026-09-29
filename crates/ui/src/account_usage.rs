@@ -55,6 +55,7 @@ pub struct AccountUsage {
     /// `None` = this device, as in [`AccountsSnapshotCache`].
     target: Option<String>,
     harness: Option<HarnessId>,
+    chat: Option<String>,
     /// Once any list has been asked for the current target.
     loaded: bool,
     last_forced: Option<Instant>,
@@ -94,6 +95,7 @@ impl AccountUsage {
             composer,
             target: None,
             harness: None,
+            chat: None,
             loaded: false,
             last_forced: None,
             error: None,
@@ -112,10 +114,12 @@ impl AccountUsage {
         &mut self,
         harness: Option<HarnessId>,
         target: Option<String>,
+        chat: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let harness = harness.filter(|h| signs_in(*h) && reports_usage(*h));
         self.harness = harness;
+        self.chat = chat;
         if self.target != target {
             self.target = target;
             self.loaded = false;
@@ -488,7 +492,7 @@ impl FooterCard {
 impl Render for AccountUsage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
-        let context = self.state.read(cx).context_usage;
+        let context = self.state.read(cx).context_usage_for(self.chat.as_deref());
         let account = self.fraction(cx).map(|fraction| {
             let level = usage_level(fraction);
             let chip = crate::context_usage::ring_chip(

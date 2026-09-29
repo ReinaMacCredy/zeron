@@ -70,11 +70,16 @@ impl Subagents {
         method: &str,
         params: &Value,
     ) -> Vec<AgentEvent> {
-        let events = self
-            .streams
-            .entry(child.to_owned())
-            .or_default()
-            .map(child, method, params);
+        let events = if method == "thread/tokenUsage/updated" {
+            super::normalize::context_usage_event(params)
+                .into_iter()
+                .collect()
+        } else {
+            self.streams
+                .entry(child.to_owned())
+                .or_default()
+                .map(child, method, params)
+        };
         self.route(child, events)
     }
 
@@ -218,6 +223,29 @@ mod tests {
         );
         assert!(children.bind("alpha", "spawn").is_empty());
         assert_eq!(children.pending_bytes, 0);
+    }
+
+    #[test]
+    fn a_child_token_update_reaches_its_spawn_as_context_usage() {
+        let mut children = Subagents::new("root".into());
+        children.bind("alpha", "spawn-alpha");
+        let update = serde_json::json!({
+            "threadId": "alpha",
+            "tokenUsage": {
+                "last": { "totalTokens": 18250, "inputTokens": 18000, "outputTokens": 250 },
+                "modelContextWindow": 258400
+            }
+        });
+        assert_eq!(
+            children.notification("alpha", "thread/tokenUsage/updated", &update),
+            vec![tag(
+                "spawn-alpha",
+                AgentEvent::ContextUsage {
+                    tokens: Some(18250),
+                    window: Some(258400),
+                }
+            )]
+        );
     }
 
     #[test]
