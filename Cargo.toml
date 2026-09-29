@@ -23,7 +23,7 @@ members = [
 exclude = ["vendor/cua-driver"]
 
 [workspace.package]
-version = "0.2.97"
+version = "0.2.98"
 edition = "2024"
 license = "MIT"
 publish = false
