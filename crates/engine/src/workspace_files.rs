@@ -272,6 +272,24 @@ impl WorkspaceFiles {
         &self,
         target: &WorkspaceTarget,
     ) -> Result<ResolvedWorkspace, WorkspaceFilesError> {
+        self.resolve_target_for(target, false).await
+    }
+
+    /// Absolute host paths stay readable when the chat folder is not a checkout.
+    async fn resolve_read_target(
+        &self,
+        target: &WorkspaceTarget,
+        path: &str,
+    ) -> Result<ResolvedWorkspace, WorkspaceFilesError> {
+        self.resolve_target_for(target, Path::new(path).has_root())
+            .await
+    }
+
+    async fn resolve_target_for(
+        &self,
+        target: &WorkspaceTarget,
+        host_read: bool,
+    ) -> Result<ResolvedWorkspace, WorkspaceFilesError> {
         let root = match (&target.chat_id, &target.space_id) {
             (Some(_), Some(_)) | (None, None) => {
                 return Err(WorkspaceFilesError::BadParams(
@@ -336,15 +354,20 @@ impl WorkspaceFiles {
                         "chat space belongs to another device".into(),
                     ));
                 }
-                self.inner
+                match self
+                    .inner
                     .repos
                     .workspace_checkout(Path::new(&space.path), &cwd)
                     .await
-                    .ok_or_else(|| {
-                        WorkspaceFilesError::Authorization(
+                {
+                    Some(root) => root,
+                    None if host_read => cwd,
+                    None => {
+                        return Err(WorkspaceFilesError::Authorization(
                             "chat folder is not a workspace checkout".into(),
-                        )
-                    })?
+                        ));
+                    }
+                }
             }
             (None, Some(space_id)) => {
                 let space = self
@@ -443,7 +466,9 @@ impl WorkspaceFiles {
         &self,
         request: ReadWorkspaceFileRequest,
     ) -> Result<WorkspaceFileText, WorkspaceFilesError> {
-        let workspace = self.resolve_target(&request.target).await?;
+        let workspace = self
+            .resolve_read_target(&request.target, &request.path)
+            .await?;
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_on_drop = CancelOnDrop::new(cancel.clone());
         let result = tokio::task::spawn_blocking(move || {
@@ -472,7 +497,9 @@ impl WorkspaceFiles {
         &self,
         request: zeron_proto::ReadWorkspaceImageRequest,
     ) -> Result<zeron_proto::WorkspaceImageChunk, WorkspaceFilesError> {
-        let workspace = self.resolve_target(&request.target).await?;
+        let workspace = self
+            .resolve_read_target(&request.target, &request.path)
+            .await?;
         if request.expected_checkout_id.is_empty()
             || request.expected_checkout_id != workspace.checkout_id
         {

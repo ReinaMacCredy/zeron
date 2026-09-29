@@ -561,6 +561,91 @@ async fn projectless_home_is_required_for_files_catalogs_and_terminal() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn absolute_image_reads_work_from_a_chat_outside_any_checkout() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    init_repo(&repo).await;
+    let scratch = temp.path().join("scratch");
+    let images = temp.path().join("images");
+    std::fs::create_dir_all(&scratch).unwrap();
+    std::fs::create_dir_all(&images).unwrap();
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"/>"#;
+    std::fs::write(images.join("shot.svg"), svg).unwrap();
+    let image_path = images.join("shot.svg").to_string_lossy().into_owned();
+    let core = assemble(&temp.path().join("data"), "device-files");
+    core.workspace
+        .create_space(
+            "space-files",
+            &core.device_id,
+            repo.to_str().unwrap(),
+            None,
+            true,
+        )
+        .unwrap();
+    core.workspace
+        .create_chat("chat-outside", Some("space-files"), None, None, None)
+        .unwrap();
+    core.workspace
+        .set_chat_cwd("chat-outside", scratch.to_str().unwrap())
+        .unwrap();
+    core.workspace
+        .create_chat(
+            "chat-projectless",
+            None,
+            Some(&core.device_id),
+            None,
+            Some(scratch.to_string_lossy().into_owned()),
+        )
+        .unwrap();
+    let client = zeron_rpc::memory_client(core.rpc_service());
+
+    for chat in ["chat-outside", "chat-projectless"] {
+        let read = client
+            .call(
+                methods::READ_WORKSPACE_FILE,
+                serde_json::json!({ "chatId": chat, "path": image_path }),
+            )
+            .await
+            .expect("absolute read from a non-checkout chat");
+        let checkout = read["checkoutId"].as_str().unwrap().to_string();
+        assert!(!checkout.is_empty());
+        assert_eq!(read["readOnlyReason"], "outsideWorkspace");
+        let image = client
+            .call(
+                methods::READ_WORKSPACE_IMAGE,
+                serde_json::json!({
+                    "chatId": chat, "path": image_path,
+                    "expectedCheckoutId": checkout, "offset": 0
+                }),
+            )
+            .await
+            .expect("absolute image from a non-checkout chat");
+        assert_eq!(image["done"], true);
+        assert_eq!(image["size"], svg.len());
+    }
+
+    assert!(
+        client
+            .call(
+                methods::READ_WORKSPACE_FILE,
+                serde_json::json!({ "chatId": "chat-outside", "path": "README.md" }),
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        client
+            .call(
+                methods::LIST_WORKSPACE_DIRECTORY,
+                serde_json::json!({ "chatId": "chat-outside" }),
+            )
+            .await
+            .is_err()
+    );
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn write_rejects_changed_checkout_even_when_contents_match() {
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
