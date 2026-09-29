@@ -3079,6 +3079,57 @@ async fn a_subagent_cut_off_by_the_run_ending_says_why() {
 }
 
 #[tokio::test]
+async fn a_subagent_token_report_lands_on_its_own_doc_not_the_parent() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(ControlledHarness(std::sync::Mutex::new(Some(rx)))),
+    );
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-sub-usage",
+        SessionCommandPayload::Run {
+            request: run_request("spawn"),
+            message_id: "user-spawn".into(),
+        },
+    );
+    let sub = |event: AgentEvent| AgentEvent::Subagent {
+        parent_tool_use_id: "agent-1".into(),
+        event: Box::new(event),
+    };
+    let usage = |tokens: u64| AgentEvent::ContextUsage {
+        tokens: Some(tokens),
+        window: None,
+    };
+    tx.send(sub(AgentEvent::TextDelta {
+        text: "scanning".into(),
+    }))
+    .unwrap();
+    tx.send(sub(usage(26429))).unwrap();
+    tx.send(sub(usage(29216))).unwrap();
+    tx.send(sub(done(DoneStatus::Completed))).unwrap();
+    tx.send(done(DoneStatus::Completed)).unwrap();
+    let sub_doc = core
+        .doc_host
+        .open(&format!("{CHAT}--sub--agent-1"))
+        .unwrap();
+    wait_for(
+        || sub_doc.doc().context_usage().and_then(|u| u.tokens) == Some(29216),
+        "the subagent doc carries its latest token total",
+    )
+    .await;
+    wait_for(
+        || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle),
+        "the run settles",
+    )
+    .await;
+    assert_eq!(handle.doc().context_usage(), None);
+    core.shutdown().await;
+}
+
+#[tokio::test]
 async fn a_compaction_after_a_stray_done_reopens_working_and_writes_its_note() {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let dir = tempfile::tempdir().unwrap();
