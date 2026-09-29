@@ -347,27 +347,8 @@ pub fn sidebar_accounts(snapshot: &AgentAccountsSnapshot) -> Vec<&AgentAccount> 
         .collect()
 }
 
-/// The account's most-used window — the limit that bites first. Pure.
-pub fn worst_fraction(account: &AgentAccount) -> f32 {
-    account
-        .usage_windows
-        .iter()
-        .map(|w| w.used_fraction.clamp(0.0, 1.0))
-        .fold(0.0, f32::max)
-}
-
-/// Brand tint for a provider's usage dot (the Claude mark's orange; the
-/// OpenAI mark is monochrome, so Codex takes the text colour).
-pub fn provider_tint(harness: HarnessId, theme: &Theme) -> Hsla {
-    match harness {
-        HarnessId::Codex => theme.text,
-        HarnessId::Cursor => theme.text_muted,
-        _ => crate::icons::claude_brand(),
-    }
-}
-
 /// The 5px usage track with its level-coloured fill (shared by the settings
-/// meter, the sidebar mini and the account-menu section).
+/// meter and the account-menu section).
 pub fn usage_bar(fraction: f32, theme: &Theme) -> gpui::Div {
     let fraction = fraction.clamp(0.0, 1.0);
     let level = usage_level(fraction);
@@ -2813,8 +2794,6 @@ mod tests {
         let rows = sidebar_accounts(&snapshot);
         let ids: Vec<&str> = rows.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(ids, ["c2", "x1"]);
-        assert_eq!(worst_fraction(rows[0]), 0.25);
-        assert_eq!(worst_fraction(rows[1]), 0.54);
         assert!(sidebar_accounts(&AgentAccountsSnapshot::default()).is_empty());
     }
 }
