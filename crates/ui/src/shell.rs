@@ -10968,20 +10968,34 @@ impl Shell {
                     // status strip above it is empty air), zero at the
                     // underlay's bottom edge.
                     let bottom_band = (stack_h - Theme::STATUS_STRIP_HEIGHT).max(1.0);
-                    div().absolute().inset_0().bottom(px(term_h)).child(
-                        crate::edge_fade::edge_faded(
-                            Theme::TRANSCRIPT_FADE_BAND,
-                            true,
-                            true,
-                            div().size_full().child(outlet),
+                    // The split's primary header sits under the titlebar;
+                    // starting the underlay below it moves the transcript's
+                    // own titlebar inset and fade down with it, while the
+                    // backgrounds above stay put.
+                    let header_inset = if self.split.is_some() && has_selection {
+                        split::SPLIT_HEADER_HEIGHT
+                    } else {
+                        0.0
+                    };
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .top(px(header_inset))
+                        .bottom(px(term_h))
+                        .child(
+                            crate::edge_fade::edge_faded(
+                                Theme::TRANSCRIPT_FADE_BAND,
+                                true,
+                                true,
+                                div().size_full().child(outlet),
+                            )
+                            // Fully faded BY the titlebar's bottom edge (the
+                            // title text is opaque — overlap read as collision),
+                            // ramping in the band just below it.
+                            .inset_top(Theme::TITLEBAR_HEIGHT)
+                            .band_top(Theme::TRANSCRIPT_FADE_BAND)
+                            .band_bottom(bottom_band),
                         )
-                        // Fully faded BY the titlebar's bottom edge (the
-                        // title text is opaque — overlap read as collision),
-                        // ramping in the band just below it.
-                        .inset_top(Theme::TITLEBAR_HEIGHT)
-                        .band_top(Theme::TRANSCRIPT_FADE_BAND)
-                        .band_bottom(bottom_band),
-                    )
                 },
             )
             // The glass chrome stack, floating over the transcript's bottom:
@@ -13692,12 +13706,6 @@ impl Render for Shell {
                         .flex_none()
                         .relative()
                         .flex()
-                        // The transcript keeps its own titlebar inset and
-                        // fade, so pushing the column down by the header
-                        // parks both below the header.
-                        .when(main_header.is_some(), |el| {
-                            el.pt(px(split::SPLIT_HEADER_HEIGHT))
-                        })
                         .child(main)
                         .children(main_header)
                         .children(main_veil)
