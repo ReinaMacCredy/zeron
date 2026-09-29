@@ -20,15 +20,22 @@ pub(crate) fn is_html_path(path: &str) -> bool {
     lower.ends_with(".html") || lower.ends_with(".htm")
 }
 
-pub(crate) fn html_link_targets<'a>(texts: impl Iterator<Item = &'a str>) -> Vec<String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HtmlTarget {
+    pub dest: String,
+    pub linked: bool,
+}
+
+pub(crate) fn html_link_targets<'a>(texts: impl Iterator<Item = &'a str>) -> Vec<HtmlTarget> {
     use pulldown_cmark::{Event, Parser, Tag};
-    let mut out: Vec<String> = Vec::new();
+    let mut out: Vec<HtmlTarget> = Vec::new();
     for text in texts {
         for event in Parser::new(text) {
-            let Event::Start(Tag::Link { dest_url, .. }) = event else {
-                continue;
+            let (dest, linked) = match &event {
+                Event::Start(Tag::Link { dest_url, .. }) => (dest_url.trim(), true),
+                Event::Code(code) if !code.contains(char::is_whitespace) => (code.as_ref(), false),
+                _ => continue,
             };
-            let dest = dest_url.trim();
             if dest.contains("://") && !dest.starts_with("file://") {
                 continue;
             }
@@ -39,8 +46,15 @@ pub(crate) fn html_link_targets<'a>(texts: impl Iterator<Item = &'a str>) -> Vec
             {
                 path = head;
             }
-            if is_html_path(path) && !out.iter().any(|seen| seen == dest) {
-                out.push(dest.to_string());
+            if !is_html_path(path) {
+                continue;
+            }
+            match out.iter_mut().find(|seen| seen.dest == dest) {
+                Some(seen) => seen.linked |= linked,
+                None => out.push(HtmlTarget {
+                    dest: dest.to_string(),
+                    linked,
+                }),
             }
         }
     }
@@ -200,17 +214,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn collects_html_link_destinations_only() {
+    fn collects_html_links_and_inline_code_paths() {
         let text = "Made [demo.html](demo.html), [page](out/Index.HTM#L3), \
                     [again](demo.html), [notes](notes.md), [web](https://x.dev/a.html), \
-                    [file](file:///tmp/w/a.html), [line](b.html:12:3), `c.html`";
+                    [file](file:///tmp/w/a.html), [line](b.html:12:3), `c.html`, \
+                    `docs/d.html:4`, `open e.html`, `https://x.dev/f.html`, `notes.md`, \
+                    `g.html` then [g](g.html)\n\n```\nh.html\n```";
+        let targets = html_link_targets([text].into_iter());
         assert_eq!(
-            html_link_targets([text].into_iter()),
+            targets
+                .iter()
+                .map(|target| (target.dest.as_str(), target.linked))
+                .collect::<Vec<_>>(),
             vec![
-                "demo.html",
-                "out/Index.HTM#L3",
-                "file:///tmp/w/a.html",
-                "b.html:12:3"
+                ("demo.html", true),
+                ("out/Index.HTM#L3", true),
+                ("file:///tmp/w/a.html", true),
+                ("b.html:12:3", true),
+                ("c.html", false),
+                ("docs/d.html:4", false),
+                ("g.html", true),
             ]
         );
     }
