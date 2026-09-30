@@ -1297,6 +1297,11 @@ impl Composer {
                     cx.notify();
                 }))
         });
+        let empty = rows.is_empty().then(|| {
+            div()
+                .debug_selector(|| "background-detail-empty".into())
+                .child("No output yet")
+        });
         div()
             .relative()
             .child(
@@ -1316,7 +1321,8 @@ impl Composer {
                     .font_family(theme.font_mono.clone())
                     .text_size(crate::typography::ui_rems(10.5))
                     .text_color(theme.text_muted)
-                    .children(rows),
+                    .children(rows)
+                    .children(empty),
             )
             .children(jump)
     }
@@ -2000,6 +2006,7 @@ mod tests {
         assert!(cx.debug_bounds("background-detail").is_some());
         assert!(cx.debug_bounds("background-roster-row-0").is_none());
         assert!(cx.debug_bounds("background-detail-tokens").is_none());
+        assert!(cx.debug_bounds("background-detail-empty").is_some());
         composer.update(cx, |composer, cx| {
             let feed = composer
                 .background
@@ -2023,6 +2030,7 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("background-detail-tokens").is_some());
         assert!(cx.debug_bounds("background-detail-log").is_some());
+        assert!(cx.debug_bounds("background-detail-empty").is_none());
         let open_pane = cx
             .debug_bounds("background-detail-open-pane")
             .expect("open in pane painted");
@@ -2083,6 +2091,19 @@ mod tests {
         assert!(cx.debug_bounds("background-detail-log").is_some());
         assert!(cx.debug_bounds("background-shell-row-0").is_none());
         assert!(cx.debug_bounds("background-detail-stop").is_some());
+        assert!(cx.debug_bounds("background-detail-empty").is_none());
+        composer.update(cx, |composer, cx| {
+            composer
+                .background
+                .outputs
+                .get_mut("shell-1")
+                .unwrap()
+                .lines
+                .clear();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("background-detail-empty").is_some());
         let back = cx
             .debug_bounds("background-detail-back")
             .expect("back painted");
