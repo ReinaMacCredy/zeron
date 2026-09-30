@@ -49,6 +49,16 @@ pub(crate) fn approval_policy(mode: PermissionMode) -> &'static str {
     }
 }
 
+/// `thread/start` / `turn/start`'s `approvalsReviewer`: Auto hands escalations
+/// to codex's auto-review subagent (the CLI's `--approve-for-me`); the others
+/// pin `user` so a config.toml reviewer can't answer an Ask run's prompts.
+pub(crate) fn approvals_reviewer(mode: PermissionMode) -> &'static str {
+    match mode {
+        PermissionMode::Auto => "auto_review",
+        PermissionMode::Ask | PermissionMode::Full => "user",
+    }
+}
+
 /// `thread/start`'s `sandbox` param (kebab-case wire words).
 pub(crate) fn sandbox_mode(sandbox: SandboxLevel) -> &'static str {
     match sandbox {
@@ -222,6 +232,9 @@ mod tests {
         assert_eq!(approval_policy(PermissionMode::Ask), "untrusted");
         assert_eq!(approval_policy(PermissionMode::Auto), "on-request");
         assert_eq!(approval_policy(PermissionMode::Full), "never");
+        assert_eq!(approvals_reviewer(PermissionMode::Ask), "user");
+        assert_eq!(approvals_reviewer(PermissionMode::Auto), "auto_review");
+        assert_eq!(approvals_reviewer(PermissionMode::Full), "user");
         assert_eq!(
             sandbox_mode(PermissionMode::Ask.sandbox()),
             "workspace-write"

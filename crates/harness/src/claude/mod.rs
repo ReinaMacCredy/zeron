@@ -227,16 +227,17 @@ impl ClaudeHarness {
         }
         // The CLI decides what asks under each mode (default asks for
         // everything but its own read-only safe list, acceptEdits also lets
-        // file edits through; the interactive `auto` mode is silently
-        // downgraded to `default` in print mode — all verified live against
-        // 2.1.274); every `can_use_tool` that does reach stdio is a question
-        // for the user unless the mode is Full, where the handler auto-allows
+        // file edits through, `auto` lets its classifier clear what it deems
+        // safe and falls back to `default` on models without auto mode —
+        // verified live against 2.1.284); every `can_use_tool` that does
+        // reach stdio is a question for the user unless the mode is Full,
+        // where the handler auto-allows
         // — Full keeps the `default` flag zeron always ran with, so the
         // unattended path is byte-for-byte the old one (`bypassPermissions`
         // would also be refused under a managed disableBypassPermissionsMode).
         let cli_mode = match request.permission_mode {
             zeron_proto::PermissionMode::Ask | zeron_proto::PermissionMode::Full => "default",
-            zeron_proto::PermissionMode::Auto => "acceptEdits",
+            zeron_proto::PermissionMode::Auto => "auto",
         };
         cmd.args(["--permission-mode", cli_mode]);
         if let Some(resume) = &request.resume {
@@ -1400,7 +1401,7 @@ mod tests {
         assert_eq!(mode_of(&ask).as_deref(), Some("default"));
         assert!(!ask.iter().any(|a| a == "--dangerously-skip-permissions"));
         let auto = args(PermissionMode::Auto);
-        assert_eq!(mode_of(&auto).as_deref(), Some("acceptEdits"));
+        assert_eq!(mode_of(&auto).as_deref(), Some("auto"));
         assert!(!auto.iter().any(|a| a == "--dangerously-skip-permissions"));
         // Full is the pre-mode wire: `default` plus the handler's auto-allow.
         let full = args(PermissionMode::Full);

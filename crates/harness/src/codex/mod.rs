@@ -18,7 +18,8 @@
 //! - Approvals + sandbox follow the run's [`zeron_proto::PermissionMode`]:
 //!   Full is yolo (`approvalPolicy: "never"` + `danger-full-access`, the
 //!   unattended behavior), Auto is codex's own auto mode (`on-request` +
-//!   `workspace-write`), Ask is `untrusted` + `workspace-write`. Under
+//!   `workspace-write` + `approvalsReviewer: "auto_review"`, the CLI's
+//!   `--approve-for-me`), Ask is `untrusted` + `workspace-write`. Under
 //!   Ask/Auto the `item/commandExecution/requestApproval` +
 //!   `item/fileChange/requestApproval` requests round-trip through
 //!   [`RunControls::request_input`] as a synthesized yes/no question; under
@@ -64,7 +65,8 @@ use crate::jsonrpc::{Incoming, RpcClient};
 use crate::process::{Child, Command, Stdio};
 use crate::{Harness, HarnessError, RunControls, ToolServer};
 use catalog::{
-    REASONING_LEVELS, approval_policy, sandbox_mode, sandbox_policy_value, static_models, to_effort,
+    REASONING_LEVELS, approval_policy, approvals_reviewer, sandbox_mode, sandbox_policy_value,
+    static_models, to_effort,
 };
 use normalize::{
     ChildRoute, Phase, ReasoningStream, delta_text, item_id, item_type, notification_thread_id,
@@ -993,6 +995,10 @@ fn thread_params(
     }
     p.insert("cwd".into(), Value::String(request.cwd.clone()));
     p.insert("approvalPolicy".into(), approval_policy.into());
+    p.insert(
+        "approvalsReviewer".into(),
+        approvals_reviewer(request.permission_mode).into(),
+    );
     p.insert("sandbox".into(), sandbox_mode(request.sandbox).into());
     if let Some(model) = &request.model {
         p.insert("model".into(), Value::String(model.clone()));
@@ -1276,6 +1282,10 @@ async fn run_session(session: Session) {
         p.insert("threadId".into(), Value::String(thread_id.clone()));
         p.insert("input".into(), prompt_input(text));
         p.insert("approvalPolicy".into(), approval_policy.into());
+        p.insert(
+            "approvalsReviewer".into(),
+            approvals_reviewer(request.permission_mode).into(),
+        );
         p.insert(
             "sandboxPolicy".into(),
             sandbox_policy_value(request.sandbox),
@@ -2496,6 +2506,17 @@ mod tests {
             let key = format!("plugins.{competing}.enabled");
             assert!(title["config"].get(key.as_str()).is_none());
         }
+    }
+
+    #[test]
+    fn approve_for_me_routes_escalations_to_codex_auto_review() {
+        let mut request = computer_request(false);
+        request.permission_mode = zeron_proto::PermissionMode::Auto;
+        let auto = thread_params(&request, None, false, "on-request", None);
+        assert_eq!(auto["approvalsReviewer"], "auto_review");
+        request.permission_mode = zeron_proto::PermissionMode::Ask;
+        let ask = thread_params(&request, None, false, "untrusted", None);
+        assert_eq!(ask["approvalsReviewer"], "user");
     }
 
     #[test]
