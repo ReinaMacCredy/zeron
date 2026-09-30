@@ -5493,6 +5493,12 @@ impl Shell {
         self.settings.skills_in_slash_menu = current.skills_in_slash_menu;
         self.settings.reduce_motion = current.reduce_motion;
         self.settings.pause_animations_in_background = current.pause_animations_in_background;
+        self.settings.frost = current.frost;
+        self.settings.diff_split = current.diff_split;
+        self.settings.diff_wrap = current.diff_wrap;
+        self.settings.code_fences_fit_content = current.code_fences_fit_content;
+        self.settings.html_open_app = current.html_open_app;
+        self.settings.transcript_compact_mode = current.transcript_compact_mode;
     }
 
     fn retry_engine(&mut self, cx: &mut Context<Self>) {
@@ -18496,6 +18502,42 @@ mod settings_modal_regressions {
             },
             cx,
         )
+    }
+
+    #[gpui::test]
+    fn shell_save_keeps_settings_written_outside_the_shell(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
+        let window = cx.add_window(|_, cx| test_shell(dir.path(), cx));
+        window
+            .update(cx, |shell, _, cx| {
+                settings::update(SavePolicy::Immediate, cx, |settings| {
+                    settings.frost.tint = 0.9;
+                    settings.frost.dim_backdrop = false;
+                    settings.frost.backdrop_brightness = 0.5;
+                    settings.diff_split = true;
+                    settings.diff_wrap = true;
+                    settings.code_fences_fit_content = true;
+                    settings.html_open_app = crate::html_open::HtmlOpenApp::Zeron;
+                    settings.transcript_compact_mode = true;
+                });
+                shell.schedule_save(cx);
+                settings::flush(cx);
+                for saved in [
+                    settings::current(cx),
+                    settings::UiSettings::load(dir.path()),
+                ] {
+                    assert_eq!(saved.frost.tint, 0.9);
+                    assert!(!saved.frost.dim_backdrop);
+                    assert_eq!(saved.frost.backdrop_brightness, 0.5);
+                    assert!(saved.diff_split);
+                    assert!(saved.diff_wrap);
+                    assert!(saved.code_fences_fit_content);
+                    assert_eq!(saved.html_open_app, crate::html_open::HtmlOpenApp::Zeron);
+                    assert!(saved.transcript_compact_mode);
+                }
+            })
+            .unwrap();
     }
 
     #[test]
