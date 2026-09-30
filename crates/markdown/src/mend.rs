@@ -12,8 +12,8 @@
 //! flip when the row completes — instead of jittering throughout.
 //!
 //! Repairs, in the spirit of remend's handler set (its katex/html/comparison
-//! handlers don't apply here — zeron renders raw HTML literally and has no
-//! math):
+//! handlers don't apply here — zeron renders raw HTML literally and math as
+//! Unicode text, so an unclosed `$` just settles on completion):
 //! - emphasis parity: `**a`→`**a**`, `*a`→`*a*`, `_a`/`__a`, `~~a`, nested
 //!   closers innermost-first (`**a *b` → `**a *b***`), half-streamed closers
 //!   completed (`**a*` → `**a**`);

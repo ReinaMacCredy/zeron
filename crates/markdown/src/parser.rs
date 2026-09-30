@@ -132,7 +132,10 @@ impl BlockTree {
 // ---------------------------------------------------------------------------
 
 fn options() -> Options {
-    Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS
+    Options::ENABLE_TABLES
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_MATH
 }
 
 /// Parse a whole source into a [`BlockTree`].
@@ -727,6 +730,40 @@ fn parse_inline_event(cur: &mut Cursor, runs: &mut Vec<InlineRun>, style: &Inlin
             );
         }
         Event::FootnoteReference(t) => push(runs, format!("[{t}]"), style.clone()),
+        Event::InlineMath(t) => {
+            // A closing `$` glued to a word is a shell variable (`$HOME/$USER`), not math.
+            let glued = matches!(
+                cur.peek_event(),
+                Some(Event::Text(next)) if next.starts_with(|c: char| c.is_alphanumeric())
+            );
+            if glued {
+                push(runs, format!("${t}$"), style.clone());
+            } else {
+                push(runs, crate::math::tex_to_text(&t), style.clone());
+            }
+        }
+        Event::DisplayMath(t) => {
+            while let Some(last) = runs.last_mut() {
+                last.text.truncate(last.text.trim_end_matches(' ').len());
+                if !last.text.is_empty() {
+                    break;
+                }
+                runs.pop();
+            }
+            if !runs.is_empty() {
+                push(runs, "\n".into(), style.clone());
+            }
+            push(runs, crate::math::tex_to_text(&t), style.clone());
+            if matches!(cur.peek_event(), Some(Event::SoftBreak | Event::HardBreak)) {
+                cur.bump();
+            }
+            if cur
+                .peek_event()
+                .is_some_and(|e| !matches!(e, Event::End(_)))
+            {
+                push(runs, "\n".into(), style.clone());
+            }
+        }
         Event::Start(tag) => {
             let mut inner = style.clone();
             match tag {
@@ -1731,5 +1768,78 @@ mod image_model_tests {
         assert_eq!(images[1].source, "b.png");
         assert!(images[1].alt.is_empty());
         assert_eq!(runs.first().unwrap().text, "Before ");
+    }
+}
+
+#[cfg(test)]
+mod math_tests {
+    use super::*;
+
+    const THREAD: &str = "Gọi ba người là $A, B, C$. Mỗi người:\n* **$\\text{T}$ (Nói thật):** đúng.\n\n### II. Xét 8 trường hợp ($2^3 = 8$)\n\n| TH | A | Kiểm tra |\n| :---: | :---: | :--- |\n| **2** | $\\text{T}$ | $A$ là $\\text{T}$, $C$ là $\\text{D} \\implies A \\neq C \\implies S_B$ **Sai**. |\n\nMột người $P \\in \\{-1, +1\\}$ thỏa mãn:\n$$P = V$$\n\nÁp dụng:\n   $$V_A = -(B \\cdot C) \\iff \\mathbf{A \\cdot B \\cdot C = -1}$$\n";
+
+    fn text(runs: &[InlineRun]) -> String {
+        runs.iter().map(|run| run.text.as_str()).collect()
+    }
+
+    fn paragraph(source: &str) -> String {
+        match &parse_full(source).blocks[0].block {
+            Block::Paragraph { runs } => text(runs),
+            other => panic!("paragraph expected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn thread_math_renders_as_unicode_in_prose_headings_and_tables() {
+        let tree = parse_full(THREAD);
+        let Block::Paragraph { runs } = &tree.blocks[0].block else {
+            panic!("paragraph");
+        };
+        assert_eq!(text(runs), "Gọi ba người là A, B, C. Mỗi người:");
+        let Block::Heading { runs, .. } = &tree.blocks[2].block else {
+            panic!("heading");
+        };
+        assert_eq!(text(runs), "II. Xét 8 trường hợp (2³ = 8)");
+        let Block::Table { rows, .. } = &tree.blocks[3].block else {
+            panic!("table");
+        };
+        assert_eq!(text(&rows[0][1]), "T");
+        assert_eq!(text(&rows[0][2]), "A là T, C là D ⟹ A ≠ C ⟹ S_B Sai.");
+        assert!(
+            rows[0][2]
+                .iter()
+                .any(|run| run.text == "Sai" && run.style.bold)
+        );
+        assert!(!format!("{tree:?}").contains('$'));
+    }
+
+    #[test]
+    fn display_math_sits_on_its_own_line() {
+        assert_eq!(
+            paragraph("Một người thỏa mãn:\n$$P = V$$\nnext"),
+            "Một người thỏa mãn:\nP = V\nnext"
+        );
+        assert_eq!(paragraph("$$P = V$$"), "P = V");
+    }
+
+    #[test]
+    fn currency_and_shell_variables_stay_literal() {
+        assert_eq!(
+            paragraph("costs $5 and $10 total"),
+            "costs $5 and $10 total"
+        );
+        assert_eq!(paragraph("costs $100"), "costs $100");
+        assert_eq!(paragraph("set $A=$B now"), "set $A=$B now");
+        assert_eq!(paragraph("$HOME/$USER"), "$HOME/$USER");
+        assert_eq!(paragraph("echo $PATH and $HOME"), "echo $PATH and $HOME");
+        assert_eq!(paragraph("run `echo $x$y`"), "run echo $x$y");
+    }
+
+    #[test]
+    fn streamed_math_matches_full_parse() {
+        let mut stream = IncrementalParser::new();
+        for ch in THREAD.chars() {
+            stream.append(&ch.to_string());
+            assert_eq!(stream.tree(), &parse_full(stream.source()));
+        }
     }
 }
