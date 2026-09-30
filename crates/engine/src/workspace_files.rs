@@ -2,7 +2,7 @@
 //!
 //! Every operation resolves a synced chat or space to a checkout owned by this
 //! device before accepting a workspace-relative path. The two read verbs also
-//! take an absolute path anywhere on the device (read-only; see [`HostFile`]).
+//! take an absolute path from a chat target (see [`resolve_absolute_read`]).
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
@@ -29,6 +29,7 @@ use crate::{Repos, WorkspaceHost};
 
 const MAX_RELATIVE_PATH_BYTES: usize = 4096;
 const MAX_RELATIVE_PATH_COMPONENTS: usize = 256;
+const MAX_ABSOLUTE_PATH_BYTES: usize = 16 * 1024;
 pub const DIRECTORY_PAGE_SIZE: usize = 500;
 pub const MAX_DIRECTORY_ENTRIES: usize = 50_000;
 pub const MAX_SEARCH_QUERY_CHARS: usize = 256;
@@ -175,6 +176,36 @@ impl WorkspaceRelativePath {
         Ok(Self(parsed.to_path_buf()))
     }
 
+    /// Build a workspace-relative path from an already-resolved filesystem
+    /// path — the strip a canonical absolute path leaves under its base.
+    /// Every component must be a plain name.
+    fn from_resolved(path: &Path) -> Result<Self, WorkspaceFilesError> {
+        let mut parsed = PathBuf::new();
+        let mut count = 0usize;
+        for component in path.components() {
+            count += 1;
+            if count > MAX_RELATIVE_PATH_COMPONENTS {
+                return Err(bad_path("path has too many components"));
+            }
+            match component {
+                Component::Normal(value) => {
+                    let value = value
+                        .to_str()
+                        .ok_or_else(|| bad_path("path must be UTF-8"))?;
+                    if value.eq_ignore_ascii_case(".git") {
+                        return Err(bad_path(".git paths are not accessible"));
+                    }
+                    parsed.push(value);
+                }
+                _ => return Err(bad_path("path must be workspace-relative")),
+            }
+        }
+        if parsed.as_os_str().is_empty() {
+            return Err(bad_path("path must not be empty"));
+        }
+        Ok(Self(parsed))
+    }
+
     pub fn as_path(&self) -> &Path {
         &self.0
     }
@@ -193,55 +224,6 @@ impl WorkspaceRelativePath {
 
 fn bad_path(message: &str) -> WorkspaceFilesError {
     WorkspaceFilesError::BadParams(message.to_string())
-}
-
-/// An absolute path named by a tool call, read outside the checkout jail.
-/// Canonicalized up front so the component walk meets no symlink (`/tmp` and
-/// `/var` are symlinks on macOS). Only the read verbs accept one; a write
-/// still needs a workspace-relative path.
-struct HostFile {
-    root: PathBuf,
-    relative: WorkspaceRelativePath,
-}
-
-impl HostFile {
-    fn resolve(path: &str) -> Result<Option<Self>, WorkspaceFilesError> {
-        if !Path::new(path).has_root() {
-            return Ok(None);
-        }
-        if path.len() > MAX_RELATIVE_PATH_BYTES {
-            return Err(bad_path("path is too long"));
-        }
-        if path.contains('\0') {
-            return Err(bad_path("path contains an invalid character"));
-        }
-        let canonical = std::fs::canonicalize(path).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                WorkspaceFilesError::NotFound("file not found".into())
-            } else {
-                WorkspaceFilesError::Io(error.to_string())
-            }
-        })?;
-        let mut root = PathBuf::new();
-        let mut parts = Vec::new();
-        for component in canonical.components() {
-            match component {
-                Component::Prefix(_) | Component::RootDir => root.push(component.as_os_str()),
-                Component::Normal(value) => {
-                    parts.push(
-                        value
-                            .to_str()
-                            .ok_or_else(|| bad_path("path must be UTF-8"))?,
-                    );
-                }
-                Component::CurDir | Component::ParentDir => {
-                    return Err(bad_path("path must not contain . or .."));
-                }
-            }
-        }
-        let relative = WorkspaceRelativePath::file(&parts.join("/"))?;
-        Ok(Some(Self { root, relative }))
-    }
 }
 
 fn plain_folder_identity(device_id: &str, root: &Path) -> String {
@@ -469,22 +451,18 @@ impl WorkspaceFiles {
         let workspace = self
             .resolve_read_target(&request.target, &request.path)
             .await?;
+        // Only a chat target may read by absolute path; space targets keep
+        // the workspace-relative grammar.
+        let absolute = request.target.chat_id.is_some() && request.path.starts_with('/');
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_on_drop = CancelOnDrop::new(cancel.clone());
         let result = tokio::task::spawn_blocking(move || {
-            // A tool chip can point outside the checkout (a harness spills
-            // tool results under its own data dir); those open read-only.
-            let Some(host) = HostFile::resolve(&request.path)? else {
-                let relative = WorkspaceRelativePath::file(&request.path)?;
-                let mut file = read_file_blocking(&workspace.root, &relative, &cancel)?;
-                file.checkout_id = workspace.checkout_id;
-                return Ok(file);
-            };
-            let mut file = read_file_blocking(&host.root, &host.relative, &cancel)?;
+            if absolute {
+                return read_absolute_file_blocking(&workspace, &request.path, &cancel);
+            }
+            let relative = WorkspaceRelativePath::file(&request.path)?;
+            let mut file = read_file_blocking(&workspace.root, &relative, &cancel)?;
             file.checkout_id = workspace.checkout_id;
-            file.path = request.path;
-            file.read_only_reason
-                .get_or_insert(WorkspaceReadOnlyReason::OutsideWorkspace);
             Ok(file)
         })
         .await
@@ -500,19 +478,35 @@ impl WorkspaceFiles {
         let workspace = self
             .resolve_read_target(&request.target, &request.path)
             .await?;
-        if request.expected_checkout_id.is_empty()
-            || request.expected_checkout_id != workspace.checkout_id
+        let absolute = request.target.chat_id.is_some() && request.path.starts_with('/');
+        if !absolute
+            && (request.expected_checkout_id.is_empty()
+                || request.expected_checkout_id != workspace.checkout_id)
         {
             return Err(WorkspaceFilesError::Authorization(
                 "Workspace changed before image read".into(),
             ));
         }
-        tokio::task::spawn_blocking(move || match HostFile::resolve(&request.path)? {
-            Some(host) => read_image_blocking(&host.root, &host.relative, &request),
-            None => {
-                let relative = WorkspaceRelativePath::file(&request.path)?;
-                read_image_blocking(&workspace.root, &relative, &request)
+        tokio::task::spawn_blocking(move || {
+            if absolute {
+                return match resolve_absolute_read(&workspace, &request.path)? {
+                    AbsoluteRead::Inside(relative) => {
+                        if request.expected_checkout_id.is_empty()
+                            || request.expected_checkout_id != workspace.checkout_id
+                        {
+                            return Err(WorkspaceFilesError::Authorization(
+                                "Workspace changed before image read".into(),
+                            ));
+                        }
+                        read_image_blocking(&workspace.root, &relative, &request)
+                    }
+                    AbsoluteRead::Outside { base, relative } => {
+                        read_image_blocking(&base, &relative, &request)
+                    }
+                };
             }
+            let relative = WorkspaceRelativePath::file(&request.path)?;
+            read_image_blocking(&workspace.root, &relative, &request)
         })
         .await
         .map_err(|e| WorkspaceFilesError::Io(e.to_string()))?
@@ -1392,6 +1386,91 @@ fn read_image_blocking(
     })
 }
 
+/// How an absolute request path resolves against the workspace root: the
+/// canonical path inside it reads like the equivalent relative path
+/// (editable), anything else is a read-only host file.
+enum AbsoluteRead {
+    Inside(WorkspaceRelativePath),
+    Outside {
+        /// The filesystem root the canonical path hangs off — `/` on POSIX —
+        /// so the blocking readers' component walk applies unchanged.
+        base: PathBuf,
+        relative: WorkspaceRelativePath,
+    },
+}
+
+/// Canonicalize an absolute request path and classify it against the
+/// workspace. The wire grammar mirrors the link side's safety envelope: one
+/// leading slash, never `//`, no trailing slash, no `?`, backslashes, NUL or
+/// `.`/`..` segments. A missing path is the same `NotFound` a relative read
+/// reports.
+fn resolve_absolute_read(
+    workspace: &ResolvedWorkspace,
+    path: &str,
+) -> Result<AbsoluteRead, WorkspaceFilesError> {
+    if path.len() > MAX_ABSOLUTE_PATH_BYTES
+        || path.len() == 1
+        || path.starts_with("//")
+        || path.ends_with('/')
+        || path.contains(['\\', '?'])
+        || path.chars().any(char::is_control)
+        || path
+            .split('/')
+            .any(|component| matches!(component, "." | ".."))
+    {
+        return Err(bad_path("path must be workspace-relative"));
+    }
+    let canonical = std::fs::canonicalize(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            WorkspaceFilesError::NotFound("file not found".into())
+        } else {
+            WorkspaceFilesError::Io(error.to_string())
+        }
+    })?;
+    let root = std::fs::canonicalize(&workspace.root).unwrap_or(workspace.root.clone());
+    if let Ok(relative) = canonical.strip_prefix(&root) {
+        return WorkspaceRelativePath::from_resolved(relative).map(AbsoluteRead::Inside);
+    }
+    let base = canonical
+        .ancestors()
+        .last()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| canonical.clone());
+    let relative = canonical.strip_prefix(&base).map_err(|error| {
+        WorkspaceFilesError::Io(format!("absolute path has no host root: {error}"))
+    })?;
+    WorkspaceRelativePath::from_resolved(relative)
+        .map(|relative| AbsoluteRead::Outside { base, relative })
+}
+
+/// A chat-target read of an absolute path: inside the workspace it reads
+/// exactly like the equivalent relative path (editable, checkout-bound);
+/// outside it is a host file — read-only, no checkout identity — that still
+/// reports Binary, TooLarge, symlink or not-a-regular-file ahead of
+/// `OutsideWorkspace`.
+fn read_absolute_file_blocking(
+    workspace: &ResolvedWorkspace,
+    path: &str,
+    cancel: &AtomicBool,
+) -> Result<WorkspaceFileText, WorkspaceFilesError> {
+    match resolve_absolute_read(workspace, path)? {
+        AbsoluteRead::Inside(relative) => {
+            let mut file = read_file_blocking(&workspace.root, &relative, cancel)?;
+            file.checkout_id = workspace.checkout_id.clone();
+            Ok(file)
+        }
+        AbsoluteRead::Outside { base, relative } => {
+            let mut file = read_file_blocking(&base, &relative, cancel)?;
+            if file.read_only_reason.is_none() {
+                file.read_only_reason = Some(WorkspaceReadOnlyReason::OutsideWorkspace);
+            }
+            file.checkout_id = String::new();
+            file.path = path.to_owned();
+            Ok(file)
+        }
+    }
+}
+
 fn read_file_blocking(
     root: &Path,
     relative: &WorkspaceRelativePath,
@@ -2128,38 +2207,6 @@ mod tests {
     }
 
     #[test]
-    fn host_file_reads_an_absolute_path_outside_any_checkout() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join("real")).unwrap();
-        let file = dir.path().join("real").join("tool-result.txt");
-        std::fs::write(&file, b"spilled output\n").unwrap();
-
-        assert!(HostFile::resolve("tool-result.txt").unwrap().is_none());
-        assert!(matches!(
-            HostFile::resolve(dir.path().join("missing.txt").to_str().unwrap()),
-            Err(WorkspaceFilesError::NotFound(_))
-        ));
-
-        // A tempdir sits under a symlink on macOS (/var -> /private/var);
-        // add one more on top and the read must still land on the file.
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("link")).unwrap();
-        #[cfg(unix)]
-        let requested = dir.path().join("link").join("tool-result.txt");
-        #[cfg(not(unix))]
-        let requested = file.clone();
-        let host = HostFile::resolve(requested.to_str().unwrap())
-            .unwrap()
-            .unwrap();
-        let text = read_file_blocking(&host.root, &host.relative, &no_cancel()).unwrap();
-        assert_eq!(text.text.as_deref(), Some("spilled output\n"));
-        assert_eq!(
-            host.root.join(host.relative.as_path()),
-            std::fs::canonicalize(&file).unwrap()
-        );
-    }
-
-    #[test]
     fn relative_paths_reject_drive_letters_and_ntfs_alternate_data_streams() {
         for path in [
             "C:/file.txt",
@@ -2436,6 +2483,202 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    // Absolute reads take POSIX paths — the only shape a UI sends.
+    #[cfg(unix)]
+    fn resolved_workspace(root: &Path) -> ResolvedWorkspace {
+        ResolvedWorkspace {
+            checkout_id: "checkout-test".into(),
+            root: root.to_path_buf(),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absolute_read_inside_the_workspace_is_editable() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("dir")).unwrap();
+        std::fs::write(root.path().join("dir/file.txt"), b"inside\n").unwrap();
+        let canonical = std::fs::canonicalize(root.path()).unwrap();
+        let workspace = resolved_workspace(&canonical);
+        let absolute = canonical
+            .join("dir/file.txt")
+            .to_string_lossy()
+            .into_owned();
+
+        let file = read_absolute_file_blocking(&workspace, &absolute, &no_cancel()).unwrap();
+        assert_eq!(file.text.as_deref(), Some("inside\n"));
+        assert_eq!(file.path, "dir/file.txt");
+        assert_eq!(file.checkout_id, "checkout-test");
+        assert!(file.read_only_reason.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absolute_read_outside_the_workspace_is_read_only() {
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("report.md"), b"outside\n").unwrap();
+        let canonical_root = std::fs::canonicalize(workspace_dir.path()).unwrap();
+        let workspace = resolved_workspace(&canonical_root);
+        let absolute = std::fs::canonicalize(outside.path().join("report.md"))
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+
+        let file = read_absolute_file_blocking(&workspace, &absolute, &no_cancel()).unwrap();
+        assert_eq!(file.text.as_deref(), Some("outside\n"));
+        assert_eq!(
+            file.read_only_reason,
+            Some(WorkspaceReadOnlyReason::OutsideWorkspace)
+        );
+        assert_eq!(file.checkout_id, "");
+        assert_eq!(file.path, absolute);
+
+        // A stronger existing reason keeps its own classification.
+        let binary = outside.path().join("raw.bin");
+        std::fs::write(&binary, b"a\0b").unwrap();
+        let file = read_absolute_file_blocking(&workspace, &binary.to_string_lossy(), &no_cancel())
+            .unwrap();
+        assert_eq!(file.read_only_reason, Some(WorkspaceReadOnlyReason::Binary));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absolute_read_reports_missing_and_non_regular_files() {
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let canonical_root = std::fs::canonicalize(workspace_dir.path()).unwrap();
+        let workspace = resolved_workspace(&canonical_root);
+
+        let missing = outside
+            .path()
+            .join("missing.md")
+            .to_string_lossy()
+            .into_owned();
+        let error = read_absolute_file_blocking(&workspace, &missing, &no_cancel()).unwrap_err();
+        assert!(matches!(error, WorkspaceFilesError::NotFound(_)), "{error}");
+
+        let directory = outside.path().to_string_lossy().into_owned();
+        let file = read_absolute_file_blocking(&workspace, &directory, &no_cancel()).unwrap();
+        assert_eq!(
+            file.read_only_reason,
+            Some(WorkspaceReadOnlyReason::NotRegularFile)
+        );
+        assert!(file.text.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absolute_read_rejects_unsafe_wire_shapes() {
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let canonical_root = std::fs::canonicalize(workspace_dir.path()).unwrap();
+        let workspace = resolved_workspace(&canonical_root);
+        for path in [
+            "//double/slash.md",
+            "/",
+            "/tmp/dir/",
+            "/tmp/a?b.md",
+            "/tmp/a\\b.md",
+            "/tmp/a/../b.md",
+            "/tmp/./b.md",
+        ] {
+            assert!(
+                read_absolute_file_blocking(&workspace, path, &no_cancel()).is_err(),
+                "{path}"
+            );
+        }
+        // Writes still parse through the relative grammar: an absolute path
+        // can never reach `write_file`'s host filesystem.
+        assert!(WorkspaceRelativePath::file("/tmp/file.md").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absolute_read_follows_symlinks_to_their_canonical_home() {
+        use std::os::unix::fs::symlink;
+
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(workspace_dir.path().join("real.md"), b"real\n").unwrap();
+        std::fs::write(outside.path().join("out.md"), b"out\n").unwrap();
+        // A link inside the workspace pointing out reads as an outside file;
+        // a link outside pointing in reads as the editable workspace file.
+        symlink(
+            outside.path().join("out.md"),
+            workspace_dir.path().join("escape.md"),
+        )
+        .unwrap();
+        symlink(
+            workspace_dir.path().join("real.md"),
+            outside.path().join("enter.md"),
+        )
+        .unwrap();
+        let canonical_root = std::fs::canonicalize(workspace_dir.path()).unwrap();
+        let workspace = resolved_workspace(&canonical_root);
+
+        let escape = canonical_root
+            .join("escape.md")
+            .to_string_lossy()
+            .into_owned();
+        let file = read_absolute_file_blocking(&workspace, &escape, &no_cancel()).unwrap();
+        assert_eq!(
+            file.read_only_reason,
+            Some(WorkspaceReadOnlyReason::OutsideWorkspace)
+        );
+        let enter = std::fs::canonicalize(outside.path().join("enter.md"))
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let file = read_absolute_file_blocking(&workspace, &enter, &no_cancel()).unwrap();
+        assert!(file.read_only_reason.is_none());
+        assert_eq!(file.path, "real.md");
+        assert_eq!(file.checkout_id, "checkout-test");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absolute_image_read_outside_the_workspace_works() {
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let png = outside.path().join("pixel.png");
+        std::fs::write(&png, b"\x89PNG\r\n\x1a\nfake").unwrap();
+        let canonical_root = std::fs::canonicalize(workspace_dir.path()).unwrap();
+        let workspace = resolved_workspace(&canonical_root);
+        let absolute = std::fs::canonicalize(&png)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+
+        let AbsoluteRead::Outside { base, relative } =
+            resolve_absolute_read(&workspace, &absolute).unwrap()
+        else {
+            panic!("expected outside resolution");
+        };
+        let request = zeron_proto::ReadWorkspaceImageRequest {
+            target: WorkspaceTarget {
+                chat_id: Some("chat".into()),
+                space_id: None,
+                checkout_path: None,
+            },
+            path: absolute.clone(),
+            expected_checkout_id: String::new(),
+            offset: 0,
+            expected_content_hash: None,
+        };
+        let chunk = read_image_blocking(&base, &relative, &request).unwrap();
+        assert_eq!(chunk.mime_type, "image/png");
+        assert!(chunk.done);
+        assert_eq!(chunk.size, 12);
+        // The same path inside the root still wants a matching checkout id.
+        std::fs::write(workspace_dir.path().join("in.png"), b"\x89PNG\r\n\x1a\n").unwrap();
+        let inside = canonical_root.join("in.png").to_string_lossy().into_owned();
+        let AbsoluteRead::Inside(relative) = resolve_absolute_read(&workspace, &inside).unwrap()
+        else {
+            panic!("expected inside resolution");
+        };
+        assert_eq!(relative.wire_path(), "in.png");
     }
 
     fn write_request(

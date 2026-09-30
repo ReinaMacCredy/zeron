@@ -111,6 +111,7 @@ pub fn init(
         surface,
         cx,
     );
+    settings::wallpaper_colors::ensure_color(cx);
 }
 
 /// The mode currently in effect (defaults to `System` before [`init`]).
@@ -270,6 +271,7 @@ pub fn apply(cx: &mut App) {
             && theme.accent_selection == accent
             && theme.surface_preference == surface
             && theme.frost == frost
+            && theme.wallpaper_color == settings::wallpaper_colors::active(cx)
     });
     if changed {
         tracing::debug!(?wanted, %variant_id, "appearance: installing palette");

@@ -1202,6 +1202,8 @@ fn permission_question(tool_name: &str, input: &Value) -> UserInputQuestion {
         options: vec!["Allow".into(), "Deny".into()],
         multi_select: false,
         kind: None,
+        prefill: None,
+        multiline: false,
     }
 }
 
@@ -1220,6 +1222,8 @@ fn parse_questions(input: &Value) -> Vec<UserInputQuestion> {
                 id: uuid::Uuid::new_v4().to_string(),
                 header: field(["header", "title"]).unwrap_or("Question").into(),
                 question: field(["question", "prompt"]).unwrap_or("").into(),
+                prefill: None,
+                multiline: false,
                 multi_select: ["multiSelect", "multi_select"]
                     .iter()
                     .find_map(|k| q.get(*k).and_then(Value::as_bool))

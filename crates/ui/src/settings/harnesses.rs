@@ -870,7 +870,7 @@ impl HarnessesPage {
                     HarnessId::Pi => meta.push(
                         div()
                             .text_color(theme.text_muted.opacity(0.65))
-                            .child("pi-acp bridge · Managed by Zeron")
+                            .child("Pi RPC · Native connection")
                             .into_any_element(),
                     ),
                     _ => {}

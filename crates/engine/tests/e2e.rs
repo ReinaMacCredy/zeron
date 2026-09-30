@@ -1431,6 +1431,8 @@ async fn respond_input_resolves_pending_question() {
                     header: "Pick".into(),
                     question: "Which one?".into(),
                     options: vec!["a".into(), "b".into()],
+                    prefill: None,
+                    multiline: false,
                     multi_select: false,
                     kind: None,
                 }])
@@ -1585,6 +1587,8 @@ async fn wrong_id_respond_is_rejected_and_correct_answer_still_resumes() {
                     header: "Pick".into(),
                     question: "Which one?".into(),
                     options: vec!["a".into(), "b".into()],
+                    prefill: None,
+                    multiline: false,
                     multi_select: false,
                     kind: None,
                 }])
@@ -1777,6 +1781,8 @@ async fn interrupt_unblocks_a_run_awaiting_input() {
                         header: "Pick".into(),
                         question: "Which one?".into(),
                         options: vec!["a".into(), "b".into()],
+                        prefill: None,
+                        multiline: false,
                         multi_select: false,
                         kind: None,
                     }])
@@ -1925,6 +1931,8 @@ async fn harness_emitted_input_twin_is_dropped_and_answer_resumes() {
                     header: "Pick".into(),
                     question: "Which one?".into(),
                     options: vec!["a".into(), "b".into()],
+                    prefill: None,
+                    multiline: false,
                     multi_select: false,
                     kind: None,
                 };

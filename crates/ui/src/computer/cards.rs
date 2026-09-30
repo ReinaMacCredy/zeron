@@ -827,6 +827,8 @@ mod tests {
                 tool: tool.map(str::to_owned),
                 params: params.map(str::to_owned),
             }),
+            prefill: None,
+            multiline: false,
         }
     }
 

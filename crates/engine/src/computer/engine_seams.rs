@@ -123,6 +123,8 @@ pub fn consent_question(card: &ComputerConsentCard) -> UserInputQuestion {
             tool: Some(card.tool_name.clone()),
             params: Some(card.params_display.clone()),
         }),
+        prefill: None,
+        multiline: false,
     }
 }
 
@@ -155,6 +157,8 @@ pub fn foreground_question(app: Option<&ComputerConsentApp>) -> UserInputQuestio
         ],
         multi_select: false,
         kind: Some(UserInputKind::Foreground { app: app.cloned() }),
+        prefill: None,
+        multiline: false,
     }
 }
 

@@ -14,7 +14,7 @@ pub enum HarnessId {
     Grok,
     /// Nous Research's Hermes Agent, driven over ACP (`hermes acp`).
     Hermes,
-    /// The pi coding agent (pi.dev), driven over ACP via the `pi-acp` adapter.
+    /// The Pi coding agent (pi.dev), driven over its native JSONL RPC protocol.
     Pi,
     /// SST's opencode agent, driven natively over its own HTTP/SSE server
     /// protocol (`opencode serve` — the same wire the opencode desktop app
@@ -620,6 +620,10 @@ pub struct UserInputQuestion {
     pub multi_select: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<UserInputKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill: Option<String>,
+    #[serde(default)]
+    pub multiline: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -891,6 +895,8 @@ mod tests {
             options: vec!["Allow for this turn".into(), "No".into()],
             multi_select: false,
             kind: Some(kind),
+            prefill: None,
+            multiline: false,
         };
         assert!(question.is_computer() && !question.is_consent());
         let plain = UserInputQuestion {

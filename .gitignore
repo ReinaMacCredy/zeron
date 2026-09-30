@@ -12,3 +12,5 @@ build/
 edge/dist/
 xcuserdata/
 .agents
+.claude
+CLAUDE.md

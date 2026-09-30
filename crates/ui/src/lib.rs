@@ -206,6 +206,11 @@ pub fn run_app(config: UiConfig) {
                     ui_settings.git_history_author_display,
                     cx,
                 );
+                motion::init(
+                    ui_settings.reduce_motion,
+                    ui_settings.pause_animations_in_background,
+                    cx,
+                );
                 composer::init(cx, ui_settings.composer_send_behavior);
                 appshots::set_enabled(ui_settings.appshots_enabled);
                 appshots::set_welcome_pending(!ui_settings.appshot_welcome_acknowledged);

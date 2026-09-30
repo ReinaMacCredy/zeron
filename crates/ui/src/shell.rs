@@ -65,6 +65,9 @@ use crate::transcript::{self, BranchKind, Transcript, TranscriptEvent};
 use crate::workspace_links::resolve_workspace_file_link;
 
 mod actions_ui;
+mod chat_dropzone;
+#[cfg(test)]
+mod chat_dropzone_tests;
 mod command_palette;
 mod files_panel;
 mod harness_updates;
@@ -105,6 +108,7 @@ actions!(
     shell,
     [
         SaveFile,
+        RandomWallpaper,
         ToggleSidebar,
         ToggleChanges,
         ToggleFiles,
@@ -433,6 +437,11 @@ pub fn apply_keymap(
     // key equivalents and must survive keymap re-application.
     crate::app_menus::bind_keys(cx);
     cx.bind_keys([
+        KeyBinding::new(
+            &valid_or_default(&keymap.random_wallpaper, "mod-u"),
+            RandomWallpaper,
+            None,
+        ),
         KeyBinding::new(
             &valid_or_default(&keymap.save_file, "mod-s"),
             SaveFile,
@@ -1109,6 +1118,10 @@ const SIDEBAR_LIST_PAD_TOP: f32 = 4.0;
 
 /// Active and archived sessions share harness/title geometry.
 const SIDEBAR_ACTIVE_HARNESS_ICON_SIZE: f32 = 13.0;
+/// Compact-row time slot while a text jump hint ("Ctrl+9") stands in for the
+/// time: wide enough for the widest of them at 11px on one line. In
+/// default-size pixels; scaled with the UI font via `ui_rems`.
+const COMPACT_JUMP_HINT_WIDTH: f32 = 42.0;
 const SIDEBAR_ACTIVE_HARNESS_TITLE_GAP: f32 = Theme::SPACE_SM;
 /// The sidebar footer's profile and settings buttons share one hit target.
 const SIDEBAR_FOOTER_BUTTON_SIZE: f32 = 28.0;
@@ -1957,7 +1970,7 @@ pub struct Shell {
     new_thread_artwork_ready: crate::new_thread_background_effects::Readiness,
     /// The chat layer alternates with the hero by route and carries its own
     /// blurred image, so sharing one tracker would restart the hero's fade.
-    chat_artwork_ready: crate::new_thread_background_effects::Readiness,
+    chat_artwork_ready: crate::new_thread_background_effects::FadeIn,
     /// Session-transient disclosure state, matching the Archived shelf.
     pub(super) pinned_open: bool,
     pub(super) sessions_open: bool,
@@ -1979,6 +1992,8 @@ pub struct Shell {
     pub(super) jump_hints: bool,
     /// Lazy panes: no entity (and no RPC) until first opened.
     terminal: Option<Entity<TerminalPanel>>,
+    /// Last resolved layout, for drag anchors and matching transcript clearance.
+    terminal_geometry: crate::terminal::dock::SharedGeometry,
     /// Embedded terminal host for right-pane Terminal surfaces — a SEPARATE
     /// entity from the bottom drawer's (own PTYs, own grid geometry; one
     /// panel can only size one visible grid at a time).
@@ -2758,6 +2773,7 @@ impl Shell {
             viewport_width: 1280.0,
             viewport_height: 880.0,
             terminal_tween: None,
+            terminal_geometry: Default::default(),
             fullscreen: None,
             titlebar_tween: None,
             titlebar_island: None,
@@ -3786,6 +3802,8 @@ impl Shell {
         let shell = cx.weak_entity();
         crate::markdown::render::LinkUi {
             source_session,
+            source_local: false,
+            file_roots: None,
             handler: std::rc::Rc::new(move |activation, window, cx| {
                 shell
                     .update(cx, |shell, cx| {
@@ -4102,6 +4120,11 @@ impl Shell {
 
     /// Open a transcript's file link in the linking chat's own checkout: a
     /// side chat's link resolves against, and edits, the side chat's files.
+    /// An absolute path the linking checkout cannot own falls through the
+    /// chat's parent and this device's project roots before it is treated
+    /// as a host file; the first known root that owns the path wins. A chat
+    /// root opens the file in that chat's context; a project root and a host
+    /// file open by absolute path through the linking chat.
     fn open_workspace_file_link(
         &mut self,
         chat_id: &str,
@@ -4109,20 +4132,40 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(owner) = self.link_owner(chat_id, cx) else {
-            return false;
+        let owner_state = self
+            .link_owner(chat_id, cx)
+            .map(|(_, state)| state)
+            .unwrap_or_else(|| self.state.clone());
+        let roots = owner_state.read(cx).file_link_roots(chat_id);
+        let root_refs: Vec<&str> = roots.iter().map(|root| root.root.as_str()).collect();
+        use crate::workspace_links::FileLinkResolution;
+        let (owner_chat, link) = match crate::workspace_links::first_root_owning(target, root_refs)
+        {
+            Some(FileLinkResolution::Owned { root, link }) => match roots[root].chat.as_deref() {
+                Some(owner) => (owner.to_owned(), link),
+                // A linking chat without a checkout of its own resolves in
+                // its own file context, as before.
+                None if root == 0 => (chat_id.to_owned(), link),
+                // A project root past the linking chat's own has no chat of
+                // its own, and its relative path would name a different file
+                // under the linking chat's checkout: read it by absolute path
+                // through the linking chat, which keeps it editable only
+                // inside that checkout.
+                None => (
+                    chat_id.to_owned(),
+                    crate::workspace_links::WorkspaceFileLink {
+                        path: roots[root].absolute(&link).to_string_lossy().into_owned(),
+                        outside: true,
+                        ..link
+                    },
+                ),
+            },
+            // An absolute path no known root owns is still a file link: it
+            // opens read-only through the linking chat's own file context.
+            Some(FileLinkResolution::Outside(link)) => (chat_id.to_owned(), link),
+            None => return false,
         };
-        let Some(root) = owner
-            .1
-            .read(cx)
-            .chats
-            .iter()
-            .find(|chat| chat.id == chat_id)
-            .and_then(|chat| chat.cwd.clone())
-        else {
-            return false;
-        };
-        let Some(link) = resolve_workspace_file_link(target, &root) else {
+        let Some(owner) = self.link_owner(&owner_chat, cx) else {
             return false;
         };
 
@@ -5205,7 +5248,7 @@ impl Shell {
     /// animates 200 ms; closing detaches (PTYs stay alive), opening restores.
     /// The flag is per chat (zeron `sessionPanels`).
     fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let from = self.terminal_target(cx);
+        let from = self.terminal_geometry.get().height;
         let key = self.panel_key(cx);
         let open = self.panels.toggle_terminal(&key);
         self.terminal_tween = Some(WidthTween::new(from, self.terminal_target(cx)));
@@ -5254,11 +5297,16 @@ impl Shell {
         let dy = anchor_y - f32::from(event.event.position.y);
         let viewport_h = f32::from(window.viewport_size().height);
         let requested = anchor_h + dy;
-        let max = (viewport_h * TERMINAL_MAX_VH).max(TERMINAL_MIN_HEIGHT);
-        self.settings.terminal_height = clamp_terminal_height(requested, viewport_h);
+        let max = self
+            .terminal_geometry
+            .get()
+            .limit
+            .min(viewport_h * TERMINAL_MAX_VH);
+        let min = TERMINAL_MIN_HEIGHT.min(max);
+        self.settings.terminal_height = clamp_terminal_height(requested.min(max), viewport_h);
         self.pane_resize_dragging = Some(PaneResizeKind::Terminal);
-        self.pane_resize_active = (requested > TERMINAL_MIN_HEIGHT && requested < max)
-            .then_some(PaneResizeKind::Terminal);
+        self.pane_resize_active =
+            (requested > min && requested < max).then_some(PaneResizeKind::Terminal);
         self.terminal_tween = None; // live drag tracks the pointer
         self.schedule_save(cx);
         cx.notify();
@@ -5424,6 +5472,11 @@ impl Shell {
         self.settings.new_thread_composer_background = current.new_thread_composer_background;
         self.settings.new_thread_background_effect = current.new_thread_background_effect;
         self.settings.chat_background = current.chat_background;
+        self.settings.wallpaper_folder = current.wallpaper_folder;
+        self.settings.wallpaper_source = current.wallpaper_source;
+        self.settings.wallpaper_history = current.wallpaper_history;
+        self.settings.wallpaper_theme_colors = current.wallpaper_theme_colors;
+        self.settings.wallpaper_color = current.wallpaper_color;
         self.settings.open_web_links_in_zeron = current.open_web_links_in_zeron;
         self.settings.ui_font_family = current.ui_font_family;
         self.settings.ui_font_size = current.ui_font_size;
@@ -5437,6 +5490,8 @@ impl Shell {
         self.settings.computer_effort_hint_dismissed = current.computer_effort_hint_dismissed;
         self.settings.skill_completion_by_harness = current.skill_completion_by_harness;
         self.settings.skills_in_slash_menu = current.skills_in_slash_menu;
+        self.settings.reduce_motion = current.reduce_motion;
+        self.settings.pause_animations_in_background = current.pause_animations_in_background;
     }
 
     fn retry_engine(&mut self, cx: &mut Context<Self>) {
@@ -5574,6 +5629,44 @@ impl Shell {
         }
         self.close_chat_menu(cx);
         cx.notify();
+    }
+
+    fn ensure_appearance_page(&mut self, cx: &mut Context<Self>) {
+        if self.appearance_page.is_none() {
+            let page = cx.new(AppearancePage::new);
+            self.appearance_settings_sub = Some(cx.subscribe(
+                &page,
+                |this: &mut Shell, _, event: &AppearanceSettingsEvent, cx| match *event {
+                    AppearanceSettingsEvent::CodeFontSizeChanged(size) => {
+                        this.set_code_font_size(size, cx);
+                    }
+                },
+            ));
+            self.appearance_page = Some(page);
+        }
+    }
+
+    fn random_wallpaper(&mut self, cx: &mut Context<Self>) {
+        self.ensure_appearance_page(cx);
+        if settings::current(cx).wallpaper_folder.is_none() {
+            self.open_settings(SettingsSection::Appearance, cx);
+            if let Some(page) = &self.appearance_page {
+                page.update(cx, |page, cx| page.choose_wallpaper_folder(cx));
+            }
+            return;
+        }
+        let task = settings::wallpaper::randomize(cx);
+        cx.spawn(async move |this, cx| {
+            if let Err(error) = task.await {
+                let _ = this.update(cx, |this, cx| {
+                    this.open_settings(SettingsSection::Appearance, cx);
+                    if let Some(page) = &this.appearance_page {
+                        page.update(cx, |page, cx| page.show_wallpaper_error(error, cx));
+                    }
+                });
+            }
+        })
+        .detach();
     }
 
     pub(crate) fn open_settings(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
@@ -5749,18 +5842,7 @@ impl Shell {
                 }
             }
             SettingsSection::Appearance => {
-                if self.appearance_page.is_none() {
-                    let page = cx.new(AppearancePage::new);
-                    self.appearance_settings_sub = Some(cx.subscribe(
-                        &page,
-                        |this: &mut Shell, _, event: &AppearanceSettingsEvent, cx| match *event {
-                            AppearanceSettingsEvent::CodeFontSizeChanged(size) => {
-                                this.set_code_font_size(size, cx);
-                            }
-                        },
-                    ));
-                    self.appearance_page = Some(page);
-                }
+                self.ensure_appearance_page(cx);
                 match &self.appearance_page {
                     Some(page) => page.clone().into_any_element(),
                     None => Empty.into_any_element(),
@@ -7306,6 +7388,7 @@ impl Shell {
             .child(window_control_button(
                 "toggle-sidebar",
                 icons::SIDEBAR_MINIMALISTIC_LEFT,
+                ShortcutId::ToggleSidebar.label(),
                 &theme,
                 cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)),
             ))
@@ -7319,6 +7402,7 @@ impl Shell {
                     .child(nav_history_button(
                         "nav-back",
                         icons::ARROW_LEFT,
+                        "Back",
                         can_back,
                         &theme,
                         cx.listener(|this, _, _, cx| this.navigate_back(cx)),
@@ -7326,6 +7410,7 @@ impl Shell {
                     .child(nav_history_button(
                         "nav-forward",
                         icons::ARROW_RIGHT,
+                        "Forward",
                         can_forward,
                         &theme,
                         cx.listener(|this, _, _, cx| this.navigate_forward(cx)),
@@ -7339,6 +7424,7 @@ impl Shell {
                     .child(window_control_button(
                         "titlebar-new-session",
                         icons::PLUS,
+                        ShortcutId::NewSession.label(),
                         &theme,
                         cx.listener(|this, _, _, cx| this.open_new_session(cx)),
                     ))
@@ -8211,6 +8297,7 @@ impl Shell {
                     .px(px(4.0))
                     .rounded(px(4.0))
                     .bg(tone.opacity(0.08))
+                    .whitespace_nowrap()
                     .text_size(crate::typography::ui_rems(10.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(tone.opacity(0.85))
@@ -8703,14 +8790,30 @@ impl Shell {
                         }))
                     })
                     .when(compact, |el| {
+                        // The time slot is 30px, which holds "17m" but not
+                        // "Ctrl+2": unwrapped, the hint broke after the `+`
+                        // and stacked two lines. A text-length hint keeps one
+                        // line in a wider slot — a floor, not content sized,
+                        // so "Ctrl+1" (a narrower glyph) doesn't nudge its
+                        // row's badge off the others'. The floor scales with
+                        // the UI font like the text does, and a longer
+                        // rebound combo grows the slot instead of spilling
+                        // over the title.
+                        let text_hint = compact_jump_label
+                            .as_ref()
+                            .is_some_and(|label| label.chars().count() > 3);
                         el.child(
                             div()
                                 .debug_selector({
                                     let id = id.clone();
                                     move || format!("chat-time-{id}")
                                 })
-                                .w(px(30.0))
+                                .when(text_hint, |el| {
+                                    el.min_w(crate::typography::ui_rems(COMPACT_JUMP_HINT_WIDTH))
+                                })
+                                .when(!text_hint, |el| el.w(px(30.0)))
                                 .flex_none()
+                                .whitespace_nowrap()
                                 .text_right()
                                 .text_size(crate::typography::ui_rems(11.0))
                                 .text_color(subline)
@@ -9433,6 +9536,7 @@ impl Shell {
                             cx.stop_propagation();
                             this.dismiss_github_star_banner(cx);
                         }))
+                        .tooltip(crate::settings::widgets::text_tooltip("Dismiss"))
                         .child(icon(icons::CLOSE).size(px(10.0)).text_color(tone)),
                 )
                 .into_any_element(),
@@ -11425,8 +11529,9 @@ impl Shell {
                     cx,
                 )
             });
-        let artwork_opacity = self.new_thread_artwork_ready.opacity(
-            artwork.as_ref().map(|image| image.id),
+        let artwork_frame = self.new_thread_artwork_ready.frame(
+            artwork,
+            new_thread_background_setting.is_some(),
             self.reduced_motion,
             frame_time,
         );
@@ -11470,19 +11575,43 @@ impl Shell {
         self.composer.update(cx, |composer, cx| {
             composer.set_available_width(composer_width, cx)
         });
-        let term_h = self.eval_tween(self.terminal_tween, self.terminal_target(cx));
+        let terminal_geometry =
+            std::rc::Rc::new(std::cell::Cell::new(crate::terminal::dock::Geometry::new(
+                self.eval_tween(self.terminal_tween, self.terminal_target(cx)),
+                self.settings.terminal_height,
+                (self.viewport_height * TERMINAL_MAX_VH).min(
+                    (self.viewport_height - Theme::TITLEBAR_HEIGHT - Theme::STATUS_STRIP_HEIGHT)
+                        .max(0.0),
+                ),
+            )));
+        let term_h = self.terminal_geometry.get().height;
         let new_thread_background_layer = (!has_selection || dock_frame.active).then(|| {
-            if artwork.is_some() && artwork_opacity < 1.0 {
+            if artwork_frame.active {
                 window.request_animation_frame();
             }
-            new_thread_background(
-                artwork,
-                self.viewport_height,
-                (self.viewport_width - self.sidebar_now()).max(0.0),
-                self.composer.read(cx).surface_bounds(),
-                dock_frame.dissolve(),
-                artwork_opacity * new_thread_background_opacity(theme.is_frost()),
-            )
+            let width = (self.viewport_width - self.sidebar_now()).max(0.0);
+            let bounds = self.composer.read(cx).surface_bounds();
+            let opacity = new_thread_background_opacity(theme.is_frost());
+            div()
+                .absolute()
+                .inset_0()
+                .child(new_thread_background(
+                    artwork_frame.previous,
+                    self.viewport_height,
+                    width,
+                    bounds.clone(),
+                    dock_frame.dissolve(),
+                    (1.0 - artwork_frame.mix) * opacity,
+                ))
+                .child(new_thread_background(
+                    artwork_frame.current,
+                    self.viewport_height,
+                    width,
+                    bounds,
+                    dock_frame.dissolve(),
+                    artwork_frame.mix * opacity,
+                ))
+                .into_any_element()
         });
 
         // Content outlet: selected chat → transcript; nothing selected → the
@@ -11579,17 +11708,7 @@ impl Shell {
             None
         };
         let status = self.render_status_strip(composer_width, cx);
-        // Attachment dropzone over the ENTIRE conversation column (transcript
-        // + composer, not just the pill). OS images keep using the upload
-        // pipeline; workspace files/directories and file tabs become the same
-        // projected file-mention chips the composer already understands.
-        // The veil itself uses typed `drag_over` styles below. Do not cache
-        // drag presence in shell state: the platform's `FileDrop::Exited`
-        // clears GPUI's external payload without sending one last mouse-move,
-        // so a cached bit can survive and reappear during an unrelated drag
-        // such as a pane resize.
-        div()
-            .id("chat-dropzone")
+        self.chat_dropzone("chat-dropzone", self.composer.clone(), cx)
             .track_focus(&self.navigation_focus.main)
             .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
                 this.capture_navigation_focus(false, false, window, cx);
@@ -11601,28 +11720,6 @@ impl Shell {
             .h_full()
             .flex()
             .flex_col()
-            .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, _, cx| {
-                let paths = paths.paths().to_vec();
-                this.composer
-                    .update(cx, |composer, cx| composer.add_paths(paths, cx));
-                cx.notify();
-            }))
-            .on_drop::<WorkspacePathDrag>(cx.listener(
-                |this, payload: &WorkspacePathDrag, window, cx| {
-                    this.composer.update(cx, |composer, cx| {
-                        composer.add_workspace_path(&payload.path, payload.is_directory, window, cx)
-                    });
-                    cx.notify();
-                },
-            ))
-            .on_drop::<RightTabDrag>(cx.listener(|this, payload: &RightTabDrag, window, cx| {
-                if let Some(path) = &payload.workspace_path {
-                    this.composer.update(cx, |composer, cx| {
-                        composer.add_workspace_path(&path.path, path.is_directory, window, cx)
-                    });
-                }
-                cx.notify();
-            }))
             // The hero is deliberately outside the transcript EdgeFade below:
             // it must paint under the overlaid titlebar instead of becoming
             // fully transparent across the titlebar's inset band.
@@ -11663,12 +11760,8 @@ impl Shell {
                     } else {
                         0.0
                     };
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .top(px(header_inset))
-                        .bottom(px(term_h))
-                        .child(
+                    div().absolute().inset_0().top(px(header_inset)).child(
+                        crate::terminal::dock::above_terminal(
                             crate::edge_fade::edge_faded(
                                 Theme::TRANSCRIPT_FADE_BAND,
                                 true,
@@ -11681,9 +11774,41 @@ impl Shell {
                             .inset_top(Theme::TITLEBAR_HEIGHT)
                             .band_top(Theme::TRANSCRIPT_FADE_BAND)
                             .band_bottom(bottom_band),
-                        )
+                            terminal_geometry.clone(),
+                        ),
+                    )
                 },
             )
+            .when_some(harness_update_card, |column, chip| {
+                // Home notices stay anchored to the window bottom, behind the
+                // dock. Clip paint and hitboxes at the same measured terminal
+                // edge as the transcript, including during open/close motion;
+                // draw order alone would show them through the terminal glass.
+                column.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .child(crate::terminal::dock::above_terminal(
+                            div().size_full().overflow_hidden().child(
+                                div().relative().w_full().h(px(self.viewport_height)).child(
+                                    div()
+                                        .absolute()
+                                        .left_0()
+                                        .right_0()
+                                        .bottom(px(24.0 - 8.0 * (1.0 - chip_opacity)))
+                                        .opacity(chip_opacity)
+                                        .flex()
+                                        .justify_center()
+                                        .child(chip)
+                                        .when(has_selection, |el| {
+                                            el.child(div().absolute().inset_0().occlude())
+                                        }),
+                                ),
+                            ),
+                            terminal_geometry.clone(),
+                        )),
+                )
+            })
             // The glass chrome stack, floating over the transcript's bottom:
             // reserved status strip (h-6, the WorkingIndicator — the composer
             // below never shifts), composer, terminal dock. A paint-time
@@ -11741,52 +11866,11 @@ impl Shell {
                             self.reduced_motion,
                             frame_time,
                         )
+                        .reserve_terminal(terminal_geometry.clone())
                     })
-                    .child(self.render_terminal_container(window, cx))
+                    .child(self.render_terminal_container(terminal_geometry, window, cx))
             })
-            .when_some(harness_update_card, |column, chip| {
-                column.child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .right_0()
-                        .bottom(px(24.0 - 8.0 * (1.0 - chip_opacity)))
-                        .opacity(chip_opacity)
-                        .flex()
-                        .justify_center()
-                        .child(chip)
-                        .when(has_selection, |el| {
-                            el.child(div().absolute().inset_0().occlude())
-                        }),
-                )
-            })
-            .child(
-                div()
-                    .id("attachment-drop-overlay")
-                    .absolute()
-                    .inset_0()
-                    .opacity(0.0)
-                    .bg(theme.scrim().opacity(0.4 / 0.6))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(crate::typography::ui_rems(13.0))
-                    .text_color(theme.text)
-                    // GPUI matches these styles against the active payload's
-                    // concrete TypeId. Resize markers therefore cannot reveal
-                    // this overlay, even after an external drag exits without
-                    // another move event.
-                    .drag_over::<gpui::ExternalPaths>(|style, _, _, _| style.opacity(1.0))
-                    .drag_over::<WorkspacePathDrag>(|style, _, _, _| style.opacity(1.0))
-                    .drag_over::<RightTabDrag>(|style, tab, _, _| {
-                        if tab.workspace_path.is_some() {
-                            style.opacity(1.0)
-                        } else {
-                            style
-                        }
-                    })
-                    .child("Drop to attach"),
-            )
+            .child(Self::attachment_drop_overlay(theme))
             .into_any_element()
     }
 
@@ -11893,10 +11977,17 @@ impl Shell {
 
     /// Terminal panel dock at the main-column bottom: a 5px height-drag handle
     /// over the panel, the whole container height-animated 200 ms on toggle.
-    fn render_terminal_container(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_terminal_container(
+        &mut self,
+        geometry: crate::terminal::dock::SharedGeometry,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let target = self.terminal_target(cx);
         let tween = self.terminal_tween;
         if target <= 0.0 && tween.is_none() {
+            self.terminal_geometry
+                .set(crate::terminal::dock::Geometry::default());
             return gpui::Empty.into_any_element();
         }
         // Defensive: an open flag needs its entity (and set_open) even if
@@ -11935,8 +12026,6 @@ impl Shell {
         } else {
             handle_hover
         };
-        let height = self.settings.terminal_height;
-
         let handle = div()
             .id("terminal-resize")
             .h(px(TERMINAL_RESIZE_HITBOX_HEIGHT))
@@ -11956,8 +12045,10 @@ impl Shell {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
-                    this.terminal_drag_anchor =
-                        Some((f32::from(event.position.y), this.settings.terminal_height));
+                    this.terminal_drag_anchor = Some((
+                        f32::from(event.position.y),
+                        this.terminal_geometry.get().height,
+                    ));
                     this.pane_resize_dragging = Some(PaneResizeKind::Terminal);
                     this.pane_resize_active = Some(PaneResizeKind::Terminal);
                     cx.notify();
@@ -11994,24 +12085,27 @@ impl Shell {
         // FLOATS over the panel's top edge (painted after, so it wins hit
         // testing) instead of stacking above it — stacked, its hitbox would read as
         // dead air between the seam and the tab bar (user report).
-        let inner = div()
-            .h(px(height))
-            .w_full()
-            .relative()
-            .flex()
-            .flex_col()
-            .child(div().flex_1().min_h_0().child(panel))
-            .child(handle.absolute().top_0().left_0().right_0());
+        crate::terminal::dock::terminal(geometry, self.terminal_geometry.clone(), move |geometry| {
+            let inner = div()
+                .h(px(geometry.content_height))
+                .w_full()
+                .relative()
+                .flex()
+                .flex_col()
+                .child(div().flex_1().min_h_0().child(panel))
+                .child(handle.absolute().top_0().left_0().right_0());
 
-        div()
-            .w_full()
-            .flex_none()
-            .overflow_hidden()
-            .border_t_1()
-            .border_color(border)
-            .h(px(self.eval_tween(tween, target)))
-            .child(inner)
-            .into_any_element()
+            div()
+                .w_full()
+                .flex_none()
+                .overflow_hidden()
+                .when(geometry.height > 0.0, |el| el.border_t_1())
+                .border_color(border)
+                .h(px(geometry.height))
+                .child(inner)
+                .into_any_element()
+        })
+        .into_any_element()
     }
 
     /// Working indicator strip: gradient spinner + rotating flavour word (7s,
@@ -12876,6 +12970,7 @@ impl Shell {
                     cx.notify();
                 }
             }))
+            .tooltip(crate::settings::widgets::text_tooltip("New tab"))
             .child(
                 icon(icons::PLUS)
                     .size(px(13.0))
@@ -13521,6 +13616,7 @@ fn grid_backdrop(theme: &Theme) -> AnyElement {
 fn window_control_button(
     id: &'static str,
     icon_path: &'static str,
+    label: &'static str,
     theme: &Theme,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
@@ -13560,6 +13656,7 @@ fn window_control_button(
             cx.stop_propagation();
             on_click(event, window, cx)
         })
+        .tooltip(crate::settings::widgets::text_tooltip(label))
         .child(icon(icon_path).size(px(16.0)).text_color(muted))
 }
 
@@ -13675,6 +13772,7 @@ fn linux_caption_button(
 fn nav_history_button(
     id: &'static str,
     icon_path: &'static str,
+    label: &'static str,
     enabled: bool,
     theme: &Theme,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
@@ -13696,7 +13794,7 @@ fn nav_history_button(
             )
             .into_any_element();
     }
-    window_control_button(id, icon_path, theme, on_click).into_any_element()
+    window_control_button(id, icon_path, label, theme, on_click).into_any_element()
 }
 
 /// A size-7 icon button for the main-panel header (zeron __root.tsx:
@@ -13704,6 +13802,7 @@ fn nav_history_button(
 fn header_icon_button(
     id: &'static str,
     icon_path: &'static str,
+    label: &'static str,
     theme: &Theme,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
@@ -13734,11 +13833,13 @@ fn header_icon_button(
             cx.stop_propagation();
             on_click(event, window, cx)
         })
+        .tooltip(crate::settings::widgets::text_tooltip(label))
         .child(icon(icon_path).size(px(16.0)).text_color(muted))
 }
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        settings::wallpaper::preload(cx);
         self.navigation_focus
             .remember(&self.shortcut_focus, window, cx);
         #[cfg(target_os = "macos")]
@@ -13924,6 +14025,7 @@ impl Render for Shell {
             self.activation_sub = Some(cx.observe_window_activation(
                 window,
                 |this: &mut Shell, window, cx| {
+                    motion::window_activation_changed(window.is_window_active(), cx);
                     if window.is_window_active()
                         && let Some(update) = crate::app_update::AppUpdate::global(cx)
                     {
@@ -14050,6 +14152,9 @@ impl Render for Shell {
                 if !matches!(this.route, Route::Settings(_)) {
                     this.toggle_sidebar(cx)
                 }
+            }))
+            .on_action(cx.listener(|this, _: &RandomWallpaper, _, cx| {
+                this.random_wallpaper(cx);
             }))
             // New session works from anywhere — `open_new_session` routes back
             // to chat itself, so Settings is not a dead spot.
@@ -14379,7 +14484,7 @@ impl Render for Shell {
                 // Clearance excludes the terminal dock: the transcript
                 // viewport ends at the dock's top (see the underlay in
                 // `render_main`), so only the chrome above it overlaps.
-                let term_h = self.eval_tween(self.terminal_tween, self.terminal_target(cx));
+                let term_h = self.terminal_geometry.get().height;
                 let stack_h = (self.bottom_stack.get() - term_h).max(0.0);
                 let expected_has_composer = self.state.read(cx).selected_chat.is_some();
                 let bottom_stack_ready = bottom_stack_measurement_matches(
@@ -14677,7 +14782,10 @@ impl Render for Shell {
 mod tests {
     use super::*;
 
-    fn chat_with_path(cwd: Option<&str>, source: Option<(&str, &str)>) -> zeron_proto::Chat {
+    pub(super) fn chat_with_path(
+        cwd: Option<&str>,
+        source: Option<(&str, &str)>,
+    ) -> zeron_proto::Chat {
         zeron_proto::Chat {
             id: "chat".into(),
             device_id: "remote-device".into(),
@@ -16421,6 +16529,9 @@ mod exit_regressions {
                     let chat_background = settings::current(cx).chat_background;
                     assert_eq!(chat_background.enabled, open_links_in_zeron);
                     settings::update(settings::SavePolicy::Immediate, cx, |settings| {
+                        settings.wallpaper_folder = Some(dir.path().join("wallpapers"));
+                        settings.wallpaper_source = Some(dir.path().join("wallpapers/current.png"));
+                        settings.wallpaper_history = vec![dir.path().join("wallpapers/current.png")];
                         settings.window_geometry = geometry;
                         settings.open_web_links_in_zeron = open_links_in_zeron;
                         settings.terminal_font_family = terminal_family.clone();
@@ -16442,6 +16553,12 @@ mod exit_regressions {
                         shell.settings.terminal_height = 300.0 + step as f32;
                         shell.schedule_save(cx);
                         let current = settings::current(cx);
+                        assert_eq!(current.wallpaper_history, vec![dir.path().join("wallpapers/current.png")]);
+                        assert_eq!(current.wallpaper_folder, Some(dir.path().join("wallpapers")));
+                        assert_eq!(
+                            current.wallpaper_source,
+                            Some(dir.path().join("wallpapers/current.png"))
+                        );
                         assert_eq!(current.window_geometry, geometry);
                         assert_eq!(current.new_thread_background_effect, effect);
                         assert_eq!(current.chat_background, chat_background);
@@ -16466,6 +16583,12 @@ mod exit_regressions {
                     settings::flush(cx);
                     let loaded = settings::UiSettings::load(dir.path());
                     assert_eq!(loaded.window_geometry, geometry);
+                    assert_eq!(loaded.wallpaper_history, vec![dir.path().join("wallpapers/current.png")]);
+                    assert_eq!(loaded.wallpaper_folder, Some(dir.path().join("wallpapers")));
+                    assert_eq!(
+                        loaded.wallpaper_source,
+                        Some(dir.path().join("wallpapers/current.png"))
+                    );
                     assert_eq!(loaded.new_thread_background_effect, effect);
                     assert_eq!(loaded.chat_background, chat_background);
                     assert_eq!(loaded.open_web_links_in_zeron, open_links_in_zeron);
@@ -16555,6 +16678,56 @@ mod exit_regressions {
                 })
                 .unwrap();
         }
+    }
+
+    #[gpui::test]
+    fn shell_saves_keep_motion_settings_chosen_in_appearance(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, _, cx| {
+                // The Appearance page writes these straight to the store,
+                // outside the shell's working copy.
+                settings::update(SavePolicy::Immediate, cx, |settings| {
+                    settings.reduce_motion = crate::motion::ReduceMotion::On;
+                    settings.pause_animations_in_background = true;
+                });
+                // Any shell-owned change (sidebar width, panels) republishes
+                // the working copy; it must not revert the motion choices.
+                shell.schedule_save(cx);
+                let saved = settings::current(cx);
+                assert_eq!(saved.reduce_motion, crate::motion::ReduceMotion::On);
+                assert!(saved.pause_animations_in_background);
+            })
+            .unwrap();
     }
 
     #[gpui::test]
@@ -16961,7 +17134,9 @@ mod exit_regressions {
                     .unwrap()
                     .transcript
                     .clone();
-                let ui = child.read(cx).link_ui().unwrap();
+                let ui = child
+                    .update(cx, |transcript, cx| transcript.link_ui(cx))
+                    .unwrap();
                 assert_eq!(ui.source_session.as_deref(), Some("first-session"));
                 activation.action = LinkAction::Internal;
                 activation.source_session = ui.source_session;
@@ -16977,6 +17152,144 @@ mod exit_regressions {
             .unwrap();
         cx.run_until_parked();
         assert!(weak.upgrade().is_none());
+    }
+
+    /// Encoded destinations open the decoded path, and an absolute
+    /// destination no root owns opens through the linking chat's own file
+    /// context with its absolute path intact.
+    #[cfg(unix)]
+    #[gpui::test]
+    fn encoded_and_outside_file_links_open_in_the_linking_chats_context(cx: &mut TestAppContext) {
+        use crate::markdown::render::{LinkAction, LinkActivation, LinkOutcome, LinkTarget};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(root.join("2026-09-26/Some Folder")).unwrap();
+        std::fs::write(
+            root.join("2026-09-26/Some Folder/it's here.txt"),
+            "encoded\n",
+        )
+        .unwrap();
+        let outside = dir.path().join("outside/INFORME.md");
+        std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
+        std::fs::write(&outside, "# Informe\n").unwrap();
+        cx.update(|cx| {
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, window, cx| {
+                let mut owner = super::tests::chat_with_path(Some(&root.to_string_lossy()), None);
+                owner.id = "owner".into();
+                owner.device_id = "local".into();
+                shell.active_chat = "owner".into();
+                shell.state.update(cx, |state, _| {
+                    state.local_device_id = Some("local".into());
+                    state.apply_chats(vec![owner]);
+                    state.selected_chat = Some("owner".into());
+                });
+
+                let mut activation = LinkActivation {
+                    target: LinkTarget::new("enc", "2026-09-26/Some%20Folder/it%27s%20here.txt"),
+                    action: LinkAction::Primary,
+                    source_session: Some("owner".into()),
+                };
+                assert_eq!(
+                    shell.activate_session_link(&activation, window, cx),
+                    LinkOutcome::Internal
+                );
+                let id = shell.file_surface_seq;
+                assert_eq!(
+                    shell.file_surface_paths.get(&id).map(String::as_str),
+                    Some("2026-09-26/Some Folder/it's here.txt")
+                );
+
+                // The absolute spelling of the same file resolves in-root.
+                let absolute = format!(
+                    "{}/2026-09-26/Some%20Folder/it%27s%20here.txt",
+                    root.display()
+                );
+                activation.target = LinkTarget::new("abs", &absolute);
+                assert_eq!(
+                    shell.activate_session_link(&activation, window, cx),
+                    LinkOutcome::Internal
+                );
+                let id = shell.file_surface_seq;
+                assert_eq!(
+                    shell.file_surface_paths.get(&id).map(String::as_str),
+                    Some("2026-09-26/Some Folder/it's here.txt")
+                );
+                assert_eq!(shell.file_surfaces[&id].read(cx).chat_id(), "owner");
+
+                // Outside every known root the absolute path still opens,
+                // through the linking chat.
+                let outside_target = outside.to_string_lossy().into_owned();
+                activation.target = LinkTarget::new("outside", &outside_target);
+                assert_eq!(
+                    shell.activate_session_link(&activation, window, cx),
+                    LinkOutcome::Internal
+                );
+                let id = shell.file_surface_seq;
+                assert_eq!(
+                    shell.file_surface_paths.get(&id).map(String::as_str),
+                    Some(outside_target.as_str())
+                );
+                assert_eq!(shell.file_surfaces[&id].read(cx).chat_id(), "owner");
+
+                // A path under another project root on this device keeps its
+                // absolute spelling: its root-relative tail would name a
+                // different file under the linking chat's checkout.
+                let project = dir.path().join("other-project");
+                shell.state.update(cx, |state, _| {
+                    state.apply_spaces(vec![zeron_proto::Space {
+                        id: "other".into(),
+                        device_id: "local".into(),
+                        path: project.to_string_lossy().into_owned(),
+                        name: None,
+                        git_detected: false,
+                        git_checked_at: None,
+                        checkout_id: None,
+                        created_at: Utc::now(),
+                    }]);
+                });
+                let project_target = project.join("notes.md").to_string_lossy().into_owned();
+                activation.target = LinkTarget::new("project", &project_target);
+                assert_eq!(
+                    shell.activate_session_link(&activation, window, cx),
+                    LinkOutcome::Internal
+                );
+                let id = shell.file_surface_seq;
+                assert_eq!(
+                    shell.file_surface_paths.get(&id).map(String::as_str),
+                    Some(project_target.as_str())
+                );
+                assert_eq!(shell.file_surfaces[&id].read(cx).chat_id(), "owner");
+            })
+            .unwrap();
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]

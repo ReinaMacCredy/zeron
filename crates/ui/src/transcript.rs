@@ -3616,6 +3616,17 @@ pub struct Transcript {
     /// boundary invalidates only the live tail per commit.
     render_cache: Rc<RefCell<RenderCache>>,
     workspace_link: Option<render::LinkUi>,
+    /// File-link roots per linking chat, valid for one
+    /// `AppState::link_roots_revision`: every rendered row asks for them.
+    file_link_roots: (
+        u64,
+        HashMap<SharedString, Rc<Vec<crate::workspace_links::FileLinkRoot>>>,
+    ),
+    /// Inline code spans that name an existing file, rewritten into the
+    /// Markdown links they stand for per text part (see
+    /// [`crate::markdown::inline_code_links`]). Reset with the same
+    /// link-roots revision that resets `file_link_roots`.
+    inline_code_links: crate::markdown::inline_code_links::InlineCodeLinkCache,
     rendered_rows: HashSet<SharedString>,
     /// Last UI typography generation reflected in `list` item measurements.
     /// Family and size changes can alter prose wrapping without changing row
@@ -3835,13 +3846,77 @@ impl Transcript {
         self.workspace_link = Some(handler);
     }
 
-    pub(crate) fn link_ui(&self) -> Option<render::LinkUi> {
+    pub(crate) fn link_ui(&mut self, cx: &mut Context<Self>) -> Option<render::LinkUi> {
+        let source = self
+            .workspace_link
+            .as_ref()
+            .and_then(|link| link.source_session.clone())
+            .or_else(|| self.chat_id.clone())?;
+        self.link_ui_for(&SharedString::from(source), cx)
+    }
+
+    /// The workspace-link handler bound to `source_chat_id`: the linking
+    /// chat's own checkout resolves first, then its parent's and this
+    /// device's project roots, and the roots come along for the trailing
+    /// open glyph and the file menu.
+    fn link_ui_for(
+        &mut self,
+        source_chat_id: &SharedString,
+        cx: &mut Context<Self>,
+    ) -> Option<render::LinkUi> {
+        let roots = self.file_link_roots(source_chat_id, cx);
+        let source_local = self.state.read(cx).chat_is_local(source_chat_id);
         self.workspace_link.clone().map(|mut link| {
-            if link.source_session.is_none() {
-                link.source_session = self.chat_id.clone();
-            }
+            link.source_session = Some(source_chat_id.to_string());
+            link.source_local = source_local;
+            link.file_roots = Some(roots);
             link
         })
+    }
+
+    /// The ordered checkouts a file link from `chat_id` may open against:
+    /// the chat's own, its parent's, then this device's project roots. The
+    /// memo keeps row rendering from rebuilding them every frame; a state
+    /// change that can move a root clears it.
+    fn file_link_roots(
+        &mut self,
+        chat_id: &SharedString,
+        cx: &gpui::App,
+    ) -> Rc<Vec<crate::workspace_links::FileLinkRoot>> {
+        let state = self.state.read(cx);
+        let (revision, memo) = &mut self.file_link_roots;
+        if *revision != state.link_roots_revision {
+            *revision = state.link_roots_revision;
+            memo.clear();
+        }
+        memo.entry(chat_id.clone())
+            .or_insert_with(|| Rc::new(state.file_link_roots(chat_id)))
+            .clone()
+    }
+
+    /// The row's text with every inline code span that names an existing
+    /// file rewritten into the Markdown link it stands for (see
+    /// [`crate::markdown::inline_code_links`]). The walk is memoized per part
+    /// and link-roots revision; a revision change also drops the flatten
+    /// cache, whose entries were shaped with the previous roots' styling.
+    fn inline_code_tree(
+        &mut self,
+        tree: &Arc<BlockTree>,
+        ui: Option<&render::LinkUi>,
+        cx: &gpui::App,
+    ) -> Arc<BlockTree> {
+        let Some(ui) = ui else {
+            return tree.clone();
+        };
+        let Some(roots) = ui.file_roots.as_deref() else {
+            return tree.clone();
+        };
+        let revision = self.state.read(cx).link_roots_revision;
+        if self.inline_code_links.set_revision(revision) {
+            self.render_cache.borrow_mut().clear();
+        }
+        self.inline_code_links
+            .linked_tree(tree, roots, ui.source_local)
     }
 
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
@@ -3973,6 +4048,8 @@ impl Transcript {
             veil_attach_pending: true,
             render_cache: Rc::new(RefCell::new(RenderCache::default())),
             workspace_link: None,
+            file_link_roots: Default::default(),
+            inline_code_links: Default::default(),
             rendered_rows: HashSet::new(),
             typography_generation: crate::typography::generation(cx),
             content_width: crate::settings::transcript_width(cx),
@@ -7963,6 +8040,8 @@ impl Transcript {
                 column.into_any_element()
             }
             RowKind::Markdown { tree, block_ix } => {
+                let link = self.link_ui(cx);
+                let tree = self.inline_code_tree(tree, link.as_ref(), cx);
                 let Some(top) = tree.blocks.get(*block_ix) else {
                     return gpui::Empty.into_any_element();
                 };
@@ -7975,11 +8054,11 @@ impl Transcript {
                     cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
                     now: Instant::now(),
                     copy: Some(self.copy_ui_for(&row.id, cx)),
-                    link: self.link_ui(),
+                    link,
                     workspace_root: workspace_root.clone(),
                     code,
                 };
-                let highlight = self.code_highlight_for(&row.id, tree, Some(*block_ix), cx);
+                let highlight = self.code_highlight_for(&row.id, &tree, Some(*block_ix), cx);
                 render::render_block(
                     &top.block,
                     *block_ix,
@@ -7994,6 +8073,8 @@ impl Transcript {
                 )
             }
             RowKind::LiveMarkdown { tree, block_ix } => {
+                let link = self.link_ui(cx);
+                let tree = self.inline_code_tree(tree, link.as_ref(), cx);
                 let Some(top) = tree.blocks.get(*block_ix) else {
                     return gpui::Empty.into_any_element();
                 };
@@ -8003,9 +8084,18 @@ impl Transcript {
                 // Baseline rows (text already streamed when the transcript
                 // attached) start seeded: the existing reply must not fade in
                 // on a session switch — only fresh appends animate.
+                let reduced_motion = motion::reduced_motion(cx);
+                if reduced_motion {
+                    // Motion can resume mid-stream (background pause, or the OS
+                    // setting flipping back). Text painted meanwhile is already
+                    // on screen, so the next veil seeds it rather than
+                    // dissolving the reply in again.
+                    self.veils.remove(&row.id);
+                    self.veil_baseline.insert(row.id.clone());
+                }
                 let seed_history = !self.veils.contains_key(&row.id)
                     && self.historical_markdown.contains_key(&row.id);
-                let veil = (!motion::reduced_motion(cx)).then(|| {
+                let veil = (!reduced_motion).then(|| {
                     self.veils
                         .entry(row.id.clone())
                         .or_insert_with(|| {
@@ -8025,7 +8115,7 @@ impl Transcript {
                     cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
                     now: Instant::now(),
                     copy: Some(self.copy_ui_for(&row.id, cx)),
-                    link: self.link_ui(),
+                    link,
                     workspace_root: workspace_root.clone(),
                     code,
                 };
@@ -8047,7 +8137,7 @@ impl Transcript {
                         veil.borrow_mut().finish_seeding();
                     }
                 }
-                let highlight = self.code_highlight_for(&row.id, tree, Some(*block_ix), cx);
+                let highlight = self.code_highlight_for(&row.id, &tree, Some(*block_ix), cx);
                 let timer = frame_stats_enabled().then(Instant::now);
                 let el = render::render_block(
                     &top.block,
@@ -8192,6 +8282,7 @@ impl Transcript {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.copy_message(entry_id.clone(), text.clone(), cx)
                     }))
+                    .tooltip(crate::settings::widgets::text_tooltip("Copy message"))
                     .child(
                         crate::icons::icon(if copied_message {
                             crate::icons::CHECK
@@ -9577,8 +9668,8 @@ fn user_bubble_text(
     let sel_key: std::sync::Arc<str> = format!("{row_id}:u").into();
     let sel_theme = theme.clone();
     let underlay = canvas(
-        |_, _, _| (),
-        move |_, _, window, cx| {
+        |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
+        move |_, hitbox, window, cx| {
             for span in mentions.iter() {
                 if !matches!(span.target, crate::composer::SentMentionTarget::File { .. }) {
                     continue;
@@ -9602,7 +9693,7 @@ fn user_bubble_text(
                     crate::composer::paint_thread_icon(rect, *icon, icon_fallback, window, cx);
                 }
             }
-            render::paint_text_selection(window, &sel_key, &text, &layout, &sel_theme);
+            render::paint_text_selection(window, hitbox, &sel_key, &text, &layout, &sel_theme);
             // Passive geometry cache only: no entity update and no notify.
             // `bounds().height` can be the collapsed clip height, so derive
             // the full text height from the wrapped line layouts instead. The
@@ -15407,6 +15498,73 @@ mod tests {
         }
 
         #[test]
+        fn text_streamed_under_reduced_motion_does_not_fade_in_when_motion_resumes() {
+            fn render_rows(
+                transcript: &Entity<Transcript>,
+                window: gpui::WindowHandle<CachedTranscript>,
+                cx: &mut gpui::App,
+            ) {
+                cx.update_window(window.into(), |_, window, cx| {
+                    transcript.update(cx, |this, cx| {
+                        for ix in 0..this.list.item_count() {
+                            let _ = this.render_row(ix, window, cx);
+                        }
+                    });
+                })
+                .unwrap();
+            }
+            fn streaming(text: &str) -> Vec<SessionMessageEntry> {
+                vec![
+                    prompt("ask"),
+                    assistant(
+                        "reply",
+                        MessageStatus::Streaming,
+                        vec![text_part("body", text)],
+                    ),
+                ]
+            }
+            with_window(|transcript, window, cx| {
+                let body = SharedString::from("reply#body.0");
+                // Attach on the prompt alone, so the reply is live text rather
+                // than an attach-time baseline.
+                transcript.update(cx, |this, cx| feed(this, vec![prompt("ask")], cx));
+                render_rows(&transcript, window, cx);
+
+                // A row that first streams while motion is reduced.
+                cx.set_reduce_motion(true);
+                transcript.update(cx, |this, cx| feed(this, streaming("uno"), cx));
+                render_rows(&transcript, window, cx);
+                assert!(!transcript.read(cx).veils.contains_key(&body));
+                cx.set_reduce_motion(false);
+                render_rows(&transcript, window, cx);
+                let veil = transcript.read(cx).veils[&body].clone();
+                assert!(
+                    veil.borrow_mut()
+                        .advance(0, "uno", Instant::now())
+                        .is_empty(),
+                    "text painted under reduced motion must not dissolve in"
+                );
+
+                // A row already fading when motion pauses, then resumes.
+                cx.set_reduce_motion(true);
+                transcript.update(cx, |this, cx| feed(this, streaming("uno dos"), cx));
+                render_rows(&transcript, window, cx);
+                cx.set_reduce_motion(false);
+                render_rows(&transcript, window, cx);
+                let veil = transcript.read(cx).veils[&body].clone();
+                assert!(
+                    veil.borrow_mut()
+                        .advance(0, "uno dos", Instant::now())
+                        .is_empty(),
+                    "text streamed while paused is already on screen"
+                );
+                let spans = veil.borrow_mut().advance(0, "uno dos tres", Instant::now());
+                assert_eq!(spans.len(), 1);
+                assert_eq!(spans[0].0, "uno dos".len().."uno dos tres".len());
+            });
+        }
+
+        #[test]
         fn replay_growth_snaps_only_when_following_the_tail() {
             with_window(|transcript, window, cx| {
                 let entries: Vec<_> = (0..30).map(|ix| prompt(&format!("prompt-{ix}"))).collect();
@@ -17802,7 +17960,7 @@ mod computer_tests {
                     app: None,
                     tool: Some("computer_click".into()),
                     params: Some(r#"{"x":1,"y":2}"#.into()),
-                }),
+                }), prefill: None, multiline: false, 
             }],
             resolved,
             answers,
@@ -17828,6 +17986,8 @@ mod computer_tests {
                         pid: Some(4242),
                     }),
                 }),
+                prefill: None,
+                multiline: false,
             }],
             resolved,
             answers: label.map(|label| {
@@ -17940,6 +18100,8 @@ mod computer_tests {
                 options: vec!["Allow once".into(), "Deny".into()],
                 multi_select: false,
                 kind: None,
+                prefill: None,
+                multiline: false,
             }],
             resolved,
             answers: None,

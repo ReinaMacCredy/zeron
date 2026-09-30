@@ -11,6 +11,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Range;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -132,7 +133,55 @@ pub use super::links::{LinkAction, LinkActivation, LinkOutcome, LinkTarget};
 #[derive(Clone)]
 pub struct LinkUi {
     pub source_session: Option<String>,
+    /// The linking chat lives on this device — outside links get their
+    /// system-level menu rows (default app, file manager).
+    pub source_local: bool,
+    /// The ordered checkouts a file link may resolve against on this surface,
+    /// the linking chat's own first. `None` renders no trailing open glyph
+    /// and offers no file paths — previews and web-only surfaces.
+    pub(crate) file_roots: Option<Rc<Vec<crate::workspace_links::FileLinkRoot>>>,
     pub handler: Rc<dyn Fn(&LinkActivation, &mut Window, &mut gpui::App) -> LinkOutcome>,
+}
+
+impl LinkUi {
+    /// The workspace file `target` resolves to under this surface's roots,
+    /// when the link is one at all. Drives the trailing open glyph and the
+    /// menu's file rows; the click path re-resolves with owners. Owned links
+    /// get their absolute path from the resolved root joined with the link's
+    /// workspace-relative path; an outside link's absolute path is the
+    /// decoded target itself.
+    pub(crate) fn file_link(&self, target: &str) -> Option<crate::workspace_links::FileLink> {
+        let roots = self.file_roots.as_deref()?;
+        match crate::workspace_links::first_root_owning(
+            target,
+            roots.iter().map(|root| root.root.as_str()),
+        )? {
+            crate::workspace_links::FileLinkResolution::Owned { root: ix, link } => {
+                let root = &roots[ix];
+                let absolute = root.absolute(&link);
+                // A project root past the linking chat's own opens by
+                // absolute path (see `Shell::open_workspace_file_link`), so
+                // its hover card shows that path too.
+                let path = if ix > 0 && root.chat.is_none() {
+                    absolute.to_string_lossy().into_owned()
+                } else {
+                    link.path
+                };
+                Some(crate::workspace_links::FileLink {
+                    absolute,
+                    path,
+                    local: root.local,
+                })
+            }
+            crate::workspace_links::FileLinkResolution::Outside(link) => {
+                Some(crate::workspace_links::FileLink {
+                    absolute: PathBuf::from(&link.path),
+                    path: link.path,
+                    local: self.source_local,
+                })
+            }
+        }
+    }
 }
 
 pub fn activate_link(
@@ -808,7 +857,13 @@ fn render_table(
                     .as_ref()
                     .filter(|ui| ui.source_session.is_some())
                     .map(|_| {
-                        super::link_presentation::present(&flat, px(560.), px(MD_TEXT_SIZE), window)
+                        super::link_presentation::present(
+                            &flat,
+                            px(560.),
+                            px(MD_TEXT_SIZE),
+                            window,
+                            opts,
+                        )
                     });
                 let flat = measured.as_ref().unwrap_or(&flat);
                 // Cell sources are single-line; guard anyway (same byte count,
@@ -912,6 +967,9 @@ pub struct FlatText {
     pub runs: Vec<TextRun>,
     pub links: Vec<(Range<usize>, String)>,
     pub code_ranges: Vec<Range<usize>>,
+    /// Reserved slots after resolved file links — displayed-text
+    /// coordinates. Each slot paints the trailing open glyph.
+    pub file_glyphs: Vec<Range<usize>>,
 }
 
 /// Inline-code tint: a text-safe use of the selected accent identity.
@@ -947,12 +1005,25 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
     let mut out: Vec<TextRun> = Vec::with_capacity(runs.len());
     let mut links: Vec<(Range<usize>, String)> = Vec::new();
     let mut code_ranges: Vec<Range<usize>> = Vec::new();
+    // A run may stand for a longer source text than it shows (a file link
+    // labeled by its file name). The source is only kept when some run does.
+    let relabeled = runs.iter().any(|run| run.style.file_label.is_some());
+    let mut source = String::new();
+    let mut omissions: Vec<(Range<usize>, Range<usize>)> = Vec::new();
     for run in runs {
         if run.text.is_empty() {
             continue;
         }
+        let shown = run.style.file_label.as_deref().unwrap_or(&run.text);
         let start = text.len();
-        text.push_str(&run.text);
+        text.push_str(shown);
+        if relabeled {
+            let source_start = source.len();
+            source.push_str(&run.text);
+            if shown != run.text.as_str() {
+                omissions.push((source_start..source.len(), start..text.len()));
+            }
+        }
         let mut f = if run.style.code {
             font(theme.font_mono.clone())
         } else {
@@ -1001,7 +1072,7 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
             }
         }
         out.push(TextRun {
-            len: run.text.len(),
+            len: shown.len(),
             font: f,
             color,
             // Inline code's wash is painted as ROUNDED quads by the canvas
@@ -1020,11 +1091,20 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
         });
     }
     FlatText {
-        original: None,
+        // The source survives for copy and selection only where a label
+        // actually replaced text.
+        original: (!omissions.is_empty()).then(|| super::link_presentation::OriginalText {
+            text: source.into(),
+            offsets: super::link_presentation::OffsetMap {
+                omissions,
+                prior: None,
+            },
+        }),
         text: text.into(),
         runs: out,
         links,
         code_ranges,
+        file_glyphs: Vec::new(),
     }
 }
 
@@ -1131,8 +1211,8 @@ pub(super) fn flat_text_presented_element(
     let wash = inline_code_wash(theme);
     let sel_wash = selection_wash(theme);
     let underlay = canvas(
-        |_, _, _| (),
-        move |_, _, window, _| {
+        |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
+        move |_, hitbox, window, _| {
             for range in &code_ranges {
                 for rect in range_rects(&layout, range, INLINE_CODE_PAD_X, INLINE_CODE_INSET_Y) {
                     window.paint_quad(quad(
@@ -1171,7 +1251,14 @@ pub(super) fn flat_text_presented_element(
                     offsets: offsets.clone(),
                 })
             });
-            register_selection_listeners(window, &sel_key, &flat_text, &layout, offsets.clone());
+            register_selection_listeners(
+                window,
+                hitbox,
+                &sel_key,
+                &flat_text,
+                &layout,
+                offsets.clone(),
+            );
         },
     )
     .absolute()
@@ -1183,7 +1270,15 @@ pub(super) fn flat_text_presented_element(
     if flat.links.is_empty() {
         return child;
     }
-    super::link_interaction::LinkRanges {
+    // A resolved file link's hit range covers its reserved glyph slot,
+    // so the trailing open glyph activates the link too.
+    let glyph_end = |range: &std::ops::Range<usize>| {
+        flat.file_glyphs
+            .iter()
+            .find(|slot| slot.start == range.end)
+            .map_or(range.end, |slot| slot.end)
+    };
+    let child = super::link_interaction::LinkRanges {
         id: format!(
             "{}-{}-t{ix}",
             opts.row_key,
@@ -1194,13 +1289,13 @@ pub(super) fn flat_text_presented_element(
         )
         .into(),
         child,
-        layout: link_layout,
+        layout: link_layout.clone(),
         links: flat
             .links
             .iter()
             .map(|(range, url)| {
                 (
-                    range.clone(),
+                    range.start..glyph_end(range),
                     LinkTarget::new(
                         flat.original
                             .as_ref()
@@ -1215,6 +1310,17 @@ pub(super) fn flat_text_presented_element(
             .collect(),
         ui: opts.link.clone(),
     }
+    .into_any_element();
+    // Trailing open glyphs of resolved file links paint over the shaped text.
+    if flat.file_glyphs.is_empty() {
+        return child;
+    }
+    super::link_presentation::FileLinkGlyphs {
+        id: format!("{}-file-glyphs-{ix}", opts.row_key).into(),
+        child,
+        layout: link_layout,
+        slots: flat.file_glyphs.clone(),
+    }
     .into_any_element()
 }
 
@@ -1227,19 +1333,22 @@ fn selection_wash(theme: &Theme) -> Hsla {
 /// bubble. Paints the selection wash under the glyphs, registers the element
 /// into the frame's document-ordered registry (so drags span into adjacent
 /// markdown rows and Cmd+C joins in order), and re-registers the mouse
-/// listeners. Call from a paint-phase canvas that sits UNDER the text.
+/// listeners. Call from a paint-phase canvas that sits UNDER the text, passing
+/// the hitbox inserted in that canvas's prepaint phase.
 pub(crate) fn paint_text_selection(
     window: &mut Window,
+    hitbox: gpui::Hitbox,
     key: &std::sync::Arc<str>,
     text: &SharedString,
     layout: &gpui::TextLayout,
     theme: &Theme,
 ) {
-    paint_text_selection_with_wash(window, key, text, layout, selection_wash(theme));
+    paint_text_selection_with_wash(window, hitbox, key, text, layout, selection_wash(theme));
 }
 
 fn paint_text_selection_with_wash(
     window: &mut Window,
+    hitbox: gpui::Hitbox,
     key: &std::sync::Arc<str>,
     text: &SharedString,
     layout: &gpui::TextLayout,
@@ -1265,7 +1374,7 @@ fn paint_text_selection_with_wash(
             offsets: None,
         })
     });
-    register_selection_listeners(window, key, text, layout, None);
+    register_selection_listeners(window, hitbox, key, text, layout, None);
 }
 
 /// The wrapping div shared by every selectable text region: markdown
@@ -1288,9 +1397,9 @@ fn selectable_text_element(
     let styled = StyledText::new(text.clone()).with_runs(runs);
     let layout = styled.layout().clone();
     let underlay = canvas(
-        |_, _, _| (),
-        move |_, _, window, _| {
-            paint_text_selection_with_wash(window, &key, &text, &layout, wash);
+        |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
+        move |_, hitbox, window, _| {
+            paint_text_selection_with_wash(window, hitbox, &key, &text, &layout, wash);
         },
     )
     .absolute()
@@ -1478,6 +1587,7 @@ pub(crate) fn update_drag_at(position: gpui::Point<gpui::Pixels>) -> bool {
 /// outside the element's bounds; frame-scoped, so paint re-registers).
 fn register_selection_listeners(
     window: &mut Window,
+    hitbox: gpui::Hitbox,
     key: &std::sync::Arc<str>,
     text: &SharedString,
     layout: &gpui::TextLayout,
@@ -1490,7 +1600,10 @@ fn register_selection_listeners(
             if phase != DispatchPhase::Bubble || e.button != MouseButton::Left {
                 return;
             }
-            if layout.bounds().contains(&e.position) {
+            // Geometry alone includes text hidden behind popups or clipping.
+            // Only start a selection when this surface receives the press;
+            // subsequent drag events stay window-wide to span text blocks.
+            if hitbox.is_hovered(window) && layout.bounds().contains(&e.position) {
                 let ix = match layout.index_for_position(e.position) {
                     Ok(ix) | Err(ix) => ix,
                 };
@@ -1960,6 +2073,7 @@ fn code_copy_button(
                 cx.stop_propagation();
                 handler(ix, code_text.clone(), window, cx);
             })
+            .tooltip(|_, cx| cx.new(|_| CodeBlockTooltip("Copy code")).into())
             .child(
                 crate::icons::icon(if copied {
                     crate::icons::CHECK
@@ -2390,7 +2504,10 @@ mod tests {
     use crate::markdown::parser::{InlineStyle, parse_full};
     use gpui::TestAppContext;
 
-    struct CodeSelectionHarness;
+    #[derive(Default)]
+    struct CodeSelectionHarness {
+        occluded: bool,
+    }
 
     impl Render for CodeSelectionHarness {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2436,6 +2553,9 @@ mod tests {
                     &opts,
                     &theme,
                 ))
+                .when(self.occluded, |root| {
+                    root.child(div().absolute().inset_0().occlude())
+                })
         }
     }
 
@@ -2443,7 +2563,7 @@ mod tests {
     fn code_block_lines_participate_in_text_selection(cx: &mut TestAppContext) {
         let _selection = super::super::selection::test_state_lock();
         cx.update(|cx| cx.set_global(Theme::dark()));
-        let (_, cx) = cx.add_window_view(|_, _| CodeSelectionHarness);
+        let (_, cx) = cx.add_window_view(|_, _| CodeSelectionHarness::default());
         cx.simulate_resize(size(px(640.0), px(240.0)));
         cx.update(|window, cx| {
             window.refresh();
@@ -2511,6 +2631,54 @@ mod tests {
         assert!(second_bounds.bottom() < after_bounds.bottom());
     }
 
+    #[gpui::test]
+    fn occluded_text_ignores_double_and_triple_clicks(cx: &mut TestAppContext) {
+        let _selection = super::super::selection::test_state_lock();
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let (view, cx) = cx.add_window_view(|_, _| CodeSelectionHarness { occluded: true });
+        cx.simulate_resize(size(px(640.0), px(240.0)));
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        let key = "code-selection-test-code1-line0";
+        let position = selection_test_bounds(key).origin + point(px(5.0), px(9.0));
+        for click_count in [2, 3] {
+            cx.simulate_event(gpui::MouseDownEvent {
+                button: gpui::MouseButton::Left,
+                position,
+                click_count,
+                ..Default::default()
+            });
+            let dragging = super::super::selection::is_dragging();
+            let selected = super::super::selection::selected_text();
+            cx.simulate_event(gpui::MouseUpEvent {
+                button: gpui::MouseButton::Left,
+                position,
+                ..Default::default()
+            });
+            super::super::selection::clear_if_owner(key);
+            assert_eq!((dragging, selected), (false, None));
+        }
+        view.update(cx, |view, cx| {
+            view.occluded = false;
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        cx.simulate_event(gpui::MouseDownEvent {
+            button: gpui::MouseButton::Left,
+            position,
+            click_count: 2,
+            ..Default::default()
+        });
+        let selected = super::super::selection::selected_text();
+        super::super::selection::clear_if_owner(key);
+        assert_eq!(selected.as_deref(), Some("selectable"));
+    }
+
     /// Markdown code blocks are the surface the shared setting's default was
     /// taken from, so they scale 1:1 and need no ratio of their own.
     #[test]
@@ -2549,6 +2717,103 @@ mod tests {
             sole_workspace_file_link(&runs, "/work/comet"),
             Some("src/slides.ts".into())
         );
+    }
+
+    /// The sole-file row follows the same grammar as a click: an encoded
+    /// path resolves decoded, and an absolute path no root owns is still the
+    /// linking chat's file (read-only, but not plain text).
+    #[test]
+    fn sole_file_row_covers_decoded_and_outside_links() {
+        let decoded = vec![InlineRun {
+            text: "it's here.txt".into(),
+            style: InlineStyle {
+                link: Some("2026-09-26/Some%20Folder/it's%20here.txt".into()),
+                ..Default::default()
+            },
+        }];
+        assert_eq!(
+            sole_workspace_file_link(&decoded, "/work/comet"),
+            Some("2026-09-26/Some Folder/it's here.txt".into())
+        );
+
+        let outside = vec![InlineRun {
+            text: "INFORME.md".into(),
+            style: InlineStyle {
+                link: Some("/tmp/elsewhere/INFORME.md".into()),
+                ..Default::default()
+            },
+        }];
+        assert_eq!(
+            sole_workspace_file_link(&outside, "/work/comet"),
+            Some("/tmp/elsewhere/INFORME.md".into())
+        );
+
+        // A relative path no root owns stays plain text.
+        let unresolved = vec![InlineRun {
+            text: "go.md".into(),
+            style: InlineStyle {
+                link: Some("../go.md".into()),
+                ..Default::default()
+            },
+        }];
+        assert_eq!(sole_workspace_file_link(&unresolved, "/work/comet"), None);
+    }
+
+    #[test]
+    fn a_file_label_shows_in_place_of_the_path_which_stays_the_copy_source() {
+        let path = "2026-09-29/Some Long Folder Name/SOURCES.md";
+        let linked = InlineRun {
+            text: path.into(),
+            style: InlineStyle {
+                link: Some(path.into()),
+                file_label: Some("SOURCES.md".into()),
+                ..Default::default()
+            },
+        };
+        // A whole line or list item still gets the file row's icon identity.
+        assert_eq!(
+            sole_file_reference(std::slice::from_ref(&linked), "/work/comet"),
+            Some(path.into())
+        );
+
+        let sentence = vec![
+            InlineRun {
+                text: "See ".into(),
+                style: InlineStyle::default(),
+            },
+            linked,
+            InlineRun {
+                text: " next.".into(),
+                style: InlineStyle::default(),
+            },
+        ];
+        let flat = flatten_runs(&sentence, &Theme::dark(), false);
+        assert_eq!(flat.text.as_ref(), "See SOURCES.md next.");
+        assert_eq!(flat.links, vec![(4..14, path.to_owned())]);
+        assert_eq!(
+            flat.runs.iter().map(|run| run.len).sum::<usize>(),
+            flat.text.len()
+        );
+        let original = flat.original.expect("the path is kept for copy");
+        assert_eq!(original.text.as_ref(), format!("See {path} next."));
+        // Selecting the whole label copies the whole path; the prose around
+        // it maps one to one.
+        let offsets = &original.offsets;
+        assert_eq!(offsets.original(4), 4);
+        assert_eq!(offsets.original(14), 4 + path.len());
+        assert_eq!(offsets.original(flat.text.len()), original.text.len());
+        assert_eq!(offsets.displayed(4 + path.len() + 1), 15);
+    }
+
+    #[test]
+    fn an_authored_file_link_label_is_never_replaced_by_the_file_name() {
+        let tree = parse_full("[docs/a.md](docs/a.md)");
+        let Block::Paragraph { runs } = &tree.blocks[0].block else {
+            panic!("expected a paragraph");
+        };
+        let flat = flatten_runs(runs, &Theme::dark(), false);
+        assert_eq!(flat.text.as_ref(), "docs/a.md");
+        assert!(flat.original.is_none(), "the authored label is the source");
     }
 
     #[test]
@@ -2975,6 +3240,7 @@ mod tests {
                     runs: Vec::new(),
                     links: Vec::new(),
                     code_ranges: Vec::new(),
+                    file_glyphs: Vec::new(),
                 }),
             );
             cache.code.insert(
@@ -3019,6 +3285,7 @@ mod tests {
                 runs: Vec::new(),
                 links: Vec::new(),
                 code_ranges: Vec::new(),
+                file_glyphs: Vec::new(),
             }),
         );
         cache.sync_generation(10);

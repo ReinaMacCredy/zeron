@@ -907,6 +907,8 @@ mod tests {
                 options: vec!["Yes".into(), "No".into()],
                 multi_select: false,
                 kind,
+                prefill: None,
+                multiline: false,
             }],
             resolved: answer.is_some(),
             answers: answer.map(|label| {

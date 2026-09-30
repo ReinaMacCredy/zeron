@@ -47,6 +47,8 @@ fn question(id: &str, consent: bool) -> UserInputQuestion {
             tool: None,
             params: None,
         }),
+        prefill: None,
+        multiline: false,
     }
 }
 

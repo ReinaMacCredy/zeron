@@ -2476,6 +2476,8 @@ mod computer_marker_tests {
             options: vec!["Yes".into(), "No".into()],
             multi_select: false,
             kind: None,
+            prefill: None,
+            multiline: false,
         }
     }
 
