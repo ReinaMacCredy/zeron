@@ -378,8 +378,7 @@ impl Harness for PiHarness {
                 request_input,
                 mut steering,
                 interrupt,
-                tool_server: _,
-                stop_tasks: _,
+                ..
             } = controls;
             runner.process.dialogs.input = Some(std::sync::Arc::from(request_input));
             let consumer = runner.tx.clone();

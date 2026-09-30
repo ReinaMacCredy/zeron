@@ -4392,7 +4392,8 @@ impl Shell {
         let Some(root) = self.chat_cwd(chat_id, cx) else {
             return;
         };
-        let Some(link) = resolve_workspace_file_link(path, &root) else {
+        let Some(link) = resolve_workspace_file_link(path, &root).filter(|link| !link.outside)
+        else {
             if std::path::Path::new(path.trim()).has_root() {
                 self.defer_file_surface(path.trim().to_owned(), cx);
             }

@@ -608,7 +608,7 @@ async fn absolute_image_reads_work_from_a_chat_outside_any_checkout() {
             .await
             .expect("absolute read from a non-checkout chat");
         let checkout = read["checkoutId"].as_str().unwrap().to_string();
-        assert!(!checkout.is_empty());
+        assert!(checkout.is_empty());
         assert_eq!(read["readOnlyReason"], "outsideWorkspace");
         let image = client
             .call(
