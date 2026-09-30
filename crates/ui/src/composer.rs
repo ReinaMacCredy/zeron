@@ -1930,6 +1930,7 @@ pub enum ComposerInputEvent {
     MentionNavigate(isize),
     MentionAccept,
     MentionDismiss,
+    HistoryNavigate(isize),
     /// Images pasted from the clipboard (screenshots / copied image data) —
     /// the wrapper stages them as attachments (use-attachments.ts onPaste).
     PastedImages(Vec<gpui::Image>),
@@ -2055,6 +2056,7 @@ pub struct ComposerInput {
     /// mention token is active, keeping input focus and native text editing.
     mention_open: bool,
     mention_has_selection: bool,
+    prompt_history: bool,
     /// Last prepainted chip bounds; the paint-phase pointer listener uses
     /// these instead of attempting to infer text geometry from the cursor.
     mention_hits: Vec<MentionHit>,
@@ -2138,6 +2140,7 @@ impl ComposerInput {
             last_edit: None,
             mention_open: false,
             mention_has_selection: false,
+            prompt_history: false,
             mention_hits: Vec::new(),
             mention_tooltip: MentionTooltipPhase::Hidden,
             mention_tooltip_generation: 0,
@@ -2851,11 +2854,11 @@ impl ComposerInput {
             cx.emit(ComposerInputEvent::MentionNavigate(-1));
             return;
         }
-        if let Some((ix, affinity, column)) = self.vertical_target(-1.0) {
-            self.move_to(ix, cx);
-            self.caret_affinity = affinity;
-            self.preferred_column = Some(column);
+        if self.prompt_history && self.on_edge_row(-1.0) {
+            cx.emit(ComposerInputEvent::HistoryNavigate(-1));
+            return;
         }
+        self.move_vertical(-1.0, cx);
     }
 
     fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
@@ -2863,11 +2866,27 @@ impl ComposerInput {
             cx.emit(ComposerInputEvent::MentionNavigate(1));
             return;
         }
-        if let Some((ix, affinity, column)) = self.vertical_target(1.0) {
+        if self.prompt_history && self.on_edge_row(1.0) {
+            cx.emit(ComposerInputEvent::HistoryNavigate(1));
+            return;
+        }
+        self.move_vertical(1.0, cx);
+    }
+
+    pub(crate) fn move_vertical(&mut self, dir: f32, cx: &mut Context<Self>) {
+        if let Some((ix, affinity, column)) = self.vertical_target(dir) {
             self.move_to(ix, cx);
             self.caret_affinity = affinity;
             self.preferred_column = Some(column);
         }
+    }
+
+    fn on_edge_row(&self, dir: f32) -> bool {
+        let Some(current) = self.cursor_point() else {
+            return self.content.is_empty();
+        };
+        let target_y = f32::from(current.y) + dir * f32::from(self.line_height);
+        target_y < 0.0 || target_y >= self.content_height
     }
 
     fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
@@ -5958,6 +5977,36 @@ fn slash_error_message(err: &RpcError, skill: bool) -> SharedString {
     }
 }
 
+struct PromptHistoryCursor {
+    ix: usize,
+    stash: String,
+    shown: String,
+}
+
+fn sent_prompts(transcript: &[SessionMessageEntry]) -> Vec<String> {
+    let mut prompts: Vec<String> = Vec::new();
+    for entry in transcript.iter().rev() {
+        if entry.role != MessageRole::User || entry.answers_request_id.is_some() {
+            continue;
+        }
+        let text = entry
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                MessagePart::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let text = text.trim();
+        if text.is_empty() || prompts.last().is_some_and(|last| last == text) {
+            continue;
+        }
+        prompts.push(text.to_string());
+    }
+    prompts
+}
+
 pub struct Composer {
     pub(crate) state: Entity<AppState>,
     /// The chat this composer writes to, when it is NOT the selected one: a
@@ -6054,6 +6103,7 @@ pub struct Composer {
     background: background::BackgroundUi,
     /// Focus once on mount, navigation, or after opening/closing a queue edit.
     pub(crate) focus_pending: bool,
+    prompt_history: Option<PromptHistoryCursor>,
     /// Live drag over the queue panel: which row, and where it would land.
     pub(crate) queue_drag: Option<crate::queue::QueueDragState>,
     pub(crate) queue_scroll: gpui::ScrollHandle,
@@ -6197,6 +6247,7 @@ impl Composer {
             let mut input =
                 ComposerInput::with_context("Do anything…", MESSAGE_COMPOSER_CONTEXT, cx);
             input.enable_mentions();
+            input.prompt_history = true;
             input.thread_state = Some(state.clone());
             input
         });
@@ -6253,6 +6304,7 @@ impl Composer {
                     this.dismiss_mention(cx)
                 }
             }
+            ComposerInputEvent::HistoryNavigate(delta) => this.navigate_history(*delta, cx),
             ComposerInputEvent::PastedImages(images) => {
                 let staged = images
                     .iter()
@@ -6328,6 +6380,7 @@ impl Composer {
             queue_edit_renew_task: None,
             background: Default::default(),
             focus_pending: true,
+            prompt_history: None,
             queue_drag: None,
             queue_scroll: gpui::ScrollHandle::new(),
             queue_full_preview: None,
@@ -7584,6 +7637,13 @@ impl Composer {
     }
 
     fn on_input_edited(&mut self, cx: &mut Context<Self>) {
+        if self
+            .prompt_history
+            .as_ref()
+            .is_some_and(|cursor| cursor.shown != self.input.read(cx).text())
+        {
+            self.prompt_history = None;
+        }
         self.sync_draft(cx);
         if self.wizard.is_some() {
             if self.mention.token.is_some() || self.mention_task.is_some() {
@@ -9006,6 +9066,7 @@ impl Composer {
                 }
             };
             self.current_key = key;
+            self.prompt_history = None;
             // `failure` deliberately survives navigation: chat-scoped
             // failures render only under their own chat (see `failure_key`),
             // so switching away and back must not erase the one visible
@@ -9194,6 +9255,50 @@ impl Composer {
         self.failure_key = None;
         cx.emit(ComposerEvent::WorkspaceCommand(command));
         cx.notify();
+    }
+
+    fn navigate_history(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let target = if self.wizard.is_some()
+            || self.editing_queued.is_some()
+            || self.chat_override.is_some()
+            || self.input.read(cx).read_only
+        {
+            None
+        } else {
+            match (&self.prompt_history, delta < 0) {
+                (None, true) => Some(0),
+                (Some(cursor), true) => Some(cursor.ix + 1),
+                (Some(cursor), false) => cursor.ix.checked_sub(1),
+                (None, false) => None,
+            }
+        };
+        let prompts = target
+            .map(|_| sent_prompts(&self.state.read(cx).transcript))
+            .unwrap_or_default();
+        match target.and_then(|ix| prompts.get(ix).map(|prompt| (ix, prompt.clone()))) {
+            Some((ix, prompt)) => {
+                let stash = match self.prompt_history.take() {
+                    Some(cursor) => cursor.stash,
+                    None => self.input.read(cx).text().to_string(),
+                };
+                self.prompt_history = Some(PromptHistoryCursor {
+                    ix,
+                    stash,
+                    shown: prompt.clone(),
+                });
+                self.input
+                    .update(cx, |input, cx| input.set_text(prompt, cx));
+            }
+            None if delta > 0 && self.prompt_history.is_some() => {
+                let stash = self.prompt_history.take().map(|cursor| cursor.stash);
+                self.input.update(cx, |input, cx| {
+                    input.set_text(stash.unwrap_or_default(), cx)
+                });
+            }
+            None => self
+                .input
+                .update(cx, |input, cx| input.move_vertical(delta as f32, cx)),
+        }
     }
 
     fn on_submit(&mut self, cx: &mut Context<Self>) {
@@ -15318,6 +15423,90 @@ mod tests {
         assert_eq!(label(120), "2h");
         assert_eq!(label(145), "2h 25m");
         assert_eq!(label(3 * 24 * 60 + 5), "3d");
+    }
+
+    #[gpui::test]
+    fn arrow_keys_walk_the_chats_sent_prompts_and_restore_the_draft(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        let entry = |id: &str, role: MessageRole, text: &str| SessionMessageEntry {
+            id: id.into(),
+            role,
+            parts: vec![MessagePart::Text {
+                id: "t0".into(),
+                text: text.into(),
+            }],
+            created_at: 0,
+            device_id: "dev".into(),
+            status: None,
+            continuation_of: None,
+            from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
+            duration_ms: None,
+        };
+        handle
+            .update(cx, |composer, _, cx| {
+                composer.state.update(cx, |state, _| {
+                    state.chats = vec![chat_row("c1", None)];
+                    state.selected_chat = Some("c1".into());
+                    state.transcript = vec![
+                        entry("u1", MessageRole::User, "first"),
+                        entry("a1", MessageRole::Assistant, "reply"),
+                        entry("u2", MessageRole::User, "second"),
+                    ];
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let settle = |cx: &mut gpui::TestAppContext| {
+            cx.run_until_parked();
+            cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+                .unwrap();
+        };
+        handle
+            .update(cx, |composer, _, cx| {
+                composer
+                    .input
+                    .update(cx, |input, cx| input.set_text("draft", cx));
+            })
+            .unwrap();
+        settle(cx);
+        let press = |cx: &mut gpui::TestAppContext, up: bool| -> String {
+            handle
+                .update(cx, |composer, window, cx| {
+                    composer.input.update(cx, |input, cx| {
+                        if up {
+                            input.up(&Up, window, cx)
+                        } else {
+                            input.down(&Down, window, cx)
+                        }
+                    });
+                })
+                .unwrap();
+            settle(cx);
+            handle
+                .update(cx, |composer, _, cx| {
+                    composer.input.read(cx).text().to_string()
+                })
+                .unwrap()
+        };
+        assert_eq!(press(cx, true), "second");
+        assert_eq!(press(cx, true), "first");
+        assert_eq!(press(cx, true), "first");
+        assert_eq!(press(cx, false), "second");
+        assert_eq!(press(cx, false), "draft");
+        assert_eq!(press(cx, false), "draft");
+
+        assert_eq!(press(cx, true), "second");
+        handle
+            .update(cx, |composer, _, cx| {
+                composer
+                    .input
+                    .update(cx, |input, cx| input.set_text("second, edited", cx));
+            })
+            .unwrap();
+        settle(cx);
+        assert_eq!(press(cx, false), "second, edited");
     }
 
     #[gpui::test]

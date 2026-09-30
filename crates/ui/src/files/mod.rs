@@ -533,7 +533,8 @@ impl FilesSurface {
             | ComposerInputEvent::PastedPaths(_)
             | ComposerInputEvent::PastedText { .. }
             | ComposerInputEvent::CursorMoved
-            | ComposerInputEvent::ViewportChanged => {}
+            | ComposerInputEvent::ViewportChanged
+            | ComposerInputEvent::HistoryNavigate(_) => {}
         });
         let observe = cx.observe(&state, |this: &mut Self, _, cx| {
             if this.sync_target(cx) {
