@@ -11,7 +11,7 @@ use futures::stream::BoxStream;
 
 use zeron_doc::{
     MessagePart, MessageRole, MessageStatus, SegmentWriter, SessionCommandEntry,
-    SessionCommandPayload, SessionCommandStatus, SessionDoc, SessionMessageEntry,
+    SessionCommandPayload, SessionCommandStatus, SessionDoc, SessionMessageEntry, SubagentStatus,
 };
 use zeron_engine::{EngineCore, HarnessRegistry, RunJournal};
 use zeron_harness::mock::MockHarness;
@@ -1287,6 +1287,166 @@ async fn recover_stale_journal_stamps_aborted_on_boot() {
         core.sessions.session_status(CHAT).map(|s| s.status),
         Some(SessionStatus::Idle)
     );
+}
+
+fn spawn_chip(id: &str, status: SubagentStatus) -> MessagePart {
+    MessagePart::Tool {
+        id: id.into(),
+        call: ToolCall::Unknown {
+            name: "Agent: scout".into(),
+            input: None,
+        },
+        output: None,
+        diff: None,
+        is_error: false,
+        resolved: true,
+        output_ref: None,
+        output_bytes: None,
+        diff_ref: None,
+        diff_stats: None,
+        subagent_ref: Some(format!("{CHAT}--sub--{id}")),
+        subagent_status: Some(status),
+        subagent_tail: None,
+    }
+}
+
+#[tokio::test]
+async fn recover_stale_journal_settles_chips_in_completed_local_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let device_id = "dev-host-fixed";
+    std::fs::write(dir.path().join("device-id"), device_id).unwrap();
+    let journal = RunJournal::open(dir.path().join("orgs/dev-org/dev-user/journals")).unwrap();
+    journal
+        .append(
+            CHAT,
+            &AgentEvent::Subagent {
+                parent_tool_use_id: "spawn-running".into(),
+                event: Box::new(AgentEvent::TextDelta {
+                    text: "working".into(),
+                }),
+            },
+        )
+        .unwrap();
+    let doc = SessionDoc::init(CHAT).unwrap();
+    for (id, device) in [("local", device_id), ("remote", "other-device")] {
+        doc.push_message(&SessionMessageEntry {
+            id: id.into(),
+            role: MessageRole::Assistant,
+            parts: vec![
+                spawn_chip(&format!("{id}-running"), SubagentStatus::Running),
+                spawn_chip(&format!("{id}-done"), SubagentStatus::Done),
+            ],
+            created_at: 1,
+            device_id: device.into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+            from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
+        })
+        .unwrap();
+    }
+    let store = DocsStore::open(dir.path().join("orgs/dev-org/dev-user")).unwrap();
+    store
+        .save_snapshot(CHAT, &doc.export_snapshot().unwrap())
+        .unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(MockHarness {
+            script: mock_script(),
+        }),
+    );
+    let all = entries(&core);
+    let statuses: Vec<_> = all
+        .iter()
+        .flat_map(|e| &e.parts)
+        .filter_map(|p| match p {
+            MessagePart::Tool {
+                subagent_status, ..
+            } => *subagent_status,
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        statuses,
+        [
+            SubagentStatus::Failed,
+            SubagentStatus::Done,
+            SubagentStatus::Running,
+            SubagentStatus::Done
+        ]
+    );
+    assert!(
+        all.iter()
+            .all(|e| e.status == Some(MessageStatus::Complete))
+    );
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn subagent_done_without_a_live_sink_updates_a_persisted_chip() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(MockHarness {
+            script: vec![
+                AgentEvent::Subagent {
+                    parent_tool_use_id: "old-spawn".into(),
+                    event: Box::new(done(DoneStatus::Completed)),
+                },
+                done(DoneStatus::Completed),
+            ],
+        }),
+    );
+    core.doc_host
+        .open(CHAT)
+        .unwrap()
+        .doc()
+        .push_message(&SessionMessageEntry {
+            id: "old-assistant".into(),
+            role: MessageRole::Assistant,
+            parts: vec![spawn_chip("old-spawn", SubagentStatus::Running)],
+            created_at: 1,
+            device_id: core.device_id.clone(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+            from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
+        })
+        .unwrap();
+    core.sessions
+        .dispatch(CHAT, HarnessId::Mock, run_request("resume"), None)
+        .await
+        .unwrap();
+    wait_for(
+        || {
+            core.sessions
+                .session_status(CHAT)
+                .is_some_and(|s| s.status == SessionStatus::Idle)
+        },
+        "resumed turn completes",
+    )
+    .await;
+    let all = entries(&core);
+    let chip = all
+        .iter()
+        .flat_map(|e| &e.parts)
+        .find(|p| matches!(p, MessagePart::Tool { id, .. } if id == "old-spawn"))
+        .unwrap();
+    assert!(
+        matches!(
+            chip,
+            MessagePart::Tool {
+                subagent_status: Some(SubagentStatus::Done),
+                ..
+            }
+        ),
+        "{chip:?}"
+    );
+    core.shutdown().await;
 }
 
 #[tokio::test]

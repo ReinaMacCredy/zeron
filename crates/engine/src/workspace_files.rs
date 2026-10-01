@@ -27,6 +27,8 @@ use zeron_rpc::RpcError;
 
 use crate::{Repos, WorkspaceHost};
 
+mod mutations;
+
 const MAX_RELATIVE_PATH_BYTES: usize = 4096;
 const MAX_RELATIVE_PATH_COMPONENTS: usize = 256;
 const MAX_ABSOLUTE_PATH_BYTES: usize = 16 * 1024;
@@ -53,6 +55,7 @@ struct WorkspaceFilesInner {
     repos: Repos,
     workspace: WorkspaceHost,
     device_id: String,
+    mutation_gates: Mutex<HashMap<String, Weak<tokio::sync::RwLock<()>>>>,
     write_locks: Mutex<HashMap<WorkspaceFileKey, Weak<tokio::sync::Mutex<()>>>>,
     watches: Mutex<HashMap<String, Arc<CheckoutWatch>>>,
     cancel: CancellationToken,
@@ -243,6 +246,7 @@ impl WorkspaceFiles {
                 repos,
                 workspace,
                 device_id: device_id.into(),
+                mutation_gates: Mutex::new(HashMap::new()),
                 write_locks: Mutex::new(HashMap::new()),
                 watches: Mutex::new(HashMap::new()),
                 cancel: CancellationToken::new(),
@@ -416,7 +420,14 @@ impl WorkspaceFiles {
         .await
         .map_err(|error| WorkspaceFilesError::Io(format!("directory worker failed: {error}")))?;
         cancel_on_drop.disarm();
-        result
+        result.map(|mut page| {
+            page.checkout_id = Some(workspace.checkout_id);
+            page.mutation_capabilities = Some(zeron_proto::WorkspaceMutationCapabilities {
+                move_entry: cfg!(any(target_os = "linux", target_os = "macos", windows)),
+                delete_entry: true,
+            });
+            page
+        })
     }
 
     pub async fn search(
@@ -526,6 +537,15 @@ impl WorkspaceFiles {
                     .into(),
             ));
         }
+        let mutation_guard = self
+            .mutation_gate(&workspace.checkout_id)
+            .read_owned()
+            .await;
+        if self.resolve_target(&request.target).await? != workspace {
+            return Err(WorkspaceFilesError::Authorization(
+                "Workspace changed while waiting to save".into(),
+            ));
+        }
         let relative = WorkspaceRelativePath::file(&request.path)?;
         let key = WorkspaceFileKey {
             checkout_id: workspace.checkout_id.clone(),
@@ -547,6 +567,7 @@ impl WorkspaceFiles {
         let cancel_on_drop = CancelOnDrop::new(cancel.clone());
         let expected_hash = request.expected_content_hash;
         let result = tokio::task::spawn_blocking(move || {
+            let _mutation_guard = mutation_guard;
             let _write_guard = write_guard;
             write_file_blocking(&workspace.root, &relative, &expected_hash, &bytes, &cancel)
         })
@@ -911,6 +932,7 @@ fn normalize_watch_events(
                     changes.insert(
                         path.clone(),
                         WorkspaceFileChange {
+                            operation_id: None,
                             kind: WorkspaceFileChangeKind::Modified,
                             path,
                             old_path: None,
@@ -921,6 +943,7 @@ fn normalize_watch_events(
                 changes.insert(
                     path.clone(),
                     WorkspaceFileChange {
+                        operation_id: None,
                         kind: WorkspaceFileChangeKind::Renamed,
                         path,
                         old_path: Some(old_path),
@@ -947,6 +970,7 @@ fn normalize_watch_events(
                 continue;
             };
             let incoming = WorkspaceFileChange {
+                operation_id: None,
                 kind,
                 path: path.clone(),
                 old_path: None,
@@ -1119,6 +1143,8 @@ fn list_directory_blocking(
             .as_ref()
             .is_some_and(|visible| !visible.contains(&path));
         entries.push(WorkspaceEntry {
+            mutation_revision: (!mutations::is_link(&metadata))
+                .then(|| mutations::revision(&metadata)),
             name: entry.file_name().to_string_lossy().into_owned(),
             path,
             kind,
@@ -1172,6 +1198,8 @@ fn list_directory_blocking(
         })
     });
     Ok(WorkspaceDirectoryPage {
+        checkout_id: None,
+        mutation_capabilities: None,
         directory: directory.wire_path(),
         entries: page_entries,
         next_cursor,
@@ -1555,7 +1583,7 @@ fn checked_file_metadata(
                 WorkspaceFilesError::Io(error.to_string())
             }
         })?;
-        if metadata.file_type().is_symlink() {
+        if mutations::is_link(&metadata) {
             let message = if index + 1 == components.len() {
                 "path is a symlink"
             } else {
@@ -2014,6 +2042,8 @@ fn checked_directory(
     root: &Path,
     directory: &WorkspaceRelativePath,
 ) -> Result<PathBuf, WorkspaceFilesError> {
+    let canonical_root =
+        std::fs::canonicalize(root).map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
     let mut current = root.to_path_buf();
     for component in directory.as_path().components() {
         let Component::Normal(component) = component else {
@@ -2022,7 +2052,7 @@ fn checked_directory(
         current.push(component);
         let metadata = std::fs::symlink_metadata(&current)
             .map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
-        if metadata.file_type().is_symlink() {
+        if mutations::is_link(&metadata) {
             return Err(WorkspaceFilesError::Unsupported(
                 "symlink directories cannot be traversed".into(),
             ));
@@ -2035,7 +2065,7 @@ fn checked_directory(
     }
     let canonical = std::fs::canonicalize(&current)
         .map_err(|error| WorkspaceFilesError::Io(error.to_string()))?;
-    if !canonical.starts_with(root) {
+    if !canonical.starts_with(&canonical_root) {
         return Err(WorkspaceFilesError::Authorization(
             "directory escaped workspace".into(),
         ));
@@ -2171,6 +2201,26 @@ mod tests {
 
     fn no_cancel() -> AtomicBool {
         AtomicBool::new(false)
+    }
+
+    #[test]
+    fn checked_directory_accepts_the_workspace_root_and_its_child_after_canonicalization() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("child")).unwrap();
+        let canonical_root = std::fs::canonicalize(root.path()).unwrap();
+
+        assert_eq!(
+            checked_directory(root.path(), &WorkspaceRelativePath::directory("").unwrap()).unwrap(),
+            canonical_root
+        );
+        assert_eq!(
+            checked_directory(
+                root.path(),
+                &WorkspaceRelativePath::directory("child").unwrap()
+            )
+            .unwrap(),
+            canonical_root.join("child")
+        );
     }
 
     #[test]

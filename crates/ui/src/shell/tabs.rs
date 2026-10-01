@@ -618,8 +618,8 @@ impl Shell {
     }
 
     /// `+` in the titlebar: open the new-session canvas. A set sidebar filter
-    /// re-homes the canvas onto that project; under "All" the current pick
-    /// (the last selected project, restored from composer defaults) stands.
+    /// re-homes the canvas onto that project; under "All" the canvas reopens
+    /// on the project/device it was left at (see `AppState::canvas_target`).
     ///
     /// A new chat always starts with the terminal hidden: when the drawer is
     /// open it just hides (detach, not close — the source chat's tabs and
@@ -654,13 +654,16 @@ impl Shell {
         self.state.update(cx, |s, cx| {
             // The draft comes first so the target picks below record onto
             // IT, never onto an invested draft being left behind (d20).
+            // Leaving a chat puts the canvas's own target back; the filter
+            // (an explicit standing choice) then applies on top of it.
+            let restores = s.canvas_target.is_some();
             s.select_chat(None, cx);
             s.new_draft(cx);
             if target.is_some() {
                 s.select_space(target, cx);
-            } else if defaults.no_project {
-                // Opening an existing project session (including boot's last
-                // session) must not erase the saved new-session opt-out.
+            } else if !restores && defaults.no_project {
+                // No canvas target was set aside (e.g. after a runtime swap):
+                // fall back to the saved new-session opt-out.
                 s.select_space(None, cx);
                 if let Some(device) = defaults.device {
                     s.select_device(device, cx);

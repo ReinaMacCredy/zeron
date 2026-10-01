@@ -34,6 +34,8 @@ pub mod edge_fade;
 pub mod file_icons;
 pub mod files;
 pub mod frost;
+mod glass;
+mod haptics;
 pub mod history;
 pub(crate) mod html_open;
 pub mod icons;

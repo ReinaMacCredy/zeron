@@ -621,6 +621,15 @@ impl ClaudeHarness {
                 cmd.args(["--append-system-prompt", guidance]);
             }
         }
+        let normalizer = if let Some(session_id) = &request.resume {
+            let config = crate::model_context::root(
+                "CLAUDE_CONFIG_DIR",
+                crate::executable::home_or_current_dir().join(".claude"),
+            );
+            Normalizer::for_resume(&config, session_id).await
+        } else {
+            Normalizer::new()
+        };
         let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 HarnessError::NotInstalled(crate::executable::binary_hint(&exe))
@@ -675,6 +684,7 @@ impl ClaudeHarness {
 
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         tokio::spawn(run_session(Session {
+            normalizer,
             title_only,
             permission_mode: request.permission_mode,
             computer_control: request.computer_control,
@@ -803,6 +813,7 @@ async fn stdin_writer(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<Std
 }
 
 struct Session {
+    normalizer: Normalizer,
     title_only: bool,
     permission_mode: zeron_proto::PermissionMode,
     computer_control: bool,
@@ -825,6 +836,7 @@ struct Session {
 /// mailbox, the interrupt token, and consumer liveness.
 async fn run_session(session: Session) {
     let Session {
+        normalizer: mut norm,
         title_only,
         permission_mode,
         computer_control,
@@ -852,7 +864,6 @@ async fn run_session(session: Session) {
     let mut stop_tasks = stop_tasks;
     let mut stop_seq: u64 = 0;
 
-    let mut norm = Normalizer::new();
     let mut pending_steers = std::collections::VecDeque::new();
     // Top-level tool calls in flight: a steer must not abort them (see
     // `wire::steer_message_line`).

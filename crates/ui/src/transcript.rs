@@ -11443,10 +11443,14 @@ impl Render for Transcript {
             .on_mouse_move(cx.listener(Self::on_selection_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_selection_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_selection_mouse_up))
-            // FIRST child ⇒ paints first: clears the frame's markdown text-
-            // selection registry before any row's text elements re-register
-            // (document paint order = selection order; see markdown/render.rs).
-            .child(crate::markdown::render::selection_frame_reset())
+            // FIRST child ⇒ paints first: clears this transcript's slice of the
+            // frame's markdown text-selection registry before any row's text
+            // elements re-register (document paint order = selection order;
+            // see markdown/render.rs). Keyed by entity so a side chat or
+            // subagent tab painted in the same frame can't wipe it.
+            .child(crate::markdown::render::selection_frame_reset_for(
+                cx.entity_id().as_u64(),
+            ))
             .child(content)
             .child(rail)
             .children(self.render_computer_preview(window, cx))

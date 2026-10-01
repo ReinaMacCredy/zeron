@@ -663,6 +663,14 @@ pub fn canvas_panel_key(space_id: Option<&str>) -> String {
     format!("{CANVAS_PANEL_PREFIX}{}", space_id.unwrap_or(""))
 }
 
+/// The new-session canvas's project/device pick, see [`AppState::canvas_target`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanvasTarget {
+    space: Option<String>,
+    no_project: bool,
+    device: Option<String>,
+}
+
 /// Root application state. Reducer methods (`apply_*`, [`Self::session_for`], …)
 /// are plain `&mut self` functions so tests construct the struct directly; gpui
 /// glue ([`Self::bootstrap`], [`Self::select_chat`]) layers subscriptions on top.
@@ -714,6 +722,10 @@ pub struct AppState {
     /// device whose projects the project picker lists. `None` falls back to
     /// the local device.
     pub selected_device: Option<String>,
+    /// The new-session canvas's own target, set aside while a chat is open
+    /// (a chat implies ITS project/device) and put back on return, so the
+    /// canvas always reopens where the user left it.
+    pub(crate) canvas_target: Option<CanvasTarget>,
     pub selected_chat: Option<String>,
     /// Pre-session drafts (t3code draft sessions), device-local. The canvas
     /// is always one of them (d20): `active_draft` names the one the
@@ -854,6 +866,7 @@ impl AppState {
             selected_space: None,
             no_project: false,
             selected_device: None,
+            canvas_target: None,
             selected_chat: None,
             draft_sessions: Vec::new(),
             active_draft: None,
@@ -1126,6 +1139,7 @@ impl AppState {
             self.transcript_baselines.remove(selected);
             self.prepared_transcripts.remove(selected);
             self.selected_chat = None;
+            self.restore_canvas_target();
             self.transcript.clear();
             self.context_usage = None;
             self.transcript_revision = self.transcript_revision.wrapping_add(1);
@@ -1883,6 +1897,34 @@ impl AppState {
         }
     }
 
+    fn current_canvas_target(&self) -> CanvasTarget {
+        CanvasTarget {
+            space: self.selected_space.clone(),
+            no_project: self.no_project,
+            device: self.selected_device.clone(),
+        }
+    }
+
+    /// Put back the canvas target set aside when a chat opened. A project
+    /// deleted meanwhile heals the way [`Self::apply_spaces`] would.
+    fn restore_canvas_target(&mut self) {
+        let Some(target) = self.canvas_target.take() else {
+            return;
+        };
+        self.selected_device = target.device;
+        self.no_project = target.no_project;
+        self.selected_space = target.space;
+        if self.spaces_synced
+            && !self.no_project
+            && self
+                .selected_space
+                .as_ref()
+                .is_none_or(|id| !self.spaces.iter().any(|s| &s.id == id))
+        {
+            self.selected_space = self.first_space_on_picked_device();
+        }
+    }
+
     pub fn selected_space_row(&self) -> Option<&Space> {
         if self.no_project {
             return None;
@@ -2153,6 +2195,7 @@ impl AppState {
         self.selected_space = None;
         self.no_project = false;
         self.selected_device = None;
+        self.canvas_target = None;
         self.selected_chat = None;
         self.auto_selected = false;
         self.chats_synced = false;
@@ -2576,6 +2619,8 @@ impl AppState {
         }
         // Target picks record onto `active_draft`; clear it while restoring.
         self.active_draft = None;
+        // The draft's own target replaces the canvas target a chat set aside.
+        self.canvas_target = None;
         if session.no_project {
             self.select_space(None, cx);
             if let Some(device) = session.device_id.clone() {
@@ -2711,6 +2756,11 @@ impl AppState {
                 self.leave_draft(cx);
             }
         }
+        match (&self.selected_chat, &chat_id) {
+            (None, Some(_)) => self.canvas_target = Some(self.current_canvas_target()),
+            (Some(_), None) => self.restore_canvas_target(),
+            _ => {}
+        }
         // Take the destination before trimming: switching to the oldest warm
         // transcript must not evict the very entry we are about to display.
         let cached = self
@@ -2801,7 +2851,7 @@ impl AppState {
         self.queue_task = None;
         if let Some(id) = chat_id.as_deref() {
             // A chat implies its project (or the lack of one); `select_chat(None)`
-            // (the new-session canvas) keeps the current project pick.
+            // (the new-session canvas) restores the pick set aside above.
             if let Some(chat) = self.chats.iter().find(|c| c.id == id) {
                 match chat.space_id.clone() {
                     Some(space_id) => {
@@ -4989,6 +5039,46 @@ mod tests {
             state.select_device("empty-device".into(), cx);
             assert!(state.selected_space.is_none());
             assert_eq!(state.effective_device_id().as_deref(), Some("empty-device"));
+        });
+    }
+
+    #[gpui::test]
+    fn canvas_reopens_on_its_own_target_after_visiting_chats(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, cx| {
+            state.apply_spaces(vec![
+                space("s1", "dev", "/a", 1),
+                space("s2", "remote", "/b", 2),
+            ]);
+            let mut remote = chat("remote-chat", 1, None);
+            remote.device_id = "remote".into();
+            remote.space_id = Some("s2".into());
+            let mut loose = chat("loose-chat", 2, None);
+            loose.device_id = "remote".into();
+            state.apply_chats(vec![remote, loose.clone()]);
+            state.select_space(Some("s1".into()), cx);
+
+            // Chats imply their own target while open…
+            state.select_chat(Some("remote-chat".into()), cx);
+            assert_eq!(state.selected_space.as_deref(), Some("s2"));
+            state.select_chat(Some("loose-chat".into()), cx);
+            assert!(state.no_project);
+            // …and the canvas returns to where it was left.
+            state.select_chat(None, cx);
+            assert!(!state.no_project);
+            assert_eq!(state.selected_space.as_deref(), Some("s1"));
+            assert_eq!(state.effective_device_id().as_deref(), Some("dev"));
+
+            // A projectless canvas survives a project chat, and a chat deleted
+            // elsewhere lands back on it too.
+            state.select_space(None, cx);
+            state.select_device("remote".into(), cx);
+            state.select_chat(Some("remote-chat".into()), cx);
+            state.apply_chats(vec![loose]);
+            assert!(state.selected_chat.is_none());
+            assert!(state.no_project);
+            assert!(state.selected_space.is_none());
+            assert_eq!(state.effective_device_id().as_deref(), Some("remote"));
         });
     }
 
