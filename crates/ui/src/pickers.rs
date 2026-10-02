@@ -5993,15 +5993,10 @@ impl Pickers {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let ladder = self.trait_ladder(cx);
-        let len = ladder.len();
-        let rail_len = len.saturating_sub(1).max(1) as f32;
         let selected = self.effort_index(cx);
-        let (thumb, _) = self.effort_thumb(cx);
-        let (press, _) = self.effort_press();
         let speed = self.speed_toggle(cx);
         let effort_is_default = ladder.get(selected).copied() == default_reasoning(&ladder);
         let can_reset = speed.as_ref().is_some_and(|t| !t.at_default) || !effort_is_default;
-        let dragging = self.effort_dragging;
         let label = ladder
             .get(selected)
             .map(|level| reasoning_label(*level))
@@ -6073,6 +6068,30 @@ impl Pickers {
                     .child(SharedString::from(label)),
             )
             .child(reset);
+
+        let track = self.render_effort_track(highlighted, theme, cx);
+
+        div()
+            .px(px(4.0))
+            .pt(px(2.0))
+            .pb(px(4.0))
+            .child(header)
+            .child(div().mt(px(4.0)).px(px(2.0)).py(px(2.0)).child(track))
+            .into_any_element()
+    }
+
+    fn render_effort_track(
+        &mut self,
+        highlighted: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let len = self.trait_ladder(cx).len();
+        let rail_len = len.saturating_sub(1).max(1) as f32;
+        let selected = self.effort_index(cx);
+        let (thumb, _) = self.effort_thumb(cx);
+        let (press, _) = self.effort_press();
+        let dragging = self.effort_dragging;
 
         // At the first stop the fill sits entirely under the thumb, and
         // anti-aliasing would leave a sliver of accent peeking out: fade it
@@ -6237,13 +6256,7 @@ impl Pickers {
             .child(rail)
             .child(canvas);
 
-        div()
-            .px(px(4.0))
-            .pt(px(2.0))
-            .pb(px(4.0))
-            .child(header)
-            .child(div().mt(px(4.0)).px(px(2.0)).py(px(2.0)).child(track))
-            .into_any_element()
+        track.into_any_element()
     }
 }
 
@@ -9861,6 +9874,85 @@ mod tests {
         });
         cx.update(|window, cx| window.draw(cx).clear());
         assert!(cx.debug_bounds("effort-track").is_some());
+    }
+
+    #[gpui::test]
+    fn compact_panel_draws_the_stepped_slider_when_chosen(cx: &mut gpui::TestAppContext) {
+        struct PanelFixture {
+            pickers: Entity<Pickers>,
+        }
+        impl Render for PanelFixture {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let menu = self
+                    .pickers
+                    .update(cx, |pickers, cx| pickers.render_compact_menu(window, cx));
+                div().size_full().p(px(40.0)).child(menu)
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            crate::composer::init(cx, Default::default());
+            let mut settings = crate::settings::UiSettings::default();
+            settings.compact_model_picker = true;
+            crate::settings::init(settings, dir.path(), cx);
+        });
+        let pickers = cx.update(|cx| {
+            let state = cx.new(|_| AppState::new());
+            cx.new(|cx| Pickers::new(state, cx))
+        });
+        pickers.update(cx, |pickers, cx| {
+            let mut model = bare_model("fable", "Fable");
+            model.reasoning_levels = vec![
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High,
+            ];
+            pickers.config.harness = Some(HarnessId::ClaudeCode);
+            pickers.harnesses =
+                Loadable::Ready(vec![descriptor(HarnessId::ClaudeCode, "Claude Code")]);
+            pickers
+                .models
+                .insert(HarnessId::ClaudeCode, Loadable::Ready(vec![model]));
+            pickers.pick_model("fable".into(), cx);
+            pickers.open.open(PickerKind::HarnessModel);
+        });
+        let (_fixture, cx) = cx.add_window_view(|_, _| PanelFixture {
+            pickers: pickers.clone(),
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("effort-track").is_none(),
+            "glass by default"
+        );
+
+        cx.update(|_, cx| {
+            crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |settings| {
+                settings.compact_effort_slider = crate::settings::EffortSliderStyle::Stepped
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        let track = cx
+            .debug_bounds("effort-track")
+            .expect("stepped track painted");
+        cx.simulate_click(
+            gpui::point(
+                track.origin.x + px(EFFORT_THUMB_SIZE / 2.0),
+                track.center().y,
+            ),
+            gpui::Modifiers::default(),
+        );
+        pickers.read_with(cx, |pickers, cx| {
+            assert_eq!(pickers.effective_reasoning(cx), Some(ReasoningLevel::Low));
+            assert!(pickers.effort_thumb(cx).1, "the thumb snaps to the stop");
+        });
+
+        pickers.update(cx, |pickers, cx| {
+            let effort = pickers.compact_effort(cx).unwrap();
+            pickers.pick_compact_effort(effort, 2, cx);
+            assert_eq!(pickers.effective_reasoning(cx), Some(ReasoningLevel::High));
+            assert!(pickers.effort_thumb(cx).1, "keyboard steps snap too");
+        });
     }
 
     #[gpui::test]

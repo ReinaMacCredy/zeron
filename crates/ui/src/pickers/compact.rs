@@ -793,10 +793,10 @@ impl Pickers {
         }
         match effort.stops {
             EffortStops::Reasoning(levels) => {
-                let Some(level) = levels.get(index).copied() else {
+                if index >= levels.len() {
                     return;
-                };
-                self.pick_reasoning(level, cx);
+                }
+                self.pick_effort_index(index, cx);
             }
             EffortStops::Option {
                 id,
@@ -1213,7 +1213,26 @@ impl Pickers {
             .flex()
             .flex_col()
             .child(header);
-        if !levels.is_empty() {
+        let stepped = crate::settings::compact_effort_slider(cx)
+            == crate::settings::EffortSliderStyle::Stepped
+            && !self.trait_ladder(cx).is_empty();
+        if stepped {
+            let track = self.render_effort_track(false, &theme, cx);
+            panel = panel.child(
+                div()
+                    .px(px(8.0))
+                    .pt(px(SLIDER_TOP))
+                    .pb(px(SLIDER_BOTTOM))
+                    .child(
+                        div()
+                            .h(px(SLIDER_HEIGHT))
+                            .flex()
+                            .flex_col()
+                            .justify_center()
+                            .child(track),
+                    ),
+            );
+        } else if !levels.is_empty() {
             let target = if levels.len() > 1 {
                 selected as f32 / (levels.len() - 1) as f32
             } else {

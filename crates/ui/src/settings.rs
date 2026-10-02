@@ -479,6 +479,12 @@ pub fn compact_model_picker(cx: &App) -> bool {
         .is_some_and(|store| store.current.compact_model_picker)
 }
 
+pub fn compact_effort_slider(cx: &App) -> EffortSliderStyle {
+    cx.try_global::<SettingsStore>()
+        .map(|store| store.current.compact_effort_slider)
+        .unwrap_or_default()
+}
+
 /// Copy a selected image into Zeron's device-local data directory and make it
 /// the new-thread canvas background. A unique file name avoids stale image
 /// caches when the background is replaced.
@@ -783,6 +789,14 @@ pub enum FollowUpBehavior {
     Steer,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EffortSliderStyle {
+    #[default]
+    Glass,
+    Stepped,
+}
+
 /// The modifier that steps the thinking level with `-` and `=`/`+`.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -1042,6 +1056,7 @@ pub struct UiSettings {
         std::collections::HashMap<zeron_proto::HarnessId, SkillCompletionSettings>,
     /// Open model selection with an effort slider and a separate model list.
     pub compact_model_picker: bool,
+    pub compact_effort_slider: EffortSliderStyle,
     pub sidebar_width: f32,
     pub sidebar_collapsed: bool,
     /// Legacy: the grouped-by-project toggle predates spaces (which group by
@@ -1279,6 +1294,7 @@ impl Default for UiSettings {
             skills_in_slash_menu: false,
             skill_completion_by_harness: Default::default(),
             compact_model_picker: true,
+            compact_effort_slider: EffortSliderStyle::Glass,
             appshots_enabled: false,
             appshot_sound_enabled: true,
             appshot_destination: crate::appshots::AppshotDestination::Automatic,
@@ -2174,6 +2190,20 @@ mod tests {
     }
 
     #[test]
+    fn compact_effort_slider_defaults_to_glass_and_persists() {
+        let legacy: UiSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.compact_effort_slider, EffortSliderStyle::Glass);
+        let settings = UiSettings {
+            compact_effort_slider: EffortSliderStyle::Stepped,
+            ..legacy
+        };
+        let saved = serde_json::to_string(&settings).unwrap();
+        assert!(saved.contains(r#""compactEffortSlider":"stepped""#));
+        let loaded: UiSettings = serde_json::from_str(&saved).unwrap();
+        assert_eq!(loaded.compact_effort_slider, EffortSliderStyle::Stepped);
+    }
+
+    #[test]
     fn composer_send_behavior_is_opt_in_for_old_and_partial_settings() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -2917,6 +2947,7 @@ mod tests {
             skills_in_slash_menu: true,
             skill_completion_by_harness: Default::default(),
             compact_model_picker: true,
+            compact_effort_slider: EffortSliderStyle::Glass,
             appshots_enabled: false,
             appshot_sound_enabled: true,
             // The destination is only persisted where Appshots exist (macOS and

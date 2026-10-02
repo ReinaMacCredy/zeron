@@ -1048,6 +1048,77 @@ impl Render for ShortcutsPage {
                         cx.notify();
                     })),
             );
+        let effort_slider = crate::settings::compact_effort_slider(cx);
+        let effort_slider_row = widgets::card_row(&theme, false)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(widgets::row_title(&theme, "Effort slider"))
+                    .child(widgets::meta_line(
+                        &theme,
+                        vec![
+                            div()
+                                .child("Slider style in the compact model picker.")
+                                .into_any_element(),
+                        ],
+                    )),
+            )
+            .child(
+                div()
+                    .id("compact-effort-slider-style")
+                    .flex_none()
+                    .flex()
+                    .flex_row()
+                    .rounded(px(9.0))
+                    .p(px(2.0))
+                    .bg(crate::theme::ink(0.04))
+                    .children(
+                        [
+                            (crate::settings::EffortSliderStyle::Glass, "Glass"),
+                            (crate::settings::EffortSliderStyle::Stepped, "Stepped"),
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(ix, (style, label))| {
+                            let selected = effort_slider == style;
+                            div()
+                                .id(("effort-slider-option", ix))
+                                .min_w(px(72.0))
+                                .px(px(12.0))
+                                .py(px(6.0))
+                                .rounded(px(7.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_size(px(12.0))
+                                .text_color(if selected {
+                                    theme.text
+                                } else {
+                                    theme.text_muted
+                                })
+                                .when(selected, |el| {
+                                    el.bg(theme.bg)
+                                        .border_1()
+                                        .border_color(theme.border.opacity(0.8))
+                                })
+                                .when(!selected, |el| {
+                                    el.cursor_pointer()
+                                        .hover(|s| s.text_color(theme.text))
+                                        .on_click(cx.listener(move |_, _, _, cx| {
+                                            crate::settings::update(
+                                                crate::settings::SavePolicy::Debounced,
+                                                cx,
+                                                |settings| settings.compact_effort_slider = style,
+                                            );
+                                            cx.refresh_windows();
+                                            cx.notify();
+                                        }))
+                                })
+                                .child(SharedString::from(label))
+                        }),
+                    ),
+            );
         let escape_behavior_row = widgets::card_row(&theme, false)
             .child(
                 div()
@@ -1114,6 +1185,7 @@ impl Render for ShortcutsPage {
                                             })
                                             .child(compact_mode_row)
                                             .child(compact_model_picker_row)
+                                            .child(effort_slider_row)
                                             .child(escape_behavior_row),
                                     )
                                     .child(
