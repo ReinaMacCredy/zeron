@@ -321,6 +321,79 @@ impl Pickers {
         self.title.is_none() && crate::settings::compact_model_picker(cx)
     }
 
+    pub(super) fn toggle_compact_layout(&mut self, cx: &mut Context<Self>) {
+        let compact = !crate::settings::compact_model_picker(cx);
+        crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |settings| {
+            settings.compact_model_picker = compact
+        });
+        self.cancel_setting_hover();
+        self.setting_menu = None;
+        self.effort_dragging = false;
+        self.effort_press = None;
+        self.effort_snap = None;
+        self.compact_model_list = false;
+        self.compact_providers = false;
+        self.compact_effort_dragging = false;
+        self.compact_keyboard = false;
+        self.compact_motion = CompactMotion::default();
+        let groups = self.setting_groups(cx);
+        self.open_model_height = model_menu_height(groups.len(), has_effort_card(&groups));
+        self.model_rail = self.primed_model_rail(cx);
+        self.search_reset_muted = !self.search.read(cx).text().is_empty();
+        self.search.update(cx, |input, cx| {
+            if !input.text().is_empty() {
+                input.set_text("", cx);
+            }
+        });
+        self.active = self.selected_model_index(cx);
+        popover::reset_menu_scroll(&self.model_scroll_base(), &mut self.menu_bar);
+        self.model_scroll
+            .scroll_to_item(self.active, gpui::ScrollStrategy::Nearest);
+        cx.refresh_windows();
+        cx.notify();
+    }
+
+    pub(super) fn compact_layout_toggle(
+        &self,
+        compact: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let hint: SharedString = if compact {
+            "Switch to full picker"
+        } else {
+            "Switch to compact picker"
+        }
+        .into();
+        div()
+            .id("picker-layout-toggle")
+            .debug_selector(|| "picker-layout-toggle".into())
+            .role(gpui::Role::Button)
+            .aria_label(hint.clone())
+            .tooltip(move |_, cx| cx.new(|_| PickerHint(hint.clone())).into())
+            .w(px(FAST_BUTTON_WIDTH))
+            .flex_none()
+            .rounded(px(popover::MENU_ITEM_RADIUS))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .hover(|el| el.bg(crate::theme::ink(0.06)))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.toggle_compact_layout(cx);
+                cx.stop_propagation();
+            }))
+            .child(
+                crate::icons::icon(if compact {
+                    crate::icons::EXPAND_ARROWS
+                } else {
+                    crate::icons::COLLAPSE_ARROWS
+                })
+                .size(px(15.0))
+                .text_color(theme.text_muted),
+            )
+    }
+
     pub(super) fn show_compact_models(&mut self, cx: &mut Context<Self>) {
         // The provider button picks the provider; the list holds its models.
         self.show_compact_list(ModelRail::Harness, "Search models…", cx);
@@ -1133,7 +1206,8 @@ impl Pickers {
             .gap(px(popover::CARD_INSET))
             .children(provider_button)
             .child(title)
-            .children(fast_button);
+            .children(fast_button)
+            .child(self.compact_layout_toggle(true, &theme, cx).h_full());
         let mut panel = div()
             .p(px(popover::CARD_INSET))
             .flex()
