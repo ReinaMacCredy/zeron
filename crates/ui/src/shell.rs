@@ -5591,6 +5591,7 @@ impl Shell {
         self.settings.html_open_app = current.html_open_app;
         self.settings.transcript_compact_mode = current.transcript_compact_mode;
         self.settings.compact_model_picker = current.compact_model_picker;
+        self.settings.compact_effort_slider = current.compact_effort_slider;
     }
 
     fn retry_engine(&mut self, cx: &mut Context<Self>) {
