@@ -6967,7 +6967,7 @@ impl Composer {
             let details = quotes
                 .iter()
                 .map(|quote| crate::badges::BadgeDetail {
-                    location: "Selected text".into(),
+                    location: quote.location().into(),
                     tag: None,
                     body: quote.text.clone().into(),
                 })

@@ -442,6 +442,38 @@ struct OpenTerminalParams {
     /// space named by a `space-canvas:{spaceId}` chat id.
     #[serde(default)]
     cwd: Option<String>,
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    agent: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReadTerminalParams {
+    terminal_id: String,
+    chat_id: String,
+    #[serde(default)]
+    lines: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SendTerminalInputParams {
+    terminal_id: String,
+    chat_id: String,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    keys: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetTerminalSelectionParams {
+    terminal_id: String,
+    #[serde(default)]
+    text: Option<String>,
 }
 
 /// Matches the UI canvas panel key (`AppState::panel_session_key`).
@@ -1639,6 +1671,10 @@ fn forwardable(method: &str) -> bool {
             | methods::WRITE_TERMINAL
             | methods::RESIZE_TERMINAL
             | methods::CLOSE_TERMINAL
+            | methods::LIST_TERMINALS
+            | methods::READ_TERMINAL
+            | methods::SEND_TERMINAL_INPUT
+            | methods::SET_TERMINAL_SELECTION
             // Agent accounts are per-device CLI logins (the device switcher
             // retargets which device's logins are shown).
             | methods::LIST_AGENT_ACCOUNTS
@@ -3598,6 +3634,7 @@ impl RpcService for EngineRpc {
                     p.rows,
                 )
                 .map_err(|err| RpcError::Failed(err.to_string()))?;
+                let _ = self.terminals.assign_chat(&run.terminal.id, &p.chat_id);
                 RpcReply::value(&run)
             }
             methods::OPEN_TERMINAL => {
@@ -3620,11 +3657,76 @@ impl RpcService for EngineRpc {
                 });
                 let cwd = resolve_open_terminal_cwd(p.cwd, chat_cwd, space_cwd)
                     .map_err(|error| RpcError::Failed(error.to_string()))?;
-                let session = self
-                    .terminals
-                    .open(&cwd, p.cols, p.rows)
+                let session = match &p.command {
+                    Some(command) => self.terminals.open_with_command(
+                        &cwd,
+                        p.cols,
+                        p.rows,
+                        &std::collections::HashMap::new(),
+                        command,
+                    ),
+                    None => self.terminals.open(&cwd, p.cols, p.rows),
+                }
+                .map_err(|e| RpcError::Failed(e.to_string()))?;
+                self.terminals
+                    .assign_chat(&session.id, &p.chat_id)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
+                if p.agent {
+                    self.terminals
+                        .announce_agent_open(&p.chat_id, session.clone());
+                }
                 RpcReply::value(&session)
+            }
+            methods::LIST_TERMINALS => {
+                let p: ChatParams = parse_params(params)?;
+                RpcReply::value(&self.terminals.list_for_chat(&p.chat_id))
+            }
+            methods::READ_TERMINAL => {
+                let p: ReadTerminalParams = parse_params(params)?;
+                let screen = self
+                    .terminals
+                    .read(
+                        &p.terminal_id,
+                        &p.chat_id,
+                        p.lines.unwrap_or(80).clamp(1, 2000),
+                    )
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&screen)
+            }
+            methods::SEND_TERMINAL_INPUT => {
+                let p: SendTerminalInputParams = parse_params(params)?;
+                self.terminals
+                    .send_input(&p.terminal_id, &p.chat_id, p.text.as_deref(), &p.keys)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "ok": true }))
+            }
+            methods::SET_TERMINAL_SELECTION => {
+                let p: SetTerminalSelectionParams = parse_params(params)?;
+                self.terminals
+                    .set_selection(&p.terminal_id, p.text)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "ok": true }))
+            }
+            methods::WATCH_AGENT_TERMINALS => {
+                let opened = self.terminals.subscribe_agent_opened();
+                Ok(RpcReply::Stream(
+                    futures::stream::unfold(opened, |mut opened| async move {
+                        loop {
+                            match opened.recv().await {
+                                Ok(event) => {
+                                    if let Ok(value) = serde_json::to_value(&event) {
+                                        return Some((value, opened));
+                                    }
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                    return None;
+                                }
+                            }
+                        }
+                    })
+                    .boxed(),
+                ))
             }
             methods::SUBSCRIBE_TERMINAL => {
                 let p: SubscribeTerminalParams = parse_params(params)?;

@@ -22,12 +22,15 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use portable_pty::PtySize;
 #[cfg(not(windows))]
 use portable_pty::{CommandBuilder, native_pty_system};
+mod screen;
 #[cfg(windows)]
 mod windows;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 
 use zeron_doc::TERMINAL_OUTPUT_BATCH_MS;
-use zeron_proto::{TerminalEvent, TerminalSession};
+use zeron_proto::{
+    AgentTerminalOpened, TerminalEvent, TerminalInfo, TerminalScreen, TerminalSession,
+};
 
 use crate::{EngineError, new_id};
 
@@ -55,6 +58,12 @@ struct LiveTerminal {
     seq: u64,
     last_active_at: std::time::Instant,
     exited: bool,
+    exit_code: Option<i32>,
+    chat_id: Option<String>,
+    cwd: String,
+    shell: String,
+    screen: screen::Screen,
+    selection: Option<String>,
 }
 
 impl LiveTerminal {
@@ -78,9 +87,10 @@ impl LiveTerminal {
             }
         }
         self.subscribers.retain(|tx| tx.send(event.clone()).is_ok());
-        if matches!(event, TerminalEvent::Exit { .. }) {
+        if let TerminalEvent::Exit { exit_code, .. } = event {
             self.initial_script.take();
             self.exited = true;
+            self.exit_code = Some(exit_code);
             self.subscribers.clear();
         }
     }
@@ -93,6 +103,7 @@ impl LiveTerminal {
 
 struct TerminalsInner {
     sessions: Mutex<HashMap<String, Arc<Mutex<LiveTerminal>>>>,
+    agent_opened: broadcast::Sender<AgentTerminalOpened>,
 }
 
 impl Drop for TerminalsInner {
@@ -157,6 +168,7 @@ impl Terminals {
         let terminals = Self {
             inner: Arc::new(TerminalsInner {
                 sessions: Mutex::new(HashMap::new()),
+                agent_opened: broadcast::channel(64).0,
             }),
         };
         tokio::spawn(reaper_task(Arc::downgrade(&terminals.inner)));
@@ -319,6 +331,15 @@ impl Terminals {
             seq: 0,
             last_active_at: std::time::Instant::now(),
             exited: false,
+            exit_code: None,
+            chat_id: None,
+            cwd: cwd.to_string(),
+            shell: shell_name.clone(),
+            screen: {
+                let size = clamp_size(cols, rows);
+                screen::Screen::new(size.cols, size.rows)
+            },
+            selection: None,
         }));
         lock(&self.inner.sessions).insert(id.clone(), session.clone());
 
@@ -447,11 +468,13 @@ impl Terminals {
         if session.exited {
             return Ok(());
         }
+        let size = clamp_size(cols, rows);
+        session.screen.resize(size.cols, size.rows);
         let Some(master) = session.master.as_ref() else {
             return Ok(());
         };
         master
-            .resize(clamp_size(cols, rows))
+            .resize(size)
             .map_err(|e| EngineError::Other(format!("Terminal resize failed: {e}")))
     }
 
@@ -469,6 +492,113 @@ impl Terminals {
         }
     }
 
+    pub fn assign_chat(&self, terminal_id: &str, chat_id: &str) -> Result<(), EngineError> {
+        let session = self.session(terminal_id)?;
+        lock(&session).chat_id = Some(chat_id.to_string());
+        Ok(())
+    }
+
+    pub fn announce_agent_open(&self, chat_id: &str, terminal: TerminalSession) {
+        let _ = self.inner.agent_opened.send(AgentTerminalOpened {
+            chat_id: chat_id.to_string(),
+            terminal,
+        });
+    }
+
+    pub fn subscribe_agent_opened(&self) -> broadcast::Receiver<AgentTerminalOpened> {
+        self.inner.agent_opened.subscribe()
+    }
+
+    fn chat_session(
+        &self,
+        terminal_id: &str,
+        chat_id: &str,
+    ) -> Result<Arc<Mutex<LiveTerminal>>, EngineError> {
+        let session = self.session(terminal_id)?;
+        if lock(&session).chat_id.as_deref() != Some(chat_id) {
+            return Err(EngineError::Other(
+                "Terminal does not belong to this chat".into(),
+            ));
+        }
+        Ok(session)
+    }
+
+    pub fn list_for_chat(&self, chat_id: &str) -> Vec<TerminalInfo> {
+        let sessions: Vec<_> = lock(&self.inner.sessions)
+            .iter()
+            .map(|(id, session)| (id.clone(), session.clone()))
+            .collect();
+        let mut terminals: Vec<_> = sessions
+            .into_iter()
+            .filter_map(|(id, session)| {
+                let session = lock(&session);
+                (session.chat_id.as_deref() == Some(chat_id))
+                    .then(|| (session.last_active_at, info(&id, &session)))
+            })
+            .collect();
+        terminals.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+        terminals.into_iter().map(|(_, info)| info).collect()
+    }
+
+    pub fn read(
+        &self,
+        terminal_id: &str,
+        chat_id: &str,
+        max_lines: usize,
+    ) -> Result<TerminalScreen, EngineError> {
+        let session = self.chat_session(terminal_id, chat_id)?;
+        let session = lock(&session);
+        let text = session.screen.text(max_lines);
+        Ok(TerminalScreen {
+            terminal: info(terminal_id, &session),
+            cols: text.cols,
+            rows: text.rows,
+            alt_screen: text.alt_screen,
+            cursor_row: text.cursor_row,
+            cursor_col: text.cursor_col,
+            lines: text.lines,
+            truncated: text.truncated,
+        })
+    }
+
+    pub fn send_input(
+        &self,
+        terminal_id: &str,
+        chat_id: &str,
+        text: Option<&str>,
+        keys: &[String],
+    ) -> Result<(), EngineError> {
+        let session = self.chat_session(terminal_id, chat_id)?;
+        let app_cursor = lock(&session).screen.app_cursor();
+        let mut bytes = text
+            .unwrap_or_default()
+            .replace("\r\n", "\r")
+            .replace('\n', "\r")
+            .into_bytes();
+        for key in keys {
+            bytes.extend(
+                screen::key_bytes(key, app_cursor)
+                    .ok_or_else(|| EngineError::Other(format!("Unknown key \"{key}\"")))?,
+            );
+        }
+        if bytes.is_empty() {
+            return Err(EngineError::Other(
+                "Nothing to send: give text or keys".into(),
+            ));
+        }
+        self.write_bytes(terminal_id, &bytes)
+    }
+
+    pub fn set_selection(
+        &self,
+        terminal_id: &str,
+        text: Option<String>,
+    ) -> Result<(), EngineError> {
+        let session = self.session(terminal_id)?;
+        lock(&session).selection = text.filter(|text| !text.is_empty());
+        Ok(())
+    }
+
     /// Any live PTY (the reaper prunes exited ones) — restarts kill shells, so
     /// the auto-updater waits for none.
     pub fn any_open(&self) -> bool {
@@ -481,6 +611,17 @@ impl Terminals {
         for session in sessions {
             dispose(&session, true);
         }
+    }
+}
+
+fn info(id: &str, session: &LiveTerminal) -> TerminalInfo {
+    TerminalInfo {
+        id: id.to_string(),
+        cwd: session.cwd.clone(),
+        shell: session.shell.clone(),
+        title: session.screen.title(),
+        exit_code: session.exit_code,
+        selection: session.selection.clone(),
     }
 }
 
@@ -541,6 +682,7 @@ async fn pump_output(
             return false;
         };
         let mut session = lock(&session);
+        session.screen.feed(&buffer);
         let seq = session.next_seq();
         session.emit(TerminalEvent::Data {
             seq,
@@ -1192,5 +1334,115 @@ mod initial_command_tests {
                 .is_err()
         );
         assert!(!terminals.any_open());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod agent_tests {
+    use super::*;
+
+    async fn read_until(
+        terminals: &Terminals,
+        id: &str,
+        chat: &str,
+        needle: &str,
+    ) -> TerminalScreen {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let screen = terminals.read(id, chat, 50).unwrap();
+                if screen.lines.iter().any(|line| line.contains(needle)) {
+                    return screen;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{needle:?} never appeared"))
+    }
+
+    #[tokio::test]
+    async fn chat_terminals_are_listed_read_and_driven_by_their_owner_only() {
+        let root = tempfile::tempdir().unwrap();
+        let terminals = Terminals::new();
+        let session = terminals
+            .open_with_shell(root.path().to_str().unwrap(), 60, 10, Some("/bin/sh"))
+            .unwrap();
+        terminals.assign_chat(&session.id, "chat-a").unwrap();
+        let other = terminals
+            .open_with_shell(root.path().to_str().unwrap(), 60, 10, Some("/bin/sh"))
+            .unwrap();
+        terminals.assign_chat(&other.id, "chat-b").unwrap();
+
+        let listed = terminals.list_for_chat("chat-a");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, session.id);
+        assert_eq!(listed[0].shell, "sh");
+
+        terminals
+            .send_input(
+                &session.id,
+                "chat-a",
+                Some("echo agent-$((40+2))"),
+                &["enter".into()],
+            )
+            .unwrap();
+        let screen = read_until(&terminals, &session.id, "chat-a", "agent-42").await;
+        assert_eq!((screen.cols, screen.rows), (60, 10));
+        assert!(!screen.alt_screen);
+
+        assert!(terminals.read(&session.id, "chat-b", 50).is_err());
+        assert!(
+            terminals
+                .send_input(&session.id, "chat-b", Some("x"), &[])
+                .is_err()
+        );
+        assert!(
+            terminals
+                .send_input(&session.id, "chat-a", None, &["bogus-key".into()])
+                .is_err()
+        );
+
+        terminals
+            .set_selection(&session.id, Some("agent-42".into()))
+            .unwrap();
+        assert_eq!(
+            terminals.list_for_chat("chat-a")[0].selection.as_deref(),
+            Some("agent-42")
+        );
+        terminals
+            .set_selection(&session.id, Some(String::new()))
+            .unwrap();
+        assert_eq!(terminals.list_for_chat("chat-a")[0].selection, None);
+
+        terminals.resize(&session.id, 90, 12).unwrap();
+        assert_eq!(terminals.read(&session.id, "chat-a", 5).unwrap().cols, 90);
+
+        terminals
+            .send_input(&session.id, "chat-a", Some("exit 3\n"), &[])
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while terminals.list_for_chat("chat-a")[0].exit_code != Some(3) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("exit code is reported");
+        terminals.close(&session.id).unwrap();
+        terminals.close(&other.id).unwrap();
+    }
+
+    #[tokio::test]
+    async fn agent_opened_terminals_are_announced() {
+        let root = tempfile::tempdir().unwrap();
+        let terminals = Terminals::new();
+        let mut opened = terminals.subscribe_agent_opened();
+        let session = terminals
+            .open_with_shell(root.path().to_str().unwrap(), 60, 10, Some("/bin/sh"))
+            .unwrap();
+        terminals.announce_agent_open("chat-a", session.clone());
+        let event = opened.recv().await.unwrap();
+        assert_eq!(event.chat_id, "chat-a");
+        assert_eq!(event.terminal, session);
+        terminals.close(&session.id).unwrap();
     }
 }

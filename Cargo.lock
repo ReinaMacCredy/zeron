@@ -12163,6 +12163,7 @@ dependencies = [
 name = "zeron-engine"
 version = "0.2.101"
 dependencies = [
+ "alacritty_terminal",
  "anyhow",
  "async-trait",
  "base64 0.22.1",

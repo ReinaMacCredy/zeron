@@ -8,6 +8,7 @@
 pub struct Quote {
     pub id: String,
     pub text: String,
+    pub terminal: bool,
 }
 
 impl Quote {
@@ -15,15 +16,38 @@ impl Quote {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             text: text.into(),
+            terminal: false,
+        }
+    }
+
+    pub fn terminal(text: impl Into<String>) -> Self {
+        Self {
+            id: TERMINAL_QUOTE_ID.to_string(),
+            text: text.into(),
+            terminal: true,
+        }
+    }
+
+    pub fn location(&self) -> &'static str {
+        if self.terminal {
+            TERMINAL_LOCATION
+        } else {
+            DETAIL_LOCATION
         }
     }
 }
+
+pub const TERMINAL_QUOTE_ID: &str = "terminal-selection";
 
 pub const QUOTE_ONLY_TEXT: &str = "Refer to the selected text below.";
 
 pub const QUOTE_BLOCK_HEADER: &str = "Selected text from this conversation (quoted):";
 
 const DETAIL_LOCATION: &str = "Selected text";
+
+pub const TERMINAL_BLOCK_HEADER: &str = "Selected text from this chat's terminal (quoted):";
+
+const TERMINAL_LOCATION: &str = "Terminal selection";
 
 fn quote_block(text: &str) -> String {
     text.trim()
@@ -43,17 +67,39 @@ pub fn with_quotes(text: &str, quotes: &[Quote]) -> String {
     if quotes.is_empty() {
         return text.to_string();
     }
-    let blocks: Vec<String> = quotes.iter().map(|q| quote_block(&q.text)).collect();
-    let body = if text.is_empty() {
+    let mut out = if text.is_empty() {
         QUOTE_ONLY_TEXT
     } else {
         text
-    };
-    format!("{body}\n\n{QUOTE_BLOCK_HEADER}\n{}", blocks.join("\n\n"))
+    }
+    .to_string();
+    for (terminal, header) in [(false, QUOTE_BLOCK_HEADER), (true, TERMINAL_BLOCK_HEADER)] {
+        let blocks: Vec<String> = quotes
+            .iter()
+            .filter(|q| q.terminal == terminal)
+            .map(|q| quote_block(&q.text))
+            .collect();
+        if !blocks.is_empty() {
+            out = format!("{out}\n\n{header}\n{}", blocks.join("\n\n"));
+        }
+    }
+    out
 }
 
 pub fn extract_badge(text: &str) -> Option<(String, crate::badges::MessageBadge)> {
-    let marker = format!("\n\n{QUOTE_BLOCK_HEADER}\n");
+    extract_block(text, QUOTE_BLOCK_HEADER, DETAIL_LOCATION)
+}
+
+pub fn extract_terminal_badge(text: &str) -> Option<(String, crate::badges::MessageBadge)> {
+    extract_block(text, TERMINAL_BLOCK_HEADER, TERMINAL_LOCATION)
+}
+
+fn extract_block(
+    text: &str,
+    header: &str,
+    location: &'static str,
+) -> Option<(String, crate::badges::MessageBadge)> {
+    let marker = format!("\n\n{header}\n");
     let at = text.rfind(&marker)?;
     let block = &text[at + marker.len()..];
     if block.is_empty()
@@ -77,7 +123,7 @@ pub fn extract_badge(text: &str) -> Option<(String, crate::badges::MessageBadge)
                 .collect::<Vec<_>>()
                 .join("\n");
             crate::badges::BadgeDetail {
-                location: DETAIL_LOCATION.into(),
+                location: location.into(),
                 tag: None,
                 body: body.into(),
             }
@@ -107,6 +153,24 @@ pub fn chip_label(count: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_selections_get_their_own_block_and_badge() {
+        let quotes = vec![Quote::terminal("$ make\nerror: boom"), Quote::new("why")];
+        let sent = with_quotes("fix it", &quotes);
+        assert_eq!(
+            sent,
+            format!(
+                "fix it\n\n{QUOTE_BLOCK_HEADER}\n> why\n\n{TERMINAL_BLOCK_HEADER}\n> $ make\n> error: boom"
+            )
+        );
+        let (rest, badges) = crate::badges::split(&sent);
+        assert_eq!(rest, "fix it");
+        assert_eq!(badges.len(), 2);
+        assert_eq!(badges[0].details[0].location.as_ref(), TERMINAL_LOCATION);
+        assert_eq!(badges[0].details[0].body.as_ref(), "$ make\nerror: boom");
+        assert_eq!(badges[1].details[0].body.as_ref(), "why");
+    }
 
     #[test]
     fn empty_set_leaves_the_prompt_untouched() {

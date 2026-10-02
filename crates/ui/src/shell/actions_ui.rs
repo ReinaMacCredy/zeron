@@ -73,6 +73,30 @@ impl Shell {
         cx.notify();
     }
 
+    pub(super) fn attach_agent_terminal(
+        &mut self,
+        opened: zeron_proto::AgentTerminalOpened,
+        cx: &mut Context<Self>,
+    ) {
+        let chat_id = opened.chat_id;
+        let panel = self.terminal_panel(cx);
+        let tab = panel.update(cx, |panel, cx| {
+            panel.reserve_tab_for_chat(chat_id.clone(), "Agent terminal", cx)
+        });
+        panel.update(cx, |panel, cx| {
+            panel.attach_reserved_session(&chat_id, tab, opened.terminal, None, cx)
+        });
+        self.panels
+            .update(&chat_id, |panels| panels.terminal_open = true);
+        if self.active_chat == chat_id {
+            self.terminal_tween = None;
+            self.terminal_tween_task = None;
+            panel.update(cx, |panel, cx| panel.set_open(true, cx));
+            panel.update(cx, |panel, cx| panel.select_tab_by_key(tab, cx));
+        }
+        cx.notify();
+    }
+
     fn project_action_context(&self, cx: &App) -> Option<ProjectActionContext> {
         let state = self.state.read(cx);
         let chat = state.selected_chat_row()?;

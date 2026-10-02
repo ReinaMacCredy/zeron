@@ -1149,6 +1149,40 @@ pub struct TerminalSession {
     pub shell: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalInfo {
+    pub id: String,
+    pub cwd: String,
+    pub shell: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalScreen {
+    pub terminal: TerminalInfo,
+    pub cols: u16,
+    pub rows: u16,
+    pub alt_screen: bool,
+    pub cursor_row: usize,
+    pub cursor_col: usize,
+    pub lines: Vec<String>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentTerminalOpened {
+    pub chat_id: String,
+    pub terminal: TerminalSession,
+}
+
 /// One `SubscribeTerminal` stream item. `seq` is a per-terminal monotonic counter
 /// used for replay resumption (`afterSeq`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

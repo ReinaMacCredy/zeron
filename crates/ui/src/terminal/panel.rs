@@ -266,6 +266,7 @@ struct TerminalTab {
     scroll_remainder: f32,
     exited: Option<i32>,
     last_seq: u64,
+    pushed_selection: Option<String>,
     coalescer: InputCoalescer,
     flush_task: Option<Task<()>>,
     resize_task: Option<Task<()>>,
@@ -495,6 +496,7 @@ impl TerminalPanel {
             scroll_remainder: 0.0,
             exited: None,
             last_seq: 0,
+            pushed_selection: None,
             coalescer: InputCoalescer::default(),
             flush_task: None,
             resize_task: None,
@@ -1140,6 +1142,7 @@ impl TerminalPanel {
                 position: event.position,
                 armed: false,
             });
+            self.share_selection(cx);
         } else {
             // Word and line selections are complete on the press, so they need
             // no threshold — but keep the drag live so the pointer can extend
@@ -1195,14 +1198,58 @@ impl TerminalPanel {
         self.schedule_selection_scroll(cx);
     }
 
-    fn on_mouse_up(
-        &mut self,
-        _event: &MouseUpEvent,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) {
-        self.selection_drag = None;
+    fn on_mouse_up(&mut self, _event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let selecting = self.selection_drag.take().is_some_and(|drag| drag.armed);
         self.selection_scroll_task = None;
+        if selecting {
+            self.share_selection(cx);
+        }
+    }
+
+    fn share_selection(&mut self, cx: &mut Context<Self>) {
+        let text = self
+            .with_active_emulator(cx, |emu| emu.selection_text())
+            .flatten();
+        if let Some(key) = self.state.read(cx).focused_id() {
+            let quote = text.clone();
+            self.state.update(cx, |state, cx| {
+                if state.set_terminal_quote(&key, quote) {
+                    cx.notify();
+                }
+            });
+        }
+        let Some(engine) = self.engine(cx) else {
+            return;
+        };
+        let chat = self.selected_chat(cx);
+        let Some(tabs) = self.chats.get_mut(&chat) else {
+            return;
+        };
+        let active = tabs.active;
+        let Some(tab) = tabs.tabs.get_mut(active) else {
+            return;
+        };
+        if tab.pushed_selection == text {
+            return;
+        }
+        let Some(id) = tab.terminal_id.clone() else {
+            return;
+        };
+        tab.pushed_selection = text.clone();
+        let target = tab.target_device_id.clone();
+        cx.spawn(async move |_, _| {
+            let _ = engine
+                .client()
+                .call(
+                    methods::SET_TERMINAL_SELECTION,
+                    with_target(
+                        serde_json::json!({ "terminalId": id, "text": text }),
+                        &target,
+                    ),
+                )
+                .await;
+        })
+        .detach();
     }
 
     /// Copy the selection. Returns whether anything was copied, so the caller

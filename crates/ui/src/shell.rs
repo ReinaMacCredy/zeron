@@ -2900,6 +2900,9 @@ impl Shell {
         if let Some(notice) = state.update(cx, |state, _| state.take_deep_link_notice()) {
             self.sidebar_notice = Some(notice.into());
         }
+        for opened in state.update(cx, |state, _| state.take_agent_terminals()) {
+            self.attach_agent_terminal(opened, cx);
+        }
         let announcements = state.update(cx, |state, _| state.take_model_announcements());
         // Background-only exists because a session ping has the sidebar dot
         // to fall back on; a new model has none, so only the master switch applies.

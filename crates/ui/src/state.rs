@@ -742,6 +742,7 @@ pub struct AppState {
     pending_deep_link: Option<crate::links::ConversationDeepLink>,
     deep_link_notice: Option<String>,
     model_announcements: Vec<(String, String)>,
+    agent_terminals: Vec<zeron_proto::AgentTerminalOpened>,
     /// Joined transcript of the selected chat (continuations folded engine-side).
     pub transcript: Vec<SessionMessageEntry>,
     /// The selected chat's pending-message queue — what was typed while the
@@ -909,6 +910,7 @@ impl AppState {
             pending_deep_link: None,
             deep_link_notice: None,
             model_announcements: Vec::new(),
+            agent_terminals: Vec::new(),
         }
     }
 
@@ -1054,6 +1056,22 @@ impl AppState {
 
     pub fn add_quote(&mut self, key: &str, quote: Quote) {
         self.quotes.entry(key.to_string()).or_default().push(quote);
+    }
+
+    pub fn set_terminal_quote(&mut self, key: &str, text: Option<String>) -> bool {
+        let current = self
+            .quotes(key)
+            .iter()
+            .find(|quote| quote.terminal)
+            .map(|quote| quote.text.as_str());
+        if current == text.as_deref() {
+            return false;
+        }
+        self.remove_quote(key, crate::quotes::TERMINAL_QUOTE_ID);
+        if let Some(text) = text {
+            self.add_quote(key, Quote::terminal(text));
+        }
+        true
     }
 
     pub fn remove_quote(&mut self, key: &str, id: &str) {
@@ -2408,6 +2426,15 @@ impl AppState {
                     true
                 },
             ),
+            spawn_watch(
+                cx,
+                handle.clone(),
+                methods::WATCH_AGENT_TERMINALS,
+                |state, opened| {
+                    state.agent_terminals.push(opened);
+                    true
+                },
+            ),
             spawn_watch(cx, handle.clone(), methods::WATCH_SPACES, |state, value| {
                 state.apply_spaces(value);
                 true
@@ -2543,6 +2570,10 @@ impl AppState {
 
     pub fn take_model_announcements(&mut self) -> Vec<(String, String)> {
         std::mem::take(&mut self.model_announcements)
+    }
+
+    pub fn take_agent_terminals(&mut self) -> Vec<zeron_proto::AgentTerminalOpened> {
+        std::mem::take(&mut self.agent_terminals)
     }
 
     /// Select a chat (or clear). Swaps the per-chat doc-transcript subscription:
