@@ -4708,7 +4708,7 @@ impl Shell {
         // a frozen one reads top-down.
         let transcript =
             cx.new(|cx| Transcript::for_doc(self.state.clone(), doc_id.clone(), !frozen, cx));
-        let links = Self::session_links(Some(self.active_chat.clone()), cx);
+        let links = Self::session_links(Some(chat_id.clone()), cx);
         transcript.update(cx, |transcript, _| {
             transcript.set_workspace_link_handler(links)
         });
@@ -4891,8 +4891,19 @@ impl Shell {
                 | ComposerEvent::NewThreadTransitionStarted
                 | ComposerEvent::BackgroundStarted
                 | ComposerEvent::WorkspaceCommand(_)
-                | ComposerEvent::WorktreeSetup { .. }
-                | ComposerEvent::OpenSubagent { .. } => {}
+                | ComposerEvent::WorktreeSetup { .. } => {}
+                ComposerEvent::OpenSubagent {
+                    chat_id,
+                    doc_id,
+                    title,
+                    frozen,
+                } => _this.add_subagent_surface(
+                    chat_id.clone(),
+                    doc_id.clone(),
+                    title.clone(),
+                    *frozen,
+                    cx,
+                ),
                 ComposerEvent::UnsentChanged => cx.notify(),
                 ComposerEvent::ThreadMentionDropped => _this.accept_command_palette_drop(),
                 ComposerEvent::OpenComputerSetup { missing } => {

@@ -411,9 +411,6 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if self.chat_override.is_some() {
-            return None;
-        }
         let (chat_id, harness, chat_reasoning) = self.bound_chat_row(cx).map(|chat| {
             let config = chat.config.as_ref();
             (
@@ -426,8 +423,13 @@ impl Composer {
             chat_reasoning.or_else(|| self.pickers.read(cx).resolved(cx).reasoning);
         let (agents, shells) = {
             let state = self.state.read(cx);
+            let transcript = if self.chat_override.is_some() {
+                state.sub_transcript(&chat_id)
+            } else {
+                &state.transcript
+            };
             (
-                agent_runs(&state.transcript),
+                agent_runs(transcript),
                 shell_tasks(state.session_for(&chat_id)),
             )
         };
@@ -2135,6 +2137,80 @@ mod tests {
             spawn_reasoning(&spawn(serde_json::json!({ "model": "opus" }))),
             None
         );
+    }
+
+    #[gpui::test]
+    fn a_chat_bound_composer_shows_its_own_chats_pills(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let state = cx.new(|_| crate::state::AppState::new());
+        state.update(cx, |state, _| {
+            state.chats = vec![claude_chat("c1"), claude_chat("c2")];
+            state.selected_chat = Some("c1".into());
+            state.sessions = vec![Session {
+                chat_id: "c2".into(),
+                ..session(
+                    SessionStatus::Working,
+                    false,
+                    vec![task("shell-1", BackgroundTaskKind::Shell)],
+                )
+            }];
+            state.transcript = vec![
+                entry("u1", MessageRole::User, 1, vec![]),
+                entry(
+                    "a1",
+                    MessageRole::Assistant,
+                    2,
+                    vec![spawn("p1", "Agent: main", Some(SubagentStatus::Running))],
+                ),
+            ];
+        });
+        let composer = cx.new(|cx| Composer::for_chat(state.clone(), "c2".into(), cx));
+        struct Fixture(Entity<Composer>);
+        impl Render for Fixture {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .justify_end()
+                    .child(self.0.clone())
+            }
+        }
+        let (_fixture, cx) = cx.add_window_view(|_, _| Fixture(composer.clone()));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("background-shells-pill").is_some());
+        assert!(cx.debug_bounds("background-agents-pill").is_none());
+
+        state.update(cx, |state, _| {
+            state.set_subagent_snapshot(
+                "c2".into(),
+                vec![
+                    entry("u2", MessageRole::User, 1, vec![]),
+                    entry(
+                        "a2",
+                        MessageRole::Assistant,
+                        2,
+                        vec![spawn("p2", "Agent: split", Some(SubagentStatus::Running))],
+                    ),
+                ],
+            );
+        });
+        composer.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("background-agents-pill").is_some());
     }
 
     #[test]

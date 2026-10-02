@@ -357,8 +357,19 @@ impl Shell {
                 | ComposerEvent::NewThreadTransitionStarted
                 | ComposerEvent::BackgroundStarted
                 | ComposerEvent::WorkspaceCommand(_)
-                | ComposerEvent::WorktreeSetup { .. }
-                | ComposerEvent::OpenSubagent { .. } => {}
+                | ComposerEvent::WorktreeSetup { .. } => {}
+                ComposerEvent::OpenSubagent {
+                    chat_id,
+                    doc_id,
+                    title,
+                    frozen,
+                } => _this.add_subagent_surface(
+                    chat_id.clone(),
+                    doc_id.clone(),
+                    title.clone(),
+                    *frozen,
+                    cx,
+                ),
                 ComposerEvent::UnsentChanged => cx.notify(),
                 ComposerEvent::ThreadMentionDropped => _this.accept_command_palette_drop(),
                 ComposerEvent::OpenComputerSetup { missing } => {
