@@ -1059,7 +1059,7 @@ impl Render for ShortcutsPage {
                         &theme,
                         vec![
                             div()
-                                .child("Slider style in the compact model picker.")
+                                .child("Slider style in the model picker.")
                                 .into_any_element(),
                         ],
                     )),

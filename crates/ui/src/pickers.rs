@@ -4637,7 +4637,11 @@ impl Pickers {
     /// Model picker with favorites and harness tabs above a scoped search.
     /// On an existing chat browsing another tab changes nothing until a
     /// model there is picked.
-    fn render_harness_model_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_harness_model_popover(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let compact = self.compact_model_picker(cx);
         let height = self.menu_geometry().height.min(self.open_model_height);
         let groups = self.setting_groups(cx);
@@ -4964,7 +4968,7 @@ impl Pickers {
                     .selected_model(cx)
                     .is_some_and(|m| !m.options.is_empty()));
         let tray: Option<AnyElement> = has_tray.then(|| {
-            let sections = self.render_traits_sections(cx);
+            let sections = self.render_traits_sections(window, cx);
             div()
                 .id("model-traits-tray")
                 .flex_none()
@@ -5324,7 +5328,7 @@ impl Pickers {
         let Some(row) = self.card_row(cx) else {
             return div().into_any_element();
         };
-        let settings = self.render_setting_rows(SettingScope::Card, cx);
+        let settings = self.render_setting_rows(SettingScope::Card, None, cx);
         let toggles: Vec<AnyElement> = self
             .card_groups(cx)
             .into_iter()
@@ -5675,13 +5679,34 @@ impl Pickers {
     }
 
     /// Each model setting gets a compact trigger and its own nested choices.
-    fn render_traits_sections(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        self.render_setting_rows(SettingScope::Tray, cx)
+    fn render_traits_sections(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let effort_card = if self.compact_model_picker(cx) {
+            None
+        } else {
+            self.scope_groups(SettingScope::Tray, cx)
+                .iter()
+                .position(|group| group.id == ModelSetting::Reasoning)
+                .map(|ix| {
+                    let highlighted = self.active == self.model_rows_len(cx) + ix;
+                    let theme = Theme::of(cx).for_popup();
+                    self.render_effort_card(highlighted, &theme, window, cx)
+                })
+        };
+        self.render_setting_rows(SettingScope::Tray, effort_card, cx)
     }
 
     /// Setting triggers for the tray or a hover card. Card rows stay out of
     /// the keyboard cursor, and its switches render separately.
-    fn render_setting_rows(&mut self, scope: SettingScope, cx: &mut Context<Self>) -> AnyElement {
+    fn render_setting_rows(
+        &mut self,
+        scope: SettingScope,
+        mut effort_card: Option<AnyElement>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
         let tray = scope == SettingScope::Tray;
         let base_index = if tray {
@@ -5716,8 +5741,11 @@ impl Pickers {
             {
                 continue;
             }
-            if tray && !self.compact_model_picker(cx) && group.id == ModelSetting::Reasoning {
-                rows.push(self.render_effort_card(self.active == base_index + ix, &theme, cx));
+            if tray
+                && group.id == ModelSetting::Reasoning
+                && let Some(card) = effort_card.take()
+            {
+                rows.push(card);
                 continue;
             }
             let open = self.setting_scope == scope && self.setting_menu.as_ref() == Some(&group.id);
@@ -5990,6 +6018,7 @@ impl Pickers {
         &mut self,
         highlighted: bool,
         theme: &Theme,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let ladder = self.trait_ladder(cx);
@@ -6069,15 +6098,20 @@ impl Pickers {
             )
             .child(reset);
 
-        let track = self.render_effort_track(highlighted, theme, cx);
-
-        div()
-            .px(px(4.0))
-            .pt(px(2.0))
-            .pb(px(4.0))
-            .child(header)
-            .child(div().mt(px(4.0)).px(px(2.0)).py(px(2.0)).child(track))
-            .into_any_element()
+        let glass = (crate::settings::compact_effort_slider(cx)
+            == crate::settings::EffortSliderStyle::Glass)
+            .then(|| self.render_glass_effort_slider(highlighted, window, cx))
+            .flatten();
+        let card = div().px(px(4.0)).pt(px(2.0)).child(header);
+        match glass {
+            Some(slider) => card.child(div().px(px(2.0)).child(slider)),
+            None => {
+                let track = self.render_effort_track(highlighted, theme, cx);
+                card.pb(px(4.0))
+                    .child(div().mt(px(4.0)).px(px(2.0)).py(px(2.0)).child(track))
+            }
+        }
+        .into_any_element()
     }
 
     fn render_effort_track(
@@ -7115,7 +7149,7 @@ impl Render for Pickers {
                 let menu = if self.compact_model_picker(cx) {
                     self.render_compact_menu(window, cx)
                 } else {
-                    let content = self.render_harness_model_popover(cx);
+                    let content = self.render_harness_model_popover(window, cx);
                     self.popover_frame_flush(304.0, content, cx)
                 };
                 Some((PickerKind::HarnessModel, menu))
@@ -8022,10 +8056,10 @@ mod tests {
             bounds: Rc<Cell<gpui::Bounds<gpui::Pixels>>>,
         }
         impl Render for Fixture {
-            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
                 let measured = self.bounds.clone();
                 let menu = self.pickers.update(cx, |pickers, cx| {
-                    let content = pickers.render_harness_model_popover(cx);
+                    let content = pickers.render_harness_model_popover(window, cx);
                     pickers.popover_frame_flush(304.0, content, cx)
                 });
                 div().size_full().relative().child(
@@ -8593,19 +8627,24 @@ mod tests {
             pickers: Entity<Pickers>,
         }
         impl Render for CardFixture {
-            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                let menu = self
-                    .pickers
-                    .update(cx, |pickers, cx| pickers.render_harness_model_popover(cx));
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let menu = self.pickers.update(cx, |pickers, cx| {
+                    pickers.render_harness_model_popover(window, cx)
+                });
                 div()
                     .size_full()
                     .p(px(40.0))
                     .child(div().w(px(304.0)).child(menu))
             }
         }
+        let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             cx.set_global(Theme::dark());
             crate::composer::init(cx, Default::default());
+            let mut settings = crate::settings::UiSettings::default();
+            settings.compact_model_picker = false;
+            settings.compact_effort_slider = crate::settings::EffortSliderStyle::Stepped;
+            crate::settings::init(settings, dir.path(), cx);
         });
         let pickers = cx.update(|cx| {
             let state = cx.new(|_| AppState::new());
@@ -8827,10 +8866,10 @@ mod tests {
             bounds: Rc<Cell<gpui::Bounds<gpui::Pixels>>>,
         }
         impl Render for CardFixture {
-            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
                 let measured = self.bounds.clone();
                 let menu = self.pickers.update(cx, |pickers, cx| {
-                    let content = pickers.render_harness_model_popover(cx);
+                    let content = pickers.render_harness_model_popover(window, cx);
                     pickers.popover_frame_flush(304.0, content, cx)
                 });
                 div().size_full().relative().child(
@@ -9023,10 +9062,10 @@ mod tests {
             bounds: Rc<Cell<gpui::Bounds<gpui::Pixels>>>,
         }
         impl Render for MouseFixture {
-            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
                 let measured = self.bounds.clone();
                 let menu = self.pickers.update(cx, |pickers, cx| {
-                    let content = pickers.render_harness_model_popover(cx);
+                    let content = pickers.render_harness_model_popover(window, cx);
                     pickers.popover_frame_flush(304.0, content, cx)
                 });
                 div().size_full().relative().child(
@@ -9816,7 +9855,7 @@ mod tests {
                     if pickers.compact_model_picker(cx) {
                         pickers.render_compact_menu(window, cx)
                     } else {
-                        pickers.render_harness_model_popover(cx)
+                        pickers.render_harness_model_popover(window, cx)
                     }
                 });
                 div()
@@ -9873,7 +9912,26 @@ mod tests {
             assert!(pickers.model_rail == ModelRail::Harness);
         });
         cx.update(|window, cx| window.draw(cx).clear());
+        let glass = cx
+            .debug_bounds("glass-effort-slider")
+            .expect("full picker draws the glass slider");
+        assert!(cx.debug_bounds("effort-track").is_none());
+        cx.simulate_click(
+            gpui::point(glass.origin.x + px(4.0), glass.center().y),
+            gpui::Modifiers::default(),
+        );
+        pickers.read_with(cx, |pickers, cx| {
+            assert_eq!(pickers.effective_reasoning(cx), Some(ReasoningLevel::Low));
+        });
+
+        cx.update(|_, cx| {
+            crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |settings| {
+                settings.compact_effort_slider = crate::settings::EffortSliderStyle::Stepped
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
         assert!(cx.debug_bounds("effort-track").is_some());
+        assert!(cx.debug_bounds("glass-effort-slider").is_none());
     }
 
     #[gpui::test]

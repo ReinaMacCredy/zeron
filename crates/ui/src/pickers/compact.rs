@@ -862,7 +862,7 @@ impl Pickers {
             window.request_animation_frame();
         }
         let content = match page {
-            CompactPage::Models => self.render_harness_model_popover(cx),
+            CompactPage::Models => self.render_harness_model_popover(window, cx),
             CompactPage::Providers => self.render_compact_provider_page(cx),
             CompactPage::Panel => self.render_compact_model_panel(window, cx),
         };
@@ -948,26 +948,19 @@ impl Pickers {
         }
     }
 
-    pub(super) fn render_compact_model_panel(
+    pub(super) fn render_glass_effort_slider(
         &mut self,
+        highlighted: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> Option<AnyElement> {
         let theme = Theme::of(cx).for_popup();
-        let (levels, selected) = self
-            .compact_effort(cx)
-            .map_or((Vec::new(), 0), |e| (e.labels, e.selected));
-        let label: SharedString = self
-            .selected_model(cx)
-            .map(|m| m.label.clone())
-            .unwrap_or_else(|| "Select model".into())
-            .into();
-        let effort: SharedString = levels
-            .get(selected)
-            .cloned()
-            .unwrap_or_else(|| "Default".into());
-        let model_accessible: SharedString =
-            format!("{} · {} · Change model", effort, label).into();
+        let CompactEffort {
+            labels: levels,
+            selected,
+            ..
+        } = self.compact_effort(cx)?;
+        let effort = levels.get(selected).cloned().unwrap_or_default();
         let now = std::time::Instant::now();
         let reduced = cx.reduce_motion();
         // Fast mode alone brings the fill to life: a sheen and speed streaks
@@ -1002,6 +995,203 @@ impl Pickers {
         } else {
             0.5
         };
+        let target = if levels.len() > 1 {
+            selected as f32 / (levels.len() - 1) as f32
+        } else {
+            0.0
+        };
+        let (mut fraction, moving) =
+            ScalarTransition::sample(&mut self.compact_motion.effort, target, now, reduced);
+        if self.compact_effort_dragging {
+            fraction = self.compact_motion.drag_fraction.unwrap_or(target);
+            // Keep the release animation rooted at the actual pointer, not the previous stop.
+            self.compact_motion.effort = Some(ScalarTransition {
+                from: fraction,
+                to: fraction,
+                started: now,
+            });
+        }
+        if moving {
+            window.request_animation_frame();
+        }
+        let (press, pressing) = ScalarTransition::sample(
+            &mut self.compact_motion.press,
+            if self.compact_effort_dragging {
+                1.0
+            } else {
+                0.0
+            },
+            now,
+            reduced,
+        );
+        if pressing {
+            window.request_animation_frame();
+        }
+        let entity = cx.entity().downgrade();
+        let drag_entity = entity.clone();
+        let slider = div()
+            .id("compact-effort-slider")
+            .debug_selector(|| "glass-effort-slider".into())
+            .role(gpui::Role::Slider)
+            .aria_label("Reasoning effort")
+            .aria_value(effort.clone())
+            .aria_numeric_value(selected as f64)
+            .aria_min_numeric_value(0.0)
+            .aria_max_numeric_value(levels.len().saturating_sub(1) as f64)
+            .aria_numeric_value_step(1.0)
+            .aria_orientation(gpui::Orientation::Horizontal)
+            .aria_description("Use Left and Right to adjust reasoning; Home and End select the first and last levels")
+            .relative()
+            .h(px(SLIDER_HEIGHT))
+            .cursor_pointer()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                    window.focus(&this.focus, cx);
+                    this.compact_keyboard = false;
+                    if this.compact_model_picker(cx) {
+                        this.active = NO_ACTIVE_ROW;
+                    }
+                    this.compact_effort_dragging = true;
+                    this.pick_effort_at(event.position.x, cx);
+                    cx.notify();
+                    cx.stop_propagation();
+                }),
+            )
+            .child(
+                gpui::canvas(
+                    move |bounds, _, cx| {
+                        let _ = entity.update(cx, |this, _| this.effort_bounds = Some(bounds));
+                    },
+                    move |_, _, window, _| {
+                        let release = drag_entity.clone();
+                        window.on_mouse_event(move |_: &gpui::MouseUpEvent, phase, _, cx| {
+                            if phase == gpui::DispatchPhase::Bubble {
+                                let _ = release.update(cx, |this, cx| {
+                                    if this.compact_effort_dragging {
+                                        this.compact_effort_dragging = false;
+                                        this.compact_motion.drag_fraction = None;
+                                        cx.notify();
+                                    }
+                                });
+                            }
+                        });
+                        let entity = drag_entity.clone();
+                        window.on_mouse_event(
+                            move |event: &gpui::MouseMoveEvent, phase, _, cx| {
+                                if phase == gpui::DispatchPhase::Bubble
+                                    && event.pressed_button == Some(gpui::MouseButton::Left)
+                                {
+                                    let _ = entity.update(cx, |this, cx| {
+                                        if this.compact_effort_dragging {
+                                            this.pick_effort_at(event.position.x, cx);
+                                        }
+                                    });
+                                }
+                            },
+                        );
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            )
+            .child(crate::glass::light(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top(px(RAIL_TOP))
+                    .h(px(RAIL_HEIGHT))
+                    .rounded_full(),
+                &theme,
+                1.0,
+            ))
+            // A contained glow: it must not wash over the option rows.
+            .child(effort_fill(
+                &theme,
+                fraction,
+                levels.len(),
+                Shimmer {
+                    intensity,
+                    phase,
+                    breath,
+                },
+            ))
+            .child({
+                // A plain handle that keeps its size; a press only lifts
+                // it on a softer, wider drop.
+                let (w, h) = (THUMB_WIDTH, THUMB_HEIGHT);
+                // Fast mode breathes a soft accent halo under the thumb.
+                let live = intensity * (0.55 + 0.45 * breath);
+                let place = |el: gpui::Div| {
+                    el.absolute()
+                        .left(gpui::relative(fraction))
+                        .ml(px(-w / 2.0))
+                        .w(px(w))
+                        .h(px(h))
+                        .rounded_full()
+                };
+                div()
+                    .absolute()
+                    .left(px(THUMB_INSET))
+                    .right(px(THUMB_INSET))
+                    .top(px((SLIDER_HEIGHT - h) / 2.0))
+                    .when(intensity > 0.001, |el| {
+                        el.child(place(div()).shadow(vec![gpui::BoxShadow {
+                            color: theme.accent.opacity(0.35 * live),
+                            offset: gpui::point(px(0.0), px(1.0)),
+                            blur_radius: px(10.0),
+                            spread_radius: px(0.0),
+                            inset: false,
+                        }]))
+                    })
+                    .when(press > 0.001, |el| {
+                        el.child(place(div()).shadow(vec![gpui::BoxShadow {
+                            color: gpui::black().opacity(0.12 * press),
+                            offset: gpui::point(px(0.0), px(2.0 * press)),
+                            blur_radius: px(8.0),
+                            spread_radius: px(0.0),
+                            inset: false,
+                        }]))
+                    })
+                    .when(highlighted, |el| {
+                        el.child(place(div()).shadow(vec![gpui::BoxShadow {
+                            color: theme.accent.opacity(0.4),
+                            offset: gpui::point(px(0.0), px(0.0)),
+                            blur_radius: px(0.0),
+                            spread_radius: px(3.0),
+                            inset: false,
+                        }]))
+                    })
+                    .child(
+                        crate::glass::thumb(place(div()), &theme),
+                    )
+            });
+        Some(slider.into_any_element())
+    }
+
+    pub(super) fn render_compact_model_panel(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = Theme::of(cx).for_popup();
+        let (levels, selected) = self
+            .compact_effort(cx)
+            .map_or((Vec::new(), 0), |e| (e.labels, e.selected));
+        let label: SharedString = self
+            .selected_model(cx)
+            .map(|m| m.label.clone())
+            .unwrap_or_else(|| "Select model".into())
+            .into();
+        let effort: SharedString = levels
+            .get(selected)
+            .cloned()
+            .unwrap_or_else(|| "Default".into());
+        let model_accessible: SharedString =
+            format!("{} · {} · Change model", effort, label).into();
+        let now = std::time::Instant::now();
+        let reduced = cx.reduce_motion();
         // The effort titles the model's name as one button filling the row
         // up to fast mode, its text on the rail's and option rows' edge; fast
         // mode is a small icon button whose glyph ends where the rail does.
@@ -1232,167 +1422,7 @@ impl Pickers {
                             .child(track),
                     ),
             );
-        } else if !levels.is_empty() {
-            let target = if levels.len() > 1 {
-                selected as f32 / (levels.len() - 1) as f32
-            } else {
-                0.0
-            };
-            let (mut fraction, moving) =
-                ScalarTransition::sample(&mut self.compact_motion.effort, target, now, reduced);
-            if self.compact_effort_dragging {
-                fraction = self.compact_motion.drag_fraction.unwrap_or(target);
-                // Keep the release animation rooted at the actual pointer, not the previous stop.
-                self.compact_motion.effort = Some(ScalarTransition {
-                    from: fraction,
-                    to: fraction,
-                    started: now,
-                });
-            }
-            if moving {
-                window.request_animation_frame();
-            }
-            let (press, pressing) = ScalarTransition::sample(
-                &mut self.compact_motion.press,
-                if self.compact_effort_dragging {
-                    1.0
-                } else {
-                    0.0
-                },
-                now,
-                reduced,
-            );
-            if pressing {
-                window.request_animation_frame();
-            }
-            let entity = cx.entity().downgrade();
-            let drag_entity = entity.clone();
-            let slider = div()
-                .id("compact-effort-slider")
-                .role(gpui::Role::Slider)
-                .aria_label("Reasoning effort")
-                .aria_value(effort.clone())
-                .aria_numeric_value(selected as f64)
-                .aria_min_numeric_value(0.0)
-                .aria_max_numeric_value(levels.len().saturating_sub(1) as f64)
-                .aria_numeric_value_step(1.0)
-                .aria_orientation(gpui::Orientation::Horizontal)
-                .aria_description("Use Left and Right to adjust reasoning; Home and End select the first and last levels")
-                .relative()
-                .h(px(SLIDER_HEIGHT))
-                .cursor_pointer()
-                .on_mouse_down(
-                    gpui::MouseButton::Left,
-                    cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
-                        window.focus(&this.focus, cx);
-                        this.compact_keyboard = false;
-                        this.active = NO_ACTIVE_ROW;
-                        this.compact_effort_dragging = true;
-                        this.pick_effort_at(event.position.x, cx);
-                        cx.notify();
-                        cx.stop_propagation();
-                    }),
-                )
-                .child(
-                    gpui::canvas(
-                        move |bounds, _, cx| {
-                            let _ = entity.update(cx, |this, _| this.effort_bounds = Some(bounds));
-                        },
-                        move |_, _, window, _| {
-                            let release = drag_entity.clone();
-                            window.on_mouse_event(move |_: &gpui::MouseUpEvent, phase, _, cx| {
-                                if phase == gpui::DispatchPhase::Bubble {
-                                    let _ = release.update(cx, |this, cx| {
-                                        if this.compact_effort_dragging {
-                                            this.compact_effort_dragging = false;
-                                            this.compact_motion.drag_fraction = None;
-                                            cx.notify();
-                                        }
-                                    });
-                                }
-                            });
-                            let entity = drag_entity.clone();
-                            window.on_mouse_event(
-                                move |event: &gpui::MouseMoveEvent, phase, _, cx| {
-                                    if phase == gpui::DispatchPhase::Bubble
-                                        && event.pressed_button == Some(gpui::MouseButton::Left)
-                                    {
-                                        let _ = entity.update(cx, |this, cx| {
-                                            if this.compact_effort_dragging {
-                                                this.pick_effort_at(event.position.x, cx);
-                                            }
-                                        });
-                                    }
-                                },
-                            );
-                        },
-                    )
-                    .absolute()
-                    .inset_0(),
-                )
-                .child(crate::glass::light(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .right_0()
-                        .top(px(RAIL_TOP))
-                        .h(px(RAIL_HEIGHT))
-                        .rounded_full(),
-                    &theme,
-                    1.0,
-                ))
-                // A contained glow: it must not wash over the option rows.
-                .child(effort_fill(
-                    &theme,
-                    fraction,
-                    levels.len(),
-                    Shimmer {
-                        intensity,
-                        phase,
-                        breath,
-                    },
-                ))
-                .child({
-                    // A plain handle that keeps its size; a press only lifts
-                    // it on a softer, wider drop.
-                    let (w, h) = (THUMB_WIDTH, THUMB_HEIGHT);
-                    // Fast mode breathes a soft accent halo under the thumb.
-                    let live = intensity * (0.55 + 0.45 * breath);
-                    let place = |el: gpui::Div| {
-                        el.absolute()
-                            .left(gpui::relative(fraction))
-                            .ml(px(-w / 2.0))
-                            .w(px(w))
-                            .h(px(h))
-                            .rounded_full()
-                    };
-                    div()
-                        .absolute()
-                        .left(px(THUMB_INSET))
-                        .right(px(THUMB_INSET))
-                        .top(px((SLIDER_HEIGHT - h) / 2.0))
-                        .when(intensity > 0.001, |el| {
-                            el.child(place(div()).shadow(vec![gpui::BoxShadow {
-                                color: theme.accent.opacity(0.35 * live),
-                                offset: gpui::point(px(0.0), px(1.0)),
-                                blur_radius: px(10.0),
-                                spread_radius: px(0.0),
-                                inset: false,
-                            }]))
-                        })
-                        .when(press > 0.001, |el| {
-                            el.child(place(div()).shadow(vec![gpui::BoxShadow {
-                                color: gpui::black().opacity(0.12 * press),
-                                offset: gpui::point(px(0.0), px(2.0 * press)),
-                                blur_radius: px(8.0),
-                                spread_radius: px(0.0),
-                                inset: false,
-                            }]))
-                        })
-                        .child(
-                            crate::glass::thumb(place(div()), &theme),
-                        )
-                });
+        } else if let Some(slider) = self.render_glass_effort_slider(false, window, cx) {
             // The rail starts on the same edge as the title and row labels.
             panel = panel.child(
                 div()
@@ -1409,7 +1439,7 @@ impl Pickers {
             .filter(|g| Self::compact_option_visible(&g.id, &hidden))
             .count();
         if option_count > 0 {
-            let options = self.render_traits_sections(cx);
+            let options = self.render_traits_sections(window, cx);
             let scrollbar = popover::rail(self, "compact-options-scrollbar", &theme, cx);
             let chrome = CARD_BORDERS
                 + header_block(!levels.is_empty())
