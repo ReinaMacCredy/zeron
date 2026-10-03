@@ -6743,7 +6743,7 @@ impl Composer {
                     && composer_has_content(
                         this.input.read(cx).text(),
                         this.staged().len() + this.staged_appshots().len(),
-                        this.staged_comments(cx).len(),
+                        this.staged_chip_count(cx),
                     )
                 {
                     this.on_submit(cx);
@@ -13798,7 +13798,7 @@ mod tests {
                 // Staging runs in the background; navigating meanwhile must
                 // not move the attachment into the other chat's draft.
                 composer.current_key = "chat-b".into();
-                assert!(composer.attachments.is_empty());
+                assert!(composer.attachments.values().all(Vec::is_empty));
             })
             .unwrap();
         cx.run_until_parked();
