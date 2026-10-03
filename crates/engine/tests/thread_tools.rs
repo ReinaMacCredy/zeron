@@ -1421,3 +1421,121 @@ async fn a_cancelled_child_settles_while_its_own_child_still_runs() {
     );
     rig.core.shutdown().await;
 }
+
+/// Starts streaming and never finishes, so the engine can die mid-run.
+struct StallingHarness;
+
+#[async_trait]
+impl Harness for StallingHarness {
+    fn id(&self) -> HarnessId {
+        HarnessId::Mock
+    }
+    fn display_name(&self) -> &str {
+        "Stalling"
+    }
+    fn supports_steering(&self) -> bool {
+        false
+    }
+    fn steering_mode(&self) -> SteeringMode {
+        SteeringMode::TurnBoundary
+    }
+    fn reasoning_levels(&self) -> &[ReasoningLevel] {
+        &[]
+    }
+    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+        Ok(vec![])
+    }
+    async fn run(
+        &self,
+        _request: RunRequest,
+        _controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        Ok(futures::stream::iter([
+            Ok(AgentEvent::SessionStarted {
+                harness: HarnessId::Mock,
+                model: "stall-1".into(),
+                tools: vec![],
+                cwd: "/tmp".into(),
+                session_id: "hs-stall".into(),
+                assistant_message_id: "a-stall".into(),
+            }),
+            Ok(AgentEvent::TextDelta {
+                text: "working".into(),
+            }),
+        ])
+        .chain(futures::stream::pending())
+        .boxed())
+    }
+}
+
+#[test]
+fn a_child_revived_after_a_crash_settles_from_its_revived_run() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("device-id"), "dev-a").unwrap();
+
+    let crashed = tokio::runtime::Runtime::new().unwrap();
+    let (core, child) = crashed.block_on(async {
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(StallingHarness));
+        let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+            .expect("engine core assembles");
+        core.workspace
+            .create_space("space-tt", "dev-a", "/tmp", None, false)
+            .expect("space");
+        core.workspace
+            .create_chat("lead", Some("space-tt"), None, None, None)
+            .expect("lead chat");
+        let child = core
+            .doc_host
+            .delegate_task(delegate("survive the crash"), Default::default())
+            .await
+            .expect("delegate")
+            .task_id;
+        wait_for(
+            || {
+                entries(&core, &child).iter().any(|e| {
+                    e.role == zeron_doc::MessageRole::Assistant
+                        && e.status == Some(zeron_doc::MessageStatus::Streaming)
+                })
+            },
+            "the child mid-run",
+        )
+        .await;
+        core.doc_host.flush_all();
+        core.workspace.flush();
+        (core, child)
+    });
+    crashed.shutdown_background();
+    drop(core);
+
+    let rebooted = tokio::runtime::Runtime::new().unwrap();
+    rebooted.block_on(async {
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(RecordingHarness {
+            prompts: prompts.clone(),
+            steers: Arc::new(Mutex::new(Vec::new())),
+            steerable: false,
+            step_delay: Duration::from_millis(50),
+        }));
+        let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+            .expect("engine core reassembles");
+        wait_for(
+            || !delegation(&core, &child).is_running(),
+            "the revived child to settle",
+        )
+        .await;
+        assert!(
+            prompts
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p.ends_with("survive the crash")),
+            "the crashed child run was revived"
+        );
+        let d = delegation(&core, &child);
+        assert_eq!(d.status, zeron_proto::DelegationStatus::Completed);
+        assert_eq!(d.summary.as_deref(), Some("noted"));
+        core.shutdown().await;
+    });
+}
