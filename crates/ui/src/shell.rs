@@ -8524,6 +8524,14 @@ impl Shell {
         let ring =
             crate::composer::background::sidebar_ring(status, self.state.read(cx).session_for(&id))
                 .filter(|_| !queued && !undelivered && !expired);
+        let work_label = ring.filter(|_| working).and_then(|_| {
+            let state = self.state.read(cx);
+            crate::composer::background::ring_label(&state.session_for(&id)?.background_tasks)
+        });
+        let status_label: Option<SharedString> = match work_label {
+            Some(label) => Some(label.into()),
+            None => status_label.map(SharedString::from),
+        };
         let compact_status = compact.then(|| {
             let glyph = if ring.is_some() {
                 crate::composer::background::sidebar_ring_mark(0, theme).into_any_element()
@@ -8563,7 +8571,7 @@ impl Shell {
                 .flex()
                 .items_center()
                 .justify_center()
-                .aria_label(status_label.unwrap_or("Idle"))
+                .aria_label(status_label.clone().unwrap_or_else(|| "Idle".into()))
                 .child(glyph)
                 .into_any_element()
         });
@@ -8645,13 +8653,16 @@ impl Shell {
                 div().into_any_element()
             }
         } else {
-            match status_label {
+            match status_label.clone() {
                 Some(label) => {
                     // Glyph slot: Working wears the preset's animated pixel
                     // glyph beside its label, Done wears the check, and the
                     // remaining statuses use a compact dot.
                     let glyph: AnyElement = if let Some(count) = ring {
-                        crate::composer::background::sidebar_ring_mark(count, theme)
+                        crate::composer::background::sidebar_ring_mark(
+                            if working { 0 } else { count },
+                            theme,
+                        )
                             .into_any_element()
                     } else if status == zeron_proto::ChatIndicator::Completed && !expired {
                         icon(icons::CHECK)
@@ -8687,7 +8698,7 @@ impl Shell {
                                 .text_size(crate::typography::ui_rems(10.0))
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(status_color)
-                                .child(SharedString::from(label)),
+                                .child(label),
                         )
                         .into_any_element()
                 }
@@ -8719,16 +8730,16 @@ impl Shell {
                     move || format!("{row_id}-corner")
                 })
                 .aria_label(if corner_hovered {
-                    if archived { "Unarchive" } else { "Archive" }
+                    SharedString::from(if archived { "Unarchive" } else { "Archive" })
                 } else {
                     if compact {
-                        if remote {
+                        SharedString::from(if remote {
                             "Remote session"
                         } else {
                             "Session actions"
-                        }
+                        })
                     } else {
-                        status_label.unwrap_or("Idle")
+                        status_label.clone().unwrap_or_else(|| "Idle".into())
                     }
                 })
                 .when(compact, |el| el.w(px(18.0)).justify_center())
