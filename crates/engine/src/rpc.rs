@@ -1749,7 +1749,7 @@ fn doc_messages_stream(
             rx,
             None::<crate::doc_host::TranscriptSnapshot>,
             doc,
-            None,
+            (None, None),
             zeron_doc::TranscriptBaseline::default(),
         ),
         |(mut rx, mut prev, doc, mut previous_usage, mut opening_baseline)| async move {
@@ -1795,14 +1795,15 @@ fn doc_messages_stream(
                 prev = Some(current);
                 // No-op commits (a second watcher attaching, command-only
                 // changes) produce empty deltas — skip the frame entirely.
-                let usage = doc.context_usage();
+                let usage = (doc.context_usage(), doc.session_stats());
                 if frame.is_empty_delta() && usage == previous_usage && replay_baseline.is_none() {
                     continue;
                 }
                 previous_usage = usage;
                 let value = serde_json::to_value(zeron_doc::TranscriptUpdate {
                     frame,
-                    context_usage: usage,
+                    context_usage: usage.0,
+                    session_stats: usage.1,
                     replay_baseline,
                 })
                 .ok()?;
@@ -1825,6 +1826,7 @@ async fn opening_doc_messages_stream(
         let mut preview = serde_json::to_value(zeron_doc::TranscriptUpdate {
             frame: zeron_doc::TranscriptFrame::reset(&entries),
             context_usage: handle.doc().context_usage(),
+            session_stats: handle.doc().session_stats(),
             replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&entries)),
         })
         .map_err(|e| crate::EngineError::Other(e.to_string()))?;

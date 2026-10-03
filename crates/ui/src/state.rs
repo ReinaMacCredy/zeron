@@ -51,6 +51,7 @@ struct CachedTranscript {
     chat_id: String,
     entries: Vec<SessionMessageEntry>,
     context_usage: Option<zeron_proto::ContextUsage>,
+    session_stats: Option<zeron_proto::SessionStats>,
     bytes: usize,
 }
 
@@ -750,6 +751,7 @@ pub struct AppState {
     /// chat's doc holds them (every device sees the same queue).
     pub queue: Vec<zeron_doc::QueuedMessage>,
     pub context_usage: Option<zeron_proto::ContextUsage>,
+    pub session_stats: Option<zeron_proto::SessionStats>,
     /// Chat whose context is being compacted, while the `CompactChat` call is
     /// out. In-process only (the compaction writes nothing until it lands),
     /// and chat-keyed: the composer follows the selection, so a bare flag
@@ -824,6 +826,7 @@ pub struct AppState {
     /// [`Self::unwatch_subagent_doc`].
     sub_watch_tasks: HashMap<String, Task<()>>,
     sub_context_usage: HashMap<String, zeron_proto::ContextUsage>,
+    sub_session_stats: HashMap<String, zeron_proto::SessionStats>,
 }
 
 /// Text/reasoning growth changes the transcript without changing session
@@ -874,6 +877,7 @@ impl AppState {
             transcript: Vec::new(),
             queue: Vec::new(),
             context_usage: None,
+            session_stats: None,
             compacting_chat: None,
             open_sidechat_tabs: HashSet::new(),
             computer_settings: None,
@@ -904,6 +908,7 @@ impl AppState {
             sub_transcripts: HashMap::new(),
             sub_watch_tasks: HashMap::new(),
             sub_context_usage: HashMap::new(),
+            sub_session_stats: HashMap::new(),
             auto_selected: false,
             chats_synced: false,
             spaces_synced: false,
@@ -1160,6 +1165,7 @@ impl AppState {
             self.restore_canvas_target();
             self.transcript.clear();
             self.context_usage = None;
+            self.session_stats = None;
             self.transcript_revision = self.transcript_revision.wrapping_add(1);
             self.transcript_replayed = false;
             self.transcript_task = None;
@@ -1590,6 +1596,10 @@ impl AppState {
             self.context_usage = update.context_usage;
             cx.notify();
         }
+        if self.session_stats != update.session_stats {
+            self.session_stats = update.session_stats;
+            cx.notify();
+        }
         Ok(())
     }
 
@@ -1656,6 +1666,7 @@ impl AppState {
         self.sub_watch_tasks.remove(doc_id);
         self.sub_transcripts.remove(doc_id);
         self.sub_context_usage.remove(doc_id);
+        self.sub_session_stats.remove(doc_id);
         self.prepared_transcripts.remove(doc_id);
         self.transcript_baselines.remove(doc_id);
     }
@@ -1666,6 +1677,15 @@ impl AppState {
                 self.sub_context_usage.get(id).copied()
             }
             _ => self.context_usage,
+        }
+    }
+
+    pub fn session_stats_for(&self, chat_id: Option<&str>) -> Option<zeron_proto::SessionStats> {
+        match chat_id {
+            Some(id) if self.selected_chat.as_deref() != Some(id) => {
+                self.sub_session_stats.get(id).copied()
+            }
+            _ => self.session_stats,
         }
     }
 
@@ -2223,6 +2243,7 @@ impl AppState {
         self.transcript_cache.clear();
         self.prepared_transcripts.clear();
         self.context_usage = None;
+        self.session_stats = None;
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         self.transcript_replayed = false;
         self.echoes.clear();
@@ -2834,6 +2855,7 @@ impl AppState {
                     chat_id: previous.clone(),
                     entries,
                     context_usage: self.context_usage,
+                    session_stats: self.session_stats,
                     bytes,
                 });
                 while self.transcript_cache.len() > TRANSCRIPT_CACHE_CAP
@@ -2857,6 +2879,7 @@ impl AppState {
         self.auto_selected = true;
         self.transcript.clear();
         self.context_usage = None;
+        self.session_stats = None;
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         self.transcript_replayed = false;
         if let Some(cached) = cached {
@@ -2875,6 +2898,7 @@ impl AppState {
             }
             self.transcript = cached.entries;
             self.context_usage = cached.context_usage;
+            self.session_stats = cached.session_stats;
             self.transcript_replayed = true;
         }
         self.transcript_task = None;
@@ -3519,6 +3543,13 @@ fn spawn_subagent_watch(
                             }
                             None => state.sub_context_usage.remove(&doc_id).is_some(),
                         };
+                        let stats_changed = match update.session_stats {
+                            Some(stats) => {
+                                state.sub_session_stats.insert(doc_id.clone(), stats) != Some(stats)
+                            }
+                            None => state.sub_session_stats.remove(&doc_id).is_some(),
+                        };
+                        let usage_changed = usage_changed || stats_changed;
                         let frame = update.frame;
                         let text_only = is_text_append(&frame) && !usage_changed;
                         state.transcript_revision = state.transcript_revision.wrapping_add(1);
@@ -4188,6 +4219,7 @@ mod tests {
             let update = |id: &str| zeron_doc::TranscriptUpdate {
                 frame: TranscriptFrame::reset(&[user_entry(id)]),
                 context_usage: None,
+                session_stats: None,
                 replay_baseline: None,
             };
             state.select_chat(Some("whale".into()), cx);

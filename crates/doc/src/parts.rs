@@ -525,6 +525,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
         // engine's compaction sink.
         AgentEvent::AssistantMessageCompleted { .. }
         | AgentEvent::Usage { .. }
+        | AgentEvent::PromptCache { .. }
         | AgentEvent::Compacted { .. }
         | AgentEvent::Compacting { .. }
         | AgentEvent::BackgroundTasks { .. }

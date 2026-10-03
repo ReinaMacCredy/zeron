@@ -196,6 +196,24 @@ impl Harness for MockHarness {
             .position(|e| matches!(e, AgentEvent::Done { .. }))
             .unwrap_or(self.script.len());
         let (body, tail) = self.script.split_at(done_ix);
+        let usage_events = std::env::var("ZERON_MOCK_USAGE")
+            .ok()
+            .is_some_and(|v| !v.is_empty() && v != "0")
+            .then(|| {
+                [
+                    AgentEvent::PromptCache {
+                        read_tokens: 49_648,
+                        write_tokens: 3_719,
+                        ttl_secs: Some(3600),
+                    },
+                    AgentEvent::Usage {
+                        input_tokens: 18,
+                        output_tokens: 288,
+                    },
+                ]
+            })
+            .into_iter()
+            .flatten();
         let error_event = mock_error.then(|| AgentEvent::Error {
             message: "Claude usage limit reached — try again after the limit resets.".into(),
         });
@@ -677,6 +695,7 @@ impl Harness for MockHarness {
             .chain(mend_event)
             .chain(error_event)
             .chain(compact_events)
+            .chain(usage_events)
             .chain(tail.iter().cloned())
             .map(Ok)
             .collect();
