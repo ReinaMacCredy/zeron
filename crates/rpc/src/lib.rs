@@ -63,6 +63,9 @@ pub mod methods {
     /// Tail of a live background shell's output file: `{chatId, taskId}` →
     /// stream of `{lines, running}`, ending after the task leaves the set.
     pub const WATCH_BACKGROUND_OUTPUT: &str = "WatchBackgroundOutput";
+    /// Live output tokens/s of `chatId`'s running harness: `{chatId}` →
+    /// stream of `{rate}` (`null` until enough output to measure).
+    pub const WATCH_TOKEN_RATE: &str = "WatchTokenRate";
     /// Create a sidechat of `sourceChatId` under the client-minted `chatId`,
     /// replying with the created `Chat` row. The first prompt is the caller's
     /// to send afterwards, as an ordinary `QueueCommand` Run on `chatId`.

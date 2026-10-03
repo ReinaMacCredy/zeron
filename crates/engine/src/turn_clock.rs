@@ -41,6 +41,10 @@ impl TurnClock {
         self.active
     }
 
+    pub(crate) fn streaming(&self) -> bool {
+        self.active && self.phase() == Phase::Llm
+    }
+
     /// `user_turn` marks a segment a person's prompt opened: it counts as a
     /// turn and its first output is a time-to-first-token sample.
     pub(crate) fn start(&mut self, user_turn: bool, now: Instant) {

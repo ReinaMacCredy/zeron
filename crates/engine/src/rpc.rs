@@ -1622,6 +1622,7 @@ fn forwardable(method: &str) -> bool {
             | methods::COMPACT_CHAT
             | methods::STOP_BACKGROUND_TASK
             | methods::WATCH_BACKGROUND_OUTPUT
+            | methods::WATCH_TOKEN_RATE
             | methods::FORK_CHAT
             | methods::REWIND_CHAT
             | methods::QUEUE_COMMAND
@@ -1719,6 +1720,7 @@ fn is_stream_method(method: &str) -> bool {
         methods::WATCH_DOC_MESSAGES
             | methods::WATCH_QUEUE
             | methods::WATCH_BACKGROUND_OUTPUT
+            | methods::WATCH_TOKEN_RATE
             | methods::SUBSCRIBE_TERMINAL
             | methods::WATCH_CHECKOUT_DIFFS
             | methods::WATCH_WORKSPACE_GIT_STATUS
@@ -2139,6 +2141,15 @@ impl RpcService for EngineRpc {
                     crate::background_output::watch(self.sessions.clone(), p.chat_id, p.task_id)
                         .map_err(|e| RpcError::Failed(e.to_string()))?;
                 Ok(RpcReply::Stream(stream))
+            }
+            methods::WATCH_TOKEN_RATE => {
+                let p: ChatParams = parse_params(params)?;
+                let rx = self.sessions.watch_token_rate(&p.chat_id);
+                Ok(RpcReply::Stream(
+                    watch_stream(rx)
+                        .map(|rate| serde_json::json!({ "rate": rate }))
+                        .boxed(),
+                ))
             }
             methods::COMPACT_CHAT => {
                 let p: CompactChatParams = parse_params(params)?;

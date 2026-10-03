@@ -8062,6 +8062,14 @@ impl Transcript {
         } else {
             flavour_word(seed, elapsed_secs)
         };
+        let token_rate = if sending || subagent_doc.is_some() {
+            None
+        } else {
+            let state = self.state.read(cx);
+            (state.selected_chat == self.live_chat_id(cx))
+                .then(|| state.token_rate())
+                .flatten()
+        };
         let theme = Theme::of(cx).clone();
         Some(
             div()
@@ -8099,6 +8107,15 @@ impl Transcript {
                             .top(px(1.0))
                             .text_color(theme.text_faint)
                             .child(SharedString::from(format_elapsed(elapsed_secs))),
+                    )
+                })
+                .when_some(token_rate, |el, rate| {
+                    el.child(
+                        div()
+                            .relative()
+                            .top(px(1.0))
+                            .text_color(theme.text_faint)
+                            .child(SharedString::from(format!("· {rate} tok/s"))),
                     )
                 })
                 .into_any_element(),
