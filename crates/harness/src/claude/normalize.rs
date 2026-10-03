@@ -1023,6 +1023,19 @@ impl Normalizer {
                     input_tokens: f.usage.input_tokens,
                     output_tokens: f.usage.output_tokens,
                 };
+                let cache = (f.usage.cache_read_input_tokens + f.usage.cache_creation_input_tokens
+                    > 0)
+                    .then(|| AgentEvent::PromptCache {
+                        read_tokens: f.usage.cache_read_input_tokens,
+                        write_tokens: f.usage.cache_creation_input_tokens,
+                        ttl_secs: if f.usage.cache_creation.ephemeral_1h_input_tokens > 0 {
+                            Some(3600)
+                        } else if f.usage.cache_creation.ephemeral_5m_input_tokens > 0 {
+                            Some(300)
+                        } else {
+                            None
+                        },
+                    });
                 let api_error = f
                     .result
                     .as_deref()
@@ -1112,6 +1125,7 @@ impl Normalizer {
                         window: Some(window),
                     });
                 }
+                out.extend(cache);
                 out.extend([usage, done]);
                 out
             }
@@ -1676,6 +1690,30 @@ mod tests {
             ))
         );
         assert!(matches!(ev.last(), Some(AgentEvent::Done { .. })));
+    }
+
+    #[test]
+    fn result_usage_reports_prompt_cache_traffic_and_tier() {
+        let ev = normalize_one(
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":18,"cache_creation_input_tokens":3719,"cache_read_input_tokens":49648,"output_tokens":288,"cache_creation":{"ephemeral_1h_input_tokens":3719,"ephemeral_5m_input_tokens":0}}}"#,
+        );
+        assert!(ev.contains(&AgentEvent::PromptCache {
+            read_tokens: 49648,
+            write_tokens: 3719,
+            ttl_secs: Some(3600),
+        }));
+        assert!(matches!(
+            &ev[ev.len() - 2..],
+            [AgentEvent::Usage { .. }, AgentEvent::Done { .. }]
+        ));
+        let uncached = normalize_one(
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":5,"output_tokens":2}}"#,
+        );
+        assert!(
+            !uncached
+                .iter()
+                .any(|e| matches!(e, AgentEvent::PromptCache { .. }))
+        );
     }
 
     #[test]

@@ -41,6 +41,7 @@ pub mod spaces;
 pub mod terminals;
 pub mod titles;
 mod transcript_history;
+mod turn_clock;
 pub mod uploads;
 pub mod workspace_files;
 pub mod workspace_host;

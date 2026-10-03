@@ -3509,6 +3509,14 @@ fn cursor_unstarted_history(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn record_session_stats(doc: &SessionDoc, chat_id: &str, stats: Option<zeron_proto::SessionStats>) {
+    if let Some(stats) = stats
+        && let Err(err) = doc.record_session_stats(&stats)
+    {
+        tracing::warn!(chat = %chat_id, error = %err, "session stats write failed");
+    }
+}
+
 async fn drive_run(
     inner: Arc<Inner>,
     chat_id: String,
@@ -3694,6 +3702,8 @@ async fn drive_run(
     };
 
     let doc_ref: &SessionDoc = &doc;
+    let mut clock = crate::turn_clock::TurnClock::new(std::time::Instant::now());
+    clock.start(true, std::time::Instant::now());
     let mut folded: Vec<MessagePart> = Vec::new();
     // Every tool id this run has folded, across segment resets. Adapters
     // re-emit shape-bearing `tool_call_update`s (title/rawInput refreshes,
@@ -4017,6 +4027,7 @@ async fn drive_run(
                     dirty = false;
                     entry_id = new_id();
                     segment_started = now_ms();
+                    record_session_stats(doc_ref, &chat_id, clock.settle(std::time::Instant::now()));
                     idle_since = Some(tokio::time::Instant::now());
                     self_continued_turn = false;
                     inner.set_status_with_completion(
@@ -4274,6 +4285,7 @@ async fn drive_run(
             if *active && idle_since.take().is_some() {
                 entry_id = new_id();
                 segment_started = now_ms();
+                clock.start(false, std::time::Instant::now());
                 inner.set_status(&chat_id, SessionStatus::Working, true);
             }
             inner.set_compacting(&chat_id, *active);
@@ -4303,6 +4315,11 @@ async fn drive_run(
                 dirty = false;
                 entry_id = new_id();
                 segment_started = now_ms();
+                if clock.is_active() {
+                    let now = std::time::Instant::now();
+                    record_session_stats(doc_ref, &chat_id, clock.settle(now));
+                    clock.start(false, now);
+                }
             }
             if let Err(err) = record_compaction(doc_ref, &device_id, *pre_tokens, *post_tokens) {
                 tracing::warn!(chat = %chat_id, error = %err, "compaction note write failed");
@@ -4387,6 +4404,7 @@ async fn drive_run(
                 // fall through — this event is the new segment's first part.
                 entry_id = new_id();
                 segment_started = now_ms();
+                clock.start(false, std::time::Instant::now());
                 run_computer.begin_turn(&current_user_id, last_turn_computer);
                 inner.set_status(&chat_id, SessionStatus::Working, true);
             } else {
@@ -4554,6 +4572,9 @@ async fn drive_run(
             dirty = false;
             entry_id = next_assistant_message_id.clone().unwrap_or_else(new_id);
             segment_started = now_ms();
+            let now = std::time::Instant::now();
+            record_session_stats(doc_ref, &chat_id, clock.settle(now));
+            clock.start(true, now);
             // The elapsed timer is per user message, not per child process: a
             // steer boundary restarts it (matches the parked-resume path and
             // the composer's optimistic overlay, which already reads 0:00).
@@ -4641,6 +4662,7 @@ async fn drive_run(
             _ => {}
         }
 
+        clock.observe(&event, std::time::Instant::now());
         inner.publish(&chat_id, &event);
 
         // Defensive rule from zeron: a mid-run SessionStarted re-emission (Claude SDK
@@ -4657,6 +4679,7 @@ async fn drive_run(
         }
 
         if let AgentEvent::Done { status, .. } = &event {
+            record_session_stats(doc_ref, &chat_id, clock.settle(std::time::Instant::now()));
             inner.set_compacting(&chat_id, false);
             // A question still pending at turn end can never be legitimately
             // answered (its turn is over): drain the resolvers NOW, or a late

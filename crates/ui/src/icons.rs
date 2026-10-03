@@ -82,6 +82,7 @@ icon_assets![
     (QUEUE_CLOSE, "queue-close"),
     (QUEUE_PAPERCLIP, "queue-paperclip"),
     (CLOCK_CIRCLE, "clock-circle"),
+    (SPEEDOMETER, "speedometer"),
     (CALENDAR, "calendar"),
     (LIST, "list"),
     (FOLDER_WITH_FILES, "folder-with-files"),

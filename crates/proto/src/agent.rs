@@ -811,11 +811,21 @@ pub enum AgentEvent {
     BackgroundTasks {
         tasks: Vec<crate::BackgroundTask>,
     },
-    /// Kept as a harness passthrough (rate-limit probes); never persisted to docs.
+    /// Kept as a harness passthrough (rate-limit probes); only its running
+    /// totals reach the doc, through the session stats.
     #[serde(rename_all = "camelCase")]
     Usage {
         input_tokens: u64,
         output_tokens: u64,
+    },
+    /// A turn's prompt-cache traffic. `ttl_secs` is the tier the turn wrote
+    /// to, absent when it only read.
+    #[serde(rename_all = "camelCase")]
+    PromptCache {
+        read_tokens: u64,
+        write_tokens: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ttl_secs: Option<u32>,
     },
     /// The agent advertised (or changed) its slash-command set — ACP
     /// `available_commands_update`. The engine caches the latest list per
@@ -1219,6 +1229,65 @@ pub struct ContextUsage {
 impl ContextUsage {
     pub fn fraction(self) -> Option<f64> {
         Some(self.tokens? as f64 / self.window.filter(|n| *n > 0)? as f64)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SessionStats {
+    pub turns: u64,
+    pub steps: u64,
+    pub llm_ms: u64,
+    pub tool_ms: u64,
+    pub ttft_ms: u64,
+    pub ttft_count: u64,
+    pub output_tokens: u64,
+    /// LLM time of the segments that reported usage: harnesses without a
+    /// usage report must not drag tokens per second toward zero.
+    pub usage_llm_ms: u64,
+    pub input_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub cache_ttl_secs: Option<u32>,
+    /// Epoch millis of the last turn that touched the prompt cache.
+    pub cache_touched_at: Option<i64>,
+}
+
+impl SessionStats {
+    pub fn add(&mut self, other: &SessionStats) {
+        self.turns += other.turns;
+        self.steps += other.steps;
+        self.llm_ms += other.llm_ms;
+        self.tool_ms += other.tool_ms;
+        self.ttft_ms += other.ttft_ms;
+        self.ttft_count += other.ttft_count;
+        self.output_tokens += other.output_tokens;
+        self.usage_llm_ms += other.usage_llm_ms;
+        self.input_tokens += other.input_tokens;
+        self.cache_read_tokens += other.cache_read_tokens;
+        self.cache_write_tokens += other.cache_write_tokens;
+        self.cache_ttl_secs = other.cache_ttl_secs.or(self.cache_ttl_secs);
+        self.cache_touched_at = self.cache_touched_at.max(other.cache_touched_at);
+    }
+
+    pub fn avg_ttft_ms(&self) -> Option<u64> {
+        (self.ttft_count > 0).then(|| self.ttft_ms / self.ttft_count)
+    }
+
+    pub fn tokens_per_second(&self) -> Option<f64> {
+        (self.output_tokens > 0 && self.usage_llm_ms > 0)
+            .then(|| self.output_tokens as f64 * 1000.0 / self.usage_llm_ms as f64)
+    }
+
+    pub fn cache_hit_rate(&self) -> Option<f64> {
+        let cached = self.cache_read_tokens + self.cache_write_tokens;
+        (cached > 0)
+            .then(|| self.cache_read_tokens as f64 / (cached + self.input_tokens) as f64)
+    }
+
+    /// Millis until the prompt cache expires; negative once it has.
+    pub fn cache_remaining_ms(&self, now_ms: i64) -> Option<i64> {
+        Some(self.cache_touched_at? + i64::from(self.cache_ttl_secs?) * 1000 - now_ms)
     }
 }
 

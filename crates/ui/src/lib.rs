@@ -58,6 +58,7 @@ pub mod project_actions;
 pub mod queue;
 pub mod quotes;
 pub mod rail;
+mod session_stats;
 pub mod settings;
 pub mod shell;
 pub mod sound;

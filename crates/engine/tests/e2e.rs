@@ -2914,6 +2914,75 @@ async fn context_usage_settles_after_done_without_reopening_the_turn() {
     );
 }
 
+#[tokio::test]
+async fn session_stats_accumulate_across_runs() {
+    let tool = |id: &str| AgentEvent::ToolCall {
+        id: id.into(),
+        call: zeron_proto::ToolCall::Unknown {
+            name: "Bash".into(),
+            input: None,
+        },
+    };
+    let result = |id: &str| AgentEvent::ToolResult {
+        id: id.into(),
+        is_error: false,
+        output: None,
+        diff: None,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(ScriptedHarness {
+            script: vec![
+                AgentEvent::TextDelta {
+                    text: "Looking".into(),
+                },
+                tool("a"),
+                tool("b"),
+                result("a"),
+                result("b"),
+                AgentEvent::Usage {
+                    input_tokens: 10,
+                    output_tokens: 120,
+                },
+                done(DoneStatus::Completed),
+            ],
+            step_delay: Duration::from_millis(20),
+            hang_until_interrupt: false,
+        }),
+    );
+    let handle = core.doc_host.open(CHAT).unwrap();
+    for n in 1..=2 {
+        queue_as_viewer(
+            handle.doc(),
+            &format!("stats-run-{n}"),
+            SessionCommandPayload::Run {
+                request: run_request("measure"),
+                message_id: format!("stats-user-{n}"),
+            },
+        );
+        wait_for(
+            || {
+                handle
+                    .doc()
+                    .session_stats()
+                    .is_some_and(|stats| stats.turns == n)
+            },
+            "turn stats recorded",
+        )
+        .await;
+    }
+    let stats = handle.doc().session_stats().unwrap();
+    assert_eq!(stats.steps, 4);
+    assert_eq!(stats.output_tokens, 240);
+    assert_eq!(stats.ttft_count, 2);
+    assert!(stats.tool_ms >= 2 * 40, "{stats:?}");
+    assert!(
+        stats.llm_ms > 0 && stats.usage_llm_ms == stats.llm_ms,
+        "{stats:?}"
+    );
+}
+
 /// A steerable harness whose stream the test feeds by hand: the mailbox stays
 /// alive and every event lands exactly when the test sends it.
 struct ControlledHarness(

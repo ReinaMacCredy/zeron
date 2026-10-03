@@ -24,6 +24,8 @@ pub struct TranscriptUpdate {
     pub frame: TranscriptFrame,
     #[serde(default)]
     pub context_usage: Option<zeron_proto::ContextUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_stats: Option<zeron_proto::SessionStats>,
     /// Historical content included in this update, independent of reset/delta
     /// encoding. Omitted on ordinary live updates and by older engines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -513,6 +515,7 @@ mod context_update_tests {
         let old = serde_json::json!({"reset": []});
         let update: TranscriptUpdate = serde_json::from_value(old).unwrap();
         assert_eq!(update.context_usage, None);
+        assert_eq!(update.session_stats, None);
         assert!(update.replay_baseline.is_none());
         let value = serde_json::to_value(TranscriptUpdate {
             frame: TranscriptFrame::reset(&[]),
@@ -521,9 +524,14 @@ mod context_update_tests {
                 tokens: Some(0),
                 window: Some(200000),
             }),
+            session_stats: Some(zeron_proto::SessionStats {
+                turns: 2,
+                ..Default::default()
+            }),
         })
         .unwrap();
         assert_eq!(value["contextUsage"]["tokens"], 0);
+        assert_eq!(value["sessionStats"]["turns"], 2);
         let roundtrip: TranscriptUpdate = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(
             roundtrip.replay_baseline,

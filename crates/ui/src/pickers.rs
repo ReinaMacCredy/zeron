@@ -897,6 +897,7 @@ pub struct Pickers {
     /// The harness tab an existing chat's picker is browsing: only the model
     /// list follows it; the chat's harness changes on a confirmed pick.
     viewed_harness: Option<HarnessId>,
+    stats_chip: Entity<crate::session_stats::StatsChip>,
     _search_events: Subscription,
     _state_observe: Subscription,
     _catalog_observe: Subscription,
@@ -1128,6 +1129,7 @@ impl Pickers {
             mutate_task: None,
             pending_model_switch: None,
             viewed_harness: None,
+            stats_chip: cx.new(crate::session_stats::StatsChip::new),
             _search_events: search_events,
             _state_observe: state_observe,
             _catalog_observe: catalog_observe,
@@ -1179,6 +1181,12 @@ impl Pickers {
         self.chat_override
             .clone()
             .or_else(|| self.state.read(cx).selected_chat.clone())
+    }
+
+    fn chat_session_stats(&self, cx: &App) -> Option<zeron_proto::SessionStats> {
+        let state = self.state.read(cx);
+        state.selected_chat.as_deref()?;
+        state.session_stats_for(self.chat_override.as_deref())
     }
 
     fn chat_context_usage(&self, cx: &App) -> Option<zeron_proto::ContextUsage> {
@@ -4132,11 +4140,19 @@ impl Pickers {
                 ));
             // Checkout + branch stay together. PR and usage form the trailing
             // status group, independently of the branch label's length.
+            let stats = self.chat_session_stats(cx);
+            let working = self
+                .state
+                .read(cx)
+                .turn_in_flight(&chat.id, chrono::Utc::now());
+            self.stats_chip
+                .update(cx, |chip, cx| chip.set(stats, working, cx));
             return Some(
                 row()
                     .pr_0()
                     .child(left)
                     .child(right)
+                    .child(self.stats_chip.clone())
                     .child(div().flex_1().min_w_0())
                     .when_some(change_request, |el, summary| {
                         el.child(div().flex_none().child(

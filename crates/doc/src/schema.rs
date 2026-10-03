@@ -407,6 +407,28 @@ impl SessionDoc {
         Ok(())
     }
 
+    pub fn session_stats(&self) -> Option<zeron_proto::SessionStats> {
+        let loro::ValueOrContainer::Value(LoroValue::String(value)) =
+            self.doc.get_map("meta").get("sessionStats")?
+        else {
+            return None;
+        };
+        serde_json::from_str(&value).ok()
+    }
+
+    pub fn record_session_stats(&self, delta: &zeron_proto::SessionStats) -> Result<(), DocError> {
+        if *delta == zeron_proto::SessionStats::default() {
+            return Ok(());
+        }
+        let mut next = self.session_stats().unwrap_or_default();
+        next.add(delta);
+        self.doc
+            .get_map("meta")
+            .insert("sessionStats", serde_json::to_string(&next)?)?;
+        self.doc.commit();
+        Ok(())
+    }
+
     pub fn computer_generation(&self) -> u64 {
         match self.doc.get_map("meta").get("computerGeneration") {
             Some(loro::ValueOrContainer::Value(LoroValue::I64(value))) => value.max(0) as u64,

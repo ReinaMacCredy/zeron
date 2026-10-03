@@ -207,6 +207,20 @@ pub(crate) struct UsageBody {
     pub input_tokens: u64,
     #[serde(default)]
     pub output_tokens: u64,
+    #[serde(default)]
+    pub cache_read_input_tokens: u64,
+    #[serde(default)]
+    pub cache_creation_input_tokens: u64,
+    #[serde(default)]
+    pub cache_creation: CacheCreation,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct CacheCreation {
+    #[serde(default)]
+    pub ephemeral_5m_input_tokens: u64,
+    #[serde(default)]
+    pub ephemeral_1h_input_tokens: u64,
 }
 
 /// A CLI→client control request (`can_use_tool` is the one we act on).
