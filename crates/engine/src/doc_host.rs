@@ -45,6 +45,10 @@ use crate::sessions::{SessionsEngine, SteerOutcome};
 use crate::workspace_host::WorkspaceHost;
 use crate::{EngineError, Terminals, new_id, now_ms};
 
+#[path = "doc_host_delegation.rs"]
+mod delegation;
+pub use delegation::{DELEGATION_GUIDANCE, DelegateTaskParams, TaskView};
+
 /// Debounce window for local snapshot saves after a doc change.
 const SNAPSHOT_DEBOUNCE_MS: u64 = 1_000;
 
@@ -230,6 +234,7 @@ pub struct DocHostConfig {
 struct DocHostInner {
     store: Arc<DocsStore>,
     config: DocHostConfig,
+    delegation_lock: tokio::sync::Mutex<()>,
     /// Set-once (first wins), cleared by `shutdown_workers`: sessions and
     /// doc-host reference each other through Arcs, so a retired runtime's
     /// graph only drops once this back-edge is severed.
@@ -1018,6 +1023,7 @@ impl DocHost {
             inner: Arc::new(DocHostInner {
                 store,
                 config,
+                delegation_lock: tokio::sync::Mutex::new(()),
                 sessions: Mutex::new(None),
                 workspace: OnceLock::new(),
                 repos: OnceLock::new(),
@@ -1112,6 +1118,7 @@ impl DocHost {
                 host.drain_queue(&handle).await;
             });
         }
+        self.spawn_delegation_watcher(statuses.clone());
         self.spawn_queue_flush_watcher(statuses);
     }
 
@@ -3555,6 +3562,7 @@ impl DocHost {
             edited_at: None,
             delivery_gate: None,
             computer_generation: Some(handle.doc.computer_generation()),
+            delegated_tasks: Vec::new(),
         })?;
         handle.publish_queue();
         // Same reasoning as a command: the user is acting in this chat again.
@@ -3607,6 +3615,7 @@ impl DocHost {
             delivery_gate: None,
             from_chat_id: Some(from_chat_id.to_string()),
             computer_generation: Some(handle.doc.computer_generation()),
+            delegated_tasks: Vec::new(),
         })?;
         handle.publish_queue();
         self.unarchive_on_send(chat_id);
@@ -3706,33 +3715,7 @@ impl DocHost {
                 "this thread already has {live} open threads it created; archive one first"
             )));
         }
-        let mut config = from.config.clone();
-        let model = model.map(str::trim).filter(|model| !model.is_empty());
-        if harness.is_some() || model.is_some() || reasoning.is_some() {
-            let config = config.get_or_insert_with(|| zeron_proto::ChatConfig {
-                harness: self.inner.config.default_harness,
-                model: None,
-                reasoning: None,
-                model_options: Default::default(),
-                sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
-                permission_mode: zeron_proto::PermissionMode::Ask,
-            });
-            if let Some(harness) = harness {
-                // A model id belongs to one harness; carrying it across would
-                // hand Codex a Claude id. Reasoning is Zeron's own ladder and
-                // survives the switch.
-                if harness != config.harness {
-                    config.model = None;
-                }
-                config.harness = harness;
-            }
-            if let Some(model) = model {
-                config.model = Some(model.to_string());
-            }
-            if let Some(reasoning) = reasoning {
-                config.reasoning = Some(reasoning);
-            }
-        }
+        let config = self.derived_config(&from, harness, model, reasoning);
         let chat_id = new_id();
         let (space_id, cwd) = match (space_id, cwd) {
             (_, Some(cwd)) => (space_id.or(from.space_id.as_deref()), Some(cwd.to_string())),
@@ -4461,6 +4444,17 @@ impl DocHost {
                 .and_then(|chat| chat.title);
             prompt = thread_message_prompt(from, title.as_deref(), &prompt);
         }
+        if !item.delegated_tasks.is_empty() {
+            if self.wake_owner_gone(chat_id, &item.delegated_tasks) {
+                return Ok(());
+            }
+            handle.write_user_message_from(
+                &message_id,
+                &item.text,
+                item.issued_at.min(now_ms()),
+                item.delegated_tasks.first().map(String::as_str),
+            )?;
+        }
         if send == QueueSend::Steer {
             match sessions
                 .steer_with(
@@ -4472,7 +4466,10 @@ impl DocHost {
                 )
                 .await?
             {
-                SteerOutcome::Accepted => return Ok(()),
+                SteerOutcome::Accepted => {
+                    self.wake_delivered(&item.delegated_tasks);
+                    return Ok(());
+                }
                 SteerOutcome::NotSteerable
                     if self.computer_flip_waits(&sessions, chat_id, computer_control) =>
                 {
@@ -4518,6 +4515,7 @@ impl DocHost {
         let harness = self.harness_for_request(chat_id, &request);
         self.dispatch_with_source_context(&sessions, chat_id, harness, request, Some(message_id))
             .await?;
+        self.wake_delivered(&item.delegated_tasks);
         Ok(())
     }
 
@@ -5696,7 +5694,13 @@ impl DocHost {
                 if let Some(computer) = sessions.computer() {
                     computer.stop_chat(chat_id, handle.doc.computer_generation());
                 }
-                self.interrupt_and_pause_queue(sessions, handle).await?;
+                let turn = sessions
+                    .session_status(chat_id)
+                    .and_then(|session| session.started_at);
+                let stopped = self.interrupt_and_pause_queue(sessions, handle).await?;
+                if stopped && let Some(turn) = turn {
+                    self.dispose_turn_wakes(chat_id, turn).await;
+                }
                 Ok((SessionCommandStatus::Applied, None))
             }
             SessionCommandPayload::RespondInput {
@@ -5830,6 +5834,7 @@ impl DocHost {
             edited_at: None,
             delivery_gate: None,
             computer_generation,
+            delegated_tasks: Vec::new(),
         };
         if handle.doc.read_queue()?.iter().any(|row| row.id == item.id) {
             return Ok(()); // a redelivered command: already held
@@ -5987,6 +5992,7 @@ impl DocHost {
             edited_at: None,
             delivery_gate: None,
             computer_generation,
+            delegated_tasks: Vec::new(),
         })?;
         handle.publish_queue();
         Ok(())

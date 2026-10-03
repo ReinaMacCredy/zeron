@@ -907,6 +907,58 @@ impl WorkspaceHost {
         cwd: Option<String>,
         created_by_chat_id: Option<&str>,
     ) -> Result<(), EngineError> {
+        self.insert_chat(
+            chat_id,
+            space_id,
+            device_id,
+            config,
+            cwd,
+            created_by_chat_id,
+            None,
+        )
+    }
+
+    /// Born with its delegation so no reader ever sees it as an ordinary chat.
+    pub fn create_delegated_chat(
+        &self,
+        chat_id: &str,
+        space_id: Option<&str>,
+        device_id: Option<&str>,
+        config: Option<ChatConfig>,
+        cwd: Option<String>,
+        delegation: zeron_proto::Delegation,
+    ) -> Result<(), EngineError> {
+        if self
+            .read(|doc| doc.chat(&delegation.delegated_by_chat_id))?
+            .is_none()
+        {
+            return Err(EngineError::Other(format!(
+                "no such chat: {}",
+                delegation.delegated_by_chat_id
+            )));
+        }
+        self.insert_chat(
+            chat_id,
+            space_id,
+            device_id,
+            config,
+            cwd,
+            None,
+            Some(delegation),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_chat(
+        &self,
+        chat_id: &str,
+        space_id: Option<&str>,
+        device_id: Option<&str>,
+        config: Option<ChatConfig>,
+        cwd: Option<String>,
+        created_by_chat_id: Option<&str>,
+        delegation: Option<zeron_proto::Delegation>,
+    ) -> Result<(), EngineError> {
         if self.read(|doc| doc.chat(chat_id))?.is_some() {
             return Ok(()); // idempotent: optimistic client retries never duplicate
         }
@@ -961,6 +1013,7 @@ impl WorkspaceHost {
                 sidechat_source_chat_id: None,
                 created_by_chat_id: created_by_chat_id.map(str::to_string),
                 previous_harnesses: Vec::new(),
+                delegation,
             })
         })?;
         Ok(())
@@ -1014,6 +1067,7 @@ impl WorkspaceHost {
             sidechat_source_chat_id: Some(source_chat_id.to_string()),
             created_by_chat_id: None,
             previous_harnesses: Vec::new(),
+            delegation: None,
         };
         self.mutate(|doc| doc.upsert_chat(&chat))?;
         Ok(chat)
@@ -1068,6 +1122,7 @@ impl WorkspaceHost {
             sidechat_source_chat_id: None,
             created_by_chat_id: None,
             previous_harnesses: Vec::new(),
+            delegation: None,
         };
         self.mutate(|doc| doc.upsert_chat(&chat))?;
         Ok(chat)
@@ -1216,6 +1271,22 @@ impl WorkspaceHost {
 
     pub fn set_chat_archived(&self, chat_id: &str, archived: bool) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.set_chat_archived(chat_id, archived))?)
+    }
+
+    pub fn update_chat_delegation(
+        &self,
+        chat_id: &str,
+        update: impl FnOnce(&mut zeron_proto::Delegation) -> bool,
+    ) -> Result<Option<zeron_proto::Delegation>, EngineError> {
+        Ok(self.mutate(|doc| -> Result<_, zeron_doc::DocError> {
+            let Some(mut delegation) = doc.chat(chat_id)?.and_then(|chat| chat.delegation) else {
+                return Ok(None);
+            };
+            if update(&mut delegation) {
+                doc.set_chat_delegation(chat_id, &delegation)?;
+            }
+            Ok(Some(delegation))
+        })?)
     }
 
     /// LWW full-config replace on the chat row (zeron `SetChatConfig` — the

@@ -461,6 +461,27 @@ impl ToolCall {
         name == "Agent" || name.starts_with("Agent: ")
     }
 
+    /// Never a native spawn: the engine binds its child by task text (d67).
+    pub fn is_delegate_task(&self) -> bool {
+        match self {
+            ToolCall::Mcp { tool, .. } => tool == "delegate_task",
+            ToolCall::Unknown { name, .. } => name.ends_with("delegate_task"),
+            _ => false,
+        }
+    }
+
+    pub fn delegate_task_text(&self) -> Option<&str> {
+        if !self.is_delegate_task() {
+            return None;
+        }
+        match self {
+            ToolCall::Unknown { input, .. } | ToolCall::Mcp { input, .. } => {
+                input.as_ref()?.get("task")?.as_str().map(str::trim)
+            }
+            _ => None,
+        }
+    }
+
     /// The model a subagent SPAWN was given, when the spawn named one.
     ///
     /// Read off the spawn's own input rather than the session's picked model:

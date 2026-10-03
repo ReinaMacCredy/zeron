@@ -95,6 +95,7 @@ fn host_rows(now: chrono::DateTime<Utc>) -> (Device, Space, Chat) {
         sidechat_source_chat_id: None,
         created_by_chat_id: None,
         previous_harnesses: Vec::new(),
+        delegation: None,
     };
     (device, space, chat)
 }

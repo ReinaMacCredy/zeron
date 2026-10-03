@@ -65,6 +65,8 @@ pub(crate) struct AgentRun {
     pub reasoning: Option<ReasoningLevel>,
     pub state: RunState,
     pub started_ms: i64,
+    pub delegated: bool,
+    pub harness: Option<HarnessId>,
 }
 
 /// Spawn chips from the latest prompt onward, plus any chip still running
@@ -106,7 +108,51 @@ pub(crate) fn agent_runs(transcript: &[SessionMessageEntry]) -> Vec<AgentRun> {
                     reasoning: spawn_reasoning(call),
                     state,
                     started_ms: entry.created_at,
+                    delegated: false,
+                    harness: None,
                 })
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn delegate_runs(
+    transcript: &[SessionMessageEntry],
+    chats: &[zeron_proto::Chat],
+    owner: &str,
+) -> Vec<AgentRun> {
+    let turn_start_ms = transcript
+        .iter()
+        .rev()
+        .find(|entry| entry.role == MessageRole::User && entry.answers_request_id.is_none())
+        .map_or(0, |entry| entry.created_at);
+    chats
+        .iter()
+        .filter_map(|chat| {
+            let delegation = chat
+                .delegation
+                .as_ref()
+                .filter(|d| d.delegated_by_chat_id == owner)?;
+            let state = match delegation.status {
+                zeron_proto::DelegationStatus::Running => RunState::Working,
+                zeron_proto::DelegationStatus::Completed => RunState::Completed,
+                _ => RunState::Failed,
+            };
+            let started_ms = delegation.started_at.timestamp_millis();
+            (state == RunState::Working || started_ms >= turn_start_ms).then(|| AgentRun {
+                part_id: chat.id.clone(),
+                doc_id: chat.id.clone(),
+                title: chat
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| "Delegated task".into())
+                    .into(),
+                model: chat.config.as_ref().and_then(|c| c.model.clone()),
+                reasoning: chat.config.as_ref().and_then(|c| c.reasoning),
+                state,
+                started_ms,
+                delegated: true,
+                harness: chat.config.as_ref().map(|c| c.harness),
             })
         })
         .collect()
@@ -428,10 +474,9 @@ impl Composer {
             } else {
                 &state.transcript
             };
-            (
-                agent_runs(transcript),
-                shell_tasks(state.session_for(&chat_id)),
-            )
+            let mut agents = agent_runs(transcript);
+            agents.extend(delegate_runs(transcript, &state.chats, &chat_id));
+            (agents, shell_tasks(state.session_for(&chat_id)))
         };
         if self.background.chat.as_deref() != Some(chat_id.as_str()) {
             self.background = BackgroundUi {
@@ -576,10 +621,10 @@ impl Composer {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let running: Vec<String> = agents
+        let running: Vec<(String, bool)> = agents
             .iter()
-            .filter(|run| run.state == RunState::Working)
-            .map(|run| run.part_id.clone())
+            .filter(|run| run.state == RunState::Working && (stoppable || run.delegated))
+            .map(|run| (run.part_id.clone(), run.delegated))
             .collect();
         let header = div()
             .h(px(36.0))
@@ -598,7 +643,7 @@ impl Composer {
                     .truncate()
                     .child(SharedString::from(roster_heading(agents))),
             )
-            .when(stoppable && !running.is_empty(), |el| {
+            .when(!running.is_empty(), |el| {
                 el.child(
                     div()
                         .id("background-roster-stop-all")
@@ -608,8 +653,8 @@ impl Composer {
                         .hover(|s| s.text_color(theme.text))
                         .child("Stop all")
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            for task_id in &running {
-                                this.stop_background_task(task_id.clone(), cx);
+                            for (task_id, delegated) in &running {
+                                this.stop_agent_run(task_id.clone(), *delegated, cx);
                             }
                         })),
                 )
@@ -646,16 +691,19 @@ impl Composer {
                 })
             };
             let state_text = run_state_text(run, now_ms);
-            let tag = run_tag(run, harness);
-            let stop = (stoppable && run.state == RunState::Working).then(|| {
-                let task_id = run.part_id.clone();
-                stop_button(format!("background-roster-stop-{ix}"), theme).on_click(cx.listener(
-                    move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.stop_background_task(task_id.clone(), cx);
-                    },
-                ))
-            });
+            let run_harness = run.harness.or(harness);
+            let tag = run_tag(run, run_harness);
+            let stop =
+                ((stoppable || run.delegated) && run.state == RunState::Working).then(|| {
+                    let task_id = run.part_id.clone();
+                    let delegated = run.delegated;
+                    stop_button(format!("background-roster-stop-{ix}"), theme).on_click(
+                        cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.stop_agent_run(task_id.clone(), delegated, cx);
+                        }),
+                    )
+                });
             div()
                 .id(("background-roster-row", ix))
                 .debug_selector(move || format!("background-roster-row-{ix}"))
@@ -676,7 +724,7 @@ impl Composer {
                     theme,
                 ))
                 .child(div().flex_1().min_w_0().truncate().child(run.title.clone()))
-                .when_some(tag, |el, tag| el.child(model_tag(tag, harness, theme)))
+                .when_some(tag, |el, tag| el.child(model_tag(tag, run_harness, theme)))
                 .child(
                     div()
                         .flex_none()
@@ -1057,12 +1105,13 @@ impl Composer {
             .map(|feed| (feed.entries.as_slice(), feed.tokens))
             .unwrap_or((&[], None));
         let hide_thinking = detail.hide_thinking;
-        let stop = (stoppable && run.state == RunState::Working).then(|| {
+        let stop = ((stoppable || run.delegated) && run.state == RunState::Working).then(|| {
             let task_id = run.part_id.clone();
+            let delegated = run.delegated;
             stop_button("background-detail-stop".into(), theme).on_click(cx.listener(
                 move |this, _, _, cx| {
                     cx.stop_propagation();
-                    this.stop_background_task(task_id.clone(), cx);
+                    this.stop_agent_run(task_id.clone(), delegated, cx);
                 },
             ))
         });
@@ -1082,7 +1131,10 @@ impl Composer {
             .gap(px(6.0))
             .pl(px(36.0))
             .pb(px(8.0))
-            .children(run_tag(run, harness).map(|tag| model_tag(tag, harness, theme)))
+            .children(
+                run_tag(run, run.harness.or(harness))
+                    .map(|tag| model_tag(tag, run.harness.or(harness), theme)),
+            )
             .children(level.map(|level| {
                 detail_chip(
                     "thinking",
@@ -1336,6 +1388,35 @@ impl Composer {
                     .children(empty),
             )
             .children(jump)
+    }
+
+    fn stop_agent_run(&mut self, task_id: String, delegated: bool, cx: &mut Context<Self>) {
+        if !delegated {
+            self.stop_background_task(task_id, cx);
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            tracing::warn!(task_id, "cancel delegated task: engine not connected");
+            return;
+        };
+        let Some(chat_id) = self.bound_chat_row(cx).map(|chat| chat.id.clone()) else {
+            return;
+        };
+        let params = serde_json::json!({ "chatId": chat_id, "taskId": task_id });
+        cx.spawn(async move |_, cx| {
+            if let Err(error) = crate::attachments::call_with_timeout(
+                &engine,
+                cx.background_executor(),
+                methods::TASK_CANCEL,
+                params,
+                STOP_TIMEOUT,
+            )
+            .await
+            {
+                tracing::warn!(%error, "cancel delegated task failed");
+            }
+        })
+        .detach();
     }
 
     fn stop_background_task(&mut self, task_id: String, cx: &mut Context<Self>) {
@@ -1736,7 +1817,52 @@ mod tests {
             reasoning: None,
             state,
             started_ms: 0,
+            delegated: false,
+            harness: None,
         }
+    }
+
+    #[test]
+    fn delegated_children_join_the_roster_on_their_own_harness() {
+        let child = |id: &str, owner: &str, status, started_ms: i64| {
+            let mut chat: zeron_proto::Chat = serde_json::from_value(serde_json::json!({
+                "id": id, "deviceId": "dev", "archived": false,
+                "title": format!("Task {id}"),
+                "createdAt": "2026-10-03T10:00:00Z",
+                "config": { "harness": "codex", "model": "gpt-5", "sandbox": "workspace-write" },
+            }))
+            .unwrap();
+            chat.delegation = Some(zeron_proto::Delegation {
+                delegated_by_chat_id: owner.into(),
+                depth: 1,
+                anchor: "task".into(),
+                client_request_id: None,
+                owner_turn_started_at: None,
+                wake: zeron_proto::DelegationWake::Always,
+                status,
+                cancel_requested: false,
+                delivery: None,
+                summary: None,
+                started_at: chrono::DateTime::from_timestamp_millis(started_ms).unwrap(),
+                completed_at: None,
+            });
+            chat
+        };
+        use zeron_proto::DelegationStatus::*;
+        let chats = vec![
+            child("old-running", "owner", Running, 1_000),
+            child("old-done", "owner", Completed, 1_000),
+            child("new-failed", "owner", Failed, 5_000),
+            child("elsewhere", "other", Running, 5_000),
+        ];
+        let transcript = vec![entry("u2", MessageRole::User, 4_000, vec![])];
+        let runs = delegate_runs(&transcript, &chats, "owner");
+        let ids: Vec<&str> = runs.iter().map(|run| run.doc_id.as_str()).collect();
+        assert_eq!(ids, ["old-running", "new-failed"]);
+        assert!(runs.iter().all(|run| run.delegated));
+        assert_eq!(runs[0].harness, Some(HarnessId::Codex));
+        assert_eq!(runs[0].state, RunState::Working);
+        assert_eq!(runs[1].state, RunState::Failed);
     }
 
     #[test]
@@ -1913,6 +2039,7 @@ mod tests {
             sidechat_source_chat_id: None,
             created_by_chat_id: None,
             previous_harnesses: Vec::new(),
+            delegation: None,
         }
     }
 

@@ -9614,6 +9614,7 @@ mod tests {
             sidechat_source_chat_id: None,
             created_by_chat_id: None,
             previous_harnesses: vec![HarnessId::ClaudeCode, HarnessId::Codex],
+            delegation: None,
         };
         assert_eq!(
             chat_harness_marks(&chat),
@@ -10524,6 +10525,7 @@ mod tests {
                     sidechat_source_chat_id: None,
                     created_by_chat_id: None,
                     previous_harnesses: Vec::new(),
+                    delegation: None,
                 }];
                 state.selected_chat = Some("c1".into());
                 state.transcript_replayed = false;

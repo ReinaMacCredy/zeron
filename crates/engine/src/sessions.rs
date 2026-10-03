@@ -157,6 +157,8 @@ struct RunHandle {
     computer: Arc<RunComputer>,
     /// Stop one live background task of this run (see `RunControls::stop_tasks`).
     stop_tx: mpsc::UnboundedSender<String>,
+    /// The MCP call never carries the harness tool id, so the part is matched by task text.
+    delegate_binds: Arc<Mutex<Vec<(String, String)>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -343,6 +345,7 @@ impl RunSetup {
                 fork_history_sent: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 computer: RunComputer::new(),
                 stop_tx,
+                delegate_binds: Arc::new(Mutex::new(Vec::new())),
             },
             controls,
             engine_rx,
@@ -449,13 +452,46 @@ impl Inner {
                 port.to_string(),
             ],
             env: vec![(zeron_rpc::COMPUTER_RUN_SECRET_ENV.into(), secret.into())],
-            guidance: computer_control
-                .then(crate::computer::tools::guidance::computer_tool_instructions),
+            guidance: Some(match computer_control {
+                true => format!(
+                    "{}\n\n{}",
+                    crate::computer::tools::guidance::computer_tool_instructions(),
+                    crate::doc_host::DELEGATION_GUIDANCE
+                ),
+                false => crate::doc_host::DELEGATION_GUIDANCE.to_string(),
+            }),
         })
     }
 
     fn computer(&self) -> Option<Arc<ComputerRuntime>> {
         lock(&self.computer).clone()
+    }
+
+    fn bind_delegates(&self, chat_id: &str, run_id: &str, parts: &mut [MessagePart]) {
+        let Some(binds) = lock(&self.runs)
+            .get(chat_id)
+            .filter(|run| run.run_id == run_id)
+            .map(|run| run.delegate_binds.clone())
+        else {
+            return;
+        };
+        lock(&binds).retain(|(task, child)| {
+            let slot = parts.iter_mut().find_map(|part| match part {
+                MessagePart::Tool {
+                    call, subagent_ref, ..
+                } if subagent_ref.is_none() && call.delegate_task_text() == Some(task.as_str()) => {
+                    Some(subagent_ref)
+                }
+                _ => None,
+            });
+            match slot {
+                Some(slot) => {
+                    *slot = Some(child.clone());
+                    false
+                }
+                None => true,
+            }
+        });
     }
 
     fn computer_turn_ended(&self, chat_id: &str, turn_id: Option<String>) {
@@ -587,6 +623,12 @@ impl SessionsEngine {
             .stop_tx
             .send(task_id.to_owned())
             .map_err(|_| EngineError::Other("the run has ended".into()))
+    }
+
+    pub fn bind_delegate(&self, chat_id: &str, task: &str, child_chat_id: &str) {
+        if let Some(run) = lock(&self.inner.runs).get(chat_id) {
+            lock(&run.delegate_binds).push((task.trim().to_string(), child_chat_id.to_string()));
+        }
     }
 
     pub fn session_status(&self, chat_id: &str) -> Option<Session> {
@@ -4670,6 +4712,12 @@ async fn drive_run(
         let skip_fold = matches!(&event, AgentEvent::SessionStarted { .. }) && !folded.is_empty();
         if !skip_fold {
             fold_event_into_parts(&mut folded, &event);
+            if matches!(
+                event,
+                AgentEvent::ToolCall { .. } | AgentEvent::ToolResult { .. }
+            ) {
+                inner.bind_delegates(&chat_id, &run_id, &mut folded);
+            }
             // R2 sidecar PARKED (2026-08-10, product call): the fold's
             // summary/stats ARE the doc's whole record — no refs stamped, no
             // uploads. Full outputs survive only in the host's local run

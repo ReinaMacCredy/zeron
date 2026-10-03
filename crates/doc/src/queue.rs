@@ -55,6 +55,8 @@ pub struct QueuedMessage {
     pub from_chat_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub computer_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delegated_tasks: Vec<String>,
 }
 
 /// Why a queued row is not currently eligible for automatic or explicit
@@ -104,6 +106,7 @@ impl QueuedMessage {
             edited_at: None,
             delivery_gate: None,
             computer_generation: None,
+            delegated_tasks: Vec::new(),
         }
     }
 }
@@ -367,6 +370,12 @@ fn write_queued_map(map: &loro::LoroMap, item: &QueuedMessage) -> Result<(), Doc
     if let Some(generation) = item.computer_generation {
         map.insert("computerGeneration", generation as i64)?;
     }
+    if !item.delegated_tasks.is_empty() {
+        map.insert(
+            "delegatedTasks",
+            crate::schema::loro_value_from_json(&serde_json::to_value(&item.delegated_tasks)?),
+        )?;
+    }
     if let Some(gate) = &item.delivery_gate {
         map.insert(
             "deliveryGate",
@@ -408,6 +417,10 @@ fn queued_from_json(v: serde_json::Value) -> Option<QueuedMessage> {
             .and_then(|f| f.as_str())
             .map(str::to_string),
         computer_generation: v.get("computerGeneration").and_then(|g| g.as_u64()),
+        delegated_tasks: v
+            .get("delegatedTasks")
+            .and_then(|tasks| serde_json::from_value(tasks.clone()).ok())
+            .unwrap_or_default(),
         delivery_gate: match v.get("deliveryGate") {
             None | Some(serde_json::Value::Null) => None,
             Some(gate) => serde_json::from_value(gate.clone()).ok().or_else(|| {
@@ -444,6 +457,7 @@ mod tests {
             edited_at: None,
             delivery_gate: None,
             computer_generation: None,
+            delegated_tasks: Vec::new(),
         }
     }
 

@@ -6152,6 +6152,7 @@ rename to new_name.rs
             sidechat_source_chat_id: None,
             created_by_chat_id: None,
             previous_harnesses: Vec::new(),
+            delegation: None,
         }
     }
 

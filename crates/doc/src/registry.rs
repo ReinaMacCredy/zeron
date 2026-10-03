@@ -939,6 +939,14 @@ impl RegistryDoc {
                 opt_str(chat.created_by_chat_id.as_deref()),
             ),
             ("previousHarnesses", json!(chat.previous_harnesses)),
+            (
+                "delegation",
+                chat.delegation
+                    .as_ref()
+                    .map(serde_json::to_value)
+                    .transpose()?
+                    .unwrap_or(Value::Null),
+            ),
         ]);
         self.write(KIND_CHATS, &chat.id.clone(), OpKind::Upsert, set);
         Ok(())
@@ -1015,6 +1023,24 @@ impl RegistryDoc {
             chat_id,
             OpKind::Update,
             fields([("title", json!(title))]),
+        );
+        Ok(true)
+    }
+
+    pub fn set_chat_delegation(
+        &mut self,
+        chat_id: &str,
+        delegation: &zeron_proto::Delegation,
+    ) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CHATS, chat_id) {
+            return Ok(false);
+        }
+        let value = serde_json::to_value(delegation)?;
+        self.write(
+            KIND_CHATS,
+            chat_id,
+            OpKind::Update,
+            fields([("delegation", value)]),
         );
         Ok(true)
     }
@@ -1396,6 +1422,14 @@ impl RegistryDoc {
                         opt_str(chat.created_by_chat_id.as_deref()),
                     ),
                     ("previousHarnesses", json!(chat.previous_harnesses)),
+                    (
+                        "delegation",
+                        chat.delegation
+                            .as_ref()
+                            .map(serde_json::to_value)
+                            .transpose()?
+                            .unwrap_or(Value::Null),
+                    ),
                 ]),
             );
         }

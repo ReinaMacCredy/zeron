@@ -428,7 +428,7 @@ impl Shell {
                 .cmp(&b.created_at)
                 .then_with(|| a.id.cmp(&b.id))
         });
-        let subagents = self.transcript.read(cx).subagent_summaries();
+        let subagents = self.transcript.read(cx).subagent_summaries(cx);
         let sources = self.transcript.read(cx).user_attachments();
         let instructions = chat
             .as_ref()
@@ -610,6 +610,10 @@ impl Shell {
                         SidecarEntry::new("subagent", ix, icons::ASTRA_AGENT, agent.title.clone())
                             .value(Some(SidecarValue::Tone(status.into(), tone)))
                             .action(move |this, _, cx| {
+                                if agent.delegated {
+                                    this.open_child_chat_tab(&agent.doc_id, cx);
+                                    return;
+                                }
                                 this.add_subagent_surface(
                                     agent.chat_id.clone(),
                                     agent.doc_id.clone(),

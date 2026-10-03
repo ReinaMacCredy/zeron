@@ -311,6 +311,51 @@ impl Shell {
         }
     }
 
+    fn delegate_owner_line(
+        &self,
+        id: u64,
+        owner_id: String,
+        title: String,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = Theme::of(cx);
+        div()
+            .flex_none()
+            .w_full()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_center()
+            .gap(px(6.0))
+            .py(px(4.0))
+            .text_size(crate::typography::ui_rems(11.0))
+            .text_color(theme.text_muted)
+            .child(
+                crate::icons::icon(crate::icons::BOT)
+                    .size(px(12.0))
+                    .text_color(theme.text_faint),
+            )
+            .child(div().min_w_0().truncate().child(SharedString::from(format!(
+                "Subagent of {}",
+                transcript::single_line(&title)
+            ))))
+            .child(
+                div()
+                    .id(("delegate-owner-open", id))
+                    .debug_selector(|| "delegate-owner-open".into())
+                    .flex_none()
+                    .cursor_pointer()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text.opacity(0.8))
+                    .hover(|s| s.text_color(theme.text))
+                    .child(SharedString::from("Open parent"))
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.open_chat(owner_id.clone(), cx)),
+                    ),
+            )
+            .into_any_element()
+    }
+
     pub(super) fn render_side_chat(&mut self, id: u64, cx: &mut Context<Self>) -> AnyElement {
         let Some(tab) = self
             .side_chats
@@ -321,6 +366,24 @@ impl Shell {
         };
         let transcript = tab.transcript.clone();
         let composer = tab.composer.clone();
+        let owner = tab.state.read(cx).selected_chat.clone().and_then(|child| {
+            let state = self.state.read(cx);
+            let owner_id = state
+                .chats
+                .iter()
+                .find(|chat| chat.id == child)?
+                .delegation
+                .as_ref()?
+                .delegated_by_chat_id
+                .clone();
+            let title = state
+                .chats
+                .iter()
+                .find(|chat| chat.id == owner_id)
+                .and_then(|chat| chat.title.clone())
+                .unwrap_or_else(|| "this chat".into());
+            Some((owner_id, title))
+        });
         // Share the main chat's docked width cap and responsive padding.
         let width = composer_target_width(
             self.right_visible_width(cx),
@@ -366,6 +429,9 @@ impl Shell {
                     )
                     .children(pill),
             )
+            .when_some(owner, |el, (owner_id, title)| {
+                el.child(self.delegate_owner_line(id, owner_id, title, cx))
+            })
             .child(div().flex_none().child(composer))
             .child(Self::attachment_drop_overlay(Theme::of(cx)))
             .into_any_element()

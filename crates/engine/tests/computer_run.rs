@@ -27,6 +27,14 @@ use zeron_rpc::methods;
 const CHAT: &str = "chat-cu";
 const LEAD: &str = "lead";
 
+/// Every run carries the delegation guidance (d67); only a computer run
+/// carries the computer chapter.
+fn no_computer_guidance(seen: &Seen) -> bool {
+    seen.guidance
+        .as_deref()
+        .is_none_or(|text| !text.contains("## Zeron computer use"))
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct Seen {
     prompt: String,
@@ -447,7 +455,7 @@ async fn settings_off_activates_only_the_user_authored_slash_turn_and_restarts_w
     let rig = rig();
     rig.run("c1", "plain", PermissionMode::Full, None);
     let first = rig.saw(1).await;
-    assert!(!first.computer && first.guidance.is_none());
+    assert!(!first.computer && no_computer_guidance(&first));
     rig.finish_turn().await;
 
     rig.run(
@@ -474,7 +482,7 @@ async fn settings_off_activates_only_the_user_authored_slash_turn_and_restarts_w
 
     rig.run("c3", "plain again", PermissionMode::Full, None);
     let third = rig.saw(3).await;
-    assert!(!third.computer && third.resumed && !third.steer && third.guidance.is_none());
+    assert!(!third.computer && third.resumed && !third.steer && no_computer_guidance(&third));
     rig.finish_turn().await;
     assert_eq!(
         rig.user_texts(),
@@ -710,7 +718,7 @@ async fn an_agent_that_cannot_see_the_computer_tools_refuses_computer_visibly() 
     assert!(!seen.computer, "no catalog for an agent that cannot see it");
     assert_eq!(seen.prompt, "/computer-use open Calculator");
     assert!(
-        seen.guidance.is_none(),
+        no_computer_guidance(&seen),
         "no guidance for tools it cannot see"
     );
     assert!(
