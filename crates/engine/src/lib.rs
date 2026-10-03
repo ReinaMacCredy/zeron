@@ -40,6 +40,7 @@ pub mod source_control;
 pub mod spaces;
 pub mod terminals;
 pub mod titles;
+mod token_rate;
 mod transcript_history;
 mod turn_clock;
 pub mod uploads;

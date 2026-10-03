@@ -132,6 +132,22 @@ impl RuntimeConfig {
     }
 }
 
+struct LiveTokenRate {
+    meter: crate::token_rate::TokenRate,
+    tx: watch::Sender<Option<u32>>,
+    sent_at: Option<std::time::Instant>,
+}
+
+impl LiveTokenRate {
+    fn new() -> Self {
+        Self {
+            meter: crate::token_rate::TokenRate::new(),
+            tx: watch::channel(None).0,
+            sent_at: None,
+        }
+    }
+}
+
 struct RunHandle {
     run_id: String,
     steerable: bool,
@@ -384,6 +400,7 @@ struct Inner {
     runs: Mutex<HashMap<String, RunHandle>>,
     /// chat_id → broadcast hub (retained across runs so subscribers survive turns).
     hubs: Mutex<HashMap<String, broadcast::Sender<JournaledEvent>>>,
+    token_rates: Mutex<HashMap<String, LiveTokenRate>>,
     statuses: Mutex<HashMap<String, Session>>,
     sessions_tx: watch::Sender<Vec<Session>>,
     /// Last dispatched request per chat — the steer→new-turn fallback re-derives its
@@ -519,6 +536,7 @@ impl SessionsEngine {
                 doc_host: Mutex::new(None),
                 runs: Mutex::new(HashMap::new()),
                 hubs: Mutex::new(HashMap::new()),
+                token_rates: Mutex::new(HashMap::new()),
                 statuses: Mutex::new(HashMap::new()),
                 sessions_tx,
                 last_requests: Mutex::new(HashMap::new()),
@@ -723,6 +741,15 @@ impl SessionsEngine {
     /// The last request dispatched for a chat (steer→new-turn fallback).
     pub fn last_request(&self, chat_id: &str) -> Option<RunRequest> {
         lock(&self.inner.last_requests).get(chat_id).cloned()
+    }
+
+    /// The chat's live output tokens/s; never persisted.
+    pub fn watch_token_rate(&self, chat_id: &str) -> watch::Receiver<Option<u32>> {
+        lock(&self.inner.token_rates)
+            .entry(chat_id.to_string())
+            .or_insert_with(LiveTokenRate::new)
+            .tx
+            .subscribe()
     }
 
     /// Subscribe to a chat's live event stream: returns the journal replay after
@@ -2478,6 +2505,30 @@ impl Inner {
                 event
             })
             .collect()
+    }
+
+    fn meter_tokens(
+        &self,
+        chat_id: &str,
+        now: std::time::Instant,
+        f: impl FnOnce(&mut crate::token_rate::TokenRate),
+    ) {
+        const PUBLISH_EVERY: std::time::Duration = std::time::Duration::from_millis(500);
+        let mut rates = lock(&self.token_rates);
+        let live = rates
+            .entry(chat_id.to_string())
+            .or_insert_with(LiveTokenRate::new);
+        f(&mut live.meter);
+        if live
+            .sent_at
+            .is_some_and(|at| now.saturating_duration_since(at) < PUBLISH_EVERY)
+        {
+            return;
+        }
+        live.sent_at = Some(now);
+        let rate = live.meter.rate(now).map(|r| r.round() as u32);
+        live.tx
+            .send_if_modified(|slot| std::mem::replace(slot, rate) != rate);
     }
 
     fn publish(&self, chat_id: &str, event: &AgentEvent) -> u64 {
@@ -4499,6 +4550,10 @@ async fn drive_run(
         // to nothing, so journaling/publishing them is only noise (hundreds
         // per long turn observed) — the touch above already did their job.
         if matches!(&event, AgentEvent::ReasoningDelta { text } if text.is_empty()) {
+            if clock.streaming() {
+                let now = std::time::Instant::now();
+                inner.meter_tokens(&chat_id, now, |meter| meter.stream(now));
+            }
             continue;
         }
         let event = match event {
@@ -4719,7 +4774,11 @@ async fn drive_run(
             _ => {}
         }
 
-        clock.observe(&event, std::time::Instant::now());
+        let now = std::time::Instant::now();
+        clock.observe(&event, now);
+        inner.meter_tokens(&chat_id, now, |meter| {
+            meter.observe(&event, clock.streaming(), now)
+        });
         inner.publish(&chat_id, &event);
 
         // Defensive rule from zeron: a mid-run SessionStarted re-emission (Claude SDK

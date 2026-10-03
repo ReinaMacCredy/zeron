@@ -815,6 +815,8 @@ pub struct AppState {
     change_requests: ChangeRequestClientState,
     change_request_tasks: HashMap<ChangeRequestWatchKey, Task<()>>,
     queue_task: Option<Task<()>>,
+    token_rate: Option<u32>,
+    token_rate_task: Option<Task<()>>,
     change_requests_visible: bool,
     /// SUBAGENT transcripts keyed by subagent doc id (the right pane's
     /// subagent tabs read these). Independent of `selected_chat`: a tab's
@@ -904,6 +906,8 @@ impl AppState {
             change_requests: ChangeRequestClientState::default(),
             change_request_tasks: HashMap::new(),
             queue_task: None,
+            token_rate: None,
+            token_rate_task: None,
             change_requests_visible: true,
             sub_transcripts: HashMap::new(),
             sub_watch_tasks: HashMap::new(),
@@ -1171,6 +1175,8 @@ impl AppState {
             self.transcript_task = None;
             self.queue.clear();
             self.queue_task = None;
+            self.token_rate = None;
+            self.token_rate_task = None;
         }
         gone
     }
@@ -1678,6 +1684,64 @@ impl AppState {
             }
             _ => self.context_usage,
         }
+    }
+
+    pub fn token_rate(&self) -> Option<u32> {
+        self.token_rate
+    }
+
+    fn spawn_token_rate_watch(
+        &self,
+        cx: &mut Context<Self>,
+        handle: EngineHandle,
+        chat_id: String,
+    ) -> Task<()> {
+        #[derive(serde::Deserialize)]
+        struct RateFrame {
+            rate: Option<u32>,
+        }
+        const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+        let device_id = self
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .map(|chat| chat.device_id.clone());
+        cx.spawn(async move |this, cx| {
+            loop {
+                let params = serde_json::json!({
+                    "chatId": chat_id,
+                    "targetDeviceId": device_id,
+                });
+                let mut rx = match handle
+                    .client()
+                    .subscribe_checked(methods::WATCH_TOKEN_RATE, params)
+                    .await
+                {
+                    Ok(rx) => rx,
+                    Err(err) => {
+                        tracing::debug!(%chat_id, error = %err, "token rate watch unavailable");
+                        return;
+                    }
+                };
+                while let Some(value) = rx.recv().await {
+                    let Ok(frame) = serde_json::from_value::<RateFrame>(value) else {
+                        continue;
+                    };
+                    let alive = this.update(cx, |state, cx| {
+                        if state.selected_chat.as_deref() == Some(chat_id.as_str())
+                            && state.token_rate != frame.rate
+                        {
+                            state.token_rate = frame.rate;
+                            cx.notify();
+                        }
+                    });
+                    if alive.is_err() {
+                        return;
+                    }
+                }
+                cx.background_executor().timer(RETRY_DELAY).await;
+            }
+        })
     }
 
     pub fn session_stats_for(&self, chat_id: Option<&str>) -> Option<zeron_proto::SessionStats> {
@@ -2346,6 +2410,8 @@ impl AppState {
             return;
         };
         self.transcript_task = Some(spawn_transcript_watch(cx, handle.clone(), chat_id.clone()));
+        self.token_rate_task =
+            Some(self.spawn_token_rate_watch(cx, handle.clone(), chat_id.clone()));
         if handle
             .engine_info()
             .supports(zeron_proto::capabilities::MESSAGE_QUEUE_V1)
@@ -2497,6 +2563,8 @@ impl AppState {
         if let Some(chat_id) = self.selected_chat.clone() {
             self.transcript_task =
                 Some(spawn_transcript_watch(cx, handle.clone(), chat_id.clone()));
+            self.token_rate_task =
+                Some(self.spawn_token_rate_watch(cx, handle.clone(), chat_id.clone()));
             if handle
                 .engine_info()
                 .supports(zeron_proto::capabilities::MESSAGE_QUEUE_V1)
@@ -2906,6 +2974,8 @@ impl AppState {
         self.transcript_task = None;
         self.queue.clear();
         self.queue_task = None;
+        self.token_rate = None;
+        self.token_rate_task = None;
         if let Some(id) = chat_id.as_deref() {
             // A chat implies its project (or the lack of one); `select_chat(None)`
             // (the new-session canvas) restores the pick set aside above.
