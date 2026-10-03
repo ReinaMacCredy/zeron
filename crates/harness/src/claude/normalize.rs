@@ -307,6 +307,7 @@ pub(crate) struct Normalizer {
     /// Only the Bash launch tool_result names a shell's output file.
     task_outputs: std::collections::HashMap<String, String>,
     live_tasks: Vec<zeron_proto::BackgroundTask>,
+    nested_agent_tasks: std::collections::HashSet<String>,
     /// tool_use ids of Agent/Task spawn calls, recorded from their own
     /// assistant frames (plus `task_started`'s agent-task pairing). Gates
     /// `task_notification`: background SHELL tasks settle through the same
@@ -352,6 +353,7 @@ impl Normalizer {
             spawn_aliases: std::collections::HashMap::new(),
             task_outputs: std::collections::HashMap::new(),
             live_tasks: Vec::new(),
+            nested_agent_tasks: std::collections::HashSet::new(),
             agent_spawn_tools: std::collections::HashSet::new(),
             seeded_prompts: std::collections::HashMap::new(),
             pending_advisor: std::collections::HashMap::new(),
@@ -610,20 +612,32 @@ impl Normalizer {
                 // An AGENT task starting (subagent_type present — subagent-
                 // owned shell tasks carry the same subtype without it):
                 // record agentId → spawn id for SendMessage steer re-keying.
-                if f.subtype == "task_started"
-                    && f.subagent_type.is_some()
-                    && let (Some(task), Some(tool)) = (
-                        f.task_id.as_deref().filter(|t| !t.is_empty()),
-                        f.tool_use_id.as_deref().filter(|t| !t.is_empty()),
-                    )
-                {
-                    match self.agent_tasks.get(task) {
-                        Some(spawn) if spawn != tool => {
-                            self.spawn_aliases.insert(tool.to_owned(), spawn.clone());
+                if f.subtype == "task_started" {
+                    if f.subagent_type.is_some()
+                        && let (Some(task), Some(tool)) = (
+                            f.task_id.as_deref().filter(|t| !t.is_empty()),
+                            f.tool_use_id.as_deref().filter(|t| !t.is_empty()),
+                        )
+                    {
+                        match self.agent_tasks.get(task) {
+                            Some(spawn) if spawn != tool => {
+                                self.spawn_aliases.insert(tool.to_owned(), spawn.clone());
+                            }
+                            _ => {
+                                self.agent_tasks.insert(task.to_owned(), tool.to_owned());
+                                self.agent_spawn_tools.insert(tool.to_owned());
+                            }
                         }
-                        _ => {
-                            self.agent_tasks.insert(task.to_owned(), tool.to_owned());
-                            self.agent_spawn_tools.insert(tool.to_owned());
+                    }
+                    // The CLI lists a task before its task_started names the depth.
+                    if let Some(task) = f.task_id.filter(|_| f.spawn_depth.is_some_and(|d| d > 1)) {
+                        let listed = self.live_tasks.len();
+                        self.live_tasks.retain(|t| t.id != task);
+                        self.nested_agent_tasks.insert(task);
+                        if self.live_tasks.len() != listed {
+                            return vec![AgentEvent::BackgroundTasks {
+                                tasks: self.live_tasks.clone(),
+                            }];
                         }
                     }
                     return Vec::new();
@@ -642,7 +656,9 @@ impl Normalizer {
                         .tasks
                         .unwrap_or_default()
                         .into_iter()
-                        .filter(|t| !t.task_id.is_empty())
+                        .filter(|t| {
+                            !t.task_id.is_empty() && !self.nested_agent_tasks.contains(&t.task_id)
+                        })
                         .map(|t| zeron_proto::BackgroundTask {
                             output_path: self.task_outputs.get(&t.task_id).cloned(),
                             kind: match t.task_type.as_str() {
@@ -1869,6 +1885,60 @@ mod tests {
             r#"{"type":"system","subtype":"task_notification","task_id":"b7wb5vp5o","tool_use_id":"toolu_bash","status":"completed","summary":"done","uuid":"u4","session_id":"s1"}"#,
         );
         assert!(settled.is_empty(), "{settled:?}");
+    }
+
+    #[test]
+    fn a_nested_spawn_never_joins_the_background_set() {
+        let mut norm = Normalizer::new();
+        let mut feed = |line: &str| {
+            let frame = crate::claude::wire::parse_frame(line).expect("parses");
+            norm.normalize(frame, false)
+        };
+        let listed = |events: &[AgentEvent]| -> Vec<Vec<String>> {
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    AgentEvent::BackgroundTasks { tasks } => {
+                        Some(tasks.iter().map(|t| t.id.clone()).collect())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        // Order captured from CLI 2.1.288: a background agent spawning two background agents.
+        let top = feed(
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"addc","task_type":"local_agent","description":"Nested agent probe"}],"session_id":"s1"}"#,
+        );
+        assert_eq!(listed(&top), [vec!["addc".to_string()]]);
+        feed(
+            r#"{"type":"system","subtype":"task_started","task_id":"addc","tool_use_id":"toolu_top","description":"Nested agent probe","subagent_type":"general-purpose","spawn_depth":1,"task_type":"local_agent","session_id":"s1"}"#,
+        );
+        let both = feed(
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"addc","task_type":"local_agent","description":"Nested agent probe"},{"task_id":"afe3","task_type":"local_agent","description":"Sleep then pong A"}],"session_id":"s1"}"#,
+        );
+        assert_eq!(
+            listed(&both),
+            [vec!["addc".to_string(), "afe3".to_string()]]
+        );
+        let pruned = feed(
+            r#"{"type":"system","subtype":"task_started","task_id":"afe3","tool_use_id":"toolu_a","description":"Sleep then pong A","subagent_type":"general-purpose","spawn_depth":2,"task_type":"local_agent","session_id":"s1"}"#,
+        );
+        assert_eq!(listed(&pruned), [vec!["addc".to_string()]]);
+        let relisted = feed(
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"addc","task_type":"local_agent","description":"Nested agent probe"},{"task_id":"afe3","task_type":"local_agent","description":"Sleep then pong A"},{"task_id":"ac82","task_type":"local_agent","description":"Sleep then pong B"}],"session_id":"s1"}"#,
+        );
+        assert_eq!(
+            listed(&relisted),
+            [vec!["addc".to_string(), "ac82".to_string()]]
+        );
+        let pruned = feed(
+            r#"{"type":"system","subtype":"task_started","task_id":"ac82","tool_use_id":"toolu_b","description":"Sleep then pong B","subagent_type":"general-purpose","spawn_depth":2,"task_type":"local_agent","session_id":"s1"}"#,
+        );
+        assert_eq!(listed(&pruned), [vec!["addc".to_string()]]);
+        let parent_done = feed(
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"afe3","task_type":"local_agent","description":"Sleep then pong A"},{"task_id":"ac82","task_type":"local_agent","description":"Sleep then pong B"}],"session_id":"s1"}"#,
+        );
+        assert_eq!(listed(&parent_done), [Vec::<String>::new()]);
     }
 
     #[test]

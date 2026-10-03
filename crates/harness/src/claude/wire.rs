@@ -48,6 +48,8 @@ pub(crate) struct SystemFrame {
     /// absent on subagent-owned background shell tasks.
     #[serde(default)]
     pub subagent_type: Option<String>,
+    #[serde(default)]
+    pub spawn_depth: Option<u32>,
     /// `compact_boundary`: the CLI's own measurement of the compaction it
     /// just performed.
     #[serde(default)]
