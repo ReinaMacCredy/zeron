@@ -30,6 +30,20 @@ Zeron bundles the SVG icon set and filename/folder associations from
 Symbols is MIT licensed. The complete upstream license and copyright notice is
 retained at `crates/ui/assets/file-icons/LICENSE.symbols`.
 
+## Lucide
+
+The `crates/ui/assets/icons/lucide-*.svg` glyphs are from
+[Lucide](https://github.com/lucide-icons/lucide), ISC licensed
+(Copyright (c) for portions of Lucide are held by Cole Bemis 2013-2022 as part
+of Feather (MIT); all other copyright (c) for Lucide are held by Lucide
+Contributors 2022).
+
+## T3 Code
+
+`crates/ui/assets/icons/pr-branch-mark.svg` reproduces the empty-state drawing
+from [T3 Code](https://github.com/pingdotgg/t3code), MIT licensed,
+Copyright (c) 2026 T3 Tools Inc.
+
 ## Bundled theme palette adaptations
 
 Zeron includes manually curated palette adaptations derived from the projects

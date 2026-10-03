@@ -1673,6 +1673,7 @@ fn forwardable(method: &str) -> bool {
             | methods::WATCH_CHECKOUT_DIFFS
             | methods::WATCH_WORKSPACE_GIT_STATUS
             | methods::WATCH_CHECKOUT_CHANGE_REQUEST
+            | methods::LIST_CHANGE_REQUESTS
             | methods::GET_CHECKOUT_DIFF
             | methods::DISCARD_WORKING_TREE
             | methods::GET_CHECKOUT_FILE_DIFF_TEXT
@@ -2919,6 +2920,24 @@ impl RpcService for EngineRpc {
                     .map_err(|error| RpcError::Failed(error.to_string()))?
                     .filter_map(|status| async move { serde_json::to_value(status).ok() });
                 Ok(RpcReply::Stream(stream.boxed()))
+            }
+            methods::LIST_CHANGE_REQUESTS => {
+                let p: zeron_proto::ListChangeRequestsRequest = parse_params(params)?;
+                let local_device = self.doc_host.device_id();
+                let roots: Vec<std::path::PathBuf> = self
+                    .workspace
+                    .watch_spaces()
+                    .borrow()
+                    .iter()
+                    .filter(|space| space.device_id == local_device && space.git_detected)
+                    .map(|space| std::path::PathBuf::from(&space.path))
+                    .collect();
+                let listing = crate::source_control::ChangeRequestResolver::new()
+                    .list_change_requests(&roots, &p)
+                    .await;
+                Ok(RpcReply::Value(
+                    serde_json::to_value(listing).map_err(|e| RpcError::Failed(e.to_string()))?,
+                ))
             }
             // One-shot scoped capture for the Changes pane: `branch` diffs the
             // working tree against merge-base(baseRef, HEAD); `turn` diffs the
@@ -4559,6 +4578,8 @@ mod tests {
         assert!(forwardable(methods::RESOLVE_GIT_AVATARS));
         assert!(forwardable(methods::WATCH_CHECKOUT_CHANGE_REQUEST));
         assert!(is_stream_method(methods::WATCH_CHECKOUT_CHANGE_REQUEST));
+        assert!(forwardable(methods::LIST_CHANGE_REQUESTS));
+        assert!(!is_stream_method(methods::LIST_CHANGE_REQUESTS));
         assert!(forwardable(methods::DISCARD_WORKING_TREE));
         assert!(forwardable(methods::LIST_WORKSPACE_DIRECTORY));
         assert!(forwardable(methods::SEARCH_WORKSPACE_FILES));

@@ -78,6 +78,7 @@ mod navigation_focus;
 #[cfg(test)]
 mod navigation_tests;
 mod project_icon;
+mod pull_requests;
 mod side_chats;
 mod sidebar_pins;
 mod sidebar_sections;
@@ -830,6 +831,7 @@ fn settings_open_route(route: &str, remembered: SettingsSection) -> Option<Setti
 pub enum Route {
     Chat,
     Settings(SettingsSection),
+    PullRequests,
 }
 
 /// Maximum width the right pane may occupy while retaining the conversation
@@ -2197,6 +2199,8 @@ pub struct Shell {
     account_usage: Option<AgentAccountsSnapshot>,
     account_usage_task: Option<Task<()>>,
     harnesses_page: Option<Entity<HarnessesPage>>,
+    pull_requests_page: Option<Entity<crate::pull_requests::PullRequestsPage>>,
+    pull_requests_sub: Option<Subscription>,
     /// Filters the settings nav; cleared when settings close.
     settings_search: Entity<ComposerInput>,
     _settings_search_sub: Subscription,
@@ -2604,6 +2608,7 @@ impl Shell {
         // remembered like any other link to a section.
         let open_route = std::env::var("ZERON_OPEN_ROUTE").ok();
         let route = match open_route.as_deref() {
+            Some("pull-requests") => Route::PullRequests,
             Some(route) if route == "settings" || route.starts_with("settings/") => {
                 match settings_open_route(route, settings.settings_section) {
                     Some(section) => {
@@ -2644,7 +2649,7 @@ impl Shell {
             _ => None,
         };
         let nav = NavHistory::new(match route {
-            Route::Chat => NavEntry::Chat(String::new()),
+            Route::Chat | Route::PullRequests => NavEntry::Chat(String::new()),
             Route::Settings(section) => NavEntry::Settings(section),
         });
         // Parent notifications carry presentation changes (session status,
@@ -2758,6 +2763,8 @@ impl Shell {
             account_usage: None,
             account_usage_task: None,
             harnesses_page: None,
+            pull_requests_page: None,
+            pull_requests_sub: None,
             settings_search,
             _settings_search_sub: settings_search_sub,
             shortcuts_sub: None,
@@ -3506,7 +3513,7 @@ impl Shell {
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         // The settings sidebar is pinned; flipping the flag here would only
         // change what the chat route shows after Back.
-        if matches!(self.route, Route::Settings(_)) {
+        if matches!(self.route, Route::Settings(_) | Route::PullRequests) {
             return;
         }
         let from = self.sidebar_now();
@@ -10404,55 +10411,60 @@ impl Shell {
             .child(trigger)
             .child(
                 div()
-                    .id("settings-trigger")
-                    .debug_selector(|| "settings-trigger".into())
-                    .role(gpui::Role::Button)
-                    .aria_label(if settings_open {
-                        "Close settings"
-                    } else {
-                        "Settings"
-                    })
-                    .aria_toggled(if settings_open {
-                        gpui::Toggled::True
-                    } else {
-                        gpui::Toggled::False
-                    })
-                    .tooltip(move |_, cx| {
-                        let text = settings_tooltip.clone();
-                        cx.new(|_| SurfaceTabTooltip { text }).into()
-                    })
-                    .tab_index(0)
-                    .size(px(SIDEBAR_FOOTER_BUTTON_SIZE))
-                    .flex_none()
-                    .rounded(px(8.0))
                     .flex()
                     .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .bg(if settings_open {
-                        theme.glass_hover()
-                    } else {
-                        motion::hover_blend(
-                            "settings-trigger",
-                            theme.glass_hover().opacity(0.0),
-                            theme.glass_hover(),
-                        )
-                    })
-                    .on_hover(motion::hover_listener("settings-trigger"))
-                    .focus_visible(|s| s.border_2().border_color(theme.accent))
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_settings(cx)))
+                    .gap(px(4.0))
+                    .child(self.render_pull_requests_trigger(theme, cx))
                     .child(
-                        icon(icons::SETTINGS)
-                            .size(px(15.0))
-                            .text_color(if settings_open {
-                                theme.text
+                        div()
+                            .id("settings-trigger")
+                            .debug_selector(|| "settings-trigger".into())
+                            .role(gpui::Role::Button)
+                            .aria_label(if settings_open {
+                                "Close settings"
+                            } else {
+                                "Settings"
+                            })
+                            .aria_toggled(if settings_open {
+                                gpui::Toggled::True
+                            } else {
+                                gpui::Toggled::False
+                            })
+                            .tooltip(move |_, cx| {
+                                let text = settings_tooltip.clone();
+                                cx.new(|_| SurfaceTabTooltip { text }).into()
+                            })
+                            .tab_index(0)
+                            .size(px(SIDEBAR_FOOTER_BUTTON_SIZE))
+                            .flex_none()
+                            .rounded(px(8.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .bg(if settings_open {
+                                theme.glass_hover()
                             } else {
                                 motion::hover_blend(
                                     "settings-trigger",
-                                    theme.text_muted,
-                                    theme.text,
+                                    theme.glass_hover().opacity(0.0),
+                                    theme.glass_hover(),
                                 )
-                            }),
+                            })
+                            .on_hover(motion::hover_listener("settings-trigger"))
+                            .focus_visible(|s| s.border_2().border_color(theme.accent))
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_settings(cx)))
+                            .child(icon(icons::SETTINGS).size(px(15.0)).text_color(
+                                if settings_open {
+                                    theme.text
+                                } else {
+                                    motion::hover_blend(
+                                        "settings-trigger",
+                                        theme.text_muted,
+                                        theme.text,
+                                    )
+                                },
+                            )),
                     ),
             )
             .into_any_element()
@@ -11037,6 +11049,13 @@ impl Shell {
         if event.keystroke.key == "escape" && self.switcher.is_some() {
             self.switcher_close(cx);
             cx.stop_propagation();
+            return;
+        }
+        if matches!(self.route, Route::PullRequests) {
+            if event.keystroke.key == "escape" && self.add_space.is_none() {
+                self.close_pull_requests(cx);
+                cx.stop_propagation();
+            }
             return;
         }
         if matches!(self.route, Route::Settings(_)) {
@@ -14486,7 +14505,7 @@ impl Render for Shell {
                 }
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
-                if !matches!(this.route, Route::Settings(_)) {
+                if !matches!(this.route, Route::Settings(_) | Route::PullRequests) {
                     this.toggle_sidebar(cx)
                 }
             }))
@@ -14566,7 +14585,7 @@ impl Render for Shell {
                 this.step_reasoning(-1, cx);
             }))
             .on_action(cx.listener(|this, _: &AddSpacePalette, _, cx| {
-                if matches!(this.route, Route::Settings(_)) {
+                if matches!(this.route, Route::Settings(_) | Route::PullRequests) {
                     return;
                 }
                 if this.add_space.is_some() {
@@ -14749,6 +14768,10 @@ impl Render for Shell {
                 // Settings replaces the whole workspace, sidebar included. The
                 // chat layout stays unmounted; its entities keep their state
                 // for the return trip.
+                if matches!(self.route, Route::PullRequests) {
+                    let page = self.render_pull_requests_page(window, cx);
+                    break 'ready root.child(motion::fade_in("phase-app", page));
+                }
                 if let Route::Settings(section) = self.route {
                     let settings_page = self.render_settings_page(section, window, cx);
                     let overlays = self.render_overlays(window.viewport_size(), window, cx);

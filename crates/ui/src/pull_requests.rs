@@ -1,0 +1,1199 @@
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+use chrono::{DateTime, Utc};
+use gpui::{
+    Animation, AnimationExt as _, AnyElement, App, Context, Entity, EventEmitter, Hsla,
+    IntoElement, ParentElement, Render, ScrollHandle, SharedString, Styled, Subscription, Task,
+    Window, div, percentage, prelude::*, px,
+};
+use zeron_proto::{
+    ChangeRequestChecksState, ChangeRequestFailure, ChangeRequestListItem, ChangeRequestListing,
+    ChangeRequestMergeability, ChangeRequestReviewDecision, ChangeRequestState,
+    ListChangeRequestsRequest,
+};
+use zeron_rpc::methods;
+
+use crate::composer::{ComposerInput, ComposerInputEvent};
+use crate::icons::{self, icon};
+use crate::popover::Loadable;
+use crate::state::AppState;
+use crate::theme::{Appearance, Theme, oklch};
+
+const CONTAINER_MAX_WIDTH: f32 = 1152.0;
+const CONTAINER_PAD_X: f32 = 24.0;
+const GHOST_ROWS: usize = 7;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PullRequestGroup {
+    Authored,
+    ReviewRequested,
+    Others,
+}
+
+impl PullRequestGroup {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Authored => "Authored",
+            Self::ReviewRequested => "Review requested",
+            Self::Others => "Others",
+        }
+    }
+}
+
+fn authored_by_viewer(item: &ChangeRequestListItem, viewers: &BTreeMap<String, String>) -> bool {
+    let (Some(author), Some(viewer)) = (item.author.as_ref(), viewers.get(&item.host)) else {
+        return false;
+    };
+    author.login.eq_ignore_ascii_case(viewer)
+}
+
+pub(crate) fn group_items<'a>(
+    items: &[&'a ChangeRequestListItem],
+    viewers: &BTreeMap<String, String>,
+) -> Vec<(PullRequestGroup, Vec<&'a ChangeRequestListItem>)> {
+    let mut authored = Vec::new();
+    let mut review_requested = Vec::new();
+    let mut others = Vec::new();
+    for item in items {
+        if authored_by_viewer(item, viewers) {
+            authored.push(*item);
+        } else if item.viewer_review_requested {
+            review_requested.push(*item);
+        } else {
+            others.push(*item);
+        }
+    }
+    [
+        (PullRequestGroup::Authored, authored),
+        (PullRequestGroup::ReviewRequested, review_requested),
+        (PullRequestGroup::Others, others),
+    ]
+    .into_iter()
+    .filter(|(_, items)| !items.is_empty())
+    .collect()
+}
+
+fn readiness_tier(item: &ChangeRequestListItem) -> u8 {
+    if item.mergeability == ChangeRequestMergeability::Conflicting {
+        4
+    } else if item.state != ChangeRequestState::Open {
+        3
+    } else if item.is_draft {
+        2
+    } else if item.checks_state == Some(ChangeRequestChecksState::Passing)
+        && item.review_decision == Some(ChangeRequestReviewDecision::Approved)
+    {
+        0
+    } else if item.checks_state == Some(ChangeRequestChecksState::Passing) {
+        1
+    } else {
+        2
+    }
+}
+
+pub(crate) fn rank_by_merge_readiness(items: &mut [&ChangeRequestListItem]) {
+    items.sort_by(|left, right| {
+        let size = |item: &ChangeRequestListItem| item.additions + item.deletions;
+        readiness_tier(left)
+            .cmp(&readiness_tier(right))
+            .then_with(|| (size(right) > 0).cmp(&(size(left) > 0)))
+            .then_with(|| size(left).cmp(&size(right)))
+            .then_with(|| right.updated_at.cmp(&left.updated_at))
+    });
+}
+
+pub(crate) fn matches_query(item: &ChangeRequestListItem, query: &str) -> bool {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return true;
+    }
+    let haystack = format!(
+        "#{} {} {} {} {}",
+        item.number,
+        item.title,
+        item.repository,
+        item.head_ref,
+        item.author
+            .as_ref()
+            .map(|author| author.login.as_str())
+            .unwrap_or_default(),
+    )
+    .to_lowercase();
+    haystack.contains(&query)
+}
+
+pub(crate) fn relative_time(now: DateTime<Utc>, at: DateTime<Utc>) -> String {
+    let seconds = (now - at).num_seconds();
+    if seconds < 60 {
+        return "just now".into();
+    }
+    let minutes = seconds / 60;
+    if minutes < 60 {
+        return format!("{minutes}m ago");
+    }
+    let hours = minutes / 60;
+    if hours < 24 {
+        return format!("{hours}h ago");
+    }
+    format!("{}d ago", hours / 24)
+}
+
+pub(crate) fn failure_message(failure: ChangeRequestFailure) -> &'static str {
+    match failure {
+        ChangeRequestFailure::CliUnavailable => {
+            "GitHub CLI (`gh`) is required to browse pull requests. Install it from https://cli.github.com/ and reload."
+        }
+        ChangeRequestFailure::Authentication => {
+            "GitHub CLI is not authenticated. Run `gh auth login` and retry."
+        }
+        ChangeRequestFailure::RateLimited => "GitHub's rate limit was reached. Try again shortly.",
+        ChangeRequestFailure::Timeout => "GitHub took too long to answer.",
+        ChangeRequestFailure::Decode => "GitHub returned a response that could not be read.",
+        ChangeRequestFailure::CommandFailed => "GitHub CLI could not list pull requests.",
+        ChangeRequestFailure::RepositoryUnavailable => "This folder is not a Git checkout.",
+        ChangeRequestFailure::UnsupportedRepository => {
+            "Change requests cannot be browsed for this project's host yet."
+        }
+    }
+}
+
+fn shown_failure(failure: ChangeRequestFailure) -> bool {
+    !matches!(
+        failure,
+        ChangeRequestFailure::RepositoryUnavailable | ChangeRequestFailure::UnsupportedRepository
+    )
+}
+
+#[derive(Clone, Copy)]
+struct Tones {
+    open: Hsla,
+    merged: Hsla,
+    closed: Hsla,
+    draft: Hsla,
+    conflict: Hsla,
+    pending: Hsla,
+    approved_text: Hsla,
+    changes_text: Hsla,
+}
+
+impl Tones {
+    fn of(theme: &Theme) -> Self {
+        let dark = theme.appearance == Appearance::Dark;
+        let alpha = |color: Hsla, a: f32| Hsla { a, ..color };
+        if dark {
+            Self {
+                open: alpha(oklch(0.845, 0.143, 164.978), 0.9),
+                merged: alpha(oklch(0.811, 0.111, 293.571), 0.9),
+                closed: alpha(oklch(0.808, 0.114, 19.571), 0.9),
+                draft: alpha(oklch(0.705, 0.015, 286.067), 0.8),
+                conflict: theme.danger,
+                pending: alpha(oklch(0.828, 0.189, 84.429), 0.9),
+                approved_text: alpha(oklch(0.765, 0.177, 163.223), 0.8),
+                changes_text: alpha(oklch(0.828, 0.189, 84.429), 0.8),
+            }
+        } else {
+            Self {
+                open: oklch(0.596, 0.145, 163.225),
+                merged: oklch(0.541, 0.281, 293.009),
+                closed: oklch(0.577, 0.245, 27.325),
+                draft: oklch(0.552, 0.016, 285.938),
+                conflict: theme.danger,
+                pending: oklch(0.666, 0.179, 58.318),
+                approved_text: alpha(oklch(0.596, 0.145, 163.225), 0.9),
+                changes_text: alpha(oklch(0.666, 0.179, 58.318), 0.9),
+            }
+        }
+    }
+
+    fn glyph(self, item: &ChangeRequestListItem) -> (&'static str, Hsla, String) {
+        match item.state {
+            ChangeRequestState::Merged => (icons::LUCIDE_GIT_MERGE, self.merged, "Merged".into()),
+            ChangeRequestState::Closed => (
+                icons::LUCIDE_GIT_PULL_REQUEST_CLOSED,
+                self.closed,
+                "Closed".into(),
+            ),
+            ChangeRequestState::Open if item.is_draft => (
+                icons::LUCIDE_GIT_PULL_REQUEST_DRAFT,
+                self.draft,
+                "Draft".into(),
+            ),
+            ChangeRequestState::Open
+                if item.mergeability == ChangeRequestMergeability::Conflicting =>
+            {
+                (
+                    icons::LUCIDE_TRIANGLE_ALERT,
+                    self.conflict,
+                    format!("Conflicts with {}", item.base_ref),
+                )
+            }
+            ChangeRequestState::Open => (icons::LUCIDE_GIT_PULL_REQUEST, self.open, "Open".into()),
+        }
+    }
+
+    fn checks(self, state: ChangeRequestChecksState) -> (&'static str, Hsla) {
+        match state {
+            ChangeRequestChecksState::Passing => (icons::LUCIDE_CIRCLE_CHECK, self.open),
+            ChangeRequestChecksState::Failing => (icons::LUCIDE_CIRCLE_X, self.conflict),
+            ChangeRequestChecksState::Pending => (icons::LUCIDE_CIRCLE_DOT, self.pending),
+        }
+    }
+}
+
+pub enum PullRequestsEvent {
+    Close,
+}
+
+pub struct PullRequestsPage {
+    state: Entity<AppState>,
+    search: Entity<ComposerInput>,
+    _search_sub: Subscription,
+    listing: Loadable<ChangeRequestListing>,
+    refreshing: bool,
+    load_task: Option<Task<()>>,
+    scroll: ScrollHandle,
+}
+
+impl EventEmitter<PullRequestsEvent> for PullRequestsPage {}
+
+impl PullRequestsPage {
+    pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        let search = cx.new(|cx| {
+            ComposerInput::with_context("Search pull requests, or label:bug", "PaletteSearch", cx)
+        });
+        let search_sub = cx.subscribe(&search, |_, _, event, cx| {
+            if matches!(event, ComposerInputEvent::Edited) {
+                cx.notify();
+            }
+        });
+        let mut page = Self {
+            state,
+            search,
+            _search_sub: search_sub,
+            listing: Loadable::Idle,
+            refreshing: false,
+            load_task: None,
+            scroll: ScrollHandle::new(),
+        };
+        page.refresh(cx);
+        page
+    }
+
+    pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        if matches!(self.listing, Loadable::Ready(_)) {
+            self.refreshing = true;
+        } else {
+            self.listing = Loadable::Loading;
+        }
+        let params = serde_json::to_value(ListChangeRequestsRequest::default())
+            .unwrap_or(serde_json::Value::Null);
+        self.load_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::LIST_CHANGE_REQUESTS, params)
+                .await;
+            this.update(cx, |page, cx| {
+                page.refreshing = false;
+                let parsed = result.map_err(|error| error.to_string()).and_then(|value| {
+                    serde_json::from_value::<ChangeRequestListing>(value)
+                        .map_err(|error| error.to_string())
+                });
+                match parsed {
+                    Ok(listing) => page.listing = Loadable::Ready(listing),
+                    Err(error) if !matches!(page.listing, Loadable::Ready(_)) => {
+                        page.listing = Loadable::Error(error)
+                    }
+                    Err(_) => {}
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn query(&self, cx: &App) -> String {
+        self.search.read(cx).text().to_string()
+    }
+
+    fn render_topbar(&self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let spacer = crate::shell::titlebar_spacer_width(
+            cfg!(target_os = "macos"),
+            window.is_fullscreen(),
+            0.0,
+        );
+        div()
+            .h(px(Theme::TITLEBAR_HEIGHT))
+            .pt(px(Theme::TITLEBAR_TOP_PAD))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(12.0))
+            .child(div().w(px(spacer)).flex_none())
+            .child(
+                div()
+                    .id("pull-requests-back")
+                    .role(gpui::Role::Button)
+                    .aria_label("Back")
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .h(px(28.0))
+                    .px(px(8.0))
+                    .rounded(px(8.0))
+                    .text_size(px(13.0))
+                    .text_color(theme.text_muted)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.ink(0.06)).text_color(theme.text))
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(PullRequestsEvent::Close)))
+                    .child(
+                        icon(icons::LUCIDE_ARROW_LEFT)
+                            .size(px(14.0))
+                            .text_color(theme.text_muted),
+                    )
+                    .child("Back"),
+            )
+            .child(
+                div()
+                    .text_size(px(14.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child("Pull Requests"),
+            )
+            .into_any_element()
+    }
+
+    fn render_controls(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let busy = self.refreshing || matches!(self.listing, Loadable::Loading);
+        let refresh_icon = icon(icons::LUCIDE_REFRESH_CW)
+            .size(px(16.0))
+            .text_color(theme.text);
+        let refresh_icon: AnyElement = if busy {
+            refresh_icon
+                .with_animation(
+                    "pull-requests-refresh-spin",
+                    Animation::new(Duration::from_millis(800)).repeat(),
+                    |svg, delta| {
+                        svg.with_transformation(gpui::Transformation::rotate(percentage(delta)))
+                    },
+                )
+                .into_any_element()
+        } else {
+            refresh_icon.into_any_element()
+        };
+        let outline = |el: gpui::Stateful<gpui::Div>| {
+            el.h(px(32.0))
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(theme.hairline(0.09))
+                .bg(theme.surface_raised)
+                .hover(|style| style.bg(theme.ink(0.06)))
+        };
+        div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(8.0))
+            .child(
+                outline(div().id("pull-requests-search"))
+                    .flex_1()
+                    .min_w(px(160.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .px(px(10.0))
+                    .child(
+                        icon(icons::LUCIDE_SEARCH)
+                            .size(px(16.0))
+                            .text_color(theme.text_muted),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(14.0))
+                            .child(self.search.clone()),
+                    ),
+            )
+            .child(
+                outline(div().id("pull-requests-refresh"))
+                    .w(px(32.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .role(gpui::Role::Button)
+                    .aria_label("Refresh pull requests")
+                    .cursor_pointer()
+                    .on_click(cx.listener(|page, _, _, cx| {
+                        if !page.refreshing {
+                            page.refresh(cx);
+                        }
+                    }))
+                    .child(refresh_icon),
+            )
+            .into_any_element()
+    }
+
+    fn render_ghost(&self, theme: &Theme) -> AnyElement {
+        let title = [0.6, 0.4, 0.5, 0.66, 0.4, 0.6, 0.5];
+        let meta = [0.4, 0.33, 0.4, 0.25, 0.33, 0.4, 0.33];
+        let bar = theme.text_muted.opacity(0.15);
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .children((0..GHOST_ROWS).map(|index| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.0))
+                    .px(px(12.0))
+                    .py(px(8.0))
+                    .child(div().size(px(16.0)).rounded_full().bg(bar).flex_none())
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .h(px(14.0))
+                                    .w(gpui::relative(title[index % 7]))
+                                    .rounded(px(4.0))
+                                    .bg(bar),
+                            )
+                            .child(
+                                div()
+                                    .h(px(12.0))
+                                    .w(gpui::relative(meta[index % 7]))
+                                    .rounded(px(4.0))
+                                    .bg(bar),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .items_end()
+                            .gap(px(8.0))
+                            .child(div().h(px(12.0)).w(px(48.0)).rounded(px(4.0)).bg(bar))
+                            .child(div().h(px(12.0)).w(px(64.0)).rounded(px(4.0)).bg(bar)),
+                    )
+            }))
+            .with_animation(
+                "pull-requests-ghost-pulse",
+                Animation::new(Duration::from_millis(1600)).repeat(),
+                |el, delta| el.opacity(1.0 - 0.45 * (delta * std::f32::consts::PI).sin()),
+            )
+            .into_any_element()
+    }
+
+    fn render_state(
+        &self,
+        theme: &Theme,
+        title: String,
+        description: String,
+        with_mark: bool,
+        clear_search: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mark: AnyElement = if with_mark {
+            branch_mark(theme)
+        } else {
+            div()
+                .size(px(36.0))
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(theme.hairline(0.09))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    icon(icons::LUCIDE_GIT_PULL_REQUEST)
+                        .size(px(16.0))
+                        .text_color(theme.text),
+                )
+                .into_any_element()
+        };
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(24.0))
+            .px(px(16.0))
+            .py(px(64.0))
+            .child(mark)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(6.0))
+                    .max_w(px(420.0))
+                    .child(
+                        div()
+                            .text_size(px(20.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(theme.text)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(14.0))
+                            .text_color(theme.text_muted)
+                            .text_center()
+                            .child(description),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .when(clear_search, |row| {
+                        row.child(
+                            state_button(
+                                "pull-requests-clear-search",
+                                icons::LUCIDE_SEARCH,
+                                "Clear search",
+                                theme,
+                            )
+                            .on_click(cx.listener(|page, _, _, cx| {
+                                page.search.update(cx, |input, cx| input.set_text("", cx));
+                                cx.notify();
+                            })),
+                        )
+                    })
+                    .child(
+                        state_button(
+                            "pull-requests-retry",
+                            icons::LUCIDE_REFRESH_CW,
+                            if with_mark { "Check again" } else { "Retry" },
+                            theme,
+                        )
+                        .on_click(cx.listener(|page, _, _, cx| page.refresh(cx))),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_row(
+        &self,
+        item: &ChangeRequestListItem,
+        theme: &Theme,
+        tones: Tones,
+        row_width: f32,
+        now: DateTime<Utc>,
+    ) -> AnyElement {
+        let (glyph, glyph_tone, _) = tones.glyph(item);
+        let muted70 = theme.text_muted.opacity(0.7);
+        let muted50 = theme.text_muted.opacity(0.5);
+        let meta_width = (row_width - 24.0 - 28.0 - 160.0).max(0.0);
+        let separator = || div().flex_none().text_color(muted50).child("·");
+        let mut meta = div()
+            .flex_1()
+            .min_w_0()
+            .overflow_hidden()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .text_size(px(12.0))
+            .text_color(muted70)
+            .whitespace_nowrap()
+            .child(div().flex_none().child(format!("#{}", item.number)))
+            .child(separator())
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(item.repository.clone()),
+            );
+        if let Some(author) = &item.author {
+            meta = meta.child(separator()).child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .flex_none()
+                    .child(avatar(&author.login, theme))
+                    .when(meta_width >= 320.0, |el| el.child(author.login.clone())),
+            );
+        }
+        let visible_labels = if meta_width >= 768.0 {
+            3
+        } else if meta_width >= 576.0 {
+            2
+        } else {
+            1
+        }
+        .min(item.labels.len());
+        if visible_labels > 0 {
+            meta = meta.child(separator());
+            for (index, label) in item.labels.iter().take(visible_labels).enumerate() {
+                let rest = item.labels.len() - visible_labels;
+                let suffix = if index + 1 == visible_labels && rest > 0 {
+                    format!(" +{rest}")
+                } else {
+                    String::new()
+                };
+                meta = meta.child(label_pill(
+                    &label.name,
+                    label.color.as_deref(),
+                    &suffix,
+                    theme,
+                ));
+            }
+        }
+
+        let mut right_top = div()
+            .flex()
+            .items_center()
+            .justify_end()
+            .gap(px(8.0))
+            .max_w(px(144.0))
+            .text_size(px(12.0));
+        if row_width >= 448.0 {
+            match item.review_decision {
+                Some(ChangeRequestReviewDecision::Approved) => {
+                    right_top = right_top.child(
+                        div()
+                            .text_color(tones.approved_text)
+                            .whitespace_nowrap()
+                            .child("Approved"),
+                    )
+                }
+                Some(ChangeRequestReviewDecision::ChangesRequested) => {
+                    right_top = right_top.child(
+                        div()
+                            .text_color(tones.changes_text)
+                            .whitespace_nowrap()
+                            .child("Changes requested"),
+                    )
+                }
+                _ => {}
+            }
+        }
+        if let Some(checks) = item.checks_state {
+            let (glyph, tone) = tones.checks(checks);
+            right_top = right_top.child(icon(glyph).size(px(16.0)).text_color(tone));
+        }
+
+        let mut right_bottom = div()
+            .flex()
+            .items_center()
+            .justify_end()
+            .gap(px(12.0))
+            .whitespace_nowrap()
+            .text_size(px(11.0))
+            .text_color(muted70);
+        if item.additions + item.deletions > 0 {
+            right_bottom =
+                right_bottom.child(diff_stat(item.additions, item.deletions, tones, theme));
+        }
+        if row_width >= 384.0 {
+            right_bottom = right_bottom.child(relative_time(now, item.updated_at));
+        }
+
+        let url = item.url.clone();
+        div()
+            .id(SharedString::from(format!(
+                "pull-request-row-{}-{}-{}",
+                item.host, item.repository, item.number
+            )))
+            .role(gpui::Role::Button)
+            .aria_label(SharedString::from(item.title.clone()))
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(px(12.0))
+            .p(px(12.0))
+            .rounded(px(10.0))
+            .cursor_pointer()
+            .hover(|style| style.bg(theme.ink(0.035)))
+            .on_click(move |_, _, cx| cx.open_url(&url))
+            .child(
+                icon(glyph)
+                    .size(px(16.0))
+                    .text_color(glyph_tone)
+                    .flex_none(),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(12.0))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
+                                    .text_size(px(14.0))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child(item.title.clone()),
+                            )
+                            .child(right_top),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(12.0))
+                            .child(meta)
+                            .child(right_bottom),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_body(&self, theme: &Theme, row_width: f32, cx: &mut Context<Self>) -> AnyElement {
+        let listing = match &self.listing {
+            Loadable::Idle | Loadable::Loading => return self.render_ghost(theme),
+            Loadable::Error(error) => {
+                return self.render_state(
+                    theme,
+                    "Could not load pull requests".into(),
+                    error.clone(),
+                    false,
+                    false,
+                    cx,
+                );
+            }
+            Loadable::Ready(listing) => listing,
+        };
+        let shown_errors: Vec<_> = listing
+            .errors
+            .iter()
+            .filter(|error| shown_failure(error.failure))
+            .collect();
+        if listing.items.is_empty() && !shown_errors.is_empty() {
+            return self.render_state(
+                theme,
+                "Could not load pull requests".into(),
+                failure_message(shown_errors[0].failure).into(),
+                false,
+                false,
+                cx,
+            );
+        }
+        let query = self.query(cx);
+        let items: Vec<&ChangeRequestListItem> = listing
+            .items
+            .iter()
+            .filter(|item| matches_query(item, &query))
+            .collect();
+        if items.is_empty() {
+            let trimmed = query.trim();
+            let (title, description) = if trimmed.is_empty() {
+                (
+                    "No pull requests".to_string(),
+                    "Pull requests from every project in this workspace appear here.".to_string(),
+                )
+            } else {
+                let shown: String = if trimmed.chars().count() > 48 {
+                    format!("{}…", trimmed.chars().take(48).collect::<String>())
+                } else {
+                    trimmed.to_string()
+                };
+                (
+                    format!("Nothing matches “{shown}”"),
+                    "The hosts were searched for it. Try fewer words, or search by number, author or branch."
+                        .to_string(),
+                )
+            };
+            let clear_search = !trimmed.is_empty();
+            return self.render_state(theme, title, description, true, clear_search, cx);
+        }
+        let tones = Tones::of(theme);
+        let now = Utc::now();
+        let searching = !query.trim().is_empty();
+        let groups = group_items(&items, &listing.viewers);
+        let mut column = div().flex().flex_col().gap(px(12.0));
+        for (group, mut group_items) in groups {
+            if !searching {
+                rank_by_merge_readiness(&mut group_items);
+            }
+            column = column.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .px(px(12.0))
+                            .pb(px(2.0))
+                            .text_size(px(12.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text_muted.opacity(0.7))
+                            .child(group.label()),
+                    )
+                    .children(
+                        group_items
+                            .into_iter()
+                            .map(|item| self.render_row(item, theme, tones, row_width, now)),
+                    ),
+            );
+        }
+        if let Some(error) = shown_errors.first() {
+            column = column.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(12.0))
+                    .rounded(px(10.0))
+                    .border_1()
+                    .border_color(tones.pending.opacity(0.3))
+                    .bg(tones.pending.opacity(0.05))
+                    .px(px(12.0))
+                    .py(px(8.0))
+                    .text_size(px(12.0))
+                    .text_color(theme.text)
+                    .child(format!(
+                        "{} Showing the last pull requests loaded.",
+                        failure_message(error.failure)
+                    )),
+            );
+        }
+        if listing.truncated {
+            column = column.child(
+                div()
+                    .flex()
+                    .justify_center()
+                    .py(px(12.0))
+                    .text_size(px(12.0))
+                    .text_color(theme.text_muted)
+                    .child("Narrow your search to find more pull requests."),
+            );
+        }
+        column.into_any_element()
+    }
+}
+
+fn avatar(login: &str, theme: &Theme) -> AnyElement {
+    let initial = login
+        .chars()
+        .next()
+        .map(|c| c.to_uppercase().to_string())
+        .unwrap_or_default();
+    div()
+        .size(px(16.0))
+        .flex_none()
+        .rounded_full()
+        .bg(theme.ink(0.08))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(8.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(theme.text_muted)
+        .child(initial)
+        .into_any_element()
+}
+
+fn label_color(color: Option<&str>, theme: &Theme) -> Hsla {
+    color
+        .filter(|hex| hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit()))
+        .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+        .map(|rgb| gpui::rgb(rgb).into())
+        .unwrap_or(theme.text_muted)
+}
+
+fn label_pill(name: &str, color: Option<&str>, suffix: &str, theme: &Theme) -> AnyElement {
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .max_w(px(160.0))
+        .rounded_full()
+        .border_1()
+        .border_color(theme.hairline(0.08))
+        .bg(theme.ink(0.025))
+        .pl(px(4.0))
+        .pr(px(6.0))
+        .text_size(px(10.0))
+        .line_height(px(14.0))
+        .text_color(theme.text_muted)
+        .child(
+            div()
+                .size(px(8.0))
+                .flex_none()
+                .rounded_full()
+                .bg(label_color(color, theme)),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .child(format!("{name}{suffix}")),
+        )
+        .into_any_element()
+}
+
+fn diff_stat(additions: u64, deletions: u64, tones: Tones, theme: &Theme) -> AnyElement {
+    div()
+        .flex()
+        .items_baseline()
+        .gap(px(4.0))
+        .child(
+            div()
+                .text_color(tones.open)
+                .child(format!("+{}", group_thousands(additions))),
+        )
+        .child(
+            div()
+                .text_color(theme.danger)
+                .child(format!("-{}", group_thousands(deletions))),
+        )
+        .into_any_element()
+}
+
+pub(crate) fn group_thousands(value: u64) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
+fn state_button(
+    id: &'static str,
+    glyph: &'static str,
+    label: &'static str,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .role(gpui::Role::Button)
+        .aria_label(label)
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .h(px(28.0))
+        .px(px(9.0))
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(theme.hairline(0.09))
+        .text_size(px(13.0))
+        .text_color(theme.text)
+        .cursor_pointer()
+        .hover(|style| style.bg(theme.ink(0.06)))
+        .child(icon(glyph).size(px(14.0)).text_color(theme.text))
+        .child(label)
+}
+
+fn branch_mark(theme: &Theme) -> AnyElement {
+    icon(icons::PR_BRANCH_MARK)
+        .w(px(128.0))
+        .h(px(80.0))
+        .text_color(theme.text_muted.opacity(0.6))
+        .into_any_element()
+}
+
+impl Render for PullRequestsPage {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if matches!(self.listing, Loadable::Idle) {
+            self.refresh(cx);
+        }
+        let theme = Theme::of(cx).clone();
+        let viewport = f32::from(window.viewport_size().width);
+        let container = viewport.min(CONTAINER_MAX_WIDTH);
+        let row_width = (container - 2.0 * CONTAINER_PAD_X).max(0.0);
+        let topbar = self.render_topbar(&theme, window, cx);
+        let controls = self.render_controls(&theme, cx);
+        let body = self.render_body(&theme, row_width, cx);
+        div()
+            .id("pull-requests-page")
+            .role(gpui::Role::Group)
+            .aria_label("Pull Requests")
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(theme.bg)
+            .child(topbar)
+            .child(
+                div()
+                    .id("pull-requests-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
+                    .child(
+                        div()
+                            .mx_auto()
+                            .w_full()
+                            .max_w(px(CONTAINER_MAX_WIDTH))
+                            .px(px(CONTAINER_PAD_X))
+                            .pt(px(24.0))
+                            .pb(px(48.0))
+                            .flex()
+                            .flex_col()
+                            .gap(px(16.0))
+                            .child(controls)
+                            .child(body),
+                    ),
+            )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::TimeZone;
+    use zeron_proto::ChangeRequestActor;
+
+    use super::*;
+
+    fn item(number: u64, author: &str) -> ChangeRequestListItem {
+        ChangeRequestListItem {
+            provider: "github".into(),
+            host: "github.com".into(),
+            repository: "acme/zeron".into(),
+            number,
+            title: format!("Change {number}"),
+            url: format!("https://github.com/acme/zeron/pull/{number}"),
+            author: Some(ChangeRequestActor {
+                login: author.into(),
+                avatar_url: None,
+            }),
+            head_ref: format!("feature/{number}"),
+            base_ref: "main".into(),
+            state: ChangeRequestState::Open,
+            is_draft: false,
+            mergeability: ChangeRequestMergeability::Mergeable,
+            additions: 0,
+            deletions: 0,
+            created_at: Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap(),
+            updated_at: Utc.with_ymd_and_hms(2026, 9, 2, 0, 0, 0).unwrap(),
+            viewer_review_requested: false,
+            labels: Vec::new(),
+            review_decision: None,
+            checks_state: None,
+        }
+    }
+
+    #[test]
+    fn groups_put_authored_before_review_requested_and_drop_empty_groups() {
+        let mine = item(1, "Alice");
+        let mut asked = item(2, "bob");
+        asked.viewer_review_requested = true;
+        let mut mine_and_asked = item(3, "alice");
+        mine_and_asked.viewer_review_requested = true;
+        let viewers = BTreeMap::from([("github.com".to_string(), "alice".to_string())]);
+        let all = [&mine, &asked, &mine_and_asked];
+        let groups = group_items(&all, &viewers);
+        let shape: Vec<(PullRequestGroup, Vec<u64>)> = groups
+            .into_iter()
+            .map(|(group, items)| (group, items.iter().map(|item| item.number).collect()))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (PullRequestGroup::Authored, vec![1, 3]),
+                (PullRequestGroup::ReviewRequested, vec![2]),
+            ]
+        );
+        assert!(
+            group_items(&all, &BTreeMap::new())
+                .iter()
+                .all(|(group, _)| *group != PullRequestGroup::Authored)
+        );
+    }
+
+    #[test]
+    fn merge_readiness_orders_tiers_then_measured_size_then_recency() {
+        let mut ready = item(1, "a");
+        ready.checks_state = Some(ChangeRequestChecksState::Passing);
+        ready.review_decision = Some(ChangeRequestReviewDecision::Approved);
+        let mut green = item(2, "a");
+        green.checks_state = Some(ChangeRequestChecksState::Passing);
+        let mut draft = item(3, "a");
+        draft.is_draft = true;
+        draft.checks_state = Some(ChangeRequestChecksState::Passing);
+        draft.review_decision = Some(ChangeRequestReviewDecision::Approved);
+        let mut merged = item(4, "a");
+        merged.state = ChangeRequestState::Merged;
+        let mut conflicting = item(5, "a");
+        conflicting.mergeability = ChangeRequestMergeability::Conflicting;
+        conflicting.checks_state = Some(ChangeRequestChecksState::Passing);
+        conflicting.review_decision = Some(ChangeRequestReviewDecision::Approved);
+        let mut small = item(6, "a");
+        small.additions = 3;
+        let mut large = item(7, "a");
+        large.additions = 300;
+        let mut newer_unmeasured = item(8, "a");
+        newer_unmeasured.updated_at = Utc.with_ymd_and_hms(2026, 9, 9, 0, 0, 0).unwrap();
+
+        let mut items = vec![
+            &conflicting,
+            &merged,
+            &newer_unmeasured,
+            &draft,
+            &large,
+            &green,
+            &small,
+            &ready,
+        ];
+        rank_by_merge_readiness(&mut items);
+        let order: Vec<u64> = items.iter().map(|item| item.number).collect();
+        assert_eq!(order, [1, 2, 6, 7, 8, 3, 4, 5]);
+    }
+
+    #[test]
+    fn search_matches_number_title_repository_branch_and_author() {
+        let row = item(42, "Carol");
+        for query in [
+            "#42",
+            "change 42",
+            "ACME/zeron",
+            "feature/42",
+            "carol",
+            "  ",
+        ] {
+            assert!(matches_query(&row, query), "{query}");
+        }
+        assert!(!matches_query(&row, "dave"));
+    }
+
+    #[test]
+    fn relative_time_matches_t3code_buckets() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 4, 12, 0, 0).unwrap();
+        let ago = |seconds: i64| relative_time(now, now - chrono::Duration::seconds(seconds));
+        assert_eq!(ago(-30), "just now");
+        assert_eq!(ago(59), "just now");
+        assert_eq!(ago(60), "1m ago");
+        assert_eq!(ago(3599), "59m ago");
+        assert_eq!(ago(3600), "1h ago");
+        assert_eq!(ago(86_399), "23h ago");
+        assert_eq!(ago(86_400 * 40), "40d ago");
+    }
+
+    #[test]
+    fn thousands_are_grouped_like_to_locale_string() {
+        assert_eq!(group_thousands(0), "0");
+        assert_eq!(group_thousands(999), "999");
+        assert_eq!(group_thousands(1240), "1,240");
+        assert_eq!(group_thousands(1_234_567), "1,234,567");
+    }
+}

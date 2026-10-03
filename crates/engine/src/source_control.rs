@@ -14,14 +14,24 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-use zeron_proto::{ChangeRequestState, ChangeRequestSummary};
+use zeron_proto::{
+    ChangeRequestActor, ChangeRequestChecksState, ChangeRequestFailure, ChangeRequestInvolvement,
+    ChangeRequestLabel, ChangeRequestListError, ChangeRequestListItem, ChangeRequestListState,
+    ChangeRequestListing, ChangeRequestMergeability, ChangeRequestReviewDecision,
+    ChangeRequestState, ChangeRequestSummary, ListChangeRequestsRequest,
+};
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(10);
 const GITHUB_TIMEOUT: Duration = Duration::from_secs(20);
+const GITHUB_LIST_TIMEOUT: Duration = Duration::from_secs(30);
 const GIT_OUTPUT_LIMIT: usize = 64 * 1024;
 const GITHUB_OUTPUT_LIMIT: usize = 1024 * 1024;
+const GITHUB_LIST_OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
 const GITHUB_RESULT_LIMIT: &str = "20";
 const GITHUB_JSON_FIELDS: &str = "number,title,url,state,baseRefName,headRefName,updatedAt,isCrossRepository,headRepositoryOwner";
+const GITHUB_LIST_FIELDS: &str = "number,title,url,author,headRefName,baseRefName,state,isDraft,mergeable,reviewDecision,createdAt,updatedAt,mergedAt,reviewRequests,labels";
+pub const DEFAULT_LIST_LIMIT: u32 = 99;
+const MAX_LIST_LIMIT: u32 = 500;
 
 /// Repository identity extracted from a Git remote URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,6 +173,146 @@ impl Default for ChangeRequestResolver {
     }
 }
 
+impl ChangeRequestResolver {
+    pub async fn list_change_requests(
+        &self,
+        roots: &[PathBuf],
+        request: &ListChangeRequestsRequest,
+    ) -> ChangeRequestListing {
+        let mut listing = ChangeRequestListing::default();
+        let mut repositories: Vec<RepositoryIdentity> = Vec::new();
+        let identities = futures::future::join_all(
+            roots
+                .iter()
+                .map(|root| async move { (root, self.inspector.repository_identity(root).await) }),
+        )
+        .await;
+        for (root, identity) in identities {
+            match identity {
+                Ok(identity) => {
+                    if !repositories
+                        .iter()
+                        .any(|known| known.remote.same_repository(&identity.remote))
+                    {
+                        repositories.push(identity);
+                    }
+                }
+                Err(error) => listing.errors.push(ChangeRequestListError {
+                    host: None,
+                    repository: None,
+                    path: root.to_string_lossy().into_owned(),
+                    failure: error.into(),
+                }),
+            }
+        }
+
+        let mut hosts: Vec<(String, PathBuf)> = Vec::new();
+        for identity in &repositories {
+            if !hosts.iter().any(|(host, _)| *host == identity.remote.host) {
+                hosts.push((identity.remote.host.clone(), identity.root.clone()));
+            }
+        }
+        let viewers = futures::future::join_all(hosts.iter().map(|(host, root)| async move {
+            (host.clone(), self.github.viewer_login(host, root).await)
+        }))
+        .await;
+        let mut viewer_failures = Vec::new();
+        for (host, viewer) in viewers {
+            match viewer {
+                Ok(login) => {
+                    listing.viewers.insert(host, login);
+                }
+                Err(error) => viewer_failures.push((host, error)),
+            }
+        }
+
+        let limit = request
+            .limit
+            .unwrap_or(DEFAULT_LIST_LIMIT)
+            .clamp(1, MAX_LIST_LIMIT);
+        let mut readable = Vec::new();
+        for identity in repositories {
+            if let Some((_, error)) = viewer_failures
+                .iter()
+                .find(|(host, _)| *host == identity.remote.host)
+            {
+                listing.errors.push(identity.list_error((*error).into()));
+            } else {
+                readable.push(identity);
+            }
+        }
+        let reads = futures::future::join_all(readable.iter().map(|identity| {
+            let viewer = listing.viewers[&identity.remote.host].clone();
+            async move {
+                let result = self
+                    .github
+                    .list_repository_items(identity, request, &viewer, limit)
+                    .await;
+                (identity, result)
+            }
+        }))
+        .await;
+        for (identity, result) in reads {
+            match result {
+                Ok((items, truncated)) => {
+                    listing.items.extend(items);
+                    listing.truncated |= truncated;
+                }
+                Err(error) => listing.errors.push(identity.list_error(error.into())),
+            }
+        }
+        listing
+            .items
+            .sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        listing
+    }
+}
+
+/// Remote choice copies t3code: `upstream`, else `origin`, else the first fetch remote by name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryIdentity {
+    pub root: PathBuf,
+    pub remote: GitRemote,
+}
+
+impl RepositoryIdentity {
+    fn name_with_owner(&self) -> String {
+        format!("{}/{}", self.remote.owner, self.remote.repository)
+    }
+
+    fn list_error(&self, failure: ChangeRequestFailure) -> ChangeRequestListError {
+        ChangeRequestListError {
+            host: Some(self.remote.host.clone()),
+            repository: Some(self.name_with_owner()),
+            path: self.root.to_string_lossy().into_owned(),
+            failure,
+        }
+    }
+}
+
+impl GitRemote {
+    fn same_repository(&self, other: &GitRemote) -> bool {
+        self.host.eq_ignore_ascii_case(&other.host)
+            && self.owner.eq_ignore_ascii_case(&other.owner)
+            && self.repository.eq_ignore_ascii_case(&other.repository)
+    }
+}
+
+impl From<ChangeRequestError> for ChangeRequestFailure {
+    fn from(error: ChangeRequestError) -> Self {
+        match error {
+            ChangeRequestError::RepositoryUnavailable => Self::RepositoryUnavailable,
+            ChangeRequestError::UnsupportedRepository => Self::UnsupportedRepository,
+            ChangeRequestError::CliUnavailable => Self::CliUnavailable,
+            ChangeRequestError::Authentication => Self::Authentication,
+            ChangeRequestError::RateLimited => Self::RateLimited,
+            ChangeRequestError::Timeout => Self::Timeout,
+            ChangeRequestError::Decode => Self::Decode,
+            ChangeRequestError::CommandFailed => Self::CommandFailed,
+        }
+    }
+}
+
 #[async_trait]
 impl CheckoutChangeRequestLookup for ChangeRequestResolver {
     async fn inspect_checkout(
@@ -263,6 +413,219 @@ impl GitHubCli {
         view.default_branch_ref
             .map(|reference| reference.name)
             .filter(|name| !name.is_empty())
+    }
+
+    async fn run_gh(
+        &self,
+        cwd: &Path,
+        args: Vec<String>,
+        timeout: Duration,
+        output_limit: usize,
+    ) -> Result<Vec<u8>, ChangeRequestError> {
+        let request = ProcessRequest {
+            program: "gh".into(),
+            args,
+            cwd: cwd.to_owned(),
+            env: vec![("GH_PROMPT_DISABLED".into(), "1".into())],
+            timeout,
+            output_limit,
+        };
+        let output = self.runner.run(request).await.map_err(classify_run_error)?;
+        if !output.success {
+            return Err(classify_github_failure(&output.stderr));
+        }
+        if output.stdout_truncated {
+            return Err(ChangeRequestError::Decode);
+        }
+        Ok(output.stdout)
+    }
+
+    async fn viewer_login(&self, host: &str, cwd: &Path) -> Result<String, ChangeRequestError> {
+        let stdout = self
+            .run_gh(
+                cwd,
+                ["api", "--hostname", host, "user", "--jq", ".login"]
+                    .map(str::to_owned)
+                    .to_vec(),
+                GITHUB_TIMEOUT,
+                GITHUB_OUTPUT_LIMIT,
+            )
+            .await?;
+        let login = String::from_utf8(stdout)
+            .map_err(|_| ChangeRequestError::Decode)?
+            .trim()
+            .to_owned();
+        if login.is_empty() {
+            return Err(ChangeRequestError::Authentication);
+        }
+        Ok(login)
+    }
+
+    async fn list_repository(
+        &self,
+        identity: &RepositoryIdentity,
+        state: ChangeRequestListState,
+        author: Option<&str>,
+        search: Option<&str>,
+        limit: u32,
+    ) -> Result<(Vec<GhListPullRequest>, usize), ChangeRequestError> {
+        let state = match state {
+            ChangeRequestListState::Open => "open",
+            ChangeRequestListState::Closed => "closed",
+            ChangeRequestListState::Merged => "merged",
+            ChangeRequestListState::All => "all",
+        };
+        let mut args: Vec<String> = vec![
+            "pr".into(),
+            "list".into(),
+            "--repo".into(),
+            format!("{}/{}", identity.remote.host, identity.name_with_owner()),
+        ];
+        if let Some(author) = author {
+            args.extend(["--author".into(), author.to_owned()]);
+        }
+        if let Some(search) = search {
+            args.extend(["--search".into(), search.to_owned()]);
+        }
+        args.extend([
+            "--state".into(),
+            state.into(),
+            "--limit".into(),
+            (limit + 1).to_string(),
+            "--json".into(),
+            GITHUB_LIST_FIELDS.into(),
+        ]);
+        let stdout = self
+            .run_gh(
+                &identity.root,
+                args,
+                GITHUB_LIST_TIMEOUT,
+                GITHUB_LIST_OUTPUT_LIMIT,
+            )
+            .await?;
+        let rows: Vec<serde_json::Value> =
+            serde_json::from_slice(&stdout).map_err(|_| ChangeRequestError::Decode)?;
+        let raw_count = rows.len();
+        let rows = rows
+            .into_iter()
+            .filter_map(|row| serde_json::from_value(row).ok())
+            .collect();
+        Ok((rows, raw_count))
+    }
+
+    async fn list_repository_items(
+        &self,
+        identity: &RepositoryIdentity,
+        request: &ListChangeRequestsRequest,
+        viewer: &str,
+        limit: u32,
+    ) -> Result<(Vec<ChangeRequestListItem>, bool), ChangeRequestError> {
+        let mut feed_terms = vec!["sort:updated-desc"];
+        if request.state == ChangeRequestListState::Closed {
+            feed_terms.insert(0, "is:unmerged");
+        }
+        let feed_search = feed_terms.join(" ");
+        let reviewing_search = format!("review-requested:{viewer} sort:updated-desc");
+        let (feed, authored, reviewing) = match request.involvement {
+            ChangeRequestInvolvement::All => {
+                let (feed, authored, reviewing) = futures::try_join!(
+                    self.list_feed(identity, request.state, &feed_search, limit),
+                    self.list_repository(
+                        identity,
+                        request.state,
+                        Some(viewer),
+                        Some(&feed_search),
+                        limit
+                    ),
+                    self.list_repository(
+                        identity,
+                        request.state,
+                        None,
+                        Some(&reviewing_search),
+                        limit
+                    ),
+                )?;
+                (feed, authored.0, reviewing.0)
+            }
+            ChangeRequestInvolvement::Authored => (
+                self.list_repository(
+                    identity,
+                    request.state,
+                    Some(viewer),
+                    Some(&feed_search),
+                    limit,
+                )
+                .await?,
+                Vec::new(),
+                Vec::new(),
+            ),
+            ChangeRequestInvolvement::Reviewing => (
+                self.list_repository(
+                    identity,
+                    request.state,
+                    None,
+                    Some(&reviewing_search),
+                    limit,
+                )
+                .await?,
+                Vec::new(),
+                Vec::new(),
+            ),
+        };
+        let (feed, raw_count) = feed;
+        let truncated = raw_count > limit as usize;
+        let review_requested: Vec<u64> = reviewing.iter().map(|row| row.number).collect();
+        let mut items: Vec<ChangeRequestListItem> = Vec::new();
+        for row in feed
+            .into_iter()
+            .take(limit as usize)
+            .chain(authored.into_iter().take(limit as usize))
+            .chain(reviewing.into_iter().take(limit as usize))
+        {
+            if items.iter().any(|item| item.number == row.number) {
+                continue;
+            }
+            let requested = review_requested.contains(&row.number);
+            if let Some(mut item) = to_list_item(identity, viewer, row) {
+                if requested
+                    && request.involvement == ChangeRequestInvolvement::All
+                    && !item
+                        .author
+                        .as_ref()
+                        .is_some_and(|author| author.login.eq_ignore_ascii_case(viewer))
+                {
+                    item.viewer_review_requested = true;
+                }
+                items.push(item);
+            }
+        }
+        Ok((items, truncated))
+    }
+
+    async fn list_feed(
+        &self,
+        identity: &RepositoryIdentity,
+        state: ChangeRequestListState,
+        search: &str,
+        limit: u32,
+    ) -> Result<(Vec<GhListPullRequest>, usize), ChangeRequestError> {
+        let (rows, raw_count) = self
+            .list_repository(identity, state, None, Some(search), limit)
+            .await?;
+        if raw_count > 0 {
+            return Ok((rows, raw_count));
+        }
+        let (rows, raw_count) = self
+            .list_repository(identity, state, None, None, limit)
+            .await?;
+        let rows = rows
+            .into_iter()
+            .filter(|row| {
+                state != ChangeRequestListState::Closed
+                    || gh_list_state(row) != ChangeRequestState::Merged
+            })
+            .collect();
+        Ok((rows, raw_count))
     }
 }
 
@@ -568,6 +931,27 @@ impl GitCheckoutInspector {
         })
     }
 
+    async fn repository_identity(
+        &self,
+        cwd: &Path,
+    ) -> Result<RepositoryIdentity, ChangeRequestError> {
+        let root = self
+            .git_required(cwd, &["rev-parse", "--show-toplevel"])
+            .await?;
+        if root.is_empty() {
+            return Err(ChangeRequestError::RepositoryUnavailable);
+        }
+        let root = PathBuf::from(root);
+        let remotes = self
+            .git_optional(&root, &["remote", "-v"])
+            .await
+            .unwrap_or_default();
+        let remote = primary_fetch_remote(&remotes)
+            .and_then(parse_git_remote)
+            .ok_or(ChangeRequestError::UnsupportedRepository)?;
+        Ok(RepositoryIdentity { root, remote })
+    }
+
     async fn git_required(&self, cwd: &Path, args: &[&str]) -> Result<String, ChangeRequestError> {
         self.git(cwd, args)
             .await
@@ -723,6 +1107,212 @@ fn to_summary(
         state: pull_request.state.into(),
         base_ref: pull_request.base_ref_name,
         head_ref: pull_request.head_ref_name,
+    })
+}
+
+fn primary_fetch_remote(output: &str) -> Option<&str> {
+    let mut remotes: Vec<(&str, &str)> = output
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let name = parts.next()?;
+            let url = parts.next()?;
+            (parts.next() == Some("(fetch)")).then_some((name, url))
+        })
+        .collect();
+    remotes.sort_by(|left, right| left.0.cmp(right.0));
+    ["upstream", "origin"]
+        .iter()
+        .find_map(|preferred| remotes.iter().find(|(name, _)| name == preferred))
+        .or_else(|| remotes.first())
+        .map(|(_, url)| *url)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhListPullRequest {
+    number: u64,
+    title: String,
+    url: String,
+    #[serde(default)]
+    author: Option<GhActor>,
+    head_ref_name: String,
+    base_ref_name: String,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    is_draft: bool,
+    #[serde(default)]
+    mergeable: Option<String>,
+    #[serde(default)]
+    review_decision: Option<String>,
+    #[serde(default)]
+    additions: u64,
+    #[serde(default)]
+    deletions: u64,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    #[serde(default)]
+    merged_at: Option<String>,
+    #[serde(default)]
+    review_requests: Option<Vec<GhReviewRequest>>,
+    #[serde(default)]
+    labels: Option<Vec<GhLabel>>,
+    #[serde(default)]
+    status_check_rollup: Option<Vec<GhCheck>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhActor {
+    login: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhReviewRequest {
+    #[serde(default)]
+    login: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhLabel {
+    name: String,
+    #[serde(default)]
+    color: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhCheck {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    conclusion: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+}
+
+fn gh_list_state(row: &GhListPullRequest) -> ChangeRequestState {
+    if row.merged_at.as_deref().is_some_and(|at| !at.is_empty()) {
+        return ChangeRequestState::Merged;
+    }
+    match row.state.as_deref().map(str::to_ascii_uppercase).as_deref() {
+        Some("MERGED") => ChangeRequestState::Merged,
+        Some("CLOSED") => ChangeRequestState::Closed,
+        _ => ChangeRequestState::Open,
+    }
+}
+
+fn checks_rollup(checks: &[GhCheck]) -> Option<ChangeRequestChecksState> {
+    let (mut failing, mut pending, mut passing) = (false, false, false);
+    for check in checks {
+        if check
+            .status
+            .as_deref()
+            .is_some_and(|status| !status.is_empty() && !status.eq_ignore_ascii_case("COMPLETED"))
+        {
+            pending = true;
+            continue;
+        }
+        let outcome = check
+            .conclusion
+            .as_deref()
+            .or(check.state.as_deref())
+            .unwrap_or_default()
+            .to_ascii_uppercase();
+        match outcome.as_str() {
+            "SUCCESS" => passing = true,
+            "FAILURE" | "ERROR" | "TIMED_OUT" | "STARTUP_FAILURE" | "CANCELLED" => failing = true,
+            "ACTION_REQUIRED" | "PENDING" | "EXPECTED" => pending = true,
+            _ => {}
+        }
+    }
+    if failing {
+        Some(ChangeRequestChecksState::Failing)
+    } else if pending {
+        Some(ChangeRequestChecksState::Pending)
+    } else if passing {
+        Some(ChangeRequestChecksState::Passing)
+    } else {
+        None
+    }
+}
+
+fn avatar_url(host: &str, login: &str) -> Option<String> {
+    let valid = !login.is_empty()
+        && login.len() <= 39
+        && login.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        && !login.starts_with('-');
+    valid.then(|| format!("https://{host}/{login}.png?size=80"))
+}
+
+fn to_list_item(
+    identity: &RepositoryIdentity,
+    viewer: &str,
+    row: GhListPullRequest,
+) -> Option<ChangeRequestListItem> {
+    if row.number == 0 || row.title.trim().is_empty() {
+        return None;
+    }
+    let url = reqwest::Url::parse(row.url.trim()).ok()?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return None;
+    }
+    let state = gh_list_state(&row);
+    let host = identity.remote.host.clone();
+    let author = row.author.map(|actor| ChangeRequestActor {
+        avatar_url: avatar_url(&host, &actor.login),
+        login: actor.login,
+    });
+    let viewer_review_requested = !author
+        .as_ref()
+        .is_some_and(|author| author.login.eq_ignore_ascii_case(viewer))
+        && row.review_requests.iter().flatten().any(|request| {
+            request
+                .login
+                .as_deref()
+                .is_some_and(|login| login.eq_ignore_ascii_case(viewer))
+        });
+    let labels = row
+        .labels
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|label| {
+            let name = label.name.trim().to_owned();
+            (!name.is_empty()).then_some(ChangeRequestLabel {
+                name,
+                color: label.color.filter(|color| !color.is_empty()),
+            })
+        })
+        .collect();
+    Some(ChangeRequestListItem {
+        provider: "github".into(),
+        repository: identity.name_with_owner(),
+        number: row.number,
+        title: row.title,
+        url: url.to_string(),
+        author,
+        head_ref: row.head_ref_name,
+        base_ref: row.base_ref_name,
+        state,
+        is_draft: row.is_draft,
+        mergeability: match row.mergeable.as_deref() {
+            Some("MERGEABLE") => ChangeRequestMergeability::Mergeable,
+            Some("CONFLICTING") => ChangeRequestMergeability::Conflicting,
+            _ => ChangeRequestMergeability::Unknown,
+        },
+        additions: row.additions,
+        deletions: row.deletions,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        viewer_review_requested,
+        labels,
+        review_decision: match row.review_decision.as_deref() {
+            Some("APPROVED") => Some(ChangeRequestReviewDecision::Approved),
+            Some("CHANGES_REQUESTED") => Some(ChangeRequestReviewDecision::ChangesRequested),
+            Some("REVIEW_REQUIRED") => Some(ChangeRequestReviewDecision::ReviewRequired),
+            _ => None,
+        },
+        checks_state: checks_rollup(row.status_check_rollup.as_deref().unwrap_or_default()),
+        host,
     })
 }
 
@@ -1637,6 +2227,363 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
         assert_eq!(
             context.head_selectors,
             ["acme:feature/shared", "feature/shared"]
+        );
+    }
+
+    type Script = dyn Fn(&ProcessRequest) -> Result<ProcessOutput, ProcessRunError> + Send + Sync;
+
+    struct ScriptedRunner {
+        script: Box<Script>,
+        requests: Mutex<Vec<ProcessRequest>>,
+    }
+
+    impl ScriptedRunner {
+        fn new(
+            script: impl Fn(&ProcessRequest) -> Result<ProcessOutput, ProcessRunError>
+            + Send
+            + Sync
+            + 'static,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                script: Box::new(script),
+                requests: Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl ProcessRunner for ScriptedRunner {
+        async fn run(&self, request: ProcessRequest) -> Result<ProcessOutput, ProcessRunError> {
+            let output = (self.script)(&request);
+            self.requests.lock().unwrap().push(request);
+            output
+        }
+    }
+
+    fn list_resolver(runner: Arc<ScriptedRunner>) -> ChangeRequestResolver {
+        ChangeRequestResolver {
+            inspector: GitCheckoutInspector::new(runner.clone()),
+            github: GitHubCli::with_runner(runner),
+        }
+    }
+
+    fn arg_after<'a>(request: &'a ProcessRequest, flag: &str) -> Option<&'a str> {
+        let index = request.args.iter().position(|arg| arg == flag)?;
+        request.args.get(index + 1).map(String::as_str)
+    }
+
+    fn list_row(
+        number: u64,
+        author: &str,
+        updated: &str,
+        extra: serde_json::Value,
+    ) -> serde_json::Value {
+        let mut row = serde_json::json!({
+            "number": number,
+            "title": format!("Change {number}"),
+            "url": format!("https://github.com/acme/zeron/pull/{number}"),
+            "author": {"login": author, "is_bot": false},
+            "headRefName": format!("feature/{number}"),
+            "baseRefName": "main",
+            "state": "OPEN",
+            "isDraft": false,
+            "mergeable": "MERGEABLE",
+            "reviewDecision": "",
+            "additions": 10,
+            "deletions": 2,
+            "createdAt": "2026-09-01T00:00:00Z",
+            "updatedAt": updated,
+            "mergedAt": null,
+            "reviewRequests": [],
+            "labels": [],
+            "statusCheckRollup": []
+        });
+        if let (Some(row), Some(extra)) = (row.as_object_mut(), extra.as_object()) {
+            for (key, value) in extra {
+                row.insert(key.clone(), value.clone());
+            }
+        }
+        row
+    }
+
+    fn git_repo_script(request: &ProcessRequest) -> Option<Result<ProcessOutput, ProcessRunError>> {
+        if request.program != "git" {
+            return None;
+        }
+        Some(
+            match request
+                .args
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .as_slice()
+            {
+                ["rev-parse", "--show-toplevel"] => command_success("/repo\n"),
+                ["remote", "-v"] => command_success(
+                    "fork\tgit@github.com:alice/zeron.git (fetch)\n\
+                 fork\tgit@github.com:alice/zeron.git (push)\n\
+                 origin\thttps://github.com/acme/zeron.git (fetch)\n\
+                 origin\thttps://github.com/acme/zeron.git (push)\n",
+                ),
+                other => panic!("unexpected git {other:?}"),
+            },
+        )
+    }
+
+    #[test]
+    fn primary_fetch_remote_prefers_upstream_then_origin_then_first_by_name() {
+        let both = "origin\thttps://h/o/a (fetch)\nupstream\thttps://h/u/a (fetch)\n";
+        assert_eq!(primary_fetch_remote(both), Some("https://h/u/a"));
+        let origin = "zed\thttps://h/z/a (fetch)\norigin\thttps://h/o/a (fetch)\norigin\thttps://h/x/a (push)\n";
+        assert_eq!(primary_fetch_remote(origin), Some("https://h/o/a"));
+        let others = "zed\thttps://h/z/a (fetch)\nbeta\thttps://h/b/a (fetch)\n";
+        assert_eq!(primary_fetch_remote(others), Some("https://h/b/a"));
+        assert_eq!(primary_fetch_remote("only\thttps://h/o/a (push)\n"), None);
+    }
+
+    #[tokio::test]
+    async fn list_change_requests_merges_feed_authored_and_reviewing_reads() {
+        let runner = ScriptedRunner::new(|request| {
+            if let Some(output) = git_repo_script(request) {
+                return output;
+            }
+            assert_eq!(request.program, "gh");
+            assert_eq!(request.cwd, PathBuf::from("/repo"));
+            assert!(
+                request
+                    .env
+                    .contains(&("GH_PROMPT_DISABLED".into(), "1".into()))
+            );
+            if request.args.first().map(String::as_str) == Some("api") {
+                assert_eq!(arg_after(request, "--hostname"), Some("github.com"));
+                return command_success("alice\n");
+            }
+            assert_eq!(arg_after(request, "--repo"), Some("github.com/acme/zeron"));
+            assert_eq!(arg_after(request, "--state"), Some("open"));
+            assert_eq!(arg_after(request, "--limit"), Some("100"));
+            assert_eq!(arg_after(request, "--json"), Some(GITHUB_LIST_FIELDS));
+            let rows = if arg_after(request, "--author") == Some("alice") {
+                vec![list_row(
+                    1,
+                    "alice",
+                    "2026-09-03T00:00:00Z",
+                    serde_json::json!({}),
+                )]
+            } else if arg_after(request, "--search")
+                .is_some_and(|search| search.starts_with("review-requested:alice"))
+            {
+                vec![list_row(
+                    2,
+                    "bob",
+                    "2026-09-04T00:00:00Z",
+                    serde_json::json!({}),
+                )]
+            } else {
+                assert_eq!(arg_after(request, "--search"), Some("sort:updated-desc"));
+                vec![
+                    list_row(
+                        3,
+                        "carol",
+                        "2026-09-05T00:00:00Z",
+                        serde_json::json!({
+                            "isDraft": true,
+                            "mergeable": "CONFLICTING",
+                            "reviewDecision": "CHANGES_REQUESTED",
+                            "labels": [{"name": " bug ", "color": "d73a4a"}, {"name": "  "}],
+                            "statusCheckRollup": [
+                                {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                                {"__typename": "StatusContext", "state": "FAILURE"}
+                            ]
+                        }),
+                    ),
+                    list_row(1, "alice", "2026-09-03T00:00:00Z", serde_json::json!({})),
+                    serde_json::json!({"number": "not a row"}),
+                ]
+            };
+            command_success(serde_json::to_vec(&rows).unwrap())
+        });
+        let listing = list_resolver(runner)
+            .list_change_requests(
+                &[PathBuf::from("/repo")],
+                &ListChangeRequestsRequest::default(),
+            )
+            .await;
+
+        assert!(listing.errors.is_empty(), "{:?}", listing.errors);
+        assert_eq!(
+            listing.viewers.get("github.com").map(String::as_str),
+            Some("alice")
+        );
+        assert!(!listing.truncated);
+        let numbers: Vec<u64> = listing.items.iter().map(|item| item.number).collect();
+        assert_eq!(numbers, [3, 2, 1]);
+        let carol = &listing.items[0];
+        assert_eq!(carol.repository, "acme/zeron");
+        assert_eq!(carol.host, "github.com");
+        assert!(carol.is_draft);
+        assert_eq!(carol.mergeability, ChangeRequestMergeability::Conflicting);
+        assert_eq!(
+            carol.review_decision,
+            Some(ChangeRequestReviewDecision::ChangesRequested)
+        );
+        assert_eq!(carol.checks_state, Some(ChangeRequestChecksState::Failing));
+        assert_eq!(
+            carol.labels,
+            [ChangeRequestLabel {
+                name: "bug".into(),
+                color: Some("d73a4a".into())
+            }]
+        );
+        assert_eq!(
+            carol
+                .author
+                .as_ref()
+                .and_then(|author| author.avatar_url.as_deref()),
+            Some("https://github.com/carol.png?size=80")
+        );
+        assert!(listing.items[1].viewer_review_requested);
+        assert!(!listing.items[2].viewer_review_requested);
+    }
+
+    #[tokio::test]
+    async fn list_change_requests_reports_an_unauthenticated_host_per_repository() {
+        let runner = ScriptedRunner::new(|request| {
+            if let Some(output) = git_repo_script(request) {
+                return output;
+            }
+            assert_eq!(request.args.first().map(String::as_str), Some("api"));
+            command_failure("To get started with GitHub CLI, please run:  gh auth login")
+        });
+        let listing = list_resolver(runner.clone())
+            .list_change_requests(
+                &[PathBuf::from("/repo")],
+                &ListChangeRequestsRequest::default(),
+            )
+            .await;
+
+        assert!(listing.items.is_empty());
+        assert!(listing.viewers.is_empty());
+        assert_eq!(
+            listing.errors,
+            [ChangeRequestListError {
+                host: Some("github.com".into()),
+                repository: Some("acme/zeron".into()),
+                path: "/repo".into(),
+                failure: ChangeRequestFailure::Authentication,
+            }]
+        );
+        assert!(
+            runner.requests.lock().unwrap().iter().all(|request| request
+                .args
+                .first()
+                .map(String::as_str)
+                != Some("pr"))
+        );
+    }
+
+    #[tokio::test]
+    async fn list_change_requests_reports_missing_gh_and_non_git_roots() {
+        let runner = ScriptedRunner::new(|request| {
+            if request.program == "git" && request.cwd == Path::new("/plain") {
+                return command_failure("fatal: not a git repository");
+            }
+            if let Some(output) = git_repo_script(request) {
+                return output;
+            }
+            Err(ProcessRunError::Spawn(io::ErrorKind::NotFound))
+        });
+        let listing = list_resolver(runner)
+            .list_change_requests(
+                &[PathBuf::from("/plain"), PathBuf::from("/repo")],
+                &ListChangeRequestsRequest::default(),
+            )
+            .await;
+
+        let failures: Vec<_> = listing.errors.iter().map(|error| error.failure).collect();
+        assert_eq!(
+            failures,
+            [
+                ChangeRequestFailure::RepositoryUnavailable,
+                ChangeRequestFailure::CliUnavailable
+            ]
+        );
+        assert_eq!(listing.errors[0].path, "/plain");
+        assert_eq!(listing.errors[0].repository, None);
+    }
+
+    #[tokio::test]
+    async fn list_change_requests_falls_back_to_an_unsorted_read_and_flags_truncation() {
+        let runner = ScriptedRunner::new(|request| {
+            if let Some(output) = git_repo_script(request) {
+                return output;
+            }
+            if request.args.first().map(String::as_str) == Some("api") {
+                return command_success("alice");
+            }
+            assert_eq!(arg_after(request, "--limit"), Some("3"));
+            let rows = match arg_after(request, "--search") {
+                None => vec![
+                    list_row(7, "bob", "2026-09-07T00:00:00Z", serde_json::json!({})),
+                    list_row(6, "bob", "2026-09-06T00:00:00Z", serde_json::json!({})),
+                    list_row(5, "bob", "2026-09-05T00:00:00Z", serde_json::json!({})),
+                ],
+                Some(_) => Vec::new(),
+            };
+            command_success(serde_json::to_vec(&rows).unwrap())
+        });
+        let request = ListChangeRequestsRequest {
+            involvement: ChangeRequestInvolvement::All,
+            limit: Some(2),
+            ..Default::default()
+        };
+        let listing = list_resolver(runner.clone())
+            .list_change_requests(&[PathBuf::from("/repo")], &request)
+            .await;
+
+        assert!(listing.truncated);
+        let numbers: Vec<u64> = listing.items.iter().map(|item| item.number).collect();
+        assert_eq!(numbers, [7, 6]);
+        let unsorted_reads = runner
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.args.first().map(String::as_str) == Some("pr"))
+            .filter(|request| arg_after(request, "--search").is_none())
+            .count();
+        assert_eq!(unsorted_reads, 1);
+    }
+
+    #[test]
+    fn checks_rollup_matches_t3code_precedence() {
+        let check = |status: Option<&str>, conclusion: Option<&str>, state: Option<&str>| GhCheck {
+            status: status.map(str::to_owned),
+            conclusion: conclusion.map(str::to_owned),
+            state: state.map(str::to_owned),
+        };
+        assert_eq!(checks_rollup(&[]), None);
+        assert_eq!(checks_rollup(&[check(None, Some("SKIPPED"), None)]), None);
+        assert_eq!(
+            checks_rollup(&[check(Some("COMPLETED"), Some("SUCCESS"), None)]),
+            Some(ChangeRequestChecksState::Passing)
+        );
+        assert_eq!(
+            checks_rollup(&[
+                check(Some("COMPLETED"), Some("SUCCESS"), None),
+                check(Some("IN_PROGRESS"), None, None),
+            ]),
+            Some(ChangeRequestChecksState::Pending)
+        );
+        assert_eq!(
+            checks_rollup(&[
+                check(Some("IN_PROGRESS"), None, None),
+                check(Some("COMPLETED"), Some("CANCELLED"), None),
+            ]),
+            Some(ChangeRequestChecksState::Failing)
+        );
+        assert_eq!(
+            checks_rollup(&[check(None, None, Some("PENDING"))]),
+            Some(ChangeRequestChecksState::Pending)
         );
     }
 }

@@ -973,6 +973,135 @@ pub struct CheckoutChangeRequestStatus {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChangeRequestListState {
+    #[default]
+    Open,
+    Closed,
+    Merged,
+    All,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChangeRequestInvolvement {
+    #[default]
+    All,
+    Authored,
+    Reviewing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChangeRequestMergeability {
+    Mergeable,
+    Conflicting,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChangeRequestReviewDecision {
+    Approved,
+    ChangesRequested,
+    ReviewRequired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChangeRequestChecksState {
+    Passing,
+    Failing,
+    Pending,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeRequestActor {
+    pub login: String,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeRequestLabel {
+    pub name: String,
+    #[serde(default)]
+    pub color: Option<String>,
+}
+
+/// Kept apart from [`ChangeRequestSummary`], whose wire shape the checkout badge pins.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeRequestListItem {
+    pub provider: String,
+    pub host: String,
+    pub repository: String,
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    pub author: Option<ChangeRequestActor>,
+    pub head_ref: String,
+    pub base_ref: String,
+    pub state: ChangeRequestState,
+    pub is_draft: bool,
+    pub mergeability: ChangeRequestMergeability,
+    pub additions: u64,
+    pub deletions: u64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub viewer_review_requested: bool,
+    pub labels: Vec<ChangeRequestLabel>,
+    #[serde(default)]
+    pub review_decision: Option<ChangeRequestReviewDecision>,
+    #[serde(default)]
+    pub checks_state: Option<ChangeRequestChecksState>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChangeRequestFailure {
+    RepositoryUnavailable,
+    UnsupportedRepository,
+    CliUnavailable,
+    Authentication,
+    RateLimited,
+    Timeout,
+    Decode,
+    CommandFailed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeRequestListError {
+    pub host: Option<String>,
+    pub repository: Option<String>,
+    pub path: String,
+    pub failure: ChangeRequestFailure,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListChangeRequestsRequest {
+    #[serde(default)]
+    pub state: ChangeRequestListState,
+    #[serde(default)]
+    pub involvement: ChangeRequestInvolvement,
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeRequestListing {
+    pub viewers: std::collections::BTreeMap<String, String>,
+    pub items: Vec<ChangeRequestListItem>,
+    pub errors: Vec<ChangeRequestListError>,
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetCheckoutFileDiffTextRequest {

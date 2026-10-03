@@ -250,6 +250,24 @@ icon_assets![
     (ASTRA_CHEVRONS_RIGHT, "astra-chevrons-right"),
     (ASTRA_X, "astra-x"),
     (ASTRA_TERMINAL, "astra-terminal"),
+    (LUCIDE_GIT_PULL_REQUEST, "lucide-git-pull-request"),
+    (LUCIDE_GIT_MERGE, "lucide-git-merge"),
+    (
+        LUCIDE_GIT_PULL_REQUEST_CLOSED,
+        "lucide-git-pull-request-closed"
+    ),
+    (
+        LUCIDE_GIT_PULL_REQUEST_DRAFT,
+        "lucide-git-pull-request-draft"
+    ),
+    (LUCIDE_TRIANGLE_ALERT, "lucide-triangle-alert"),
+    (LUCIDE_CIRCLE_CHECK, "lucide-circle-check"),
+    (LUCIDE_CIRCLE_X, "lucide-circle-x"),
+    (LUCIDE_CIRCLE_DOT, "lucide-circle-dot"),
+    (LUCIDE_SEARCH, "lucide-search"),
+    (LUCIDE_REFRESH_CW, "lucide-refresh-cw"),
+    (LUCIDE_ARROW_LEFT, "lucide-arrow-left"),
+    (PR_BRANCH_MARK, "pr-branch-mark"),
 ];
 
 /// Serves both the compact control-icon set and the complete file-identity
