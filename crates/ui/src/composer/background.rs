@@ -430,11 +430,17 @@ pub(crate) struct BackgroundUi {
     agents_glyph: Option<(RunState, Option<Instant>)>,
     tick: Option<gpui::Task<()>>,
     outputs: HashMap<String, ShellOutput>,
+    tokens: HashMap<String, AgentTokens>,
     detail: Option<TrayDetail>,
 }
 
 struct ShellOutput {
     lines: Vec<String>,
+    _watch: Option<gpui::Task<()>>,
+}
+
+struct AgentTokens {
+    count: Option<u64>,
     _watch: Option<gpui::Task<()>>,
 }
 
@@ -454,7 +460,6 @@ struct TrayDetail {
 struct AgentFeed {
     doc_id: String,
     entries: Vec<SessionMessageEntry>,
-    tokens: Option<u64>,
     _watch: Option<gpui::Task<()>>,
 }
 
@@ -558,6 +563,11 @@ impl Composer {
         }
         let shells_mounted = self.background.shells.get().is_some();
         self.sync_output_watches(if shells_mounted { &shells } else { &[] }, cx);
+        let token_docs: Vec<&str> = match rise {
+            Some(_) => agents.iter().map(|run| run.doc_id.as_str()).collect(),
+            None => Vec::new(),
+        };
+        self.sync_token_watches(&token_docs, cx);
         let ticking = (rise.is_some() && overall == RunState::Working) || shells_mounted;
         if ticking && self.background.tick.is_none() {
             self.background.tick = Some(cx.spawn(async move |this, cx| {
@@ -715,6 +725,8 @@ impl Composer {
             let state_text = run_state_text(run, now_ms);
             let run_harness = run.harness.or(harness);
             let tag = run_tag(run, run_harness);
+            let level = run.reasoning.or(chat_reasoning);
+            let tokens = self.agent_tokens(&run.doc_id);
             let stop = run.can_stop(stoppable).then(|| {
                 let task_id = run.part_id.clone();
                 let delegated = run.delegated;
@@ -746,6 +758,22 @@ impl Composer {
                 ))
                 .child(div().flex_1().min_w_0().truncate().child(run.title.clone()))
                 .when_some(tag, |el, tag| el.child(model_tag(tag, run_harness, theme)))
+                .when_some(level, |el, level| {
+                    el.child(
+                        detail_chip(
+                            "thinking",
+                            crate::pickers::reasoning_label(level).to_string(),
+                            theme,
+                        )
+                        .debug_selector(move || format!("background-roster-thinking-{ix}")),
+                    )
+                })
+                .when_some(tokens, |el, tokens| {
+                    el.child(
+                        detail_chip("tokens", compact_count(tokens), theme)
+                            .debug_selector(move || format!("background-roster-tokens-{ix}")),
+                    )
+                })
                 .child(
                     div()
                         .flex_none()
@@ -1031,6 +1059,73 @@ impl Composer {
         }))
     }
 
+    fn agent_tokens(&self, doc_id: &str) -> Option<u64> {
+        self.background.tokens.get(doc_id)?.count
+    }
+
+    fn sync_token_watches(&mut self, docs: &[&str], cx: &mut Context<Self>) {
+        self.background
+            .tokens
+            .retain(|id, _| docs.contains(&id.as_str()));
+        for &id in docs {
+            if !self.background.tokens.contains_key(id) {
+                let watch = self.watch_agent_tokens(id.to_owned(), cx);
+                self.background.tokens.insert(
+                    id.to_owned(),
+                    AgentTokens {
+                        count: None,
+                        _watch: watch,
+                    },
+                );
+            }
+        }
+    }
+
+    fn watch_agent_tokens(&self, doc_id: String, cx: &mut Context<Self>) -> Option<gpui::Task<()>> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct UsageFrame {
+            #[serde(default)]
+            context_usage: Option<zeron_proto::ContextUsage>,
+        }
+        let engine = self.state.read(cx).engine().cloned()?;
+        Some(cx.spawn(async move |this, cx| {
+            let mut rx = match engine
+                .client()
+                .subscribe_checked(
+                    methods::WATCH_DOC_MESSAGES,
+                    serde_json::json!({ "chatId": doc_id }),
+                )
+                .await
+            {
+                Ok(rx) => rx,
+                Err(error) => {
+                    tracing::debug!(%error, doc_id, "subagent token watch failed");
+                    return;
+                }
+            };
+            while let Some(value) = rx.recv().await {
+                let Ok(frame) = serde_json::from_value::<UsageFrame>(value) else {
+                    continue;
+                };
+                let Some(count) = frame.context_usage.and_then(|usage| usage.tokens) else {
+                    continue;
+                };
+                let alive = this.update(cx, |this, cx| {
+                    if let Some(tokens) = this.background.tokens.get_mut(&doc_id)
+                        && tokens.count != Some(count)
+                    {
+                        tokens.count = Some(count);
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    return;
+                }
+            }
+        }))
+    }
+
     fn open_agent_detail(&mut self, part_id: String, doc_id: String, cx: &mut Context<Self>) {
         let watch = self.watch_subagent_feed(doc_id.clone(), cx);
         self.background.detail = Some(TrayDetail {
@@ -1040,7 +1135,6 @@ impl Composer {
             feed: Some(AgentFeed {
                 doc_id,
                 entries: Vec::new(),
-                tokens: None,
                 _watch: watch,
             }),
         });
@@ -1086,9 +1180,6 @@ impl Composer {
                             .as_mut()
                             .and_then(|detail| detail.feed.as_mut())
                             .filter(|feed| feed.doc_id == doc_id)?;
-                        if let Some(tokens) = update.context_usage.and_then(|usage| usage.tokens) {
-                            feed.tokens = Some(tokens);
-                        }
                         let synced =
                             zeron_doc::apply_transcript_frame(&mut feed.entries, update.frame)
                                 .is_ok();
@@ -1120,11 +1211,12 @@ impl Composer {
         let Some(detail) = self.background.detail.as_ref() else {
             return div().into_any_element();
         };
-        let (entries, tokens) = detail
+        let entries = detail
             .feed
             .as_ref()
-            .map(|feed| (feed.entries.as_slice(), feed.tokens))
-            .unwrap_or((&[], None));
+            .map(|feed| feed.entries.as_slice())
+            .unwrap_or_default();
+        let tokens = self.agent_tokens(&run.doc_id);
         let hide_thinking = detail.hide_thinking;
         let stop = run.can_stop(stoppable).then(|| {
             let task_id = run.part_id.clone();
@@ -2177,6 +2269,18 @@ mod tests {
         assert!(cx.debug_bounds("background-agents-pill").is_none());
         assert!(cx.debug_bounds("background-roster-stop-all").is_some());
         assert!(cx.debug_bounds("background-roster-stop-0").is_some());
+        assert!(cx.debug_bounds("background-roster-tokens-0").is_none());
+        composer.update(cx, |composer, cx| {
+            composer
+                .background
+                .tokens
+                .get_mut("c1--sub--p1")
+                .expect("the open roster watches each run's tokens")
+                .count = Some(29_216);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("background-roster-tokens-0").is_some());
 
         let row = cx
             .debug_bounds("background-roster-row-0")
@@ -2186,7 +2290,7 @@ mod tests {
         assert!(opened.borrow().is_empty());
         assert!(cx.debug_bounds("background-detail").is_some());
         assert!(cx.debug_bounds("background-roster-row-0").is_none());
-        assert!(cx.debug_bounds("background-detail-tokens").is_none());
+        assert!(cx.debug_bounds("background-detail-tokens").is_some());
         assert!(cx.debug_bounds("background-detail-empty").is_some());
         composer.update(cx, |composer, cx| {
             let feed = composer
@@ -2196,7 +2300,6 @@ mod tests {
                 .and_then(|detail| detail.feed.as_mut())
                 .expect("the detail owns a feed");
             assert_eq!(feed.doc_id, "c1--sub--p1");
-            feed.tokens = Some(29_216);
             feed.entries = vec![entry(
                 "s1",
                 MessageRole::Assistant,
@@ -2209,7 +2312,6 @@ mod tests {
             cx.notify();
         });
         cx.run_until_parked();
-        assert!(cx.debug_bounds("background-detail-tokens").is_some());
         assert!(cx.debug_bounds("background-detail-log").is_some());
         assert!(cx.debug_bounds("background-detail-empty").is_none());
         let open_pane = cx
@@ -2236,6 +2338,9 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("background-roster").is_none());
         assert!(cx.debug_bounds("background-agents-pill").is_some());
+        composer.read_with(cx, |composer, _| {
+            assert!(composer.background.tokens.is_empty())
+        });
 
         let shells_pill = cx
             .debug_bounds("background-shells-pill")

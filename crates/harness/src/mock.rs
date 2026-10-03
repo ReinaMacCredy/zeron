@@ -398,6 +398,20 @@ impl Harness for MockHarness {
                     ),
                     tag(
                         "mock-sub-1",
+                        AgentEvent::ContextUsage {
+                            tokens: Some(135_500),
+                            window: Some(200_000),
+                        },
+                    ),
+                    tag(
+                        "mock-sub-2",
+                        AgentEvent::ContextUsage {
+                            tokens: Some(88_200),
+                            window: Some(200_000),
+                        },
+                    ),
+                    tag(
+                        "mock-sub-1",
                         AgentEvent::TextDelta {
                             text: "Scanning `crates/doc` for fold call sites.\n\n".into(),
                         },
