@@ -93,7 +93,7 @@ impl TurnClock {
                 self.stats.cache_read_tokens += read_tokens;
                 self.stats.cache_write_tokens += write_tokens;
                 self.stats.cache_ttl_secs = ttl_secs.or(self.stats.cache_ttl_secs);
-                self.stats.cache_touched_at = Some(epoch_ms());
+                self.stats.cache_touched_at = Some(crate::now_ms());
             }
             _ => {}
         }
@@ -141,12 +141,6 @@ impl TurnClock {
             self.stats.ttft_count += 1;
         }
     }
-}
-
-fn epoch_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as i64)
 }
 
 #[cfg(test)]

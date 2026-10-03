@@ -1106,34 +1106,6 @@ impl Render for ShortcutsPage {
                             },
                         )),
                 );
-        let limit_step = |theme: &Theme,
-                          id: &'static str,
-                          glyph: &'static str,
-                          next: Option<u32>| {
-            let enabled = next.is_some();
-            div()
-                .id(id)
-                .size(px(26.0))
-                .rounded(px(7.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(14.0))
-                .text_color(if enabled {
-                    theme.text_muted
-                } else {
-                    theme.text_muted.opacity(0.35)
-                })
-                .when_some(next, |el, next| {
-                    let text = theme.text;
-                    el.cursor_pointer()
-                        .hover(move |s| s.bg(theme.bg).text_color(text))
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| this.set_switcher_limit(next, cx)),
-                        )
-                })
-                .child(SharedString::from(glyph))
-        };
         let switcher_limit_row = widgets::card_row(&theme, false)
                 .min_h(px(84.0))
                 .child(
@@ -1155,51 +1127,29 @@ impl Render for ShortcutsPage {
                                 )),
                         ),
                 )
-                .child(
-                    div()
-                        .id("switcher-limit")
-                        .flex_none()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .rounded(px(9.0))
-                        .p(px(2.0))
-                        .bg(crate::theme::ink(0.04))
-                        .child(limit_step(
-                            &theme,
-                            "switcher-limit-down",
-                            "−",
-                            match switcher_limit {
-                                0 => None,
-                                n if n <= SWITCHER_LIMIT_MIN => Some(0),
-                                n => Some(n - 1),
-                            },
-                        ))
-                        .child(
-                            div()
-                                .min_w(px(44.0))
-                                .px(px(6.0))
-                                .flex()
-                                .justify_center()
-                                .text_size(px(12.0))
-                                .text_color(theme.text)
-                                .child(SharedString::from(if switcher_limit == 0 {
-                                    "All".to_string()
-                                } else {
-                                    switcher_limit.to_string()
-                                })),
-                        )
-                        .child(limit_step(
-                            &theme,
-                            "switcher-limit-up",
-                            "+",
-                            match switcher_limit {
-                                0 => Some(SWITCHER_LIMIT_MIN),
-                                n if n >= SWITCHER_LIMIT_MAX => None,
-                                n => Some(n + 1),
-                            },
-                        )),
-                );
+                .child(widgets::stepper(
+                    &theme,
+                    "switcher-limit",
+                    None,
+                    if switcher_limit == 0 {
+                        "All".to_string()
+                    } else {
+                        switcher_limit.to_string()
+                    },
+                    44.0,
+                    match switcher_limit {
+                        0 => None,
+                        n if n <= SWITCHER_LIMIT_MIN => Some(0),
+                        n => Some(n - 1),
+                    },
+                    match switcher_limit {
+                        0 => Some(SWITCHER_LIMIT_MIN),
+                        n if n >= SWITCHER_LIMIT_MAX => None,
+                        n => Some(n + 1),
+                    },
+                    |this: &mut Self, next, cx| this.set_switcher_limit(next, cx),
+                    cx,
+                ));
         let cycle_tabs_row = widgets::card_row(&theme, false)
             .child(
                 div()

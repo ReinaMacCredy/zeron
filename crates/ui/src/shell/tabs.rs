@@ -759,14 +759,12 @@ impl Shell {
                 },
             );
             let Some(prev) = prev else { continue };
-            let person_chat = chat.sidechat_source_chat_id.is_none()
-                && chat.created_by_chat_id.is_none()
-                && chat.delegation.is_none();
+            let person_chat = chat.sidechat_source_chat_id.is_none() && chat.is_person_opened();
             let new_run = status == ChatIndicator::Working
                 && !matches!(prev, ChatIndicator::Working | ChatIndicator::AwaitingInput);
             let asks = status == ChatIndicator::AwaitingInput
                 && prev != ChatIndicator::AwaitingInput
-                && chat.delegation.is_none();
+                && chat.delegated_by().is_none();
             if (new_run && person_chat) || asks {
                 opened.push(chat.id.clone());
             }

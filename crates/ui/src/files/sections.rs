@@ -329,10 +329,7 @@ pub(super) fn child_chat_rows(
         .filter(|chat| {
             !chat.archived
                 && (chat.created_by_chat_id.as_deref() == Some(chat_id)
-                    || chat
-                        .delegation
-                        .as_ref()
-                        .is_some_and(|d| d.delegated_by_chat_id == chat_id))
+                    || chat.delegated_by() == Some(chat_id))
         })
         .map(|chat| {
             let activity = chat.last_message_at.unwrap_or(chat.created_at);

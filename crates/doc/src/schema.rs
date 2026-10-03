@@ -380,8 +380,12 @@ impl SessionDoc {
 
     /// A single atomic value prevents tokens and capacity from tearing on sync.
     pub fn context_usage(&self) -> Option<zeron_proto::ContextUsage> {
+        self.meta_json("contextUsage")
+    }
+
+    fn meta_json<T: serde::de::DeserializeOwned>(&self, key: &str) -> Option<T> {
         let loro::ValueOrContainer::Value(LoroValue::String(value)) =
-            self.doc.get_map("meta").get("contextUsage")?
+            self.doc.get_map("meta").get(key)?
         else {
             return None;
         };
@@ -408,12 +412,7 @@ impl SessionDoc {
     }
 
     pub fn session_stats(&self) -> Option<zeron_proto::SessionStats> {
-        let loro::ValueOrContainer::Value(LoroValue::String(value)) =
-            self.doc.get_map("meta").get("sessionStats")?
-        else {
-            return None;
-        };
-        serde_json::from_str(&value).ok()
+        self.meta_json("sessionStats")
     }
 
     pub fn record_session_stats(&self, delta: &zeron_proto::SessionStats) -> Result<(), DocError> {

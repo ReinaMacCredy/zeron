@@ -331,6 +331,16 @@ impl Chat {
     pub fn on_chat2(&self) -> bool {
         self.room_gen.unwrap_or(1) >= 2
     }
+
+    pub fn delegated_by(&self) -> Option<&str> {
+        self.delegation
+            .as_ref()
+            .map(|d| d.delegated_by_chat_id.as_str())
+    }
+
+    pub fn is_person_opened(&self) -> bool {
+        self.created_by_chat_id.is_none() && self.delegation.is_none()
+    }
 }
 
 impl Chat {

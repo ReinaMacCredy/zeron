@@ -372,10 +372,8 @@ impl Shell {
                 .chats
                 .iter()
                 .find(|chat| chat.id == child)?
-                .delegation
-                .as_ref()?
-                .delegated_by_chat_id
-                .clone();
+                .delegated_by()?
+                .to_owned();
             let title = state
                 .chats
                 .iter()

@@ -58,42 +58,58 @@ fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
+fn tick<T: 'static>(
+    secs: u64,
+    cx: &mut Context<T>,
+    on_tick: impl Fn(&mut T, &mut Context<T>) + 'static,
+) -> Task<()> {
+    cx.spawn(async move |this, cx| {
+        loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(secs))
+                .await;
+            if this.update(cx, |this, cx| on_tick(this, cx)).is_err() {
+                break;
+            }
+        }
+    })
+}
+
 pub struct StatsChip {
     stats: Option<SessionStats>,
     working: bool,
+    warm: bool,
     _tick: Task<()>,
 }
 
 impl StatsChip {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let tick = cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_secs(10))
-                    .await;
-                if this
-                    .update(cx, |chip, cx| {
-                        if chip.stats.is_some() {
-                            cx.notify();
-                        }
-                    })
-                    .is_err()
-                {
-                    break;
-                }
+        let tick = tick(10, cx, |chip, cx| {
+            let warm = chip.warm_now();
+            if warm || chip.warm {
+                cx.notify();
             }
+            chip.warm = warm;
         });
         Self {
             stats: None,
             working: false,
+            warm: false,
             _tick: tick,
         }
+    }
+
+    fn warm_now(&self) -> bool {
+        self.stats
+            .and_then(|stats| Cache::of(&stats, self.working, now_ms()))
+            .is_some_and(|cache| matches!(cache, Cache::Warm { .. }))
     }
 
     pub fn set(&mut self, stats: Option<SessionStats>, working: bool, cx: &mut Context<Self>) {
         if (self.stats, self.working) != (stats, working) {
             self.stats = stats;
             self.working = working;
+            self.warm = self.warm_now();
             cx.notify();
         }
     }
@@ -227,16 +243,7 @@ struct StatsCard {
 
 impl StatsCard {
     fn new(stats: SessionStats, working: bool, cx: &mut Context<Self>) -> Self {
-        let tick = cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_secs(1))
-                    .await;
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
-                    break;
-                }
-            }
-        });
+        let tick = tick(1, cx, |_, cx| cx.notify());
         Self {
             stats,
             working,

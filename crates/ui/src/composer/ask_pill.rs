@@ -9,8 +9,7 @@ use zeron_rpc::methods;
 
 use super::background::{pill_frame, pill_leading};
 use super::{
-    AUTO_ADVANCE_MS, Composer, ComposerEvent, Wizard, WizardHost, WizardStep,
-    pending_input_request, respond_input,
+    Composer, ComposerEvent, Wizard, WizardHost, WizardStep, pending_input_request, respond_input,
 };
 use crate::icons::{self, icon};
 use crate::popover;
@@ -25,6 +24,14 @@ const FETCH_ATTEMPTS: usize = 10;
 const FETCH_RETRY: Duration = Duration::from_millis(400);
 const TAB_TITLE_WIDTH: f32 = 180.0;
 
+pub(super) fn placeholder(picked: bool) -> &'static str {
+    if picked {
+        PICKED_PLACEHOLDER
+    } else {
+        PLACEHOLDER
+    }
+}
+
 struct AskEntry {
     chat_id: String,
     wizard: Wizard,
@@ -38,7 +45,7 @@ pub(super) struct AskPills {
     open: Option<String>,
     answered: HashMap<String, String>,
     submits: HashMap<String, Task<()>>,
-    advance_task: Option<Task<()>>,
+    pub(super) advance_task: Option<Task<()>>,
     focus_pending: bool,
 }
 
@@ -172,6 +179,13 @@ impl Composer {
             .to_owned()
     }
 
+    pub(super) fn host_wizard(&mut self, host: WizardHost) -> Option<&mut Wizard> {
+        match host {
+            WizardHost::Own => self.wizard.as_mut(),
+            WizardHost::Ask => self.open_ask_entry().map(|entry| &mut entry.wizard),
+        }
+    }
+
     fn open_ask_entry(&mut self) -> Option<&mut AskEntry> {
         let chat_id = self.ask.open.as_deref()?;
         self.ask
@@ -200,14 +214,7 @@ impl Composer {
             .unwrap_or_default();
         self.ask_input.update(cx, |input, cx| {
             input.set_text(text, cx);
-            input.set_placeholder(
-                if picked {
-                    PICKED_PLACEHOLDER
-                } else {
-                    PLACEHOLDER
-                },
-                cx,
-            );
+            input.set_placeholder(placeholder(picked), cx);
         });
     }
 
@@ -230,38 +237,6 @@ impl Composer {
         self.ask.open = None;
         self.ask.advance_task = None;
         self.focus_pending = true;
-        cx.notify();
-    }
-
-    pub(super) fn ask_select(&mut self, option_ix: usize, cx: &mut Context<Self>) {
-        let Some(entry) = self.open_ask_entry() else {
-            return;
-        };
-        let step = entry.wizard.select(option_ix);
-        let picked = entry.wizard.page_has_pick();
-        self.ask_input.update(cx, |input, cx| {
-            input.set_placeholder(
-                if picked {
-                    PICKED_PLACEHOLDER
-                } else {
-                    PLACEHOLDER
-                },
-                cx,
-            )
-        });
-        match step {
-            WizardStep::AutoAdvance => {
-                self.ask.advance_task = Some(cx.spawn(async move |this, cx| {
-                    cx.background_executor()
-                        .timer(Duration::from_millis(AUTO_ADVANCE_MS))
-                        .await;
-                    this.update(cx, |composer, cx| composer.ask_advance(cx))
-                        .ok();
-                }));
-            }
-            WizardStep::Done(answers) => self.ask_finish(answers, cx),
-            WizardStep::Stay => {}
-        }
         cx.notify();
     }
 
@@ -297,7 +272,7 @@ impl Composer {
         }
     }
 
-    fn ask_finish(&mut self, answers: Vec<UserInputAnswer>, cx: &mut Context<Self>) {
+    pub(super) fn ask_finish(&mut self, answers: Vec<UserInputAnswer>, cx: &mut Context<Self>) {
         let Some(chat_id) = self.ask.open.clone() else {
             return;
         };
@@ -343,30 +318,6 @@ impl Composer {
             .ok();
         });
         self.ask.submits.insert(key, task);
-    }
-
-    fn on_ask_key(&mut self, event: &KeyDownEvent, window: &Window, cx: &mut Context<Self>) {
-        let input_focused = self.ask_input.read(cx).focus_handle.is_focused(window);
-        let input_empty = self.ask_input.read(cx).is_empty();
-        let key = event.keystroke.key.as_str();
-        // ⌘1..⌘9 jump to sidebar rows; only a bare digit picks an option.
-        if let Ok(digit) = key.parse::<usize>()
-            && (1..=9).contains(&digit)
-            && !event.keystroke.modifiers.modified()
-        {
-            if !input_focused || input_empty {
-                self.ask_select(digit - 1, cx);
-                cx.stop_propagation();
-            }
-        } else if key == "enter" {
-            if !input_focused {
-                self.ask_advance(cx);
-                cx.stop_propagation();
-            }
-        } else if key == "escape" {
-            self.close_ask_tray(cx);
-            cx.stop_propagation();
-        }
     }
 
     pub(super) fn render_corner(
@@ -460,9 +411,8 @@ impl Composer {
             .entries
             .iter()
             .find(|entry| entry.chat_id == chat_id)?;
-        let wizard = entry.wizard.clone();
-        let input = self.ask_input.clone();
-        let (body, footer) = self.wizard_body(&wizard, &input, WizardHost::Ask, cx)?;
+        let (body, footer) =
+            self.wizard_body(&entry.wizard, &self.ask_input, WizardHost::Ask, cx)?;
         let open_id = chat_id.to_owned();
         let header = div()
             .h(px(36.0))
@@ -580,7 +530,7 @@ impl Composer {
                 .debug_selector(|| "ask-tray".into())
                 .track_focus(&self.ask_focus)
                 .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                    this.on_ask_key(event, window, cx)
+                    this.on_wizard_key(WizardHost::Ask, event, window, cx)
                 }))
                 .occlude()
                 .w_full()
@@ -646,6 +596,7 @@ mod tests {
     use zeron_doc::{MessagePart, MessageRole, SessionCommandPayload, SessionMessageEntry};
     use zeron_proto::{Session, UserInputQuestion};
 
+    use crate::composer::AUTO_ADVANCE_MS;
     use crate::state::{AppState, EngineHandle};
 
     struct Fixture(Entity<Composer>);

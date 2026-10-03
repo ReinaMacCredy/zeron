@@ -3550,7 +3550,6 @@ fn cursor_unstarted_history(
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn record_session_stats(doc: &SessionDoc, chat_id: &str, stats: Option<zeron_proto::SessionStats>) {
     if let Some(stats) = stats
         && let Err(err) = doc.record_session_stats(&stats)
@@ -3559,6 +3558,7 @@ fn record_session_stats(doc: &SessionDoc, chat_id: &str, stats: Option<zeron_pro
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn drive_run(
     inner: Arc<Inner>,
     chat_id: String,

@@ -502,6 +502,13 @@ impl ThreadTools {
             .ok_or_else(|| "threadId is required".to_string())
     }
 
+    fn task_id<'a>(args: &'a Value) -> Result<&'a str, String> {
+        args["taskId"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| "taskId is required".to_string())
+    }
+
     fn spend_send(&self) -> Result<(), String> {
         let used = self.sends.fetch_add(1, Ordering::SeqCst);
         if used >= SEND_BUDGET {
@@ -704,16 +711,7 @@ impl ThreadTools {
         Ok(json!({ "harness": harness, "models": models }))
     }
 
-    pub async fn create_thread(&self, args: &Value) -> Result<Value, String> {
-        let prompt = args["prompt"]
-            .as_str()
-            .filter(|p| !p.trim().is_empty())
-            .ok_or("prompt is required")?;
-        let (caller, _) = self.peers().await?;
-        let space_id = match args["project"].as_str() {
-            Some(key) => Some(project_of(&self.projects(&caller).await?, key)?.id.clone()),
-            None => None,
-        };
+    async fn check_model(&self, caller: &Chat, args: &Value, prefix: &str) -> Result<(), String> {
         let harness = match args["harness"].as_str() {
             Some(harness) => Some(harness.to_string()),
             None => caller
@@ -734,10 +732,24 @@ impl ThreadTools {
         {
             let ids: Vec<&str> = models.iter().filter_map(|m| m["id"].as_str()).collect();
             return Err(format!(
-                "model {model} is not offered by {harness}; available: {}",
+                "{prefix}model {model} is not offered by {harness}; available: {}",
                 ids.join(", ")
             ));
         }
+        Ok(())
+    }
+
+    pub async fn create_thread(&self, args: &Value) -> Result<Value, String> {
+        let prompt = args["prompt"]
+            .as_str()
+            .filter(|p| !p.trim().is_empty())
+            .ok_or("prompt is required")?;
+        let (caller, _) = self.peers().await?;
+        let space_id = match args["project"].as_str() {
+            Some(key) => Some(project_of(&self.projects(&caller).await?, key)?.id.clone()),
+            None => None,
+        };
+        self.check_model(&caller, args, "").await?;
         self.spend_send()?;
         let created = self
             .call_engine(
@@ -915,30 +927,8 @@ impl ThreadTools {
         };
         let target = &args["target"];
         let (caller, _) = self.peers().await?;
-        let harness = match target["harness"].as_str() {
-            Some(harness) => Some(harness.to_string()),
-            None => caller
-                .config
-                .as_ref()
-                .and_then(|c| serde_json::to_value(c.harness).ok())
-                .and_then(|h| h.as_str().map(str::to_owned)),
-        };
-        if let (Some(model), Some(harness)) = (
-            target["model"]
-                .as_str()
-                .map(str::trim)
-                .filter(|m| !m.is_empty()),
-            harness,
-        ) && let Ok(models) = self.models_of(&harness).await
-            && !models.is_empty()
-            && !models.iter().any(|m| m["id"] == model)
-        {
-            let ids: Vec<&str> = models.iter().filter_map(|m| m["id"].as_str()).collect();
-            return Err(format!(
-                "model_unavailable: model {model} is not offered by {harness}; available: {}",
-                ids.join(", ")
-            ));
-        }
+        self.check_model(&caller, target, "model_unavailable: ")
+            .await?;
         let permission_mode = args["permissionMode"]
             .as_str()
             .filter(|mode| *mode != "inherit");
@@ -998,7 +988,7 @@ impl ThreadTools {
             .map_err(|e| format!("WatchChats: {e}"))?;
         let mut watching = true;
         loop {
-            let view = self.read_task(task_id, true).await?;
+            let view = self.read_task(task_id).await?;
             if view["workState"] == "result_available" {
                 return Ok(view);
             }
@@ -1010,7 +1000,7 @@ impl ThreadTools {
                         json!({ "chatId": self.chat_id, "taskId": task_id }),
                     )
                     .await?;
-                    let mut view = self.read_task(task_id, true).await?;
+                    let mut view = self.read_task(task_id).await?;
                     view["waitTimedOut"] = json!(view["workState"] != "result_available");
                     return Ok(view);
                 }
@@ -1019,11 +1009,11 @@ impl ThreadTools {
         }
     }
 
-    async fn read_task(&self, task_id: &str, acknowledge: bool) -> Result<Value, String> {
+    async fn read_task(&self, task_id: &str) -> Result<Value, String> {
         let mut view = self
             .call_engine(
                 methods::TASK_STATUS,
-                json!({ "chatId": self.chat_id, "taskId": task_id, "acknowledge": acknowledge }),
+                json!({ "chatId": self.chat_id, "taskId": task_id, "acknowledge": true }),
             )
             .await?;
         view["waitTimedOut"] = json!(false);
@@ -1031,18 +1021,12 @@ impl ThreadTools {
     }
 
     pub async fn task_status(&self, args: &Value) -> Result<Value, String> {
-        let task_id = args["taskId"]
-            .as_str()
-            .filter(|id| !id.is_empty())
-            .ok_or("taskId is required")?;
-        self.read_task(task_id, true).await
+        let task_id = Self::task_id(args)?;
+        self.read_task(task_id).await
     }
 
     pub async fn task_cancel(&self, args: &Value) -> Result<Value, String> {
-        let task_id = args["taskId"]
-            .as_str()
-            .filter(|id| !id.is_empty())
-            .ok_or("taskId is required")?;
+        let task_id = Self::task_id(args)?;
         self.call_engine(
             methods::TASK_CANCEL,
             json!({ "chatId": self.chat_id, "taskId": task_id }),

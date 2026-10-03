@@ -88,57 +88,17 @@ impl DelegationCard {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let settings = self.settings.ready().copied().unwrap_or_default();
-        let step = |glyph: &'static str, next: Option<u32>, key: &'static str| {
-            let enabled = next.is_some();
-            div()
-                .id(SharedString::from(format!("{id}-{key}")))
-                .tab_index(0)
-                .role(gpui::Role::Button)
-                .aria_label(SharedString::from(format!("{label} {key}")))
-                .size(px(26.0))
-                .rounded(px(7.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(14.0))
-                .text_color(if enabled {
-                    theme.text_muted
-                } else {
-                    theme.text_muted.opacity(0.35)
-                })
-                .when_some(next, |el, next| {
-                    let text = theme.text;
-                    let bg = theme.bg;
-                    el.cursor_pointer()
-                        .hover(move |s| s.bg(bg).text_color(text))
-                        .on_click(cx.listener(move |card, _, _, cx| {
-                            card.call(Some(apply(settings, next)), cx)
-                        }))
-                })
-                .child(SharedString::from(glyph))
-        };
-        div()
-            .id(id)
-            .flex_none()
-            .flex()
-            .flex_row()
-            .items_center()
-            .rounded(px(9.0))
-            .p(px(2.0))
-            .bg(crate::theme::ink(0.04))
-            .child(step("−", (value > 1).then(|| value - 1), "down"))
-            .child(
-                div()
-                    .min_w(px(36.0))
-                    .px(px(6.0))
-                    .flex()
-                    .justify_center()
-                    .text_size(px(12.0))
-                    .text_color(theme.text)
-                    .child(SharedString::from(value.to_string())),
-            )
-            .child(step("+", (value < max).then(|| value + 1), "up"))
-            .into_any_element()
+        widgets::stepper(
+            theme,
+            id,
+            Some(label),
+            value.to_string(),
+            36.0,
+            (value > 1).then(|| value - 1),
+            (value < max).then(|| value + 1),
+            move |card: &mut Self, next, cx| card.call(Some(apply(settings, next)), cx),
+            cx,
+        )
     }
 
     fn row(

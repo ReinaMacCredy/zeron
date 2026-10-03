@@ -69,14 +69,16 @@ pub(crate) struct AgentRun {
     pub harness: Option<HarnessId>,
 }
 
+impl AgentRun {
+    fn can_stop(&self, stoppable: bool) -> bool {
+        (stoppable || self.delegated) && self.state == RunState::Working
+    }
+}
+
 /// Spawn chips from the latest prompt onward, plus any chip still running
 /// from an earlier turn. A chip without a status predates the field and has
 /// no truthful state to report, so it is left out.
-pub(crate) fn agent_runs(transcript: &[SessionMessageEntry]) -> Vec<AgentRun> {
-    let turn_start = transcript
-        .iter()
-        .rposition(|entry| entry.role == MessageRole::User && entry.answers_request_id.is_none())
-        .unwrap_or(0);
+pub(crate) fn agent_runs(transcript: &[SessionMessageEntry], turn_start: usize) -> Vec<AgentRun> {
     transcript
         .iter()
         .enumerate()
@@ -116,16 +118,17 @@ pub(crate) fn agent_runs(transcript: &[SessionMessageEntry]) -> Vec<AgentRun> {
         .collect()
 }
 
+pub(crate) fn latest_prompt(transcript: &[SessionMessageEntry]) -> Option<usize> {
+    transcript
+        .iter()
+        .rposition(|entry| entry.role == MessageRole::User && entry.answers_request_id.is_none())
+}
+
 pub(crate) fn delegate_runs(
-    transcript: &[SessionMessageEntry],
     chats: &[zeron_proto::Chat],
     owner: &str,
+    turn_start_ms: i64,
 ) -> Vec<AgentRun> {
-    let turn_start_ms = transcript
-        .iter()
-        .rev()
-        .find(|entry| entry.role == MessageRole::User && entry.answers_request_id.is_none())
-        .map_or(0, |entry| entry.created_at);
     chats
         .iter()
         .filter_map(|chat| {
@@ -474,8 +477,13 @@ impl Composer {
             } else {
                 &state.transcript
             };
-            let mut agents = agent_runs(transcript);
-            agents.extend(delegate_runs(transcript, &state.chats, &chat_id));
+            let turn_start = latest_prompt(transcript);
+            let mut agents = agent_runs(transcript, turn_start.unwrap_or(0));
+            agents.extend(delegate_runs(
+                &state.chats,
+                &chat_id,
+                turn_start.map_or(0, |ix| transcript[ix].created_at),
+            ));
             (agents, shell_tasks(state.session_for(&chat_id)))
         };
         if self.background.chat.as_deref() != Some(chat_id.as_str()) {
@@ -623,7 +631,7 @@ impl Composer {
     ) -> AnyElement {
         let running: Vec<(String, bool)> = agents
             .iter()
-            .filter(|run| run.state == RunState::Working && (stoppable || run.delegated))
+            .filter(|run| run.can_stop(stoppable))
             .map(|run| (run.part_id.clone(), run.delegated))
             .collect();
         let header = div()
@@ -693,17 +701,16 @@ impl Composer {
             let state_text = run_state_text(run, now_ms);
             let run_harness = run.harness.or(harness);
             let tag = run_tag(run, run_harness);
-            let stop =
-                ((stoppable || run.delegated) && run.state == RunState::Working).then(|| {
-                    let task_id = run.part_id.clone();
-                    let delegated = run.delegated;
-                    stop_button(format!("background-roster-stop-{ix}"), theme).on_click(
-                        cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.stop_agent_run(task_id.clone(), delegated, cx);
-                        }),
-                    )
-                });
+            let stop = run.can_stop(stoppable).then(|| {
+                let task_id = run.part_id.clone();
+                let delegated = run.delegated;
+                stop_button(format!("background-roster-stop-{ix}"), theme).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.stop_agent_run(task_id.clone(), delegated, cx);
+                    },
+                ))
+            });
             div()
                 .id(("background-roster-row", ix))
                 .debug_selector(move || format!("background-roster-row-{ix}"))
@@ -1105,7 +1112,7 @@ impl Composer {
             .map(|feed| (feed.entries.as_slice(), feed.tokens))
             .unwrap_or((&[], None));
         let hide_thinking = detail.hide_thinking;
-        let stop = ((stoppable || run.delegated) && run.state == RunState::Working).then(|| {
+        let stop = run.can_stop(stoppable).then(|| {
             let task_id = run.part_id.clone();
             let delegated = run.delegated;
             stop_button("background-detail-stop".into(), theme).on_click(cx.listener(
@@ -1124,6 +1131,7 @@ impl Composer {
             cx,
         );
         let level = run.reasoning.or(chat_reasoning);
+        let run_harness = run.harness.or(harness);
         let chips = div()
             .flex()
             .flex_row()
@@ -1131,10 +1139,7 @@ impl Composer {
             .gap(px(6.0))
             .pl(px(36.0))
             .pb(px(8.0))
-            .children(
-                run_tag(run, run.harness.or(harness))
-                    .map(|tag| model_tag(tag, run.harness.or(harness), theme)),
-            )
+            .children(run_tag(run, run_harness).map(|tag| model_tag(tag, run_harness, theme)))
             .children(level.map(|level| {
                 detail_chip(
                     "thinking",
@@ -1395,57 +1400,57 @@ impl Composer {
             self.stop_background_task(task_id, cx);
             return;
         }
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            tracing::warn!(task_id, "cancel delegated task: engine not connected");
-            return;
-        };
-        let Some(chat_id) = self.bound_chat_row(cx).map(|chat| chat.id.clone()) else {
-            return;
-        };
-        let params = serde_json::json!({ "chatId": chat_id, "taskId": task_id });
-        cx.spawn(async move |_, cx| {
-            if let Err(error) = crate::attachments::call_with_timeout(
-                &engine,
-                cx.background_executor(),
-                methods::TASK_CANCEL,
-                params,
-                STOP_TIMEOUT,
-            )
-            .await
-            {
-                tracing::warn!(%error, "cancel delegated task failed");
-            }
-        })
-        .detach();
+        self.send_stop(
+            methods::TASK_CANCEL,
+            "cancel delegated task",
+            task_id,
+            |chat, task_id| serde_json::json!({ "chatId": chat.id, "taskId": task_id }),
+            cx,
+        );
     }
 
     fn stop_background_task(&mut self, task_id: String, cx: &mut Context<Self>) {
+        self.send_stop(
+            methods::STOP_BACKGROUND_TASK,
+            "stop background task",
+            task_id,
+            |chat, task_id| {
+                serde_json::json!({
+                    "chatId": chat.id,
+                    "taskId": task_id,
+                    "targetDeviceId": chat.device_id,
+                })
+            },
+            cx,
+        );
+    }
+
+    fn send_stop(
+        &mut self,
+        method: &'static str,
+        label: &'static str,
+        task_id: String,
+        params: impl FnOnce(&zeron_proto::Chat, String) -> serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            tracing::warn!(task_id, "stop background task: engine not connected");
+            tracing::warn!(task_id, "{label}: engine not connected");
             return;
         };
-        let Some((chat_id, device_id)) = self
-            .bound_chat_row(cx)
-            .map(|chat| (chat.id.clone(), chat.device_id.clone()))
-        else {
+        let Some(params) = self.bound_chat_row(cx).map(|chat| params(chat, task_id)) else {
             return;
         };
-        let params = serde_json::json!({
-            "chatId": chat_id,
-            "taskId": task_id,
-            "targetDeviceId": device_id,
-        });
         cx.spawn(async move |_, cx| {
             if let Err(error) = crate::attachments::call_with_timeout(
                 &engine,
                 cx.background_executor(),
-                methods::STOP_BACKGROUND_TASK,
+                method,
                 params,
                 STOP_TIMEOUT,
             )
             .await
             {
-                tracing::warn!(%error, "stop background task failed");
+                tracing::warn!(%error, "{label} failed");
             }
         })
         .detach();
@@ -1855,8 +1860,7 @@ mod tests {
             child("new-failed", "owner", Failed, 5_000),
             child("elsewhere", "other", Running, 5_000),
         ];
-        let transcript = vec![entry("u2", MessageRole::User, 4_000, vec![])];
-        let runs = delegate_runs(&transcript, &chats, "owner");
+        let runs = delegate_runs(&chats, "owner", 4_000);
         let ids: Vec<&str> = runs.iter().map(|run| run.doc_id.as_str()).collect();
         assert_eq!(ids, ["old-running", "new-failed"]);
         assert!(runs.iter().all(|run| run.delegated));
@@ -1913,7 +1917,7 @@ mod tests {
                 ],
             ),
         ];
-        let runs = agent_runs(&transcript);
+        let runs = agent_runs(&transcript, latest_prompt(&transcript).unwrap_or(0));
         let ids: Vec<&str> = runs.iter().map(|run| run.part_id.as_str()).collect();
         assert_eq!(ids, ["old-live", "new-live", "new-fail"]);
         assert_eq!(runs[0].state, RunState::Working);
@@ -1938,7 +1942,8 @@ mod tests {
             ),
             answer,
         ];
-        assert_eq!(agent_runs(&transcript).len(), 1);
+        assert_eq!(latest_prompt(&transcript), Some(0));
+        assert_eq!(agent_runs(&transcript, 0).len(), 1);
     }
 
     #[test]

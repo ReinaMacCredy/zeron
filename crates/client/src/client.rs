@@ -220,7 +220,7 @@ impl ClientInner {
         let targets = state
             .chats
             .iter()
-            .filter(|c| !c.archived && c.created_by_chat_id.is_none() && c.delegation.is_none())
+            .filter(|c| !c.archived && c.is_person_opened())
             .filter_map(|c| {
                 let source = c.source_context.as_ref()?;
                 let branch = source.branch.trim();

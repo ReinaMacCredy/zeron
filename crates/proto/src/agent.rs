@@ -471,11 +471,10 @@ impl ToolCall {
     }
 
     pub fn delegate_task_text(&self) -> Option<&str> {
-        if !self.is_delegate_task() {
-            return None;
-        }
         match self {
-            ToolCall::Unknown { input, .. } | ToolCall::Mcp { input, .. } => {
+            ToolCall::Unknown { input, .. } | ToolCall::Mcp { input, .. }
+                if self.is_delegate_task() =>
+            {
                 input.as_ref()?.get("task")?.as_str().map(str::trim)
             }
             _ => None,

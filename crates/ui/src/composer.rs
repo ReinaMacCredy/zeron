@@ -9646,7 +9646,7 @@ impl Composer {
                     self.advance_task = None;
                     // The shared input becomes the panel's free-text override.
                     self.input.update(cx, |input, cx| {
-                        input.set_placeholder("Type your own answer, or pick an option above", cx)
+                        input.set_placeholder(ask_pill::PLACEHOLDER, cx)
                     });
                 }
             }
@@ -11061,38 +11061,52 @@ impl Composer {
 
     // ---- wizard glue ----
 
-    fn wizard_select(&mut self, option_ix: usize, cx: &mut Context<Self>) {
-        let Some(wizard) = self.wizard.as_mut() else {
+    fn host_input(&self, host: WizardHost) -> &Entity<ComposerInput> {
+        match host {
+            WizardHost::Own => &self.input,
+            WizardHost::Ask => &self.ask_input,
+        }
+    }
+
+    fn host_advance(&mut self, host: WizardHost, cx: &mut Context<Self>) {
+        match host {
+            WizardHost::Own => self.wizard_advance(cx),
+            WizardHost::Ask => self.ask_advance(cx),
+        }
+    }
+
+    fn wizard_select(&mut self, host: WizardHost, option_ix: usize, cx: &mut Context<Self>) {
+        let Some(wizard) = self.host_wizard(host) else {
             return;
         };
         let step = wizard.select(option_ix);
         let has_pick = wizard.page_has_pick();
-        self.input.update(cx, |input, cx| {
-            input.set_placeholder(
-                if has_pick {
-                    "Type your own answer, or leave this blank to use the selected option"
-                } else {
-                    "Type your own answer, or pick an option above"
-                },
-                cx,
-            )
+        self.host_input(host).update(cx, |input, cx| {
+            input.set_placeholder(ask_pill::placeholder(has_pick), cx)
         });
         match step {
-            WizardStep::AutoAdvance => self.schedule_auto_advance(cx),
-            WizardStep::Done(answers) => self.wizard_finish(answers, cx),
+            WizardStep::AutoAdvance => self.schedule_auto_advance(host, cx),
+            WizardStep::Done(answers) => match host {
+                WizardHost::Own => self.wizard_finish(answers, cx),
+                WizardHost::Ask => self.ask_finish(answers, cx),
+            },
             WizardStep::Stay => {}
         }
         cx.notify();
     }
 
-    fn schedule_auto_advance(&mut self, cx: &mut Context<Self>) {
-        self.advance_task = Some(cx.spawn(async move |this, cx| {
+    fn schedule_auto_advance(&mut self, host: WizardHost, cx: &mut Context<Self>) {
+        let task = cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(AUTO_ADVANCE_MS))
                 .await;
-            this.update(cx, |composer, cx| composer.wizard_advance(cx))
+            this.update(cx, |composer, cx| composer.host_advance(host, cx))
                 .ok();
-        }));
+        });
+        match host {
+            WizardHost::Own => self.advance_task = Some(task),
+            WizardHost::Ask => self.ask.advance_task = Some(task),
+        }
     }
 
     fn wizard_advance(&mut self, cx: &mut Context<Self>) {
@@ -11178,12 +11192,22 @@ impl Composer {
         cx.notify();
     }
 
-    fn on_wizard_key(&mut self, event: &KeyDownEvent, window: &Window, cx: &mut Context<Self>) {
+    fn on_wizard_key(
+        &mut self,
+        host: WizardHost,
+        event: &KeyDownEvent,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
         // Keys bubbling out of the free-text input must not double-handle:
         // digits select options only while the input is empty, and Enter is the
         // input's own Submit action when it has focus.
-        let input_focused = self.input.read(cx).focus_handle.is_focused(window);
-        let input_empty = self.input.read(cx).is_empty();
+        let input_focused = self
+            .host_input(host)
+            .read(cx)
+            .focus_handle
+            .is_focused(window);
+        let input_empty = self.host_input(host).read(cx).is_empty();
         let key = event.keystroke.key.as_str();
         // A BARE digit picks an option. With a modifier held the keystroke
         // belongs to an app shortcut — ⌘1..⌘9 jump to a sidebar row — and the
@@ -11193,19 +11217,24 @@ impl Composer {
             && !event.keystroke.modifiers.modified()
         {
             if !input_focused || input_empty {
-                self.wizard_select(digit - 1, cx);
+                self.wizard_select(host, digit - 1, cx);
                 // Consumed as a selection: stop the platform from also
                 // inserting the digit into the focused free-text input.
                 cx.stop_propagation();
             }
         } else if key == "enter" {
             if !input_focused {
-                self.wizard_advance(cx);
+                self.host_advance(host, cx);
                 cx.stop_propagation();
             }
         } else if key == "escape" {
-            if wizard_escape_goes_back(key, input_focused, input_empty) {
-                self.wizard_back(cx);
+            match host {
+                WizardHost::Own => {
+                    if wizard_escape_goes_back(key, input_focused, input_empty) {
+                        self.wizard_back(cx);
+                    }
+                }
+                WizardHost::Ask => self.close_ask_tray(cx),
             }
             cx.stop_propagation();
         }
@@ -11235,7 +11264,7 @@ impl Composer {
             .id("question-panel")
             .track_focus(&self.wizard_focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                this.on_wizard_key(event, window, cx)
+                this.on_wizard_key(WizardHost::Own, event, window, cx)
             }))
             .occlude()
             .rounded(px(COMPOSER_RADIUS))
@@ -11259,7 +11288,7 @@ impl Composer {
     ) -> Option<(gpui::Div, gpui::Div)> {
         let theme = Theme::of(cx).clone();
         let counter = wizard.counter();
-        let question = wizard.current().cloned()?;
+        let question = wizard.current()?;
         let page = wizard.page;
         let last = page + 1 >= wizard.questions.len();
         let typed_empty = input.read(cx).is_empty();
@@ -11297,10 +11326,7 @@ impl Composer {
                 })
                 .on_hover(motion::hover_listener(format!("{hover_prefix}-{ix}")))
                 .cursor_pointer()
-                .on_click(cx.listener(move |this, _, _, cx| match host {
-                    WizardHost::Own => this.wizard_select(ix, cx),
-                    WizardHost::Ask => this.ask_select(ix, cx),
-                }))
+                .on_click(cx.listener(move |this, _, _, cx| this.wizard_select(host, ix, cx)))
                 .child(
                     div()
                         .flex_1()
@@ -11438,10 +11464,7 @@ impl Composer {
                     .id("wizard-submit")
                     .px(px(16.0))
                     .when(!can_advance, |el| el.opacity(0.4))
-                    .on_click(cx.listener(move |this, _, _, cx| match host {
-                        WizardHost::Own => this.wizard_advance(cx),
-                        WizardHost::Ask => this.ask_advance(cx),
-                    })),
+                    .on_click(cx.listener(move |this, _, _, cx| this.host_advance(host, cx))),
             );
         Some((body, footer))
     }

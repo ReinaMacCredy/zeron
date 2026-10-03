@@ -1910,7 +1910,7 @@ impl AppState {
     pub fn visible_chats(&self) -> impl Iterator<Item = &Chat> {
         self.chats
             .iter()
-            .filter(|c| !c.archived && c.delegation.is_none())
+            .filter(|c| !c.archived && c.delegated_by().is_none())
     }
 
     pub fn sessions_synced(&self) -> bool {

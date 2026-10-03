@@ -239,6 +239,11 @@ impl DocHost {
         config
     }
 
+    fn workspace_or_fail(&self) -> Result<&WorkspaceHost, EngineError> {
+        self.workspace()
+            .ok_or_else(|| failure("orchestration_error", "workspace not wired"))
+    }
+
     fn default_chat_config(&self) -> ChatConfig {
         ChatConfig {
             harness: self.inner.config.default_harness,
@@ -272,9 +277,7 @@ impl DocHost {
                 format!("role must be one of {}", ROLES.join(", ")),
             ));
         }
-        let workspace = self
-            .workspace()
-            .ok_or_else(|| failure("orchestration_error", "workspace not wired"))?;
+        let workspace = self.workspace_or_fail()?;
         let owner = workspace
             .chat(&params.owner_chat_id)?
             .ok_or_else(|| failure("thread_not_found", &params.owner_chat_id))?;
@@ -403,9 +406,7 @@ impl DocHost {
         chat_id: &str,
         anchor: String,
     ) -> Result<(), EngineError> {
-        let workspace = self
-            .workspace()
-            .ok_or_else(|| failure("orchestration_error", "workspace not wired"))?;
+        let workspace = self.workspace_or_fail()?;
         let title = params
             .title
             .as_deref()
@@ -422,17 +423,9 @@ impl DocHost {
         };
         let handle = self.open(chat_id)?;
         handle.doc.push_queued(&QueuedMessage {
-            id: anchor.clone(),
-            text: prompt,
-            attachments: Vec::new(),
-            hold_for_turn_end: false,
-            from_chat_id: None,
-            issued_by: self.inner.config.device_id.clone(),
             issued_at: now_ms(),
-            edited_at: None,
-            delivery_gate: None,
             computer_generation: Some(handle.doc.computer_generation()),
-            delegated_tasks: Vec::new(),
+            ..QueuedMessage::new(anchor.clone(), prompt, self.inner.config.device_id.clone())
         })?;
         handle.publish_queue();
         self.drain_queue(&handle).await;
@@ -510,13 +503,11 @@ impl DocHost {
     }
 
     fn owned_child(&self, owner: &str, task_id: &str) -> Result<(Chat, Vec<Chat>), EngineError> {
-        let workspace = self
-            .workspace()
-            .ok_or_else(|| failure("orchestration_error", "workspace not wired"))?;
+        let workspace = self.workspace_or_fail()?;
         let chats = workspace.read_chats()?;
         let child = chats
             .iter()
-            .find(|chat| chat.id == task_id && owned_by(chat, owner).is_some())
+            .find(|chat| chat.id == task_id && chat.delegated_by() == Some(owner))
             .cloned()
             .ok_or_else(|| {
                 failure(
@@ -754,17 +745,14 @@ impl DocHost {
                 return Ok(());
             }
             let row = QueuedMessage {
-                id: new_id(),
-                text: wake_text(&[task_id.to_string()]),
-                attachments: Vec::new(),
-                hold_for_turn_end: false,
-                from_chat_id: None,
-                issued_by: self.inner.config.device_id.clone(),
                 issued_at: now_ms(),
-                edited_at: None,
-                delivery_gate: None,
                 computer_generation: Some(handle.doc.computer_generation()),
                 delegated_tasks: vec![task_id.to_string()],
+                ..QueuedMessage::new(
+                    new_id(),
+                    wake_text(&[task_id.to_string()]),
+                    self.inner.config.device_id.clone(),
+                )
             };
             let slot = handle.steer_slot(&row.id)?;
             handle.doc.insert_queued(slot, &row)?;
@@ -840,24 +828,34 @@ impl DocHost {
                 let Some(delegation) = chat.delegation.as_ref().filter(|d| d.is_running()) else {
                     continue;
                 };
-                if !self.is_host(&chat.id) {
+                if chat.device_id != self.inner.config.device_id {
                     continue;
                 }
                 let session = sessions.session_status(&chat.id);
+                let after_restart = booted_at.is_some_and(|at| delegation.started_at < at);
                 let task_queued = self.task_queued(&chat.id, &delegation.anchor);
+                let handle = self.open(&chat.id).ok();
                 if task_queued
                     && !delegation.cancel_requested
-                    && let Ok(handle) = self.open(&chat.id)
+                    && let Some(handle) = &handle
                 {
-                    if booted_at.is_some_and(|at| delegation.started_at < at) {
+                    if after_restart {
                         handle.queue_paused.store(false, Ordering::Release);
                     }
-                    self.drain_queue(&handle).await;
+                    self.drain_queue(handle).await;
                     continue;
                 }
-                let entries = self
-                    .open(&chat.id)
-                    .ok()
+                if !task_queued
+                    && session.as_ref().is_some_and(|s| {
+                        matches!(
+                            s.status,
+                            SessionStatus::Working | SessionStatus::AwaitingInput
+                        )
+                    })
+                {
+                    continue;
+                }
+                let entries = handle
                     .and_then(|handle| handle.doc.read_entries().ok())
                     .unwrap_or_default();
                 let (text, error) = result_parts(&entries, &delegation.anchor);
@@ -867,7 +865,7 @@ impl DocHost {
                     task_queued,
                     children_pending(&chats, &chat.id),
                     reply_status(&entries, &delegation.anchor),
-                    booted_at.is_some_and(|at| delegation.started_at < at),
+                    after_restart,
                 ) {
                     finished.push((chat.clone(), status, result_text(status, text, error)));
                 }
@@ -894,11 +892,7 @@ impl DocHost {
         let Some(workspace) = self.workspace() else {
             return;
         };
-        let Some(owner_id) = child
-            .delegation
-            .as_ref()
-            .map(|d| d.delegated_by_chat_id.clone())
-        else {
+        let Some(owner_id) = child.delegated_by().map(str::to_owned) else {
             return;
         };
         let owner = workspace.chat(&owner_id).ok().flatten();
@@ -914,23 +908,24 @@ impl DocHost {
             d.status = status;
             d.summary = Some(clip(&result, SUMMARY_CHARS));
             d.completed_at = Some(Utc::now());
-            if d.delivery.is_some_and(DelegationDelivery::is_final) {
-            } else if owner.as_ref().is_none_or(|owner| {
-                owner.archived
-                    || owner
-                        .delegation
-                        .as_ref()
-                        .is_some_and(|o| o.cancel_requested)
-            }) {
-                d.delivery = Some(DelegationDelivery::Disposed);
-            } else if d.wake == DelegationWake::SettledOnly
-                && owner_turn.is_some()
-                && owner_turn == d.owner_turn_started_at
-            {
-                d.delivery = None;
-            } else {
-                d.delivery = Some(DelegationDelivery::Claimed);
-                offer = true;
+            if !d.delivery.is_some_and(DelegationDelivery::is_final) {
+                if owner.as_ref().is_none_or(|owner| {
+                    owner.archived
+                        || owner
+                            .delegation
+                            .as_ref()
+                            .is_some_and(|o| o.cancel_requested)
+                }) {
+                    d.delivery = Some(DelegationDelivery::Disposed);
+                } else if d.wake == DelegationWake::SettledOnly
+                    && owner_turn.is_some()
+                    && owner_turn == d.owner_turn_started_at
+                {
+                    d.delivery = None;
+                } else {
+                    d.delivery = Some(DelegationDelivery::Claimed);
+                    offer = true;
+                }
             }
             true
         });

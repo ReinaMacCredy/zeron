@@ -1720,3 +1720,69 @@ pub fn text_tooltip_above(
         .into()
     }
 }
+
+#[allow(clippy::too_many_arguments)]
+pub fn stepper<T: 'static>(
+    theme: &Theme,
+    id: &'static str,
+    aria_label: Option<&'static str>,
+    value: impl Into<SharedString>,
+    value_min_w: f32,
+    down: Option<u32>,
+    up: Option<u32>,
+    on_step: impl Fn(&mut T, u32, &mut Context<T>) + Clone + 'static,
+    cx: &mut Context<T>,
+) -> AnyElement {
+    let step = |glyph: &'static str, next: Option<u32>, key: &'static str| {
+        let enabled = next.is_some();
+        let on_step = on_step.clone();
+        div()
+            .id(SharedString::from(format!("{id}-{key}")))
+            .when_some(aria_label, |el, label| {
+                el.tab_index(0)
+                    .role(gpui::Role::Button)
+                    .aria_label(SharedString::from(format!("{label} {key}")))
+            })
+            .size(px(26.0))
+            .rounded(px(7.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(px(14.0))
+            .text_color(if enabled {
+                theme.text_muted
+            } else {
+                theme.text_muted.opacity(0.35)
+            })
+            .when_some(next, |el, next| {
+                let text = theme.text;
+                let bg = theme.bg;
+                el.cursor_pointer()
+                    .hover(move |s| s.bg(bg).text_color(text))
+                    .on_click(cx.listener(move |this, _, _, cx| on_step(this, next, cx)))
+            })
+            .child(SharedString::from(glyph))
+    };
+    div()
+        .id(id)
+        .flex_none()
+        .flex()
+        .flex_row()
+        .items_center()
+        .rounded(px(9.0))
+        .p(px(2.0))
+        .bg(crate::theme::ink(0.04))
+        .child(step("−", down, "down"))
+        .child(
+            div()
+                .min_w(px(value_min_w))
+                .px(px(6.0))
+                .flex()
+                .justify_center()
+                .text_size(px(12.0))
+                .text_color(theme.text)
+                .child(value.into()),
+        )
+        .child(step("+", up, "up"))
+        .into_any_element()
+}

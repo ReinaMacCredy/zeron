@@ -121,17 +121,26 @@ fn rig(step_delay: Duration) -> Rig {
 }
 
 fn rig_with(step_delay: Duration, steerable: bool) -> Rig {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("device-id"), "dev-a").unwrap();
     let prompts = Arc::new(Mutex::new(Vec::new()));
     let steers = Arc::new(Mutex::new(Vec::new()));
-    let registry = HarnessRegistry::new();
-    registry.register(Arc::new(RecordingHarness {
+    let rig = rig_on(Arc::new(RecordingHarness {
         prompts: prompts.clone(),
         steers: steers.clone(),
         steerable,
         step_delay,
     }));
+    Rig {
+        prompts,
+        steers,
+        ..rig
+    }
+}
+
+fn rig_on(harness: Arc<dyn Harness>) -> Rig {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("device-id"), "dev-a").unwrap();
+    let registry = HarnessRegistry::new();
+    registry.register(harness);
     let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
         .expect("engine core assembles");
     core.workspace
@@ -142,8 +151,8 @@ fn rig_with(step_delay: Duration, steerable: bool) -> Rig {
         .expect("lead chat");
     Rig {
         core,
-        prompts,
-        steers,
+        prompts: Arc::default(),
+        steers: Arc::default(),
         _dir: dir,
     }
 }
@@ -185,6 +194,12 @@ fn idle(core: &EngineCore, chat_id: &str) -> bool {
     core.sessions
         .session_status(chat_id)
         .is_some_and(|s| s.status == SessionStatus::Idle)
+}
+
+fn working(core: &EngineCore, chat_id: &str) -> bool {
+    core.sessions
+        .session_status(chat_id)
+        .is_some_and(|s| s.status == SessionStatus::Working)
 }
 
 /// A person's own run on `chat_id`, the way a viewport queues it.
@@ -1172,33 +1187,15 @@ impl Harness for DelegatingHarness {
 
 #[tokio::test]
 async fn the_delegate_task_chip_links_to_the_child_it_opened() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("device-id"), "dev-a").unwrap();
     let release = Arc::new(tokio::sync::Notify::new());
-    let registry = HarnessRegistry::new();
-    registry.register(Arc::new(DelegatingHarness {
+    let rig = rig_on(Arc::new(DelegatingHarness {
         release: release.clone(),
         steerable: false,
         steers: Arc::default(),
     }));
-    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
-        .expect("engine core assembles");
-    core.workspace
-        .create_space("space-tt", "dev-a", "/tmp", None, false)
-        .unwrap();
-    core.workspace
-        .create_chat("lead", Some("space-tt"), None, None, None)
-        .unwrap();
-    queue_human_run(&core, "lead", "cmd-1", "msg-1");
-    wait_for(
-        || {
-            core.sessions
-                .session_status("lead")
-                .is_some_and(|s| s.status == SessionStatus::Working)
-        },
-        "the owner's turn",
-    )
-    .await;
+    let core = &rig.core;
+    queue_human_run(core, "lead", "cmd-1", "msg-1");
+    wait_for(|| working(core, "lead"), "the owner's turn").await;
     let child = core
         .doc_host
         .delegate_task(delegate(" probe the cache "), Default::default())
@@ -1223,34 +1220,16 @@ async fn the_delegate_task_chip_links_to_the_child_it_opened() {
 
 #[tokio::test]
 async fn a_child_that_finishes_mid_turn_steers_its_wake_into_the_owners_turn() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("device-id"), "dev-a").unwrap();
     let release = Arc::new(tokio::sync::Notify::new());
     let steers: Arc<Mutex<Vec<String>>> = Arc::default();
-    let registry = HarnessRegistry::new();
-    registry.register(Arc::new(DelegatingHarness {
+    let rig = rig_on(Arc::new(DelegatingHarness {
         release: release.clone(),
         steerable: true,
         steers: steers.clone(),
     }));
-    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
-        .expect("engine core assembles");
-    core.workspace
-        .create_space("space-tt", "dev-a", "/tmp", None, false)
-        .unwrap();
-    core.workspace
-        .create_chat("lead", Some("space-tt"), None, None, None)
-        .unwrap();
-    queue_human_run(&core, "lead", "cmd-1", "msg-1");
-    wait_for(
-        || {
-            core.sessions
-                .session_status("lead")
-                .is_some_and(|s| s.status == SessionStatus::Working)
-        },
-        "the owner's turn",
-    )
-    .await;
+    let core = &rig.core;
+    queue_human_run(core, "lead", "cmd-1", "msg-1");
+    wait_for(|| working(core, "lead"), "the owner's turn").await;
     let child = core
         .doc_host
         .delegate_task(delegate("probe the cache"), Default::default())
@@ -1279,33 +1258,15 @@ async fn a_child_that_finishes_mid_turn_steers_its_wake_into_the_owners_turn() {
 
 #[tokio::test]
 async fn children_finishing_while_the_wake_waits_share_one_wake() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("device-id"), "dev-a").unwrap();
     let release = Arc::new(tokio::sync::Notify::new());
-    let registry = HarnessRegistry::new();
-    registry.register(Arc::new(DelegatingHarness {
+    let rig = rig_on(Arc::new(DelegatingHarness {
         release: release.clone(),
         steerable: false,
         steers: Arc::default(),
     }));
-    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
-        .expect("engine core assembles");
-    core.workspace
-        .create_space("space-tt", "dev-a", "/tmp", None, false)
-        .unwrap();
-    core.workspace
-        .create_chat("lead", Some("space-tt"), None, None, None)
-        .unwrap();
-    queue_human_run(&core, "lead", "cmd-1", "msg-1");
-    wait_for(
-        || {
-            core.sessions
-                .session_status("lead")
-                .is_some_and(|s| s.status == SessionStatus::Working)
-        },
-        "the owner's turn",
-    )
-    .await;
+    let core = &rig.core;
+    queue_human_run(core, "lead", "cmd-1", "msg-1");
+    wait_for(|| working(core, "lead"), "the owner's turn").await;
     let mut children = Vec::new();
     for task in ["first", "second"] {
         children.push(
