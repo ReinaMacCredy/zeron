@@ -2852,7 +2852,17 @@ impl AppState {
         crate::draft_store::set_session(session.clone(), cx);
     }
 
+    #[track_caller]
     pub fn select_chat(&mut self, chat_id: Option<String>, cx: &mut Context<Self>) {
+        if self.selected_chat != chat_id {
+            tracing::info!(
+                target: "chat_selection",
+                from = ?self.selected_chat,
+                to = ?chat_id,
+                caller = %std::panic::Location::caller(),
+                "select_chat"
+            );
+        }
         if let Some(id) = &chat_id
             && !self.is_unsaved_side_chat(id)
         {

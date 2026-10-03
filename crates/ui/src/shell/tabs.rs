@@ -511,6 +511,7 @@ impl Shell {
 
     /// Open a session from the sidebar: select it, the main area follows.
     /// The session being left is snapshotted first for the switcher.
+    #[track_caller]
     pub(crate) fn open_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
         if self.state.read(cx).selected_chat.as_deref() != Some(chat_id.as_str()) {
             self.snapshot_current_chat(cx);
@@ -518,7 +519,14 @@ impl Shell {
         self.select_existing_chat(chat_id, cx);
     }
 
+    #[track_caller]
     pub(super) fn select_existing_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        tracing::info!(
+            target: "chat_selection",
+            to = %chat_id,
+            caller = %std::panic::Location::caller(),
+            "shell opens chat"
+        );
         // A draft id must never become `selected_chat`: it has no doc to
         // watch and would read as a promoted session.
         if self.state.read(cx).is_draft(&chat_id) {
@@ -536,6 +544,7 @@ impl Shell {
     /// draft opens on the canvas, `None` lands on the canvas (a fresh draft
     /// when the active one is gone). `snapshot`: capture the frame being
     /// left for the switcher (false under an overlay, which is in the frame).
+    #[track_caller]
     pub(super) fn navigate_to(
         &mut self,
         id: Option<String>,
