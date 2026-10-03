@@ -804,12 +804,19 @@ impl DocHost {
         mut statuses: watch::Receiver<Vec<zeron_proto::Session>>,
     ) {
         let host = self.clone();
-        let booted_at = Utc::now();
         self.spawn_worker(async move {
-            host.settle_delegations(Some(booted_at)).await;
             while statuses.changed().await.is_ok() {
                 host.settle_delegations(None).await;
             }
+        });
+    }
+
+    /// Runs after `recover_stale`, so children it is reviving are already marked.
+    pub fn settle_delegations_after_boot(&self) {
+        let host = self.clone();
+        let booted_at = Utc::now();
+        self.spawn_worker(async move {
+            host.settle_delegations(Some(booted_at)).await;
         });
     }
 
@@ -828,7 +835,7 @@ impl DocHost {
                 let Some(delegation) = chat.delegation.as_ref().filter(|d| d.is_running()) else {
                     continue;
                 };
-                if chat.device_id != self.inner.config.device_id {
+                if chat.device_id != self.inner.config.device_id || sessions.is_reviving(&chat.id) {
                     continue;
                 }
                 let session = sessions.session_status(&chat.id);

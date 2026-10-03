@@ -408,6 +408,8 @@ struct Inner {
     /// chat completes a real turn (t3code `timedOutNativeCompactions`): the
     /// harness may still be compacting behind the timeout.
     compaction_timed_out: Mutex<std::collections::HashSet<String>>,
+    /// Chats `recover_stale` is re-dispatching: their Idle + aborted reply is not an ending.
+    reviving: Mutex<std::collections::HashSet<String>>,
     /// Auto-titler for untitled chats (wired at engine assembly; absent in bare tests).
     titles: OnceLock<crate::titles::TitleGenerator>,
     generated_images: OnceLock<(crate::uploads::Uploads, std::path::PathBuf)>,
@@ -526,6 +528,7 @@ impl SessionsEngine {
                 sidechat_contexts: Mutex::new(HashMap::new()),
                 compacting: Mutex::new(std::collections::HashSet::new()),
                 compaction_timed_out: Mutex::new(std::collections::HashSet::new()),
+                reviving: Mutex::new(std::collections::HashSet::new()),
                 titles: OnceLock::new(),
                 generated_images: OnceLock::new(),
                 turn_listener: OnceLock::new(),
@@ -2001,6 +2004,9 @@ impl SessionsEngine {
                 })
                 .unwrap_or(false);
             let will_resume = fresh && prompt.is_some() && attempts < MAX_AUTO_RESUME;
+            if will_resume {
+                lock(&self.inner.reviving).insert(chat_id.clone());
+            }
 
             let note = if will_resume {
                 "Run interrupted by engine restart — resuming"
@@ -2026,73 +2032,82 @@ impl SessionsEngine {
             let (user_id, prompt_text, user_authored) = prompt.expect("gated by will_resume");
             let sessions = self.clone();
             tokio::spawn(async move {
-                let Some(host) = sessions.inner.doc_host() else {
-                    return;
-                };
-                let request = sessions
-                    .last_request(&chat_id)
-                    .or_else(|| host.request_from_chat_row(&chat_id, &prompt_text))
-                    // Last resort: the journal's own cwd (zeron's draft config)
-                    // — a crash can predate the debounced workspace-row write.
-                    .or_else(|| {
-                        let (_, cwd) = sessions.inner.journal_harness_session(&chat_id)?;
-                        Some(RunRequest {
-                            mcp: None,
-                            prompt: String::new(),
-                            harness: None,
-                            model: None,
-                            reasoning: None,
-                            model_options: Default::default(),
-                            cwd,
-                            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
-                            permission_mode: zeron_proto::PermissionMode::Full,
-                            auto_approve: false,
-                            attachments: Vec::new(),
-                            resume: None,
-                            worktree: None,
-                            branch: None,
-                            forked_at: None,
-                            computer_control: false,
-                        })
-                    });
-                let Some(mut request) = request else {
-                    tracing::warn!(chat = %chat_id, "auto-resume skipped: no run config");
-                    return;
-                };
-                request.computer_control = false;
-                if let (Some(computer), Ok(handle)) = (sessions.computer(), host.open(&chat_id)) {
-                    request.computer_control = computer.resolve_computer_control(
-                        &chat_id,
-                        handle.doc().computer_generation(),
-                        &prompt_text,
-                        user_authored,
-                        dispatched_generation(handle.doc(), &user_id),
-                    );
-                }
-                request.prompt = prompt_text;
-                request.resume = None; // dispatch re-injects the remembered session
-                request.attachments = Vec::new();
-                let harness_id = host.harness_for_request(&chat_id, &request);
-                match host
-                    .dispatch_with_source_context(
-                        &sessions,
-                        &chat_id,
-                        harness_id,
-                        request,
-                        Some(user_id),
-                    )
-                    .await
-                {
-                    Ok(_) => {
-                        tracing::info!(chat = %chat_id, attempt, "auto-resumed crashed run")
+                async {
+                    let Some(host) = sessions.inner.doc_host() else {
+                        return;
+                    };
+                    let request = sessions
+                        .last_request(&chat_id)
+                        .or_else(|| host.request_from_chat_row(&chat_id, &prompt_text))
+                        // Last resort: the journal's own cwd (zeron's draft config)
+                        // — a crash can predate the debounced workspace-row write.
+                        .or_else(|| {
+                            let (_, cwd) = sessions.inner.journal_harness_session(&chat_id)?;
+                            Some(RunRequest {
+                                mcp: None,
+                                prompt: String::new(),
+                                harness: None,
+                                model: None,
+                                reasoning: None,
+                                model_options: Default::default(),
+                                cwd,
+                                sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+                                permission_mode: zeron_proto::PermissionMode::Full,
+                                auto_approve: false,
+                                attachments: Vec::new(),
+                                resume: None,
+                                worktree: None,
+                                branch: None,
+                                forked_at: None,
+                                computer_control: false,
+                            })
+                        });
+                    let Some(mut request) = request else {
+                        tracing::warn!(chat = %chat_id, "auto-resume skipped: no run config");
+                        return;
+                    };
+                    request.computer_control = false;
+                    if let (Some(computer), Ok(handle)) = (sessions.computer(), host.open(&chat_id)) {
+                        request.computer_control = computer.resolve_computer_control(
+                            &chat_id,
+                            handle.doc().computer_generation(),
+                            &prompt_text,
+                            user_authored,
+                            dispatched_generation(handle.doc(), &user_id),
+                        );
                     }
-                    Err(err) => {
-                        tracing::warn!(chat = %chat_id, error = %err, "auto-resume dispatch failed")
+                    request.prompt = prompt_text;
+                    request.resume = None; // dispatch re-injects the remembered session
+                    request.attachments = Vec::new();
+                    let harness_id = host.harness_for_request(&chat_id, &request);
+                    match host
+                        .dispatch_with_source_context(
+                            &sessions,
+                            &chat_id,
+                            harness_id,
+                            request,
+                            Some(user_id),
+                        )
+                        .await
+                    {
+                        Ok(_) => {
+                            tracing::info!(chat = %chat_id, attempt, "auto-resumed crashed run")
+                        }
+                        Err(err) => {
+                            tracing::warn!(chat = %chat_id, error = %err, "auto-resume dispatch failed")
+                        }
                     }
                 }
+                .await;
+                lock(&sessions.inner.reviving).remove(&chat_id);
+                sessions.inner.sessions_tx.send_modify(|_| {});
             });
         }
         Ok(recovered)
+    }
+
+    pub(crate) fn is_reviving(&self, chat_id: &str) -> bool {
+        lock(&self.inner.reviving).contains(chat_id)
     }
 
     /// Graceful shutdown: interrupt every live run so streaming entries settle.

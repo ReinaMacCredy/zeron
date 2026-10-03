@@ -383,6 +383,20 @@ pub(crate) fn sidebar_ring(indicator: ChatIndicator, session: Option<&Session>) 
     (held || idle).then_some(session.background_tasks.len())
 }
 
+pub(crate) fn ring_label(tasks: &[BackgroundTask]) -> Option<String> {
+    let count = |kind: BackgroundTaskKind| tasks.iter().filter(|task| task.kind == kind).count();
+    let parts: Vec<String> = [
+        (count(BackgroundTaskKind::Agent), "subagent"),
+        (count(BackgroundTaskKind::Shell), "shell"),
+        (count(BackgroundTaskKind::Other), "task"),
+    ]
+    .into_iter()
+    .filter(|(n, _)| *n > 0)
+    .map(|(n, noun)| format!("{n} {noun}{}", if n == 1 { "" } else { "s" }))
+    .collect();
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
 pub(crate) fn sidebar_ring_mark(count: usize, theme: &Theme) -> Div {
     div()
         .flex_none()
@@ -2013,6 +2027,30 @@ mod tests {
         assert_eq!(sidebar_ring(ChatIndicator::Working, Some(&held)), Some(0));
         assert_eq!(sidebar_ring(ChatIndicator::Errored, Some(&held)), None);
         assert_eq!(sidebar_ring(ChatIndicator::Idle, None), None);
+    }
+
+    #[test]
+    fn ring_label_counts_background_work_by_kind() {
+        let agents: Vec<_> = (0..4)
+            .map(|ix| task(&format!("a{ix}"), BackgroundTaskKind::Agent))
+            .collect();
+        assert_eq!(ring_label(&agents).as_deref(), Some("4 subagents"));
+        let shells = [
+            task("s1", BackgroundTaskKind::Shell),
+            task("s2", BackgroundTaskKind::Shell),
+        ];
+        assert_eq!(ring_label(&shells).as_deref(), Some("2 shells"));
+        let mixed = [
+            task("a1", BackgroundTaskKind::Agent),
+            task("s1", BackgroundTaskKind::Shell),
+            task("o1", BackgroundTaskKind::Other),
+            task("o2", BackgroundTaskKind::Other),
+        ];
+        assert_eq!(
+            ring_label(&mixed).as_deref(),
+            Some("1 subagent · 1 shell · 2 tasks")
+        );
+        assert_eq!(ring_label(&[]), None);
     }
 
     fn claude_chat(id: &str) -> zeron_proto::Chat {
