@@ -526,6 +526,7 @@ impl Composer {
                 )))
                 .child(div().child(SharedString::from(agents_label(&agents))))
                 .on_click(cx.listener(|this, _, _, cx| {
+                    this.close_ask_tray(cx);
                     this.background.roster_opened = Some(Instant::now());
                     if this.background.shells.begin_close() {
                         popover::reap_popup(cx, |this: &mut Composer| &mut this.background.shells);
@@ -553,6 +554,14 @@ impl Composer {
                 .children(roster)
                 .into_any_element(),
         )
+    }
+
+    pub(super) fn roster_open(&self) -> bool {
+        self.background.roster_opened.is_some()
+    }
+
+    pub(super) fn close_roster(&mut self) {
+        self.background.roster_opened = None;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1487,7 +1496,7 @@ fn detail_head(
         .child(div().size(px(20.0)).flex_none().children(stop))
 }
 
-fn pill_frame(id: &'static str, theme: &Theme) -> Stateful<Div> {
+pub(super) fn pill_frame(id: &'static str, theme: &Theme) -> Stateful<Div> {
     div()
         .id(id)
         .flex_none()
@@ -1509,7 +1518,7 @@ fn pill_frame(id: &'static str, theme: &Theme) -> Stateful<Div> {
         .active(|s| s.opacity(0.85))
 }
 
-fn pill_leading(glyph: AnyElement) -> Div {
+pub(super) fn pill_leading(glyph: AnyElement) -> Div {
     div().flex().items_center().mr(px(4.0)).child(glyph)
 }
 

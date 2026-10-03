@@ -227,7 +227,8 @@ impl Shell {
                         | ComposerEvent::WorktreeSetup { .. }
                         | ComposerEvent::OpenSidechat { .. }
                         | ComposerEvent::BackgroundStarted
-                        | ComposerEvent::OpenSubagent { .. } => {}
+                        | ComposerEvent::OpenSubagent { .. }
+                        | ComposerEvent::OpenChat(_) => {}
                         ComposerEvent::UnsentChanged => cx.notify(),
                         ComposerEvent::ThreadMentionDropped => this.accept_command_palette_drop(),
                         ComposerEvent::OpenComputerSetup { missing } => {

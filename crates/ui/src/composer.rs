@@ -41,6 +41,7 @@ use crate::settings::{ComposerSendBehavior, FollowUpBehavior, platform_combo};
 use crate::state::{AppState, Indicator};
 use crate::theme::Theme;
 
+mod ask_pill;
 pub(crate) mod background;
 
 // ---------------------------------------------------------------------------
@@ -708,6 +709,21 @@ pub fn input_request_resolved(transcript: &[SessionMessageEntry], request_id: &s
 // ---------------------------------------------------------------------------
 // Question wizard (pure reducer)
 // ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WizardHost {
+    Own,
+    Ask,
+}
+
+impl WizardHost {
+    fn hover_prefix(self) -> &'static str {
+        match self {
+            WizardHost::Own => "wizard-option",
+            WizardHost::Ask => "ask-option",
+        }
+    }
+}
 
 /// Reducer outcome of a wizard interaction.
 #[derive(Debug, Clone, PartialEq)]
@@ -5427,6 +5443,7 @@ pub enum ComposerEvent {
         title: String,
         frozen: bool,
     },
+    OpenChat(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6469,6 +6486,10 @@ pub struct Composer {
     /// Requests already answered locally (suppresses the panel until the doc
     /// frame marks them resolved).
     answered_requests: HashSet<String>,
+    ask: ask_pill::AskPills,
+    ask_input: Entity<ComposerInput>,
+    ask_focus: FocusHandle,
+    _ask_input_events: Subscription,
     advance_task: Option<Task<()>>,
     send_task: Option<Task<()>>,
     /// The queued message being edited in the composer (see
@@ -6750,6 +6771,15 @@ impl Composer {
                 }
             }
         });
+        let ask_input = cx.new(|cx| ComposerInput::new(ask_pill::PLACEHOLDER, cx));
+        let ask_input_events =
+            cx.subscribe(&ask_input, |this: &mut Self, _, event, cx| match event {
+                ComposerInputEvent::Submitted | ComposerInputEvent::ModifiedSubmitted => {
+                    this.ask_advance(cx)
+                }
+                ComposerInputEvent::Edited => cx.notify(),
+                _ => {}
+            });
         let current_key = state.read(cx).focused_id().unwrap_or_default();
         let current_is_canvas = state.read(cx).selected_chat.is_none();
         let mut composer = Self {
@@ -6786,6 +6816,10 @@ impl Composer {
             wizard: None,
             wizard_focus: cx.focus_handle(),
             answered_requests: HashSet::new(),
+            ask: Default::default(),
+            ask_input,
+            ask_focus: cx.focus_handle(),
+            _ask_input_events: ask_input_events,
             failure_key: None,
             resume_compaction_kept: None,
             action_task: None,
@@ -9409,6 +9443,7 @@ impl Composer {
     }
 
     fn on_state_changed(&mut self, cx: &mut Context<Self>) {
+        self.sync_asks(cx);
         self.ensure_compaction_kind(cx);
         self.prefetch_slash_catalog(cx);
         self.prune_drafts(cx);
@@ -11188,14 +11223,48 @@ impl Composer {
         let Some(wizard) = self.wizard.clone() else {
             return gpui::Empty.into_any_element();
         };
-        let counter = wizard.counter();
-        let Some(question) = wizard.current().cloned() else {
+        let input = self.input.clone();
+        let Some((body, footer)) = self.wizard_body(&wizard, &input, WizardHost::Own, cx) else {
             return gpui::Empty.into_any_element();
         };
+
+        // Stands in for the composer pill, so it is the same frosted surface:
+        // without the backdrop blur the translucent fill let the transcript
+        // show through unblurred.
+        let panel = div()
+            .id("question-panel")
+            .track_focus(&self.wizard_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                this.on_wizard_key(event, window, cx)
+            }))
+            .occlude()
+            .rounded(px(COMPOSER_RADIUS))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.composer_surface_bg())
+            .when(!theme.is_frost(), |el| el.shadow_lg())
+            .flex()
+            .flex_col()
+            .child(body)
+            .child(footer);
+        crate::frost::frosted(COMPOSER_RADIUS, crate::frost::MENU_BLUR, panel).into_any_element()
+    }
+
+    fn wizard_body(
+        &self,
+        wizard: &Wizard,
+        input: &Entity<ComposerInput>,
+        host: WizardHost,
+        cx: &mut Context<Self>,
+    ) -> Option<(gpui::Div, gpui::Div)> {
+        let theme = Theme::of(cx).clone();
+        let counter = wizard.counter();
+        let question = wizard.current().cloned()?;
         let page = wizard.page;
         let last = page + 1 >= wizard.questions.len();
-        let typed_empty = self.input.read(cx).is_empty();
+        let typed_empty = input.read(cx).is_empty();
         let can_advance = wizard.page_has_pick() || !typed_empty || question.multiline;
+        let hover_prefix = host.hover_prefix();
 
         let options = question.options.iter().enumerate().map(|(ix, label)| {
             // Selection reads on the row only while no typed override exists
@@ -11221,14 +11290,17 @@ impl Composer {
                     crate::theme::ink(0.09)
                 } else {
                     motion::hover_blend(
-                        &format!("wizard-option-{ix}"),
+                        &format!("{hover_prefix}-{ix}"),
                         crate::theme::ink(0.025),
                         crate::theme::ink(0.06),
                     )
                 })
-                .on_hover(motion::hover_listener(format!("wizard-option-{ix}")))
+                .on_hover(motion::hover_listener(format!("{hover_prefix}-{ix}")))
                 .cursor_pointer()
-                .on_click(cx.listener(move |this, _, _, cx| this.wizard_select(ix, cx)))
+                .on_click(cx.listener(move |this, _, _, cx| match host {
+                    WizardHost::Own => this.wizard_select(ix, cx),
+                    WizardHost::Ask => this.ask_select(ix, cx),
+                }))
                 .child(
                     div()
                         .flex_1()
@@ -11268,126 +11340,110 @@ impl Composer {
                 })
         });
 
-        // Stands in for the composer pill, so it is the same frosted surface:
-        // without the backdrop blur the translucent fill let the transcript
-        // show through unblurred.
-        let panel = div()
-            .id("question-panel")
-            .track_focus(&self.wizard_focus)
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                this.on_wizard_key(event, window, cx)
-            }))
-            .occlude()
-            .rounded(px(COMPOSER_RADIUS))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.composer_surface_bg())
-            .when(!theme.is_frost(), |el| el.shadow_lg())
+        let body = div()
+            .px(px(16.0))
+            .pt(px(16.0))
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .px(px(16.0))
-                    .pt(px(16.0))
-                    .flex()
-                    .flex_col()
-                    // Header: tracked uppercase + counter chip when paged.
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(10.0))
-                            .child(
-                                div()
-                                    .text_size(crate::typography::ui_rems(10.5))
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(theme.text_muted.opacity(0.6))
-                                    .child(SharedString::from(crate::popover::tracked_upper(
-                                        &question.header,
-                                    ))),
-                            )
-                            .when(wizard.questions.len() > 1, |el| {
-                                el.child(
-                                    div()
-                                        .h(px(20.0))
-                                        .px(px(6.0))
-                                        .flex()
-                                        .items_center()
-                                        .rounded(px(6.0))
-                                        .bg(crate::theme::ink(0.06))
-                                        .text_size(crate::typography::ui_rems(10.0))
-                                        .font_weight(gpui::FontWeight::MEDIUM)
-                                        .text_color(theme.text_muted.opacity(0.6))
-                                        .child(SharedString::from(counter)),
-                                )
-                            }),
-                    )
-                    .child(
-                        div()
-                            .mt(px(6.0))
-                            .text_size(crate::typography::ui_rems(15.0))
-                            .line_height(px(20.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child(SharedString::from(question.question.clone())),
-                    )
-                    .when(question.multi_select, |el| {
-                        el.child(
-                            div()
-                                .mt(px(4.0))
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .text_color(theme.text_muted.opacity(0.65))
-                                .child(SharedString::from("Select one or more options.")),
-                        )
-                    })
-                    .child(
-                        div()
-                            .mt(px(12.0))
-                            .flex()
-                            .flex_col()
-                            .gap(px(4.0))
-                            .children(options),
-                    )
-                    // Free-text override over a hairline (shares the composer
-                    // input entity).
-                    .child(
-                        div()
-                            .mt(px(12.0))
-                            .border_t_1()
-                            .border_color(crate::theme::hairline(0.06))
-                            .pt(px(12.0))
-                            .pb(px(4.0))
-                            .px(px(4.0))
-                            .child(self.input.clone()),
-                    ),
-            )
+            // Header: tracked uppercase + counter chip when paged.
             .child(
                 div()
                     .flex()
                     .flex_row()
-                    .justify_between()
                     .items_center()
-                    .px(px(16.0))
-                    .pb(px(16.0))
-                    .pt(px(4.0))
-                    .child(if page > 0 {
-                        crate::popover::btn_ghost(&theme, "Back", "wizard-back")
-                            .id("wizard-back")
-                            .on_click(cx.listener(|this, _, _, cx| this.wizard_back(cx)))
-                            .into_any_element()
-                    } else {
-                        gpui::Empty.into_any_element()
-                    })
+                    .gap(px(10.0))
                     .child(
-                        crate::popover::btn_primary(&theme, if last { "Submit" } else { "Next" })
-                            .id("wizard-submit")
-                            .px(px(16.0))
-                            .when(!can_advance, |el| el.opacity(0.4))
-                            .on_click(cx.listener(|this, _, _, cx| this.wizard_advance(cx))),
-                    ),
+                        div()
+                            .text_size(crate::typography::ui_rems(10.5))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text_muted.opacity(0.6))
+                            .child(SharedString::from(crate::popover::tracked_upper(
+                                &question.header,
+                            ))),
+                    )
+                    .when(wizard.questions.len() > 1, |el| {
+                        el.child(
+                            div()
+                                .h(px(20.0))
+                                .px(px(6.0))
+                                .flex()
+                                .items_center()
+                                .rounded(px(6.0))
+                                .bg(crate::theme::ink(0.06))
+                                .text_size(crate::typography::ui_rems(10.0))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme.text_muted.opacity(0.6))
+                                .child(SharedString::from(counter)),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .mt(px(6.0))
+                    .text_size(crate::typography::ui_rems(15.0))
+                    .line_height(px(20.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child(SharedString::from(question.question.clone())),
+            )
+            .when(question.multi_select, |el| {
+                el.child(
+                    div()
+                        .mt(px(4.0))
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.text_muted.opacity(0.65))
+                        .child(SharedString::from("Select one or more options.")),
+                )
+            })
+            .child(
+                div()
+                    .mt(px(12.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .children(options),
+            )
+            // Free-text override over a hairline.
+            .child(
+                div()
+                    .mt(px(12.0))
+                    .border_t_1()
+                    .border_color(crate::theme::hairline(0.06))
+                    .pt(px(12.0))
+                    .pb(px(4.0))
+                    .px(px(4.0))
+                    .child(input.clone()),
             );
-        crate::frost::frosted(COMPOSER_RADIUS, crate::frost::MENU_BLUR, panel).into_any_element()
+        let footer = div()
+            .flex()
+            .flex_row()
+            .justify_between()
+            .items_center()
+            .px(px(16.0))
+            .pb(px(16.0))
+            .pt(px(4.0))
+            .child(if page > 0 {
+                crate::popover::btn_ghost(&theme, "Back", "wizard-back")
+                    .id("wizard-back")
+                    .on_click(cx.listener(move |this, _, _, cx| match host {
+                        WizardHost::Own => this.wizard_back(cx),
+                        WizardHost::Ask => this.ask_back(cx),
+                    }))
+                    .into_any_element()
+            } else {
+                gpui::Empty.into_any_element()
+            })
+            .child(
+                crate::popover::btn_primary(&theme, if last { "Submit" } else { "Next" })
+                    .id("wizard-submit")
+                    .px(px(16.0))
+                    .when(!can_advance, |el| el.opacity(0.4))
+                    .on_click(cx.listener(move |this, _, _, cx| match host {
+                        WizardHost::Own => this.wizard_advance(cx),
+                        WizardHost::Ask => this.ask_advance(cx),
+                    })),
+            );
+        Some((body, footer))
     }
 
     /// `refocus` returns focus to the editor afterwards. Enter/Space on the
@@ -12482,7 +12538,7 @@ impl Render for Composer {
                 self.staged_chip_count(cx),
             );
         let container = container
-            .when_some(self.render_background_corner(window, cx), |el, corner| {
+            .when_some(self.render_corner(window, cx), |el, corner| {
                 el.child(corner)
             })
             .children(self.render_computer_strip(&theme, cx));

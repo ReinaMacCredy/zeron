@@ -2515,6 +2515,7 @@ impl Shell {
                 ComposerEvent::OpenComputerSetup { missing } => {
                     this.open_computer_permission_guide(missing.clone(), cx)
                 }
+                ComposerEvent::OpenChat(chat_id) => this.open_chat(chat_id.clone(), cx),
                 ComposerEvent::OpenSubagent {
                     chat_id,
                     doc_id,
@@ -4967,7 +4968,8 @@ impl Shell {
                 | ComposerEvent::NewThreadTransitionStarted
                 | ComposerEvent::BackgroundStarted
                 | ComposerEvent::WorkspaceCommand(_)
-                | ComposerEvent::WorktreeSetup { .. } => {}
+                | ComposerEvent::WorktreeSetup { .. }
+                | ComposerEvent::OpenChat(_) => {}
                 ComposerEvent::OpenSubagent {
                     chat_id,
                     doc_id,
