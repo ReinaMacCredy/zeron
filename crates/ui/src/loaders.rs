@@ -6,7 +6,9 @@
 //! come from [`motion::staggered_phase`], so all cells stay phase-locked.
 //! Cells animate inside fixed-size slots — opacity and inner size
 //! are paint-local and never move surrounding layout. Reduced motion snaps every
-//! cell to its rest state automatically (gpui `reduce_motion`).
+//! cell to its rest state automatically (gpui `reduce_motion`). Activity grids
+//! retain a gentle brightness pulse with system reduced motion; explicit On
+//! and background pause keep them still.
 
 use gpui::{
     AnyElement, App, AppContext, Context, Entity, EntityId, IntoElement, ParentElement,
@@ -121,7 +123,7 @@ pub fn gradient_spinner(
 ) -> impl IntoElement {
     let center = (MATRIX_SIDE as f32 - 1.0) / 2.0;
     let max = MATRIX_SIDE as f32 - 1.0 + center;
-    let delta = motion::pulse_delta_slow(&GRADIENT_SPIN, view, cx);
+    let pulse = motion::activity_pulse_slow(view, cx);
     div()
         .flex()
         .flex_col()
@@ -141,7 +143,7 @@ pub fn gradient_spinner(
                         .size(px(cell_px))
                         .rounded(px(cell_px / 2.0))
                         .bg(tint)
-                        .opacity(motion::gspin_opacity(delta + phase, GSPIN_DIM))
+                        .opacity(pulse.opacity(phase, GSPIN_DIM))
                 }))
         }))
 }
@@ -246,7 +248,7 @@ fn mini_spinner_cells(
     /// (0,0) → (0,1) → (1,1) → (2,1) → (2,0) → (1,0).
     const RING: [[usize; COLS]; ROWS] = [[0, 1], [5, 2], [4, 3]];
     const RING_LEN: f32 = (COLS * ROWS) as f32;
-    let delta = motion::pulse_delta(&GRADIENT_SPIN, view, cx);
+    let pulse = motion::activity_pulse(view, cx);
     div()
         .flex()
         .flex_col()
@@ -263,7 +265,7 @@ fn mini_spinner_cells(
                         .size(px(cell_px))
                         .rounded(px(cell_px / 2.0))
                         .bg(tint)
-                        .opacity(motion::gspin_opacity(delta + phase, GSPIN_DIM))
+                        .opacity(pulse.opacity(phase, GSPIN_DIM))
                 }))
         }))
 }

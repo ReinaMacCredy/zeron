@@ -9,7 +9,9 @@
 //! statuses are snake_case).
 
 use serde_json::Value;
-use zeron_proto::{AgentEvent, SlashCommand, SlashCommandKind, TodoItem, ToolCall, ToolDiff};
+use zeron_proto::{
+    AgentEvent, SlashCommand, SlashCommandKind, TodoItem, TodoStatus, ToolCall, ToolDiff,
+};
 
 /// Byte cap applied to tool output text at the harness boundary. The doc-side
 /// fold applies its own (smaller) cap before anything persists; this one only
@@ -471,9 +473,11 @@ pub(crate) fn map_update(update: &Value) -> Vec<AgentEvent> {
                 .map(|a| a.as_slice())
                 .unwrap_or_default()
                 .iter()
-                .map(|e| TodoItem {
-                    text: str_field(e, "content"),
-                    done: e.get("status").and_then(Value::as_str) == Some("completed"),
+                .map(|e| {
+                    TodoItem::new(
+                        str_field(e, "content"),
+                        TodoStatus::parse(e.get("status").and_then(Value::as_str).unwrap_or("")),
+                    )
                 })
                 .collect();
             // The plan has no wire id; a stable synthetic id makes every
@@ -729,14 +733,8 @@ mod tests {
                 id: zeron_proto::LIVE_PLAN_TOOL_ID.into(),
                 call: ToolCall::Todo {
                     items: vec![
-                        TodoItem {
-                            text: "read code".into(),
-                            done: true
-                        },
-                        TodoItem {
-                            text: "write fix".into(),
-                            done: false
-                        },
+                        TodoItem::new("read code", TodoStatus::Completed),
+                        TodoItem::new("write fix", TodoStatus::InProgress),
                     ]
                 },
             }

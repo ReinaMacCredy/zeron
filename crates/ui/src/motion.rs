@@ -21,6 +21,8 @@
 //! switch; pure helpers take the flag explicitly where they run outside elements.
 //! [`ReduceMotion`] drives that switch from the OS accessibility setting or the
 //! user's override, and optionally from main-window focus.
+//! Activity grids use [`ActivityPulse`] to retain a gentle brightness cue under
+//! system reduced motion; explicit On and background pause keep them still.
 //!
 //! translateY is implemented as a relative-position `top` inset: taffy applies
 //! relative insets after layout, so — like a CSS transform — siblings never move.
@@ -122,8 +124,57 @@ fn pulse_delta_every(spec: &MotionSpec, view: EntityId, stride: u64, cx: &mut Ap
         return 0.0;
     }
     pulse_lease_every(view, stride, cx);
+    pulse_phase(spec, cx)
+}
+
+fn pulse_phase(spec: &MotionSpec, cx: &mut App) -> f32 {
     let clock = cx.default_global::<PulseClock>();
     (clock.epoch.elapsed().as_secs_f32() / spec.total().as_secs_f32()).fract()
+}
+
+/// Activity feedback uses a slow, uniform brightness pulse when the system
+/// reduces motion. Explicit On and background pause still stop all animation.
+/// Decorative animation continues to use the reduced-motion-gated helpers.
+#[derive(Clone, Copy)]
+pub struct ActivityPulse {
+    phase: f32,
+    subtle: bool,
+}
+
+impl ActivityPulse {
+    pub fn opacity(&self, cell_phase: f32, dim: f32) -> f32 {
+        if self.subtle {
+            // No travelling chase or size change, just a gentle 2.4s fade.
+            0.6 + 0.2 * pulse_wave(self.phase)
+        } else {
+            gspin_opacity(self.phase + cell_phase, dim)
+        }
+    }
+}
+
+pub fn activity_pulse(view: EntityId, cx: &mut App) -> ActivityPulse {
+    activity_pulse_every(view, 1, cx)
+}
+
+pub fn activity_pulse_slow(view: EntityId, cx: &mut App) -> ActivityPulse {
+    activity_pulse_every(view, 2, cx)
+}
+
+fn activity_pulse_every(view: EntityId, stride: u64, cx: &mut App) -> ActivityPulse {
+    let subtle = cx.reduce_motion();
+    let animate = !subtle
+        || cx.try_global::<MotionState>().is_some_and(|state| {
+            state.preference == ReduceMotion::System
+                && state.system
+                && !(state.pause_in_background && !state.active)
+        });
+    let phase = if animate {
+        schedule_pulse_every(view, if subtle { 2 } else { stride }, cx);
+        pulse_phase(if subtle { &ZERON_PULSE } else { &GRADIENT_SPIN }, cx)
+    } else {
+        0.0
+    };
+    ActivityPulse { phase, subtle }
 }
 
 /// Schedule cosmetic animation through the same bounded clock as loaders.
@@ -137,6 +188,10 @@ fn pulse_lease_every(view: EntityId, stride: u64, cx: &mut App) {
     if cx.reduce_motion() {
         return;
     }
+    schedule_pulse_every(view, stride, cx);
+}
+
+fn schedule_pulse_every(view: EntityId, stride: u64, cx: &mut App) {
     let clock = cx.default_global::<PulseClock>();
     let now = Instant::now();
     clock
@@ -1114,6 +1169,171 @@ mod tests {
         assert_eq!(EASE_SNAP.eval_unclamped(1.0), 1.0);
         assert_eq!(EASE_SNAP.eval_unclamped(0.0), 0.0);
         assert!((0..=100).all(|i| EASE_SNAP.eval(i as f32 / 100.0) <= 1.0));
+    }
+
+    #[test]
+    fn reduced_activity_pulse_is_slow_uniform_and_gentle() {
+        for phase in [0.0, 0.1, 0.25, 0.5, 0.75, 0.9] {
+            let pulse = ActivityPulse {
+                phase,
+                subtle: true,
+            };
+            let opacity = pulse.opacity(0.0, 0.1);
+            assert!((0.6..=0.8).contains(&opacity));
+            assert_eq!(opacity, pulse.opacity(0.5, 0.1), "no travelling wave");
+        }
+        let rest = ActivityPulse {
+            phase: 0.0,
+            subtle: true,
+        }
+        .opacity(0.0, 0.1);
+        let crest = ActivityPulse {
+            phase: 0.5,
+            subtle: true,
+        }
+        .opacity(0.0, 0.1);
+        assert!(
+            crest > rest,
+            "the activity cue must visibly change brightness"
+        );
+    }
+
+    #[gpui::test]
+    fn activity_pulse_honors_explicit_on_and_background_pause(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+
+        cx.update(|cx| {
+            for (preference, system, pause_in_background, active, animates) in [
+                (ReduceMotion::On, false, false, true, false),
+                (ReduceMotion::On, true, false, true, false),
+                (ReduceMotion::System, true, true, false, false),
+                (ReduceMotion::Off, true, true, false, false),
+                (ReduceMotion::System, true, true, true, true),
+                (ReduceMotion::System, true, false, false, true),
+                (ReduceMotion::System, false, false, true, true),
+                (ReduceMotion::Off, true, false, true, true),
+            ] {
+                cx.set_global(MotionState {
+                    preference,
+                    pause_in_background,
+                    system,
+                    active,
+                });
+                apply(cx);
+                let view = cx.new(|_| ());
+                let pulse = activity_pulse(view.entity_id(), cx);
+                let leased = cx
+                    .try_global::<PulseClock>()
+                    .is_some_and(|clock| clock.leases.contains_key(&view.entity_id()));
+                assert_eq!(
+                    leased, animates,
+                    "{preference:?}, system={system}, pause={pause_in_background}, active={active}"
+                );
+                if reduced_motion(cx) {
+                    assert!(pulse.subtle);
+                    let decorative_view = cx.new(|_| ());
+                    assert_eq!(
+                        pulse_delta(&ZERON_PULSE, decorative_view.entity_id(), cx),
+                        0.0
+                    );
+                    assert!(!cx.try_global::<PulseClock>().is_some_and(|clock| {
+                        clock.leases.contains_key(&decorative_view.entity_id())
+                    }));
+                }
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn cached_activity_loaders_keep_renewing_under_system_reduced_motion(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::{AppContext as _, Context, ParentElement as _, Render};
+
+        struct Loaders;
+        impl Render for Loaders {
+            fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let theme = crate::theme::Theme::dark();
+                gpui::div()
+                    .child(crate::loaders::gradient_spinner(
+                        "working",
+                        &theme,
+                        2.5,
+                        cx.entity_id(),
+                        cx,
+                    ))
+                    .child(crate::loaders::mini_glyph_spinner(
+                        "sidebar-working",
+                        2.0,
+                        theme.glyph,
+                        cx.entity_id(),
+                        cx,
+                    ))
+            }
+        }
+
+        cx.update(|cx| {
+            cx.set_global(MotionState {
+                preference: ReduceMotion::System,
+                pause_in_background: false,
+                system: true,
+                active: true,
+            });
+            apply(cx);
+        });
+        let window = cx.add_window(|_, _| Loaders);
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        cx.run_until_parked();
+        for _ in 0..20 {
+            cx.background_executor.advance_clock(PULSE_TICK);
+            cx.run_until_parked();
+            cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+                .unwrap();
+        }
+        cx.update(|cx| {
+            let clock = cx.global::<PulseClock>();
+            assert!(clock.tick >= 20);
+            assert_eq!(
+                clock.leases.len(),
+                2,
+                "transcript and cached sidebar loader"
+            );
+            assert!(
+                clock.leases.values().all(|lease| lease.stride == 2),
+                "both loaders renew at 15Hz"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn system_reduced_motion_keeps_activity_loaders_ticking(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+
+        cx.update(|cx| {
+            cx.set_global(MotionState {
+                preference: ReduceMotion::System,
+                pause_in_background: false,
+                system: true,
+                active: true,
+            });
+            apply(cx);
+            assert!(reduced_motion(cx));
+
+            let view = cx.new(|_| ());
+            drop(crate::loaders::gradient_spinner(
+                "working",
+                &crate::theme::Theme::dark(),
+                2.5,
+                view.entity_id(),
+                cx,
+            ));
+            assert!(
+                cx.try_global::<PulseClock>()
+                    .is_some_and(|clock| clock.leases.contains_key(&view.entity_id())),
+                "a working indicator must keep receiving ticks with system reduced motion"
+            );
+        });
     }
 
     #[test]

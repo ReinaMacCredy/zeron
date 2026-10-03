@@ -48,6 +48,7 @@ macro_rules! icon_assets {
 }
 
 icon_assets![
+    (MICROPHONE, "microphone"),
     (PROJECT_DEFAULT, "project-default"),
     (REMOTE_SERVER, "remote-server"),
     // Service-tier bolt, drawn in the toolbar family's linear weight; the

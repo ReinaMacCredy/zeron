@@ -63,6 +63,7 @@ name = "compact-picker-fixture"
 required-features = ["compact-picker-fixture"]
 
 [dependencies]
+zeron-voice = { path = "../voice" }
 url = "2"
 zeron-proto.workspace = true
 similar.workspace = true

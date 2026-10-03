@@ -231,9 +231,26 @@ pub fn ensure_extension(name: &str, format: ImageFormat) -> String {
     }
 }
 
-/// Stage a file from disk (picker / drop / pasted path). `Err` carries the
-/// user-facing message (mirrors the old `onError` copy).
+/// Stage a file from disk (picker / drop / pasted path); a BMP is converted to
+/// PNG, which agents can read. `Err` carries the user-facing message (mirrors
+/// the old `onError` copy).
 pub fn stage_file(path: &Path) -> Result<StagedAttachment, String> {
+    let mut staged = stage_file_verbatim(path)?;
+    if staged.image.format == ImageFormat::Bmp {
+        let png = bmp_to_png(&staged.image)
+            .map_err(|_| format!("{} is not a valid image.", staged.name))?;
+        staged.image = Arc::new(png);
+        staged.name = Path::new(&staged.name)
+            .with_extension("png")
+            .to_string_lossy()
+            .into_owned();
+    }
+    Ok(staged)
+}
+
+/// Stage a file's bytes exactly as stored, for callers that decode the image
+/// themselves (wallpapers) rather than hand it to an agent.
+pub fn stage_file_verbatim(path: &Path) -> Result<StagedAttachment, String> {
     let display_name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -253,14 +270,34 @@ pub fn stage_file(path: &Path) -> Result<StagedAttachment, String> {
     })
 }
 
-/// Stage an image pasted from the clipboard.
+/// Stage an image pasted from the clipboard. A BMP (what Windows puts there for
+/// a screenshot) is converted to PNG like [`stage_file`] does; one that won't
+/// decode stays as pasted.
 pub fn stage_clipboard_image(image: Image) -> StagedAttachment {
-    let format = image.format;
+    let image = if image.format == ImageFormat::Bmp
+        && let Ok(png) = bmp_to_png(&image)
+    {
+        png
+    } else {
+        image
+    };
     StagedAttachment {
         id: uuid::Uuid::new_v4().to_string(),
-        name: ensure_extension("image", format),
+        name: ensure_extension("image", image.format),
         image: Arc::new(image),
     }
+}
+
+/// Windows screenshots are BMP, but no agent harness inlines BMP and the
+/// agent's `Read` tool can't decode one — so they go out as PNG.
+fn bmp_to_png(bmp: &Image) -> Result<Image, String> {
+    let decoded = image::load_from_memory_with_format(&bmp.bytes, image::ImageFormat::Bmp)
+        .map_err(|e| e.to_string())?;
+    let mut png = std::io::Cursor::new(Vec::new());
+    decoded
+        .write_to(&mut png, image::ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
+    Ok(Image::from_bytes(ImageFormat::Png, png.into_inner()))
 }
 
 /// Stage native macOS capture bytes without a temporary file. The capture
@@ -919,6 +956,8 @@ pub struct PreviewImage {
     pub name: SharedString,
     pub image: Arc<Image>,
     pub(crate) viewer: crate::image_viewer::ImageView,
+    /// Fill behind an image drawn on a transparent canvas (diagrams).
+    pub(crate) plate: Option<gpui::Hsla>,
 }
 
 impl PreviewImage {
@@ -927,7 +966,13 @@ impl PreviewImage {
             name: name.into(),
             image,
             viewer: Default::default(),
+            plate: None,
         }
+    }
+
+    pub(crate) fn with_plate(mut self, plate: gpui::Hsla) -> Self {
+        self.plate = Some(plate);
+        self
     }
 }
 
@@ -969,9 +1014,14 @@ pub(crate) fn lightbox_with_size(
             })
     });
     let content = match natural_size {
-        Some(natural) => preview
-            .viewer
-            .render(preview.image.clone(), natural, None, window, cx),
+        Some(natural) => preview.viewer.render(
+            preview.image.clone(),
+            natural,
+            None,
+            preview.plate,
+            window,
+            cx,
+        ),
         None => div()
             .text_color(ink(0.6))
             .child("Loading image…")
@@ -1174,6 +1224,72 @@ mod tests {
                 "ext {ext}"
             );
         }
+    }
+
+    /// A 1x1 32-bit BI_RGB bitmap as the Windows clipboard produces it: one
+    /// BGRX pixel, the fourth byte unused (zero).
+    fn clipboard_bmp() -> Vec<u8> {
+        let mut bmp = b"BM".to_vec();
+        // File size, reserved, pixel offset, header size, width, height.
+        for field in [58u32, 0, 54, 40, 1, 1] {
+            bmp.extend(field.to_le_bytes());
+        }
+        bmp.extend([1, 0, 32, 0]); // planes, bits per pixel
+        bmp.extend([0; 24]); // BI_RGB, image size, resolution, palette
+        bmp.extend([30, 20, 10, 0]);
+        bmp
+    }
+
+    #[test]
+    fn pasted_bmp_screenshot_is_staged_as_an_opaque_png() {
+        let staged = stage_clipboard_image(Image::from_bytes(ImageFormat::Bmp, clipboard_bmp()));
+        assert_eq!(staged.image.format, ImageFormat::Png);
+        assert_eq!(staged.name, "image.png");
+        let png = image::load_from_memory(staged.bytes()).unwrap();
+        assert_eq!(png.into_rgba8().get_pixel(0, 0).0, [10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn bmp_file_is_staged_as_png_but_wallpapers_keep_the_original() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Screenshot 1.BMP");
+        std::fs::write(&path, clipboard_bmp()).unwrap();
+
+        let staged = stage_file(&path).unwrap();
+        assert_eq!(staged.image.format, ImageFormat::Png);
+        assert_eq!(staged.name, "Screenshot 1.png");
+        assert!(image::load_from_memory(staged.bytes()).is_ok());
+
+        let verbatim = stage_file_verbatim(&path).unwrap();
+        assert_eq!(verbatim.image.format, ImageFormat::Bmp);
+        assert_eq!(verbatim.name, "Screenshot 1.BMP");
+        assert_eq!(verbatim.bytes(), clipboard_bmp());
+    }
+
+    #[test]
+    fn non_bmp_files_are_staged_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shot.png");
+        image::RgbImage::new(1, 1).save(&path).unwrap();
+        let staged = stage_file(&path).unwrap();
+        assert_eq!(staged.name, "shot.png");
+        assert_eq!(staged.bytes(), std::fs::read(&path).unwrap());
+    }
+
+    #[test]
+    fn undecodable_bmp_is_refused_for_files_and_kept_for_pastes() {
+        let broken = b"BM not really a bitmap".to_vec();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("broken.bmp");
+        std::fs::write(&path, &broken).unwrap();
+        assert_eq!(
+            stage_file(&path).err().unwrap(),
+            "broken.bmp is not a valid image."
+        );
+
+        let pasted = stage_clipboard_image(Image::from_bytes(ImageFormat::Bmp, broken));
+        assert_eq!(pasted.image.format, ImageFormat::Bmp);
+        assert_eq!(pasted.name, "image.bmp");
     }
 
     #[test]

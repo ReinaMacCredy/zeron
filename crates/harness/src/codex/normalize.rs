@@ -6,7 +6,7 @@
 //! types) are accepted, and unknown item types map to nothing.
 
 use serde_json::Value;
-use zeron_proto::{AgentEvent, DoneStatus, TodoItem, ToolCall, ToolDiff};
+use zeron_proto::{AgentEvent, DoneStatus, TodoItem, TodoStatus, ToolCall, ToolDiff};
 
 use crate::acp::normalize::{capped_diff, patch_diff};
 
@@ -224,6 +224,30 @@ fn file_change_diff(change: &Value) -> Option<ToolDiff> {
     }
 }
 
+/// `turn/plan/updated` → the live checklist chip. Steps carry
+/// `pending | inProgress | completed`; like ACP plans the update has no item
+/// id, so it refreshes the singleton [`zeron_proto::LIVE_PLAN_TOOL_ID`] in place.
+pub(crate) fn plan_update_events(params: &Value) -> Vec<AgentEvent> {
+    let Some(plan) = params.get("plan").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let items = plan
+        .iter()
+        .map(|step| {
+            TodoItem::new(
+                str_field(step, &["step"]),
+                TodoStatus::parse(&str_field(step, &["status"])),
+            )
+        })
+        .collect();
+    tool_lifecycle(
+        Phase::Completed,
+        zeron_proto::LIVE_PLAN_TOOL_ID.into(),
+        ToolCall::Todo { items },
+        false,
+    )
+}
+
 pub(crate) fn item_type(item: &Value) -> &str {
     item.get("type").and_then(Value::as_str).unwrap_or("")
 }
@@ -397,9 +421,17 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
                 .map(|a| a.as_slice())
                 .unwrap_or_default()
                 .iter()
-                .map(|t| TodoItem {
-                    text: str_field(t, &["text"]),
-                    done: field(t, &["completed", "done"]).and_then(Value::as_bool) == Some(true),
+                .map(|t| {
+                    let done =
+                        field(t, &["completed", "done"]).and_then(Value::as_bool) == Some(true);
+                    TodoItem::new(
+                        str_field(t, &["text"]),
+                        if done {
+                            TodoStatus::Completed
+                        } else {
+                            TodoStatus::Pending
+                        },
+                    )
                 })
                 .collect();
             tool_lifecycle(phase, id, ToolCall::Todo { items }, false)
@@ -909,6 +941,40 @@ mod tests {
             "changes": [{"path": "/c.rs", "kind": {"type": "delete"}, "diff": "gone\n"}]}),
         );
         assert_eq!(declined, None);
+    }
+
+    #[test]
+    fn plan_update_maps_to_the_live_checklist_with_in_progress() {
+        let events = plan_update_events(&json!({
+            "threadId": "t", "turnId": "u", "explanation": null,
+            "plan": [
+                { "step": "read", "status": "completed" },
+                { "step": "fix", "status": "inProgress" },
+                { "step": "test", "status": "pending" },
+            ],
+        }));
+        assert_eq!(
+            events,
+            vec![
+                AgentEvent::ToolCall {
+                    id: zeron_proto::LIVE_PLAN_TOOL_ID.into(),
+                    call: ToolCall::Todo {
+                        items: vec![
+                            TodoItem::new("read", TodoStatus::Completed),
+                            TodoItem::new("fix", TodoStatus::InProgress),
+                            TodoItem::new("test", TodoStatus::Pending),
+                        ]
+                    },
+                },
+                AgentEvent::ToolResult {
+                    id: zeron_proto::LIVE_PLAN_TOOL_ID.into(),
+                    is_error: false,
+                    output: None,
+                    diff: None,
+                },
+            ]
+        );
+        assert!(plan_update_events(&json!({ "threadId": "t" })).is_empty());
     }
 
     #[test]

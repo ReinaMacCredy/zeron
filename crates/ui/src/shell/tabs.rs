@@ -433,7 +433,7 @@ impl Shell {
             || self.sync_flow.has_visible_overlay()
             || self.delete_confirm.is_some()
             || self.delete_space_confirm.is_some()
-            || self.rename_dialog.is_some()
+            || self.chat_rename.is_some()
             || self.rename_space_dialog.is_some()
             || self.discard_working_tree.is_some()
             || self.chat_menu.get().is_some()
@@ -624,7 +624,10 @@ impl Shell {
     /// A new chat always starts with the terminal hidden: when the drawer is
     /// open it just hides (detach, not close — the source chat's tabs and
     /// PTYs survive for the return trip).
-    pub(super) fn open_new_session(&mut self, cx: &mut Context<Self>) {
+    ///
+    /// `project` (the per-project `+` on a sidebar group header) homes the
+    /// canvas on that project and wins over the sidebar filter.
+    pub(super) fn open_new_session(&mut self, project: Option<String>, cx: &mut Context<Self>) {
         self.snapshot_current_chat(cx);
         self.command_palette = None;
         self.route = Route::Chat;
@@ -645,9 +648,8 @@ impl Shell {
         }
         let target = {
             let state = self.state.read(cx);
-            self.settings
-                .space_filter
-                .clone()
+            project
+                .or_else(|| self.settings.space_filter.clone())
                 .filter(|id| state.space_row(id).is_some())
         };
         let defaults = crate::settings::composer::ComposerDefaults::load(&self.data_dir);
@@ -2145,7 +2147,7 @@ mod strip_regressions {
                 .expect("boot draft");
             assert_eq!(shell.open_tab_ids(cx), [first.clone()]);
             // ⌘N on an empty draft reuses it.
-            shell.open_new_session(cx);
+            shell.open_new_session(None, cx);
             shell.on_state_changed(&shell.state.clone(), cx);
             assert_eq!(
                 shell.state.read(cx).active_draft.as_deref(),
@@ -2154,7 +2156,7 @@ mod strip_regressions {
             assert_eq!(shell.open_tab_ids(cx), [first.clone()]);
             // ⌘N on an invested draft opens a second one beside it.
             invest(&first, "keep me", cx);
-            shell.open_new_session(cx);
+            shell.open_new_session(None, cx);
             shell.on_state_changed(&shell.state.clone(), cx);
             let second = shell.state.read(cx).active_draft.clone().unwrap();
             assert_ne!(second, first);

@@ -395,8 +395,15 @@ impl Pickers {
     }
 
     pub(super) fn show_compact_models(&mut self, cx: &mut Context<Self>) {
-        // The provider button picks the provider; the list holds its models.
-        self.show_compact_list(ModelRail::Harness, "Search models…", cx);
+        // Browse every offered provider, just as the standard picker's rail
+        // allows. rail_descriptors still limits existing chats to their provider.
+        // A foreign-provider row switches the provider before picking its model.
+        let rail = if self.harness_is_committed(cx) {
+            ModelRail::Harness
+        } else {
+            ModelRail::All
+        };
+        self.show_compact_list(rail, "Search models…", cx);
     }
 
     /// The starred models across providers, opened from the provider page.
@@ -701,6 +708,17 @@ impl Pickers {
             .map(|o| o.id.clone())
     }
 
+    /// The panel's title for a [`ModelName`]. Loading also draws a ghost
+    /// bar in the name's place, as the composer chip does.
+    fn compact_title_text(name: &ModelName) -> SharedString {
+        match name {
+            ModelName::Named(label) => label.clone(),
+            ModelName::Loading => "Loading models…".into(),
+            ModelName::None { no_agents: true } => "No agents available".into(),
+            ModelName::None { .. } => "Select model".into(),
+        }
+    }
+
     /// The slider's stops: the model's reasoning ladder, else an option
     /// shaped like one (Cursor's `effort`/`reasoning` choices), so every
     /// model with an effort gets the same slider.
@@ -893,11 +911,18 @@ impl Pickers {
 
     /// The panel's shortcuts, live only while it is the picker's page: Up
     /// and Down open the model list on the model beside the selected one,
-    /// Tab cycles providers, Left/Right (Home/End) set the effort.
+    /// Tab cycles providers, Left/Right (Home/End) set the effort, F toggles
+    /// fast mode.
     pub(super) fn compact_panel_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         self.compact_keyboard = true;
         match event.keystroke.key.as_str() {
             "escape" => self.animate_close(cx),
+            "f" if !event.keystroke.modifiers.modified() => {
+                let Some((option, choice, default, _)) = self.compact_fast_choice(cx) else {
+                    return;
+                };
+                self.pick_option(option, choice, default, cx);
+            }
             "up" | "down" => {
                 self.show_compact_models(cx);
                 let delta = if event.keystroke.key == "up" { -1 } else { 1 };
@@ -1179,11 +1204,17 @@ impl Pickers {
         let (levels, selected) = self
             .compact_effort(cx)
             .map_or((Vec::new(), 0), |e| (e.labels, e.selected));
-        let label: SharedString = self
-            .selected_model(cx)
-            .map(|m| m.label.clone())
-            .unwrap_or_else(|| "Select model".into())
-            .into();
+        let name = self.model_name(cx);
+        let label = Self::compact_title_text(&name);
+        let name_element: AnyElement = if name == ModelName::Loading {
+            popover::skeleton_bar(72.0, cx.entity_id(), cx)
+        } else {
+            div()
+                .min_w_0()
+                .truncate()
+                .child(label.clone())
+                .into_any_element()
+        };
         let effort: SharedString = levels
             .get(selected)
             .cloned()
@@ -1249,7 +1280,7 @@ impl Pickers {
                                 .text_color(motion::mix(theme.text_muted, theme.text, hover))
                         }
                     })
-                    .child(div().min_w_0().truncate().child(label.clone()))
+                    .child(name_element)
                     .child(
                         // Leans 3pt toward the list and firms up on hover.
                         div()

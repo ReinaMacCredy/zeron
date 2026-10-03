@@ -211,6 +211,8 @@ pub enum FilesEvent {
     },
     /// A footer row: open this side chat (by id) in the right pane.
     OpenChildChat(String),
+    /// A footer row's double-click: edit this side chat's title in place.
+    RenameChildChat(String),
     ChildChatContextMenu {
         chat_id: String,
         position: Point<Pixels>,

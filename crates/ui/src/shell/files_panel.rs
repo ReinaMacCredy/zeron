@@ -232,6 +232,9 @@ impl Shell {
                         cx,
                     ),
                     FilesEvent::OpenChildChat(chat_id) => this.open_child_chat_tab(chat_id, cx),
+                    FilesEvent::RenameChildChat(chat_id) => {
+                        this.open_rename_chat(chat_id.clone(), cx)
+                    }
                     FilesEvent::ChildChatContextMenu { chat_id, position } => {
                         this.chat_menu.open(ChatMenuState {
                             chat_id: chat_id.clone(),

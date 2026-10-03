@@ -57,7 +57,7 @@ fn choose(
         (recency, *rank)
     });
     for (_, path) in candidates {
-        if let Ok(staged) = crate::attachments::stage_file(&path)
+        if let Ok(staged) = crate::attachments::stage_file_verbatim(&path)
             && let Ok(image) = crate::new_thread_background_image::decode(staged.bytes())
         {
             return Ok((path, staged, image));

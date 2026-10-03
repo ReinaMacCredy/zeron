@@ -152,6 +152,7 @@ zeron/
                                  # sockets ({s,k,to,from} frames)
     theme/        zeron-theme    # source-neutral theme schema + built-in/custom registry,
                                  # validation, provenance, and local VS Code compiler
+    voice/        zeron-voice    # desktop-local optional Parakeet model, capture and inference; no RPC/sync
     ui/           zeron-ui       # gpui app: shell, sidebar, conversation, composer,
                                  # terminal view, diff pane, settings, animation kit
   apps/
