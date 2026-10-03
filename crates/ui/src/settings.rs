@@ -21,6 +21,7 @@ pub mod appearance;
 pub mod archived;
 pub mod composer;
 pub mod computer;
+pub mod delegation;
 pub mod devices;
 pub mod files;
 pub mod harnesses;

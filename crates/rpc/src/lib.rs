@@ -45,6 +45,9 @@ pub mod methods {
     /// replies with the device's fresh `ListHarnesses` catalog.
     pub const GET_TITLE_SETTINGS: &str = "GetTitleSettings";
     pub const SET_TITLE_SETTINGS: &str = "SetTitleSettings";
+    /// `delegate_task` limits (d69). No params / `DelegationSettings` → `{}`.
+    pub const GET_DELEGATION_SETTINGS: &str = "GetDelegationSettings";
+    pub const SET_DELEGATION_SETTINGS: &str = "SetDelegationSettings";
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_SKILLS: &str = "ListSkills";
@@ -75,6 +78,17 @@ pub mod methods {
     /// target, a working target finishes its own turn first. Self-send and
     /// cross-project sends are refused. `{chatId, fromChatId, text}` → `{id}`.
     pub const SEND_THREAD_MESSAGE: &str = "SendThreadMessage";
+    // Delegated child tasks (d67-d70), IPC-only like the thread tools.
+    /// `DelegateTaskParams` → `TaskView`. Failures read `"<code>: <message>"`.
+    pub const DELEGATE_TASK: &str = "DelegateTask";
+    /// `{chatId, taskId, acknowledge?}` → `TaskView`; acknowledging a finished
+    /// task settles its wake.
+    pub const TASK_STATUS: &str = "TaskStatus";
+    /// `{chatId, taskId}` → `{status}`: `cancel_requested` or the final status.
+    pub const TASK_CANCEL: &str = "TaskCancel";
+    /// `{chatId, taskId}` → `{}`: a timed-out `mode: wait` hands the result
+    /// back to the wake.
+    pub const TASK_WAKE_ALWAYS: &str = "TaskWakeAlways";
     /// Compact joined transcript count, last role and bounded prose preview. `{chatId}`.
     pub const GET_THREAD_SUMMARY: &str = "GetThreadSummary";
     /// Move the inter-thread messages waiting on `chatId`'s queue into its

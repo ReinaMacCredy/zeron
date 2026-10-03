@@ -817,3 +817,607 @@ async fn summary_rpc_reads_a_bounded_preview_without_a_transcript_watch() {
     assert_eq!(summary["lastText"], format!("{}…", "界".repeat(120)));
     assert!(summary.to_string().len() < 500);
 }
+
+fn delegate(task: &str) -> zeron_engine::doc_host::DelegateTaskParams {
+    serde_json::from_value(serde_json::json!({ "ownerChatId": "lead", "task": task }))
+        .expect("delegate params")
+}
+
+fn delegation(core: &EngineCore, chat_id: &str) -> zeron_proto::Delegation {
+    core.workspace
+        .chat(chat_id)
+        .unwrap()
+        .and_then(|chat| chat.delegation)
+        .expect("a delegated chat")
+}
+
+fn queue_interrupt(core: &EngineCore, chat_id: &str) {
+    core.doc_host
+        .open(chat_id)
+        .expect("open chat")
+        .doc()
+        .queue_command(&SessionCommandEntry {
+            id: "stop-1".into(),
+            payload: SessionCommandPayload::Interrupt {},
+            issued_by: "viewer".into(),
+            issued_at: chrono::Utc::now().timestamp_millis(),
+            based_on: None::<CommandBasedOn>,
+            expires_at: None,
+            status: SessionCommandStatus::Pending,
+            resolution: None,
+            computer_generation: None,
+        })
+        .expect("queue interrupt");
+}
+
+#[tokio::test]
+async fn a_delegated_child_is_owned_hidden_and_starts_from_the_task_alone() {
+    let rig = rig(Duration::from_millis(5));
+    let mut params = delegate("audit the login flow");
+    params.role = Some("review".into());
+    let view = rig
+        .core
+        .doc_host
+        .delegate_task(params, Default::default())
+        .await
+        .expect("delegate");
+    let row = rig.core.workspace.chat(&view.task_id).unwrap().unwrap();
+    let d = row.delegation.expect("delegation");
+    assert_eq!(d.delegated_by_chat_id, "lead");
+    assert_eq!(d.depth, 1);
+    assert_eq!(row.created_by_chat_id, None, "d29 stays grouping-only");
+    assert_eq!(row.title.as_deref(), Some("audit the login flow"));
+    wait_for(
+        || !rig.prompts.lock().unwrap().is_empty(),
+        "the child's first turn",
+    )
+    .await;
+    assert_eq!(
+        rig.prompts.lock().unwrap()[0],
+        "Act as the review sub-agent for this task.\n\naudit the login flow",
+        "no owner history and no peer framing"
+    );
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_finished_child_wakes_its_idle_owner_once_and_task_status_acknowledges() {
+    let rig = rig(Duration::from_millis(5));
+    let view = rig
+        .core
+        .doc_host
+        .delegate_task(delegate("count the tests"), Default::default())
+        .await
+        .expect("delegate");
+    let child = view.task_id.clone();
+    let wake = format!(
+        "Delegated task {child} reached a terminal state. Use task_status with taskId {child} to read the result."
+    );
+    wait_for(
+        || {
+            entries(&rig.core, "lead")
+                .iter()
+                .any(|e| e.from_chat_id.as_deref() == Some(child.as_str()))
+        },
+        "the owner's wake",
+    )
+    .await;
+    wait_for(|| idle(&rig.core, "lead"), "the owner's wake turn").await;
+    let d = delegation(&rig.core, &child);
+    assert_eq!(d.status, zeron_proto::DelegationStatus::Completed);
+    assert_eq!(d.delivery, Some(zeron_proto::DelegationDelivery::Delivered));
+    let wakes = rig
+        .prompts
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|p| **p == wake)
+        .count();
+    assert_eq!(wakes, 1, "one wake, sent as the bare pointer text");
+
+    let read = rig
+        .core
+        .doc_host
+        .task_status("lead", &child, true)
+        .await
+        .unwrap();
+    assert_eq!(read.work_state, "result_available");
+    assert_eq!(read.status, "completed");
+    assert_eq!(read.summary.as_deref(), Some("noted"));
+    assert_eq!(
+        delegation(&rig.core, &child).delivery,
+        Some(zeron_proto::DelegationDelivery::Acknowledged)
+    );
+    assert!(
+        rig.core
+            .doc_host
+            .task_status("someone-else", &child, true)
+            .await
+            .is_err(),
+        "only the owner reads its task"
+    );
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_owner_stop_disposes_the_wake_but_leaves_the_child_running() {
+    let rig = rig(Duration::from_millis(150));
+    queue_human_run(&rig.core, "lead", "cmd-1", "msg-1");
+    wait_for(
+        || {
+            rig.core
+                .sessions
+                .session_status("lead")
+                .is_some_and(|s| s.status == SessionStatus::Working)
+        },
+        "the owner's turn",
+    )
+    .await;
+    let child = rig
+        .core
+        .doc_host
+        .delegate_task(delegate("long job"), Default::default())
+        .await
+        .unwrap()
+        .task_id;
+    queue_interrupt(&rig.core, "lead");
+    wait_for(
+        || {
+            delegation(&rig.core, &child).delivery
+                == Some(zeron_proto::DelegationDelivery::Disposed)
+        },
+        "the stop to dispose the wake",
+    )
+    .await;
+    assert!(
+        delegation(&rig.core, &child).is_running(),
+        "the child keeps working"
+    );
+    wait_for(
+        || !delegation(&rig.core, &child).is_running(),
+        "the child to finish",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !entries(&rig.core, "lead")
+            .iter()
+            .any(|e| e.from_chat_id.as_deref() == Some(child.as_str())),
+        "no wake after a stop"
+    );
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_archived_owner_gets_no_wake_and_stays_archived() {
+    let rig = rig(Duration::from_millis(30));
+    let child = rig
+        .core
+        .doc_host
+        .delegate_task(delegate("quiet job"), Default::default())
+        .await
+        .unwrap()
+        .task_id;
+    rig.core.workspace.set_chat_archived("lead", true).unwrap();
+    wait_for(
+        || !delegation(&rig.core, &child).is_running(),
+        "the child to finish",
+    )
+    .await;
+    assert_eq!(
+        delegation(&rig.core, &child).delivery,
+        Some(zeron_proto::DelegationDelivery::Disposed)
+    );
+    assert!(rig.core.workspace.chat("lead").unwrap().unwrap().archived);
+    assert_eq!(queue_len(&rig.core, "lead"), 0);
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn delegation_limits_and_retries_follow_the_settings() {
+    let rig = rig(Duration::from_millis(200));
+    let limits = zeron_engine::registry::DelegationSettings {
+        max_depth: 1,
+        max_running_children: 1,
+    };
+    let mut first = delegate("one");
+    first.client_request_id = Some("k1".into());
+    let child = rig
+        .core
+        .doc_host
+        .delegate_task(first.clone(), limits)
+        .await
+        .unwrap()
+        .task_id;
+    let again = rig
+        .core
+        .doc_host
+        .delegate_task(first, limits)
+        .await
+        .unwrap()
+        .task_id;
+    assert_eq!(
+        again, child,
+        "a retried clientRequestId returns the same task"
+    );
+    let err = rig
+        .core
+        .doc_host
+        .delegate_task(delegate("two"), limits)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.starts_with("child_limit"), "{err}");
+    let mut nested = delegate("grandchild");
+    nested.owner_chat_id = child.clone();
+    let err = rig
+        .core
+        .doc_host
+        .delegate_task(nested, limits)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.starts_with("depth_limit"), "{err}");
+    let cancelled = rig.core.doc_host.task_cancel("lead", &child).await.unwrap();
+    assert_eq!(cancelled, "cancel_requested");
+    wait_for(
+        || delegation(&rig.core, &child).status == zeron_proto::DelegationStatus::Cancelled,
+        "the cancelled child to settle",
+    )
+    .await;
+    rig.core.shutdown().await;
+}
+
+struct DelegatingHarness {
+    release: Arc<tokio::sync::Notify>,
+    steerable: bool,
+    steers: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl Harness for DelegatingHarness {
+    fn id(&self) -> HarnessId {
+        HarnessId::Mock
+    }
+    fn display_name(&self) -> &str {
+        "Delegating"
+    }
+    fn supports_steering(&self) -> bool {
+        self.steerable
+    }
+    fn steering_mode(&self) -> SteeringMode {
+        if self.steerable {
+            SteeringMode::StepBoundary
+        } else {
+            SteeringMode::TurnBoundary
+        }
+    }
+    fn reasoning_levels(&self) -> &[ReasoningLevel] {
+        &[]
+    }
+    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+        Ok(vec![])
+    }
+    async fn run(
+        &self,
+        request: RunRequest,
+        mut controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(8);
+        let steers = self.steers.clone();
+        let confirm = tx.clone();
+        tokio::spawn(async move {
+            while let Some(message) = controls.steering.recv().await {
+                steers.lock().unwrap().push(message.prompt);
+                let _ = confirm
+                    .send(Ok(AgentEvent::Steered {
+                        assistant_message_id: Some("a-del".into()),
+                        next_assistant_message_id: Some("a-del-2".into()),
+                    }))
+                    .await;
+            }
+        });
+        let owner = request.prompt == "human prompt";
+        let release = self.release.clone();
+        tokio::spawn(async move {
+            let started = AgentEvent::SessionStarted {
+                harness: HarnessId::Mock,
+                model: "rec-1".into(),
+                tools: vec![],
+                cwd: "/tmp".into(),
+                session_id: "hs-del".into(),
+                assistant_message_id: "a-del".into(),
+            };
+            let _ = tx.send(Ok(started)).await;
+            if owner {
+                let call = zeron_proto::ToolCall::Mcp {
+                    server: "zeron".into(),
+                    tool: "delegate_task".into(),
+                    input: Some(serde_json::json!({ "task": "probe the cache" })),
+                };
+                let _ = tx
+                    .send(Ok(AgentEvent::ToolCall {
+                        id: "tc-1".into(),
+                        call,
+                    }))
+                    .await;
+                release.notified().await;
+                let _ = tx
+                    .send(Ok(AgentEvent::ToolResult {
+                        id: "tc-1".into(),
+                        is_error: false,
+                        output: None,
+                        diff: None,
+                    }))
+                    .await;
+            }
+            let _ = tx
+                .send(Ok(AgentEvent::TextDelta { text: "ok".into() }))
+                .await;
+            let _ = tx
+                .send(Ok(AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    result: None,
+                    error: None,
+                    session_id: Some("hs-del".into()),
+                }))
+                .await;
+        });
+        Ok(futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|event| (event, rx))
+        })
+        .boxed())
+    }
+}
+
+#[tokio::test]
+async fn the_delegate_task_chip_links_to_the_child_it_opened() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("device-id"), "dev-a").unwrap();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(DelegatingHarness {
+        release: release.clone(),
+        steerable: false,
+        steers: Arc::default(),
+    }));
+    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+        .expect("engine core assembles");
+    core.workspace
+        .create_space("space-tt", "dev-a", "/tmp", None, false)
+        .unwrap();
+    core.workspace
+        .create_chat("lead", Some("space-tt"), None, None, None)
+        .unwrap();
+    queue_human_run(&core, "lead", "cmd-1", "msg-1");
+    wait_for(
+        || {
+            core.sessions
+                .session_status("lead")
+                .is_some_and(|s| s.status == SessionStatus::Working)
+        },
+        "the owner's turn",
+    )
+    .await;
+    let child = core
+        .doc_host
+        .delegate_task(delegate(" probe the cache "), Default::default())
+        .await
+        .unwrap()
+        .task_id;
+    release.notify_one();
+    let chip_ref = || {
+        entries(&core, "lead").iter().find_map(|entry| {
+            entry.parts.iter().find_map(|part| match part {
+                zeron_doc::MessagePart::Tool {
+                    id, subagent_ref, ..
+                } if id == "tc-1" => Some(subagent_ref.clone()),
+                _ => None,
+            })
+        })
+    };
+    wait_for(|| chip_ref().flatten().is_some(), "the chip binding").await;
+    assert_eq!(chip_ref().flatten().as_deref(), Some(child.as_str()));
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_child_that_finishes_mid_turn_steers_its_wake_into_the_owners_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("device-id"), "dev-a").unwrap();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let steers: Arc<Mutex<Vec<String>>> = Arc::default();
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(DelegatingHarness {
+        release: release.clone(),
+        steerable: true,
+        steers: steers.clone(),
+    }));
+    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+        .expect("engine core assembles");
+    core.workspace
+        .create_space("space-tt", "dev-a", "/tmp", None, false)
+        .unwrap();
+    core.workspace
+        .create_chat("lead", Some("space-tt"), None, None, None)
+        .unwrap();
+    queue_human_run(&core, "lead", "cmd-1", "msg-1");
+    wait_for(
+        || {
+            core.sessions
+                .session_status("lead")
+                .is_some_and(|s| s.status == SessionStatus::Working)
+        },
+        "the owner's turn",
+    )
+    .await;
+    let child = core
+        .doc_host
+        .delegate_task(delegate("probe the cache"), Default::default())
+        .await
+        .unwrap()
+        .task_id;
+    wait_for(
+        || {
+            steers
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|steer| steer.contains(&format!("Delegated task {child} reached")))
+        },
+        "the wake steered into the live turn",
+    )
+    .await;
+    assert_eq!(queue_len(&core, "lead"), 0, "steered, not queued");
+    assert_eq!(
+        delegation(&core, &child).delivery,
+        Some(zeron_proto::DelegationDelivery::Delivered)
+    );
+    release.notify_one();
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn children_finishing_while_the_wake_waits_share_one_wake() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("device-id"), "dev-a").unwrap();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(DelegatingHarness {
+        release: release.clone(),
+        steerable: false,
+        steers: Arc::default(),
+    }));
+    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+        .expect("engine core assembles");
+    core.workspace
+        .create_space("space-tt", "dev-a", "/tmp", None, false)
+        .unwrap();
+    core.workspace
+        .create_chat("lead", Some("space-tt"), None, None, None)
+        .unwrap();
+    queue_human_run(&core, "lead", "cmd-1", "msg-1");
+    wait_for(
+        || {
+            core.sessions
+                .session_status("lead")
+                .is_some_and(|s| s.status == SessionStatus::Working)
+        },
+        "the owner's turn",
+    )
+    .await;
+    let mut children = Vec::new();
+    for task in ["first", "second"] {
+        children.push(
+            core.doc_host
+                .delegate_task(delegate(task), Default::default())
+                .await
+                .unwrap()
+                .task_id,
+        );
+    }
+    let queue = || {
+        core.doc_host
+            .open("lead")
+            .unwrap()
+            .doc()
+            .read_queue()
+            .unwrap()
+    };
+    wait_for(
+        || queue().iter().any(|row| row.delegated_tasks.len() == 2),
+        "one wake naming both children",
+    )
+    .await;
+    let wakes: Vec<_> = queue()
+        .into_iter()
+        .filter(|row| !row.delegated_tasks.is_empty())
+        .collect();
+    assert_eq!(wakes.len(), 1);
+    assert_eq!(wakes[0].delegated_tasks, children);
+    assert!(wakes[0].text.starts_with("Delegated tasks "));
+    release.notify_one();
+    wait_for(
+        || {
+            children.iter().all(|child| {
+                delegation(&core, child).delivery
+                    == Some(zeron_proto::DelegationDelivery::Delivered)
+            })
+        },
+        "the shared wake delivered",
+    )
+    .await;
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_child_that_cannot_start_fails_the_delegation() {
+    let rig = rig(Duration::from_millis(5));
+    let mut params = delegate("needs codex");
+    params.harness = Some(HarnessId::Codex);
+    let err = rig
+        .core
+        .doc_host
+        .delegate_task(params, Default::default())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.starts_with("orchestration_error"), "{err}");
+    let failed: Vec<_> = rig
+        .core
+        .workspace
+        .read_chats()
+        .unwrap()
+        .into_iter()
+        .filter_map(|chat| chat.delegation)
+        .collect();
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].status, zeron_proto::DelegationStatus::Failed);
+    assert_eq!(
+        failed[0].delivery,
+        Some(zeron_proto::DelegationDelivery::Disposed)
+    );
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_cancelled_child_settles_while_its_own_child_still_runs() {
+    let rig = rig(Duration::from_millis(150));
+    let child = rig
+        .core
+        .doc_host
+        .delegate_task(delegate("parent job"), Default::default())
+        .await
+        .unwrap()
+        .task_id;
+    let mut nested = delegate("grandchild job");
+    nested.owner_chat_id = child.clone();
+    let grandchild = rig
+        .core
+        .doc_host
+        .delegate_task(nested, Default::default())
+        .await
+        .unwrap()
+        .task_id;
+    rig.core.doc_host.task_cancel("lead", &child).await.unwrap();
+    wait_for(
+        || delegation(&rig.core, &child).status == zeron_proto::DelegationStatus::Cancelled,
+        "the cancelled child to settle",
+    )
+    .await;
+    assert!(
+        delegation(&rig.core, &grandchild).is_running(),
+        "cancel does not reach below the child"
+    );
+    wait_for(
+        || !delegation(&rig.core, &grandchild).is_running(),
+        "the grandchild to finish",
+    )
+    .await;
+    assert_eq!(
+        delegation(&rig.core, &grandchild).delivery,
+        Some(zeron_proto::DelegationDelivery::Disposed),
+        "no wake into a cancelled child"
+    );
+    rig.core.shutdown().await;
+}

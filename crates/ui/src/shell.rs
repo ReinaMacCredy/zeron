@@ -697,6 +697,11 @@ impl SettingsSection {
                 ("Session switcher shows", &["switcher", "recency"]),
                 ("Session switcher shows at most", &["switcher"]),
                 ("Thread naming", &["title", "automatic"]),
+                ("Delegation depth", &["delegate", "subagent", "nest"]),
+                (
+                    "Delegated tasks per chat",
+                    &["delegate", "subagent", "limit"],
+                ),
             ],
             SettingsSection::Harnesses => &[("Add account", &["sign in", "api key", "login"])],
             SettingsSection::Appearance => &[
@@ -3117,7 +3122,9 @@ impl Shell {
                         let send_pending = state.send_pending(&s.chat_id, now);
                         let chat = state.chats.iter().find(|c| c.id == s.chat_id);
                         let title = chat.and_then(|c| c.title.clone());
-                        let notify = chat.is_some_and(|c| c.created_by_chat_id.is_none());
+                        let notify = chat.is_some_and(|c| {
+                            c.created_by_chat_id.is_none() && c.delegation.is_none()
+                        });
                         (s.chat_id.clone(), status, send_pending, title, notify)
                     })
                     .collect();
@@ -4494,6 +4501,7 @@ impl Shell {
             }
             TranscriptEvent::OpenFile { chat_id, path } => self.open_tool_file(chat_id, path, cx),
             TranscriptEvent::OpenChat { chat_id } => self.open_chat(chat_id.clone(), cx),
+            TranscriptEvent::OpenDelegate { chat_id } => self.open_child_chat_tab(chat_id, cx),
             #[cfg(target_os = "macos")]
             TranscriptEvent::OpenHtml { chat_id, path } => {
                 self.open_html_in_browser(chat_id, path, cx)
@@ -15133,6 +15141,7 @@ mod tests {
             sidechat_source_chat_id: None,
             created_by_chat_id: None,
             previous_harnesses: Vec::new(),
+            delegation: None,
         }
     }
 
@@ -17546,6 +17555,7 @@ mod exit_regressions {
                         created_by_chat_id: None,
                         sidechat_source_chat_id: None,
                         previous_harnesses: Vec::new(),
+                        delegation: None,
                         space_id: Some("other".into()),
                         last_seen_at: None,
                         room_gen: None,
@@ -18485,6 +18495,7 @@ mod right_tab_mouse_regressions {
                     sidechat_source_chat_id: None,
                     created_by_chat_id: None,
                     previous_harnesses: Vec::new(),
+                    delegation: None,
                 };
                 let mut side = source.clone();
                 side.id = "side".into();

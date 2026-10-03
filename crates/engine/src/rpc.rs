@@ -144,6 +144,15 @@ struct CreateThreadParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct TaskParams {
+    chat_id: String,
+    task_id: String,
+    #[serde(default)]
+    acknowledge: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SendThreadMessageParams {
     chat_id: String,
     from_chat_id: String,
@@ -1603,6 +1612,8 @@ fn forwardable(method: &str) -> bool {
             | methods::CANCEL_INSTALL
             | methods::GET_TITLE_SETTINGS
             | methods::SET_TITLE_SETTINGS
+            | methods::GET_DELEGATION_SETTINGS
+            | methods::SET_DELEGATION_SETTINGS
             | methods::SET_HARNESS_ENABLED
             | methods::LIST_MODELS
             | methods::LIST_SKILLS
@@ -2005,6 +2016,16 @@ impl RpcService for EngineRpc {
                     .map_err(RpcError::Failed)?;
                 RpcReply::value(&self.registry.title_settings())
             }
+            methods::GET_DELEGATION_SETTINGS => {
+                RpcReply::value(&self.registry.delegation_settings())
+            }
+            methods::SET_DELEGATION_SETTINGS => {
+                let p: crate::registry::DelegationSettings = parse_params(params)?;
+                self.registry
+                    .set_delegation_settings(p)
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&self.registry.delegation_settings())
+            }
             methods::SET_HARNESS_ENABLED => {
                 let p: SetHarnessEnabledParams = parse_params(params)?;
                 update_harness_enabled(&self.registry, p.harness, p.enabled).await?;
@@ -2177,6 +2198,41 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "id": id }))
+            }
+            methods::DELEGATE_TASK => {
+                let p: crate::doc_host::DelegateTaskParams = parse_params(params)?;
+                let view = self
+                    .doc_host
+                    .delegate_task(p, self.registry.delegation_settings())
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&view)
+            }
+            methods::TASK_STATUS => {
+                let p: TaskParams = parse_params(params)?;
+                let view = self
+                    .doc_host
+                    .task_status(&p.chat_id, &p.task_id, p.acknowledge)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&view)
+            }
+            methods::TASK_CANCEL => {
+                let p: TaskParams = parse_params(params)?;
+                let status = self
+                    .doc_host
+                    .task_cancel(&p.chat_id, &p.task_id)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "taskId": p.task_id, "status": status }))
+            }
+            methods::TASK_WAKE_ALWAYS => {
+                let p: TaskParams = parse_params(params)?;
+                self.doc_host
+                    .task_wake_always(&p.chat_id, &p.task_id)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({}))
             }
             methods::GET_THREAD_SUMMARY => {
                 let p: ChatParams = parse_params(params)?;

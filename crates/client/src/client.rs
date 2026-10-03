@@ -220,7 +220,7 @@ impl ClientInner {
         let targets = state
             .chats
             .iter()
-            .filter(|c| !c.archived && c.created_by_chat_id.is_none())
+            .filter(|c| !c.archived && c.created_by_chat_id.is_none() && c.delegation.is_none())
             .filter_map(|c| {
                 let source = c.source_context.as_ref()?;
                 let branch = source.branch.trim();
@@ -761,6 +761,7 @@ impl Client {
             sidechat_source_chat_id: None,
             created_by_chat_id: None,
             previous_harnesses: Vec::new(),
+            delegation: None,
         };
         let id = chat.id.clone();
         self.inner.registry_write(|doc| doc.upsert_chat(&chat))?;

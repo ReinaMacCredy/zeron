@@ -95,6 +95,7 @@ struct HarnessPrefsFile {
     /// on without a trip to Settings.
     disabled: Vec<HarnessId>,
     titles: TitleSettings,
+    delegation: DelegationSettings,
     seen_models: Vec<SeenModels>,
     /// The allow-list written back when enablement was a fixed default set.
     /// Read once, folded into `disabled`, and never written again.
@@ -127,6 +128,22 @@ pub struct TitleSettings {
     pub harness: Option<HarnessId>,
     /// None selects the cheapest model offered by the selected harness.
     pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DelegationSettings {
+    pub max_depth: u32,
+    pub max_running_children: u32,
+}
+
+impl Default for DelegationSettings {
+    fn default() -> Self {
+        Self {
+            max_depth: 2,
+            max_running_children: 8,
+        }
+    }
 }
 
 type Factory = Box<dyn Fn() -> Result<Arc<dyn Harness>, HarnessError> + Send + Sync>;
@@ -464,6 +481,19 @@ impl HarnessRegistry {
         }
         settings.model = settings.model.filter(|model| !model.trim().is_empty());
         self.prefs().titles = settings;
+        self.persist_prefs();
+        Ok(())
+    }
+
+    pub fn delegation_settings(&self) -> DelegationSettings {
+        self.prefs().delegation
+    }
+
+    pub fn set_delegation_settings(&self, settings: DelegationSettings) -> Result<(), String> {
+        if settings.max_depth == 0 || settings.max_running_children == 0 {
+            return Err("Delegation limits must be at least 1".into());
+        }
+        self.prefs().delegation = settings;
         self.persist_prefs();
         Ok(())
     }

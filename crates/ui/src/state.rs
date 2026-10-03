@@ -1888,7 +1888,9 @@ impl AppState {
     // ---- queries ----
 
     pub fn visible_chats(&self) -> impl Iterator<Item = &Chat> {
-        self.chats.iter().filter(|c| !c.archived)
+        self.chats
+            .iter()
+            .filter(|c| !c.archived && c.delegation.is_none())
     }
 
     pub fn sessions_synced(&self) -> bool {
@@ -4108,6 +4110,7 @@ mod tests {
             sidechat_source_chat_id: None,
             created_by_chat_id: None,
             previous_harnesses: Vec::new(),
+            delegation: None,
         }
     }
 
@@ -5211,6 +5214,33 @@ mod tests {
         assert_eq!(visible, ["b"]);
     }
 
+    #[test]
+    fn visible_chats_leave_out_delegated_children() {
+        let mut state = AppState::new();
+        let mut child = chat("child", 0, None);
+        child.delegation = Some(zeron_proto::Delegation {
+            delegated_by_chat_id: "b".into(),
+            depth: 1,
+            anchor: "task".into(),
+            client_request_id: None,
+            owner_turn_started_at: None,
+            wake: zeron_proto::DelegationWake::Always,
+            status: zeron_proto::DelegationStatus::Running,
+            cancel_requested: false,
+            delivery: None,
+            summary: None,
+            started_at: chrono::Utc::now(),
+            completed_at: None,
+        });
+        state.apply_chats(vec![child, chat("b", 1, None)]);
+        let visible: Vec<&str> = state.visible_chats().map(|c| c.id.as_str()).collect();
+        assert_eq!(visible, ["b"]);
+        assert!(
+            state.chats.iter().any(|c| c.id == "child"),
+            "kept in state so its tab can open"
+        );
+    }
+
     #[gpui::test]
     fn a_removed_or_archived_chat_drops_its_computer_preview(cx: &mut gpui::TestAppContext) {
         cx.update(crate::computer::preview::init);
@@ -5426,6 +5456,7 @@ mod tests {
             delivery_gate: None,
             from_chat_id: None,
             computer_generation: None,
+            delegated_tasks: Vec::new(),
         };
         state.push_echo("c1", echo("held"));
         state.push_echo("c1", echo("sent"));

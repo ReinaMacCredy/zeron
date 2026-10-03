@@ -16646,6 +16646,7 @@ mod tests {
                         sidechat_source_chat_id: None,
                         created_by_chat_id: None,
                         previous_harnesses: Vec::new(),
+                        delegation: None,
                     }];
                     state.selected_chat = Some("c1".into());
                 });
@@ -16893,6 +16894,7 @@ mod tests {
             sidechat_source_chat_id: sidechat_of.map(str::to_string),
             created_by_chat_id: None,
             previous_harnesses: Vec::new(),
+            delegation: None,
         }
     }
 
@@ -17421,6 +17423,7 @@ mod tests {
             sidechat_source_chat_id: None,
             created_by_chat_id: None,
             previous_harnesses: Vec::new(),
+            delegation: None,
         };
         let mut chats = vec![
             chat("a1", Some("Fix PR fetching")),

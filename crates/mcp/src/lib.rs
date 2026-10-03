@@ -8,7 +8,8 @@
 //! never a tool input. Threads are peers (d25): nothing here cancels or
 //! archive-cascades another chat. Two tools act on another chat's turn by
 //! owner ruling (d49, 2026-09-25): interrupt_thread stops it and
-//! respond_to_input answers its pending question.
+//! respond_to_input answers its pending question. Delegated tasks (d67) are
+//! owned children, not peers: task_cancel stops one.
 
 use std::collections::HashSet;
 use std::pin::Pin;
@@ -45,6 +46,7 @@ pub const SEND_BUDGET: usize = 16;
 /// A Working row that stops heartbeating only turns stale by the clock, so a
 /// wait re-evaluates its snapshot on a timer, not just on pushes.
 const STALE_RECHECK: Duration = Duration::from_secs(5);
+const MODEL_LIST_WAIT: Duration = Duration::from_secs(20);
 
 pub struct ThreadTools {
     client: RpcClient,
@@ -275,6 +277,61 @@ pub fn tool_list() -> Value {
                 "required": ["harness"],
                 "additionalProperties": false
             }
+        },
+        {
+            "name": "orchestrator_capabilities",
+            "description": "List the harnesses on this device and their current models from the same live catalog as the composer, the run settings a delegated task inherits from this chat, and the delegation limits set in Settings. For a separate top-level chat use create_thread.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        },
+        {
+            "name": "delegate_task",
+            "description": "Delegate one task to a Zeron-owned child agent/subagent of THIS chat and run it with only the supplied task prompt, without copying this chat's history. Choose harnesses and models from orchestrator_capabilities, which uses the same live catalog as the composer. Prefer native subagent tools for same-harness work only when they support the chosen model. Use this for any model missing from the native tool, including same-harness work, for cross-harness work, or for explicitly Zeron-owned child tasks. The childThreadId is backing storage, not an ordinary top-level thread. Harness, model, reasoning and permission mode inherit unless target overrides them; permissionMode may only narrow. Prefer mode='async' for long work; mode='wait' blocks until completion or timeout. timeoutMs on mode=wait is only this chat's wait budget and does not cancel the child. waitTimedOut on that wait call means the timeout fired; keep that taskId and read status on a later task_status. An async child's completion wakes this chat through a message, steered into an active turn where supported or queued otherwise, so end the turn instead of polling or spawning watchers; use task_status only when the result is needed mid-turn.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task": { "type": "string", "description": "Self-contained task for one delegated child agent/subagent." },
+                    "target": {
+                        "type": "object",
+                        "properties": {
+                            "harness": { "type": "string", "description": "Harness id from orchestrator_capabilities; default: this chat's." },
+                            "model": { "type": "string", "description": "Model id as that harness names it; default: this chat's model on the same harness, else the harness default." },
+                            "reasoning": { "type": "string", "enum": REASONING_LEVELS }
+                        },
+                        "additionalProperties": false
+                    },
+                    "title": { "type": "string", "maxLength": 512 },
+                    "role": { "type": "string", "enum": ["implementation", "research", "review", "design", "test", "general"] },
+                    "mode": { "type": "string", "enum": ["async", "wait"], "description": "Defaults to async. Use wait only when this turn needs the child's result before you can continue." },
+                    "timeoutMs": { "type": "integer", "minimum": 1, "maximum": MAX_WAIT_SECS * 1000, "description": "Wait budget for mode=wait only. Default 10 minutes. Elapsing it returns waitTimedOut=true on that call and does not cancel the child." },
+                    "clientRequestId": { "type": "string", "maxLength": 256, "description": "Idempotency key: a retry with the same key returns the original task." },
+                    "permissionMode": { "type": "string", "enum": ["inherit", "ask", "auto", "full"] }
+                },
+                "required": ["task"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "task_status",
+            "description": "Read a Zeron-owned delegated task created by this chat. workState distinguishes working, waiting_for_children, and result_available; a finished turn with live nested work is not a finished task. summary is the final task result, including the error on failure, and stays stable once published. hasPendingChildRuns reports a later turn the child is running. Reading a finished result acknowledges its automatic wake.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "taskId": { "type": "string" } },
+                "required": ["taskId"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "task_cancel",
+            "description": "Request interruption of an active Zeron-owned delegated task and dispose its automatic wake. Finished results stay readable.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "taskId": { "type": "string" },
+                    "reason": { "type": "string", "maxLength": 2000 }
+                },
+                "required": ["taskId"],
+                "additionalProperties": false
+            }
         }
     ])
 }
@@ -380,6 +437,10 @@ impl ThreadTools {
             "list_projects" => self.list_projects().await,
             "list_harnesses" => self.list_harnesses().await,
             "list_models" => self.list_models(args).await,
+            "orchestrator_capabilities" => self.orchestrator_capabilities().await,
+            "delegate_task" => self.delegate_task(args).await,
+            "task_status" => self.task_status(args).await,
+            "task_cancel" => self.task_cancel(args).await,
             other => Err(format!("unknown tool: {other}")),
         }
     }
@@ -780,6 +841,213 @@ impl ThreadTools {
                 _ = tokio::time::sleep(STALE_RECHECK) => {}
             }
         }
+    }
+
+    pub async fn orchestrator_capabilities(&self) -> Result<Value, String> {
+        let (caller, _) = self.peers().await?;
+        let harnesses = self.list_harnesses().await?["harnesses"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let catalogs = futures::future::join_all(harnesses.iter().map(|harness| async move {
+            let id = harness["id"].as_str().unwrap_or_default();
+            if harness["available"] != true {
+                return Err("Harness is not installed or is switched off.".to_string());
+            }
+            match tokio::time::timeout(MODEL_LIST_WAIT, self.models_of(id)).await {
+                Ok(Ok(models)) => Ok(models),
+                Ok(Err(err)) => Err(format!("Model list unavailable: {err}")),
+                Err(_) => Err("Model list did not arrive in time.".to_string()),
+            }
+        }))
+        .await;
+        let harnesses: Vec<Value> = harnesses
+            .iter()
+            .zip(catalogs)
+            .map(|(harness, catalog)| {
+                let (models, constraints) = match catalog {
+                    Ok(models) => (models, Vec::new()),
+                    Err(reason) => (Vec::new(), vec![reason]),
+                };
+                let models: Vec<&Value> = models.iter().map(|model| &model["id"]).collect();
+                json!({
+                    "harness": harness["id"],
+                    "name": harness["name"],
+                    "steersMidTurn": harness["steersMidTurn"],
+                    "reasoningLevels": harness["reasoningLevels"],
+                    "models": models,
+                    "canRunChildTask": constraints.is_empty(),
+                    "constraints": constraints,
+                })
+            })
+            .collect();
+        let limits = self
+            .call_engine(methods::GET_DELEGATION_SETTINGS, json!({}))
+            .await?;
+        let config = caller.config.as_ref();
+        Ok(json!({
+            "parentThreadId": caller.id,
+            "inheritedHarness": config.map(|c| c.harness),
+            "inheritedModel": config.and_then(|c| c.model.as_deref()),
+            "inheritedReasoning": config.and_then(|c| c.reasoning),
+            "permissionMode": config.map(|c| c.permission_mode),
+            "depth": caller.delegation.as_ref().map_or(0, |d| d.depth),
+            "harnesses": harnesses,
+            "features": {
+                "appOwnedSubagents": true,
+                "asyncPolling": true,
+                "cancellation": true,
+                "maxDepth": limits["maxDepth"],
+                "maxRunningChildren": limits["maxRunningChildren"],
+            },
+        }))
+    }
+
+    pub async fn delegate_task(&self, args: &Value) -> Result<Value, String> {
+        let task = args["task"]
+            .as_str()
+            .filter(|t| !t.trim().is_empty())
+            .ok_or("task is required")?;
+        let wait = match args["mode"].as_str() {
+            None | Some("async") => false,
+            Some("wait") => true,
+            Some(_) => return Err("mode must be async or wait".into()),
+        };
+        let target = &args["target"];
+        let (caller, _) = self.peers().await?;
+        let harness = match target["harness"].as_str() {
+            Some(harness) => Some(harness.to_string()),
+            None => caller
+                .config
+                .as_ref()
+                .and_then(|c| serde_json::to_value(c.harness).ok())
+                .and_then(|h| h.as_str().map(str::to_owned)),
+        };
+        if let (Some(model), Some(harness)) = (
+            target["model"]
+                .as_str()
+                .map(str::trim)
+                .filter(|m| !m.is_empty()),
+            harness,
+        ) && let Ok(models) = self.models_of(&harness).await
+            && !models.is_empty()
+            && !models.iter().any(|m| m["id"] == model)
+        {
+            let ids: Vec<&str> = models.iter().filter_map(|m| m["id"].as_str()).collect();
+            return Err(format!(
+                "model_unavailable: model {model} is not offered by {harness}; available: {}",
+                ids.join(", ")
+            ));
+        }
+        let permission_mode = args["permissionMode"]
+            .as_str()
+            .filter(|mode| *mode != "inherit");
+        let mut view = self
+            .call_engine(
+                methods::DELEGATE_TASK,
+                json!({
+                    "ownerChatId": self.chat_id,
+                    "task": task,
+                    "title": args["title"].as_str(),
+                    "role": args["role"].as_str(),
+                    "harness": target["harness"].as_str(),
+                    "model": target["model"].as_str(),
+                    "reasoning": target["reasoning"].as_str(),
+                    "permissionMode": permission_mode,
+                    "wait": wait,
+                    "clientRequestId": args["clientRequestId"].as_str(),
+                }),
+            )
+            .await?;
+        if !wait {
+            view["waitTimedOut"] = json!(false);
+            return Ok(view);
+        }
+        let task_id = view["taskId"]
+            .as_str()
+            .ok_or("engine returned no taskId")?
+            .to_string();
+        let timeout = Duration::from_millis(
+            args["timeoutMs"]
+                .as_u64()
+                .unwrap_or(DEFAULT_WAIT_SECS * 1000)
+                .clamp(1, MAX_WAIT_SECS * 1000),
+        );
+        self.await_task(&task_id, timeout).await
+    }
+
+    async fn await_task(&self, task_id: &str, timeout: Duration) -> Result<Value, String> {
+        let waited = self.wait_for_task(task_id, timeout).await;
+        if waited.is_err() {
+            let _ = self
+                .call_engine(
+                    methods::TASK_WAKE_ALWAYS,
+                    json!({ "chatId": self.chat_id, "taskId": task_id }),
+                )
+                .await;
+        }
+        waited
+    }
+
+    async fn wait_for_task(&self, task_id: &str, timeout: Duration) -> Result<Value, String> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut chats = self
+            .client
+            .subscribe(methods::WATCH_CHATS, json!({}))
+            .await
+            .map_err(|e| format!("WatchChats: {e}"))?;
+        let mut watching = true;
+        loop {
+            let view = self.read_task(task_id, true).await?;
+            if view["workState"] == "result_available" {
+                return Ok(view);
+            }
+            tokio::select! {
+                item = chats.recv(), if watching => watching = item.is_some(),
+                _ = tokio::time::sleep_until(deadline) => {
+                    self.call_engine(
+                        methods::TASK_WAKE_ALWAYS,
+                        json!({ "chatId": self.chat_id, "taskId": task_id }),
+                    )
+                    .await?;
+                    let mut view = self.read_task(task_id, true).await?;
+                    view["waitTimedOut"] = json!(view["workState"] != "result_available");
+                    return Ok(view);
+                }
+                _ = tokio::time::sleep(STALE_RECHECK) => {}
+            }
+        }
+    }
+
+    async fn read_task(&self, task_id: &str, acknowledge: bool) -> Result<Value, String> {
+        let mut view = self
+            .call_engine(
+                methods::TASK_STATUS,
+                json!({ "chatId": self.chat_id, "taskId": task_id, "acknowledge": acknowledge }),
+            )
+            .await?;
+        view["waitTimedOut"] = json!(false);
+        Ok(view)
+    }
+
+    pub async fn task_status(&self, args: &Value) -> Result<Value, String> {
+        let task_id = args["taskId"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .ok_or("taskId is required")?;
+        self.read_task(task_id, true).await
+    }
+
+    pub async fn task_cancel(&self, args: &Value) -> Result<Value, String> {
+        let task_id = args["taskId"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .ok_or("taskId is required")?;
+        self.call_engine(
+            methods::TASK_CANCEL,
+            json!({ "chatId": self.chat_id, "taskId": task_id }),
+        )
+        .await
     }
 
     pub async fn interrupt_thread(&self, args: &Value) -> Result<Value, String> {
@@ -1529,7 +1797,7 @@ mod tests {
 
     use super::*;
 
-    const THREAD_TOOLS: [&str; 14] = [
+    const THREAD_TOOLS: [&str; 18] = [
         "list_threads",
         "read_thread",
         "create_thread",
@@ -1544,6 +1812,10 @@ mod tests {
         "list_projects",
         "list_harnesses",
         "list_models",
+        "orchestrator_capabilities",
+        "delegate_task",
+        "task_status",
+        "task_cancel",
     ];
 
     fn chat(id: &str, space: Option<&str>, archived: bool, created_by: Option<&str>) -> Value {
@@ -1691,6 +1963,46 @@ mod tests {
                             "messages": [{ "id": "q-9", "fromChatId": "b", "text": "done, 4 tests" }]
                         }),
                         _ => json!({}),
+                    }))
+                }
+                methods::DELEGATE_TASK
+                | methods::TASK_STATUS
+                | methods::TASK_CANCEL
+                | methods::TASK_WAKE_ALWAYS
+                | methods::GET_DELEGATION_SETTINGS => {
+                    let reads = self
+                        .calls
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|(logged, _)| logged == methods::TASK_STATUS)
+                        .count();
+                    self.calls
+                        .lock()
+                        .unwrap()
+                        .push((method.to_string(), params.clone()));
+                    let task_id = match method {
+                        methods::DELEGATE_TASK if params["task"] == "slow" => "slow",
+                        methods::DELEGATE_TASK => "t-1",
+                        _ => params["taskId"].as_str().unwrap_or_default(),
+                    };
+                    let done = method == methods::TASK_STATUS && task_id != "slow" && reads >= 1;
+                    Ok(RpcReply::Value(match method {
+                        methods::TASK_CANCEL => {
+                            json!({ "taskId": task_id, "status": "cancel_requested" })
+                        }
+                        methods::TASK_WAKE_ALWAYS => json!({}),
+                        methods::GET_DELEGATION_SETTINGS => {
+                            json!({ "maxDepth": 2, "maxRunningChildren": 8 })
+                        }
+                        _ => json!({
+                            "taskId": task_id,
+                            "childThreadId": task_id,
+                            "status": if done { "completed" } else { "running" },
+                            "workState": if done { "result_available" } else { "working" },
+                            "hasPendingChildRuns": false,
+                            "summary": done.then_some("all 4 tests pass"),
+                        }),
                     }))
                 }
                 methods::LIST_TERMINALS => {
@@ -1856,8 +2168,15 @@ mod tests {
             .map(|tool| tool["name"].as_str().unwrap())
             .collect();
         assert_eq!(names, THREAD_TOOLS);
-        // d49 lifts d25 for exactly interrupt and respond; nothing cancels.
-        assert!(names.iter().all(|n| !n.contains("cancel")));
+        // d49 lifts d25 for exactly interrupt and respond; only an owned
+        // delegated task (d67) can be cancelled, never a peer thread.
+        assert_eq!(
+            names
+                .iter()
+                .filter(|n| n.contains("cancel"))
+                .collect::<Vec<_>>(),
+            [&"task_cancel"]
+        );
         assert!(names.contains(&"interrupt_thread") && names.contains(&"respond_to_input"));
         for tool in list.as_array().unwrap() {
             assert_eq!(
@@ -2619,6 +2938,121 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn an_async_delegation_returns_at_once_and_spends_no_send() {
+        let rig = rig(fixture());
+        let out = rig
+            .tools
+            .call(
+                "delegate_task",
+                &json!({ "task": "fix the flaky test", "role": "test", "clientRequestId": "k1" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["taskId"], "t-1");
+        assert_eq!(out["waitTimedOut"], false);
+        let sent = logged(&rig.calls, methods::DELEGATE_TASK);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["ownerChatId"], "a");
+        assert_eq!(sent[0]["wait"], false);
+        assert_eq!(sent[0]["role"], "test");
+        assert_eq!(sent[0]["clientRequestId"], "k1");
+        assert!(logged(&rig.calls, methods::TASK_STATUS).is_empty());
+        assert_eq!(rig.tools.sends.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_waiting_delegation_returns_the_result_and_acknowledges_it() {
+        let rig = rig(fixture());
+        let out = rig
+            .tools
+            .delegate_task(&json!({ "task": "review", "mode": "wait", "timeoutMs": 60_000 }))
+            .await
+            .unwrap();
+        assert_eq!(out["workState"], "result_available");
+        assert_eq!(out["summary"], "all 4 tests pass");
+        assert_eq!(out["waitTimedOut"], false);
+        assert!(
+            logged(&rig.calls, methods::TASK_STATUS)
+                .iter()
+                .all(|params| params["acknowledge"] == true)
+        );
+        assert!(logged(&rig.calls, methods::TASK_WAKE_ALWAYS).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_wait_hands_the_task_to_the_wake_and_leaves_it_running() {
+        let rig = rig(fixture());
+        let out = rig
+            .tools
+            .delegate_task(&json!({ "task": "slow", "mode": "wait", "timeoutMs": 50 }))
+            .await
+            .unwrap();
+        assert_eq!(out["waitTimedOut"], true);
+        assert_eq!(out["workState"], "working");
+        assert_eq!(logged(&rig.calls, methods::TASK_WAKE_ALWAYS).len(), 1);
+        assert!(logged(&rig.calls, methods::TASK_CANCEL).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_delegation_to_an_unoffered_model_fails_before_the_engine() {
+        let rig = rig(fixture());
+        let err = rig
+            .tools
+            .delegate_task(
+                &json!({ "task": "x", "target": { "harness": "codex", "model": "nope" } }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.starts_with("model_unavailable"), "{err}");
+        assert!(logged(&rig.calls, methods::DELEGATE_TASK).is_empty());
+        assert!(
+            rig.tools
+                .delegate_task(&json!({ "task": "x", "mode": "later" }))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn capabilities_list_models_per_harness_and_the_settings_limits() {
+        let out = rig(fixture())
+            .tools
+            .orchestrator_capabilities()
+            .await
+            .unwrap();
+        let harnesses = out["harnesses"].as_array().unwrap();
+        let codex = harnesses.iter().find(|h| h["harness"] == "codex").unwrap();
+        assert_eq!(codex["canRunChildTask"], false);
+        assert!(codex["models"].as_array().unwrap().is_empty());
+        let claude = harnesses
+            .iter()
+            .find(|h| h["harness"] == "claude-code")
+            .unwrap();
+        assert_eq!(claude["canRunChildTask"], true);
+        assert_eq!(out["parentThreadId"], "a");
+        assert_eq!(out["features"]["maxDepth"], 2);
+        assert_eq!(out["depth"], 0);
+    }
+
+    #[tokio::test]
+    async fn task_status_and_cancel_name_the_caller_as_owner() {
+        let rig = rig(fixture());
+        rig.tools
+            .task_status(&json!({ "taskId": "t-1" }))
+            .await
+            .unwrap();
+        let cancelled = rig
+            .tools
+            .task_cancel(&json!({ "taskId": "t-1", "reason": "no longer needed" }))
+            .await
+            .unwrap();
+        assert_eq!(cancelled["status"], "cancel_requested");
+        assert_eq!(logged(&rig.calls, methods::TASK_STATUS)[0]["chatId"], "a");
+        assert_eq!(logged(&rig.calls, methods::TASK_CANCEL)[0]["chatId"], "a");
+        assert!(rig.tools.task_status(&json!({})).await.is_err());
     }
 
     fn logged(fake: &Fake, method: &str) -> Vec<Value> {

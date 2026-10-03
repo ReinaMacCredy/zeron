@@ -402,7 +402,7 @@ pub struct ToolItem {
 /// collapsible "Called N tools" wrap so a running subagent is visible
 /// without opening the fold.
 fn is_agent_call(call: &ToolCall) -> bool {
-    call.is_subagent_spawn()
+    call.is_subagent_spawn() || call.is_delegate_task()
 }
 
 /// The chip's GENUS is the call itself, never the ref: docs written before
@@ -445,6 +445,7 @@ pub(crate) struct SubagentSummary {
     pub doc_id: String,
     pub title: SharedString,
     pub status: Option<SubagentStatus>,
+    pub delegated: bool,
 }
 
 /// Ordinary tool groups fold behind a summary header; agent/spawn chips
@@ -3849,18 +3850,100 @@ pub enum TranscriptEvent {
     /// A tool chip's file badge: open the file in the right pane — the Diff
     /// tab when it has uncommitted changes, else the Files editor. `path` is
     /// as the tool call named it (absolute or cwd-relative).
-    OpenFile { chat_id: String, path: String },
+    OpenFile {
+        chat_id: String,
+        path: String,
+    },
     /// A peer message's "From <thread>" header: open that thread.
-    OpenChat { chat_id: String },
+    OpenChat {
+        chat_id: String,
+    },
+    OpenDelegate {
+        chat_id: String,
+    },
     /// `path` is workspace-relative; the shell re-resolves it.
-    OpenHtml { chat_id: String, path: String },
+    OpenHtml {
+        chat_id: String,
+        path: String,
+    },
     /// A Computer card's button: Enable on a denied card, Set up on a setup card.
-    Computer { request: ComputerRequest },
+    Computer {
+        request: ComputerRequest,
+    },
 }
 
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
 
 impl Transcript {
+    fn render_wake_row(
+        &self,
+        row_id: &SharedString,
+        ids: &[String],
+        views: &[DelegateView],
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let failed = views
+            .iter()
+            .any(|v| v.status == Some(zeron_proto::DelegationStatus::Failed));
+        let open = (ids.len() == 1).then(|| ids[0].clone());
+        div()
+            .w_full()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .pb(px(8.0))
+            .text_size(crate::typography::ui_rems(11.0))
+            .text_color(if failed {
+                theme.danger
+            } else {
+                theme.text_muted
+            })
+            .child(
+                crate::icons::icon(crate::icons::BOT)
+                    .size(px(12.0))
+                    .flex_none()
+                    .text_color(theme.text_faint),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .child(SharedString::from(wake_summary(views))),
+            )
+            .when_some(open, |el, child| {
+                el.child(
+                    div()
+                        .id(SharedString::from(format!("{row_id}-open-delegate")))
+                        .debug_selector(|| "delegate-wake-open".into())
+                        .flex_none()
+                        .cursor_pointer()
+                        .px(px(6.0))
+                        .rounded(px(5.0))
+                        .bg(theme.ink(0.06))
+                        .text_color(theme.text.opacity(0.8))
+                        .hover(|s| s.text_color(theme.text))
+                        .child(SharedString::from("Open subagent"))
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.stop_propagation();
+                            cx.emit(TranscriptEvent::OpenDelegate {
+                                chat_id: child.clone(),
+                            });
+                        })),
+                )
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .h(px(1.0))
+                    .ml(px(4.0))
+                    .bg(theme.border.opacity(0.6)),
+            )
+            .into_any_element()
+    }
+
     pub(crate) fn set_workspace_link_handler(&mut self, handler: render::LinkUi) {
         self.workspace_link = Some(handler);
     }
@@ -5137,8 +5220,9 @@ impl Transcript {
 
     /// Every subagent this transcript spawned, in transcript order — the
     /// spawn chips are the only index (no listing endpoint).
-    pub(crate) fn subagent_summaries(&self) -> Vec<SubagentSummary> {
+    pub(crate) fn subagent_summaries(&self, cx: &gpui::App) -> Vec<SubagentSummary> {
         let chat_id = self.chat_id.clone().unwrap_or_default();
+        let mut seen = std::collections::HashSet::new();
         self.rows
             .iter()
             .filter_map(|row| match &row.kind {
@@ -5150,15 +5234,32 @@ impl Transcript {
                     .iter()
                     .filter(|tool| is_spawn_link(tool))
                     .filter_map(|tool| {
+                        let doc_id = tool.subagent_ref.clone()?.to_string();
+                        if !tool.call.is_delegate_task() {
+                            return Some(SubagentSummary {
+                                chat_id: chat_id.clone(),
+                                doc_id,
+                                title: subagent_tab_title(&tool.call),
+                                status: tool.subagent_status,
+                                delegated: false,
+                            });
+                        }
+                        let view = delegate_view(&self.state.read(cx).chats, &doc_id);
                         Some(SubagentSummary {
                             chat_id: chat_id.clone(),
-                            doc_id: tool.subagent_ref.clone()?.to_string(),
-                            title: subagent_tab_title(&tool.call),
-                            status: tool.subagent_status,
+                            doc_id,
+                            title: view.title,
+                            status: view.status.map(|status| match status {
+                                zeron_proto::DelegationStatus::Running => SubagentStatus::Running,
+                                zeron_proto::DelegationStatus::Completed => SubagentStatus::Done,
+                                _ => SubagentStatus::Failed,
+                            }),
+                            delegated: true,
                         })
                     })
                     .collect::<Vec<_>>()
             })
+            .filter(|summary| seen.insert(summary.doc_id.clone()))
             .collect()
     }
 
@@ -8079,172 +8180,201 @@ impl Transcript {
                 let text = text.clone();
                 let mentions = mentions.clone();
                 let pending = *pending;
-                // An inter-thread message (thread tools) is a peer speaking:
-                // a "→ from <thread>" rule carrying the sender's harness mark
-                // and clock time, then plain prose. Never the user's own
-                // right-aligned bubble, and no accent: the rule is the same
-                // hairline the system dividers use (owner pick C3, 2026-09-18).
-                let peer: Option<(SharedString, Option<zeron_proto::HarnessId>)> =
-                    from_chat_id.as_ref().map(|from| {
-                        let state = self.state.read(cx);
-                        let chat = state
-                            .chats
-                            .iter()
-                            .find(|chat| chat.id.as_str() == from.as_ref());
-                        let title = chat
-                            .and_then(|chat| chat.title.clone())
-                            .map(|title| SharedString::from(single_line(&title)))
-                            .unwrap_or_else(|| from.clone());
-                        let harness = chat.and_then(|chat| chat.config.as_ref().map(|c| c.harness));
-                        (title, harness)
-                    });
-                let mut column = div().w_full().flex().flex_col();
-                if let Some((title, harness)) = &peer {
-                    let clock: Option<SharedString> = row
-                        .timestamp
-                        .and_then(chrono::DateTime::from_timestamp_millis)
-                        .map(|utc| {
-                            utc.with_timezone(&chrono::Local)
-                                .format("%-I:%M %p")
-                                .to_string()
-                                .into()
+                let wake = from_chat_id.as_ref().and_then(|from| {
+                    let state = self.state.read(cx);
+                    let owner = self.chat_id.as_deref()?;
+                    let ids = wake_task_ids(&text)?;
+                    state
+                        .chats
+                        .iter()
+                        .any(|chat| {
+                            chat.id.as_str() == from.as_ref()
+                                && chat
+                                    .delegation
+                                    .as_ref()
+                                    .is_some_and(|d| d.delegated_by_chat_id == owner)
+                        })
+                        .then(|| {
+                            let views: Vec<DelegateView> = ids
+                                .iter()
+                                .map(|id| delegate_view(&state.chats, id))
+                                .collect();
+                            (ids, views)
+                        })
+                });
+                if let Some((ids, views)) = wake {
+                    self.render_wake_row(&row.id, &ids, &views, &theme, cx)
+                } else {
+                    // An inter-thread message (thread tools) is a peer speaking:
+                    // a "→ from <thread>" rule carrying the sender's harness mark
+                    // and clock time, then plain prose. Never the user's own
+                    // right-aligned bubble, and no accent: the rule is the same
+                    // hairline the system dividers use (owner pick C3, 2026-09-18).
+                    let peer: Option<(SharedString, Option<zeron_proto::HarnessId>)> =
+                        from_chat_id.as_ref().map(|from| {
+                            let state = self.state.read(cx);
+                            let chat = state
+                                .chats
+                                .iter()
+                                .find(|chat| chat.id.as_str() == from.as_ref());
+                            let title = chat
+                                .and_then(|chat| chat.title.clone())
+                                .map(|title| SharedString::from(single_line(&title)))
+                                .unwrap_or_else(|| from.clone());
+                            let harness =
+                                chat.and_then(|chat| chat.config.as_ref().map(|c| c.harness));
+                            (title, harness)
                         });
-                    column = column.child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(6.0))
-                            .pb(px(8.0))
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(theme.text_muted)
-                            .child(
-                                crate::icons::icon(crate::icons::CHAT_ROUND_LINE)
-                                    .size(px(12.0))
-                                    .flex_none()
-                                    .text_color(theme.text_faint),
-                            )
-                            .child(SharedString::from("From"))
-                            .child({
-                                // The name is the way over: clicking it opens
-                                // the sending thread.
-                                let open_id = from_chat_id.clone().map(|id| id.to_string());
-                                div()
-                                    .id(SharedString::from(format!("{}-from-thread", row.id)))
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap(px(6.0))
-                                    .cursor_pointer()
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(theme.text.opacity(0.8))
-                                    .hover(|s| s.text_color(theme.text))
-                                    .when_some(
-                                        harness.map(crate::pickers::harness_brand_icon),
-                                        |el, (path, tint)| {
-                                            el.child(
-                                                crate::icons::icon(path)
-                                                    .size(px(12.0))
-                                                    .flex_none()
-                                                    .text_color(tint.unwrap_or(theme.text_muted)),
-                                            )
-                                        },
-                                    )
-                                    .child(title.clone())
-                                    .when_some(open_id, |el, open_id| {
-                                        el.on_click(cx.listener(move |_, _, _, cx| {
-                                            cx.stop_propagation();
-                                            cx.emit(TranscriptEvent::OpenChat {
-                                                chat_id: open_id.clone(),
-                                            });
-                                        }))
-                                    })
-                            })
-                            .when_some(clock, |el, clock| {
-                                el.child(
+                    let mut column = div().w_full().flex().flex_col();
+                    if let Some((title, harness)) = &peer {
+                        let clock: Option<SharedString> = row
+                            .timestamp
+                            .and_then(chrono::DateTime::from_timestamp_millis)
+                            .map(|utc| {
+                                utc.with_timezone(&chrono::Local)
+                                    .format("%-I:%M %p")
+                                    .to_string()
+                                    .into()
+                            });
+                        column = column.child(
+                            div()
+                                .w_full()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(6.0))
+                                .pb(px(8.0))
+                                .text_size(crate::typography::ui_rems(11.0))
+                                .text_color(theme.text_muted)
+                                .child(
+                                    crate::icons::icon(crate::icons::CHAT_ROUND_LINE)
+                                        .size(px(12.0))
+                                        .flex_none()
+                                        .text_color(theme.text_faint),
+                                )
+                                .child(SharedString::from("From"))
+                                .child({
+                                    // The name is the way over: clicking it opens
+                                    // the sending thread.
+                                    let open_id = from_chat_id.clone().map(|id| id.to_string());
                                     div()
-                                        .font_family(theme.font_mono.clone())
-                                        .text_size(crate::typography::ui_rems(10.0))
-                                        .text_color(theme.text_faint)
-                                        .child(clock),
-                                )
-                            })
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .h(px(1.0))
-                                    .ml(px(4.0))
-                                    .bg(theme.border.opacity(0.6)),
-                            ),
-                    );
+                                        .id(SharedString::from(format!("{}-from-thread", row.id)))
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap(px(6.0))
+                                        .cursor_pointer()
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .text_color(theme.text.opacity(0.8))
+                                        .hover(|s| s.text_color(theme.text))
+                                        .when_some(
+                                            harness.map(crate::pickers::harness_brand_icon),
+                                            |el, (path, tint)| {
+                                                el.child(
+                                                    crate::icons::icon(path)
+                                                        .size(px(12.0))
+                                                        .flex_none()
+                                                        .text_color(
+                                                            tint.unwrap_or(theme.text_muted),
+                                                        ),
+                                                )
+                                            },
+                                        )
+                                        .child(title.clone())
+                                        .when_some(open_id, |el, open_id| {
+                                            el.on_click(cx.listener(move |_, _, _, cx| {
+                                                cx.stop_propagation();
+                                                cx.emit(TranscriptEvent::OpenChat {
+                                                    chat_id: open_id.clone(),
+                                                });
+                                            }))
+                                        })
+                                })
+                                .when_some(clock, |el, clock| {
+                                    el.child(
+                                        div()
+                                            .font_family(theme.font_mono.clone())
+                                            .text_size(crate::typography::ui_rems(10.0))
+                                            .text_color(theme.text_faint)
+                                            .child(clock),
+                                    )
+                                })
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .h(px(1.0))
+                                        .ml(px(4.0))
+                                        .bg(theme.border.opacity(0.6)),
+                                ),
+                        );
+                    }
+                    // Attachment thumbnails ride ABOVE the bubble, right-aligned
+                    // (chat-view.tsx RowView: UserAttachmentStrip then the text
+                    // HStack); image-only sends show no bubble at all.
+                    if !attachments.is_empty() {
+                        column = column.child(self.render_user_attachments(
+                            &row.id,
+                            &attachments,
+                            window,
+                            cx,
+                        ));
+                    }
+                    if !badges.is_empty() {
+                        column = column.child(
+                            div()
+                                .w_full()
+                                .flex()
+                                .flex_row()
+                                .flex_wrap()
+                                .justify_end()
+                                .items_center()
+                                .gap(px(6.0))
+                                .pb(px(6.0))
+                                .children(badges.iter().enumerate().map(|(bix, badge)| {
+                                    crate::badges::render(
+                                        SharedString::from(format!("{}#badge{bix}", row.id)),
+                                        badge,
+                                        &theme,
+                                    )
+                                })),
+                        );
+                    }
+                    if !text.is_empty() {
+                        // `min_w_0` is load-bearing: gpui text answers min/max-content
+                        // probes with its UNWRAPPED width, so without it the bubble's
+                        // automatic min-size is the full single-line width — the flex
+                        // item can't shrink, `justify_end` pushes the overflow off the
+                        // left edge, and long prompts render as one clipped line
+                        // instead of wrapping inside the 80% column cap.
+                        let peer_voice = peer.is_some();
+                        column = column.child(
+                            div()
+                                .w_full()
+                                .flex()
+                                .when(!peer_voice, |el| el.justify_end())
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .when(peer_voice, |el| el.w_full())
+                                        .when(!peer_voice, |el| {
+                                            el.max_w(px(self.content_width * 0.8))
+                                                .bg(crate::theme::user_bubble_bg())
+                                                .rounded(px(Theme::BUBBLE_RADIUS))
+                                                .px(px(16.0))
+                                                .py(px(10.0))
+                                        })
+                                        .text_size(crate::typography::ui_rems(14.0))
+                                        .line_height(crate::typography::ui_rems(USER_LINE_HEIGHT))
+                                        .text_color(theme.text)
+                                        .when(pending, |el| el.opacity(0.65))
+                                        .child(self.render_user_body(
+                                            &row.id, ix, text, mentions, &theme, window, cx,
+                                        )),
+                                ),
+                        );
+                    }
+                    column.into_any_element()
                 }
-                // Attachment thumbnails ride ABOVE the bubble, right-aligned
-                // (chat-view.tsx RowView: UserAttachmentStrip then the text
-                // HStack); image-only sends show no bubble at all.
-                if !attachments.is_empty() {
-                    column = column.child(self.render_user_attachments(
-                        &row.id,
-                        &attachments,
-                        window,
-                        cx,
-                    ));
-                }
-                if !badges.is_empty() {
-                    column = column.child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .flex_row()
-                            .flex_wrap()
-                            .justify_end()
-                            .items_center()
-                            .gap(px(6.0))
-                            .pb(px(6.0))
-                            .children(badges.iter().enumerate().map(|(bix, badge)| {
-                                crate::badges::render(
-                                    SharedString::from(format!("{}#badge{bix}", row.id)),
-                                    badge,
-                                    &theme,
-                                )
-                            })),
-                    );
-                }
-                if !text.is_empty() {
-                    // `min_w_0` is load-bearing: gpui text answers min/max-content
-                    // probes with its UNWRAPPED width, so without it the bubble's
-                    // automatic min-size is the full single-line width — the flex
-                    // item can't shrink, `justify_end` pushes the overflow off the
-                    // left edge, and long prompts render as one clipped line
-                    // instead of wrapping inside the 80% column cap.
-                    let peer_voice = peer.is_some();
-                    column = column.child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .when(!peer_voice, |el| el.justify_end())
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .when(peer_voice, |el| el.w_full())
-                                    .when(!peer_voice, |el| {
-                                        el.max_w(px(self.content_width * 0.8))
-                                            .bg(crate::theme::user_bubble_bg())
-                                            .rounded(px(Theme::BUBBLE_RADIUS))
-                                            .px(px(16.0))
-                                            .py(px(10.0))
-                                    })
-                                    .text_size(crate::typography::ui_rems(14.0))
-                                    .line_height(crate::typography::ui_rems(USER_LINE_HEIGHT))
-                                    .text_color(theme.text)
-                                    .when(pending, |el| el.opacity(0.65))
-                                    .child(self.render_user_body(
-                                        &row.id, ix, text, mentions, &theme, window, cx,
-                                    )),
-                            ),
-                    );
-                }
-                column.into_any_element()
             }
             RowKind::Markdown { tree, block_ix } => {
                 let link = self.link_ui(cx);
@@ -9476,6 +9606,26 @@ impl Transcript {
                 // Spawn chips are LINKS, not accordions: the click opens the
                 // subagent's transcript as a right-pane tab (the shell hosts
                 // the surface — the chip only announces which doc it indexes).
+                if let Some(child) = tool
+                    .subagent_ref
+                    .clone()
+                    .filter(|_| tool.call.is_delegate_task())
+                {
+                    let view = delegate_view(&self.state.read(cx).chats, &child);
+                    return delegate_chip(
+                        &view,
+                        SharedString::from(format!("{row_id}#s{ix}")),
+                        cx.listener(move |_, _, _, cx| {
+                            cx.emit(TranscriptEvent::OpenDelegate {
+                                chat_id: child.to_string(),
+                            });
+                        }),
+                        collapses,
+                        theme,
+                        cx.entity_id(),
+                        cx,
+                    );
+                }
                 if let Some(doc_id) = tool.subagent_ref.clone().filter(|_| is_spawn_link(tool)) {
                     let chat_id = self.chat_id.clone().unwrap_or_default();
                     let title = subagent_tab_title(&tool.call);
@@ -11297,6 +11447,246 @@ fn tool_chip(
                 .child(chip_header_row(tool, None, file_link, theme, view, cx)),
         )
         .into_any_element()
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DelegateView {
+    pub title: SharedString,
+    pub harness: Option<zeron_proto::HarnessId>,
+    pub model: Option<SharedString>,
+    pub status: Option<zeron_proto::DelegationStatus>,
+    pub elapsed_secs: Option<i64>,
+}
+
+pub(crate) fn delegate_view(chats: &[zeron_proto::Chat], child_id: &str) -> DelegateView {
+    let chat = chats.iter().find(|chat| chat.id == child_id);
+    let delegation = chat.and_then(|chat| chat.delegation.as_ref());
+    DelegateView {
+        title: chat
+            .and_then(|chat| chat.title.as_deref())
+            .map(|title| SharedString::from(single_line(title)))
+            .unwrap_or_else(|| "Delegated task".into()),
+        harness: chat.and_then(|chat| chat.config.as_ref().map(|c| c.harness)),
+        model: chat
+            .and_then(|chat| chat.config.as_ref())
+            .and_then(|c| c.model.clone())
+            .map(SharedString::from),
+        status: delegation.map(|d| d.status),
+        elapsed_secs: delegation.map(|d| {
+            let end = d.completed_at.unwrap_or_else(chrono::Utc::now);
+            (end - d.started_at).num_seconds()
+        }),
+    }
+}
+
+fn delegate_status_text(status: Option<zeron_proto::DelegationStatus>) -> &'static str {
+    use zeron_proto::DelegationStatus::*;
+    match status {
+        Some(Running) => "Running",
+        Some(Completed) => "Completed",
+        Some(Failed) => "Failed",
+        Some(Cancelled | Interrupted) => "Stopped",
+        None => "Unavailable",
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn delegate_chip(
+    view: &DelegateView,
+    id: SharedString,
+    on_open: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    rail: bool,
+    theme: &Theme,
+    entity: gpui::EntityId,
+    cx: &mut gpui::App,
+) -> AnyElement {
+    use zeron_proto::DelegationStatus;
+    let running = view.status == Some(DelegationStatus::Running);
+    let failed = view.status == Some(DelegationStatus::Failed);
+    let (glyph, tint) = view
+        .harness
+        .map(crate::pickers::harness_brand_icon)
+        .unwrap_or((crate::icons::BOT, None));
+    let label: SharedString = view
+        .harness
+        .map(crate::composer::harness_display_name)
+        .unwrap_or("Agent")
+        .into();
+    let state: SharedString = match (running, view.elapsed_secs) {
+        (false, Some(secs)) => format!(
+            "{} in {}",
+            delegate_status_text(view.status),
+            format_elapsed(secs)
+        )
+        .into(),
+        _ => delegate_status_text(view.status).into(),
+    };
+    let header = div()
+        .h(px(CHIP_HEADER_HEIGHT))
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .px(px(8.0))
+        .text_size(px(TOOL_LABEL_SIZE))
+        .line_height(px(TOOL_LABEL_LINE_HEIGHT))
+        .child(
+            div()
+                .size(px(18.0))
+                .flex_none()
+                .rounded(px(5.0))
+                .bg(crate::theme::ink(0.08))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    crate::icons::icon(glyph)
+                        .size(px(12.0))
+                        .text_color(tint.unwrap_or(theme.text_muted)),
+                ),
+        )
+        .child(
+            div()
+                .flex_none()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(if failed {
+                    theme.danger
+                } else {
+                    theme.text_muted
+                })
+                .child(label),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_color(if failed {
+                    theme.danger
+                } else {
+                    theme.text.opacity(0.85)
+                })
+                .child(view.title.clone()),
+        )
+        .when_some(view.model.clone(), |row, model| {
+            row.child(
+                div()
+                    .flex_none()
+                    .text_size(px(11.0))
+                    .text_color(theme.text_faint)
+                    .child(model),
+            )
+        })
+        .child(
+            div()
+                .flex_none()
+                .text_size(px(11.0))
+                .text_color(if failed {
+                    theme.danger
+                } else {
+                    theme.text_faint
+                })
+                .child(state),
+        )
+        .when(running, |row| {
+            row.child(div().flex_none().child(crate::loaders::mini_glyph_spinner(
+                format!("delegate-chip-{}", id),
+                2.0,
+                theme.glyph,
+                entity,
+                cx,
+            )))
+        })
+        .child(
+            div()
+                .size(px(18.0))
+                .flex_none()
+                .rounded(px(5.0))
+                .bg(crate::theme::ink(0.06))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    crate::icons::icon(crate::icons::ARROW_UP_RIGHT)
+                        .size(px(11.0))
+                        .text_color(theme.text_muted.opacity(0.8)),
+                ),
+        );
+    div()
+        .h(px(CHIP_HEIGHT))
+        .w_full()
+        .flex_none()
+        .flex()
+        .flex_row()
+        .items_center()
+        .when(rail, |row| {
+            row.child(
+                div()
+                    .ml(px(12.0))
+                    .h_full()
+                    .w(px(1.0))
+                    .flex_none()
+                    .bg(crate::theme::ink(0.08)),
+            )
+        })
+        .child(
+            div()
+                .id(id)
+                .debug_selector(|| "delegate-chip".into())
+                .when(rail, |el| el.ml(px(12.0)))
+                .h(px(CHIP_CARD_HEIGHT))
+                .min_w_0()
+                .flex_1()
+                .flex()
+                .items_center()
+                .overflow_hidden()
+                .rounded(px(9.0))
+                .border_1()
+                .border_color(crate::theme::hairline(0.07))
+                .bg(crate::theme::ink(0.03))
+                .cursor_pointer()
+                .hover(|s| s.bg(crate::theme::ink(0.05)))
+                .on_click(on_open)
+                .child(header),
+        )
+        .into_any_element()
+}
+
+pub(crate) fn wake_task_ids(text: &str) -> Option<Vec<String>> {
+    if let Some(rest) = text.strip_prefix("Delegated task ") {
+        let (id, _) = rest.split_once(" reached a terminal state.")?;
+        return Some(vec![id.to_string()]);
+    }
+    let rest = text.strip_prefix("Delegated tasks ")?;
+    let (ids, _) = rest.split_once(" reached terminal states.")?;
+    Some(ids.split(", ").map(str::to_string).collect())
+}
+
+pub(crate) fn wake_summary(views: &[DelegateView]) -> String {
+    use zeron_proto::DelegationStatus::*;
+    let outcome = if views.iter().any(|v| v.status == Some(Failed)) {
+        "failed"
+    } else if views
+        .iter()
+        .any(|v| matches!(v.status, Some(Cancelled | Interrupted)))
+    {
+        "stopped"
+    } else {
+        "finished"
+    };
+    match views {
+        [one] => format!("Delegated task \u{201c}{}\u{201d} {outcome}", one.title),
+        many => format!(
+            "{} delegated tasks {outcome}: {}",
+            many.len(),
+            many.iter()
+                .map(|v| v.title.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
 }
 
 /// A spawn chip: same card as [`tool_chip`], but the WHOLE card is the
@@ -13647,6 +14037,7 @@ mod tests {
                 sidechat_source_chat_id: None,
                 created_by_chat_id: None,
                 previous_harnesses: Vec::new(),
+                delegation: None,
             }];
             state.selected_chat = Some("chat".into());
             state.transcript_replayed = true;
@@ -15221,6 +15612,76 @@ mod tests {
             subagent_status: Some(SubagentStatus::Running),
             subagent_tail: None,
         }
+    }
+
+    #[test]
+    fn wake_text_names_its_tasks_and_reads_as_t3_words() {
+        assert_eq!(
+            wake_task_ids(
+                "Delegated task c1 reached a terminal state. Use task_status with taskId c1 to read the result."
+            ),
+            Some(vec!["c1".to_string()])
+        );
+        assert_eq!(
+            wake_task_ids(
+                "Delegated tasks c1, c2 reached terminal states. Use task_status with each taskId to read the results."
+            ),
+            Some(vec!["c1".to_string(), "c2".to_string()])
+        );
+        assert_eq!(wake_task_ids("Delegated task: please review"), None);
+        let view = |title: &str, status| DelegateView {
+            title: title.to_string().into(),
+            harness: None,
+            model: None,
+            status: Some(status),
+            elapsed_secs: Some(3),
+        };
+        use zeron_proto::DelegationStatus::*;
+        assert_eq!(
+            wake_summary(&[view("Audit", Completed)]),
+            "Delegated task \u{201c}Audit\u{201d} finished"
+        );
+        assert_eq!(
+            wake_summary(&[view("Audit", Completed), view("Lint", Failed)]),
+            "2 delegated tasks failed: Audit, Lint"
+        );
+    }
+
+    #[test]
+    fn delegate_task_calls_stand_apart_like_agent_chips() {
+        let delegate = MessagePart::Tool {
+            id: "d1".into(),
+            call: ToolCall::Mcp {
+                server: "zeron".into(),
+                tool: "delegate_task".into(),
+                input: None,
+            },
+            is_error: false,
+            resolved: true,
+            output: None,
+            diff: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            diff_stats: None,
+            subagent_ref: Some("child-1".into()),
+            subagent_status: None,
+            subagent_tail: None,
+        };
+        let entry = assistant(
+            "m-del",
+            MessageStatus::Complete,
+            vec![tool_part("a", "ls"), delegate, tool_part("b", "pwd")],
+        );
+        let rows = rows_for_entry(&entry, false, false, &mut parse);
+        let groups: Vec<bool> = rows
+            .iter()
+            .filter_map(|row| match &row.kind {
+                RowKind::ToolGroup { tools, .. } => Some(tool_group_collapses(tools)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(groups, [true, false, true]);
     }
 
     #[test]

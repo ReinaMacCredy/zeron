@@ -427,6 +427,7 @@ pub(crate) fn seed(
             sidechat_source_chat_id: None,
             created_by_chat_id: demo.parent.map(str::to_owned),
             previous_harnesses: Vec::new(),
+            delegation: None,
         };
         doc.upsert_chat(&chat)?;
         if let Some(status) = demo.status {

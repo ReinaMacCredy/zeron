@@ -244,6 +244,81 @@ pub struct Chat {
     /// row and tab stack their marks ahead of the current one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub previous_harnesses: Vec<HarnessId>,
+    /// Unlike `created_by_chat_id`, the delegating chat owns this one (d67).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation: Option<Delegation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Delegation {
+    pub delegated_by_chat_id: String,
+    /// 1 for a child of a person-opened chat, 2 for a grandchild.
+    pub depth: u32,
+    /// The task message's id in this chat; the result is what the agent
+    /// wrote after it.
+    pub anchor: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_request_id: Option<String>,
+    /// The owner's turn start when it delegated; an owner Stop disposes the
+    /// wakes of exactly that turn's children.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_turn_started_at: Option<DateTime<Utc>>,
+    pub wake: DelegationWake,
+    pub status: DelegationStatus,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancel_requested: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<DelegationDelivery>,
+    /// The result, clipped for rows; `task_status` reads the full text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    pub started_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+impl Delegation {
+    pub fn is_running(&self) -> bool {
+        self.status == DelegationStatus::Running
+    }
+}
+
+/// When a finished child wakes its owner. `SettledOnly` is a `mode: wait`
+/// call: its blocking return carries the result while the owner's turn is
+/// live, so only an owner that already settled is woken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DelegationWake {
+    Always,
+    SettledOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DelegationStatus {
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+    Interrupted,
+}
+
+/// Where the owner's wake for a finished child stands. `Claimed` = named by
+/// a wake message not yet handed to the owner's agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DelegationDelivery {
+    Claimed,
+    Delivered,
+    Acknowledged,
+    Disposed,
+}
+
+impl DelegationDelivery {
+    pub fn is_final(self) -> bool {
+        !matches!(self, Self::Claimed)
+    }
 }
 
 impl Chat {

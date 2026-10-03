@@ -188,7 +188,7 @@ impl Shell {
         let mut chats: Vec<_> = state
             .chats
             .iter()
-            .filter(|chat| chat.created_by_chat_id.is_none())
+            .filter(|chat| chat.created_by_chat_id.is_none() && chat.delegation.is_none())
             .filter(|chat| {
                 let project = state
                     .space_for_chat(chat)
