@@ -3,14 +3,14 @@ use gpui::{Context, IntoElement, SharedString, Task, Window, div, prelude::*, px
 use zeron_proto::SessionStats;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Cache {
+enum Cache {
     Refreshing { ttl_secs: u32 },
     Warm { left_ms: i64, ttl_secs: u32 },
     Cold { ago_ms: i64 },
 }
 
 impl Cache {
-    pub fn of(stats: &SessionStats, working: bool, now_ms: i64) -> Option<Self> {
+    fn of(stats: &SessionStats, working: bool, now_ms: i64) -> Option<Self> {
         let ttl_secs = stats.cache_ttl_secs?;
         let left_ms = stats.cache_remaining_ms(now_ms)?;
         Some(if working {
@@ -54,15 +54,65 @@ fn tier(ttl_secs: u32) -> String {
     }
 }
 
-pub fn now_ms() -> i64 {
+fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-pub fn chip(
-    stats: SessionStats,
+pub struct StatsChip {
+    stats: Option<SessionStats>,
     working: bool,
-    theme: &Theme,
-) -> Option<gpui::Stateful<gpui::Div>> {
+    _tick: Task<()>,
+}
+
+impl StatsChip {
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        let tick = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(10))
+                    .await;
+                if this
+                    .update(cx, |chip, cx| {
+                        if chip.stats.is_some() {
+                            cx.notify();
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        Self {
+            stats: None,
+            working: false,
+            _tick: tick,
+        }
+    }
+
+    pub fn set(&mut self, stats: Option<SessionStats>, working: bool, cx: &mut Context<Self>) {
+        if (self.stats, self.working) != (stats, working) {
+            self.stats = stats;
+            self.working = working;
+            cx.notify();
+        }
+    }
+}
+
+impl Render for StatsChip {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx).clone();
+        match self
+            .stats
+            .and_then(|stats| chip(stats, self.working, &theme))
+        {
+            Some(chip) => chip.into_any_element(),
+            None => div().into_any_element(),
+        }
+    }
+}
+
+fn chip(stats: SessionStats, working: bool, theme: &Theme) -> Option<gpui::Stateful<gpui::Div>> {
     let label = chip_label(&stats)?;
     let cache = Cache::of(&stats, working, now_ms());
     let cache_color = match cache {

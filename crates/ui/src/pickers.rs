@@ -897,7 +897,7 @@ pub struct Pickers {
     /// The harness tab an existing chat's picker is browsing: only the model
     /// list follows it; the chat's harness changes on a confirmed pick.
     viewed_harness: Option<HarnessId>,
-    stats_tick: Option<Task<()>>,
+    stats_chip: Entity<crate::session_stats::StatsChip>,
     _search_events: Subscription,
     _state_observe: Subscription,
     _catalog_observe: Subscription,
@@ -1129,7 +1129,7 @@ impl Pickers {
             mutate_task: None,
             pending_model_switch: None,
             viewed_harness: None,
-            stats_tick: None,
+            stats_chip: cx.new(crate::session_stats::StatsChip::new),
             _search_events: search_events,
             _state_observe: state_observe,
             _catalog_observe: catalog_observe,
@@ -4145,34 +4145,14 @@ impl Pickers {
                 .state
                 .read(cx)
                 .turn_in_flight(&chat.id, chrono::Utc::now());
-            let ticking = stats.is_some_and(|stats| {
-                matches!(
-                    crate::session_stats::Cache::of(&stats, working, crate::session_stats::now_ms()),
-                    Some(crate::session_stats::Cache::Warm { .. })
-                )
-            });
-            if !ticking {
-                self.stats_tick = None;
-            } else if self.stats_tick.is_none() {
-                self.stats_tick = Some(cx.spawn(async move |this, cx| {
-                    loop {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_secs(10))
-                            .await;
-                        if this.update(cx, |_, cx| cx.notify()).is_err() {
-                            break;
-                        }
-                    }
-                }));
-            }
-            let stats =
-                stats.and_then(|stats| crate::session_stats::chip(stats, working, &theme));
+            self.stats_chip
+                .update(cx, |chip, cx| chip.set(stats, working, cx));
             return Some(
                 row()
                     .pr_0()
                     .child(left)
                     .child(right)
-                    .children(stats)
+                    .child(self.stats_chip.clone())
                     .child(div().flex_1().min_w_0())
                     .when_some(change_request, |el, summary| {
                         el.child(div().flex_none().child(
