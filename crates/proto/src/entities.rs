@@ -1276,6 +1276,56 @@ pub struct RunChangeRequestActionRequest {
     pub comment: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChangeRequestReviewEvent {
+    Comment,
+    Approve,
+    RequestChanges,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeRequestReviewComment {
+    pub path: String,
+    pub line: u64,
+    pub left_side: bool,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmitChangeRequestReviewRequest {
+    pub host: String,
+    pub repository: String,
+    pub number: u64,
+    pub event: ChangeRequestReviewEvent,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub comments: Vec<ChangeRequestReviewComment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplyToChangeRequestThreadRequest {
+    pub host: String,
+    pub repository: String,
+    pub number: u64,
+    pub thread_id: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetChangeRequestThreadResolvedRequest {
+    pub host: String,
+    pub repository: String,
+    pub number: u64,
+    pub thread_id: String,
+    pub resolved: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateChangeRequestRequest {
@@ -1398,6 +1448,8 @@ pub struct ChangeRequestActivityComment {
     pub thread_resolved: bool,
     #[serde(default)]
     pub outdated: bool,
+    #[serde(default)]
+    pub left_side: bool,
     #[serde(default)]
     pub reactions: Vec<ChangeRequestReaction>,
 }

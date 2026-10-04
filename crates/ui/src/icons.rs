@@ -315,6 +315,7 @@ icon_assets![
     (LUCIDE_PLAY, "lucide-play"),
     (LUCIDE_USER_PLUS, "lucide-user-plus"),
     (LUCIDE_PENCIL, "lucide-pencil"),
+    (LUCIDE_MESSAGE_SQUARE_OFF, "lucide-message-square-off"),
 ];
 
 /// Serves both the compact control-icon set and the complete file-identity

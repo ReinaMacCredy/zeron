@@ -36,6 +36,10 @@ use zeron_proto::{
     ChangeRequestStats, ChangeRequestSummary, ChangeRequestVerdict, GetChangeRequestRequest,
     ListChangeRequestStatsRequest, ListChangeRequestsRequest,
 };
+use zeron_proto::{
+    ChangeRequestReviewEvent, ReplyToChangeRequestThreadRequest,
+    SetChangeRequestThreadResolvedRequest, SubmitChangeRequestReviewRequest,
+};
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(10);
 const GITHUB_TIMEOUT: Duration = Duration::from_secs(20);
@@ -964,6 +968,153 @@ impl ChangeRequestResolver {
             )
             .await
             .map(|_| ())
+    }
+
+    /// One review with its inline comments; the request body (user text) travels on stdin.
+    pub async fn submit_change_request_review(
+        &self,
+        roots: &[PathBuf],
+        request: &SubmitChangeRequestReviewRequest,
+    ) -> Result<(), ActionError> {
+        if request.event != ChangeRequestReviewEvent::Approve
+            && request.body.trim().is_empty()
+            && request.comments.is_empty()
+        {
+            return Err(ActionError::Refused(
+                "A review needs a summary or at least one comment.".into(),
+            ));
+        }
+        if request
+            .comments
+            .iter()
+            .any(|comment| comment.body.trim().is_empty() || comment.line == 0)
+        {
+            return Err(ActionError::Refused(
+                "A line comment cannot be empty.".into(),
+            ));
+        }
+        let identity = self
+            .space_identity(roots, &request.host, &request.repository)
+            .await?;
+        let permissions = self.permissions(&identity, request.number).await?;
+        if permissions.did_author && request.event != ChangeRequestReviewEvent::Comment {
+            return Err(ActionError::Refused(
+                "You cannot approve or request changes on your own pull request.".into(),
+            ));
+        }
+        let body = serde_json::json!({
+            "event": match request.event {
+                ChangeRequestReviewEvent::Comment => "COMMENT",
+                ChangeRequestReviewEvent::Approve => "APPROVE",
+                ChangeRequestReviewEvent::RequestChanges => "REQUEST_CHANGES",
+            },
+            "body": request.body,
+            "comments": request.comments.iter().map(|comment| serde_json::json!({
+                "path": comment.path,
+                "line": comment.line,
+                "side": if comment.left_side { "LEFT" } else { "RIGHT" },
+                "body": comment.body,
+            })).collect::<Vec<_>>(),
+        });
+        self.github
+            .run_gh_action(
+                &identity.root,
+                vec![
+                    "api".into(),
+                    "--method".into(),
+                    "POST".into(),
+                    "--hostname".into(),
+                    identity.remote.host.clone(),
+                    format!(
+                        "repos/{}/pulls/{}/reviews",
+                        identity.name_with_owner(),
+                        request.number
+                    ),
+                    "--input".into(),
+                    "-".into(),
+                ],
+                Some(
+                    serde_json::to_vec(&body)
+                        .map_err(|_| ActionError::Host(ChangeRequestError::Decode))?,
+                ),
+            )
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn reply_to_change_request_thread(
+        &self,
+        roots: &[PathBuf],
+        request: &ReplyToChangeRequestThreadRequest,
+    ) -> Result<(), ActionError> {
+        if request.body.trim().is_empty() {
+            return Err(ActionError::Refused("A reply cannot be empty.".into()));
+        }
+        let identity = self
+            .space_identity(roots, &request.host, &request.repository)
+            .await?;
+        self.thread_in_scope(&identity, request.number, &request.thread_id)
+            .await?;
+        self.github
+            .graphql_action(
+                &identity,
+                "mutation($threadId: ID!, $body: String!) { addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $threadId, body: $body }) { comment { id } } }",
+                serde_json::json!({ "threadId": request.thread_id, "body": request.body }),
+            )
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn set_change_request_thread_resolved(
+        &self,
+        roots: &[PathBuf],
+        request: &SetChangeRequestThreadResolvedRequest,
+    ) -> Result<(), ActionError> {
+        let identity = self
+            .space_identity(roots, &request.host, &request.repository)
+            .await?;
+        let permissions = self.permissions(&identity, request.number).await?;
+        if !(permissions.can_write || permissions.did_author) {
+            return Err(ActionError::Refused(
+                "Resolving a conversation needs write access or authorship of this pull request."
+                    .into(),
+            ));
+        }
+        self.thread_in_scope(&identity, request.number, &request.thread_id)
+            .await?;
+        let mutation = if request.resolved {
+            "mutation($threadId: ID!) { resolveReviewThread(input: { threadId: $threadId }) { thread { isResolved } } }"
+        } else {
+            "mutation($threadId: ID!) { unresolveReviewThread(input: { threadId: $threadId }) { thread { isResolved } } }"
+        };
+        self.github
+            .graphql_action(
+                &identity,
+                mutation,
+                serde_json::json!({ "threadId": request.thread_id }),
+            )
+            .await
+            .map(|_| ())
+    }
+
+    /// A client-supplied thread id must name a review thread of this pull request.
+    async fn thread_in_scope(
+        &self,
+        identity: &RepositoryIdentity,
+        number: u64,
+        thread: &str,
+    ) -> Result<(), ActionError> {
+        let mut variables = activity_variables(identity, number, None);
+        variables["subjectId"] = serde_json::Value::String(thread.to_owned());
+        let raw = self
+            .github
+            .graphql(identity, THREAD_SCOPE_QUERY, variables)
+            .await?;
+        let scope: GhScopeResponse = serde_json::from_slice(&raw)
+            .map_err(|_| ActionError::Host(ChangeRequestError::Decode))?;
+        subject_in_scope(&scope, Some(thread))
+            .map(|_| ())
+            .ok_or(ActionError::Host(ChangeRequestError::UnsupportedRepository))
     }
 
     async fn space_identity(
@@ -2685,7 +2836,7 @@ const SUBJECT_SCOPE_QUERY: &str = "query($owner: String!, $name: String!, $numbe
 
 fn threads_fields() -> String {
     format!(
-        "reviewThreads(first: 100, after: $cursor) {{ pageInfo {{ hasNextPage endCursor }} nodes {{ id isResolved isOutdated path line comments(first: 10) {{ totalCount pageInfo {{ hasNextPage }} nodes {{ id author {{ login }} body createdAt url {REACTION_GROUPS} }} }} }} }}"
+        "reviewThreads(first: 100, after: $cursor) {{ pageInfo {{ hasNextPage endCursor }} nodes {{ id isResolved isOutdated path line diffSide comments(first: 10) {{ totalCount pageInfo {{ hasNextPage }} nodes {{ id author {{ login }} body createdAt url {REACTION_GROUPS} }} }} }} }}"
     )
 }
 
@@ -2882,6 +3033,8 @@ struct GhReviewThread {
     #[serde(default)]
     line: Option<u64>,
     #[serde(default)]
+    diff_side: Option<String>,
+    #[serde(default)]
     comments: GhConnection<GhActivityComment>,
 }
 
@@ -3034,6 +3187,7 @@ fn to_activity(
         thread_id: None,
         thread_resolved: false,
         outdated: false,
+        left_side: false,
         reactions: reactions(source.reaction_groups),
     };
     let issue_read = pull.comments.nodes.len() as u64;
@@ -3090,6 +3244,7 @@ fn to_activity(
             remark.thread_id = Some(thread.id.clone());
             remark.thread_resolved = thread.is_resolved;
             remark.outdated = thread.is_outdated;
+            remark.left_side = thread.diff_side.as_deref() == Some("LEFT");
             comments.push(remark);
         }
     }
@@ -3150,6 +3305,7 @@ impl From<ChangeRequestError> for ActionError {
     }
 }
 
+const THREAD_SCOPE_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!, $subjectId: ID!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { id } } node(id: $subjectId) { id ... on PullRequestReviewThread { pullRequest { id } } } }";
 const PERMISSIONS_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed viewerPermission defaultBranchRef { name } pullRequest(number: $number) { state viewerCanUpdate viewerDidAuthor headRefName headRepositoryOwner { login } } } }";
 const BASE_COMPARISON_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!, $headRef: String!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { viewerCanUpdateBranch baseRef { compare(headRef: $headRef) { behindBy } } } } }";
 const LABEL_CANDIDATES_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { labels(first: 100, orderBy: { field: NAME, direction: ASC }) { pageInfo { hasNextPage } nodes { name color description } } pullRequest(number: $number) { labels(first: 100) { nodes { name } } } } }";
@@ -6257,6 +6413,154 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
             .update_change_request(&roots, &request(None, Some("new body")))
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn reviews_and_threads_send_text_on_stdin_and_stay_in_scope() {
+        let runner = ScriptedRunner::new(|request| {
+            if let Some(output) = git_repo_script(request) {
+                return output;
+            }
+            if request.args[..2] == ["api", "graphql"] {
+                let input = stdin_json(request);
+                let query = input["query"].as_str().unwrap();
+                if query.contains("viewerPermission") {
+                    let mut json = permissions_json("WRITE", "OPEN");
+                    json["data"]["repository"]["pullRequest"]["viewerDidAuthor"] =
+                        serde_json::Value::Bool(input["variables"]["number"] == 9);
+                    return command_success(serde_json::to_vec(&json).unwrap());
+                }
+                if query.contains("compare(headRef") {
+                    return command_success(r#"{"data":{"repository":{"pullRequest":{}}}}"#);
+                }
+                if query.contains("PullRequestReviewThread") {
+                    let owner = if input["variables"]["subjectId"] == "T_7" {
+                        "PR_7"
+                    } else {
+                        "PR_other"
+                    };
+                    return command_success(
+                        serde_json::to_vec(&serde_json::json!({"data": {
+                            "repository": {"pullRequest": {"id": "PR_7"}},
+                            "node": {"id": input["variables"]["subjectId"], "pullRequest": {"id": owner}}
+                        }}))
+                        .unwrap(),
+                    );
+                }
+                assert!(query.starts_with("mutation"), "{query}");
+                return command_success(r#"{"data":{}}"#);
+            }
+            let input = stdin_json(request);
+            assert_eq!(request.args.last().map(String::as_str), Some("-"));
+            assert_eq!(input["event"], "REQUEST_CHANGES");
+            assert_eq!(input["body"], "please fix");
+            assert_eq!(
+                input["comments"],
+                serde_json::json!([{"path": "src/a.rs", "line": 4, "side": "LEFT", "body": "gone?"}])
+            );
+            command_success("{}")
+        });
+        let resolver = list_resolver(runner.clone());
+        let roots = [PathBuf::from("/repo")];
+        let review = |number: u64,
+                      event,
+                      body: &str,
+                      comments: Vec<zeron_proto::ChangeRequestReviewComment>| {
+            SubmitChangeRequestReviewRequest {
+                host: "github.com".into(),
+                repository: "acme/zeron".into(),
+                number,
+                event,
+                body: body.into(),
+                comments,
+            }
+        };
+        resolver
+            .submit_change_request_review(
+                &roots,
+                &review(
+                    7,
+                    ChangeRequestReviewEvent::RequestChanges,
+                    "please fix",
+                    vec![zeron_proto::ChangeRequestReviewComment {
+                        path: "src/a.rs".into(),
+                        line: 4,
+                        left_side: true,
+                        body: "gone?".into(),
+                    }],
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resolver
+                .submit_change_request_review(
+                    &roots,
+                    &review(7, ChangeRequestReviewEvent::Comment, " ", Vec::new())
+                )
+                .await
+                .unwrap_err(),
+            ActionError::Refused("A review needs a summary or at least one comment.".into())
+        );
+        assert_eq!(
+            resolver
+                .submit_change_request_review(
+                    &roots,
+                    &review(9, ChangeRequestReviewEvent::Approve, "", Vec::new())
+                )
+                .await
+                .unwrap_err(),
+            ActionError::Refused(
+                "You cannot approve or request changes on your own pull request.".into()
+            )
+        );
+        let reply = |thread: &str| ReplyToChangeRequestThreadRequest {
+            host: "github.com".into(),
+            repository: "acme/zeron".into(),
+            number: 7,
+            thread_id: thread.into(),
+            body: "done".into(),
+        };
+        resolver
+            .reply_to_change_request_thread(&roots, &reply("T_7"))
+            .await
+            .unwrap();
+        assert_eq!(
+            resolver
+                .reply_to_change_request_thread(&roots, &reply("T_elsewhere"))
+                .await
+                .unwrap_err(),
+            ActionError::Host(ChangeRequestError::UnsupportedRepository)
+        );
+        resolver
+            .set_change_request_thread_resolved(
+                &roots,
+                &SetChangeRequestThreadResolvedRequest {
+                    host: "github.com".into(),
+                    repository: "acme/zeron".into(),
+                    number: 7,
+                    thread_id: "T_7".into(),
+                    resolved: true,
+                },
+            )
+            .await
+            .unwrap();
+        let requests = runner.requests.lock().unwrap();
+        let mutations: Vec<String> = requests
+            .iter()
+            .filter_map(|request| request.stdin.as_deref())
+            .map(|stdin| String::from_utf8_lossy(stdin).into_owned())
+            .filter(|stdin| stdin.contains("mutation"))
+            .collect();
+        assert_eq!(mutations.len(), 2);
+        assert!(mutations[0].contains("addPullRequestReviewThreadReply"));
+        assert!(mutations[1].contains("resolveReviewThread"));
+        assert!(
+            requests
+                .iter()
+                .all(|request| !request.args.iter().any(|arg| arg.contains("please fix"))),
+            "review text never rides argv"
+        );
     }
 
     fn search_node(number: u64, author: &str, rollup: Option<&str>) -> serde_json::Value {

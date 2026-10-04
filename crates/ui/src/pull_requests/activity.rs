@@ -356,6 +356,7 @@ impl PullRequestsPage {
                             .collect();
                         activity.guesses.clear();
                         activity.activity = Loadable::Ready(loaded);
+                        page.sync_code_review(&key, cx);
                     }
                     Err(error) if activity.activity.ready().is_none() => {
                         activity.activity = Loadable::Error(error);
@@ -1956,6 +1957,7 @@ mod tests {
             thread_id: None,
             thread_resolved: false,
             outdated: false,
+            left_side: false,
             reactions: Vec::new(),
         }
     }

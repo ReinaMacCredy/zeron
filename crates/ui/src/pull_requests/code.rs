@@ -394,19 +394,26 @@ struct Slice {
     raw: Option<String>,
 }
 
+pub(crate) enum CodeEvent {
+    Toast(String, Option<String>),
+    Refresh,
+}
+
+impl gpui::EventEmitter<CodeEvent> for PullRequestCode {}
+
 pub(crate) struct PullRequestCode {
-    state: Entity<AppState>,
-    key: PullRequestKey,
+    pub(super) state: Entity<AppState>,
+    pub(super) key: PullRequestKey,
     commits: Vec<ChangeRequestCommit>,
-    commit: Option<ChangeRequestCommit>,
+    pub(super) commit: Option<ChangeRequestCommit>,
     commits_shown: usize,
     commit_menu: Popup<()>,
     slices: Vec<Slice>,
-    next_cursor: Option<String>,
+    pub(super) next_cursor: Option<String>,
     started: bool,
     pending: bool,
     error: Option<String>,
-    files: Vec<FileDiff>,
+    pub(super) files: Vec<FileDiff>,
     omitted: HashMap<String, (u64, u64)>,
     horizontal: Vec<FileHorizontalState>,
     toggled: HashSet<String>,
@@ -420,6 +427,7 @@ pub(crate) struct PullRequestCode {
     tree_folded: HashSet<String>,
     selected: Option<String>,
     generation: u64,
+    pub(super) review: super::review::ReviewState,
     _fetch: Option<Task<()>>,
 }
 
@@ -456,6 +464,7 @@ impl PullRequestCode {
             tree_folded: HashSet::new(),
             selected: None,
             generation: 0,
+            review: Default::default(),
             _fetch: None,
         }
     }
@@ -495,7 +504,7 @@ impl PullRequestCode {
 
     pub(super) fn dismiss_overlay(&mut self, cx: &mut Context<Self>) -> bool {
         if !self.commit_menu.is_open() || self.commit_menu.is_closing() {
-            return false;
+            return self.review_dismiss(cx);
         }
         self.close_commit_menu(cx);
         true
@@ -626,14 +635,20 @@ impl PullRequestCode {
 
     fn flatten_rows(&mut self) {
         let collapsed: Vec<bool> = (0..self.files.len()).map(|ix| self.collapsed(ix)).collect();
-        let (rows, ranges) = flatten(&self.files, self.mode, |ix| collapsed[ix]);
+        let (rows, _) = flatten(&self.files, self.mode, |ix| collapsed[ix]);
+        let (rows, ranges) = self.place_review(rows);
         self.rows = rows;
         self.row_ranges = ranges;
     }
 
-    fn reflatten_all(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn reflatten_all(&mut self, cx: &mut Context<Self>) {
+        let top = self.list.logical_scroll_top();
         self.flatten_rows();
         self.list.reset(self.rows.len() + 1);
+        self.list.scroll_to(ListOffset {
+            item_ix: top.item_ix.min(self.rows.len()),
+            offset_in_item: top.offset_in_item,
+        });
         cx.notify();
     }
 
@@ -799,14 +814,18 @@ impl PullRequestCode {
                     .as_deref()
                     .map(|highlights| highlights.spans(line))
                     .unwrap_or(&[]);
-                changes::diff_line_row(
+                let anchor = super::review::line_anchors(line.kind, line.old_no, line.new_no)
+                    .into_iter()
+                    .next();
+                let row = changes::diff_line_row(
                     line,
                     spans,
                     &theme,
                     changes::gutter_width(file),
                     code_width,
                     Some(code_scroll.slot("unified")),
-                )
+                );
+                self.with_adder(row, ix, file_ix, anchor, 2.0, &theme, cx)
             }
             DiffRow::SplitLine {
                 hunk, left, right, ..
@@ -843,8 +862,18 @@ impl PullRequestCode {
                     })
                     .unwrap_or_else(|| changes::split_filler().into_any_element())
                 };
-                changes::split_row(cell(left, true), cell(right, false), self.wrap, &theme)
-                    .into_any_element()
+                let anchor = right.or(left).and_then(|line| {
+                    super::review::line_anchors(line.kind, line.old_no, line.new_no)
+                        .into_iter()
+                        .next()
+                });
+                let row =
+                    changes::split_row(cell(left, true), cell(right, false), self.wrap, &theme)
+                        .into_any_element();
+                self.with_adder(row, ix, file_ix, anchor, 2.0, &theme, cx)
+            }
+            DiffRow::CommentCard { card, .. } => {
+                self.render_annotation(card as usize, &theme, window, cx)
             }
             DiffRow::BodyPad { .. } => div()
                 .w_full()
@@ -1109,6 +1138,7 @@ impl PullRequestCode {
             .when(!self.commits.is_empty(), |el| {
                 el.child(self.render_commit_trigger(theme, cx))
             })
+            .children(self.comment_lock(theme))
             .when(!self.slices.is_empty(), |el| {
                 el.child(
                     div()
@@ -1633,9 +1663,11 @@ impl PullRequestCode {
 }
 
 impl Render for PullRequestCode {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let toolbar = self.render_toolbar(&theme, cx);
+        let offdiff = self.render_offdiff(&theme, window, cx);
+        let overlay = self.render_review_overlay(&theme, cx);
         let message = |text: String| {
             div()
                 .px(px(16.0))
@@ -1684,7 +1716,8 @@ impl Render for PullRequestCode {
                                 .size_full()
                                 .with_sizing_behavior(gpui::ListSizingBehavior::Auto),
                         )
-                        .children(sticky),
+                        .children(sticky)
+                        .children(overlay),
                 )
                 .children(tree)
                 .into_any_element()
@@ -1694,6 +1727,7 @@ impl Render for PullRequestCode {
             .flex()
             .flex_col()
             .child(toolbar)
+            .children(offdiff)
             .child(body)
     }
 }

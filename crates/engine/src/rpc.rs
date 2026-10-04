@@ -1713,6 +1713,9 @@ fn forwardable(method: &str) -> bool {
             | methods::SET_CHANGE_REQUEST_LABEL
             | methods::LIST_CHANGE_REQUEST_REVIEWER_CANDIDATES
             | methods::SET_CHANGE_REQUEST_REVIEWER
+            | methods::SUBMIT_CHANGE_REQUEST_REVIEW
+            | methods::REPLY_TO_CHANGE_REQUEST_THREAD
+            | methods::SET_CHANGE_REQUEST_THREAD_RESOLVED
             | methods::GET_CHECKOUT_DIFF
             | methods::DISCARD_WORKING_TREE
             | methods::GET_CHECKOUT_FILE_DIFF_TEXT
@@ -3002,6 +3005,30 @@ impl RpcService for EngineRpc {
                 Ok(RpcReply::Value(
                     serde_json::to_value(detail).map_err(|e| RpcError::Failed(e.to_string()))?,
                 ))
+            }
+            methods::SUBMIT_CHANGE_REQUEST_REVIEW => {
+                let p: zeron_proto::SubmitChangeRequestReviewRequest = parse_params(params)?;
+                crate::source_control::ChangeRequestResolver::new()
+                    .submit_change_request_review(&self.change_request_space_roots(), &p)
+                    .await
+                    .map_err(action_failure)?;
+                Ok(RpcReply::Value(serde_json::Value::Null))
+            }
+            methods::REPLY_TO_CHANGE_REQUEST_THREAD => {
+                let p: zeron_proto::ReplyToChangeRequestThreadRequest = parse_params(params)?;
+                crate::source_control::ChangeRequestResolver::new()
+                    .reply_to_change_request_thread(&self.change_request_space_roots(), &p)
+                    .await
+                    .map_err(action_failure)?;
+                Ok(RpcReply::Value(serde_json::Value::Null))
+            }
+            methods::SET_CHANGE_REQUEST_THREAD_RESOLVED => {
+                let p: zeron_proto::SetChangeRequestThreadResolvedRequest = parse_params(params)?;
+                crate::source_control::ChangeRequestResolver::new()
+                    .set_change_request_thread_resolved(&self.change_request_space_roots(), &p)
+                    .await
+                    .map_err(action_failure)?;
+                Ok(RpcReply::Value(serde_json::Value::Null))
             }
             methods::GET_CHANGE_REQUEST_PERMISSIONS => {
                 let p: zeron_proto::GetChangeRequestRequest = parse_params(params)?;
@@ -4755,6 +4782,9 @@ mod tests {
             methods::SET_CHANGE_REQUEST_LABEL,
             methods::LIST_CHANGE_REQUEST_REVIEWER_CANDIDATES,
             methods::SET_CHANGE_REQUEST_REVIEWER,
+            methods::SUBMIT_CHANGE_REQUEST_REVIEW,
+            methods::REPLY_TO_CHANGE_REQUEST_THREAD,
+            methods::SET_CHANGE_REQUEST_THREAD_RESOLVED,
         ] {
             assert!(forwardable(method), "{method}");
         }

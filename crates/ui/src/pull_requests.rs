@@ -3,6 +3,7 @@ mod activity;
 mod code;
 mod detail;
 mod filters;
+mod review;
 
 pub use filters::PullRequestListPrefs;
 

@@ -14,7 +14,7 @@ use zeron_rpc::methods;
 
 use super::actions::ActionsState;
 use super::activity::ActivityState;
-use super::code::PullRequestCode;
+use super::code::{CodeEvent, PullRequestCode};
 use super::{
     PullRequestKey, PullRequestsPage, Tones, avatar, diff_stat, failure_message, label_color,
     relative_time,
@@ -65,6 +65,7 @@ pub(super) struct DetailState {
     copied: Option<(&'static str, Instant)>,
     tab: DetailTab,
     code: Option<Entity<PullRequestCode>>,
+    code_sub: Option<gpui::Subscription>,
     pub(super) activity: ActivityState,
     pub(super) actions: ActionsState,
     _task: Option<Task<()>>,
@@ -88,6 +89,7 @@ impl DetailState {
             copied: None,
             tab: DetailTab::Summary,
             code: None,
+            code_sub: None,
             _task: None,
         }
     }
@@ -370,12 +372,26 @@ impl PullRequestsPage {
             code.update(cx, |code, cx| code.dismiss_overlay(cx));
         }
         if tab == DetailTab::Code {
+            let created = state.code.is_none();
             let code = state
                 .code
                 .get_or_insert_with(|| {
                     cx.new(|cx| PullRequestCode::new(page_state, key.clone(), cx))
                 })
                 .clone();
+            if created {
+                let event_key = key.clone();
+                state.code_sub = Some(cx.subscribe(&code, move |page, _, event, cx| match event {
+                    CodeEvent::Toast(title, Some(description)) => {
+                        page.toast_with(title.clone(), description.clone(), cx)
+                    }
+                    CodeEvent::Toast(title, None) => page.toast(title.clone(), cx),
+                    CodeEvent::Refresh => {
+                        page.load_activity(&event_key, cx);
+                        page.load_detail(&event_key, cx);
+                    }
+                }));
+            }
             let commits = match &state.detail {
                 Loadable::Ready(detail) => detail.commits.clone(),
                 _ => Vec::new(),
@@ -387,8 +403,41 @@ impl PullRequestsPage {
                     None => code.ensure_loaded(cx),
                 }
             });
+            self.sync_code_review(key, cx);
         }
         cx.notify();
+    }
+
+    /// Pushes the threads and what the reader may do with them into the Code tab.
+    pub(super) fn sync_code_review(&mut self, key: &PullRequestKey, cx: &mut Context<Self>) {
+        let Some(state) = self.details.get(key) else {
+            return;
+        };
+        let Some(code) = state.code.clone() else {
+            return;
+        };
+        let threads = state
+            .activity
+            .activity
+            .ready()
+            .map(|activity| super::review::threads_of(&activity.comments))
+            .unwrap_or_default();
+        let permissions = state.actions.permissions.ready();
+        let context = super::review::ReviewContext {
+            threads,
+            can_comment: permissions.is_some(),
+            can_resolve: permissions.is_some_and(|p| p.can_write || p.did_author),
+            verdicts: match permissions {
+                None => Vec::new(),
+                Some(p) if p.did_author => vec![zeron_proto::ChangeRequestReviewEvent::Comment],
+                Some(_) => vec![
+                    zeron_proto::ChangeRequestReviewEvent::Comment,
+                    zeron_proto::ChangeRequestReviewEvent::Approve,
+                    zeron_proto::ChangeRequestReviewEvent::RequestChanges,
+                ],
+            },
+        };
+        code.update(cx, |code, cx| code.set_review(context, cx));
     }
 
     pub(super) fn render_checks_popover(

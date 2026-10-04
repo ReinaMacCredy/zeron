@@ -402,6 +402,7 @@ impl PullRequestsPage {
                     }
                     cx.notify();
                 }
+                page.sync_code_review(&key, cx);
             })
             .ok();
         }));
@@ -2228,7 +2229,7 @@ pub(super) enum Look {
 }
 
 pub(super) fn icon_button(
-    id: &'static str,
+    id: impl Into<gpui::ElementId>,
     label: impl Into<SharedString>,
     look: Look,
     theme: &Theme,
@@ -2240,7 +2241,7 @@ pub(super) fn icon_button(
 }
 
 pub(super) fn button(
-    id: &'static str,
+    id: impl Into<gpui::ElementId>,
     label: impl Into<SharedString>,
     look: Look,
     theme: &Theme,
@@ -2249,7 +2250,7 @@ pub(super) fn button(
 }
 
 fn styled_button(
-    id: &'static str,
+    id: impl Into<gpui::ElementId>,
     label: SharedString,
     look: Look,
     theme: &Theme,
