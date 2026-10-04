@@ -1405,19 +1405,100 @@ impl CheckoutChangeRequestLookup for ChangeRequestResolver {
     }
 }
 
+const GH_CONCURRENCY: usize = 12;
+const RATE_LIMIT_FIRST_PAUSE: Duration = Duration::from_secs(30);
+const RATE_LIMIT_MAX_PAUSE: Duration = Duration::from_secs(15 * 60);
+
+static GH_SLOTS: std::sync::LazyLock<tokio::sync::Semaphore> =
+    std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(GH_CONCURRENCY));
+static SHARED_RATE_LIMITS: std::sync::LazyLock<Arc<RateLimits>> =
+    std::sync::LazyLock::new(|| Arc::new(RateLimits::default()));
+
+fn rate_limit_pause(attempt: u32) -> Duration {
+    RATE_LIMIT_FIRST_PAUSE
+        .saturating_mul(2u32.saturating_pow(attempt.saturating_sub(1)))
+        .min(RATE_LIMIT_MAX_PAUSE)
+}
+
+// Writes bypass the pause so a user's own action is never silently dropped.
+#[derive(Default)]
+struct RateLimits {
+    hosts: std::sync::Mutex<std::collections::HashMap<String, (u32, std::time::Instant)>>,
+}
+
+impl RateLimits {
+    fn paused(&self, host: &str) -> bool {
+        self.hosts
+            .lock()
+            .ok()
+            .and_then(|hosts| {
+                hosts
+                    .get(host)
+                    .map(|(_, until)| *until > std::time::Instant::now())
+            })
+            .unwrap_or(false)
+    }
+
+    fn record(&self, host: &str, result: &Result<Vec<u8>, ChangeRequestError>) {
+        let Ok(mut hosts) = self.hosts.lock() else {
+            return;
+        };
+        match result {
+            Err(ChangeRequestError::RateLimited) => {
+                let attempt = hosts.get(host).map_or(0, |(attempt, _)| *attempt) + 1;
+                hosts.insert(
+                    host.to_owned(),
+                    (
+                        attempt,
+                        std::time::Instant::now() + rate_limit_pause(attempt),
+                    ),
+                );
+            }
+            Ok(_) => {
+                hosts.remove(host);
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+fn host_of_args(args: &[String]) -> String {
+    let after = |flag: &str| {
+        args.iter()
+            .position(|arg| arg == flag)
+            .and_then(|at| args.get(at + 1))
+    };
+    after("--hostname")
+        .cloned()
+        .or_else(|| {
+            after("--repo")
+                .filter(|repo| repo.matches('/').count() >= 2)
+                .and_then(|repo| repo.split('/').next().map(str::to_owned))
+        })
+        .unwrap_or_else(|| "github.com".into())
+        .to_ascii_lowercase()
+}
+
 /// GitHub provider backed by the host's existing `gh` installation and auth.
 #[derive(Clone)]
 pub struct GitHubCli {
     runner: Arc<dyn ProcessRunner>,
+    rate_limits: Arc<RateLimits>,
 }
 
 impl GitHubCli {
     pub fn new() -> Self {
-        Self::with_runner(Arc::new(SystemProcessRunner))
+        Self {
+            runner: Arc::new(SystemProcessRunner),
+            rate_limits: SHARED_RATE_LIMITS.clone(),
+        }
     }
 
     fn with_runner(runner: Arc<dyn ProcessRunner>) -> Self {
-        Self { runner }
+        Self {
+            runner,
+            rate_limits: Arc::new(RateLimits::default()),
+        }
     }
 
     async fn list_for_selector(
@@ -1512,6 +1593,10 @@ impl GitHubCli {
         output_limit: usize,
         stdin: Option<Vec<u8>>,
     ) -> Result<Vec<u8>, ChangeRequestError> {
+        let host = host_of_args(&args);
+        if self.rate_limits.paused(&host) {
+            return Err(ChangeRequestError::RateLimited);
+        }
         let request = ProcessRequest {
             program: "gh".into(),
             args,
@@ -1521,14 +1606,20 @@ impl GitHubCli {
             output_limit,
             stdin,
         };
-        let output = self.runner.run(request).await.map_err(classify_run_error)?;
-        if !output.success {
-            return Err(classify_github_failure(&output.stderr));
+        let result = async {
+            let _slot = GH_SLOTS.acquire().await;
+            let output = self.runner.run(request).await.map_err(classify_run_error)?;
+            if !output.success {
+                return Err(classify_github_failure(&output.stderr));
+            }
+            if output.stdout_truncated {
+                return Err(ChangeRequestError::Decode);
+            }
+            Ok(output.stdout)
         }
-        if output.stdout_truncated {
-            return Err(ChangeRequestError::Decode);
-        }
-        Ok(output.stdout)
+        .await;
+        self.rate_limits.record(&host, &result);
+        result
     }
 
     async fn viewer_login(&self, host: &str, cwd: &Path) -> Result<String, ChangeRequestError> {
@@ -1735,7 +1826,10 @@ impl GitHubCli {
             output_limit: GITHUB_OUTPUT_LIMIT,
             stdin,
         };
-        let output = self.runner.run(request).await.map_err(classify_run_error)?;
+        let output = {
+            let _slot = GH_SLOTS.acquire().await;
+            self.runner.run(request).await.map_err(classify_run_error)?
+        };
         if output.success {
             return Ok(output.stdout);
         }
@@ -1855,39 +1949,49 @@ impl GitHubCli {
         query: String,
         rows: u32,
     ) -> Result<(Vec<GhSearchPullRequest>, usize, bool), ChangeRequestError> {
-        let document = format!(
-            "query($q: String!) {{ search(query: $q, type: ISSUE, first: {rows}) {{ pageInfo {{ hasNextPage }} nodes {{ ... on PullRequest {{ {GITHUB_SEARCH_FIELDS} }} }} }} }}"
-        );
-        let stdout = self
-            .run_gh(
-                root,
-                vec![
-                    "api".into(),
-                    "graphql".into(),
-                    "--hostname".into(),
-                    host.into(),
-                    "-f".into(),
-                    format!("q={query}"),
-                    "-f".into(),
-                    format!("query={document}"),
-                ],
-                GITHUB_LIST_TIMEOUT,
-                GITHUB_LIST_OUTPUT_LIMIT,
-            )
-            .await?;
-        let response: GhSearchResponse =
-            serde_json::from_slice(&stdout).map_err(|_| ChangeRequestError::Decode)?;
-        let search = response
-            .data
-            .ok_or(ChangeRequestError::CommandFailed)?
-            .search;
-        let raw_count = search.nodes.len();
-        let rows = search
-            .nodes
+        let mut nodes = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut has_next = false;
+        while nodes.len() < rows as usize {
+            let first = (rows as usize - nodes.len()).min(100);
+            let document = format!(
+                "query($q: String!, $after: String) {{ search(query: $q, type: ISSUE, first: {first}, after: $after) {{ pageInfo {{ hasNextPage endCursor }} nodes {{ ... on PullRequest {{ {GITHUB_SEARCH_FIELDS} }} }} }} }}"
+            );
+            let mut args = vec![
+                "api".into(),
+                "graphql".into(),
+                "--hostname".into(),
+                host.into(),
+                "-f".into(),
+                format!("q={query}"),
+                "-f".into(),
+                format!("query={document}"),
+            ];
+            if let Some(cursor) = &cursor {
+                args.extend(["-f".into(), format!("after={cursor}")]);
+            }
+            let stdout = self
+                .run_gh(root, args, GITHUB_LIST_TIMEOUT, GITHUB_LIST_OUTPUT_LIMIT)
+                .await?;
+            let response: GhSearchResponse =
+                serde_json::from_slice(&stdout).map_err(|_| ChangeRequestError::Decode)?;
+            let search = response
+                .data
+                .ok_or(ChangeRequestError::CommandFailed)?
+                .search;
+            nodes.extend(search.nodes);
+            has_next = search.page_info.has_next_page;
+            cursor = search.page_info.end_cursor.filter(|_| has_next);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        let raw_count = nodes.len();
+        let rows = nodes
             .into_iter()
             .filter_map(|node| serde_json::from_value(node).ok())
             .collect();
-        Ok((rows, raw_count, search.page_info.has_next_page))
+        Ok((rows, raw_count, has_next))
     }
 
     async fn search_host_items(
@@ -1943,7 +2047,7 @@ impl GitHubCli {
             .collect::<Vec<_>>()
             .join(" ")
         };
-        let rows = (limit + 1).min(100);
+        let rows = limit + 1;
         let authored = format!("author:{viewer}");
         let reviewing = format!("review-requested:{viewer}");
         let empty = || async { Ok((Vec::new(), 0, false)) };
@@ -3973,6 +4077,41 @@ fn to_reviewer_candidates(
     ChangeRequestReviewerCandidates {
         reviewers,
         truncated: repository.assignable_users.page_info.has_next_page,
+    }
+}
+
+const RESPONSE_CACHE_CAPACITY: usize = 256;
+
+static RESPONSE_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, serde_json::Value)>>,
+> = std::sync::LazyLock::new(Default::default);
+
+pub(crate) fn cached_response(key: &str, ttl: Duration) -> Option<serde_json::Value> {
+    let cache = RESPONSE_CACHE.lock().ok()?;
+    cache
+        .get(key)
+        .filter(|(at, _)| at.elapsed() < ttl)
+        .map(|(_, value)| value.clone())
+}
+
+pub(crate) fn remember_response(key: String, value: &serde_json::Value) {
+    let Ok(mut cache) = RESPONSE_CACHE.lock() else {
+        return;
+    };
+    if cache.len() >= RESPONSE_CACHE_CAPACITY
+        && let Some(oldest) = cache
+            .iter()
+            .min_by_key(|(_, (at, _))| *at)
+            .map(|(key, _)| key.clone())
+    {
+        cache.remove(&oldest);
+    }
+    cache.insert(key, (std::time::Instant::now(), value.clone()));
+}
+
+pub(crate) fn invalidate_responses() {
+    if let Ok(mut cache) = RESPONSE_CACHE.lock() {
+        cache.clear();
     }
 }
 
@@ -6966,6 +7105,78 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
         }
     }
 
+    #[test]
+    fn rate_limit_pauses_double_to_fifteen_minutes_and_hosts_come_from_args() {
+        assert_eq!(rate_limit_pause(1), Duration::from_secs(30));
+        assert_eq!(rate_limit_pause(3), Duration::from_secs(120));
+        assert_eq!(rate_limit_pause(12), Duration::from_secs(15 * 60));
+        let args = |list: &[&str]| list.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            host_of_args(&args(&["api", "--hostname", "GHE.example.com", "user"])),
+            "ghe.example.com"
+        );
+        assert_eq!(
+            host_of_args(&args(&["pr", "view", "7", "--repo", "ghe.io/acme/zeron"])),
+            "ghe.io"
+        );
+        assert_eq!(
+            host_of_args(&args(&["pr", "view", "7", "--repo", "acme/zeron"])),
+            "github.com"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rate_limited_host_stops_reads_until_the_pause_ends_but_writes_go_through() {
+        let runner = ScriptedRunner::new(|request| {
+            if request.args.first().map(String::as_str) == Some("pr") {
+                return command_success("");
+            }
+            command_failure("API rate limit exceeded for user")
+        });
+        let github = GitHubCli::with_runner(runner.clone());
+        let read = || {
+            github.run_gh(
+                Path::new("/repo"),
+                ["api", "--hostname", "github.com", "user"]
+                    .map(str::to_owned)
+                    .to_vec(),
+                GITHUB_TIMEOUT,
+                GITHUB_OUTPUT_LIMIT,
+            )
+        };
+        assert_eq!(read().await.unwrap_err(), ChangeRequestError::RateLimited);
+        assert_eq!(read().await.unwrap_err(), ChangeRequestError::RateLimited);
+        assert_eq!(
+            runner.requests.lock().unwrap().len(),
+            1,
+            "the paused read never spawns gh"
+        );
+        github
+            .run_gh_action(
+                Path::new("/repo"),
+                ["pr", "close", "7", "--repo", "github.com/acme/zeron"]
+                    .map(str::to_owned)
+                    .to_vec(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(runner.requests.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn cached_responses_expire_and_clear_on_invalidate() {
+        let key = format!("test:{}", std::process::id());
+        remember_response(key.clone(), &serde_json::json!({"n": 1}));
+        assert_eq!(
+            cached_response(&key, Duration::from_secs(30)),
+            Some(serde_json::json!({"n": 1}))
+        );
+        assert_eq!(cached_response(&key, Duration::ZERO), None);
+        invalidate_responses();
+        assert_eq!(cached_response(&key, Duration::from_secs(30)), None);
+    }
+
     fn search_node(number: u64, author: &str, rollup: Option<&str>) -> serde_json::Value {
         serde_json::json!({
             "number": number,
@@ -7064,6 +7275,71 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
                 .map(String::as_str)
                 != Some("pr"))
         );
+    }
+
+    #[tokio::test]
+    async fn a_list_past_one_hundred_rows_follows_the_search_cursor() {
+        let runner = ScriptedRunner::new(|request| {
+            if let Some(output) = git_repo_script(request) {
+                return output;
+            }
+            if request.args.get(1).map(String::as_str) != Some("graphql") {
+                return command_success("alice\n");
+            }
+            let query = arg_after(request, "-f").unwrap_or_default();
+            if !query.contains("is:pr is:open sort:updated-desc") {
+                return command_success(
+                    r#"{"data":{"search":{"pageInfo":{"hasNextPage":false},"nodes":[]}}}"#,
+                );
+            }
+            let document = request
+                .args
+                .iter()
+                .find_map(|arg| arg.strip_prefix("query="))
+                .expect("document");
+            let after = request
+                .args
+                .iter()
+                .find_map(|arg| arg.strip_prefix("after="));
+            let (range, first, page) = match after {
+                None => (
+                    1..=100,
+                    "first: 100,",
+                    serde_json::json!({"hasNextPage": true, "endCursor": "c1"}),
+                ),
+                Some("c1") => (
+                    101..=151,
+                    "first: 51,",
+                    serde_json::json!({"hasNextPage": true, "endCursor": "c2"}),
+                ),
+                Some(other) => panic!("unexpected cursor {other}"),
+            };
+            assert!(document.contains(first), "{document}");
+            let nodes: Vec<_> = range
+                .map(|number| {
+                    let mut node = search_node(number, "carol", None);
+                    node["updatedAt"] = "2026-09-01T00:00:00Z".into();
+                    node
+                })
+                .collect();
+            command_success(
+                serde_json::to_vec(&serde_json::json!({
+                    "data": {"search": {"pageInfo": page, "nodes": nodes}}
+                }))
+                .unwrap(),
+            )
+        });
+        let request = ListChangeRequestsRequest {
+            limit: Some(150),
+            ..Default::default()
+        };
+        let listing = list_resolver(runner)
+            .list_change_requests(&[PathBuf::from("/repo")], &request)
+            .await;
+
+        assert!(listing.errors.is_empty(), "{:?}", listing.errors);
+        assert_eq!(listing.items.len(), 150);
+        assert!(listing.truncated);
     }
 
     #[tokio::test]

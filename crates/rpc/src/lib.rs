@@ -273,6 +273,7 @@ pub mod methods {
     pub const REPLY_TO_CHANGE_REQUEST_THREAD: &str = "ReplyToChangeRequestThread";
     pub const SET_CHANGE_REQUEST_THREAD_RESOLVED: &str = "SetChangeRequestThreadResolved";
     pub const PREPARE_CHANGE_REQUEST_CHAT: &str = "PrepareChangeRequestChat";
+    pub const INVALIDATE_CHANGE_REQUESTS: &str = "InvalidateChangeRequests";
     pub const GET_CHECKOUT_DIFF: &str = "GetCheckoutDiff";
     /// Permanently restore one chat-owned checkout to its current HEAD and
     /// remove only its untracked, non-ignored paths.
