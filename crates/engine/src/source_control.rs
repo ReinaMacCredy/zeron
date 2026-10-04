@@ -15,10 +15,12 @@ use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use zeron_proto::{
-    ChangeRequestActor, ChangeRequestChecksState, ChangeRequestFailure, ChangeRequestInvolvement,
-    ChangeRequestLabel, ChangeRequestListError, ChangeRequestListItem, ChangeRequestListState,
-    ChangeRequestListing, ChangeRequestMergeability, ChangeRequestReviewDecision,
-    ChangeRequestState, ChangeRequestSummary, ListChangeRequestsRequest,
+    ChangeRequestActor, ChangeRequestCheck, ChangeRequestCheckStatus, ChangeRequestChecksState,
+    ChangeRequestComment, ChangeRequestCommentKind, ChangeRequestDetail, ChangeRequestFailure,
+    ChangeRequestInvolvement, ChangeRequestLabel, ChangeRequestListError, ChangeRequestListItem,
+    ChangeRequestListState, ChangeRequestListing, ChangeRequestMergeability,
+    ChangeRequestReviewDecision, ChangeRequestReviewer, ChangeRequestState, ChangeRequestSummary,
+    ChangeRequestVerdict, GetChangeRequestRequest, ListChangeRequestsRequest,
 };
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -29,6 +31,7 @@ const GITHUB_OUTPUT_LIMIT: usize = 1024 * 1024;
 const GITHUB_LIST_OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
 const GITHUB_RESULT_LIMIT: &str = "20";
 const GITHUB_JSON_FIELDS: &str = "number,title,url,state,baseRefName,headRefName,updatedAt,isCrossRepository,headRepositoryOwner";
+const GITHUB_DETAIL_FIELDS: &str = "number,title,url,author,headRefName,baseRefName,state,isDraft,mergeable,reviewDecision,createdAt,updatedAt,mergedAt,reviewRequests,labels,additions,deletions,statusCheckRollup,body,changedFiles,closedAt,isCrossRepository,comments,reviews,latestReviews,commits";
 const GITHUB_LIST_FIELDS: &str = "number,title,url,author,headRefName,baseRefName,state,isDraft,mergeable,reviewDecision,createdAt,updatedAt,mergedAt,reviewRequests,labels";
 pub const DEFAULT_LIST_LIMIT: u32 = 99;
 const MAX_LIST_LIMIT: u32 = 500;
@@ -265,6 +268,37 @@ impl ChangeRequestResolver {
             .items
             .sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
         listing
+    }
+}
+
+impl ChangeRequestResolver {
+    pub async fn get_change_request(
+        &self,
+        roots: &[PathBuf],
+        request: &GetChangeRequestRequest,
+    ) -> Result<ChangeRequestDetail, ChangeRequestError> {
+        let identities = futures::future::join_all(
+            roots
+                .iter()
+                .map(|root| self.inspector.repository_identity(root)),
+        )
+        .await;
+        let identity = identities
+            .into_iter()
+            .filter_map(Result::ok)
+            .find(|identity| {
+                identity.remote.host.eq_ignore_ascii_case(&request.host)
+                    && identity
+                        .name_with_owner()
+                        .eq_ignore_ascii_case(&request.repository)
+            })
+            .ok_or(ChangeRequestError::UnsupportedRepository)?;
+        let (viewer, view) = futures::try_join!(
+            self.github
+                .viewer_login(&identity.remote.host, &identity.root),
+            self.github.view_pull_request(&identity, request.number),
+        )?;
+        to_detail(&identity, &viewer, view).ok_or(ChangeRequestError::Decode)
     }
 }
 
@@ -600,6 +634,30 @@ impl GitHubCli {
             }
         }
         Ok((items, truncated))
+    }
+
+    async fn view_pull_request(
+        &self,
+        identity: &RepositoryIdentity,
+        number: u64,
+    ) -> Result<GhDetailPullRequest, ChangeRequestError> {
+        let stdout = self
+            .run_gh(
+                &identity.root,
+                vec![
+                    "pr".into(),
+                    "view".into(),
+                    number.to_string(),
+                    "--repo".into(),
+                    format!("{}/{}", identity.remote.host, identity.name_with_owner()),
+                    "--json".into(),
+                    GITHUB_DETAIL_FIELDS.into(),
+                ],
+                GITHUB_LIST_TIMEOUT,
+                GITHUB_LIST_OUTPUT_LIMIT,
+            )
+            .await?;
+        serde_json::from_slice(&stdout).map_err(|_| ChangeRequestError::Decode)
     }
 
     async fn list_feed(
@@ -1180,7 +1238,8 @@ struct GhLabel {
     color: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct GhCheck {
     #[serde(default)]
     status: Option<String>,
@@ -1188,6 +1247,80 @@ struct GhCheck {
     conclusion: Option<String>,
     #[serde(default)]
     state: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    context: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    details_url: Option<String>,
+    #[serde(default)]
+    target_url: Option<String>,
+    #[serde(default)]
+    workflow_name: Option<String>,
+    #[serde(default)]
+    completed_at: Option<String>,
+    #[serde(default)]
+    started_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhDetailPullRequest {
+    #[serde(flatten)]
+    summary: GhListPullRequest,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    changed_files: u64,
+    #[serde(default)]
+    closed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    is_cross_repository: bool,
+    #[serde(default)]
+    comments: Option<Vec<GhComment>>,
+    #[serde(default)]
+    reviews: Option<Vec<GhReview>>,
+    #[serde(default)]
+    latest_reviews: Option<Vec<GhReview>>,
+    #[serde(default)]
+    commits: Option<Vec<GhCommit>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhComment {
+    id: String,
+    #[serde(default)]
+    author: Option<GhActor>,
+    #[serde(default)]
+    body: String,
+    created_at: DateTime<Utc>,
+    #[serde(default)]
+    url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhReview {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    author: Option<GhActor>,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    submitted_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhCommit {
+    #[serde(default)]
+    committed_date: Option<DateTime<Utc>>,
 }
 
 fn gh_list_state(row: &GhListPullRequest) -> ChangeRequestState {
@@ -1234,6 +1367,264 @@ fn checks_rollup(checks: &[GhCheck]) -> Option<ChangeRequestChecksState> {
     } else {
         None
     }
+}
+
+fn check_status(check: &GhCheck) -> ChangeRequestCheckStatus {
+    if check
+        .status
+        .as_deref()
+        .is_some_and(|status| !status.is_empty() && !status.eq_ignore_ascii_case("COMPLETED"))
+    {
+        return ChangeRequestCheckStatus::Pending;
+    }
+    match check
+        .conclusion
+        .as_deref()
+        .or(check.state.as_deref())
+        .unwrap_or_default()
+        .to_ascii_uppercase()
+        .as_str()
+    {
+        "SUCCESS" => ChangeRequestCheckStatus::Success,
+        "ACTION_REQUIRED" => ChangeRequestCheckStatus::ActionRequired,
+        "FAILURE" | "ERROR" | "TIMED_OUT" | "STARTUP_FAILURE" => ChangeRequestCheckStatus::Failure,
+        "CANCELLED" => ChangeRequestCheckStatus::Cancelled,
+        "SKIPPED" => ChangeRequestCheckStatus::Skipped,
+        "PENDING" | "EXPECTED" => ChangeRequestCheckStatus::Pending,
+        _ => ChangeRequestCheckStatus::Neutral,
+    }
+}
+
+fn check_time(check: &GhCheck) -> Option<&str> {
+    check
+        .completed_at
+        .as_deref()
+        .or(check.started_at.as_deref())
+        .filter(|at| !at.is_empty() && !at.starts_with("0001-01-01"))
+}
+
+fn dedupe_checks(rollup: &[GhCheck]) -> Vec<ChangeRequestCheck> {
+    let mut kept: Vec<(String, &GhCheck)> = Vec::new();
+    for check in rollup {
+        let Some(name) = check.name.as_deref().or(check.context.as_deref()) else {
+            continue;
+        };
+        let key = format!(
+            "{} {name}",
+            check.workflow_name.as_deref().unwrap_or_default()
+        );
+        match kept.iter_mut().find(|(known, _)| *known == key) {
+            Some(slot) => {
+                let newer = match (check_time(check), check_time(slot.1)) {
+                    (Some(candidate), Some(current)) => candidate >= current,
+                    (Some(_), None) | (None, None) => true,
+                    (None, Some(_)) => false,
+                };
+                if newer {
+                    slot.1 = check;
+                }
+            }
+            None => kept.push((key, check)),
+        }
+    }
+    let names: Vec<(&str, Option<&str>)> = kept
+        .iter()
+        .map(|(_, check)| {
+            (
+                check
+                    .name
+                    .as_deref()
+                    .or(check.context.as_deref())
+                    .unwrap_or_default(),
+                check.workflow_name.as_deref(),
+            )
+        })
+        .collect();
+    kept.iter()
+        .map(|(_, check)| {
+            let name = check
+                .name
+                .as_deref()
+                .or(check.context.as_deref())
+                .unwrap_or_default();
+            let shared = names.iter().any(|(other, workflow)| {
+                *other == name && *workflow != check.workflow_name.as_deref()
+            });
+            ChangeRequestCheck {
+                name: match (shared, check.workflow_name.as_deref()) {
+                    (true, Some(workflow)) if !workflow.is_empty() => {
+                        format!("{workflow} / {name}")
+                    }
+                    _ => name.to_owned(),
+                },
+                status: check_status(check),
+                description: check.description.clone().filter(|text| !text.is_empty()),
+                url: check
+                    .details_url
+                    .clone()
+                    .or_else(|| check.target_url.clone())
+                    .filter(|url| !url.is_empty()),
+                workflow_name: check.workflow_name.clone().filter(|name| !name.is_empty()),
+            }
+        })
+        .collect()
+}
+
+fn rollup_of(checks: &[ChangeRequestCheck]) -> Option<ChangeRequestChecksState> {
+    use ChangeRequestCheckStatus as S;
+    if checks
+        .iter()
+        .any(|check| matches!(check.status, S::Failure | S::Cancelled))
+    {
+        Some(ChangeRequestChecksState::Failing)
+    } else if checks
+        .iter()
+        .any(|check| matches!(check.status, S::Pending | S::ActionRequired))
+    {
+        Some(ChangeRequestChecksState::Pending)
+    } else if checks.iter().any(|check| check.status == S::Success) {
+        Some(ChangeRequestChecksState::Passing)
+    } else {
+        None
+    }
+}
+
+fn verdict_of(state: &str) -> Option<ChangeRequestVerdict> {
+    match state {
+        "APPROVED" => Some(ChangeRequestVerdict::Approved),
+        "CHANGES_REQUESTED" => Some(ChangeRequestVerdict::ChangesRequested),
+        _ => None,
+    }
+}
+
+fn to_detail(
+    identity: &RepositoryIdentity,
+    viewer: &str,
+    view: GhDetailPullRequest,
+) -> Option<ChangeRequestDetail> {
+    let host = identity.remote.host.clone();
+    let checks = dedupe_checks(
+        view.summary
+            .status_check_rollup
+            .as_deref()
+            .unwrap_or_default(),
+    );
+    let requested: Vec<String> = view
+        .summary
+        .review_requests
+        .iter()
+        .flatten()
+        .filter_map(|request| request.login.clone())
+        .collect();
+    let merged_at = view
+        .summary
+        .merged_at
+        .as_deref()
+        .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
+        .map(|at| at.with_timezone(&Utc));
+    let mut item = to_list_item(identity, viewer, view.summary)?;
+    item.checks_state = rollup_of(&checks);
+    let commits = view.commits.unwrap_or_default();
+    let newest_commit = commits
+        .iter()
+        .filter_map(|commit| commit.committed_date)
+        .max();
+    let latest_reviews = view.latest_reviews.unwrap_or_default();
+    let verdict_for = |login: &str| {
+        latest_reviews
+            .iter()
+            .filter(|review| {
+                review
+                    .author
+                    .as_ref()
+                    .is_some_and(|author| author.login.eq_ignore_ascii_case(login))
+            })
+            .find_map(|review| {
+                verdict_of(&review.state).map(|verdict| {
+                    let stale = matches!(
+                        (review.submitted_at, newest_commit),
+                        (Some(submitted), Some(newest)) if submitted < newest
+                    );
+                    (verdict, stale)
+                })
+            })
+    };
+    let mut reviewers: Vec<ChangeRequestReviewer> = Vec::new();
+    let reviewed = latest_reviews
+        .iter()
+        .filter(|review| verdict_of(&review.state).is_some())
+        .filter_map(|review| review.author.as_ref().map(|author| author.login.clone()));
+    for login in requested.iter().cloned().chain(reviewed) {
+        if reviewers
+            .iter()
+            .any(|known| known.login.eq_ignore_ascii_case(&login))
+        {
+            continue;
+        }
+        let verdict = verdict_for(&login);
+        reviewers.push(ChangeRequestReviewer {
+            avatar_url: avatar_url(&host, &login),
+            verdict: verdict.map(|(verdict, _)| verdict),
+            stale: verdict.is_some_and(|(_, stale)| stale),
+            login,
+        });
+    }
+    let actor = |author: Option<GhActor>| {
+        author.map(|actor| ChangeRequestActor {
+            avatar_url: avatar_url(&host, &actor.login),
+            login: actor.login,
+        })
+    };
+    let issue_comments = view.comments.unwrap_or_default();
+    let comment_count = issue_comments.len() as u64;
+    let mut comments: Vec<ChangeRequestComment> = issue_comments
+        .into_iter()
+        .map(|comment| ChangeRequestComment {
+            id: comment.id,
+            kind: ChangeRequestCommentKind::Comment,
+            author: actor(comment.author),
+            body: comment.body,
+            created_at: comment.created_at,
+            url: comment.url.filter(|url| !url.is_empty()),
+            review_state: None,
+        })
+        .collect();
+    for review in view.reviews.unwrap_or_default() {
+        let Some(submitted_at) = review.submitted_at else {
+            continue;
+        };
+        if review.body.trim().is_empty()
+            && !matches!(
+                review.state.as_str(),
+                "APPROVED" | "CHANGES_REQUESTED" | "DISMISSED"
+            )
+        {
+            continue;
+        }
+        comments.push(ChangeRequestComment {
+            id: review.id,
+            kind: ChangeRequestCommentKind::Review,
+            author: actor(review.author),
+            body: review.body,
+            created_at: submitted_at,
+            url: None,
+            review_state: Some(review.state),
+        });
+    }
+    comments.sort_by(|left, right| left.created_at.cmp(&right.created_at));
+    Some(ChangeRequestDetail {
+        item,
+        body: view.body.unwrap_or_default(),
+        changed_files: view.changed_files,
+        merged_at,
+        closed_at: view.closed_at,
+        is_cross_repository: view.is_cross_repository,
+        reviewers,
+        checks,
+        comments,
+        comment_count,
+        commit_count: commits.len() as u64,
+    })
 }
 
 fn avatar_url(host: &str, login: &str) -> Option<String> {
@@ -2560,6 +2951,7 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
             status: status.map(str::to_owned),
             conclusion: conclusion.map(str::to_owned),
             state: state.map(str::to_owned),
+            ..Default::default()
         };
         assert_eq!(checks_rollup(&[]), None);
         assert_eq!(checks_rollup(&[check(None, Some("SKIPPED"), None)]), None);
@@ -2585,5 +2977,172 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
             checks_rollup(&[check(None, None, Some("PENDING"))]),
             Some(ChangeRequestChecksState::Pending)
         );
+    }
+
+    fn detail_json() -> serde_json::Value {
+        let mut row = list_row(
+            742,
+            "carol",
+            "2026-10-03T00:00:00Z",
+            serde_json::json!({
+                "additions": 601,
+                "deletions": 95,
+                "reviewRequests": [{"__typename": "User", "login": "alice"}, {"__typename": "Team", "name": "core"}],
+                "statusCheckRollup": [
+                    {"__typename": "CheckRun", "name": "build", "workflowName": "CI", "status": "COMPLETED", "conclusion": "FAILURE", "completedAt": "2026-10-02T10:00:00Z", "detailsUrl": "https://ci/old"},
+                    {"__typename": "CheckRun", "name": "build", "workflowName": "CI", "status": "COMPLETED", "conclusion": "SUCCESS", "completedAt": "2026-10-02T11:00:00Z", "detailsUrl": "https://ci/new"},
+                    {"__typename": "CheckRun", "name": "test", "workflowName": "UI", "status": "IN_PROGRESS", "conclusion": "", "startedAt": "2026-10-02T11:00:00Z"},
+                    {"__typename": "CheckRun", "name": "test", "workflowName": "Engine", "status": "COMPLETED", "conclusion": "SKIPPED"},
+                    {"__typename": "StatusContext", "context": "vercel", "state": "SUCCESS", "targetUrl": "https://vercel/x"}
+                ]
+            }),
+        );
+        let extra = serde_json::json!({
+            "body": "## What\nA change.",
+            "changedFiles": 6,
+            "closedAt": null,
+            "isCrossRepository": true,
+            "comments": [
+                {"id": "IC_2", "author": {"login": "dave"}, "body": "second", "createdAt": "2026-10-02T12:00:00Z", "url": "https://github.com/acme/zeron/pull/742#c2"},
+                {"id": "IC_1", "author": {"login": "erin"}, "body": "first", "createdAt": "2026-10-01T12:00:00Z", "url": "https://github.com/acme/zeron/pull/742#c1"}
+            ],
+            "reviews": [
+                {"id": "R_1", "author": {"login": "bob"}, "body": "", "state": "APPROVED", "submittedAt": "2026-10-01T13:00:00Z"},
+                {"id": "R_2", "author": {"login": "bob"}, "body": "", "state": "COMMENTED", "submittedAt": "2026-10-01T14:00:00Z"},
+                {"id": "R_3", "author": {"login": "frank"}, "body": "Needs work", "state": "CHANGES_REQUESTED", "submittedAt": "2026-10-02T20:00:00Z"},
+                {"id": "R_4", "author": {"login": "gina"}, "body": "pending", "state": "PENDING"}
+            ],
+            "latestReviews": [
+                {"author": {"login": "bob"}, "body": "", "state": "APPROVED", "submittedAt": "2026-10-01T13:00:00Z"},
+                {"author": {"login": "frank"}, "body": "Needs work", "state": "CHANGES_REQUESTED", "submittedAt": "2026-10-02T20:00:00Z"},
+                {"author": {"login": "hank"}, "body": "", "state": "DISMISSED", "submittedAt": "2026-10-02T20:00:00Z"}
+            ],
+            "commits": [
+                {"committedDate": "2026-10-01T09:00:00Z"},
+                {"committedDate": "2026-10-02T09:00:00Z"}
+            ]
+        });
+        if let (Some(row), Some(extra)) = (row.as_object_mut(), extra.as_object()) {
+            for (key, value) in extra {
+                row.insert(key.clone(), value.clone());
+            }
+        }
+        row
+    }
+
+    #[tokio::test]
+    async fn get_change_request_maps_checks_reviewers_and_comments() {
+        let runner = ScriptedRunner::new(|request| {
+            if let Some(output) = git_repo_script(request) {
+                return output;
+            }
+            if request.args.first().map(String::as_str) == Some("api") {
+                return command_success("alice\n");
+            }
+            assert_eq!(&request.args[..3], ["pr", "view", "742"]);
+            assert_eq!(arg_after(request, "--repo"), Some("github.com/acme/zeron"));
+            assert_eq!(arg_after(request, "--json"), Some(GITHUB_DETAIL_FIELDS));
+            command_success(serde_json::to_vec(&detail_json()).unwrap())
+        });
+        let detail = list_resolver(runner)
+            .get_change_request(
+                &[PathBuf::from("/repo")],
+                &GetChangeRequestRequest {
+                    host: "GitHub.com".into(),
+                    repository: "ACME/zeron".into(),
+                    number: 742,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(detail.item.number, 742);
+        assert_eq!(detail.item.additions, 601);
+        assert!(detail.item.viewer_review_requested);
+        assert_eq!(
+            detail.item.checks_state,
+            Some(ChangeRequestChecksState::Pending)
+        );
+        assert_eq!(detail.body, "## What\nA change.");
+        assert_eq!(detail.changed_files, 6);
+        assert_eq!(detail.commit_count, 2);
+        assert_eq!(detail.comment_count, 2);
+
+        let checks: Vec<(&str, ChangeRequestCheckStatus, Option<&str>)> = detail
+            .checks
+            .iter()
+            .map(|check| (check.name.as_str(), check.status, check.url.as_deref()))
+            .collect();
+        assert_eq!(
+            checks,
+            [
+                (
+                    "build",
+                    ChangeRequestCheckStatus::Success,
+                    Some("https://ci/new")
+                ),
+                ("UI / test", ChangeRequestCheckStatus::Pending, None),
+                ("Engine / test", ChangeRequestCheckStatus::Skipped, None),
+                (
+                    "vercel",
+                    ChangeRequestCheckStatus::Success,
+                    Some("https://vercel/x")
+                ),
+            ]
+        );
+
+        let reviewers: Vec<(&str, Option<ChangeRequestVerdict>, bool)> = detail
+            .reviewers
+            .iter()
+            .map(|reviewer| (reviewer.login.as_str(), reviewer.verdict, reviewer.stale))
+            .collect();
+        assert_eq!(
+            reviewers,
+            [
+                ("alice", None, false),
+                ("bob", Some(ChangeRequestVerdict::Approved), true),
+                ("frank", Some(ChangeRequestVerdict::ChangesRequested), false),
+            ]
+        );
+
+        let comments: Vec<(&str, ChangeRequestCommentKind)> = detail
+            .comments
+            .iter()
+            .map(|comment| (comment.id.as_str(), comment.kind))
+            .collect();
+        assert_eq!(
+            comments,
+            [
+                ("IC_1", ChangeRequestCommentKind::Comment),
+                ("R_1", ChangeRequestCommentKind::Review),
+                ("IC_2", ChangeRequestCommentKind::Comment),
+                ("R_3", ChangeRequestCommentKind::Review),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn get_change_request_refuses_a_repository_outside_the_spaces() {
+        let runner = ScriptedRunner::new(|request| {
+            if let Some(output) = git_repo_script(request) {
+                return output;
+            }
+            panic!(
+                "no gh call may run for a foreign repository: {:?}",
+                request.args
+            );
+        });
+        let error = list_resolver(runner)
+            .get_change_request(
+                &[PathBuf::from("/repo")],
+                &GetChangeRequestRequest {
+                    host: "github.com".into(),
+                    repository: "someone/else".into(),
+                    number: 1,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error, ChangeRequestError::UnsupportedRepository);
     }
 }

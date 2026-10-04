@@ -1093,6 +1093,97 @@ pub struct ListChangeRequestsRequest {
     pub limit: Option<u32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChangeRequestCheckStatus {
+    Pending,
+    ActionRequired,
+    Success,
+    Failure,
+    Cancelled,
+    Skipped,
+    Neutral,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeRequestCheck {
+    pub name: String,
+    pub status: ChangeRequestCheckStatus,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub workflow_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChangeRequestVerdict {
+    Approved,
+    ChangesRequested,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeRequestReviewer {
+    pub login: String,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+    #[serde(default)]
+    pub verdict: Option<ChangeRequestVerdict>,
+    #[serde(default)]
+    pub stale: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChangeRequestCommentKind {
+    Comment,
+    Review,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeRequestComment {
+    pub id: String,
+    pub kind: ChangeRequestCommentKind,
+    pub author: Option<ChangeRequestActor>,
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub review_state: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeRequestDetail {
+    pub item: ChangeRequestListItem,
+    pub body: String,
+    pub changed_files: u64,
+    #[serde(default)]
+    pub merged_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub closed_at: Option<DateTime<Utc>>,
+    pub is_cross_repository: bool,
+    pub reviewers: Vec<ChangeRequestReviewer>,
+    pub checks: Vec<ChangeRequestCheck>,
+    pub comments: Vec<ChangeRequestComment>,
+    pub comment_count: u64,
+    pub commit_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetChangeRequestRequest {
+    pub host: String,
+    pub repository: String,
+    pub number: u64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChangeRequestListing {

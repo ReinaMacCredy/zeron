@@ -1146,6 +1146,8 @@ pub struct UiSettings {
     /// (`shell::SessionPanels`, zeron `sessionPanels` parity). Kept for file
     /// compatibility; no longer read or written by the shell.
     pub right_pane_open: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pull_requests_panel_width: Option<f32>,
     pub terminal_height: f32,
     /// Legacy — see [`Self::right_pane_open`].
     pub terminal_open: bool,
@@ -1290,6 +1292,7 @@ impl Default for UiSettings {
             right_pane_width: RIGHT_PANE_DEFAULT,
             split_ratio: SPLIT_RATIO_DEFAULT,
             right_pane_open: false,
+            pull_requests_panel_width: None,
             terminal_height: TERMINAL_DEFAULT_HEIGHT,
             terminal_open: false,
             keymap: KeymapConfig::default(),
@@ -1955,6 +1958,7 @@ impl UiSettings {
             agent_update_notifications,
             right_pane_width,
             right_pane_open,
+            pull_requests_panel_width,
             terminal_height,
             terminal_open,
             keymap,
@@ -3064,6 +3068,7 @@ mod tests {
             right_pane_width: 700.0,
             split_ratio: 0.35,
             right_pane_open: true,
+            pull_requests_panel_width: Some(520.0),
             terminal_height: 320.0,
             terminal_open: true,
             keymap: KeymapConfig {

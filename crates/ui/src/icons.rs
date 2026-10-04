@@ -268,6 +268,14 @@ icon_assets![
     (LUCIDE_REFRESH_CW, "lucide-refresh-cw"),
     (LUCIDE_ARROW_LEFT, "lucide-arrow-left"),
     (PR_BRANCH_MARK, "pr-branch-mark"),
+    (LUCIDE_USERS, "lucide-users"),
+    (LUCIDE_TAG, "lucide-tag"),
+    (LUCIDE_MESSAGE_SQUARE, "lucide-message-square"),
+    (LUCIDE_CHEVRON_RIGHT, "lucide-chevron-right"),
+    (LUCIDE_EXTERNAL_LINK, "lucide-external-link"),
+    (LUCIDE_FILE_DIFF, "lucide-file-diff"),
+    (LUCIDE_CIRCLE_DASHED, "lucide-circle-dashed"),
+    (LUCIDE_X, "lucide-x"),
 ];
 
 /// Serves both the compact control-icon set and the complete file-identity

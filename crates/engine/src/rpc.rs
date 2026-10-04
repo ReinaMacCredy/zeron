@@ -947,6 +947,17 @@ impl EngineRpc {
         self.file_search_root(p).await
     }
 
+    fn change_request_space_roots(&self) -> Vec<std::path::PathBuf> {
+        let local_device = self.doc_host.device_id();
+        self.workspace
+            .watch_spaces()
+            .borrow()
+            .iter()
+            .filter(|space| space.device_id == local_device && space.git_detected)
+            .map(|space| std::path::PathBuf::from(&space.path))
+            .collect()
+    }
+
     /// Accept only a checkout already named by a local chat or contained in a
     /// local space. Remote clients must not turn this RPC into an arbitrary path probe.
     async fn change_request_root(&self, cwd: &str) -> Result<std::path::PathBuf, RpcError> {
@@ -1675,6 +1686,7 @@ fn forwardable(method: &str) -> bool {
             | methods::WATCH_WORKSPACE_GIT_STATUS
             | methods::WATCH_CHECKOUT_CHANGE_REQUEST
             | methods::LIST_CHANGE_REQUESTS
+            | methods::GET_CHANGE_REQUEST
             | methods::GET_CHECKOUT_DIFF
             | methods::DISCARD_WORKING_TREE
             | methods::GET_CHECKOUT_FILE_DIFF_TEXT
@@ -2934,20 +2946,26 @@ impl RpcService for EngineRpc {
             }
             methods::LIST_CHANGE_REQUESTS => {
                 let p: zeron_proto::ListChangeRequestsRequest = parse_params(params)?;
-                let local_device = self.doc_host.device_id();
-                let roots: Vec<std::path::PathBuf> = self
-                    .workspace
-                    .watch_spaces()
-                    .borrow()
-                    .iter()
-                    .filter(|space| space.device_id == local_device && space.git_detected)
-                    .map(|space| std::path::PathBuf::from(&space.path))
-                    .collect();
                 let listing = crate::source_control::ChangeRequestResolver::new()
-                    .list_change_requests(&roots, &p)
+                    .list_change_requests(&self.change_request_space_roots(), &p)
                     .await;
                 Ok(RpcReply::Value(
                     serde_json::to_value(listing).map_err(|e| RpcError::Failed(e.to_string()))?,
+                ))
+            }
+            methods::GET_CHANGE_REQUEST => {
+                let p: zeron_proto::GetChangeRequestRequest = parse_params(params)?;
+                let detail = crate::source_control::ChangeRequestResolver::new()
+                    .get_change_request(&self.change_request_space_roots(), &p)
+                    .await
+                    .map_err(|error| {
+                        RpcError::Failed(
+                            serde_json::to_string(&zeron_proto::ChangeRequestFailure::from(error))
+                                .unwrap_or_default(),
+                        )
+                    })?;
+                Ok(RpcReply::Value(
+                    serde_json::to_value(detail).map_err(|e| RpcError::Failed(e.to_string()))?,
                 ))
             }
             // One-shot scoped capture for the Changes pane: `branch` diffs the
@@ -4591,6 +4609,7 @@ mod tests {
         assert!(is_stream_method(methods::WATCH_CHECKOUT_CHANGE_REQUEST));
         assert!(forwardable(methods::LIST_CHANGE_REQUESTS));
         assert!(!is_stream_method(methods::LIST_CHANGE_REQUESTS));
+        assert!(forwardable(methods::GET_CHANGE_REQUEST));
         assert!(forwardable(methods::DISCARD_WORKING_TREE));
         assert!(forwardable(methods::LIST_WORKSPACE_DIRECTORY));
         assert!(forwardable(methods::SEARCH_WORKSPACE_FILES));

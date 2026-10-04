@@ -1,11 +1,13 @@
-use std::collections::BTreeMap;
+mod detail;
+
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, Context, Entity, EventEmitter, Hsla,
-    IntoElement, ParentElement, Render, ScrollHandle, SharedString, Styled, Subscription, Task,
-    Window, div, percentage, prelude::*, px,
+    IntoElement, MouseButton, MouseMoveEvent, ParentElement, Render, ScrollHandle, SharedString,
+    Styled, Subscription, Task, Window, div, percentage, prelude::*, px,
 };
 use zeron_proto::{
     ChangeRequestChecksState, ChangeRequestFailure, ChangeRequestListItem, ChangeRequestListing,
@@ -241,6 +243,23 @@ impl Tones {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct PullRequestKey {
+    host: String,
+    repository: String,
+    number: u64,
+}
+
+impl PullRequestKey {
+    fn of(item: &ChangeRequestListItem) -> Self {
+        Self {
+            host: item.host.clone(),
+            repository: item.repository.clone(),
+            number: item.number,
+        }
+    }
+}
+
 pub enum PullRequestsEvent {
     Close,
 }
@@ -253,6 +272,12 @@ pub struct PullRequestsPage {
     refreshing: bool,
     load_task: Option<Task<()>>,
     scroll: ScrollHandle,
+    tabs: Vec<PullRequestKey>,
+    active: Option<PullRequestKey>,
+    details: HashMap<PullRequestKey, detail::DetailState>,
+    hovered_tab: Option<PullRequestKey>,
+    panel_width: Option<f32>,
+    resize_from: Option<(f32, f32)>,
 }
 
 impl EventEmitter<PullRequestsEvent> for PullRequestsPage {}
@@ -275,6 +300,12 @@ impl PullRequestsPage {
             refreshing: false,
             load_task: None,
             scroll: ScrollHandle::new(),
+            tabs: Vec::new(),
+            active: None,
+            details: HashMap::new(),
+            hovered_tab: None,
+            panel_width: None,
+            resize_from: None,
         };
         page.refresh(cx);
         page
@@ -590,8 +621,10 @@ impl PullRequestsPage {
         tones: Tones,
         row_width: f32,
         now: DateTime<Utc>,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         let (glyph, glyph_tone, _) = tones.glyph(item);
+        let selected = self.active.as_ref() == Some(&PullRequestKey::of(item));
         let muted70 = theme.text_muted.opacity(0.7);
         let muted50 = theme.text_muted.opacity(0.5);
         let meta_width = (row_width - 24.0 - 28.0 - 160.0).max(0.0);
@@ -702,6 +735,7 @@ impl PullRequestsPage {
         }
 
         let url = item.url.clone();
+        let opened = item.clone();
         div()
             .id(SharedString::from(format!(
                 "pull-request-row-{}-{}-{}",
@@ -716,8 +750,15 @@ impl PullRequestsPage {
             .p(px(12.0))
             .rounded(px(10.0))
             .cursor_pointer()
-            .hover(|style| style.bg(theme.ink(0.035)))
-            .on_click(move |_, _, cx| cx.open_url(&url))
+            .when(selected, |el| el.bg(theme.ink(0.055)))
+            .when(!selected, |el| el.hover(|style| style.bg(theme.ink(0.035))))
+            .on_click(cx.listener(move |page, event: &gpui::ClickEvent, _, cx| {
+                if event.modifiers().platform {
+                    cx.open_url(&url);
+                } else {
+                    page.open_pull_request(&opened, cx);
+                }
+            }))
             .child(
                 icon(glyph)
                     .size(px(16.0))
@@ -846,7 +887,7 @@ impl PullRequestsPage {
                     .children(
                         group_items
                             .into_iter()
-                            .map(|item| self.render_row(item, theme, tones, row_width, now)),
+                            .map(|item| self.render_row(item, theme, tones, row_width, now, cx)),
                     ),
             );
         }
@@ -1019,19 +1060,22 @@ impl Render for PullRequestsPage {
         }
         let theme = Theme::of(cx).clone();
         let viewport = f32::from(window.viewport_size().width);
-        let container = viewport.min(CONTAINER_MAX_WIDTH);
+        let panel_width = self
+            .active
+            .is_some()
+            .then(|| self.panel_width(viewport, cx));
+        let list_width = viewport - panel_width.map_or(0.0, |width| width + 1.0);
+        let container = list_width.min(CONTAINER_MAX_WIDTH);
         let row_width = (container - 2.0 * CONTAINER_PAD_X).max(0.0);
         let topbar = self.render_topbar(&theme, window, cx);
         let controls = self.render_controls(&theme, cx);
         let body = self.render_body(&theme, row_width, cx);
-        div()
-            .id("pull-requests-page")
-            .role(gpui::Role::Group)
-            .aria_label("Pull Requests")
-            .size_full()
+        let list = div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
             .flex()
             .flex_col()
-            .bg(theme.bg)
             .child(topbar)
             .child(
                 div()
@@ -1054,7 +1098,82 @@ impl Render for PullRequestsPage {
                             .child(controls)
                             .child(body),
                     ),
+            );
+        let panel = panel_width.map(|width| {
+            let resizer = div()
+                .id("pull-requests-panel-resizer")
+                .w(px(1.0))
+                .h_full()
+                .flex_none()
+                .relative()
+                .bg(if self.resize_from.is_some() {
+                    theme.hairline(0.22)
+                } else {
+                    theme.hairline(0.07)
+                })
+                .child(
+                    div()
+                        .id("pull-requests-panel-resize-handle")
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left(px(-4.0))
+                        .w(px(9.0))
+                        .cursor_col_resize()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |page, event: &gpui::MouseDownEvent, _, cx| {
+                                page.resize_from = Some((f32::from(event.position.x), width));
+                                cx.notify();
+                            }),
+                        ),
+                );
+            let panel = self.render_panel(&theme, width, window, cx);
+            (resizer, panel)
+        });
+        div()
+            .id("pull-requests-page")
+            .role(gpui::Role::Group)
+            .aria_label("Pull Requests")
+            .size_full()
+            .flex()
+            .flex_row()
+            .bg(theme.bg)
+            .on_mouse_move(cx.listener(move |page, event: &MouseMoveEvent, _, cx| {
+                if let Some((start_x, start_width)) = page.resize_from {
+                    let width = detail::clamp_panel_width(
+                        start_width - (f32::from(event.position.x) - start_x),
+                        viewport,
+                    );
+                    page.panel_width = Some(width);
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|page, _, _, cx| {
+                    if page.resize_from.take().is_some() {
+                        if let Some(width) = page.panel_width {
+                            crate::settings::update(
+                                crate::settings::SavePolicy::Debounced,
+                                cx,
+                                |settings| settings.pull_requests_panel_width = Some(width),
+                            );
+                        }
+                        cx.notify();
+                    }
+                }),
             )
+            .child(list)
+            .children(panel.map(|(resizer, panel)| {
+                div()
+                    .h_full()
+                    .flex()
+                    .flex_row()
+                    .flex_none()
+                    .child(resizer)
+                    .child(panel)
+            }))
     }
 }
 
