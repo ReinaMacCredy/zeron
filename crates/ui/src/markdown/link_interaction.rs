@@ -188,7 +188,11 @@ impl Element for LinkRanges {
                             {
                                 activate_link(
                                     click_target.clone(),
-                                    LinkAction::Primary,
+                                    if event.modifiers().platform {
+                                        LinkAction::External
+                                    } else {
+                                        LinkAction::Primary
+                                    },
                                     click_ui.as_ref(),
                                     window,
                                     cx,

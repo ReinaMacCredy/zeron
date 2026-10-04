@@ -278,6 +278,16 @@ pub(super) fn verdict_word(state: &str) -> String {
 }
 
 impl PullRequestsPage {
+    pub fn open_linked(
+        &mut self,
+        mut item: ChangeRequestListItem,
+        device: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        item.device_id = device;
+        self.open_pull_request(&item, cx);
+    }
+
     pub(super) fn open_pull_request(
         &mut self,
         item: &ChangeRequestListItem,

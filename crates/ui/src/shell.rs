@@ -331,6 +331,10 @@ fn titlebar_new_session_alpha(is_chat_route: bool, has_selected_chat: bool) -> f
 #[action(namespace = shell, no_json)]
 pub struct JumpSession(pub usize);
 
+#[derive(Clone, PartialEq, Action)]
+#[action(namespace = shell, no_json)]
+pub struct OpenPullRequestLink(pub String);
+
 // ---------------------------------------------------------------------------
 // Traffic-light-aware titlebar layout (feature-inventory §1.1)
 // ---------------------------------------------------------------------------
@@ -3998,6 +4002,15 @@ impl Shell {
             } else {
                 LinkOutcome::Rejected
             };
+        }
+        if activation.action == LinkAction::Primary
+            && let Ok(url) = &activation.target.navigation
+            && crate::pull_requests::parse_pull_request_url(url).is_some()
+        {
+            let in_zeron = crate::settings::current(cx).open_web_links_in_zeron
+                && cfg!(any(target_os = "macos", target_os = "linux"));
+            self.open_pull_request_link(url.clone(), in_zeron, window, cx);
+            return LinkOutcome::Internal;
         }
         let mut resolved = activation.clone();
         if resolved.action == LinkAction::Primary {
@@ -14523,6 +14536,11 @@ impl Render for Shell {
                     this.toggle_terminal(window, cx)
                 }
             }))
+            .on_action(
+                cx.listener(|this, link: &OpenPullRequestLink, window, cx| {
+                    this.open_pull_request_link(link.0.clone(), false, window, cx)
+                }),
+            )
             .on_action(cx.listener(|this, _: &SaveFile, _, cx| {
                 if matches!(this.route, Route::Chat) && this.right_pane_open(cx) {
                     let file = match this.resolved_right_active(cx) {
@@ -17757,6 +17775,32 @@ mod exit_regressions {
                 );
                 shell.activate_session_link(&activation, window, cx);
                 assert_eq!(shell.browsers.len(), 2);
+                let pull_request = LinkActivation {
+                    target: LinkTarget::new("#77", "https://github.com/acme/zeron/pull/77"),
+                    ..activation.clone()
+                };
+                assert_eq!(
+                    shell.activate_session_link(&pull_request, window, cx),
+                    LinkOutcome::Internal,
+                    "a pull request link is taken over and, with no engine to read it, \
+                     lands where the link would have gone"
+                );
+                assert_eq!(shell.browsers.len(), 3);
+                assert_eq!(
+                    shell.browsers[&shell.browser_seq].read(cx).page.url.as_deref(),
+                    Some("https://github.com/acme/zeron/pull/77")
+                );
+                assert_eq!(
+                    shell.activate_session_link(
+                        &LinkActivation {
+                            action: LinkAction::External,
+                            ..pull_request
+                        },
+                        window,
+                        cx
+                    ),
+                    LinkOutcome::External("https://github.com/acme/zeron/pull/77".into())
+                );
                 settings::update(settings::SavePolicy::Immediate, cx, |settings| {
                     settings.open_web_links_in_zeron = false;
                 });
@@ -17764,20 +17808,20 @@ mod exit_regressions {
                     shell.activate_session_link(&activation, window, cx),
                     LinkOutcome::External("https://example.com/docs".into())
                 );
-                assert_eq!(shell.browsers.len(), 2);
+                assert_eq!(shell.browsers.len(), 3);
                 activation.action = LinkAction::Internal;
                 assert_eq!(
                     shell.activate_session_link(&activation, window, cx),
                     LinkOutcome::Internal,
                     "the explicit internal action ignores the default preference"
                 );
-                assert_eq!(shell.browsers.len(), 3);
+                assert_eq!(shell.browsers.len(), 4);
                 activation.action = LinkAction::External;
                 assert_eq!(
                     shell.activate_session_link(&activation, window, cx),
                     LinkOutcome::External("https://example.com/docs".into())
                 );
-                assert_eq!(shell.browsers.len(), 3);
+                assert_eq!(shell.browsers.len(), 4);
                 activation.source_session = Some("other-session".into());
                 assert_eq!(
                     shell.activate_session_link(&activation, window, cx),
@@ -17791,7 +17835,7 @@ mod exit_regressions {
                     shell.activate_session_link(&activation, window, cx),
                     LinkOutcome::Rejected
                 );
-                assert_eq!(shell.browsers.len(), 3);
+                assert_eq!(shell.browsers.len(), 4);
                 shell.state.update(cx, |state, _| {
                     state.selected_chat = Some("first-session".into())
                 });
@@ -17819,7 +17863,7 @@ mod exit_regressions {
                     shell.activate_session_link(&activation, window, cx),
                     LinkOutcome::Internal
                 );
-                assert_eq!(shell.browsers.len(), 4);
+                assert_eq!(shell.browsers.len(), 5);
                 let weak = shell.browsers[&first].downgrade();
                 shell.close_right_surface(RightSurface::Browser(first), window, cx);
                 weak

@@ -294,6 +294,37 @@ fn routed(mut params: serde_json::Value, device: Option<&str>) -> serde_json::Va
 
 pub use handoff::ChatHandoff;
 
+pub(crate) fn parse_pull_request_url(url: &str) -> Option<(String, String, u64)> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let rest = rest.split(['?', '#']).next()?;
+    let mut parts = rest.split('/');
+    let host = parts.next()?.to_ascii_lowercase();
+    if !(host == "github.com" || host.starts_with("github.") || host.ends_with(".github.com")) {
+        return None;
+    }
+    let owner = parts.next().filter(|part| !part.is_empty())?;
+    let name = parts.next().filter(|part| !part.is_empty())?;
+    if parts.next()? != "pull" {
+        return None;
+    }
+    let number = parts.next()?.parse::<u64>().ok().filter(|n| *n > 0)?;
+    Some((host, format!("{owner}/{name}").to_ascii_lowercase(), number))
+}
+
+pub(crate) fn link_targets(state: &AppState) -> Vec<Option<String>> {
+    devices::list_devices(
+        state.local_device_id.as_deref(),
+        &state.devices,
+        &state.spaces,
+        Utc::now(),
+    )
+    .iter()
+    .map(devices::ListDevice::target)
+    .collect()
+}
+
 pub enum PullRequestsEvent {
     Close,
     OpenChat(ChatHandoff),
@@ -1878,6 +1909,24 @@ mod tests {
         rank_by_merge_readiness(&mut items);
         let order: Vec<u64> = items.iter().map(|item| item.number).collect();
         assert_eq!(order, [1, 2, 6, 7, 8, 3, 4, 5]);
+    }
+
+    #[test]
+    fn pull_request_urls_parse_like_t3code_for_github_hosts_only() {
+        let parsed = |url: &str| parse_pull_request_url(url);
+        assert_eq!(
+            parsed("https://github.com/ReinaMacCredy/Maestro/pull/77?w=1#discussion"),
+            Some(("github.com".into(), "reinamaccredy/maestro".into(), 77))
+        );
+        assert_eq!(
+            parsed("https://github.acme.io/acme/zeron/pull/5/files"),
+            Some(("github.acme.io".into(), "acme/zeron".into(), 5))
+        );
+        assert!(parsed("https://ghe.github.com/acme/zeron/pull/5").is_some());
+        assert_eq!(parsed("https://github.com/acme/zeron/issues/5"), None);
+        assert_eq!(parsed("https://github.com/acme/zeron/pull/0"), None);
+        assert_eq!(parsed("https://gitlab.com/acme/zeron/pull/5"), None);
+        assert_eq!(parsed("https://github.com/acme/pull/5"), None);
     }
 
     #[test]

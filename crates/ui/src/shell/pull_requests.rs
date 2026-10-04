@@ -29,6 +29,78 @@ impl Shell {
         cx.notify();
     }
 
+    pub(super) fn open_pull_request_link(
+        &mut self,
+        url: String,
+        in_zeron: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((host, repository, number)) = crate::pull_requests::parse_pull_request_url(&url)
+        else {
+            self.open_link_elsewhere(url, in_zeron, window, cx);
+            return;
+        };
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.open_link_elsewhere(url, in_zeron, window, cx);
+            return;
+        };
+        let targets = crate::pull_requests::link_targets(self.state.read(cx));
+        let params = serde_json::json!({
+            "host": host,
+            "repository": repository,
+            "number": number,
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let mut found = None;
+            for target in targets {
+                let mut params = params.clone();
+                if let Some(device) = &target {
+                    params["targetDeviceId"] = serde_json::Value::String(device.clone());
+                }
+                if let Ok(detail) = engine
+                    .client()
+                    .call(methods::GET_CHANGE_REQUEST, params)
+                    .await
+                    .map_err(|_| ())
+                    .and_then(|value| {
+                        serde_json::from_value::<zeron_proto::ChangeRequestDetail>(value)
+                            .map_err(|_| ())
+                    })
+                {
+                    found = Some((detail.item, target));
+                    break;
+                }
+            }
+            this.update_in(cx, |shell, window, cx| match found {
+                Some((item, device)) => {
+                    shell.open_pull_requests(cx);
+                    if let Some(page) = shell.pull_requests_page.clone() {
+                        page.update(cx, |page, cx| page.open_linked(item, device, cx));
+                    }
+                }
+                None => shell.open_link_elsewhere(url, in_zeron, window, cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn open_link_elsewhere(
+        &mut self,
+        url: String,
+        in_zeron: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if in_zeron {
+            self.set_surfaces_open(true, cx);
+            self.add_browser_surface(Some(url), window, cx);
+        } else {
+            cx.open_url(&url);
+        }
+    }
+
     pub(super) fn dismiss_pull_requests_overlay(&mut self, cx: &mut Context<Self>) -> bool {
         self.pull_requests_page
             .clone()
