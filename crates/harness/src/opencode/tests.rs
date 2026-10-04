@@ -1,6 +1,35 @@
 use super::*;
 
 #[test]
+fn turn_usage_sums_messages_and_bills_reasoning_as_output() {
+    let mut usage = TurnUsage::new();
+    usage.insert(
+        "msg_a".into(),
+        message_tokens(&json!({"input": 799, "output": 782, "reasoning": 15, "cache": {"read": 100_864, "write": 0}})),
+    );
+    usage.insert("msg_b".into(), message_tokens(&json!({"input": 1})));
+    usage.insert(
+        "msg_b".into(),
+        message_tokens(&json!({"input": 363, "output": 106, "reasoning": 466, "cache": {"read": 97_536, "write": 7}})),
+    );
+    assert_eq!(
+        turn_usage_events(usage),
+        [
+            AgentEvent::Usage {
+                input_tokens: 1_162,
+                output_tokens: 1_369
+            },
+            AgentEvent::PromptCache {
+                read_tokens: 198_400,
+                write_tokens: 7,
+                ttl_secs: None
+            },
+        ]
+    );
+    assert!(turn_usage_events(TurnUsage::new()).is_empty());
+}
+
+#[test]
 fn auto_mode_allows_workspace_edits_and_asks_for_the_rest() {
     assert_eq!(
         permission_kind(&json!({"id":"p","type":"edit","sessionID":"s"})),
@@ -389,8 +418,10 @@ impl TurnWire {
     /// Push one raw 2.x `/api/event` frame (normalized in the real
     /// stream_bus, not here).
     fn v2(&self, kind: &str, data: Value) {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.bus
-            .send(json!({"id": format!("evt_{kind}"), "type": kind, "data": data}))
+            .send(json!({"id": format!("evt_{seq}"), "type": kind, "data": data}))
             .unwrap();
     }
 
@@ -682,7 +713,7 @@ async fn v2_wire_streams_text_and_settles_on_execution_success() {
         .unwrap();
     assert_eq!(status, DoneStatus::Completed);
     assert_eq!(text, "PONG");
-    assert_eq!(usage, Some((4, 1)));
+    assert_eq!(usage, Some((34, 6)));
     assert_eq!(
         context_usage,
         vec![
@@ -1567,7 +1598,7 @@ fn v2_frames_normalize_to_v1_payloads() {
     assert_eq!(
         out,
         vec![json!({"type":"message.updated","properties":{
-            "info":{"sessionID":"ses_1","id":"usage","role":"assistant",
+            "info":{"sessionID":"ses_1","id":"usage:evt_9","role":"assistant",
                     "tokens":{"input":10,"output":2,"reasoning":0,
                               "cache":{"read":0,"write":0}}}}})]
     );
@@ -1604,7 +1635,7 @@ fn v2_frames_normalize_to_v1_payloads() {
     assert_eq!(
         out,
         vec![json!({"type":"message.updated","properties":{
-            "info":{"sessionID":"ses_2","id":"usage","role":"assistant",
+            "info":{"sessionID":"ses_2","id":"usage:evt_13","role":"assistant",
                     "tokens":{"input":1,"output":2},
                     "providerID":"opencode","modelID":"long-context"}}})]
     );

@@ -3619,15 +3619,22 @@ fn cursor_unstarted_history(
 fn record_session_stats(
     doc: &SessionDoc,
     chat_id: &str,
-    prices: bool,
+    (harness, model): (HarnessId, Option<&str>),
     resumed_from: Option<&str>,
     stats: Option<zeron_proto::SessionStats>,
 ) {
     if let Some(mut stats) = stats {
-        if !prices {
-            stats.unpriced_turns = stats.turns;
+        if stats.cost_session != 0 {
+            stats.bank_cost(&doc.session_stats().unwrap_or_default(), resumed_from);
+        } else if stats.total_tokens() > 0 {
+            match crate::model_prices::estimate(harness, model, &stats) {
+                Some(micros) => {
+                    stats.cost_micros = micros;
+                    stats.cost_estimated = true;
+                }
+                None => stats.unpriced_turns = stats.turns,
+            }
         }
-        stats.bank_cost(&doc.session_stats().unwrap_or_default(), resumed_from);
         if let Err(err) = doc.record_session_stats(&stats) {
             tracing::warn!(chat = %chat_id, error = %err, "session stats write failed");
         }
@@ -3653,6 +3660,7 @@ async fn drive_run(
     let user_prompt = request.prompt.clone();
     let run_cwd = request.cwd.clone();
     let resumed_from = request.resume.clone();
+    let priced_model = request.model.clone();
     let mut last_turn_computer = resume_state.turn_computer;
     let run_computer = resume_state.computer.clone();
     run_computer.begin_turn(&resume_state.user_message_id, resume_state.turn_computer);
@@ -3821,7 +3829,7 @@ async fn drive_run(
     };
 
     let doc_ref: &SessionDoc = &doc;
-    let prices = harness.reports_cost();
+    let pricing = (harness_id, priced_model.as_deref());
     let mut clock = crate::turn_clock::TurnClock::new(std::time::Instant::now());
     clock.start(true, std::time::Instant::now());
     let mut folded: Vec<MessagePart> = Vec::new();
@@ -4147,7 +4155,7 @@ async fn drive_run(
                     dirty = false;
                     entry_id = new_id();
                     segment_started = now_ms();
-                    record_session_stats(doc_ref, &chat_id, prices, resumed_from.as_deref(), clock.settle(std::time::Instant::now()));
+                    record_session_stats(doc_ref, &chat_id, pricing, resumed_from.as_deref(), clock.settle(std::time::Instant::now()));
                     idle_since = Some(tokio::time::Instant::now());
                     self_continued_turn = false;
                     inner.set_status_with_completion(
@@ -4440,7 +4448,7 @@ async fn drive_run(
                     record_session_stats(
                         doc_ref,
                         &chat_id,
-                        prices,
+                        pricing,
                         resumed_from.as_deref(),
                         clock.settle(now),
                     );
@@ -4706,7 +4714,7 @@ async fn drive_run(
             record_session_stats(
                 doc_ref,
                 &chat_id,
-                prices,
+                pricing,
                 resumed_from.as_deref(),
                 clock.settle(now),
             );
@@ -4828,7 +4836,7 @@ async fn drive_run(
             record_session_stats(
                 doc_ref,
                 &chat_id,
-                prices,
+                pricing,
                 resumed_from.as_deref(),
                 clock.settle(std::time::Instant::now()),
             );
@@ -5049,6 +5057,46 @@ fn dispatched_generation(doc: &SessionDoc, message_id: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unreported_segments_are_priced_from_the_model_and_reported_totals_still_bank() {
+        crate::model_prices::install_for_test(serde_json::json!({
+            "openai": {"models": {"gpt-test": {"cost": {"input": 2, "output": 10, "cache_read": 0.2}}}}
+        }));
+        let doc = SessionDoc::init("priced").unwrap();
+        let segment = |input, read, output| zeron_proto::SessionStats {
+            turns: 1,
+            input_tokens: input,
+            cache_read_tokens: read,
+            output_tokens: output,
+            ..Default::default()
+        };
+        let codex = (HarnessId::Codex, Some("gpt-test"));
+        record_session_stats(
+            &doc,
+            "priced",
+            codex,
+            None,
+            Some(segment(1_000, 100_000, 500)),
+        );
+        let stats = doc.session_stats().unwrap();
+        assert_eq!(stats.cost_micros, 2_000 + 20_000 + 5_000);
+        assert!(stats.cost_estimated);
+        let mut claude = segment(10, 0, 10);
+        claude.note_cost("s", 0.5);
+        record_session_stats(
+            &doc,
+            "priced",
+            (HarnessId::ClaudeCode, Some("opus")),
+            None,
+            Some(claude),
+        );
+        let unknown = (HarnessId::Codex, Some("gpt-unknown"));
+        record_session_stats(&doc, "priced", unknown, None, Some(segment(1, 0, 1)));
+        let stats = doc.session_stats().unwrap();
+        assert_eq!(stats.cost_usd(), Some(0.527));
+        assert_eq!(stats.unpriced_turns, 1);
+    }
 
     #[test]
     fn a_self_continued_turn_keeps_its_revoke_and_foreground_but_a_new_turn_resets_them() {

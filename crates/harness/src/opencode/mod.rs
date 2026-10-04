@@ -47,7 +47,7 @@
 //! [`default_stall_bound`] (`ZERON_OPENCODE_STALL_MS`, 0 disables) errors
 //! out instead of spinning "Working" forever.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -1863,7 +1863,7 @@ async fn run_session(session: Session) {
     let mut queued_steers: VecDeque<(String, bool, Vec<String>)> = VecDeque::new();
     let mut steering_open = true;
     let mut interrupt_requested = false;
-    let mut pending_usage: Option<AgentEvent> = None;
+    let mut turn_usage = TurnUsage::new();
     let mut done_sent = false;
 
     // Post-abort grace: the abort endpoint promised an idle; if it never
@@ -1881,11 +1881,13 @@ async fn run_session(session: Session) {
                 continue $label;
             }
             turn.active = false;
-            if let Some(usage) = pending_usage.take()
-                && !interrupt_requested
-                && !send(&event_tx, usage).await
-            {
-                break $label;
+            let usage = turn_usage_events(std::mem::take(&mut turn_usage));
+            if !interrupt_requested {
+                for ev in usage {
+                    if !send(&event_tx, ev).await {
+                        break $label;
+                    }
+                }
             }
             if interrupt_requested {
                 settle_children(&mut children, &event_tx, DoneStatus::Interrupted).await;
@@ -2299,7 +2301,7 @@ async fn run_session(session: Session) {
                             pending_spawns: &mut pending_spawns,
                             unbound_children: &mut unbound_children,
                             turn: &mut turn,
-                            pending_usage: &mut pending_usage,
+                            turn_usage: &mut turn_usage,
                             context_windows: &context_windows,
                         }).await;
                         match outcome {
@@ -2391,6 +2393,43 @@ async fn create_session(
         )));
     }
     unreachable!("create_session retry loop returns from every path")
+}
+
+type TurnUsage = BTreeMap<String, [u64; 4]>;
+
+/// `output` excludes `reasoning` on this wire; both bill as output.
+fn message_tokens(tokens: &Value) -> [u64; 4] {
+    let n = |pointer| tokens.pointer(pointer).and_then(Value::as_u64).unwrap_or(0);
+    [
+        n("/input"),
+        n("/output") + n("/reasoning"),
+        n("/cache/read"),
+        n("/cache/write"),
+    ]
+}
+
+fn turn_usage_events(usage: TurnUsage) -> Vec<AgentEvent> {
+    let [input, output, read, write] = usage.into_values().fold([0; 4], |mut sum, counts| {
+        for (sum, n) in sum.iter_mut().zip(counts) {
+            *sum += n;
+        }
+        sum
+    });
+    let mut events = Vec::new();
+    if input + output > 0 {
+        events.push(AgentEvent::Usage {
+            input_tokens: input,
+            output_tokens: output,
+        });
+    }
+    if read + write > 0 {
+        events.push(AgentEvent::PromptCache {
+            read_tokens: read,
+            write_tokens: write,
+            ttl_secs: None,
+        });
+    }
+    events
 }
 
 fn context_usage_event(info: &Value, context_windows: &HashMap<String, u64>) -> Option<AgentEvent> {
@@ -2729,7 +2768,7 @@ struct BusCtx<'a> {
     pending_spawns: &'a mut VecDeque<PendingSpawn>,
     unbound_children: &'a mut HashMap<String, String>,
     turn: &'a mut TurnState,
-    pending_usage: &'a mut Option<AgentEvent>,
+    turn_usage: &'a mut TurnUsage,
     context_windows: &'a HashMap<String, u64>,
 }
 
@@ -2797,7 +2836,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
         pending_spawns,
         unbound_children,
         turn,
-        pending_usage,
+        turn_usage,
         context_windows,
     } = ctx;
     // Envelope styles: /global/event wraps ({payload: {...}}); a bare
@@ -2969,8 +3008,8 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                     .assistant_messages
                     .entry(message.to_owned())
                     .or_insert(role == "assistant");
-                // Token usage rides the assistant message; the last one
-                // before idle wins, emitted right before Done.
+                // Token usage rides each assistant message (one per model
+                // step); a turn's is their sum, emitted right before Done.
                 if role == "assistant"
                     && let Some(tokens) = info.get("tokens")
                 {
@@ -2979,14 +3018,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                     {
                         return BusOutcome::ConsumerGone;
                     }
-                    let input = tokens.get("input").and_then(Value::as_u64).unwrap_or(0);
-                    let output = tokens.get("output").and_then(Value::as_u64).unwrap_or(0);
-                    if input > 0 || output > 0 {
-                        *pending_usage = Some(AgentEvent::Usage {
-                            input_tokens: input,
-                            output_tokens: output,
-                        });
-                    }
+                    turn_usage.insert(message.to_owned(), message_tokens(tokens));
                 }
                 let events = replay_pending(main_feed, message, true, turn);
                 return forward(event_tx, events).await;
@@ -4102,10 +4134,12 @@ fn normalize_v2_frame_with_session_models(
             // One step's tokens are the prompt it sent plus its reply, which
             // is what the 1.x assistant message carried. The frame omits the
             // model, so the session's latest step supplies it and the
-            // advertised context limit resolves.
+            // advertised context limit resolves. The event id keys the step
+            // so a turn's steps sum instead of replacing each other.
+            let id = event.get("id").and_then(Value::as_str).unwrap_or_default();
             let mut info = json!({
                 "sessionID": session(),
-                "id": "usage",
+                "id": format!("usage:{id}"),
                 "role": "assistant",
                 "tokens": tokens,
             });

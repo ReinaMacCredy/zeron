@@ -69,8 +69,8 @@ use catalog::{
     static_models, to_effort,
 };
 use normalize::{
-    ChildRoute, Phase, ReasoningStream, delta_text, item_id, item_type, notification_thread_id,
-    route_child_notification, turn_error_message, turn_id, usage_event,
+    ChildRoute, Phase, ReasoningStream, UsageTally, delta_text, item_id, item_type,
+    notification_thread_id, route_child_notification, turn_error_message, turn_id,
 };
 
 /// Locate the device's installed Codex CLI: `CODEX_EXECUTABLE`, then our own
@@ -1365,7 +1365,7 @@ async fn run_session(session: Session) {
     let mut streamed_text: HashSet<String> = HashSet::new();
     let mut reasoning_streams: HashMap<String, ReasoningStream> = HashMap::new();
     // Token usage is held until the turn ends, emitted just before Done.
-    let mut pending_usage: Option<AgentEvent> = None;
+    let mut turn_usage = UsageTally::default();
     // Steers whose `turn/steer` lost the turn-completed race; delivered as the
     // next `turn/start` when the expected turn's end notification arrives.
     let mut queued_steers: VecDeque<String> = VecDeque::new();
@@ -1504,9 +1504,7 @@ async fn run_session(session: Session) {
                     "thread/tokenUsage/updated" => {
                         if let Some(usage) = normalize::context_usage_event(&params)
                             && !send(&event_tx, usage).await { break 'main; }
-                        if let Some(usage) = usage_event(&params) {
-                            pending_usage = Some(usage);
-                        }
+                        turn_usage.note(&params);
                     }
 
                     // Codex's `update_plan` tool: the whole checklist, replaced
@@ -1523,10 +1521,10 @@ async fn run_session(session: Session) {
                         // Item ids never span turns; without this the set grew
                         // one entry per message for a persistent session's life.
                         streamed_text.clear();
-                        if let Some(usage) = pending_usage.take()
-                            && !send(&event_tx, usage).await
-                        {
-                            break 'main;
+                        for ev in turn_usage.take() {
+                            if !send(&event_tx, ev).await {
+                                break 'main;
+                            }
                         }
                         let error = turn_error_message(&params).or_else(|| {
                             (params
@@ -1585,10 +1583,10 @@ async fn run_session(session: Session) {
 
                     "turn/failed" => {
                         router.note_completed(&turn_id(&params));
-                        if let Some(usage) = pending_usage.take()
-                            && !send(&event_tx, usage).await
-                        {
-                            break 'main;
+                        for ev in turn_usage.take() {
+                            if !send(&event_tx, ev).await {
+                                break 'main;
+                            }
                         }
                         done_current = true;
                         if interrupted {

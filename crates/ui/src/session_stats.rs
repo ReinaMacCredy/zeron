@@ -285,22 +285,28 @@ fn usd(x: f64) -> String {
 fn cost_headline(stats: &SessionStats) -> Option<String> {
     match stats.cost_usd() {
         Some(cost) if stats.unpriced_turns > 0 => Some(format!("≥ {}", usd(cost))),
+        Some(cost) if stats.cost_estimated => Some(format!("≈ {}", usd(cost))),
         Some(cost) => Some(usd(cost)),
-        None if stats.total_tokens() > 0 => Some("Not reported".into()),
+        None if stats.total_tokens() > 0 => Some("No known price".into()),
         None => None,
     }
 }
 
 fn cost_note(stats: &SessionStats) -> Option<String> {
+    stats.cost_usd()?;
     let n = stats.unpriced_turns;
-    (stats.cost_usd().is_some() && n > 0).then(|| {
+    if n > 0 {
         let turns = if n == 1 {
             "1 turn".into()
         } else {
             format!("{n} turns")
         };
-        format!("Excludes {turns} on a harness that reports no cost")
-    })
+        Some(format!("Excludes {turns} on a model with no known price"))
+    } else {
+        stats
+            .cost_estimated
+            .then(|| "Estimated from public API prices".into())
+    }
 }
 
 fn token_split(stats: &SessionStats) -> Vec<(&'static str, u64)> {
@@ -566,7 +572,16 @@ mod tests {
         assert_eq!(cost_headline(&mixed).unwrap(), "≥ $12.84");
         assert_eq!(
             cost_note(&mixed).unwrap(),
-            "Excludes 4 turns on a harness that reports no cost"
+            "Excludes 4 turns on a model with no known price"
+        );
+        let estimated = SessionStats {
+            cost_estimated: true,
+            ..claude
+        };
+        assert_eq!(cost_headline(&estimated).unwrap(), "≈ $12.84");
+        assert_eq!(
+            cost_note(&estimated).unwrap(),
+            "Estimated from public API prices"
         );
         let codex = SessionStats {
             input_tokens: 9_812_000,
@@ -574,7 +589,7 @@ mod tests {
             unpriced_turns: 5,
             ..Default::default()
         };
-        assert_eq!(cost_headline(&codex).unwrap(), "Not reported");
+        assert_eq!(cost_headline(&codex).unwrap(), "No known price");
         assert_eq!(cost_note(&codex), None);
         assert_eq!(
             token_split(&codex),

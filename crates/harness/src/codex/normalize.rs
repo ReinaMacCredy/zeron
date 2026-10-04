@@ -124,19 +124,66 @@ pub(crate) fn turn_error_message(params: &Value) -> Option<String> {
         })
 }
 
-/// `thread/tokenUsage/updated` → a [`AgentEvent::Usage`] snapshot of the LAST
-/// turn's tokens (held by the session loop, emitted before `Done`).
-pub(crate) fn usage_event(params: &Value) -> Option<AgentEvent> {
-    let last = field(params, &["tokenUsage", "token_usage"])?.get("last")?;
+fn usage_counts(snapshot: &Value) -> [u64; 4] {
     let count = |keys: &[&str]| {
-        field(last, keys)
+        field(snapshot, keys)
             .and_then(Value::as_u64)
             .unwrap_or_default()
     };
-    Some(AgentEvent::Usage {
-        input_tokens: count(&["inputTokens", "input_tokens"]),
-        output_tokens: count(&["outputTokens", "output_tokens"]),
-    })
+    [
+        count(&["inputTokens", "input_tokens"]),
+        count(&["cachedInputTokens", "cached_input_tokens"]),
+        count(&["cacheWriteInputTokens", "cache_write_input_tokens"]),
+        count(&["outputTokens", "output_tokens"]),
+    ]
+}
+
+/// A turn's token usage summed over its model requests. Each
+/// `thread/tokenUsage/updated` carries one request (`last`) and the thread's
+/// running `total`; the total's growth is the request, so a repeated snapshot
+/// adds nothing. The first snapshot a process sees has history in `total`.
+#[derive(Default)]
+pub(crate) struct UsageTally {
+    seen: Option<[u64; 4]>,
+    turn: [u64; 4],
+}
+
+impl UsageTally {
+    pub(crate) fn note(&mut self, params: &Value) {
+        let Some(usage) = field(params, &["tokenUsage", "token_usage"]) else {
+            return;
+        };
+        let total = usage.get("total").map(usage_counts);
+        let step = match (self.seen, total) {
+            (Some(seen), Some(total)) => std::array::from_fn(|i| total[i].saturating_sub(seen[i])),
+            _ => usage.get("last").map(usage_counts).unwrap_or_default(),
+        };
+        self.seen = total.or(self.seen);
+        for (sum, n) in self.turn.iter_mut().zip(step) {
+            *sum += n;
+        }
+    }
+
+    /// Codex counts cached input inside `inputTokens`; the events split it
+    /// out so it is priced as a cache read.
+    pub(crate) fn take(&mut self) -> Vec<AgentEvent> {
+        let [input, cached, written, output] = std::mem::take(&mut self.turn);
+        if input + output == 0 {
+            return Vec::new();
+        }
+        let mut events = vec![AgentEvent::Usage {
+            input_tokens: input.saturating_sub(cached + written),
+            output_tokens: output,
+        }];
+        if cached + written > 0 {
+            events.push(AgentEvent::PromptCache {
+                read_tokens: cached,
+                write_tokens: written,
+                ttl_secs: None,
+            });
+        }
+        events
+    }
 }
 
 pub(crate) fn context_usage_event(params: &Value) -> Option<AgentEvent> {
@@ -978,22 +1025,45 @@ mod tests {
     }
 
     #[test]
-    fn usage_reads_last_snapshot_under_both_spellings() {
+    fn usage_sums_a_turns_requests_and_splits_cached_input() {
+        let snapshot = |total: [u64; 3], last: [u64; 3]| {
+            json!({"tokenUsage": {
+                "total": {"inputTokens": total[0], "cachedInputTokens": total[1], "outputTokens": total[2]},
+                "last": {"inputTokens": last[0], "cachedInputTokens": last[1], "outputTokens": last[2]},
+            }})
+        };
+        let mut tally = UsageTally::default();
+        assert!(tally.take().is_empty());
+        tally.note(&snapshot([40_000, 30_000, 500], [13_747, 11_008, 90]));
+        tally.note(&snapshot([53_858, 41_008, 565], [13_858, 11_008, 65]));
+        tally.note(&snapshot([53_858, 41_008, 565], [13_858, 11_008, 65]));
         assert_eq!(
-            usage_event(&json!({"tokenUsage": {"last": {"inputTokens": 42, "outputTokens": 7}}})),
-            Some(AgentEvent::Usage {
-                input_tokens: 42,
-                output_tokens: 7
-            })
+            tally.take(),
+            [
+                AgentEvent::Usage {
+                    input_tokens: 2_739 + 2_850,
+                    output_tokens: 155
+                },
+                AgentEvent::PromptCache {
+                    read_tokens: 22_016,
+                    write_tokens: 0,
+                    ttl_secs: None
+                },
+            ]
         );
+        tally.note(&json!({"token_usage": {
+            "total": {"input_tokens": 53_860, "output_tokens": 567},
+            "last": {"input_tokens": 2, "output_tokens": 2},
+        }}));
         assert_eq!(
-            usage_event(&json!({"token_usage": {"last": {"input_tokens": 1, "output_tokens": 2}}})),
-            Some(AgentEvent::Usage {
-                input_tokens: 1,
+            tally.take(),
+            [AgentEvent::Usage {
+                input_tokens: 2,
                 output_tokens: 2
-            })
+            }]
         );
-        assert_eq!(usage_event(&json!({})), None);
+        tally.note(&json!({}));
+        assert!(tally.take().is_empty());
     }
 
     #[test]

@@ -1280,7 +1280,10 @@ pub struct SessionStats {
     /// Epoch millis of the last turn that touched the prompt cache.
     pub cache_touched_at: Option<i64>,
     pub cost_micros: u64,
-    /// Turns run on a harness that reports no cost.
+    /// Some of `cost_micros` was priced from public per-token rates rather
+    /// than reported by the harness.
+    pub cost_estimated: bool,
+    /// Turns whose model has no known price.
     pub unpriced_turns: u64,
     /// Hash of the harness session whose running total `cost_session_micros`
     /// holds; see [`SessionStats::bank_cost`].
@@ -1313,6 +1316,7 @@ impl SessionStats {
         self.cache_touched_at = self.cache_touched_at.max(other.cache_touched_at);
         self.unpriced_turns += other.unpriced_turns;
         self.cost_micros += other.cost_micros;
+        self.cost_estimated |= other.cost_estimated;
         if other.cost_session != 0 {
             self.cost_session = other.cost_session;
             self.cost_session_micros = other.cost_session_micros;
@@ -1347,7 +1351,7 @@ impl SessionStats {
     }
 
     pub fn cost_usd(&self) -> Option<f64> {
-        (self.cost_session != 0).then(|| self.cost_micros as f64 / 1e6)
+        (self.cost_session != 0 || self.cost_estimated).then(|| self.cost_micros as f64 / 1e6)
     }
 
     pub fn total_tokens(&self) -> u64 {
@@ -1423,6 +1427,24 @@ mod session_cost_tests {
         copy.add(&source);
         assert_eq!(copy, source);
         assert_eq!(copy.cost_micros, 500_000);
+    }
+
+    #[test]
+    fn estimated_segments_price_the_session_next_to_reported_totals() {
+        let mut stats = SessionStats::default();
+        stats.add(&SessionStats {
+            cost_estimated: true,
+            ..Default::default()
+        });
+        assert_eq!(stats.cost_usd(), Some(0.0));
+        bank(&mut stats, "a", 0.5, None);
+        stats.add(&SessionStats {
+            cost_micros: 250_000,
+            cost_estimated: true,
+            ..Default::default()
+        });
+        bank(&mut stats, "a", 0.6, Some("a"));
+        assert_eq!(stats.cost_usd(), Some(0.85));
     }
 }
 

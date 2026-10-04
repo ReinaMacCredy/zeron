@@ -89,9 +89,16 @@ impl Normalizer {
                     let n = |key| usage[key].as_u64().unwrap_or(0);
                     let input = n("input") + n("cacheRead") + n("cacheWrite");
                     events.push(AgentEvent::Usage {
-                        input_tokens: input,
+                        input_tokens: n("input"),
                         output_tokens: n("output"),
                     });
+                    if n("cacheRead") + n("cacheWrite") > 0 {
+                        events.push(AgentEvent::PromptCache {
+                            read_tokens: n("cacheRead"),
+                            write_tokens: n("cacheWrite"),
+                            ttl_secs: None,
+                        });
+                    }
                     events.push(AgentEvent::ContextUsage {
                         tokens: Some(input + n("output")),
                         window: self.window,
@@ -228,6 +235,30 @@ mod tests {
         assert_eq!(n.status(), DoneStatus::Errored);
         n.map(&json!({"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[]}}));
         assert_eq!(n.status(), DoneStatus::Completed);
+    }
+    #[test]
+    fn usage_splits_cache_traffic_out_of_input() {
+        let mut n = Normalizer::default();
+        let events = n.map(&json!({"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[],
+            "usage":{"input":12,"output":30,"cacheRead":4000,"cacheWrite":500}}}));
+        assert_eq!(
+            events,
+            [
+                AgentEvent::Usage {
+                    input_tokens: 12,
+                    output_tokens: 30
+                },
+                AgentEvent::PromptCache {
+                    read_tokens: 4000,
+                    write_tokens: 500,
+                    ttl_secs: None
+                },
+                AgentEvent::ContextUsage {
+                    tokens: Some(4542),
+                    window: None
+                },
+            ]
+        );
     }
     #[test]
     fn tools_preserve_identity_and_edit_diff() {

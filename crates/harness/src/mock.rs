@@ -75,9 +75,6 @@ impl Harness for MockHarness {
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         &[ReasoningLevel::Medium]
     }
-    fn reports_cost(&self) -> bool {
-        mock_usage()
-    }
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         Ok(vec![
             Model {

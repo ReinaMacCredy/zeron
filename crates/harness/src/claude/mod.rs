@@ -446,9 +446,6 @@ impl Harness for ClaudeHarness {
     fn supports_steering(&self) -> bool {
         true
     }
-    fn reports_cost(&self) -> bool {
-        true
-    }
     fn live_reasoning(&self) -> bool {
         true
     }
