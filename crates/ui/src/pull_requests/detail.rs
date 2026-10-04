@@ -72,6 +72,16 @@ pub(super) struct DetailState {
 }
 
 impl DetailState {
+    pub(super) fn set_detail(&mut self, detail: ChangeRequestDetail) {
+        let body = strip_html(&detail.body);
+        self.body = Some(crate::markdown::parse_full(if body.trim().is_empty() {
+            "_No description provided._"
+        } else {
+            &body
+        }));
+        self.detail = Loadable::Ready(detail);
+    }
+
     pub(super) fn seed(&self) -> &ChangeRequestListItem {
         &self.seed
     }
@@ -280,6 +290,7 @@ impl PullRequestsPage {
         if !self.details.contains_key(&key) {
             self.details
                 .insert(key.clone(), DetailState::new(item.clone(), cx));
+            self.hydrate_detail(&key, cx);
             self.load_detail(&key, cx);
         }
         self.ensure_activity(&key, cx);
@@ -584,7 +595,9 @@ impl PullRequestsPage {
         let Some(state) = self.details.get_mut(key) else {
             return;
         };
-        state.detail = Loadable::Loading;
+        if state.detail.ready().is_none() {
+            state.detail = Loadable::Loading;
+        }
         let params = serde_json::to_value(GetChangeRequestRequest {
             host: key.host.clone(),
             repository: key.repository.clone(),
@@ -601,33 +614,32 @@ impl PullRequestsPage {
                 let Some(state) = page.details.get_mut(&key) else {
                     return;
                 };
-                state.detail = match result {
-                    Ok(value) => match serde_json::from_value::<ChangeRequestDetail>(value) {
-                        Ok(detail) => {
-                            if let Some(code) = state.code.clone() {
-                                let commits = detail.commits.clone();
-                                code.update(cx, |code, cx| code.set_commits(&commits, cx));
-                            }
-                            let body = strip_html(&detail.body);
-                            state.body =
-                                Some(crate::markdown::parse_full(if body.trim().is_empty() {
-                                    "_No description provided._"
-                                } else {
-                                    &body
-                                }));
-                            Loadable::Ready(detail)
+                let parsed = result.map_err(|error| {
+                    let message = error.to_string();
+                    serde_json::from_str::<ChangeRequestFailure>(&message)
+                        .map(|failure| failure_message(failure).to_string())
+                        .unwrap_or(message)
+                });
+                let parsed = parsed.and_then(|value| {
+                    serde_json::from_value::<ChangeRequestDetail>(value)
+                        .map_err(|error| error.to_string())
+                });
+                match parsed {
+                    Ok(detail) => {
+                        if let Some(code) = state.code.clone() {
+                            let commits = detail.commits.clone();
+                            code.update(cx, |code, cx| code.set_commits(&commits, cx));
                         }
-                        Err(error) => Loadable::Error(error.to_string()),
-                    },
-                    Err(error) => {
-                        let message = error.to_string();
-                        Loadable::Error(
-                            serde_json::from_str::<ChangeRequestFailure>(&message)
-                                .map(|failure| failure_message(failure).to_string())
-                                .unwrap_or(message),
-                        )
+                        if let Some(dir) = super::paging::snapshot_dir(cx) {
+                            super::paging::save_detail(&dir, &key, &detail);
+                        }
+                        state.set_detail(detail);
                     }
-                };
+                    Err(error) if state.detail.ready().is_none() => {
+                        state.detail = Loadable::Error(error)
+                    }
+                    Err(_) => {}
+                }
                 cx.notify();
             })
             .ok();

@@ -1640,6 +1640,9 @@ fn action_failure(error: crate::source_control::ActionError) -> RpcError {
     }
 }
 
+const LIST_CACHE_TTL: Duration = Duration::from_secs(30);
+const DETAIL_CACHE_TTL: Duration = Duration::from_secs(15);
+
 fn change_request_failure(error: crate::source_control::ChangeRequestError) -> RpcError {
     RpcError::Failed(
         serde_json::to_string(&zeron_proto::ChangeRequestFailure::from(error)).unwrap_or_default(),
@@ -1735,6 +1738,7 @@ fn forwardable(method: &str) -> bool {
             | methods::REPLY_TO_CHANGE_REQUEST_THREAD
             | methods::SET_CHANGE_REQUEST_THREAD_RESOLVED
             | methods::PREPARE_CHANGE_REQUEST_CHAT
+            | methods::INVALIDATE_CHANGE_REQUESTS
             | methods::GET_CHECKOUT_DIFF
             | methods::DISCARD_WORKING_TREE
             | methods::GET_CHECKOUT_FILE_DIFF_TEXT
@@ -2993,13 +2997,24 @@ impl RpcService for EngineRpc {
                 Ok(RpcReply::Stream(stream.boxed()))
             }
             methods::LIST_CHANGE_REQUESTS => {
+                let key = format!("list:{params}");
+                if let Some(hit) = crate::source_control::cached_response(&key, LIST_CACHE_TTL) {
+                    return Ok(RpcReply::Value(hit));
+                }
                 let p: zeron_proto::ListChangeRequestsRequest = parse_params(params)?;
                 let listing = crate::source_control::ChangeRequestResolver::new()
                     .list_change_requests(&self.change_request_space_roots(), &p)
                     .await;
-                Ok(RpcReply::Value(
-                    serde_json::to_value(listing).map_err(|e| RpcError::Failed(e.to_string()))?,
-                ))
+                let value =
+                    serde_json::to_value(&listing).map_err(|e| RpcError::Failed(e.to_string()))?;
+                if listing.errors.is_empty() {
+                    crate::source_control::remember_response(key, &value);
+                }
+                Ok(RpcReply::Value(value))
+            }
+            methods::INVALIDATE_CHANGE_REQUESTS => {
+                crate::source_control::invalidate_responses();
+                RpcReply::value(&serde_json::json!({}))
             }
             methods::LIST_CHANGE_REQUEST_STATS => {
                 let p: zeron_proto::ListChangeRequestStatsRequest = parse_params(params)?;
@@ -3011,6 +3026,10 @@ impl RpcService for EngineRpc {
                 ))
             }
             methods::GET_CHANGE_REQUEST => {
+                let key = format!("detail:{params}");
+                if let Some(hit) = crate::source_control::cached_response(&key, DETAIL_CACHE_TTL) {
+                    return Ok(RpcReply::Value(hit));
+                }
                 let p: zeron_proto::GetChangeRequestRequest = parse_params(params)?;
                 let detail = crate::source_control::ChangeRequestResolver::new()
                     .get_change_request(&self.change_request_space_roots(), &p)
@@ -3021,9 +3040,10 @@ impl RpcService for EngineRpc {
                                 .unwrap_or_default(),
                         )
                     })?;
-                Ok(RpcReply::Value(
-                    serde_json::to_value(detail).map_err(|e| RpcError::Failed(e.to_string()))?,
-                ))
+                let value =
+                    serde_json::to_value(detail).map_err(|e| RpcError::Failed(e.to_string()))?;
+                crate::source_control::remember_response(key, &value);
+                Ok(RpcReply::Value(value))
             }
             methods::PREPARE_CHANGE_REQUEST_CHAT => {
                 let p: zeron_proto::PrepareChangeRequestChatRequest = parse_params(params)?;
@@ -3044,7 +3064,8 @@ impl RpcService for EngineRpc {
                     .submit_change_request_review(&self.change_request_space_roots(), &p)
                     .await
                     .map_err(action_failure)?;
-                Ok(RpcReply::Value(serde_json::Value::Null))
+                crate::source_control::invalidate_responses();
+                RpcReply::value(&serde_json::json!({}))
             }
             methods::REPLY_TO_CHANGE_REQUEST_THREAD => {
                 let p: zeron_proto::ReplyToChangeRequestThreadRequest = parse_params(params)?;
@@ -3052,7 +3073,8 @@ impl RpcService for EngineRpc {
                     .reply_to_change_request_thread(&self.change_request_space_roots(), &p)
                     .await
                     .map_err(action_failure)?;
-                Ok(RpcReply::Value(serde_json::Value::Null))
+                crate::source_control::invalidate_responses();
+                RpcReply::value(&serde_json::json!({}))
             }
             methods::SET_CHANGE_REQUEST_THREAD_RESOLVED => {
                 let p: zeron_proto::SetChangeRequestThreadResolvedRequest = parse_params(params)?;
@@ -3060,7 +3082,8 @@ impl RpcService for EngineRpc {
                     .set_change_request_thread_resolved(&self.change_request_space_roots(), &p)
                     .await
                     .map_err(action_failure)?;
-                Ok(RpcReply::Value(serde_json::Value::Null))
+                crate::source_control::invalidate_responses();
+                RpcReply::value(&serde_json::json!({}))
             }
             methods::GET_CHANGE_REQUEST_PERMISSIONS => {
                 let p: zeron_proto::GetChangeRequestRequest = parse_params(params)?;
@@ -3076,7 +3099,8 @@ impl RpcService for EngineRpc {
                     .run_change_request_action(&self.change_request_space_roots(), &p)
                     .await
                     .map_err(action_failure)?;
-                Ok(RpcReply::Value(serde_json::Value::Null))
+                crate::source_control::invalidate_responses();
+                RpcReply::value(&serde_json::json!({}))
             }
             methods::UPDATE_CHANGE_REQUEST => {
                 let p: zeron_proto::UpdateChangeRequestRequest = parse_params(params)?;
@@ -3084,7 +3108,8 @@ impl RpcService for EngineRpc {
                     .update_change_request(&self.change_request_space_roots(), &p)
                     .await
                     .map_err(action_failure)?;
-                Ok(RpcReply::Value(serde_json::Value::Null))
+                crate::source_control::invalidate_responses();
+                RpcReply::value(&serde_json::json!({}))
             }
             methods::LIST_CHANGE_REQUEST_LABEL_CANDIDATES => {
                 let p: zeron_proto::GetChangeRequestRequest = parse_params(params)?;
@@ -3100,7 +3125,8 @@ impl RpcService for EngineRpc {
                     .set_change_request_label(&self.change_request_space_roots(), &p)
                     .await
                     .map_err(action_failure)?;
-                Ok(RpcReply::Value(serde_json::Value::Null))
+                crate::source_control::invalidate_responses();
+                RpcReply::value(&serde_json::json!({}))
             }
             methods::LIST_CHANGE_REQUEST_REVIEWER_CANDIDATES => {
                 let p: zeron_proto::GetChangeRequestRequest = parse_params(params)?;
@@ -3116,17 +3142,23 @@ impl RpcService for EngineRpc {
                     .set_change_request_reviewer(&self.change_request_space_roots(), &p)
                     .await
                     .map_err(action_failure)?;
-                Ok(RpcReply::Value(serde_json::Value::Null))
+                crate::source_control::invalidate_responses();
+                RpcReply::value(&serde_json::json!({}))
             }
             methods::GET_CHANGE_REQUEST_ACTIVITY => {
+                let key = format!("activity:{params}");
+                if let Some(hit) = crate::source_control::cached_response(&key, DETAIL_CACHE_TTL) {
+                    return Ok(RpcReply::Value(hit));
+                }
                 let p: zeron_proto::GetChangeRequestRequest = parse_params(params)?;
                 let activity = crate::source_control::ChangeRequestResolver::new()
                     .get_change_request_activity(&self.change_request_space_roots(), &p)
                     .await
                     .map_err(change_request_failure)?;
-                Ok(RpcReply::Value(
-                    serde_json::to_value(activity).map_err(|e| RpcError::Failed(e.to_string()))?,
-                ))
+                let value =
+                    serde_json::to_value(activity).map_err(|e| RpcError::Failed(e.to_string()))?;
+                crate::source_control::remember_response(key, &value);
+                Ok(RpcReply::Value(value))
             }
             methods::POST_CHANGE_REQUEST_COMMENT => {
                 let p: zeron_proto::PostChangeRequestCommentRequest = parse_params(params)?;
@@ -3134,7 +3166,8 @@ impl RpcService for EngineRpc {
                     .post_change_request_comment(&self.change_request_space_roots(), &p)
                     .await
                     .map_err(change_request_failure)?;
-                Ok(RpcReply::Value(serde_json::Value::Null))
+                crate::source_control::invalidate_responses();
+                RpcReply::value(&serde_json::json!({}))
             }
             methods::SET_CHANGE_REQUEST_REACTION => {
                 let p: zeron_proto::SetChangeRequestReactionRequest = parse_params(params)?;
@@ -3142,7 +3175,8 @@ impl RpcService for EngineRpc {
                     .set_change_request_reaction(&self.change_request_space_roots(), &p)
                     .await
                     .map_err(change_request_failure)?;
-                Ok(RpcReply::Value(serde_json::Value::Null))
+                crate::source_control::invalidate_responses();
+                RpcReply::value(&serde_json::json!({}))
             }
             methods::GET_CHANGE_REQUEST_DIFF => {
                 let p: zeron_proto::GetChangeRequestDiffRequest = parse_params(params)?;
@@ -4818,6 +4852,7 @@ mod tests {
             methods::REPLY_TO_CHANGE_REQUEST_THREAD,
             methods::SET_CHANGE_REQUEST_THREAD_RESOLVED,
             methods::PREPARE_CHANGE_REQUEST_CHAT,
+            methods::INVALIDATE_CHANGE_REQUESTS,
         ] {
             assert!(forwardable(method), "{method}");
         }
@@ -4841,6 +4876,34 @@ mod tests {
         assert!(is_stream_method(methods::WATCH_HARNESS_UPDATES));
         assert!(forwardable(methods::CHECK_HARNESS_UPDATES));
         assert!(forwardable(methods::APPLY_HARNESS_UPDATE));
+    }
+
+    #[tokio::test]
+    async fn invalidate_change_requests_reply_survives_the_wire() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble(
+            dir.path(),
+            std::sync::Arc::new(HarnessRegistry::new()),
+            HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        let reply = core
+            .rpc_service()
+            .handle(methods::INVALIDATE_CHANGE_REQUESTS, serde_json::json!({}))
+            .await
+            .unwrap();
+        let RpcReply::Value(value) = reply else {
+            panic!("unary reply expected");
+        };
+        let frame = zeron_rpc::ServerFrame {
+            id: 1,
+            ok: Some(value),
+            ..Default::default()
+        };
+        let received: zeron_rpc::ServerFrame =
+            serde_json::from_str(&serde_json::to_string(&frame).unwrap()).unwrap();
+        assert!(received.ok.is_some(), "a null `ok` reads back as no reply");
     }
 
     /// Every forwardable unary method gets a bounded reply deadline —

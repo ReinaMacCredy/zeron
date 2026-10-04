@@ -4,6 +4,7 @@ mod code;
 mod detail;
 mod filters;
 mod handoff;
+mod paging;
 mod review;
 
 pub use filters::PullRequestListPrefs;
@@ -306,6 +307,13 @@ pub struct PullRequestsPage {
     toasts: Vec<(u64, SharedString, Option<SharedString>)>,
     confirm: Option<actions::Confirm>,
     handoff: Option<(PullRequestKey, handoff::Handoff)>,
+    limit: u32,
+    paged_key: String,
+    last_read: std::time::Instant,
+    last_interaction: std::time::Instant,
+    window_active: bool,
+    visible: bool,
+    poll_task: Option<Task<()>>,
     checkout_menu: Option<(PullRequestKey, crate::popover::Popup<()>)>,
     toast_seq: u64,
 }
@@ -357,10 +365,21 @@ impl PullRequestsPage {
             toasts: Vec::new(),
             confirm: None,
             handoff: None,
+            limit: paging::PAGE_SIZE,
+            paged_key: String::new(),
+            last_read: std::time::Instant::now(),
+            last_interaction: std::time::Instant::now(),
+            window_active: true,
+            visible: true,
+            poll_task: None,
             checkout_menu: None,
             toast_seq: 0,
         };
+        if let Some(listing) = paging::snapshot_dir(cx).and_then(|dir| paging::load_list(&dir)) {
+            page.listing = Loadable::Ready(listing);
+        }
         page.refresh(cx);
+        page.start_live_refresh(cx);
         page
     }
 
@@ -374,13 +393,21 @@ impl PullRequestsPage {
             self.listing = Loadable::Loading;
         }
         let (text, typed) = &self.sent;
-        let request = ListChangeRequestsRequest {
+        let mut request = ListChangeRequestsRequest {
             state: self.prefs.state,
             involvement: self.prefs.involvement,
             limit: None,
             query: (!text.trim().is_empty()).then(|| text.trim().to_string()),
             filters: filters::effective_filters(&self.prefs.filters, typed),
         };
+        let paged_key = serde_json::to_string(&request).unwrap_or_default();
+        if paged_key != self.paged_key {
+            self.paged_key = paged_key;
+            self.limit = paging::PAGE_SIZE;
+        }
+        request.limit = Some(self.limit);
+        let unsearched = request.query.is_none();
+        self.last_read = std::time::Instant::now();
         let params = serde_json::to_value(request).unwrap_or(serde_json::Value::Null);
         self.load_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
@@ -407,6 +434,12 @@ impl PullRequestsPage {
                                     item.deletions = known.deletions;
                                 }
                             }
+                        }
+                        if unsearched
+                            && listing.errors.is_empty()
+                            && let Some(dir) = paging::snapshot_dir(cx)
+                        {
+                            paging::save_list(&dir, &listing);
                         }
                         page.listing = Loadable::Ready(listing);
                         page.load_stats(cx);
@@ -766,7 +799,7 @@ impl PullRequestsPage {
                     .cursor_pointer()
                     .on_click(cx.listener(|page, _, _, cx| {
                         if !page.refreshing {
-                            page.refresh(cx);
+                            page.hard_refresh(cx);
                         }
                     }))
                     .child(refresh_icon),
@@ -1302,17 +1335,7 @@ impl PullRequestsPage {
                     )),
             );
         }
-        if listing.truncated {
-            column = column.child(
-                div()
-                    .flex()
-                    .justify_center()
-                    .py(px(12.0))
-                    .text_size(px(12.0))
-                    .text_color(theme.text_muted)
-                    .child("Narrow your search to find more pull requests."),
-            );
-        }
+        column = column.children(self.render_more(listing.truncated, theme, cx));
         column.into_any_element()
     }
 }
@@ -1529,6 +1552,7 @@ impl Render for PullRequestsPage {
         if matches!(self.listing, Loadable::Idle) {
             self.refresh(cx);
         }
+        self.note_focus(window, cx);
         let theme = Theme::of(cx).clone();
         let viewport = f32::from(window.viewport_size().width);
         let panel_width = self
@@ -1605,6 +1629,12 @@ impl Render for PullRequestsPage {
         });
         div()
             .id("pull-requests-page")
+            .on_mouse_move(cx.listener(|page, _: &MouseMoveEvent, _, _| {
+                page.last_interaction = std::time::Instant::now();
+            }))
+            .on_key_down(cx.listener(|page, _: &gpui::KeyDownEvent, _, _| {
+                page.last_interaction = std::time::Instant::now();
+            }))
             .role(gpui::Role::Group)
             .aria_label("Pull Requests")
             .size_full()

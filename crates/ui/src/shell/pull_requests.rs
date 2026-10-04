@@ -23,6 +23,7 @@ impl Shell {
             page.update(cx, |page, cx| page.refresh(cx));
         }
         self.route = Route::PullRequests;
+        page.update(cx, |page, _| page.set_visible(true));
         self.close_user_menu(cx);
         self.close_chat_menu(cx);
         cx.notify();
@@ -79,6 +80,9 @@ impl Shell {
     }
 
     pub(super) fn close_pull_requests(&mut self, cx: &mut Context<Self>) {
+        if let Some(page) = &self.pull_requests_page {
+            page.update(cx, |page, _| page.set_visible(false));
+        }
         self.route = Route::Chat;
         self.focus_composer(cx);
         cx.notify();
