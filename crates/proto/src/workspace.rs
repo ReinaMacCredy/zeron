@@ -105,7 +105,8 @@ mod tests {
                     "message-queue-attachments-v1",
                     "message-queue-clean-attachment-text-v1",
                     "message-queue-edit-lease-v1",
-                    "harness-updates-v1"
+                    "harness-updates-v1",
+                    "pull-requests-page-v1"
                 ],
             })
         );
