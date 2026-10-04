@@ -201,12 +201,29 @@ fn chip_label(stats: &SessionStats) -> Option<String> {
 }
 
 fn duration(ms: u64) -> String {
+    const UNITS: [(u64, &str); 6] = [
+        (365 * 86_400, "y"),
+        (30 * 86_400, "mo"),
+        (86_400, "d"),
+        (3_600, "h"),
+        (60, "m"),
+        (1, "s"),
+    ];
     if ms < 60_000 {
-        format!("{:.1}s", ms as f64 / 1000.0)
-    } else {
-        let secs = ms / 1000;
-        format!("{}m{:02}s", secs / 60, secs % 60)
+        return format!("{:.1}s", ms as f64 / 1000.0);
     }
+    let secs = ms / 1000;
+    let (i, &(size, unit)) = UNITS
+        .iter()
+        .enumerate()
+        .find(|(_, (size, _))| secs >= *size)
+        .expect("secs >= 60");
+    let (next_size, next_unit) = UNITS[i + 1];
+    format!(
+        "{}{unit}{:02}{next_unit}",
+        secs / size,
+        secs % size / next_size
+    )
 }
 
 fn rows(stats: &SessionStats, cache: Option<Cache>) -> Vec<(&'static str, String)> {
@@ -508,10 +525,16 @@ mod tests {
     }
 
     #[test]
-    fn durations_switch_to_minutes_past_one() {
+    fn durations_roll_up_into_the_largest_unit() {
         assert_eq!(duration(13_400), "13.4s");
-        assert_eq!(duration(558 * 60_000 + 41_000), "558m41s");
         assert_eq!(duration(60_000), "1m00s");
+        assert_eq!(duration(59 * 60_000 + 59_000), "59m59s");
+        assert_eq!(duration(3_600_000), "1h00m");
+        assert_eq!(duration(172 * 60_000 + 14_000), "2h52m");
+        assert_eq!(duration(24 * 3_600_000), "1d00h");
+        assert_eq!(duration(50 * 3_600_000), "2d02h");
+        assert_eq!(duration(30 * 86_400_000), "1mo00d");
+        assert_eq!(duration(400 * 86_400_000), "1y01mo");
     }
 
     #[test]
