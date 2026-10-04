@@ -327,6 +327,11 @@ impl PullRequestsPage {
             return;
         };
         state.tab = tab;
+        if tab != DetailTab::Code
+            && let Some(code) = state.code.clone()
+        {
+            code.update(cx, |code, cx| code.dismiss_overlay(cx));
+        }
         if tab == DetailTab::Code {
             let code = state
                 .code
