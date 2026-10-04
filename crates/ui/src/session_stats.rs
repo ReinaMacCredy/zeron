@@ -235,6 +235,176 @@ fn rows(stats: &SessionStats, cache: Option<Cache>) -> Vec<(&'static str, String
     rows
 }
 
+fn tokens(n: u64) -> String {
+    let trim = |s: String| {
+        if s.contains('.') {
+            s.trim_end_matches('0').trim_end_matches('.').to_string()
+        } else {
+            s
+        }
+    };
+    let n = n as f64;
+    if n >= 1e7 {
+        format!("{}M", trim(format!("{:.1}", n / 1e6)))
+    } else if n >= 999_500.0 {
+        format!("{}M", trim(format!("{:.2}", n / 1e6)))
+    } else if n >= 1e5 {
+        format!("{:.0}K", n / 1e3)
+    } else if n >= 1e3 {
+        format!("{}K", trim(format!("{:.1}", n / 1e3)))
+    } else {
+        format!("{n}")
+    }
+}
+
+fn usd(x: f64) -> String {
+    if x < 1.0 {
+        format!("${x:.3}")
+    } else {
+        format!("${x:.2}")
+    }
+}
+
+fn cost_headline(stats: &SessionStats) -> Option<String> {
+    match stats.cost_usd() {
+        Some(cost) if stats.unpriced_turns > 0 => Some(format!("≥ {}", usd(cost))),
+        Some(cost) => Some(usd(cost)),
+        None if stats.total_tokens() > 0 => Some("Not reported".into()),
+        None => None,
+    }
+}
+
+fn cost_note(stats: &SessionStats) -> Option<String> {
+    let n = stats.unpriced_turns;
+    (stats.cost_usd().is_some() && n > 0).then(|| {
+        let turns = if n == 1 {
+            "1 turn".into()
+        } else {
+            format!("{n} turns")
+        };
+        format!("Excludes {turns} on a harness that reports no cost")
+    })
+}
+
+fn token_split(stats: &SessionStats) -> Vec<(&'static str, u64)> {
+    let mut split = vec![("Input", stats.input_tokens)];
+    if stats.cache_read_tokens + stats.cache_write_tokens > 0 {
+        split.push(("Cache read", stats.cache_read_tokens));
+        split.push(("Cache write", stats.cache_write_tokens));
+    }
+    split.push(("Output", stats.output_tokens));
+    split
+}
+
+fn cost_section(stats: &SessionStats, theme: &Theme) -> Vec<gpui::AnyElement> {
+    let Some(headline) = cost_headline(stats) else {
+        return Vec::new();
+    };
+    let priced = stats.cost_usd().is_some();
+    let total = stats.total_tokens();
+    let split: Vec<_> = token_split(stats)
+        .into_iter()
+        .map(|(label, n)| {
+            let color = match label {
+                "Input" => theme.accent,
+                "Cache read" => theme.success,
+                "Cache write" => theme.warning,
+                _ => theme.text_muted,
+            };
+            (label, n, color)
+        })
+        .collect();
+    let hero = div()
+        .px(px(8.0))
+        .pb(px(6.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .child(
+            div()
+                .text_size(crate::typography::ui_rems(if priced { 20.0 } else { 15.0 }))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(if priced { theme.text } else { theme.text_faint })
+                .child(SharedString::from(headline)),
+        )
+        .child(
+            div()
+                .text_size(crate::typography::ui_rems(11.0))
+                .text_color(theme.text_muted)
+                .child(SharedString::from(format!("{} tokens", tokens(total)))),
+        );
+    let bar = div()
+        .mx(px(8.0))
+        .h(px(6.0))
+        .rounded(px(3.0))
+        .overflow_hidden()
+        .flex()
+        .flex_row()
+        .bg(crate::theme::ink(0.08))
+        .children(
+            split
+                .iter()
+                .filter(|(_, n, _)| *n > 0)
+                .map(|(_, n, color)| {
+                    div()
+                        .h_full()
+                        .min_w(px(2.0))
+                        .w(gpui::relative(*n as f32 / total.max(1) as f32))
+                        .bg(*color)
+                }),
+        );
+    let legend = split.chunks(2).map(|pair| {
+        div()
+            .px(px(8.0))
+            .flex()
+            .flex_row()
+            .gap(px(12.0))
+            .children(pair.iter().map(|(label, n, color)| {
+                div()
+                    .flex_1()
+                    .h(px(20.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .text_size(crate::typography::ui_rems(11.5))
+                    .text_color(theme.text_muted)
+                    .child(div().size(px(7.0)).rounded(px(2.0)).bg(*color))
+                    .child(*label)
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_color(theme.text)
+                            .child(SharedString::from(tokens(*n))),
+                    )
+            }))
+            .into_any_element()
+    });
+    let mut section = vec![
+        crate::popover::menu_heading(theme, "Session cost").into_any_element(),
+        hero.into_any_element(),
+    ];
+    if total > 0 {
+        section.push(bar.into_any_element());
+        section.push(div().h(px(4.0)).into_any_element());
+        section.extend(legend);
+    }
+    if let Some(note) = cost_note(stats) {
+        section.push(
+            div()
+                .px(px(8.0))
+                .pt(px(4.0))
+                .text_size(crate::typography::ui_rems(11.0))
+                .text_color(theme.text_faint)
+                .child(SharedString::from(note))
+                .into_any_element(),
+        );
+    }
+    section.push(crate::popover::menu_separator().into_any_element());
+    section
+}
+
 struct StatsCard {
     stats: SessionStats,
     working: bool,
@@ -257,9 +427,10 @@ impl Render for StatsCard {
         let theme = Theme::of(cx).for_popup();
         let cache = Cache::of(&self.stats, self.working, now_ms());
         let card = crate::popover::popover_card(&theme)
-            .w(px(280.0))
+            .w(px(300.0))
             .flex()
             .flex_col()
+            .children(cost_section(&self.stats, &theme))
             .child(crate::popover::menu_heading(&theme, "Session statistics"))
             .children(rows(&self.stats, cache).into_iter().map(|(label, value)| {
                 div()
@@ -341,6 +512,52 @@ mod tests {
         assert_eq!(duration(13_400), "13.4s");
         assert_eq!(duration(558 * 60_000 + 41_000), "558m41s");
         assert_eq!(duration(60_000), "1m00s");
+    }
+
+    #[test]
+    fn token_counts_shorten_like_the_demo() {
+        assert_eq!(tokens(940), "940");
+        assert_eq!(tokens(3_140), "3.1K");
+        assert_eq!(tokens(3_000), "3K");
+        assert_eq!(tokens(418_600), "419K");
+        assert_eq!(tokens(999_999), "1M");
+        assert_eq!(tokens(9_812_000), "9.81M");
+        assert_eq!(tokens(38_620_000), "38.6M");
+    }
+
+    #[test]
+    fn cost_headline_marks_partial_and_unreported_sessions() {
+        assert_eq!(cost_headline(&SessionStats::default()), None);
+        let mut claude = SessionStats {
+            input_tokens: 10,
+            cost_micros: 12_840_000,
+            ..Default::default()
+        };
+        claude.note_cost("s", 12.84);
+        assert_eq!(cost_headline(&claude).unwrap(), "$12.84");
+        assert_eq!(cost_note(&claude), None);
+        let mixed = SessionStats {
+            unpriced_turns: 4,
+            ..claude
+        };
+        assert_eq!(cost_headline(&mixed).unwrap(), "≥ $12.84");
+        assert_eq!(
+            cost_note(&mixed).unwrap(),
+            "Excludes 4 turns on a harness that reports no cost"
+        );
+        let codex = SessionStats {
+            input_tokens: 9_812_000,
+            output_tokens: 211_400,
+            unpriced_turns: 5,
+            ..Default::default()
+        };
+        assert_eq!(cost_headline(&codex).unwrap(), "Not reported");
+        assert_eq!(cost_note(&codex), None);
+        assert_eq!(
+            token_split(&codex),
+            [("Input", 9_812_000), ("Output", 211_400)]
+        );
+        assert_eq!(usd(0.0811149), "$0.081");
     }
 
     #[test]

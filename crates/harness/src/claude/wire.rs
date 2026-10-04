@@ -201,6 +201,8 @@ pub(crate) struct ResultFrame {
     pub usage: UsageBody,
     #[serde(default)]
     pub session_id: Option<String>,
+    #[serde(default)]
+    pub total_cost_usd: Option<f64>,
 }
 
 #[derive(Debug, Default, Deserialize)]

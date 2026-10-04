@@ -847,6 +847,14 @@ pub enum AgentEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ttl_secs: Option<u32>,
     },
+    /// The harness session's running cost. Claude reports a total for the
+    /// whole session and restores it on `--resume` (live 2.1.289), so it is
+    /// never a per-turn figure.
+    #[serde(rename_all = "camelCase")]
+    Cost {
+        session_id: String,
+        total_usd: f64,
+    },
     /// The agent advertised (or changed) its slash-command set — ACP
     /// `available_commands_update`. The engine caches the latest list per
     /// harness for the composer's `/` popup; never persisted to docs.
@@ -1271,6 +1279,21 @@ pub struct SessionStats {
     pub cache_ttl_secs: Option<u32>,
     /// Epoch millis of the last turn that touched the prompt cache.
     pub cache_touched_at: Option<i64>,
+    pub cost_micros: u64,
+    /// Turns run on a harness that reports no cost.
+    pub unpriced_turns: u64,
+    /// Hash of the harness session whose running total `cost_session_micros`
+    /// holds; see [`SessionStats::bank_cost`].
+    pub cost_session: u64,
+    pub cost_session_micros: u64,
+}
+
+fn cost_session_hash(session_id: &str) -> u64 {
+    session_id
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+        })
 }
 
 impl SessionStats {
@@ -1288,6 +1311,47 @@ impl SessionStats {
         self.cache_write_tokens += other.cache_write_tokens;
         self.cache_ttl_secs = other.cache_ttl_secs.or(self.cache_ttl_secs);
         self.cache_touched_at = self.cache_touched_at.max(other.cache_touched_at);
+        self.unpriced_turns += other.unpriced_turns;
+        self.cost_micros += other.cost_micros;
+        if other.cost_session != 0 {
+            self.cost_session = other.cost_session;
+            self.cost_session_micros = other.cost_session_micros;
+        }
+    }
+
+    pub fn note_cost(&mut self, session_id: &str, total_usd: f64) {
+        self.cost_session = cost_session_hash(session_id);
+        self.cost_session_micros = (total_usd.max(0.0) * 1e6).round() as u64;
+    }
+
+    /// Turns this segment's running total into the cost it added on top of
+    /// `prior`. A fork (`--fork-session`) gets a new id but inherits its
+    /// source's total (live 2.1.289), so resuming the banked session counts
+    /// as continuing it; a total below the base means the counter restarted.
+    pub fn bank_cost(&mut self, prior: &SessionStats, resumed_from: Option<&str>) {
+        if self.cost_session == 0 {
+            return;
+        }
+        let continues = self.cost_session == prior.cost_session
+            || resumed_from.is_some_and(|id| cost_session_hash(id) == prior.cost_session);
+        let base = if continues {
+            prior.cost_session_micros
+        } else {
+            0
+        };
+        self.cost_micros = if self.cost_session_micros >= base {
+            self.cost_session_micros - base
+        } else {
+            self.cost_session_micros
+        };
+    }
+
+    pub fn cost_usd(&self) -> Option<f64> {
+        (self.cost_session != 0).then(|| self.cost_micros as f64 / 1e6)
+    }
+
+    pub fn total_tokens(&self) -> u64 {
+        self.input_tokens + self.output_tokens + self.cache_read_tokens + self.cache_write_tokens
     }
 
     pub fn avg_ttft_ms(&self) -> Option<u64> {
@@ -1308,6 +1372,57 @@ impl SessionStats {
     /// Millis until the prompt cache expires; negative once it has.
     pub fn cache_remaining_ms(&self, now_ms: i64) -> Option<i64> {
         Some(self.cache_touched_at? + i64::from(self.cache_ttl_secs?) * 1000 - now_ms)
+    }
+}
+
+#[cfg(test)]
+mod session_cost_tests {
+    use super::*;
+
+    fn bank(
+        stats: &mut SessionStats,
+        session_id: &str,
+        total_usd: f64,
+        resumed_from: Option<&str>,
+    ) {
+        let mut segment = SessionStats::default();
+        segment.note_cost(session_id, total_usd);
+        segment.bank_cost(stats, resumed_from);
+        stats.add(&segment);
+    }
+
+    #[test]
+    fn running_totals_bank_their_deltas() {
+        let mut stats = SessionStats::default();
+        assert_eq!(stats.cost_usd(), None);
+        bank(&mut stats, "a", 0.076908, None);
+        bank(&mut stats, "a", 0.0811149, Some("a"));
+        assert_eq!(stats.cost_micros, 81_115);
+        stats.add(&SessionStats {
+            turns: 1,
+            unpriced_turns: 1,
+            ..Default::default()
+        });
+        assert_eq!(stats.cost_micros, 81_115);
+        bank(&mut stats, "fork", 0.0853264, Some("a"));
+        assert_eq!(stats.cost_micros, 85_326);
+        bank(&mut stats, "fresh", 0.05, None);
+        assert_eq!(stats.cost_micros, 135_326);
+        bank(&mut stats, "fresh", 0.01, Some("fresh"));
+        assert_eq!(stats.cost_micros, 145_326);
+        assert_eq!(stats.unpriced_turns, 1);
+        assert_eq!(stats.cost_usd(), Some(0.145326));
+    }
+
+    #[test]
+    fn copying_stats_keeps_the_banked_cost() {
+        let mut source = SessionStats::default();
+        bank(&mut source, "a", 0.3, None);
+        bank(&mut source, "b", 0.2, None);
+        let mut copy = SessionStats::default();
+        copy.add(&source);
+        assert_eq!(copy, source);
+        assert_eq!(copy.cost_micros, 500_000);
     }
 }
 

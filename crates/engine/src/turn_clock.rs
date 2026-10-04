@@ -99,6 +99,10 @@ impl TurnClock {
                 self.stats.cache_ttl_secs = ttl_secs.or(self.stats.cache_ttl_secs);
                 self.stats.cache_touched_at = Some(crate::now_ms());
             }
+            AgentEvent::Cost {
+                session_id,
+                total_usd,
+            } => self.stats.note_cost(session_id, *total_usd),
             _ => {}
         }
         if self.phase() != before {
