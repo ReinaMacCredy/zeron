@@ -15,6 +15,14 @@ pub struct MockHarness {
     pub script: Vec<AgentEvent>,
 }
 
+fn mock_usage() -> bool {
+    std::env::var("ZERON_MOCK_USAGE")
+        .ok()
+        .is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+static MOCK_COST_RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// The scripted question set for the `ZERON_MOCK_QUESTION` variant (exercises
 /// the QuestionPanel end-to-end: single-select page, multi-select page).
 fn question_script() -> Vec<UserInputQuestion> {
@@ -66,6 +74,9 @@ impl Harness for MockHarness {
     }
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         &[ReasoningLevel::Medium]
+    }
+    fn reports_cost(&self) -> bool {
+        mock_usage()
     }
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         Ok(vec![
@@ -196,15 +207,18 @@ impl Harness for MockHarness {
             .position(|e| matches!(e, AgentEvent::Done { .. }))
             .unwrap_or(self.script.len());
         let (body, tail) = self.script.split_at(done_ix);
-        let usage_events = std::env::var("ZERON_MOCK_USAGE")
-            .ok()
-            .is_some_and(|v| !v.is_empty() && v != "0")
+        let usage_events = mock_usage()
             .then(|| {
+                let runs = MOCK_COST_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 [
                     AgentEvent::PromptCache {
                         read_tokens: 49_648,
                         write_tokens: 3_719,
                         ttl_secs: Some(3600),
+                    },
+                    AgentEvent::Cost {
+                        session_id: "mock".into(),
+                        total_usd: 0.0145358 * runs as f64,
                     },
                     AgentEvent::Usage {
                         input_tokens: 18,

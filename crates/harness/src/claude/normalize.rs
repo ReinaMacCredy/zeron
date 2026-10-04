@@ -1035,6 +1035,13 @@ impl Normalizer {
                 if let Some(id) = &f.session_id {
                     self.session_id = Some(id.clone());
                 }
+                let cost = f
+                    .total_cost_usd
+                    .zip(self.session_id.clone())
+                    .map(|(total_usd, session_id)| AgentEvent::Cost {
+                        session_id,
+                        total_usd,
+                    });
                 let usage = AgentEvent::Usage {
                     input_tokens: f.usage.input_tokens,
                     output_tokens: f.usage.output_tokens,
@@ -1142,6 +1149,7 @@ impl Normalizer {
                     });
                 }
                 out.extend(cache);
+                out.extend(cost);
                 out.extend([usage, done]);
                 out
             }
@@ -1711,12 +1719,16 @@ mod tests {
     #[test]
     fn result_usage_reports_prompt_cache_traffic_and_tier() {
         let ev = normalize_one(
-            r#"{"type":"result","subtype":"success","usage":{"input_tokens":18,"cache_creation_input_tokens":3719,"cache_read_input_tokens":49648,"output_tokens":288,"cache_creation":{"ephemeral_1h_input_tokens":3719,"ephemeral_5m_input_tokens":0}}}"#,
+            r#"{"type":"result","subtype":"success","session_id":"s1","total_cost_usd":0.0145358,"usage":{"input_tokens":18,"cache_creation_input_tokens":3719,"cache_read_input_tokens":49648,"output_tokens":288,"cache_creation":{"ephemeral_1h_input_tokens":3719,"ephemeral_5m_input_tokens":0}}}"#,
         );
         assert!(ev.contains(&AgentEvent::PromptCache {
             read_tokens: 49648,
             write_tokens: 3719,
             ttl_secs: Some(3600),
+        }));
+        assert!(ev.contains(&AgentEvent::Cost {
+            session_id: "s1".into(),
+            total_usd: 0.0145358,
         }));
         assert!(matches!(
             &ev[ev.len() - 2..],
@@ -1728,7 +1740,7 @@ mod tests {
         assert!(
             !uncached
                 .iter()
-                .any(|e| matches!(e, AgentEvent::PromptCache { .. }))
+                .any(|e| matches!(e, AgentEvent::PromptCache { .. } | AgentEvent::Cost { .. }))
         );
     }
 

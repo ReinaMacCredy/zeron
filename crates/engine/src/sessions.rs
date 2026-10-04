@@ -3616,11 +3616,21 @@ fn cursor_unstarted_history(
     ))
 }
 
-fn record_session_stats(doc: &SessionDoc, chat_id: &str, stats: Option<zeron_proto::SessionStats>) {
-    if let Some(stats) = stats
-        && let Err(err) = doc.record_session_stats(&stats)
-    {
-        tracing::warn!(chat = %chat_id, error = %err, "session stats write failed");
+fn record_session_stats(
+    doc: &SessionDoc,
+    chat_id: &str,
+    prices: bool,
+    resumed_from: Option<&str>,
+    stats: Option<zeron_proto::SessionStats>,
+) {
+    if let Some(mut stats) = stats {
+        if !prices {
+            stats.unpriced_turns = stats.turns;
+        }
+        stats.bank_cost(&doc.session_stats().unwrap_or_default(), resumed_from);
+        if let Err(err) = doc.record_session_stats(&stats) {
+            tracing::warn!(chat = %chat_id, error = %err, "session stats write failed");
+        }
     }
 }
 
@@ -3642,6 +3652,7 @@ async fn drive_run(
     let harness_id = harness.id();
     let user_prompt = request.prompt.clone();
     let run_cwd = request.cwd.clone();
+    let resumed_from = request.resume.clone();
     let mut last_turn_computer = resume_state.turn_computer;
     let run_computer = resume_state.computer.clone();
     run_computer.begin_turn(&resume_state.user_message_id, resume_state.turn_computer);
@@ -3810,6 +3821,7 @@ async fn drive_run(
     };
 
     let doc_ref: &SessionDoc = &doc;
+    let prices = harness.reports_cost();
     let mut clock = crate::turn_clock::TurnClock::new(std::time::Instant::now());
     clock.start(true, std::time::Instant::now());
     let mut folded: Vec<MessagePart> = Vec::new();
@@ -4135,7 +4147,7 @@ async fn drive_run(
                     dirty = false;
                     entry_id = new_id();
                     segment_started = now_ms();
-                    record_session_stats(doc_ref, &chat_id, clock.settle(std::time::Instant::now()));
+                    record_session_stats(doc_ref, &chat_id, prices, resumed_from.as_deref(), clock.settle(std::time::Instant::now()));
                     idle_since = Some(tokio::time::Instant::now());
                     self_continued_turn = false;
                     inner.set_status_with_completion(
@@ -4425,7 +4437,13 @@ async fn drive_run(
                 segment_started = now_ms();
                 if clock.is_active() {
                     let now = std::time::Instant::now();
-                    record_session_stats(doc_ref, &chat_id, clock.settle(now));
+                    record_session_stats(
+                        doc_ref,
+                        &chat_id,
+                        prices,
+                        resumed_from.as_deref(),
+                        clock.settle(now),
+                    );
                     clock.start(false, now);
                 }
             }
@@ -4685,7 +4703,13 @@ async fn drive_run(
             entry_id = next_assistant_message_id.clone().unwrap_or_else(new_id);
             segment_started = now_ms();
             let now = std::time::Instant::now();
-            record_session_stats(doc_ref, &chat_id, clock.settle(now));
+            record_session_stats(
+                doc_ref,
+                &chat_id,
+                prices,
+                resumed_from.as_deref(),
+                clock.settle(now),
+            );
             clock.start(true, now);
             // The elapsed timer is per user message, not per child process: a
             // steer boundary restarts it (matches the parked-resume path and
@@ -4801,7 +4825,13 @@ async fn drive_run(
         }
 
         if let AgentEvent::Done { status, .. } = &event {
-            record_session_stats(doc_ref, &chat_id, clock.settle(std::time::Instant::now()));
+            record_session_stats(
+                doc_ref,
+                &chat_id,
+                prices,
+                resumed_from.as_deref(),
+                clock.settle(std::time::Instant::now()),
+            );
             inner.set_compacting(&chat_id, false);
             // A question still pending at turn end can never be legitimately
             // answered (its turn is over): drain the resolvers NOW, or a late
