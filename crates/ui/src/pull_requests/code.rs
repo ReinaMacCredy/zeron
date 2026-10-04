@@ -554,6 +554,7 @@ impl PullRequestCode {
             commit: self.commit.as_ref().map(|commit| commit.oid.clone()),
         })
         .unwrap_or(serde_json::Value::Null);
+        let params = self.key.route(params);
         self._fetch = Some(cx.spawn(async move |this, cx| {
             let result = engine
                 .client()

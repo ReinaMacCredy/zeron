@@ -35,6 +35,10 @@ pub struct PullRequestListPrefs {
     pub filters: ChangeRequestListFilters,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
 }
 
 fn qualifier_value(raw: &str) -> String {
@@ -379,6 +383,8 @@ pub(crate) fn filter_count(prefs: &PullRequestListPrefs) -> usize {
     usize::from(prefs.state != ChangeRequestListState::Open)
         + usize::from(prefs.involvement != ChangeRequestInvolvement::All)
         + usize::from(prefs.repository.is_some())
+        + usize::from(prefs.host.is_some())
+        + usize::from(prefs.device.is_some())
         + usize::from(prefs.filters.draft.is_some())
         + usize::from(prefs.filters.review.is_some())
         + usize::from(prefs.filters.checks.is_some())
@@ -404,6 +410,8 @@ pub(super) enum FilterSection {
     Review,
     Checks,
     Project,
+    Host,
+    Device,
 }
 
 pub(super) struct ListMenu {
@@ -530,6 +538,22 @@ fn label_of<T: PartialEq + Copy>(options: &Options<T>, value: T) -> &'static str
         .find(|(option, _, _)| *option == value)
         .map(|(_, label, _)| *label)
         .unwrap_or("All")
+}
+
+pub(crate) fn host_options(
+    items: &[ChangeRequestListItem],
+    errors: &[zeron_proto::ChangeRequestListError],
+) -> Vec<(String, bool)> {
+    let read: std::collections::BTreeSet<&str> =
+        items.iter().map(|item| item.host.as_str()).collect();
+    let mut hosts: Vec<(String, bool)> = read.iter().map(|host| (host.to_string(), true)).collect();
+    for host in errors.iter().filter_map(|error| error.host.as_deref()) {
+        if !hosts.iter().any(|(known, _)| known == host) {
+            hosts.push((host.to_string(), false));
+        }
+    }
+    hosts.sort();
+    hosts
 }
 
 pub(super) fn state_label(state: ChangeRequestListState) -> &'static str {
@@ -743,7 +767,7 @@ impl PullRequestsPage {
             0 => "Any".to_string(),
             count => format!("{count} selected"),
         };
-        let rows: [(FilterSection, &str, &str, String); 8] = [
+        let mut rows: Vec<(FilterSection, &str, &str, String)> = vec![
             (
                 FilterSection::State,
                 icons::LUCIDE_GIT_PULL_REQUEST,
@@ -796,6 +820,31 @@ impl PullRequestsPage {
                     .unwrap_or_else(|| "All projects".into()),
             ),
         ];
+        if self.host_choices().len() >= 2 {
+            rows.push((
+                FilterSection::Host,
+                icons::LUCIDE_GIT_PULL_REQUEST,
+                "Host",
+                self.prefs
+                    .host
+                    .clone()
+                    .unwrap_or_else(|| "All hosts".into()),
+            ));
+        }
+        let devices = self.list_devices(cx);
+        if devices.len() >= 2 {
+            rows.push((
+                FilterSection::Device,
+                icons::LAPTOP,
+                "Device",
+                self.prefs
+                    .device
+                    .as_ref()
+                    .and_then(|id| devices.iter().find(|device| device.id == *id))
+                    .map(|device| device.name.clone())
+                    .unwrap_or_else(|| "All devices".into()),
+            ));
+        }
         let open = self.menu.get().and_then(|menu| menu.submenu);
         let mut card = div()
             .w(px(224.0))
@@ -803,7 +852,13 @@ impl PullRequestsPage {
             .flex_col()
             .gap(px(popover::MENU_GAP));
         for (section, glyph, label, value) in rows {
-            if matches!(section, FilterSection::Author | FilterSection::Project) {
+            if matches!(
+                section,
+                FilterSection::Author
+                    | FilterSection::Project
+                    | FilterSection::Host
+                    | FilterSection::Device
+            ) {
                 card = card.child(popover::menu_separator());
             }
             let mut entry = div()
@@ -930,7 +985,94 @@ impl PullRequestsPage {
             FilterSection::Author => self.render_author_menu(theme, cx),
             FilterSection::Labels => self.render_labels_menu(theme, cx),
             FilterSection::Project => self.render_project_menu(theme, cx),
+            FilterSection::Host => self.render_host_menu(theme, cx),
+            FilterSection::Device => self.render_device_menu(theme, cx),
         }
+    }
+
+    fn host_choices(&self) -> Vec<(String, bool)> {
+        match &self.listing {
+            crate::popover::Loadable::Ready(listing) => {
+                host_options(&listing.items, &listing.errors)
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn render_host_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let current = self.prefs.host.clone();
+        let choices = std::iter::once((None, "All hosts".to_string(), true)).chain(
+            self.host_choices()
+                .into_iter()
+                .map(|(host, available)| (Some(host.clone()), host, available)),
+        );
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(popover::MENU_GAP))
+            .children(
+                choices
+                    .enumerate()
+                    .map(|(index, (value, label, available))| {
+                        let selected = value == current;
+                        let glyph = if value.is_none() {
+                            icons::LUCIDE_LAYERS
+                        } else {
+                            icons::LUCIDE_GIT_PULL_REQUEST
+                        };
+                        let text = if available {
+                            label.clone()
+                        } else {
+                            format!("{label} · Unavailable")
+                        };
+                        row(theme, false, format!("pull-requests-host-{index}"))
+                            .role(gpui::Role::MenuItemRadio)
+                            .aria_label(SharedString::from(text.clone()))
+                            .when(!available, |el| {
+                                el.opacity(0.5).cursor_default().tooltip(
+                                    crate::settings::widgets::text_tooltip(
+                                        "This host could not be read.",
+                                    ),
+                                )
+                            })
+                            .when(available, |el| {
+                                el.on_click(cx.listener(move |page, _, _, cx| {
+                                    let value = value.clone();
+                                    page.choose(false, cx, |prefs| prefs.host = value);
+                                }))
+                            })
+                            .child(icon(glyph).size(px(14.0)).text_color(theme.text_muted))
+                            .child(text)
+                            .child(radio_dot(selected, theme))
+                    }),
+            )
+            .into_any_element()
+    }
+
+    fn render_device_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let options = std::iter::once((
+            None,
+            SharedString::from("All devices"),
+            icons::LUCIDE_LAYERS,
+        ))
+        .chain(self.list_devices(cx).into_iter().map(|device| {
+            (
+                Some(device.id),
+                SharedString::from(device.name),
+                icons::LAPTOP,
+            )
+        }))
+        .collect();
+        self.radio_menu(
+            "pull-requests-device",
+            options,
+            &self.prefs.device,
+            true,
+            |prefs, device| prefs.device = device,
+            theme,
+            cx,
+        )
+        .into_any_element()
     }
 
     fn listed_items(&self) -> &[ChangeRequestListItem] {
@@ -1196,6 +1338,7 @@ mod tests {
             labels: Vec::new(),
             review_decision: None,
             checks_state: None,
+            device_id: None,
         }
     }
 
@@ -1261,6 +1404,34 @@ mod tests {
         assert_eq!(score_match(&row, "acme"), 40);
         assert_eq!(score_match(&row, "wizard nope"), 30);
         assert_eq!(score_match(&row, "body text"), 10);
+    }
+
+    #[test]
+    fn hosts_list_every_read_host_and_flag_only_hosts_that_never_answered() {
+        let mut ghe = item(2, "b", "x");
+        ghe.host = "ghe.acme.io".into();
+        let error = |host: &str| zeron_proto::ChangeRequestListError {
+            host: Some(host.into()),
+            repository: None,
+            path: "/repo".into(),
+            failure: zeron_proto::ChangeRequestFailure::Authentication,
+        };
+        let options = host_options(
+            &[item(1, "a", "x"), ghe],
+            &[error("github.com"), error("gitlab.acme.io")],
+        );
+        assert_eq!(
+            options,
+            [
+                ("ghe.acme.io".to_string(), true),
+                ("github.com".to_string(), true),
+                ("gitlab.acme.io".to_string(), false),
+            ]
+        );
+        let mut prefs = PullRequestListPrefs::default();
+        prefs.host = Some("github.com".into());
+        prefs.device = Some("studio".into());
+        assert_eq!(filter_count(&prefs), 2);
     }
 
     #[test]

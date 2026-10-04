@@ -125,11 +125,25 @@ impl PullRequestsPage {
             return;
         };
         self.refreshing = true;
+        let targets: Vec<Option<String>> = self
+            .list_devices(cx)
+            .iter()
+            .map(|device| device.target())
+            .collect();
         cx.spawn(async move |this, cx| {
-            let _ = engine
-                .client()
-                .call(methods::INVALIDATE_CHANGE_REQUESTS, serde_json::Value::Null)
-                .await;
+            futures::future::join_all(targets.into_iter().map(|target| {
+                let engine = engine.clone();
+                async move {
+                    let _ = engine
+                        .client()
+                        .call(
+                            methods::INVALIDATE_CHANGE_REQUESTS,
+                            super::routed(serde_json::json!({}), target.as_deref()),
+                        )
+                        .await;
+                }
+            }))
+            .await;
             this.update(cx, |page, cx| {
                 page.refreshing = false;
                 page.refresh(cx);
@@ -268,6 +282,7 @@ mod tests {
             host: "github.com".into(),
             repository: "acme/zeron".into(),
             number,
+            device: None,
         };
         for number in 0..35 {
             save_detail(&dir, &key(number), &detail);

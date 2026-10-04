@@ -442,6 +442,7 @@ impl PullRequestCode {
                 .collect(),
         })
         .unwrap_or(serde_json::Value::Null);
+        let params = self.key.route(params);
         cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
@@ -518,6 +519,7 @@ impl PullRequestCode {
             body,
         })
         .unwrap_or(serde_json::Value::Null);
+        let params = self.key.route(params);
         cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
@@ -559,6 +561,7 @@ impl PullRequestCode {
             resolved,
         })
         .unwrap_or(serde_json::Value::Null);
+        let params = self.key.route(params);
         cx.spawn(async move |this, cx| {
             let result = engine
                 .client()

@@ -4585,6 +4585,7 @@ fn to_list_item(
         },
         checks_state: checks_rollup(row.status_check_rollup.as_deref().unwrap_or_default()),
         host,
+        device_id: None,
     })
 }
 

@@ -1058,6 +1058,9 @@ pub struct ChangeRequestListItem {
     pub review_decision: Option<ChangeRequestReviewDecision>,
     #[serde(default)]
     pub checks_state: Option<ChangeRequestChecksState>,
+    /// Stamped by the reader when the row came from another device's engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

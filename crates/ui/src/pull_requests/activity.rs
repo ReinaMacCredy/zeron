@@ -322,6 +322,7 @@ impl PullRequestsPage {
             number: key.number,
         })
         .unwrap_or(serde_json::Value::Null);
+        let params = key.route(params);
         let key = key.clone();
         state.activity._task = Some(cx.spawn(async move |this, cx| {
             let result = engine
@@ -389,6 +390,7 @@ impl PullRequestsPage {
             body,
         })
         .unwrap_or(serde_json::Value::Null);
+        let params = key.route(params);
         let key = key.clone();
         cx.spawn(async move |this, cx| {
             let result = engine
@@ -446,6 +448,7 @@ impl PullRequestsPage {
             add,
         })
         .unwrap_or(serde_json::Value::Null);
+        let params = key.route(params);
         let key = key.clone();
         cx.spawn(async move |this, cx| {
             let result = engine

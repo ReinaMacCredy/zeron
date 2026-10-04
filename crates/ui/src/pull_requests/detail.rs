@@ -604,6 +604,7 @@ impl PullRequestsPage {
             number: key.number,
         })
         .unwrap_or(serde_json::Value::Null);
+        let params = key.route(params);
         let key = key.clone();
         state._task = Some(cx.spawn(async move |this, cx| {
             let result = engine
@@ -679,6 +680,7 @@ impl PullRequestsPage {
             Some(key) => self.render_detail(&key, theme, tones, window, cx),
             None => div().into_any_element(),
         };
+        let tab_menu = self.render_tab_menu(theme, cx);
         div()
             .w(px(width))
             .h_full()
@@ -688,6 +690,7 @@ impl PullRequestsPage {
             .bg(theme.bg)
             .child(tabstrip)
             .child(div().flex_1().min_h_0().child(body))
+            .children(tab_menu)
             .into_any_element()
     }
 
@@ -719,10 +722,15 @@ impl PullRequestsPage {
             let open_key = key.clone();
             let close_key = key.clone();
             let middle_key = key.clone();
+            let menu_key = key.clone();
             let hover_key = key.clone();
             strip = strip.child(
                 div()
                     .id(SharedString::from(id))
+                    .debug_selector({
+                        let number = key.number;
+                        move || format!("pull-request-tab-{number}")
+                    })
                     .role(gpui::Role::Tab)
                     .aria_label(SharedString::from(format!("#{}", key.number)))
                     .h(px(24.0))
@@ -751,6 +759,12 @@ impl PullRequestsPage {
                     .on_mouse_down(
                         MouseButton::Middle,
                         cx.listener(move |page, _, _, cx| page.close_tab(&middle_key, cx)),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |page, event: &gpui::MouseDownEvent, _, cx| {
+                            page.open_tab_menu(menu_key.clone(), event.position, cx)
+                        }),
                     )
                     .on_click(cx.listener(move |page, _, _, cx| {
                         page.active = Some(open_key.clone());

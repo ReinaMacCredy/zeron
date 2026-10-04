@@ -386,6 +386,7 @@ impl PullRequestsPage {
             number: key.number,
         })
         .unwrap_or(serde_json::Value::Null);
+        let params = key.route(params);
         let key = key.clone();
         state.actions._task = Some(cx.spawn(async move |this, cx| {
             let result = engine
@@ -475,6 +476,7 @@ impl PullRequestsPage {
             comment,
         })
         .unwrap_or(serde_json::Value::Null);
+        let params = key.route(params);
         let key = key.clone();
         cx.spawn(async move |this, cx| {
             let result = engine
@@ -1442,6 +1444,7 @@ impl PullRequestsPage {
             body,
         })
         .unwrap_or(serde_json::Value::Null);
+        let params = key.route(params);
         let key = key.clone();
         cx.spawn(async move |this, cx| {
             let result = engine
@@ -1723,6 +1726,7 @@ impl PullRequestsPage {
             number: key.number,
         })
         .unwrap_or(serde_json::Value::Null);
+        let params = key.route(params);
         let key = key.clone();
         cx.spawn(async move |this, cx| {
             let method = if labels {
@@ -1780,6 +1784,7 @@ impl PullRequestsPage {
             add,
         })
         .unwrap_or(serde_json::Value::Null);
+        let params = key.route(params);
         let key = key.clone();
         cx.spawn(async move |this, cx| {
             let result = engine
@@ -1841,6 +1846,7 @@ impl PullRequestsPage {
             add,
         })
         .unwrap_or(serde_json::Value::Null);
+        let params = key.route(params);
         let key = key.clone();
         cx.spawn(async move |this, cx| {
             let result = engine
@@ -2353,6 +2359,7 @@ mod tests {
             labels: Vec::new(),
             review_decision: None,
             checks_state: Some(ChangeRequestChecksState::Passing),
+            device_id: None,
         }
     }
 

@@ -2,10 +2,12 @@ mod actions;
 mod activity;
 mod code;
 mod detail;
+mod devices;
 mod filters;
 mod handoff;
 mod paging;
 mod review;
+mod tabs;
 
 pub use filters::PullRequestListPrefs;
 
@@ -54,7 +56,10 @@ impl PullRequestGroup {
 }
 
 fn authored_by_viewer(item: &ChangeRequestListItem, viewers: &BTreeMap<String, String>) -> bool {
-    let (Some(author), Some(viewer)) = (item.author.as_ref(), viewers.get(&item.host)) else {
+    let (Some(author), Some(viewer)) = (
+        item.author.as_ref(),
+        viewers.get(&devices::viewer_key(item)),
+    ) else {
         return false;
     };
     author.login.eq_ignore_ascii_case(viewer)
@@ -262,6 +267,7 @@ pub(crate) struct PullRequestKey {
     host: String,
     repository: String,
     number: u64,
+    device: Option<String>,
 }
 
 impl PullRequestKey {
@@ -270,8 +276,20 @@ impl PullRequestKey {
             host: item.host.clone(),
             repository: item.repository.clone(),
             number: item.number,
+            device: item.device_id.clone(),
         }
     }
+
+    fn route(&self, params: serde_json::Value) -> serde_json::Value {
+        routed(params, self.device.as_deref())
+    }
+}
+
+fn routed(mut params: serde_json::Value, device: Option<&str>) -> serde_json::Value {
+    if let (Some(device), Some(map)) = (device, params.as_object_mut()) {
+        map.insert("targetDeviceId".into(), device.into());
+    }
+    params
 }
 
 pub use handoff::ChatHandoff;
@@ -316,6 +334,7 @@ pub struct PullRequestsPage {
     poll_task: Option<Task<()>>,
     checkout_menu: Option<(PullRequestKey, crate::popover::Popup<()>)>,
     toast_seq: u64,
+    tab_menu: crate::popover::Popup<(PullRequestKey, gpui::Point<gpui::Pixels>)>,
 }
 
 impl EventEmitter<PullRequestsEvent> for PullRequestsPage {}
@@ -374,6 +393,7 @@ impl PullRequestsPage {
             poll_task: None,
             checkout_menu: None,
             toast_seq: 0,
+            tab_menu: Default::default(),
         };
         if let Some(listing) = paging::snapshot_dir(cx).and_then(|dir| paging::load_list(&dir)) {
             page.listing = Loadable::Ready(listing);
@@ -409,25 +429,42 @@ impl PullRequestsPage {
         let unsearched = request.query.is_none();
         self.last_read = std::time::Instant::now();
         let params = serde_json::to_value(request).unwrap_or(serde_json::Value::Null);
+        let devices: Vec<devices::ListDevice> = self
+            .list_devices(cx)
+            .into_iter()
+            .filter(|device| {
+                self.prefs
+                    .device
+                    .as_ref()
+                    .is_none_or(|wanted| *wanted == device.id)
+            })
+            .collect();
         self.load_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::LIST_CHANGE_REQUESTS, params)
-                .await;
+            let answers = futures::future::join_all(devices.iter().map(|device| {
+                let params = routed(params.clone(), device.target().as_deref());
+                let engine = engine.clone();
+                async move {
+                    engine
+                        .client()
+                        .call(methods::LIST_CHANGE_REQUESTS, params)
+                        .await
+                        .map_err(|error| error.to_string())
+                        .and_then(|value| {
+                            serde_json::from_value::<ChangeRequestListing>(value)
+                                .map_err(|error| error.to_string())
+                        })
+                }
+            }))
+            .await;
+            let parsed = devices::merge_listings(devices.iter().zip(answers).collect());
             this.update(cx, |page, cx| {
                 page.refreshing = false;
-                let parsed = result.map_err(|error| error.to_string()).and_then(|value| {
-                    serde_json::from_value::<ChangeRequestListing>(value)
-                        .map_err(|error| error.to_string())
-                });
                 match parsed {
                     Ok(mut listing) => {
                         if let Loadable::Ready(previous) = &page.listing {
                             for item in &mut listing.items {
                                 if let Some(known) = previous.items.iter().find(|known| {
-                                    known.number == item.number
-                                        && known.repository == item.repository
-                                        && known.host == item.host
+                                    PullRequestKey::of(known) == PullRequestKey::of(item)
                                 }) && change_size(item) == 0
                                 {
                                     item.additions = known.additions;
@@ -463,42 +500,56 @@ impl PullRequestsPage {
         let Loadable::Ready(listing) = &self.listing else {
             return;
         };
-        let refs: Vec<ChangeRequestRef> = listing
+        let mut by_device: BTreeMap<Option<String>, Vec<ChangeRequestRef>> = BTreeMap::new();
+        for item in listing
             .items
             .iter()
             .filter(|item| item.additions + item.deletions == 0)
-            .map(|item| ChangeRequestRef {
-                host: item.host.clone(),
-                repository: item.repository.clone(),
-                number: item.number,
-            })
-            .collect();
-        if refs.is_empty() {
+        {
+            by_device
+                .entry(item.device_id.clone())
+                .or_default()
+                .push(ChangeRequestRef {
+                    host: item.host.clone(),
+                    repository: item.repository.clone(),
+                    number: item.number,
+                });
+        }
+        if by_device.is_empty() {
             return;
         }
-        let params = serde_json::to_value(ListChangeRequestStatsRequest { refs })
-            .unwrap_or(serde_json::Value::Null);
         self.stats_task = Some(cx.spawn(async move |this, cx| {
-            let Ok(value) = engine
-                .client()
-                .call(methods::LIST_CHANGE_REQUEST_STATS, params)
-                .await
-            else {
-                return;
-            };
-            let Ok(stats) = serde_json::from_value::<ChangeRequestStats>(value) else {
-                return;
-            };
+            let answers = futures::future::join_all(by_device.into_iter().map(|(device, refs)| {
+                let params = routed(
+                    serde_json::to_value(ListChangeRequestStatsRequest { refs })
+                        .unwrap_or(serde_json::Value::Null),
+                    device.as_deref(),
+                );
+                let engine = engine.clone();
+                async move {
+                    let stats = engine
+                        .client()
+                        .call(methods::LIST_CHANGE_REQUEST_STATS, params)
+                        .await
+                        .ok()
+                        .and_then(|value| serde_json::from_value::<ChangeRequestStats>(value).ok());
+                    (device, stats)
+                }
+            }))
+            .await;
             this.update(cx, |page, cx| {
                 if let Loadable::Ready(listing) = &mut page.listing {
-                    for stat in stats.stats {
-                        if let Some(item) = listing.items.iter_mut().find(|item| {
-                            item.number == stat.reference.number
-                                && item.repository == stat.reference.repository
-                                && item.host == stat.reference.host
-                        }) {
-                            item.additions = stat.additions;
-                            item.deletions = stat.deletions;
+                    for (device, stats) in answers {
+                        for stat in stats.map(|stats| stats.stats).unwrap_or_default() {
+                            if let Some(item) = listing.items.iter_mut().find(|item| {
+                                item.number == stat.reference.number
+                                    && item.repository == stat.reference.repository
+                                    && item.host == stat.reference.host
+                                    && item.device_id == device
+                            }) {
+                                item.additions = stat.additions;
+                                item.deletions = stat.deletions;
+                            }
                         }
                     }
                 }
@@ -506,6 +557,16 @@ impl PullRequestsPage {
             })
             .ok();
         }));
+    }
+
+    fn list_devices(&self, cx: &App) -> Vec<devices::ListDevice> {
+        let state = self.state.read(cx);
+        devices::list_devices(
+            state.local_device_id.as_deref(),
+            &state.devices,
+            &state.spaces,
+            Utc::now(),
+        )
     }
 
     fn query(&self, cx: &App) -> String {
@@ -973,6 +1034,7 @@ impl PullRequestsPage {
         row_width: f32,
         now: DateTime<Utc>,
         search: &str,
+        device_label: Option<String>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let (glyph, glyph_tone, _) = tones.glyph(item);
@@ -1025,6 +1087,16 @@ impl PullRequestsPage {
                     .text_ellipsis()
                     .child(item.repository.clone()),
             );
+        if let Some(device) = device_label {
+            meta = meta.child(separator()).child(
+                div()
+                    .max_w(px(128.0))
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .flex_none()
+                    .child(device),
+            );
+        }
         if let Some(author) = &item.author {
             meta = meta.child(separator()).child(
                 div()
@@ -1096,8 +1168,11 @@ impl PullRequestsPage {
             right_top = right_top.child(
                 div()
                     .id(SharedString::from(format!(
-                        "pull-request-checks-{}-{}-{}",
-                        item.host, item.repository, item.number
+                        "pull-request-checks-{}-{}-{}-{}",
+                        item.device_id.as_deref().unwrap_or_default(),
+                        item.host,
+                        item.repository,
+                        item.number
                     )))
                     .role(gpui::Role::Button)
                     .aria_label(SharedString::from(format!(
@@ -1134,8 +1209,11 @@ impl PullRequestsPage {
         let opened = item.clone();
         div()
             .id(SharedString::from(format!(
-                "pull-request-row-{}-{}-{}",
-                item.host, item.repository, item.number
+                "pull-request-row-{}-{}-{}-{}",
+                item.device_id.as_deref().unwrap_or_default(),
+                item.host,
+                item.repository,
+                item.number
             )))
             .role(gpui::Role::Button)
             .aria_label(SharedString::from(item.title.clone()))
@@ -1250,6 +1328,11 @@ impl PullRequestsPage {
                     .repository
                     .as_deref()
                     .is_none_or(|repository| item.repository == repository)
+                    && self
+                        .prefs
+                        .host
+                        .as_deref()
+                        .is_none_or(|host| item.host == host)
             })
             .filter(|item| !busy || matches_query(item, &search_text))
             .collect();
@@ -1283,6 +1366,17 @@ impl PullRequestsPage {
         }
         let tones = Tones::of(theme);
         let now = Utc::now();
+        let list_devices = self.list_devices(cx);
+        let device_label = |item: &ChangeRequestListItem| {
+            (list_devices.len() >= 2)
+                .then(|| {
+                    list_devices
+                        .iter()
+                        .find(|device| device.target() == item.device_id)
+                        .map(|device| device.name.clone())
+                })
+                .flatten()
+        };
         let groups: Vec<(Option<PullRequestGroup>, Vec<&ChangeRequestListItem>)> =
             if self.prefs.involvement == ChangeRequestInvolvement::All {
                 group_items(&items, &listing.viewers)
@@ -1310,7 +1404,16 @@ impl PullRequestsPage {
                             .child(group.label())
                     }))
                     .children(group_items.into_iter().map(|item| {
-                        self.render_row(item, theme, tones, row_width, now, &search_text, cx)
+                        self.render_row(
+                            item,
+                            theme,
+                            tones,
+                            row_width,
+                            now,
+                            &search_text,
+                            device_label(item),
+                            cx,
+                        )
                     })),
             );
         }
@@ -1715,6 +1818,7 @@ mod tests {
             labels: Vec::new(),
             review_decision: None,
             checks_state: None,
+            device_id: None,
         }
     }
 

@@ -5297,6 +5297,12 @@ impl Shell {
     /// native traffic-light close deliberately skips these rungs: it always
     /// closes the window.
     pub fn close_active_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if matches!(self.route, Route::PullRequests) {
+            return self
+                .pull_requests_page
+                .clone()
+                .is_some_and(|page| page.update(cx, |page, cx| page.close_active_tab(cx)));
+        }
         let Some(surface) = self.closable_right_surface(cx) else {
             return false;
         };
@@ -11059,6 +11065,18 @@ impl Shell {
                 && let Some(page) = self.pull_requests_page.clone()
             {
                 page.update(cx, |page, cx| page.focus_search(window, cx));
+                cx.stop_propagation();
+                return;
+            }
+            if event.keystroke.key == "c"
+                && event.keystroke.modifiers.platform
+                && event.keystroke.modifiers.shift
+                && !event.keystroke.modifiers.alt
+                && let Some(page) = self.pull_requests_page.clone()
+            {
+                if !event.is_held {
+                    page.update(cx, |page, cx| page.copy_active_link(cx));
+                }
                 cx.stop_propagation();
                 return;
             }

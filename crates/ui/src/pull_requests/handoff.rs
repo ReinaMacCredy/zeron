@@ -291,6 +291,7 @@ impl PullRequestsPage {
             checkout: kind.checkout(),
         })
         .unwrap_or(serde_json::Value::Null);
+        let params = key.route(params);
         cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
@@ -581,6 +582,7 @@ mod tests {
             labels: Vec::new(),
             review_decision: None,
             checks_state: None,
+            device_id: None,
         }
     }
 
