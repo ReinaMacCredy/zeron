@@ -1,4 +1,7 @@
 mod detail;
+mod filters;
+
+pub use filters::PullRequestListPrefs;
 
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
@@ -10,9 +13,10 @@ use gpui::{
     Styled, Subscription, Task, Window, div, percentage, prelude::*, px,
 };
 use zeron_proto::{
-    ChangeRequestChecksState, ChangeRequestFailure, ChangeRequestListItem, ChangeRequestListing,
-    ChangeRequestMergeability, ChangeRequestRef, ChangeRequestReviewDecision, ChangeRequestState,
-    ChangeRequestStats, ListChangeRequestStatsRequest, ListChangeRequestsRequest,
+    ChangeRequestChecksState, ChangeRequestFailure, ChangeRequestInvolvement,
+    ChangeRequestListItem, ChangeRequestListing, ChangeRequestMergeability, ChangeRequestRef,
+    ChangeRequestReviewDecision, ChangeRequestState, ChangeRequestStats,
+    ListChangeRequestStatsRequest, ListChangeRequestsRequest,
 };
 use zeron_rpc::methods;
 
@@ -94,9 +98,13 @@ fn readiness_tier(item: &ChangeRequestListItem) -> u8 {
     }
 }
 
+pub(crate) fn change_size(item: &ChangeRequestListItem) -> u64 {
+    item.additions + item.deletions
+}
+
 pub(crate) fn rank_by_merge_readiness(items: &mut [&ChangeRequestListItem]) {
     items.sort_by(|left, right| {
-        let size = |item: &ChangeRequestListItem| item.additions + item.deletions;
+        let size = change_size;
         readiness_tier(left)
             .cmp(&readiness_tier(right))
             .then_with(|| (size(right) > 0).cmp(&(size(left) > 0)))
@@ -280,6 +288,13 @@ pub struct PullRequestsPage {
     resize_from: Option<(f32, f32)>,
     stats_task: Option<Task<()>>,
     checks_popover: Option<detail::ChecksPopover>,
+    prefs: PullRequestListPrefs,
+    menu: crate::popover::Popup<filters::ListMenu>,
+    author_search: Entity<ComposerInput>,
+    _author_search_sub: Subscription,
+    sent_query: String,
+    sent: (String, zeron_proto::ChangeRequestListFilters),
+    debounce_task: Option<Task<()>>,
 }
 
 impl EventEmitter<PullRequestsEvent> for PullRequestsPage {}
@@ -289,11 +304,20 @@ impl PullRequestsPage {
         let search = cx.new(|cx| {
             ComposerInput::with_context("Search pull requests, or label:bug", "PaletteSearch", cx)
         });
-        let search_sub = cx.subscribe(&search, |_, _, event, cx| {
+        let search_sub = cx.subscribe(&search, |page: &mut Self, _, event, cx| {
+            if matches!(event, ComposerInputEvent::Edited) {
+                page.schedule_search(cx);
+                cx.notify();
+            }
+        });
+        let author_search =
+            cx.new(|cx| ComposerInput::with_context("Search authors", "PaletteSearch", cx));
+        let author_search_sub = cx.subscribe(&author_search, |_, _, event, cx| {
             if matches!(event, ComposerInputEvent::Edited) {
                 cx.notify();
             }
         });
+        let prefs = crate::settings::current(cx).pull_requests_list.clone();
         let mut page = Self {
             state,
             search,
@@ -310,6 +334,13 @@ impl PullRequestsPage {
             resize_from: None,
             stats_task: None,
             checks_popover: None,
+            prefs,
+            menu: Default::default(),
+            author_search,
+            _author_search_sub: author_search_sub,
+            sent_query: String::new(),
+            sent: Default::default(),
+            debounce_task: None,
         };
         page.refresh(cx);
         page
@@ -324,8 +355,15 @@ impl PullRequestsPage {
         } else {
             self.listing = Loadable::Loading;
         }
-        let params = serde_json::to_value(ListChangeRequestsRequest::default())
-            .unwrap_or(serde_json::Value::Null);
+        let (text, typed) = &self.sent;
+        let request = ListChangeRequestsRequest {
+            state: self.prefs.state,
+            involvement: self.prefs.involvement,
+            limit: None,
+            query: (!text.trim().is_empty()).then(|| text.trim().to_string()),
+            filters: filters::effective_filters(&self.prefs.filters, typed),
+        };
+        let params = serde_json::to_value(request).unwrap_or(serde_json::Value::Null);
         self.load_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
@@ -338,7 +376,20 @@ impl PullRequestsPage {
                         .map_err(|error| error.to_string())
                 });
                 match parsed {
-                    Ok(listing) => {
+                    Ok(mut listing) => {
+                        if let Loadable::Ready(previous) = &page.listing {
+                            for item in &mut listing.items {
+                                if let Some(known) = previous.items.iter().find(|known| {
+                                    known.number == item.number
+                                        && known.repository == item.repository
+                                        && known.host == item.host
+                                }) && change_size(item) == 0
+                                {
+                                    item.additions = known.additions;
+                                    item.deletions = known.deletions;
+                                }
+                            }
+                        }
                         page.listing = Loadable::Ready(listing);
                         page.load_stats(cx);
                     }
@@ -410,6 +461,38 @@ impl PullRequestsPage {
         self.search.read(cx).text().to_string()
     }
 
+    fn schedule_search(&mut self, cx: &mut Context<Self>) {
+        self.debounce_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(250))
+                .await;
+            this.update(cx, |page, cx| {
+                let query = page.query(cx).trim().to_string();
+                let parsed = filters::parse_query(&query);
+                page.sent_query = query;
+                if parsed != page.sent {
+                    page.sent = parsed;
+                    page.refresh(cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+        let handle = gpui::Focusable::focus_handle(self.search.read(cx), cx);
+        window.focus(&handle, cx);
+        self.search
+            .update(cx, |input, cx| input.select_all_text(cx));
+        cx.notify();
+    }
+
+    fn search_busy(&self, cx: &App) -> bool {
+        self.query(cx).trim() != self.sent_query || (self.refreshing && !self.sent_query.is_empty())
+    }
+
     fn render_topbar(&self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let spacer = crate::shell::titlebar_spacer_width(
             cfg!(target_os = "macos"),
@@ -454,10 +537,86 @@ impl PullRequestsPage {
                     .text_color(theme.text)
                     .child("Pull Requests"),
             )
+            .when(self.list_condensed(), |el| {
+                let compact = |id: &'static str, label: &'static str| {
+                    div()
+                        .id(id)
+                        .role(gpui::Role::Button)
+                        .aria_label(label)
+                        .flex()
+                        .items_center()
+                        .gap(px(4.0))
+                        .h(px(28.0))
+                        .px(px(6.0))
+                        .rounded(px(8.0))
+                        .text_size(px(14.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme.text_muted)
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.ink(0.06)).text_color(theme.text))
+                        .child(label)
+                        .child(
+                            icon(icons::LUCIDE_CHEVRON_DOWN)
+                                .size(px(12.0))
+                                .text_color(theme.text_muted.opacity(0.7)),
+                        )
+                };
+                el.child(div().text_color(theme.text_muted.opacity(0.5)).child("/"))
+                    .child(self.menu_trigger(
+                        filters::MenuKind::State,
+                        compact(
+                            "pull-requests-compact-state",
+                            filters::state_label(self.prefs.state),
+                        ),
+                        theme,
+                        cx,
+                    ))
+                    .child(self.menu_trigger(
+                        filters::MenuKind::Involvement,
+                        compact(
+                            "pull-requests-compact-involvement",
+                            filters::involvement_label(self.prefs.involvement),
+                        ),
+                        theme,
+                        cx,
+                    ))
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .id("pull-requests-compact-search")
+                            .role(gpui::Role::Button)
+                            .aria_label("Search pull requests")
+                            .size(px(28.0))
+                            .mr(px(12.0))
+                            .rounded(px(8.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .hover(|style| style.bg(theme.ink(0.06)))
+                            .on_click(
+                                cx.listener(|page, _, window, cx| page.focus_search(window, cx)),
+                            )
+                            .child(
+                                icon(icons::LUCIDE_SEARCH)
+                                    .size(px(16.0))
+                                    .text_color(theme.text_muted),
+                            ),
+                    )
+            })
             .into_any_element()
     }
 
-    fn render_controls(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn list_condensed(&self) -> bool {
+        -f32::from(self.scroll.offset().y) > 64.0
+    }
+
+    fn render_controls(
+        &self,
+        theme: &Theme,
+        search_busy: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let busy = self.refreshing || matches!(self.listing, Loadable::Loading);
         let refresh_icon = icon(icons::LUCIDE_REFRESH_CW)
             .size(px(16.0))
@@ -483,6 +642,18 @@ impl PullRequestsPage {
                 .bg(theme.surface_raised)
                 .hover(|style| style.bg(theme.ink(0.06)))
         };
+        let menu_button = |id: &'static str, label: &'static str| {
+            outline(div().id(id))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .px(px(11.0))
+                .role(gpui::Role::Button)
+                .aria_label(label)
+                .cursor_pointer()
+                .text_size(px(14.0))
+                .text_color(theme.text)
+        };
         div()
             .flex()
             .flex_wrap()
@@ -496,11 +667,26 @@ impl PullRequestsPage {
                     .items_center()
                     .gap(px(8.0))
                     .px(px(10.0))
-                    .child(
+                    .child(if search_busy {
+                        icon(icons::LUCIDE_REFRESH_CW)
+                            .size(px(16.0))
+                            .text_color(theme.text_muted)
+                            .with_animation(
+                                "pull-requests-search-spin",
+                                Animation::new(Duration::from_millis(800)).repeat(),
+                                |svg, delta| {
+                                    svg.with_transformation(gpui::Transformation::rotate(
+                                        percentage(delta),
+                                    ))
+                                },
+                            )
+                            .into_any_element()
+                    } else {
                         icon(icons::LUCIDE_SEARCH)
                             .size(px(16.0))
-                            .text_color(theme.text_muted),
-                    )
+                            .text_color(theme.text_muted)
+                            .into_any_element()
+                    })
                     .child(
                         div()
                             .flex_1()
@@ -509,6 +695,48 @@ impl PullRequestsPage {
                             .child(self.search.clone()),
                     ),
             )
+            .child(
+                self.menu_trigger(
+                    filters::MenuKind::Sort,
+                    menu_button("pull-requests-sort", "Sort pull requests")
+                        .child(
+                            icon(icons::LUCIDE_ARROW_DOWN_UP)
+                                .size(px(16.0))
+                                .text_color(theme.text),
+                        )
+                        .child("Sort"),
+                    theme,
+                    cx,
+                ),
+            )
+            .child({
+                let count = filters::filter_count(&self.prefs);
+                self.menu_trigger(
+                    filters::MenuKind::Filters,
+                    menu_button("pull-requests-filters", "Filters")
+                        .child(icon(icons::LUCIDE_LIST_FILTER).size(px(16.0)).text_color(
+                            if count > 0 {
+                                theme.text
+                            } else {
+                                theme.text_muted
+                            },
+                        ))
+                        .child("Filters")
+                        .when(count > 0, |el| {
+                            el.child(
+                                div()
+                                    .rounded_full()
+                                    .bg(theme.ink(0.06))
+                                    .px(px(6.0))
+                                    .text_size(px(12.0))
+                                    .text_color(theme.text_muted)
+                                    .child(count.to_string()),
+                            )
+                        }),
+                    theme,
+                    cx,
+                )
+            })
             .child(
                 outline(div().id("pull-requests-refresh"))
                     .w(px(32.0))
@@ -529,6 +757,10 @@ impl PullRequestsPage {
     }
 
     fn render_ghost(&self, theme: &Theme) -> AnyElement {
+        self.render_ghost_rows(theme, GHOST_ROWS, None)
+    }
+
+    fn render_ghost_rows(&self, theme: &Theme, rows: usize, caption: Option<String>) -> AnyElement {
         let title = [0.6, 0.4, 0.5, 0.66, 0.4, 0.6, 0.5];
         let meta = [0.4, 0.33, 0.4, 0.25, 0.33, 0.4, 0.33];
         let bar = theme.text_muted.opacity(0.15);
@@ -536,7 +768,16 @@ impl PullRequestsPage {
             .flex()
             .flex_col()
             .gap(px(2.0))
-            .children((0..GHOST_ROWS).map(|index| {
+            .children(caption.map(|caption| {
+                div()
+                    .px(px(12.0))
+                    .pb(px(4.0))
+                    .text_size(px(12.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text_muted.opacity(0.7))
+                    .child(caption)
+            }))
+            .children((0..rows).map(|index| {
                 div()
                     .flex()
                     .items_center()
@@ -680,9 +921,12 @@ impl PullRequestsPage {
         tones: Tones,
         row_width: f32,
         now: DateTime<Utc>,
+        search: &str,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let (glyph, glyph_tone, _) = tones.glyph(item);
+        let matched_elsewhere =
+            !search.trim().is_empty() && filters::score_match(item, search) <= 10;
         let selected = self.active.as_ref() == Some(&PullRequestKey::of(item));
         let muted70 = theme.text_muted.opacity(0.7);
         let muted50 = theme.text_muted.opacity(0.5);
@@ -698,6 +942,29 @@ impl PullRequestsPage {
             .text_size(px(12.0))
             .text_color(muted70)
             .whitespace_nowrap()
+            .when(matched_elsewhere, |el| {
+                el.child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(px(2.0))
+                        .rounded_full()
+                        .border_1()
+                        .border_color(theme.hairline(0.06))
+                        .px(px(4.0))
+                        .text_size(px(10.0))
+                        .child(
+                            icon(icons::LUCIDE_SEARCH)
+                                .size(px(12.0))
+                                .text_color(muted70),
+                        )
+                        .when(meta_width >= 320.0, |el| {
+                            el.child("matched in the description")
+                        }),
+                )
+                .child(separator())
+            })
             .child(div().flex_none().child(format!("#{}", item.number)))
             .child(separator())
             .child(
@@ -881,7 +1148,13 @@ impl PullRequestsPage {
             .into_any_element()
     }
 
-    fn render_body(&self, theme: &Theme, row_width: f32, cx: &mut Context<Self>) -> AnyElement {
+    fn render_body(
+        &self,
+        theme: &Theme,
+        row_width: f32,
+        busy: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let listing = match &self.listing {
             Loadable::Idle | Loadable::Loading => return self.render_ghost(theme),
             Loadable::Error(error) => {
@@ -912,61 +1185,82 @@ impl PullRequestsPage {
             );
         }
         let query = self.query(cx);
+        let trimmed = query.trim();
+        let search_text = if busy {
+            filters::parse_query(trimmed).0
+        } else {
+            self.sent.0.clone()
+        };
         let items: Vec<&ChangeRequestListItem> = listing
             .items
             .iter()
-            .filter(|item| matches_query(item, &query))
+            .filter(|item| {
+                self.prefs
+                    .repository
+                    .as_deref()
+                    .is_none_or(|repository| item.repository == repository)
+            })
+            .filter(|item| !busy || matches_query(item, &search_text))
             .collect();
+        let shown = crate::rail::truncate_preview(trimmed, 49);
+        if items.is_empty() && busy && !search_text.trim().is_empty() {
+            return self.render_ghost_rows(
+                theme,
+                5,
+                Some(format!("Searching every host for “{shown}”")),
+            );
+        }
         if items.is_empty() {
-            let trimmed = query.trim();
-            let (title, description) = if trimmed.is_empty() {
-                (
-                    "No pull requests".to_string(),
-                    "Pull requests from every project in this workspace appear here.".to_string(),
-                )
-            } else {
-                let shown: String = if trimmed.chars().count() > 48 {
-                    format!("{}…", trimmed.chars().take(48).collect::<String>())
-                } else {
-                    trimmed.to_string()
-                };
+            let (title, description) = if !trimmed.is_empty() {
                 (
                     format!("Nothing matches “{shown}”"),
                     "The hosts were searched for it. Try fewer words, or search by number, author or branch."
                         .to_string(),
                 )
+            } else if filters::filter_count(&self.prefs) > 0 {
+                (
+                    "Nothing under these filters".to_string(),
+                    "Widen the state, involvement or project filter to see more.".to_string(),
+                )
+            } else {
+                (
+                    "No pull requests".to_string(),
+                    "Pull requests from every project in this workspace appear here.".to_string(),
+                )
             };
-            let clear_search = !trimmed.is_empty();
-            return self.render_state(theme, title, description, true, clear_search, cx);
+            return self.render_state(theme, title, description, true, !trimmed.is_empty(), cx);
         }
         let tones = Tones::of(theme);
         let now = Utc::now();
-        let searching = !query.trim().is_empty();
-        let groups = group_items(&items, &listing.viewers);
+        let groups: Vec<(Option<PullRequestGroup>, Vec<&ChangeRequestListItem>)> =
+            if self.prefs.involvement == ChangeRequestInvolvement::All {
+                group_items(&items, &listing.viewers)
+                    .into_iter()
+                    .map(|(group, items)| (Some(group), items))
+                    .collect()
+            } else {
+                vec![(None, items)]
+            };
         let mut column = div().flex().flex_col().gap(px(12.0));
         for (group, mut group_items) in groups {
-            if !searching {
-                rank_by_merge_readiness(&mut group_items);
-            }
+            filters::sort_items(&mut group_items, self.prefs.sort, &search_text);
             column = column.child(
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(2.0))
-                    .child(
+                    .children(group.map(|group| {
                         div()
                             .px(px(12.0))
                             .pb(px(2.0))
                             .text_size(px(12.0))
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.text_muted.opacity(0.7))
-                            .child(group.label()),
-                    )
-                    .children(
-                        group_items
-                            .into_iter()
-                            .map(|item| self.render_row(item, theme, tones, row_width, now, cx)),
-                    ),
+                            .child(group.label())
+                    }))
+                    .children(group_items.into_iter().map(|item| {
+                        self.render_row(item, theme, tones, row_width, now, &search_text, cx)
+                    })),
             );
         }
         if let Some(error) = shown_errors.first() {
@@ -1146,8 +1440,9 @@ impl Render for PullRequestsPage {
         let container = list_width.min(CONTAINER_MAX_WIDTH);
         let row_width = (container - 2.0 * CONTAINER_PAD_X).max(0.0);
         let topbar = self.render_topbar(&theme, window, cx);
-        let controls = self.render_controls(&theme, cx);
-        let body = self.render_body(&theme, row_width, cx);
+        let search_busy = self.search_busy(cx);
+        let controls = self.render_controls(&theme, search_busy, cx);
+        let body = self.render_body(&theme, row_width, search_busy, cx);
         let list = div()
             .flex_1()
             .min_w_0()

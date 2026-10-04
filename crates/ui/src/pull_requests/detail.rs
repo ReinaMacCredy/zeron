@@ -291,6 +291,10 @@ impl PullRequestsPage {
     }
 
     pub fn dismiss_overlay(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.menu.is_open() {
+            self.close_menu(cx);
+            return true;
+        }
         if self.checks_popover.take().is_some() {
             cx.notify();
             return true;

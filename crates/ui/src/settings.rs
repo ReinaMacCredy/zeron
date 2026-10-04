@@ -1148,6 +1148,7 @@ pub struct UiSettings {
     pub right_pane_open: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pull_requests_panel_width: Option<f32>,
+    pub pull_requests_list: crate::pull_requests::PullRequestListPrefs,
     pub terminal_height: f32,
     /// Legacy — see [`Self::right_pane_open`].
     pub terminal_open: bool,
@@ -1293,6 +1294,7 @@ impl Default for UiSettings {
             split_ratio: SPLIT_RATIO_DEFAULT,
             right_pane_open: false,
             pull_requests_panel_width: None,
+            pull_requests_list: Default::default(),
             terminal_height: TERMINAL_DEFAULT_HEIGHT,
             terminal_open: false,
             keymap: KeymapConfig::default(),
@@ -1959,6 +1961,7 @@ impl UiSettings {
             right_pane_width,
             right_pane_open,
             pull_requests_panel_width,
+            pull_requests_list,
             terminal_height,
             terminal_open,
             keymap,
@@ -3069,6 +3072,7 @@ mod tests {
             split_ratio: 0.35,
             right_pane_open: true,
             pull_requests_panel_width: Some(520.0),
+            pull_requests_list: Default::default(),
             terminal_height: 320.0,
             terminal_open: true,
             keymap: KeymapConfig {

@@ -16,10 +16,11 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 
 use zeron_proto::{
     ChangeRequestActor, ChangeRequestCheck, ChangeRequestCheckStatus, ChangeRequestChecksState,
-    ChangeRequestComment, ChangeRequestCommentKind, ChangeRequestDetail, ChangeRequestFailure,
-    ChangeRequestInvolvement, ChangeRequestLabel, ChangeRequestListError, ChangeRequestListItem,
-    ChangeRequestListState, ChangeRequestListing, ChangeRequestMergeability, ChangeRequestRef,
-    ChangeRequestReviewDecision, ChangeRequestReviewer, ChangeRequestStat, ChangeRequestState,
+    ChangeRequestComment, ChangeRequestCommentKind, ChangeRequestDetail, ChangeRequestDraftFilter,
+    ChangeRequestFailure, ChangeRequestInvolvement, ChangeRequestLabel, ChangeRequestListError,
+    ChangeRequestListFilters, ChangeRequestListItem, ChangeRequestListState, ChangeRequestListing,
+    ChangeRequestMergeability, ChangeRequestRef, ChangeRequestReviewDecision,
+    ChangeRequestReviewFilter, ChangeRequestReviewer, ChangeRequestStat, ChangeRequestState,
     ChangeRequestStats, ChangeRequestSummary, ChangeRequestVerdict, GetChangeRequestRequest,
     ListChangeRequestStatsRequest, ListChangeRequestsRequest,
 };
@@ -708,7 +709,9 @@ impl GitHubCli {
                 continue;
             }
             let requested = review_requested.contains(&row.number);
-            if let Some(mut item) = to_list_item(identity, viewer, row) {
+            if let Some(mut item) = to_list_item(identity, viewer, row)
+                .filter(|item| matches_filters(item, &request.filters, viewer))
+            {
                 if requested
                     && request.involvement == ChangeRequestInvolvement::All
                     && !item
@@ -817,10 +820,24 @@ impl GitHubCli {
             ChangeRequestListState::Merged => "is:merged",
             ChangeRequestListState::All => "",
         };
+        let text = request
+            .query
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+        let phrase = if text.is_empty() {
+            String::new()
+        } else {
+            format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+        };
+        let qualifiers = filter_qualifiers(&request.filters, viewer).join(" ");
         let query = |extra: &str| {
             [
                 format!("is:pr {state}"),
                 extra.to_owned(),
+                phrase.clone(),
+                qualifiers.clone(),
                 "sort:updated-desc".into(),
                 repos.clone(),
             ]
@@ -851,7 +868,8 @@ impl GitHubCli {
                     empty(),
                 )?,
             };
-        if raw_count == 0 && request.involvement == ChangeRequestInvolvement::All {
+        if raw_count == 0 && request.involvement == ChangeRequestInvolvement::All && text.is_empty()
+        {
             return Ok(None);
         }
         let review_requested: Vec<(String, u64)> = reviewing_rows
@@ -1460,6 +1478,116 @@ fn to_summary(
         base_ref: pull_request.base_ref_name,
         head_ref: pull_request.head_ref_name,
     })
+}
+
+fn resolve_author(author: &str, viewer: &str) -> String {
+    match author.trim() {
+        "me" | "@me" => viewer.to_owned(),
+        other => other.to_owned(),
+    }
+}
+
+fn quoted_qualifier(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "").trim())
+}
+
+fn filter_qualifiers(filters: &ChangeRequestListFilters, viewer: &str) -> Vec<String> {
+    let mut qualifiers: Vec<String> = filters
+        .labels
+        .iter()
+        .filter(|group| !group.is_empty())
+        .map(|group| {
+            format!(
+                "label:{}",
+                group
+                    .iter()
+                    .map(|label| quoted_qualifier(label))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        })
+        .collect();
+    qualifiers.extend(
+        filters
+            .excluded_labels
+            .iter()
+            .map(|label| format!("-label:{}", quoted_qualifier(label))),
+    );
+    if let Some(author) = &filters.author {
+        qualifiers.push(format!(
+            "author:{}",
+            quoted_qualifier(&resolve_author(author, viewer))
+        ));
+    }
+    if let Some(draft) = filters.draft {
+        qualifiers.push(format!("draft:{}", draft == ChangeRequestDraftFilter::Only));
+    }
+    if let Some(review) = filters.review {
+        qualifiers.push(format!(
+            "review:{}",
+            match review {
+                ChangeRequestReviewFilter::Approved => "approved",
+                ChangeRequestReviewFilter::ChangesRequested => "changes_requested",
+                ChangeRequestReviewFilter::ReviewRequired => "required",
+                ChangeRequestReviewFilter::None => "none",
+            }
+        ));
+    }
+    if let Some(checks) = filters.checks {
+        qualifiers.push(format!(
+            "status:{}",
+            if checks == ChangeRequestChecksState::Passing {
+                "success"
+            } else {
+                "failure"
+            }
+        ));
+    }
+    qualifiers
+}
+
+fn matches_filters(
+    item: &ChangeRequestListItem,
+    filters: &ChangeRequestListFilters,
+    viewer: &str,
+) -> bool {
+    let holds = |label: &str| {
+        item.labels
+            .iter()
+            .any(|held| held.name.trim().eq_ignore_ascii_case(label.trim()))
+    };
+    filters
+        .draft
+        .is_none_or(|draft| item.is_draft == (draft == ChangeRequestDraftFilter::Only))
+        && filters.review.is_none_or(|review| {
+            item.review_decision
+                == match review {
+                    ChangeRequestReviewFilter::None => None,
+                    ChangeRequestReviewFilter::Approved => {
+                        Some(ChangeRequestReviewDecision::Approved)
+                    }
+                    ChangeRequestReviewFilter::ChangesRequested => {
+                        Some(ChangeRequestReviewDecision::ChangesRequested)
+                    }
+                    ChangeRequestReviewFilter::ReviewRequired => {
+                        Some(ChangeRequestReviewDecision::ReviewRequired)
+                    }
+                }
+        })
+        && filters
+            .checks
+            .is_none_or(|checks| item.checks_state == Some(checks))
+        && filters
+            .labels
+            .iter()
+            .all(|group| group.iter().any(|label| holds(label)))
+        && !filters.excluded_labels.iter().any(|label| holds(label))
+        && filters.author.as_deref().is_none_or(|author| {
+            item.author.as_ref().is_some_and(|held| {
+                held.login
+                    .eq_ignore_ascii_case(&resolve_author(author, viewer))
+            })
+        })
 }
 
 fn valid_repository_path(path: &str) -> bool {
@@ -3757,6 +3885,117 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
                 additions: 12,
                 deletions: 3,
             }]
+        );
+    }
+
+    #[test]
+    fn filter_qualifiers_follow_github_search_spelling() {
+        let filters = ChangeRequestListFilters {
+            draft: Some(ChangeRequestDraftFilter::Hide),
+            review: Some(ChangeRequestReviewFilter::ChangesRequested),
+            checks: Some(ChangeRequestChecksState::Failing),
+            author: Some("@me".into()),
+            labels: vec![
+                vec!["bug".into(), "needs \"design\"".into()],
+                vec!["size:S".into()],
+            ],
+            excluded_labels: vec!["wontfix".into()],
+        };
+        assert_eq!(
+            filter_qualifiers(&filters, "alice"),
+            [
+                r#"label:"bug","needs design""#,
+                r#"label:"size:S""#,
+                r#"-label:"wontfix""#,
+                r#"author:"alice""#,
+                "draft:false",
+                "review:changes_requested",
+                "status:failure",
+            ]
+        );
+        assert!(filter_qualifiers(&ChangeRequestListFilters::default(), "alice").is_empty());
+    }
+
+    #[test]
+    fn local_filters_match_the_search_qualifiers() {
+        let mut item = to_list_item(
+            &RepositoryIdentity {
+                root: PathBuf::from("/repo"),
+                remote: parse_git_remote("https://github.com/acme/zeron").unwrap(),
+            },
+            "alice",
+            serde_json::from_value(list_row(
+                1,
+                "Alice",
+                "2026-09-01T00:00:00Z",
+                serde_json::json!({"labels": [{"name": "Bug"}, {"name": "size:S"}], "reviewDecision": "APPROVED"}),
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        item.checks_state = Some(ChangeRequestChecksState::Passing);
+        let check = |filters: ChangeRequestListFilters| matches_filters(&item, &filters, "alice");
+        assert!(check(ChangeRequestListFilters::default()));
+        assert!(check(ChangeRequestListFilters {
+            author: Some("me".into()),
+            labels: vec![vec!["bug".into(), "other".into()], vec!["size:s".into()]],
+            review: Some(ChangeRequestReviewFilter::Approved),
+            checks: Some(ChangeRequestChecksState::Passing),
+            draft: Some(ChangeRequestDraftFilter::Hide),
+            ..Default::default()
+        }));
+        assert!(!check(ChangeRequestListFilters {
+            excluded_labels: vec!["BUG".into()],
+            ..Default::default()
+        }));
+        assert!(!check(ChangeRequestListFilters {
+            review: Some(ChangeRequestReviewFilter::None),
+            ..Default::default()
+        }));
+        assert!(!check(ChangeRequestListFilters {
+            draft: Some(ChangeRequestDraftFilter::Only),
+            ..Default::default()
+        }));
+    }
+
+    #[tokio::test]
+    async fn search_text_is_one_quoted_phrase_and_never_falls_back() {
+        let runner = ScriptedRunner::new(|request| {
+            if let Some(output) = git_repo_script(request) {
+                return output;
+            }
+            assert_eq!(request.args.first().map(String::as_str), Some("api"));
+            if request.args.get(1).map(String::as_str) != Some("graphql") {
+                return command_success("alice\n");
+            }
+            let query = arg_after(request, "-f")
+                .and_then(|value| value.strip_prefix("q="))
+                .expect("search terms");
+            assert!(
+                query.contains(r#""fix \"quoted\" is:merged" label:"bug" sort:updated-desc"#),
+                "{query}"
+            );
+            command_success(r#"{"data":{"search":{"pageInfo":{"hasNextPage":false},"nodes":[]}}}"#)
+        });
+        let request = ListChangeRequestsRequest {
+            query: Some(r#" fix "quoted" is:merged "#.into()),
+            filters: ChangeRequestListFilters {
+                labels: vec![vec!["bug".into()]],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let listing = list_resolver(runner.clone())
+            .list_change_requests(&[PathBuf::from("/repo")], &request)
+            .await;
+        assert!(listing.items.is_empty());
+        assert!(listing.errors.is_empty());
+        assert!(
+            runner.requests.lock().unwrap().iter().all(|request| request
+                .args
+                .first()
+                .map(String::as_str)
+                != Some("pr"))
         );
     }
 }

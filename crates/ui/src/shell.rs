@@ -11052,6 +11052,16 @@ impl Shell {
             return;
         }
         if matches!(self.route, Route::PullRequests) {
+            if event.keystroke.key == "f"
+                && event.keystroke.modifiers.platform
+                && !event.keystroke.modifiers.alt
+                && !event.keystroke.modifiers.shift
+                && let Some(page) = self.pull_requests_page.clone()
+            {
+                page.update(cx, |page, cx| page.focus_search(window, cx));
+                cx.stop_propagation();
+                return;
+            }
             if event.keystroke.key == "escape" && self.add_space.is_none() {
                 if !self.dismiss_pull_requests_overlay(cx) {
                     self.close_pull_requests(cx);

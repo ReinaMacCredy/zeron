@@ -1082,6 +1082,39 @@ pub struct ChangeRequestListError {
     pub failure: ChangeRequestFailure,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChangeRequestDraftFilter {
+    Only,
+    Hide,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChangeRequestReviewFilter {
+    Approved,
+    ChangesRequested,
+    ReviewRequired,
+    None,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeRequestListFilters {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft: Option<ChangeRequestDraftFilter>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<ChangeRequestReviewFilter>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks: Option<ChangeRequestChecksState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_labels: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListChangeRequestsRequest {
@@ -1091,6 +1124,10 @@ pub struct ListChangeRequestsRequest {
     pub involvement: ChangeRequestInvolvement,
     #[serde(default)]
     pub limit: Option<u32>,
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub filters: ChangeRequestListFilters,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
