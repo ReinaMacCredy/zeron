@@ -289,6 +289,9 @@ impl Shell {
         if matches!(self.route, Route::Settings(_)) {
             self.close_settings(cx);
         }
+        if matches!(self.route, Route::PullRequests) {
+            self.close_pull_requests(cx);
+        }
         if !matches!(self.route, Route::Chat) {
             return;
         }
