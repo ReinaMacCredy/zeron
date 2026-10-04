@@ -1,14 +1,14 @@
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, ClipboardItem, Context, MouseButton, ScrollHandle, SharedString, Task, Window, div,
-    point, prelude::*, px,
+    AnyElement, ClipboardItem, Context, MouseButton, Pixels, Point, ScrollHandle, SharedString,
+    Task, Window, div, point, prelude::*, px,
 };
 use zeron_markdown::parser::BlockTree;
 use zeron_proto::{
-    ChangeRequestCheck, ChangeRequestCheckStatus, ChangeRequestComment, ChangeRequestDetail,
-    ChangeRequestFailure, ChangeRequestListItem, ChangeRequestState, ChangeRequestVerdict,
-    GetChangeRequestRequest,
+    ChangeRequestCheck, ChangeRequestCheckStatus, ChangeRequestChecksState, ChangeRequestComment,
+    ChangeRequestDetail, ChangeRequestFailure, ChangeRequestListItem, ChangeRequestState,
+    ChangeRequestVerdict, GetChangeRequestRequest,
 };
 use zeron_rpc::methods;
 
@@ -29,6 +29,20 @@ enum Section {
     Description,
     Checks,
     Comments,
+}
+
+pub(super) struct ChecksPopover {
+    key: PullRequestKey,
+    position: Point<Pixels>,
+    from_header: bool,
+}
+
+pub(crate) fn checks_verdict_label(state: ChangeRequestChecksState) -> &'static str {
+    match state {
+        ChangeRequestChecksState::Passing => "All checks have passed",
+        ChangeRequestChecksState::Failing => "Some checks were not successful",
+        ChangeRequestChecksState::Pending => "Some checks haven't completed yet",
+    }
 }
 
 pub(super) struct DetailState {
@@ -244,6 +258,158 @@ impl PullRequestsPage {
         }
         self.active = Some(key);
         cx.notify();
+    }
+
+    pub(super) fn toggle_checks_popover(
+        &mut self,
+        item: &ChangeRequestListItem,
+        position: Point<Pixels>,
+        from_header: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let key = PullRequestKey::of(item);
+        if self
+            .checks_popover
+            .as_ref()
+            .is_some_and(|open| open.key == key)
+        {
+            self.checks_popover = None;
+            cx.notify();
+            return;
+        }
+        if !self.details.contains_key(&key) {
+            self.details
+                .insert(key.clone(), DetailState::new(item.clone()));
+            self.load_detail(&key, cx);
+        }
+        self.checks_popover = Some(ChecksPopover {
+            key,
+            position,
+            from_header,
+        });
+        cx.notify();
+    }
+
+    pub fn dismiss_overlay(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.checks_popover.take().is_some() {
+            cx.notify();
+            return true;
+        }
+        false
+    }
+
+    pub(super) fn render_checks_popover(
+        &self,
+        theme: &Theme,
+        tones: Tones,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let open = self.checks_popover.as_ref()?;
+        let state = self.details.get(&open.key)?;
+        let muted = theme.text_muted;
+        let item = match &state.detail {
+            Loadable::Ready(detail) => &detail.item,
+            _ => &state.seed,
+        };
+        let mut card = crate::popover::popover_card(theme)
+            .bg(theme.surface_dialog)
+            .id("pull-request-checks-popover")
+            .occlude()
+            .w(px(320.0))
+            .p(px(12.0))
+            .flex()
+            .flex_col()
+            .on_mouse_down_out(cx.listener(|page, _, _, cx| {
+                page.checks_popover = None;
+                cx.notify();
+            }));
+        if let Some(verdict) = item.checks_state {
+            card = card.child(
+                div()
+                    .mb(px(8.0))
+                    .text_size(px(14.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child(checks_verdict_label(verdict)),
+            );
+        }
+        let body: AnyElement = match &state.detail {
+            Loadable::Ready(detail) => {
+                if open.from_header {
+                    card = card.child(
+                        div()
+                            .mb(px(8.0))
+                            .text_size(px(12.0))
+                            .text_color(muted)
+                            .child(summarize_checks(&detail.checks)),
+                    );
+                }
+                if detail.checks.is_empty() {
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(muted)
+                        .child("No checks reported")
+                        .into_any_element()
+                } else {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.0))
+                        .children(detail.checks.iter().enumerate().map(|(index, check)| {
+                            let (glyph, tone, label) =
+                                check_presentation(check.status, tones, theme);
+                            let url = check.url.clone();
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .text_size(px(12.0))
+                                .child(icon(glyph).size(px(14.0)).text_color(tone).flex_none())
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .text_color(theme.text)
+                                        .child(check.name.clone()),
+                                )
+                                .child(div().text_color(muted).child(label))
+                                .children(url.map(|url| {
+                                    div()
+                                        .id(("pull-request-check-details", index))
+                                        .text_color(theme.accent)
+                                        .cursor_pointer()
+                                        .hover(|style| style.underline())
+                                        .on_click(move |_, _, cx| cx.open_url(&url))
+                                        .child("Details")
+                                }))
+                        }))
+                        .into_any_element()
+                }
+            }
+            Loadable::Error(error) => div()
+                .text_size(px(12.0))
+                .text_color(muted)
+                .child(error.clone())
+                .into_any_element(),
+            Loadable::Idle | Loadable::Loading => div()
+                .text_size(px(12.0))
+                .text_color(muted)
+                .child("Loading checks…")
+                .into_any_element(),
+        };
+        Some(
+            gpui::deferred(
+                gpui::anchored()
+                    .position(open.position + point(px(-8.0), px(12.0)))
+                    .snap_to_window_with_margin(px(8.0))
+                    .child(card.child(body)),
+            )
+            .with_priority(1)
+            .into_any_element(),
+        )
     }
 
     pub(super) fn close_tab(&mut self, key: &PullRequestKey, cx: &mut Context<Self>) {
@@ -835,7 +1001,15 @@ impl PullRequestsPage {
                 Some(state) => tones.checks(state),
                 None => (icons::LUCIDE_CIRCLE_DOT, muted),
             };
+            let popover_item = detail.item.clone();
             div()
+                .id("pull-request-header-checks")
+                .role(gpui::Role::Button)
+                .aria_label("Checks")
+                .cursor_pointer()
+                .on_click(cx.listener(move |page, event: &gpui::ClickEvent, _, cx| {
+                    page.toggle_checks_popover(&popover_item, event.position(), true, cx);
+                }))
                 .flex()
                 .items_center()
                 .gap(px(6.0))

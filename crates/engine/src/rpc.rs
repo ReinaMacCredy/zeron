@@ -1687,6 +1687,7 @@ fn forwardable(method: &str) -> bool {
             | methods::WATCH_CHECKOUT_CHANGE_REQUEST
             | methods::LIST_CHANGE_REQUESTS
             | methods::GET_CHANGE_REQUEST
+            | methods::LIST_CHANGE_REQUEST_STATS
             | methods::GET_CHECKOUT_DIFF
             | methods::DISCARD_WORKING_TREE
             | methods::GET_CHECKOUT_FILE_DIFF_TEXT
@@ -2951,6 +2952,15 @@ impl RpcService for EngineRpc {
                     .await;
                 Ok(RpcReply::Value(
                     serde_json::to_value(listing).map_err(|e| RpcError::Failed(e.to_string()))?,
+                ))
+            }
+            methods::LIST_CHANGE_REQUEST_STATS => {
+                let p: zeron_proto::ListChangeRequestStatsRequest = parse_params(params)?;
+                let stats = crate::source_control::ChangeRequestResolver::new()
+                    .list_change_request_stats(&self.change_request_space_roots(), &p)
+                    .await;
+                Ok(RpcReply::Value(
+                    serde_json::to_value(stats).map_err(|e| RpcError::Failed(e.to_string()))?,
                 ))
             }
             methods::GET_CHANGE_REQUEST => {
@@ -4610,6 +4620,7 @@ mod tests {
         assert!(forwardable(methods::LIST_CHANGE_REQUESTS));
         assert!(!is_stream_method(methods::LIST_CHANGE_REQUESTS));
         assert!(forwardable(methods::GET_CHANGE_REQUEST));
+        assert!(forwardable(methods::LIST_CHANGE_REQUEST_STATS));
         assert!(forwardable(methods::DISCARD_WORKING_TREE));
         assert!(forwardable(methods::LIST_WORKSPACE_DIRECTORY));
         assert!(forwardable(methods::SEARCH_WORKSPACE_FILES));

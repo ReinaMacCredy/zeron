@@ -11,8 +11,8 @@ use gpui::{
 };
 use zeron_proto::{
     ChangeRequestChecksState, ChangeRequestFailure, ChangeRequestListItem, ChangeRequestListing,
-    ChangeRequestMergeability, ChangeRequestReviewDecision, ChangeRequestState,
-    ListChangeRequestsRequest,
+    ChangeRequestMergeability, ChangeRequestRef, ChangeRequestReviewDecision, ChangeRequestState,
+    ChangeRequestStats, ListChangeRequestStatsRequest, ListChangeRequestsRequest,
 };
 use zeron_rpc::methods;
 
@@ -278,6 +278,8 @@ pub struct PullRequestsPage {
     hovered_tab: Option<PullRequestKey>,
     panel_width: Option<f32>,
     resize_from: Option<(f32, f32)>,
+    stats_task: Option<Task<()>>,
+    checks_popover: Option<detail::ChecksPopover>,
 }
 
 impl EventEmitter<PullRequestsEvent> for PullRequestsPage {}
@@ -306,6 +308,8 @@ impl PullRequestsPage {
             hovered_tab: None,
             panel_width: None,
             resize_from: None,
+            stats_task: None,
+            checks_popover: None,
         };
         page.refresh(cx);
         page
@@ -334,7 +338,10 @@ impl PullRequestsPage {
                         .map_err(|error| error.to_string())
                 });
                 match parsed {
-                    Ok(listing) => page.listing = Loadable::Ready(listing),
+                    Ok(listing) => {
+                        page.listing = Loadable::Ready(listing);
+                        page.load_stats(cx);
+                    }
                     Err(error) if !matches!(page.listing, Loadable::Ready(_)) => {
                         page.listing = Loadable::Error(error)
                     }
@@ -345,6 +352,58 @@ impl PullRequestsPage {
             .ok();
         }));
         cx.notify();
+    }
+
+    fn load_stats(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let Loadable::Ready(listing) = &self.listing else {
+            return;
+        };
+        let refs: Vec<ChangeRequestRef> = listing
+            .items
+            .iter()
+            .filter(|item| item.additions + item.deletions == 0)
+            .map(|item| ChangeRequestRef {
+                host: item.host.clone(),
+                repository: item.repository.clone(),
+                number: item.number,
+            })
+            .collect();
+        if refs.is_empty() {
+            return;
+        }
+        let params = serde_json::to_value(ListChangeRequestStatsRequest { refs })
+            .unwrap_or(serde_json::Value::Null);
+        self.stats_task = Some(cx.spawn(async move |this, cx| {
+            let Ok(value) = engine
+                .client()
+                .call(methods::LIST_CHANGE_REQUEST_STATS, params)
+                .await
+            else {
+                return;
+            };
+            let Ok(stats) = serde_json::from_value::<ChangeRequestStats>(value) else {
+                return;
+            };
+            this.update(cx, |page, cx| {
+                if let Loadable::Ready(listing) = &mut page.listing {
+                    for stat in stats.stats {
+                        if let Some(item) = listing.items.iter_mut().find(|item| {
+                            item.number == stat.reference.number
+                                && item.repository == stat.reference.repository
+                                && item.host == stat.reference.host
+                        }) {
+                            item.additions = stat.additions;
+                            item.deletions = stat.deletions;
+                        }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     fn query(&self, cx: &App) -> String {
@@ -715,7 +774,26 @@ impl PullRequestsPage {
         }
         if let Some(checks) = item.checks_state {
             let (glyph, tone) = tones.checks(checks);
-            right_top = right_top.child(icon(glyph).size(px(16.0)).text_color(tone));
+            let popover_item = item.clone();
+            right_top = right_top.child(
+                div()
+                    .id(SharedString::from(format!(
+                        "pull-request-checks-{}-{}-{}",
+                        item.host, item.repository, item.number
+                    )))
+                    .role(gpui::Role::Button)
+                    .aria_label(SharedString::from(format!(
+                        "Checks: {}",
+                        detail::checks_verdict_label(checks)
+                    )))
+                    .rounded(px(4.0))
+                    .hover(|style| style.bg(theme.ink(0.06)))
+                    .on_click(cx.listener(move |page, event: &gpui::ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        page.toggle_checks_popover(&popover_item, event.position(), false, cx);
+                    }))
+                    .child(icon(glyph).size(px(16.0)).text_color(tone)),
+            );
         }
 
         let mut right_bottom = div()
@@ -1165,6 +1243,7 @@ impl Render for PullRequestsPage {
                 }),
             )
             .child(list)
+            .children(self.render_checks_popover(&theme, Tones::of(&theme), cx))
             .children(panel.map(|(resizer, panel)| {
                 div()
                     .h_full()

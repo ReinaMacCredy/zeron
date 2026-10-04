@@ -18,9 +18,10 @@ use zeron_proto::{
     ChangeRequestActor, ChangeRequestCheck, ChangeRequestCheckStatus, ChangeRequestChecksState,
     ChangeRequestComment, ChangeRequestCommentKind, ChangeRequestDetail, ChangeRequestFailure,
     ChangeRequestInvolvement, ChangeRequestLabel, ChangeRequestListError, ChangeRequestListItem,
-    ChangeRequestListState, ChangeRequestListing, ChangeRequestMergeability,
-    ChangeRequestReviewDecision, ChangeRequestReviewer, ChangeRequestState, ChangeRequestSummary,
-    ChangeRequestVerdict, GetChangeRequestRequest, ListChangeRequestsRequest,
+    ChangeRequestListState, ChangeRequestListing, ChangeRequestMergeability, ChangeRequestRef,
+    ChangeRequestReviewDecision, ChangeRequestReviewer, ChangeRequestStat, ChangeRequestState,
+    ChangeRequestStats, ChangeRequestSummary, ChangeRequestVerdict, GetChangeRequestRequest,
+    ListChangeRequestStatsRequest, ListChangeRequestsRequest,
 };
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -33,6 +34,10 @@ const GITHUB_RESULT_LIMIT: &str = "20";
 const GITHUB_JSON_FIELDS: &str = "number,title,url,state,baseRefName,headRefName,updatedAt,isCrossRepository,headRepositoryOwner";
 const GITHUB_DETAIL_FIELDS: &str = "number,title,url,author,headRefName,baseRefName,state,isDraft,mergeable,reviewDecision,createdAt,updatedAt,mergedAt,reviewRequests,labels,additions,deletions,statusCheckRollup,body,changedFiles,closedAt,isCrossRepository,comments,reviews,latestReviews,commits";
 const GITHUB_LIST_FIELDS: &str = "number,title,url,author,headRefName,baseRefName,state,isDraft,mergeable,reviewDecision,createdAt,updatedAt,mergedAt,reviewRequests,labels";
+const GITHUB_SEARCH_FIELDS: &str = "number title url author { login } headRefName baseRefName state isDraft mergeable reviewDecision createdAt updatedAt mergedAt repository { nameWithOwner } reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login } } } } labels(first: 20) { nodes { name color } } commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }";
+const STATS_CHUNK: usize = 25;
+const STATS_CONCURRENCY: usize = 4;
+const MAX_STATS_REFS: usize = 500;
 pub const DEFAULT_LIST_LIMIT: u32 = 99;
 const MAX_LIST_LIMIT: u32 = 500;
 
@@ -244,17 +249,53 @@ impl ChangeRequestResolver {
                 readable.push(identity);
             }
         }
-        let reads = futures::future::join_all(readable.iter().map(|identity| {
-            let viewer = listing.viewers[&identity.remote.host].clone();
+        let mut by_host: Vec<Vec<&RepositoryIdentity>> = Vec::new();
+        for identity in &readable {
+            match by_host
+                .iter_mut()
+                .find(|group| group[0].remote.host == identity.remote.host)
+            {
+                Some(group) => group.push(identity),
+                None => by_host.push(vec![identity]),
+            }
+        }
+        let searches = futures::future::join_all(by_host.iter().map(|group| {
+            let viewer = listing.viewers[&group[0].remote.host].clone();
             async move {
                 let result = self
                     .github
-                    .list_repository_items(identity, request, &viewer, limit)
+                    .search_host_items(group, request, &viewer, limit)
                     .await;
-                (identity, result)
+                (group, viewer, result)
             }
         }))
         .await;
+        let mut fallback = Vec::new();
+        for (group, viewer, result) in searches {
+            match result {
+                Ok(Some((items, truncated))) => {
+                    listing.items.extend(items);
+                    listing.truncated |= truncated;
+                }
+                Ok(None) => {
+                    fallback.extend(group.iter().map(|identity| (*identity, viewer.clone())))
+                }
+                Err(error) => listing.errors.extend(
+                    group
+                        .iter()
+                        .map(|identity| identity.list_error(error.into())),
+                ),
+            }
+        }
+        let reads =
+            futures::future::join_all(fallback.iter().map(|(identity, viewer)| async move {
+                let result = self
+                    .github
+                    .list_repository_items(identity, request, viewer, limit)
+                    .await;
+                (*identity, result)
+            }))
+            .await;
         for (identity, result) in reads {
             match result {
                 Ok((items, truncated)) => {
@@ -272,6 +313,53 @@ impl ChangeRequestResolver {
 }
 
 impl ChangeRequestResolver {
+    pub async fn list_change_request_stats(
+        &self,
+        roots: &[PathBuf],
+        request: &ListChangeRequestStatsRequest,
+    ) -> ChangeRequestStats {
+        let identities: Vec<RepositoryIdentity> = futures::future::join_all(
+            roots
+                .iter()
+                .map(|root| self.inspector.repository_identity(root)),
+        )
+        .await
+        .into_iter()
+        .filter_map(Result::ok)
+        .collect();
+        let mut chunks: Vec<(&RepositoryIdentity, Vec<&ChangeRequestRef>)> = Vec::new();
+        for reference in request.refs.iter().take(MAX_STATS_REFS) {
+            let Some(identity) = identities.iter().find(|identity| {
+                identity.remote.host.eq_ignore_ascii_case(&reference.host)
+                    && identity
+                        .name_with_owner()
+                        .eq_ignore_ascii_case(&reference.repository)
+            }) else {
+                continue;
+            };
+            if !valid_repository_path(&reference.repository) || reference.number == 0 {
+                continue;
+            }
+            match chunks.iter_mut().find(|(host, refs)| {
+                host.remote.host == identity.remote.host && refs.len() < STATS_CHUNK
+            }) {
+                Some((_, refs)) => refs.push(reference),
+                None => chunks.push((identity, vec![reference])),
+            }
+        }
+        let mut stats = Vec::new();
+        for batch in chunks.chunks(STATS_CONCURRENCY) {
+            let results = futures::future::join_all(
+                batch
+                    .iter()
+                    .map(|(identity, refs)| self.github.pull_request_stats(identity, refs)),
+            )
+            .await;
+            stats.extend(results.into_iter().flatten());
+        }
+        ChangeRequestStats { stats }
+    }
+
     pub async fn get_change_request(
         &self,
         roots: &[PathBuf],
@@ -658,6 +746,212 @@ impl GitHubCli {
             )
             .await?;
         serde_json::from_slice(&stdout).map_err(|_| ChangeRequestError::Decode)
+    }
+
+    async fn search(
+        &self,
+        root: &Path,
+        host: &str,
+        query: String,
+        rows: u32,
+    ) -> Result<(Vec<GhSearchPullRequest>, usize, bool), ChangeRequestError> {
+        let document = format!(
+            "query($q: String!) {{ search(query: $q, type: ISSUE, first: {rows}) {{ pageInfo {{ hasNextPage }} nodes {{ ... on PullRequest {{ {GITHUB_SEARCH_FIELDS} }} }} }} }}"
+        );
+        let stdout = self
+            .run_gh(
+                root,
+                vec![
+                    "api".into(),
+                    "graphql".into(),
+                    "--hostname".into(),
+                    host.into(),
+                    "-f".into(),
+                    format!("q={query}"),
+                    "-f".into(),
+                    format!("query={document}"),
+                ],
+                GITHUB_LIST_TIMEOUT,
+                GITHUB_LIST_OUTPUT_LIMIT,
+            )
+            .await?;
+        let response: GhSearchResponse =
+            serde_json::from_slice(&stdout).map_err(|_| ChangeRequestError::Decode)?;
+        let search = response
+            .data
+            .ok_or(ChangeRequestError::CommandFailed)?
+            .search;
+        let raw_count = search.nodes.len();
+        let rows = search
+            .nodes
+            .into_iter()
+            .filter_map(|node| serde_json::from_value(node).ok())
+            .collect();
+        Ok((rows, raw_count, search.page_info.has_next_page))
+    }
+
+    async fn search_host_items(
+        &self,
+        group: &[&RepositoryIdentity],
+        request: &ListChangeRequestsRequest,
+        viewer: &str,
+        limit: u32,
+    ) -> Result<Option<(Vec<ChangeRequestListItem>, bool)>, ChangeRequestError> {
+        if group
+            .iter()
+            .any(|identity| !valid_repository_path(&identity.name_with_owner()))
+            || !valid_login(viewer)
+        {
+            return Ok(None);
+        }
+        let host = &group[0].remote.host;
+        let root = &group[0].root;
+        let repos = group
+            .iter()
+            .map(|identity| format!("repo:{}", identity.name_with_owner()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let state = match request.state {
+            ChangeRequestListState::Open => "is:open",
+            ChangeRequestListState::Closed => "is:closed is:unmerged",
+            ChangeRequestListState::Merged => "is:merged",
+            ChangeRequestListState::All => "",
+        };
+        let query = |extra: &str| {
+            [
+                format!("is:pr {state}"),
+                extra.to_owned(),
+                "sort:updated-desc".into(),
+                repos.clone(),
+            ]
+            .into_iter()
+            .filter(|part| !part.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+        };
+        let rows = (limit + 1).min(100);
+        let authored = format!("author:{viewer}");
+        let reviewing = format!("review-requested:{viewer}");
+        let empty = || async { Ok((Vec::new(), 0, false)) };
+        let ((feed, raw_count, has_next), (authored_rows, _, _), (reviewing_rows, _, _)) =
+            match request.involvement {
+                ChangeRequestInvolvement::All => futures::try_join!(
+                    self.search(root, host, query(""), rows),
+                    self.search(root, host, query(&authored), rows),
+                    self.search(root, host, query(&reviewing), rows),
+                )?,
+                ChangeRequestInvolvement::Authored => futures::try_join!(
+                    self.search(root, host, query(&authored), rows),
+                    empty(),
+                    empty(),
+                )?,
+                ChangeRequestInvolvement::Reviewing => futures::try_join!(
+                    self.search(root, host, query(&reviewing), rows),
+                    empty(),
+                    empty(),
+                )?,
+            };
+        if raw_count == 0 && request.involvement == ChangeRequestInvolvement::All {
+            return Ok(None);
+        }
+        let review_requested: Vec<(String, u64)> = reviewing_rows
+            .iter()
+            .map(|row| {
+                (
+                    row.repository.name_with_owner.to_ascii_lowercase(),
+                    row.number,
+                )
+            })
+            .collect();
+        let mut items: Vec<ChangeRequestListItem> = Vec::new();
+        for row in feed
+            .into_iter()
+            .take(limit as usize)
+            .chain(authored_rows.into_iter().take(limit as usize))
+            .chain(reviewing_rows.into_iter().take(limit as usize))
+        {
+            let Some(identity) = group.iter().find(|identity| {
+                identity
+                    .name_with_owner()
+                    .eq_ignore_ascii_case(&row.repository.name_with_owner)
+            }) else {
+                continue;
+            };
+            let key = (
+                row.repository.name_with_owner.to_ascii_lowercase(),
+                row.number,
+            );
+            if items
+                .iter()
+                .any(|item| item.number == key.1 && item.repository.eq_ignore_ascii_case(&key.0))
+            {
+                continue;
+            }
+            let requested = review_requested.contains(&key);
+            if let Some(mut item) = to_list_item(identity, viewer, row.into_list_row()) {
+                if requested
+                    && !item
+                        .author
+                        .as_ref()
+                        .is_some_and(|author| author.login.eq_ignore_ascii_case(viewer))
+                {
+                    item.viewer_review_requested = true;
+                }
+                items.push(item);
+            }
+        }
+        Ok(Some((items, raw_count > limit as usize || has_next)))
+    }
+
+    async fn pull_request_stats(
+        &self,
+        identity: &RepositoryIdentity,
+        refs: &[&ChangeRequestRef],
+    ) -> Vec<ChangeRequestStat> {
+        let fields = refs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, reference)| {
+                let (owner, name) = reference.repository.split_once('/')?;
+                Some(format!(
+                    "s{index}: repository(owner: \"{owner}\", name: \"{name}\") {{ pullRequest(number: {}) {{ additions deletions }} }}",
+                    reference.number
+                ))
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let Ok(stdout) = self
+            .run_gh(
+                &identity.root,
+                vec![
+                    "api".into(),
+                    "graphql".into(),
+                    "--hostname".into(),
+                    identity.remote.host.clone(),
+                    "-f".into(),
+                    format!("query=query {{ {fields} }}"),
+                ],
+                GITHUB_LIST_TIMEOUT,
+                GITHUB_OUTPUT_LIMIT,
+            )
+            .await
+        else {
+            return Vec::new();
+        };
+        let Ok(response) = serde_json::from_slice::<serde_json::Value>(&stdout) else {
+            return Vec::new();
+        };
+        refs.iter()
+            .enumerate()
+            .filter_map(|(index, reference)| {
+                let pull_request = response.pointer(&format!("/data/s{index}/pullRequest"))?;
+                Some(ChangeRequestStat {
+                    reference: (*reference).clone(),
+                    additions: pull_request.get("additions")?.as_u64()?,
+                    deletions: pull_request.get("deletions")?.as_u64()?,
+                })
+            })
+            .collect()
     }
 
     async fn list_feed(
@@ -1166,6 +1460,165 @@ fn to_summary(
         base_ref: pull_request.base_ref_name,
         head_ref: pull_request.head_ref_name,
     })
+}
+
+fn valid_repository_path(path: &str) -> bool {
+    let valid = |part: &str| {
+        !part.is_empty()
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    };
+    path.split_once('/')
+        .is_some_and(|(owner, name)| valid(owner) && valid(name))
+}
+
+fn valid_login(login: &str) -> bool {
+    !login.is_empty()
+        && login
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '[' | ']'))
+}
+
+#[derive(Debug, Deserialize)]
+struct GhSearchResponse {
+    #[serde(default)]
+    data: Option<GhSearchData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhSearchData {
+    search: GhSearch,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhSearch {
+    page_info: GhPageInfo,
+    #[serde(default)]
+    nodes: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhPageInfo {
+    #[serde(default)]
+    has_next_page: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhNodes<T> {
+    #[serde(default = "Vec::new")]
+    nodes: Vec<Option<T>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhNameWithOwner {
+    name_with_owner: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhRequestedReviewer {
+    #[serde(default)]
+    requested_reviewer: Option<GhReviewRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhCommitNode {
+    commit: GhCommitRollup,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhCommitRollup {
+    #[serde(default)]
+    status_check_rollup: Option<GhRollupState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhRollupState {
+    #[serde(default)]
+    state: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhSearchPullRequest {
+    number: u64,
+    title: String,
+    url: String,
+    #[serde(default)]
+    author: Option<GhActor>,
+    head_ref_name: String,
+    base_ref_name: String,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    is_draft: bool,
+    #[serde(default)]
+    mergeable: Option<String>,
+    #[serde(default)]
+    review_decision: Option<String>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    #[serde(default)]
+    merged_at: Option<String>,
+    repository: GhNameWithOwner,
+    #[serde(default)]
+    review_requests: Option<GhNodes<GhRequestedReviewer>>,
+    #[serde(default)]
+    labels: Option<GhNodes<GhLabel>>,
+    #[serde(default)]
+    commits: Option<GhNodes<GhCommitNode>>,
+}
+
+impl GhSearchPullRequest {
+    fn into_list_row(self) -> GhListPullRequest {
+        let rollup = self
+            .commits
+            .into_iter()
+            .flat_map(|commits| commits.nodes)
+            .flatten()
+            .filter_map(|node| node.commit.status_check_rollup)
+            .filter_map(|rollup| rollup.state)
+            .map(|state| GhCheck {
+                state: Some(state),
+                ..Default::default()
+            })
+            .collect();
+        GhListPullRequest {
+            number: self.number,
+            title: self.title,
+            url: self.url,
+            author: self.author,
+            head_ref_name: self.head_ref_name,
+            base_ref_name: self.base_ref_name,
+            state: self.state,
+            is_draft: self.is_draft,
+            mergeable: self.mergeable,
+            review_decision: self.review_decision,
+            additions: 0,
+            deletions: 0,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            merged_at: self.merged_at,
+            review_requests: self.review_requests.map(|requests| {
+                requests
+                    .nodes
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|node| node.requested_reviewer)
+                    .collect()
+            }),
+            labels: self
+                .labels
+                .map(|labels| labels.nodes.into_iter().flatten().collect()),
+            status_check_rollup: Some(rollup),
+        }
+    }
 }
 
 fn primary_fetch_remote(output: &str) -> Option<&str> {
@@ -2697,6 +3150,24 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
         row
     }
 
+    fn empty_search_or_viewer(
+        request: &ProcessRequest,
+    ) -> Option<Result<ProcessOutput, ProcessRunError>> {
+        if request.args.first().map(String::as_str) != Some("api") {
+            return None;
+        }
+        assert_eq!(arg_after(request, "--hostname"), Some("github.com"));
+        Some(
+            if request.args.get(1).map(String::as_str) == Some("graphql") {
+                command_success(
+                    r#"{"data":{"search":{"pageInfo":{"hasNextPage":false},"nodes":[]}}}"#,
+                )
+            } else {
+                command_success("alice\n")
+            },
+        )
+    }
+
     fn git_repo_script(request: &ProcessRequest) -> Option<Result<ProcessOutput, ProcessRunError>> {
         if request.program != "git" {
             return None;
@@ -2745,9 +3216,8 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
                     .env
                     .contains(&("GH_PROMPT_DISABLED".into(), "1".into()))
             );
-            if request.args.first().map(String::as_str) == Some("api") {
-                assert_eq!(arg_after(request, "--hostname"), Some("github.com"));
-                return command_success("alice\n");
+            if let Some(output) = empty_search_or_viewer(request) {
+                return output;
             }
             assert_eq!(arg_after(request, "--repo"), Some("github.com/acme/zeron"));
             assert_eq!(arg_after(request, "--state"), Some("open"));
@@ -2908,8 +3378,8 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
             if let Some(output) = git_repo_script(request) {
                 return output;
             }
-            if request.args.first().map(String::as_str) == Some("api") {
-                return command_success("alice");
+            if let Some(output) = empty_search_or_viewer(request) {
+                return output;
             }
             assert_eq!(arg_after(request, "--limit"), Some("3"));
             let rows = match arg_after(request, "--search") {
@@ -3144,5 +3614,149 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
             .await
             .unwrap_err();
         assert_eq!(error, ChangeRequestError::UnsupportedRepository);
+    }
+
+    fn search_node(number: u64, author: &str, rollup: Option<&str>) -> serde_json::Value {
+        serde_json::json!({
+            "number": number,
+            "title": format!("Change {number}"),
+            "url": format!("https://github.com/acme/zeron/pull/{number}"),
+            "author": {"login": author},
+            "headRefName": format!("feature/{number}"),
+            "baseRefName": "main",
+            "state": "OPEN",
+            "isDraft": false,
+            "mergeable": "MERGEABLE",
+            "reviewDecision": "APPROVED",
+            "createdAt": "2026-09-01T00:00:00Z",
+            "updatedAt": format!("2026-09-0{number}T00:00:00Z"),
+            "mergedAt": null,
+            "repository": {"nameWithOwner": "acme/zeron"},
+            "reviewRequests": {"nodes": [{"requestedReviewer": {"login": "alice"}}, {"requestedReviewer": {}}]},
+            "labels": {"nodes": [{"name": "bug", "color": "d73a4a"}]},
+            "commits": {"nodes": [{"commit": {"statusCheckRollup": rollup.map(|state| serde_json::json!({"state": state}))}}]}
+        })
+    }
+
+    #[tokio::test]
+    async fn list_change_requests_reads_one_graphql_search_per_host() {
+        let runner = ScriptedRunner::new(|request| {
+            if let Some(output) = git_repo_script(request) {
+                return output;
+            }
+            assert_eq!(request.args.first().map(String::as_str), Some("api"));
+            if request.args.get(1).map(String::as_str) != Some("graphql") {
+                return command_success("alice\n");
+            }
+            let query = arg_after(request, "-f")
+                .and_then(|value| value.strip_prefix("q="))
+                .expect("search terms");
+            assert!(query.starts_with("is:pr is:open"), "{query}");
+            assert!(
+                query.ends_with("sort:updated-desc repo:acme/zeron"),
+                "{query}"
+            );
+            let document = request
+                .args
+                .iter()
+                .find_map(|arg| arg.strip_prefix("query="))
+                .expect("document");
+            assert!(document.contains("first: 3"), "{document}");
+            let (nodes, has_next) = if query.contains("author:alice") {
+                (vec![search_node(1, "alice", Some("SUCCESS"))], false)
+            } else if query.contains("review-requested:alice") {
+                (vec![search_node(2, "bob", Some("PENDING"))], false)
+            } else {
+                (
+                    vec![
+                        search_node(3, "carol", Some("FAILURE")),
+                        serde_json::json!({}),
+                        search_node(1, "alice", Some("SUCCESS")),
+                    ],
+                    true,
+                )
+            };
+            command_success(
+                serde_json::to_vec(&serde_json::json!({
+                    "data": {"search": {"pageInfo": {"hasNextPage": has_next}, "nodes": nodes}}
+                }))
+                .unwrap(),
+            )
+        });
+        let request = ListChangeRequestsRequest {
+            limit: Some(2),
+            ..Default::default()
+        };
+        let listing = list_resolver(runner.clone())
+            .list_change_requests(&[PathBuf::from("/repo")], &request)
+            .await;
+
+        assert!(listing.errors.is_empty(), "{:?}", listing.errors);
+        assert!(listing.truncated);
+        let shape: Vec<(u64, Option<ChangeRequestChecksState>, bool)> = listing
+            .items
+            .iter()
+            .map(|item| (item.number, item.checks_state, item.viewer_review_requested))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (3, Some(ChangeRequestChecksState::Failing), true),
+                (2, Some(ChangeRequestChecksState::Pending), true),
+                (1, Some(ChangeRequestChecksState::Passing), false),
+            ]
+        );
+        assert_eq!(listing.items[0].labels[0].name, "bug");
+        assert!(
+            runner.requests.lock().unwrap().iter().all(|request| request
+                .args
+                .first()
+                .map(String::as_str)
+                != Some("pr"))
+        );
+    }
+
+    #[tokio::test]
+    async fn list_change_request_stats_batches_aliases_and_drops_foreign_refs() {
+        let runner = ScriptedRunner::new(|request| {
+            if let Some(output) = git_repo_script(request) {
+                return output;
+            }
+            let document = request
+                .args
+                .iter()
+                .find_map(|arg| arg.strip_prefix("query="))
+                .expect("document");
+            assert!(document.contains(r#"s0: repository(owner: "acme", name: "zeron") { pullRequest(number: 7) { additions deletions } }"#), "{document}");
+            assert!(!document.contains("someone"), "{document}");
+            command_success(
+                r#"{"data":{"s0":{"pullRequest":{"additions":12,"deletions":3}},"s1":{"pullRequest":null}}}"#,
+            )
+        });
+        let reference = |repository: &str, number: u64| ChangeRequestRef {
+            host: "github.com".into(),
+            repository: repository.into(),
+            number,
+        };
+        let stats = list_resolver(runner)
+            .list_change_request_stats(
+                &[PathBuf::from("/repo")],
+                &ListChangeRequestStatsRequest {
+                    refs: vec![
+                        reference("acme/zeron", 7),
+                        reference("someone/else", 1),
+                        reference("acme/zeron", 8),
+                    ],
+                },
+            )
+            .await;
+        assert_eq!(
+            stats.stats,
+            [ChangeRequestStat {
+                reference: reference("acme/zeron", 7),
+                additions: 12,
+                deletions: 3,
+            }]
+        );
     }
 }

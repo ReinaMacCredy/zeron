@@ -11053,7 +11053,9 @@ impl Shell {
         }
         if matches!(self.route, Route::PullRequests) {
             if event.keystroke.key == "escape" && self.add_space.is_none() {
-                self.close_pull_requests(cx);
+                if !self.dismiss_pull_requests_overlay(cx) {
+                    self.close_pull_requests(cx);
+                }
                 cx.stop_propagation();
             }
             return;

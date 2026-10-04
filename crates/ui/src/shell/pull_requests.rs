@@ -27,6 +27,12 @@ impl Shell {
         cx.notify();
     }
 
+    pub(super) fn dismiss_pull_requests_overlay(&mut self, cx: &mut Context<Self>) -> bool {
+        self.pull_requests_page
+            .clone()
+            .is_some_and(|page| page.update(cx, |page, cx| page.dismiss_overlay(cx)))
+    }
+
     pub(super) fn close_pull_requests(&mut self, cx: &mut Context<Self>) {
         self.route = Route::Chat;
         self.focus_composer(cx);
