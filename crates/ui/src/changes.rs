@@ -64,7 +64,7 @@ use zeron_syntax::LanguageId as Lang;
 // ---------------------------------------------------------------------------
 
 pub const FILE_HEADER_HEIGHT: f32 = crate::surface_chrome::HEADER_HEIGHT;
-const STICKY_FILE_HEADER_BLUR: f32 = 16.0;
+pub(crate) const STICKY_FILE_HEADER_BLUR: f32 = 16.0;
 /// Coverage of the theme's content-plane tint over the sticky header blur.
 /// Light needs substantially more coverage: dark text is much more vulnerable
 /// to rows ghosting through the blur than light text is on a dark tint.
@@ -101,7 +101,7 @@ fn diff_text_size(theme: &Theme) -> f32 {
 
 /// The row box and the painted line box must agree, or code clips once the
 /// user moves the code font size off [`DIFF_TEXT_SIZE`].
-fn diff_line_height(theme: &Theme) -> f32 {
+pub(crate) fn diff_line_height(theme: &Theme) -> f32 {
     diff_text_size(theme) * (DIFF_LINE_HEIGHT / DIFF_TEXT_SIZE)
 }
 
@@ -346,7 +346,7 @@ fn visual_columns(text: &str) -> usize {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct DiffHorizontalMetrics {
+pub(crate) struct DiffHorizontalMetrics {
     max_text_width: f32,
     max_gutter_width: f32,
 }
@@ -372,7 +372,7 @@ impl DiffHorizontalMetrics {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum DiffCodeWidth {
+pub(crate) enum DiffCodeWidth {
     /// Inline tool diffs keep their existing local clipping behavior.
     Clipped,
     /// Changes rows expose a stable intrinsic code width.
@@ -382,19 +382,19 @@ enum DiffCodeWidth {
 }
 
 #[derive(Clone)]
-struct DiffCodeScroll {
+pub(crate) struct DiffCodeScroll {
     handle: gpui::ScrollHandle,
     id: SharedString,
 }
 
 #[derive(Clone)]
-struct DiffCodeScrollContext {
-    handle: gpui::ScrollHandle,
-    prefix: SharedString,
+pub(crate) struct DiffCodeScrollContext {
+    pub(crate) handle: gpui::ScrollHandle,
+    pub(crate) prefix: SharedString,
 }
 
 impl DiffCodeScrollContext {
-    fn slot(&self, suffix: impl std::fmt::Display) -> DiffCodeScroll {
+    pub(crate) fn slot(&self, suffix: impl std::fmt::Display) -> DiffCodeScroll {
         DiffCodeScroll {
             handle: self.handle.clone(),
             id: SharedString::from(format!("{}-{suffix}", self.prefix)),
@@ -1086,7 +1086,7 @@ fn excerpt_side(
     }))
 }
 
-fn excerpt_highlights(file: &FileDiff, language: Lang) -> Option<DiffHighlights> {
+pub(crate) fn excerpt_highlights(file: &FileDiff, language: Lang) -> Option<DiffHighlights> {
     if !zeron_syntax::supports_language(language) {
         return None;
     }
@@ -1187,15 +1187,15 @@ struct MeasuredDiffWidth {
     width: f32,
 }
 
-struct FileHorizontalState {
+pub(crate) struct FileHorizontalState {
     geometry: DiffHorizontalGeometry,
-    scroll: gpui::ScrollHandle,
+    pub(crate) scroll: gpui::ScrollHandle,
     /// Shape once per file, typography/theme, and highlight revision.
     measured: std::cell::RefCell<Option<MeasuredDiffWidth>>,
 }
 
 impl FileHorizontalState {
-    fn new(file: &FileDiff) -> Self {
+    pub(crate) fn new(file: &FileDiff) -> Self {
         Self {
             geometry: DiffHorizontalGeometry::from_file(file),
             scroll: gpui::ScrollHandle::new(),
@@ -1203,7 +1203,7 @@ impl FileHorizontalState {
         }
     }
 
-    fn metrics(
+    pub(crate) fn metrics(
         &self,
         file: &FileDiff,
         highlights: Option<&Arc<DiffHighlights>>,
@@ -1317,7 +1317,7 @@ pub enum DiffRow {
 }
 
 impl DiffRow {
-    fn file(self) -> usize {
+    pub(crate) fn file(self) -> usize {
         match self {
             Self::FileHeader { file }
             | Self::Notice { file, .. }
@@ -1464,17 +1464,17 @@ pub fn flatten_rows(
 
 /// The file header that should remain visible for a logical list position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct StickyFileHeader {
-    file_ix: usize,
-    header_row: usize,
-    next_header_row: Option<usize>,
+pub(crate) struct StickyFileHeader {
+    pub(crate) file_ix: usize,
+    pub(crate) header_row: usize,
+    pub(crate) next_header_row: Option<usize>,
 }
 
 /// Resolve a sticky file header from the current flattened row ranges.
 ///
 /// This remains independent of the rendered list so folds and diff resets
 /// cannot leave a second, stale active-file state behind.
-fn sticky_file_header(
+pub(crate) fn sticky_file_header(
     row_ranges: &[std::ops::Range<usize>],
     item_ix: usize,
     offset_in_item: f32,
@@ -1498,7 +1498,7 @@ fn sticky_file_header(
 }
 
 /// Offset a sticky header upward as the next file header enters its slot.
-fn sticky_header_push_offset(next_header_y: Option<f32>) -> f32 {
+pub(crate) fn sticky_header_push_offset(next_header_y: Option<f32>) -> f32 {
     next_header_y
         .map(|y| (y - FILE_HEADER_HEIGHT).min(0.0))
         .unwrap_or(0.0)
@@ -1525,16 +1525,16 @@ impl FileHeaderPresentation {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct StickyFileHeaderPaint {
-    rest_bg: gpui::Hsla,
-    hover_bg: gpui::Hsla,
-    border: gpui::Hsla,
-    frost_tint: Option<gpui::Hsla>,
+pub(crate) struct StickyFileHeaderPaint {
+    pub(crate) rest_bg: gpui::Hsla,
+    pub(crate) hover_bg: gpui::Hsla,
+    pub(crate) border: gpui::Hsla,
+    pub(crate) frost_tint: Option<gpui::Hsla>,
 }
 
 /// Resolve the sticky header from the diff's content plane, not the elevated
 /// overlay plane used by menus and popovers.
-fn sticky_file_header_paint(theme: &Theme) -> StickyFileHeaderPaint {
+pub(crate) fn sticky_file_header_paint(theme: &Theme) -> StickyFileHeaderPaint {
     if theme.is_frost() {
         let tint_alpha = match theme.appearance {
             crate::theme::Appearance::Dark => STICKY_FILE_HEADER_TINT_ALPHA_DARK,
@@ -4439,17 +4439,17 @@ impl Changes {
 }
 
 /// Green for additions — sampled from the reference diff (soft emerald).
-fn add_color(theme: &Theme) -> gpui::Hsla {
+pub(crate) fn add_color(theme: &Theme) -> gpui::Hsla {
     theme.diff_add // emerald-400
 }
 
 /// Red for deletions — softer than the theme danger, per the reference diff.
-fn del_color(theme: &Theme) -> gpui::Hsla {
+pub(crate) fn del_color(theme: &Theme) -> gpui::Hsla {
     theme.diff_del // red-400
 }
 
 /// One notice row ("New file", "Binary file — contents not shown", …).
-fn notice_row(notice: String, theme: &Theme) -> AnyElement {
+pub(crate) fn notice_row(notice: String, theme: &Theme) -> AnyElement {
     div()
         .h(px(NOTICE_HEIGHT))
         .w_full()
@@ -4539,7 +4539,7 @@ fn code_text_viewport(
 /// One +/−/context/meta diff line: coloured accent bar, dual line-number
 /// gutters (`gutter_px` wide — see [`gutter_width`]), marker column, and
 /// paint-only syntax runs.
-fn diff_line_row(
+pub(crate) fn diff_line_row(
     line: &DiffLine,
     spans: &[zeron_syntax::HighlightSpan],
     theme: &Theme,
@@ -4679,7 +4679,7 @@ fn diff_line_row(
 /// `\ No newline at end of file` and friends: a note about the row rather
 /// than code, so it is indented past the columns and never tinted. In split
 /// mode it spans both halves.
-fn meta_line_row(text: &str, theme: &Theme, pad_left: f32) -> AnyElement {
+pub(crate) fn meta_line_row(text: &str, theme: &Theme, pad_left: f32) -> AnyElement {
     div()
         .h(px(diff_line_height(theme)))
         .w_full()
@@ -4699,7 +4699,7 @@ fn meta_line_row(text: &str, theme: &Theme, pad_left: f32) -> AnyElement {
 // ---------------------------------------------------------------------------
 
 /// The paint-only syntax runs for one diff line.
-fn line_runs(
+pub(crate) fn line_runs(
     line: &DiffLine,
     highlights: Option<&DiffHighlights>,
     theme: &Theme,
@@ -4718,7 +4718,7 @@ fn line_runs(
 /// columns a unified row uses, minus the second gutter — each half numbers
 /// only its own side. Takes prebuilt `runs` so a mirrored row can share one
 /// set across both columns.
-fn split_line_cell(
+pub(crate) fn split_line_cell(
     line: &DiffLine,
     number: Option<u32>,
     runs: Vec<gpui::TextRun>,
@@ -4817,7 +4817,7 @@ fn split_line_cell(
 /// The empty half of a one-sided split row — a pure-insert row has no old
 /// line, and vice versa. A flat wash, quieter than either tint, reads as
 /// "nothing here" without competing with the code beside it.
-fn split_filler() -> gpui::Div {
+pub(crate) fn split_filler() -> gpui::Div {
     div()
         .flex_1()
         .min_w_0()
@@ -4826,7 +4826,12 @@ fn split_filler() -> gpui::Div {
 }
 
 /// Compose the two halves with the centre hairline.
-fn split_row(left: AnyElement, right: AnyElement, wrapped: bool, theme: &Theme) -> gpui::Div {
+pub(crate) fn split_row(
+    left: AnyElement,
+    right: AnyElement,
+    wrapped: bool,
+    theme: &Theme,
+) -> gpui::Div {
     div()
         .map(|el| {
             if wrapped {

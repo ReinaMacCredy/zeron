@@ -1,8 +1,8 @@
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, ClipboardItem, Context, MouseButton, Pixels, Point, ScrollHandle, SharedString,
-    Task, Window, div, point, prelude::*, px,
+    AnyElement, ClipboardItem, Context, Entity, MouseButton, Pixels, Point, ScrollHandle,
+    SharedString, Task, Window, div, point, prelude::*, px,
 };
 use zeron_markdown::parser::BlockTree;
 use zeron_proto::{
@@ -12,6 +12,7 @@ use zeron_proto::{
 };
 use zeron_rpc::methods;
 
+use super::code::PullRequestCode;
 use super::{
     PullRequestKey, PullRequestsPage, Tones, avatar, diff_stat, failure_message, label_color,
     relative_time,
@@ -29,6 +30,12 @@ enum Section {
     Description,
     Checks,
     Comments,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DetailTab {
+    Summary,
+    Code,
 }
 
 pub(super) struct ChecksPopover {
@@ -54,6 +61,8 @@ pub(super) struct DetailState {
     condensed: bool,
     closed_sections: Vec<Section>,
     copied: Option<(&'static str, Instant)>,
+    tab: DetailTab,
+    code: Option<Entity<PullRequestCode>>,
     _task: Option<Task<()>>,
 }
 
@@ -68,6 +77,8 @@ impl DetailState {
             condensed: false,
             closed_sections: Vec::new(),
             copied: None,
+            tab: DetailTab::Summary,
+            code: None,
             _task: None,
         }
     }
@@ -299,7 +310,40 @@ impl PullRequestsPage {
             cx.notify();
             return true;
         }
+        if let Some(code) = self
+            .active
+            .as_ref()
+            .and_then(|key| self.details.get(key))
+            .and_then(|state| state.code.clone())
+        {
+            return code.update(cx, |code, cx| code.dismiss_overlay(cx));
+        }
         false
+    }
+
+    fn show_tab(&mut self, key: &PullRequestKey, tab: DetailTab, cx: &mut Context<Self>) {
+        let page_state = self.state.clone();
+        let Some(state) = self.details.get_mut(key) else {
+            return;
+        };
+        state.tab = tab;
+        if tab == DetailTab::Code {
+            let code = state
+                .code
+                .get_or_insert_with(|| {
+                    cx.new(|cx| PullRequestCode::new(page_state, key.clone(), cx))
+                })
+                .clone();
+            let commits = match &state.detail {
+                Loadable::Ready(detail) => detail.commits.clone(),
+                _ => Vec::new(),
+            };
+            code.update(cx, |code, cx| {
+                code.set_commits(&commits, cx);
+                code.ensure_loaded(cx);
+            });
+        }
+        cx.notify();
     }
 
     pub(super) fn render_checks_popover(
@@ -458,6 +502,10 @@ impl PullRequestsPage {
                 state.detail = match result {
                     Ok(value) => match serde_json::from_value::<ChangeRequestDetail>(value) {
                         Ok(detail) => {
+                            if let Some(code) = state.code.clone() {
+                                let commits = detail.commits.clone();
+                                code.update(cx, |code, cx| code.set_commits(&commits, cx));
+                            }
                             let body = strip_html(&detail.body);
                             state.body =
                                 Some(crate::markdown::parse_full(if body.trim().is_empty() {
@@ -668,6 +716,15 @@ impl PullRequestsPage {
         };
         let item = detail.map(|detail| &detail.item).unwrap_or(&state.seed);
         let header = self.render_header(key, item, detail, theme, tones, cx);
+        if let (DetailTab::Code, Some(code)) = (state.tab, state.code.clone()) {
+            return div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(header)
+                .child(div().flex_1().min_h_0().child(code))
+                .into_any_element();
+        }
         let body: AnyElement = match &state.detail {
             Loadable::Ready(detail) => self.render_summary(key, detail, theme, tones, window, cx),
             Loadable::Error(error) => self.render_detail_error(key, item, error, theme, cx),
@@ -1032,7 +1089,7 @@ impl PullRequestsPage {
                     .border_color(theme.hairline(0.045))
                     .px(px(16.0))
                     .py(px(8.0))
-                    .child(segmented(theme))
+                    .child(self.render_tabs(key, state.tab, theme, cx))
                     .child(div().flex_1())
                     .children(checks_summary),
             )
@@ -1531,27 +1588,58 @@ fn verdict_badge(glyph: &'static str, label: &'static str, tone: gpui::Hsla) -> 
         .into_any_element()
 }
 
-fn segmented(theme: &Theme) -> AnyElement {
-    div()
-        .flex()
-        .gap(px(2.0))
-        .rounded(px(10.0))
-        .bg(theme.ink(0.036))
-        .p(px(2.0))
-        .children(["Summary", "Timeline", "Code"].map(|label| {
-            let active = label == "Summary";
-            div()
-                .h(px(24.0))
-                .px(px(10.0))
-                .flex()
-                .items_center()
-                .rounded(px(8.0))
-                .text_size(px(12.0))
-                .when(active, |el| el.bg(theme.ink(0.065)).text_color(theme.text))
-                .when(!active, |el| el.text_color(theme.text_muted.opacity(0.5)))
-                .child(label)
-        }))
-        .into_any_element()
+impl PullRequestsPage {
+    fn render_tabs(
+        &self,
+        key: &PullRequestKey,
+        current: DetailTab,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let tabs = [
+            ("Summary", Some(DetailTab::Summary)),
+            ("Timeline", None),
+            ("Code", Some(DetailTab::Code)),
+        ];
+        div()
+            .id("pull-request-detail-tabs")
+            .role(gpui::Role::TabList)
+            .flex()
+            .gap(px(2.0))
+            .rounded(px(10.0))
+            .bg(theme.ink(0.036))
+            .p(px(2.0))
+            .children(tabs.map(|(label, tab)| {
+                let active = tab == Some(current);
+                let key = key.clone();
+                div()
+                    .id(SharedString::from(format!(
+                        "pull-request-detail-tab-{label}"
+                    )))
+                    .role(gpui::Role::Tab)
+                    .aria_label(label)
+                    .h(px(24.0))
+                    .px(px(10.0))
+                    .flex()
+                    .items_center()
+                    .rounded(px(8.0))
+                    .text_size(px(12.0))
+                    .when(active, |el| el.bg(theme.ink(0.065)).text_color(theme.text))
+                    .when(!active && tab.is_some(), |el| {
+                        el.text_color(theme.text_muted)
+                            .cursor_pointer()
+                            .hover(|style| style.text_color(theme.text))
+                    })
+                    .when(tab.is_none(), |el| {
+                        el.text_color(theme.text_muted.opacity(0.5))
+                    })
+                    .when_some(tab.filter(|_| !active), |el, tab| {
+                        el.on_click(cx.listener(move |page, _, _, cx| page.show_tab(&key, tab, cx)))
+                    })
+                    .child(label)
+            }))
+            .into_any_element()
+    }
 }
 
 fn tab_glyph(item: &ChangeRequestListItem, tones: Tones) -> (&'static str, gpui::Hsla) {

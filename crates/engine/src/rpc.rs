@@ -1688,6 +1688,7 @@ fn forwardable(method: &str) -> bool {
             | methods::LIST_CHANGE_REQUESTS
             | methods::GET_CHANGE_REQUEST
             | methods::LIST_CHANGE_REQUEST_STATS
+            | methods::GET_CHANGE_REQUEST_DIFF
             | methods::GET_CHECKOUT_DIFF
             | methods::DISCARD_WORKING_TREE
             | methods::GET_CHECKOUT_FILE_DIFF_TEXT
@@ -2976,6 +2977,21 @@ impl RpcService for EngineRpc {
                     })?;
                 Ok(RpcReply::Value(
                     serde_json::to_value(detail).map_err(|e| RpcError::Failed(e.to_string()))?,
+                ))
+            }
+            methods::GET_CHANGE_REQUEST_DIFF => {
+                let p: zeron_proto::GetChangeRequestDiffRequest = parse_params(params)?;
+                let slice = crate::source_control::ChangeRequestResolver::new()
+                    .get_change_request_diff(&self.change_request_space_roots(), &p)
+                    .await
+                    .map_err(|error| {
+                        RpcError::Failed(
+                            serde_json::to_string(&zeron_proto::ChangeRequestFailure::from(error))
+                                .unwrap_or_default(),
+                        )
+                    })?;
+                Ok(RpcReply::Value(
+                    serde_json::to_value(slice).map_err(|e| RpcError::Failed(e.to_string()))?,
                 ))
             }
             // One-shot scoped capture for the Changes pane: `branch` diffs the
@@ -4621,6 +4637,7 @@ mod tests {
         assert!(!is_stream_method(methods::LIST_CHANGE_REQUESTS));
         assert!(forwardable(methods::GET_CHANGE_REQUEST));
         assert!(forwardable(methods::LIST_CHANGE_REQUEST_STATS));
+        assert!(forwardable(methods::GET_CHANGE_REQUEST_DIFF));
         assert!(forwardable(methods::DISCARD_WORKING_TREE));
         assert!(forwardable(methods::LIST_WORKSPACE_DIRECTORY));
         assert!(forwardable(methods::SEARCH_WORKSPACE_FILES));

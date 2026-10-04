@@ -1211,6 +1211,48 @@ pub struct ChangeRequestDetail {
     pub comments: Vec<ChangeRequestComment>,
     pub comment_count: u64,
     pub commit_count: u64,
+    #[serde(default)]
+    pub commits: Vec<ChangeRequestCommit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeRequestCommit {
+    pub oid: String,
+    pub headline: String,
+    #[serde(default)]
+    pub committed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetChangeRequestDiffRequest {
+    pub host: String,
+    pub repository: String,
+    pub number: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeRequestFileStat {
+    pub path: String,
+    pub additions: u64,
+    pub deletions: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeRequestDiffSlice {
+    pub patch: String,
+    pub truncated: bool,
+    #[serde(default)]
+    pub next_cursor: Option<String>,
+    #[serde(default)]
+    pub omitted_file_stats: Vec<ChangeRequestFileStat>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

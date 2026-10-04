@@ -293,6 +293,17 @@ icon_assets![
     (LUCIDE_FILE_DIFF, "lucide-file-diff"),
     (LUCIDE_CIRCLE_DASHED, "lucide-circle-dashed"),
     (LUCIDE_X, "lucide-x"),
+    (LUCIDE_CHEVRONS_DOWN_UP, "lucide-chevrons-down-up"),
+    (LUCIDE_CHEVRONS_UP_DOWN, "lucide-chevrons-up-down"),
+    (LUCIDE_ROWS_3, "lucide-rows-3"),
+    (LUCIDE_COLUMNS_2, "lucide-columns-2"),
+    (LUCIDE_TEXT_WRAP, "lucide-text-wrap"),
+    (LUCIDE_FOLDER_TREE, "lucide-folder-tree"),
+    (LUCIDE_SQUARE_PLUS, "lucide-square-plus"),
+    (LUCIDE_SQUARE_MINUS, "lucide-square-minus"),
+    (LUCIDE_SQUARE_DOT, "lucide-square-dot"),
+    (LUCIDE_SQUARE_ARROW_RIGHT, "lucide-square-arrow-right"),
+    (LUCIDE_ARROW_RIGHT, "lucide-arrow-right"),
 ];
 
 /// Serves both the compact control-icon set and the complete file-identity

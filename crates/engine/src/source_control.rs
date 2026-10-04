@@ -24,6 +24,9 @@ use zeron_proto::{
     ChangeRequestStats, ChangeRequestSummary, ChangeRequestVerdict, GetChangeRequestRequest,
     ListChangeRequestStatsRequest, ListChangeRequestsRequest,
 };
+use zeron_proto::{
+    ChangeRequestCommit, ChangeRequestDiffSlice, ChangeRequestFileStat, GetChangeRequestDiffRequest,
+};
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(10);
 const GITHUB_TIMEOUT: Duration = Duration::from_secs(20);
@@ -36,6 +39,8 @@ const GITHUB_JSON_FIELDS: &str = "number,title,url,state,baseRefName,headRefName
 const GITHUB_DETAIL_FIELDS: &str = "number,title,url,author,headRefName,baseRefName,state,isDraft,mergeable,reviewDecision,createdAt,updatedAt,mergedAt,reviewRequests,labels,additions,deletions,statusCheckRollup,body,changedFiles,closedAt,isCrossRepository,comments,reviews,latestReviews,commits";
 const GITHUB_LIST_FIELDS: &str = "number,title,url,author,headRefName,baseRefName,state,isDraft,mergeable,reviewDecision,createdAt,updatedAt,mergedAt,reviewRequests,labels";
 const GITHUB_SEARCH_FIELDS: &str = "number title url author { login } headRefName baseRefName state isDraft mergeable reviewDecision createdAt updatedAt mergedAt repository { nameWithOwner } reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login } } } } labels(first: 20) { nodes { name color } } commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }";
+const GITHUB_DIFF_TIMEOUT: Duration = Duration::from_secs(60);
+const DIFF_FILES_PAGE_SIZE: usize = 100;
 const STATS_CHUNK: usize = 25;
 const STATS_CONCURRENCY: usize = 4;
 const MAX_STATS_REFS: usize = 500;
@@ -366,28 +371,73 @@ impl ChangeRequestResolver {
         roots: &[PathBuf],
         request: &GetChangeRequestRequest,
     ) -> Result<ChangeRequestDetail, ChangeRequestError> {
-        let identities = futures::future::join_all(
-            roots
-                .iter()
-                .map(|root| self.inspector.repository_identity(root)),
-        )
-        .await;
-        let identity = identities
-            .into_iter()
-            .filter_map(Result::ok)
-            .find(|identity| {
-                identity.remote.host.eq_ignore_ascii_case(&request.host)
-                    && identity
-                        .name_with_owner()
-                        .eq_ignore_ascii_case(&request.repository)
-            })
-            .ok_or(ChangeRequestError::UnsupportedRepository)?;
+        let identity = self
+            .space_identity(roots, &request.host, &request.repository)
+            .await?;
         let (viewer, view) = futures::try_join!(
             self.github
                 .viewer_login(&identity.remote.host, &identity.root),
             self.github.view_pull_request(&identity, request.number),
         )?;
         to_detail(&identity, &viewer, view).ok_or(ChangeRequestError::Decode)
+    }
+
+    /// One page of a pull request's changed files as a unified patch; `cursor` is the page
+    /// number the previous slice handed back.
+    pub async fn get_change_request_diff(
+        &self,
+        roots: &[PathBuf],
+        request: &GetChangeRequestDiffRequest,
+    ) -> Result<ChangeRequestDiffSlice, ChangeRequestError> {
+        let page = match request.cursor.as_deref() {
+            None => 1,
+            Some(cursor) => cursor
+                .parse::<u32>()
+                .ok()
+                .filter(|page| *page >= 1)
+                .ok_or(ChangeRequestError::Decode)?,
+        };
+        if request
+            .commit
+            .as_deref()
+            .is_some_and(|commit| !valid_commit_sha(commit))
+        {
+            return Err(ChangeRequestError::Decode);
+        }
+        let identity = self
+            .space_identity(roots, &request.host, &request.repository)
+            .await?;
+        let stdout = self
+            .github
+            .diff_files_page(&identity, request.number, page, request.commit.as_deref())
+            .await?;
+        let (mut slice, raw_count) = files_patch(&stdout).ok_or(ChangeRequestError::Decode)?;
+        if raw_count >= DIFF_FILES_PAGE_SIZE {
+            slice.next_cursor = Some((page + 1).to_string());
+        }
+        Ok(slice)
+    }
+
+    async fn space_identity(
+        &self,
+        roots: &[PathBuf],
+        host: &str,
+        repository: &str,
+    ) -> Result<RepositoryIdentity, ChangeRequestError> {
+        let identities = futures::future::join_all(
+            roots
+                .iter()
+                .map(|root| self.inspector.repository_identity(root)),
+        )
+        .await;
+        identities
+            .into_iter()
+            .filter_map(Result::ok)
+            .find(|identity| {
+                identity.remote.host.eq_ignore_ascii_case(host)
+                    && identity.name_with_owner().eq_ignore_ascii_case(repository)
+            })
+            .ok_or(ChangeRequestError::UnsupportedRepository)
     }
 }
 
@@ -749,6 +799,40 @@ impl GitHubCli {
             )
             .await?;
         serde_json::from_slice(&stdout).map_err(|_| ChangeRequestError::Decode)
+    }
+
+    async fn diff_files_page(
+        &self,
+        identity: &RepositoryIdentity,
+        number: u64,
+        page: u32,
+        commit: Option<&str>,
+    ) -> Result<Vec<u8>, ChangeRequestError> {
+        let repository = identity.name_with_owner();
+        if !valid_repository_path(&repository) {
+            return Err(ChangeRequestError::UnsupportedRepository);
+        }
+        let paging = format!("per_page={DIFF_FILES_PAGE_SIZE}&page={page}");
+        let mut args: Vec<String> = vec![
+            "api".into(),
+            "--hostname".into(),
+            identity.remote.host.clone(),
+        ];
+        match commit {
+            None => args.push(format!("repos/{repository}/pulls/{number}/files?{paging}")),
+            Some(commit) => args.extend([
+                format!("repos/{repository}/commits/{commit}?{paging}"),
+                "--jq".into(),
+                ".files // []".into(),
+            ]),
+        }
+        self.run_gh(
+            &identity.root,
+            args,
+            GITHUB_DIFF_TIMEOUT,
+            GITHUB_LIST_OUTPUT_LIMIT,
+        )
+        .await
     }
 
     async fn search(
@@ -1901,7 +1985,88 @@ struct GhReview {
 #[serde(rename_all = "camelCase")]
 struct GhCommit {
     #[serde(default)]
+    oid: String,
+    #[serde(default)]
+    message_headline: String,
+    #[serde(default)]
     committed_date: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhPullRequestFile {
+    filename: String,
+    #[serde(default)]
+    previous_filename: Option<String>,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    additions: u64,
+    #[serde(default)]
+    deletions: u64,
+    #[serde(default)]
+    patch: Option<String>,
+}
+
+fn valid_commit_sha(commit: &str) -> bool {
+    (7..=64).contains(&commit.len()) && commit.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// The files API hands back hunks per file with no `diff --git` header, so the unified patch is
+/// assembled here (t3code `decodePullRequestFilesJson`). Returns the slice and the raw entry
+/// count, counted before decoding so the caller can page past entries that fail to decode.
+fn files_patch(raw: &[u8]) -> Option<(ChangeRequestDiffSlice, usize)> {
+    let entries: Vec<serde_json::Value> = serde_json::from_slice(raw).ok()?;
+    let raw_count = entries.len();
+    let mut slice = ChangeRequestDiffSlice::default();
+    for entry in entries {
+        let Ok(file) = serde_json::from_value::<GhPullRequestFile>(entry) else {
+            continue;
+        };
+        let status = file.status.trim().to_ascii_lowercase();
+        let hunks = file.patch.unwrap_or_default();
+        if hunks.is_empty() && file.additions + file.deletions > 0 {
+            slice.truncated = true;
+            slice.omitted_file_stats.push(ChangeRequestFileStat {
+                path: file.filename.clone(),
+                additions: file.additions,
+                deletions: file.deletions,
+            });
+        }
+        let old_path = match file.previous_filename.as_deref().map(str::trim) {
+            Some(previous) if status == "renamed" && !previous.is_empty() => previous.to_owned(),
+            _ => file.filename.clone(),
+        };
+        let new_path = &file.filename;
+        slice
+            .patch
+            .push_str(&format!("diff --git a/{old_path} b/{new_path}\n"));
+        match status.as_str() {
+            "added" => slice.patch.push_str("new file mode 100644\n"),
+            "removed" => slice.patch.push_str("deleted file mode 100644\n"),
+            "renamed" => slice
+                .patch
+                .push_str(&format!("rename from {old_path}\nrename to {new_path}\n")),
+            _ => {}
+        }
+        let minus = if status == "added" {
+            "/dev/null".to_owned()
+        } else {
+            format!("a/{old_path}")
+        };
+        let plus = if status == "removed" {
+            "/dev/null".to_owned()
+        } else {
+            format!("b/{new_path}")
+        };
+        slice.patch.push_str(&format!("--- {minus}\n+++ {plus}\n"));
+        if !hunks.is_empty() {
+            slice.patch.push_str(&hunks);
+            if !hunks.ends_with('\n') {
+                slice.patch.push('\n');
+            }
+        }
+    }
+    Some((slice, raw_count))
 }
 
 fn gh_list_state(row: &GhListPullRequest) -> ChangeRequestState {
@@ -2205,6 +2370,15 @@ fn to_detail(
         comments,
         comment_count,
         commit_count: commits.len() as u64,
+        commits: commits
+            .into_iter()
+            .filter(|commit| !commit.oid.is_empty())
+            .map(|commit| ChangeRequestCommit {
+                oid: commit.oid,
+                headline: commit.message_headline,
+                committed_at: commit.committed_date,
+            })
+            .collect(),
     })
 }
 
@@ -3616,8 +3790,8 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
                 {"author": {"login": "hank"}, "body": "", "state": "DISMISSED", "submittedAt": "2026-10-02T20:00:00Z"}
             ],
             "commits": [
-                {"committedDate": "2026-10-01T09:00:00Z"},
-                {"committedDate": "2026-10-02T09:00:00Z"}
+                {"oid": "aaaaaaa1111111", "messageHeadline": "First", "committedDate": "2026-10-01T09:00:00Z"},
+                {"oid": "bbbbbbb2222222", "messageHeadline": "Second", "committedDate": "2026-10-02T09:00:00Z"}
             ]
         });
         if let (Some(row), Some(extra)) = (row.as_object_mut(), extra.as_object()) {
@@ -3664,6 +3838,14 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
         assert_eq!(detail.body, "## What\nA change.");
         assert_eq!(detail.changed_files, 6);
         assert_eq!(detail.commit_count, 2);
+        assert_eq!(
+            detail
+                .commits
+                .iter()
+                .map(|commit| (commit.oid.as_str(), commit.headline.as_str()))
+                .collect::<Vec<_>>(),
+            [("aaaaaaa1111111", "First"), ("bbbbbbb2222222", "Second")]
+        );
         assert_eq!(detail.comment_count, 2);
 
         let checks: Vec<(&str, ChangeRequestCheckStatus, Option<&str>)> = detail
@@ -3742,6 +3924,152 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
             .await
             .unwrap_err();
         assert_eq!(error, ChangeRequestError::UnsupportedRepository);
+    }
+
+    #[test]
+    fn files_patch_synthesizes_git_headers_and_records_withheld_files() {
+        let raw = serde_json::json!([
+            {"filename": "src/new.rs", "status": "added", "additions": 1, "deletions": 0, "patch": "@@ -0,0 +1 @@\n+fn new() {}"},
+            {"filename": "src/gone.rs", "status": "removed", "additions": 0, "deletions": 1, "patch": "@@ -1 +0,0 @@\n-fn gone() {}\n"},
+            {"filename": "src/after.rs", "previous_filename": "src/before.rs", "status": "renamed", "additions": 0, "deletions": 0},
+            {"filename": "assets/logo.png", "status": "modified", "additions": 3, "deletions": 2},
+            {"status": "modified"}
+        ]);
+        let (slice, raw_count) = files_patch(raw.to_string().as_bytes()).unwrap();
+        assert_eq!(raw_count, 5);
+        assert_eq!(
+            slice.patch,
+            "diff --git a/src/new.rs b/src/new.rs\n\
+             new file mode 100644\n\
+             --- /dev/null\n\
+             +++ b/src/new.rs\n\
+             @@ -0,0 +1 @@\n\
+             +fn new() {}\n\
+             diff --git a/src/gone.rs b/src/gone.rs\n\
+             deleted file mode 100644\n\
+             --- a/src/gone.rs\n\
+             +++ /dev/null\n\
+             @@ -1 +0,0 @@\n\
+             -fn gone() {}\n\
+             diff --git a/src/before.rs b/src/after.rs\n\
+             rename from src/before.rs\n\
+             rename to src/after.rs\n\
+             --- a/src/before.rs\n\
+             +++ b/src/after.rs\n\
+             diff --git a/assets/logo.png b/assets/logo.png\n\
+             --- a/assets/logo.png\n\
+             +++ b/assets/logo.png\n"
+        );
+        assert!(slice.truncated);
+        assert_eq!(
+            slice.omitted_file_stats,
+            [ChangeRequestFileStat {
+                path: "assets/logo.png".into(),
+                additions: 3,
+                deletions: 2,
+            }]
+        );
+        assert_eq!(slice.next_cursor, None);
+    }
+
+    #[tokio::test]
+    async fn get_change_request_diff_pages_files_and_scopes_commits() {
+        let runner = ScriptedRunner::new(|request| {
+            if let Some(output) = git_repo_script(request) {
+                return output;
+            }
+            assert_eq!(request.args[..3], ["api", "--hostname", "github.com"]);
+            assert_eq!(request.output_limit, GITHUB_LIST_OUTPUT_LIMIT);
+            let files: Vec<serde_json::Value> = (0..DIFF_FILES_PAGE_SIZE)
+                .map(|ix| serde_json::json!({"filename": format!("f{ix}.rs"), "status": "modified", "patch": "@@ -1 +1 @@\n-a\n+b"}))
+                .collect();
+            match request.args[3].as_str() {
+                "repos/acme/zeron/pulls/7/files?per_page=100&page=2" => {
+                    command_success(serde_json::to_vec(&files).unwrap())
+                }
+                "repos/acme/zeron/commits/abc1234?per_page=100&page=1" => {
+                    assert_eq!(arg_after(request, "--jq"), Some(".files // []"));
+                    command_success("[]")
+                }
+                other => panic!("unexpected gh api path {other}"),
+            }
+        });
+        let resolver = list_resolver(runner.clone());
+        let roots = [PathBuf::from("/repo")];
+        let page = resolver
+            .get_change_request_diff(
+                &roots,
+                &GetChangeRequestDiffRequest {
+                    host: "github.com".into(),
+                    repository: "acme/zeron".into(),
+                    number: 7,
+                    cursor: Some("2".into()),
+                    commit: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.next_cursor.as_deref(), Some("3"));
+        assert_eq!(
+            page.patch.matches("diff --git").count(),
+            DIFF_FILES_PAGE_SIZE
+        );
+        let commit = resolver
+            .get_change_request_diff(
+                &roots,
+                &GetChangeRequestDiffRequest {
+                    host: "github.com".into(),
+                    repository: "acme/zeron".into(),
+                    number: 7,
+                    cursor: None,
+                    commit: Some("abc1234".into()),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(commit, ChangeRequestDiffSlice::default());
+        for (cursor, commit) in [
+            (Some("0"), None),
+            (None, Some("HEAD~1")),
+            (None, Some("abc")),
+        ] {
+            let error = resolver
+                .get_change_request_diff(
+                    &roots,
+                    &GetChangeRequestDiffRequest {
+                        host: "github.com".into(),
+                        repository: "acme/zeron".into(),
+                        number: 7,
+                        cursor: cursor.map(str::to_owned),
+                        commit: commit.map(str::to_owned),
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error, ChangeRequestError::Decode);
+        }
+        let foreign = resolver
+            .get_change_request_diff(
+                &roots,
+                &GetChangeRequestDiffRequest {
+                    host: "github.com".into(),
+                    repository: "someone/else".into(),
+                    number: 7,
+                    cursor: None,
+                    commit: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(foreign, ChangeRequestError::UnsupportedRepository);
+        let gh_calls = runner
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.program == "gh")
+            .count();
+        assert_eq!(gh_calls, 2);
     }
 
     fn search_node(number: u64, author: &str, rollup: Option<&str>) -> serde_json::Value {
