@@ -429,16 +429,7 @@ impl PullRequestsPage {
         let unsearched = request.query.is_none();
         self.last_read = std::time::Instant::now();
         let params = serde_json::to_value(request).unwrap_or(serde_json::Value::Null);
-        let devices: Vec<devices::ListDevice> = self
-            .list_devices(cx)
-            .into_iter()
-            .filter(|device| {
-                self.prefs
-                    .device
-                    .as_ref()
-                    .is_none_or(|wanted| *wanted == device.id)
-            })
-            .collect();
+        let devices = devices::chosen_devices(self.list_devices(cx), self.prefs.device.as_deref());
         self.load_task = Some(cx.spawn(async move |this, cx| {
             let answers = futures::future::join_all(devices.iter().map(|device| {
                 let params = routed(params.clone(), device.target().as_deref());

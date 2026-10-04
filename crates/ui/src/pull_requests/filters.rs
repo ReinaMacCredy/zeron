@@ -820,7 +820,7 @@ impl PullRequestsPage {
                     .unwrap_or_else(|| "All projects".into()),
             ),
         ];
-        if self.host_choices().len() >= 2 {
+        if self.host_choices().len() >= 2 || self.prefs.host.is_some() {
             rows.push((
                 FilterSection::Host,
                 icons::LUCIDE_GIT_PULL_REQUEST,
@@ -832,7 +832,7 @@ impl PullRequestsPage {
             ));
         }
         let devices = self.list_devices(cx);
-        if devices.len() >= 2 {
+        if devices.len() >= 2 || self.prefs.device.is_some() {
             rows.push((
                 FilterSection::Device,
                 icons::LAPTOP,

@@ -57,6 +57,20 @@ pub(crate) fn list_devices(
     listed
 }
 
+pub(crate) fn chosen_devices(listed: Vec<ListDevice>, wanted: Option<&str>) -> Vec<ListDevice> {
+    let Some(wanted) = wanted else {
+        return listed;
+    };
+    if listed.iter().any(|device| device.id == wanted) {
+        listed
+            .into_iter()
+            .filter(|device| device.id == wanted)
+            .collect()
+    } else {
+        listed
+    }
+}
+
 pub(crate) fn viewer_key(item: &ChangeRequestListItem) -> String {
     match &item.device_id {
         Some(device) => format!("{device} {}", item.host),
@@ -160,6 +174,13 @@ mod tests {
         let names: Vec<_> = listed.iter().map(|d| (d.name.as_str(), d.local)).collect();
         assert_eq!(names, [("Mac", true), ("air", false), ("Studio", false)]);
         assert_eq!(listed[0].target(), None);
+        let names =
+            |chosen: Vec<ListDevice>| chosen.into_iter().map(|d| d.name).collect::<Vec<_>>();
+        assert_eq!(
+            names(chosen_devices(listed.clone(), Some("studio"))),
+            ["Studio"]
+        );
+        assert_eq!(names(chosen_devices(listed.clone(), Some("away"))).len(), 3);
         assert_eq!(listed[2].target().as_deref(), Some("studio"));
     }
 
