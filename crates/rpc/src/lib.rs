@@ -259,6 +259,9 @@ pub mod methods {
     pub const GET_CHANGE_REQUEST: &str = "GetChangeRequest";
     pub const LIST_CHANGE_REQUEST_STATS: &str = "ListChangeRequestStats";
     pub const GET_CHANGE_REQUEST_DIFF: &str = "GetChangeRequestDiff";
+    pub const GET_CHANGE_REQUEST_ACTIVITY: &str = "GetChangeRequestActivity";
+    pub const POST_CHANGE_REQUEST_COMMENT: &str = "PostChangeRequestComment";
+    pub const SET_CHANGE_REQUEST_REACTION: &str = "SetChangeRequestReaction";
     pub const GET_CHECKOUT_DIFF: &str = "GetCheckoutDiff";
     /// Permanently restore one chat-owned checkout to its current HEAD and
     /// remove only its untracked, non-ignored paths.

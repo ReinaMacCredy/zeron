@@ -6,12 +6,13 @@ use gpui::{
 };
 use zeron_markdown::parser::BlockTree;
 use zeron_proto::{
-    ChangeRequestCheck, ChangeRequestCheckStatus, ChangeRequestChecksState, ChangeRequestComment,
-    ChangeRequestDetail, ChangeRequestFailure, ChangeRequestListItem, ChangeRequestState,
-    ChangeRequestVerdict, GetChangeRequestRequest,
+    ChangeRequestCheck, ChangeRequestCheckStatus, ChangeRequestChecksState, ChangeRequestDetail,
+    ChangeRequestFailure, ChangeRequestListItem, ChangeRequestState, ChangeRequestVerdict,
+    GetChangeRequestRequest,
 };
 use zeron_rpc::methods;
 
+use super::activity::ActivityState;
 use super::code::PullRequestCode;
 use super::{
     PullRequestKey, PullRequestsPage, Tones, avatar, diff_stat, failure_message, label_color,
@@ -35,6 +36,7 @@ enum Section {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DetailTab {
     Summary,
+    Timeline,
     Code,
 }
 
@@ -56,23 +58,23 @@ pub(super) struct DetailState {
     seed: ChangeRequestListItem,
     detail: Loadable<ChangeRequestDetail>,
     body: Option<BlockTree>,
-    comment_bodies: Vec<BlockTree>,
     scroll: ScrollHandle,
     condensed: bool,
     closed_sections: Vec<Section>,
     copied: Option<(&'static str, Instant)>,
     tab: DetailTab,
     code: Option<Entity<PullRequestCode>>,
+    pub(super) activity: ActivityState,
     _task: Option<Task<()>>,
 }
 
 impl DetailState {
-    pub(super) fn new(seed: ChangeRequestListItem) -> Self {
+    pub(super) fn new(seed: ChangeRequestListItem, cx: &mut Context<PullRequestsPage>) -> Self {
         Self {
+            activity: ActivityState::new(PullRequestKey::of(&seed), cx),
             seed,
             detail: Loadable::Idle,
             body: None,
-            comment_bodies: Vec::new(),
             scroll: ScrollHandle::new(),
             condensed: false,
             closed_sections: Vec::new(),
@@ -243,7 +245,7 @@ fn check_presentation(
     }
 }
 
-fn verdict_word(state: &str) -> String {
+pub(super) fn verdict_word(state: &str) -> String {
     let words = state.replace(['_', '-'], " ").to_lowercase();
     let mut chars = words.chars();
     chars
@@ -264,9 +266,10 @@ impl PullRequestsPage {
         }
         if !self.details.contains_key(&key) {
             self.details
-                .insert(key.clone(), DetailState::new(item.clone()));
+                .insert(key.clone(), DetailState::new(item.clone(), cx));
             self.load_detail(&key, cx);
         }
+        self.ensure_activity(&key, cx);
         self.active = Some(key);
         cx.notify();
     }
@@ -290,7 +293,7 @@ impl PullRequestsPage {
         }
         if !self.details.contains_key(&key) {
             self.details
-                .insert(key.clone(), DetailState::new(item.clone()));
+                .insert(key.clone(), DetailState::new(item.clone(), cx));
             self.load_detail(&key, cx);
         }
         self.checks_popover = Some(ChecksPopover {
@@ -310,6 +313,9 @@ impl PullRequestsPage {
             cx.notify();
             return true;
         }
+        if self.dismiss_reaction_pickers(cx) {
+            return true;
+        }
         if let Some(code) = self
             .active
             .as_ref()
@@ -321,7 +327,20 @@ impl PullRequestsPage {
         false
     }
 
-    fn show_tab(&mut self, key: &PullRequestKey, tab: DetailTab, cx: &mut Context<Self>) {
+    pub(super) fn open_commit(&mut self, key: &PullRequestKey, oid: &str, cx: &mut Context<Self>) {
+        self.show_tab(key, DetailTab::Code, Some(oid), cx);
+    }
+
+    fn show_tab(
+        &mut self,
+        key: &PullRequestKey,
+        tab: DetailTab,
+        commit: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        if tab == DetailTab::Timeline {
+            self.ensure_activity(key, cx);
+        }
         let page_state = self.state.clone();
         let Some(state) = self.details.get_mut(key) else {
             return;
@@ -345,7 +364,10 @@ impl PullRequestsPage {
             };
             code.update(cx, |code, cx| {
                 code.set_commits(&commits, cx);
-                code.ensure_loaded(cx);
+                match commit {
+                    Some(oid) => code.show_commit(oid, cx),
+                    None => code.ensure_loaded(cx),
+                }
             });
         }
         cx.notify();
@@ -518,13 +540,6 @@ impl PullRequestsPage {
                                 } else {
                                     &body
                                 }));
-                            state.comment_bodies = detail
-                                .comments
-                                .iter()
-                                .map(|comment| {
-                                    crate::markdown::parse_full(&strip_html(&comment.body))
-                                })
-                                .collect();
                             Loadable::Ready(detail)
                         }
                         Err(error) => Loadable::Error(error.to_string()),
@@ -731,6 +746,9 @@ impl PullRequestsPage {
                 .into_any_element();
         }
         let body: AnyElement = match &state.detail {
+            Loadable::Ready(detail) if state.tab == DetailTab::Timeline => {
+                self.render_timeline(key, detail, theme, tones, window, cx)
+            }
             Loadable::Ready(detail) => self.render_summary(key, detail, theme, tones, window, cx),
             Loadable::Error(error) => self.render_detail_error(key, item, error, theme, cx),
             Loadable::Idle | Loadable::Loading => self.render_summary_ghost(theme),
@@ -1096,7 +1114,13 @@ impl PullRequestsPage {
                     .py(px(8.0))
                     .child(self.render_tabs(key, state.tab, theme, cx))
                     .child(div().flex_1())
-                    .children(checks_summary),
+                    .map(|el| {
+                        if state.tab == DetailTab::Timeline {
+                            el.child(self.render_timeline_controls(key, theme, tones, cx))
+                        } else {
+                            el.children(checks_summary)
+                        }
+                    }),
             )
             .into_any_element()
     }
@@ -1203,11 +1227,7 @@ impl PullRequestsPage {
                 }))
                 .into_any_element()
         };
-        let comment_label = if detail.comment_count == 1 {
-            "1 comment".to_string()
-        } else {
-            format!("{} comments", detail.comment_count)
-        };
+        let comment_label = self.comments_meta(key);
         let meta = div()
             .px(px(16.0))
             .py(px(12.0))
@@ -1224,9 +1244,19 @@ impl PullRequestsPage {
         ));
         options.link = None;
         let description: AnyElement = match &state.body {
-            Some(tree) => {
-                crate::markdown::render::render_tree(tree, &options, theme, window, &|_| None)
-            }
+            Some(tree) => div()
+                .child(crate::markdown::render::render_tree(
+                    tree,
+                    &options,
+                    theme,
+                    window,
+                    &|_| None,
+                ))
+                .children(
+                    self.description_reactions(key, theme, cx)
+                        .map(|bar| div().mt(px(8.0)).child(bar)),
+                )
+                .into_any_element(),
             None => div().into_any_element(),
         };
         let checks: AnyElement = if detail.checks.is_empty() {
@@ -1276,32 +1306,8 @@ impl PullRequestsPage {
                 }))
                 .into_any_element()
         };
-        let comments: AnyElement = if detail.comments.is_empty() {
-            div()
-                .py(px(8.0))
-                .text_size(px(14.0))
-                .text_color(muted)
-                .child("No comments yet.")
-                .into_any_element()
-        } else {
-            let now = chrono::Utc::now();
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(12.0))
-                .children(
-                    detail
-                        .comments
-                        .iter()
-                        .zip(&state.comment_bodies)
-                        .enumerate()
-                        .rev()
-                        .map(|(index, (comment, tree))| {
-                            self.render_comment(index, comment, tree, theme, tones, now, window)
-                        }),
-                )
-                .into_any_element()
-        };
+        let comments = self.render_comments(key, detail, theme, tones, window, cx);
+        let comments_order = self.render_comments_order(key, theme, cx);
         div()
             .flex()
             .flex_col()
@@ -1312,6 +1318,7 @@ impl PullRequestsPage {
                 Section::Description,
                 "Description",
                 None,
+                None,
                 description,
                 theme,
                 cx,
@@ -1321,6 +1328,7 @@ impl PullRequestsPage {
                 Section::Checks,
                 "Checks",
                 Some(detail.checks.len() as u64),
+                None,
                 checks,
                 theme,
                 cx,
@@ -1329,7 +1337,8 @@ impl PullRequestsPage {
                 key,
                 Section::Comments,
                 "Comments",
-                Some(detail.comment_count),
+                self.comment_count(key),
+                comments_order,
                 comments,
                 theme,
                 cx,
@@ -1344,6 +1353,7 @@ impl PullRequestsPage {
         section: Section,
         title: &'static str,
         count: Option<u64>,
+        extra: Option<AnyElement>,
         body: AnyElement,
         theme: &Theme,
         cx: &mut Context<Self>,
@@ -1400,71 +1410,13 @@ impl PullRequestsPage {
                             .font_weight(gpui::FontWeight::NORMAL)
                             .text_color(theme.text_muted)
                             .child(count.to_string())
-                    })),
+                    }))
+                    .when(open, |el| {
+                        el.children(extra.map(|extra| div().ml_auto().child(extra)))
+                    }),
             )
             .when(open, |el| {
                 el.child(div().px(px(16.0)).pb(px(16.0)).child(body))
-            })
-            .into_any_element()
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn render_comment(
-        &self,
-        index: usize,
-        comment: &ChangeRequestComment,
-        tree: &BlockTree,
-        theme: &Theme,
-        tones: Tones,
-        now: chrono::DateTime<chrono::Utc>,
-        window: &mut Window,
-    ) -> AnyElement {
-        let muted = theme.text_muted;
-        let verdict: Option<AnyElement> =
-            comment.review_state.as_deref().map(|state| match state {
-                "APPROVED" => verdict_badge(icons::LUCIDE_CIRCLE_CHECK, "Approved", tones.open),
-                "CHANGES_REQUESTED" => {
-                    verdict_badge(icons::LUCIDE_CIRCLE_X, "Changes requested", tones.conflict)
-                }
-                other => div().child(verdict_word(other)).into_any_element(),
-            });
-        let options = crate::markdown::render::RenderOptions::settled(SharedString::from(format!(
-            "pull-request-comment-{index}"
-        )));
-        let has_body = !comment.body.trim().is_empty();
-        div()
-            .rounded(px(10.0))
-            .border_1()
-            .border_color(theme.hairline(0.045))
-            .p(px(12.0))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .text_size(px(12.0))
-                    .text_color(muted)
-                    .children(
-                        comment
-                            .author
-                            .as_ref()
-                            .map(|author| avatar(&author.login, theme)),
-                    )
-                    .child(relative_time(now, comment.created_at))
-                    .children(verdict),
-            )
-            .when(has_body, |el| {
-                el.child(
-                    div()
-                        .mt(px(8.0))
-                        .child(crate::markdown::render::render_tree(
-                            tree,
-                            &options,
-                            theme,
-                            window,
-                            &|_| None,
-                        )),
-                )
             })
             .into_any_element()
     }
@@ -1577,7 +1529,11 @@ impl PullRequestsPage {
     }
 }
 
-fn verdict_badge(glyph: &'static str, label: &'static str, tone: gpui::Hsla) -> AnyElement {
+pub(super) fn verdict_badge(
+    glyph: &'static str,
+    label: &'static str,
+    tone: gpui::Hsla,
+) -> AnyElement {
     div()
         .h(px(16.0))
         .flex()
@@ -1603,7 +1559,7 @@ impl PullRequestsPage {
     ) -> AnyElement {
         let tabs = [
             ("Summary", Some(DetailTab::Summary)),
-            ("Timeline", None),
+            ("Timeline", Some(DetailTab::Timeline)),
             ("Code", Some(DetailTab::Code)),
         ];
         div()
@@ -1639,7 +1595,9 @@ impl PullRequestsPage {
                         el.text_color(theme.text_muted.opacity(0.5))
                     })
                     .when_some(tab.filter(|_| !active), |el, tab| {
-                        el.on_click(cx.listener(move |page, _, _, cx| page.show_tab(&key, tab, cx)))
+                        el.on_click(
+                            cx.listener(move |page, _, _, cx| page.show_tab(&key, tab, None, cx)),
+                        )
                     })
                     .child(label)
             }))

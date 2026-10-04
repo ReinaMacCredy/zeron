@@ -1614,6 +1614,12 @@ const LOGIN_TUNNEL_TTL: Duration = Duration::from_secs(15 * 60);
 /// ControlRpc methods that honor `targetDeviceId` (feature-inventory §2.1). Extend this
 /// list (plus [`is_stream_method`] for streams) to make more of the surface
 /// device-addressable — the handlers themselves need no changes.
+fn change_request_failure(error: crate::source_control::ChangeRequestError) -> RpcError {
+    RpcError::Failed(
+        serde_json::to_string(&zeron_proto::ChangeRequestFailure::from(error)).unwrap_or_default(),
+    )
+}
+
 fn forwardable(method: &str) -> bool {
     matches!(
         method,
@@ -1689,6 +1695,9 @@ fn forwardable(method: &str) -> bool {
             | methods::GET_CHANGE_REQUEST
             | methods::LIST_CHANGE_REQUEST_STATS
             | methods::GET_CHANGE_REQUEST_DIFF
+            | methods::GET_CHANGE_REQUEST_ACTIVITY
+            | methods::POST_CHANGE_REQUEST_COMMENT
+            | methods::SET_CHANGE_REQUEST_REACTION
             | methods::GET_CHECKOUT_DIFF
             | methods::DISCARD_WORKING_TREE
             | methods::GET_CHECKOUT_FILE_DIFF_TEXT
@@ -2978,6 +2987,32 @@ impl RpcService for EngineRpc {
                 Ok(RpcReply::Value(
                     serde_json::to_value(detail).map_err(|e| RpcError::Failed(e.to_string()))?,
                 ))
+            }
+            methods::GET_CHANGE_REQUEST_ACTIVITY => {
+                let p: zeron_proto::GetChangeRequestRequest = parse_params(params)?;
+                let activity = crate::source_control::ChangeRequestResolver::new()
+                    .get_change_request_activity(&self.change_request_space_roots(), &p)
+                    .await
+                    .map_err(change_request_failure)?;
+                Ok(RpcReply::Value(
+                    serde_json::to_value(activity).map_err(|e| RpcError::Failed(e.to_string()))?,
+                ))
+            }
+            methods::POST_CHANGE_REQUEST_COMMENT => {
+                let p: zeron_proto::PostChangeRequestCommentRequest = parse_params(params)?;
+                crate::source_control::ChangeRequestResolver::new()
+                    .post_change_request_comment(&self.change_request_space_roots(), &p)
+                    .await
+                    .map_err(change_request_failure)?;
+                Ok(RpcReply::Value(serde_json::Value::Null))
+            }
+            methods::SET_CHANGE_REQUEST_REACTION => {
+                let p: zeron_proto::SetChangeRequestReactionRequest = parse_params(params)?;
+                crate::source_control::ChangeRequestResolver::new()
+                    .set_change_request_reaction(&self.change_request_space_roots(), &p)
+                    .await
+                    .map_err(change_request_failure)?;
+                Ok(RpcReply::Value(serde_json::Value::Null))
             }
             methods::GET_CHANGE_REQUEST_DIFF => {
                 let p: zeron_proto::GetChangeRequestDiffRequest = parse_params(params)?;
@@ -4638,6 +4673,9 @@ mod tests {
         assert!(forwardable(methods::GET_CHANGE_REQUEST));
         assert!(forwardable(methods::LIST_CHANGE_REQUEST_STATS));
         assert!(forwardable(methods::GET_CHANGE_REQUEST_DIFF));
+        assert!(forwardable(methods::GET_CHANGE_REQUEST_ACTIVITY));
+        assert!(forwardable(methods::POST_CHANGE_REQUEST_COMMENT));
+        assert!(forwardable(methods::SET_CHANGE_REQUEST_REACTION));
         assert!(forwardable(methods::DISCARD_WORKING_TREE));
         assert!(forwardable(methods::LIST_WORKSPACE_DIRECTORY));
         assert!(forwardable(methods::SEARCH_WORKSPACE_FILES));

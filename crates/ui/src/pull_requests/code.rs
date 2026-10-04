@@ -472,6 +472,20 @@ impl PullRequestCode {
         }
     }
 
+    pub(super) fn show_commit(&mut self, oid: &str, cx: &mut Context<Self>) {
+        self.started = true;
+        let commit = self
+            .commits
+            .iter()
+            .find(|commit| commit.oid == oid)
+            .cloned();
+        if commit.is_some() {
+            self.choose_commit(commit, cx);
+        } else if self.slices.is_empty() && !self.pending {
+            self.fetch(None, cx);
+        }
+    }
+
     pub(super) fn ensure_loaded(&mut self, cx: &mut Context<Self>) {
         if !self.started {
             self.started = true;

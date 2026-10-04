@@ -15,6 +15,12 @@ use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use zeron_proto::{
+    ChangeRequestActivity, ChangeRequestActivityComment, ChangeRequestActivityCommit,
+    ChangeRequestCommit, ChangeRequestDiffSlice, ChangeRequestFileStat, ChangeRequestReaction,
+    ChangeRequestReactionContent, GetChangeRequestDiffRequest, PostChangeRequestCommentRequest,
+    SetChangeRequestReactionRequest,
+};
+use zeron_proto::{
     ChangeRequestActor, ChangeRequestCheck, ChangeRequestCheckStatus, ChangeRequestChecksState,
     ChangeRequestComment, ChangeRequestCommentKind, ChangeRequestDetail, ChangeRequestDraftFilter,
     ChangeRequestFailure, ChangeRequestInvolvement, ChangeRequestLabel, ChangeRequestListError,
@@ -23,9 +29,6 @@ use zeron_proto::{
     ChangeRequestReviewFilter, ChangeRequestReviewer, ChangeRequestStat, ChangeRequestState,
     ChangeRequestStats, ChangeRequestSummary, ChangeRequestVerdict, GetChangeRequestRequest,
     ListChangeRequestStatsRequest, ListChangeRequestsRequest,
-};
-use zeron_proto::{
-    ChangeRequestCommit, ChangeRequestDiffSlice, ChangeRequestFileStat, GetChangeRequestDiffRequest,
 };
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -41,6 +44,8 @@ const GITHUB_LIST_FIELDS: &str = "number,title,url,author,headRefName,baseRefNam
 const GITHUB_SEARCH_FIELDS: &str = "number title url author { login } headRefName baseRefName state isDraft mergeable reviewDecision createdAt updatedAt mergedAt repository { nameWithOwner } reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login } } } } labels(first: 20) { nodes { name color } } commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }";
 const GITHUB_DIFF_TIMEOUT: Duration = Duration::from_secs(60);
 const DIFF_FILES_PAGE_SIZE: usize = 100;
+const REVIEW_THREAD_PAGES: usize = 10;
+const REACTION_GROUPS: &str = "reactionGroups { content viewerHasReacted reactors(first: 10) { totalCount nodes { ... on User { login } ... on Bot { login } ... on Organization { login } ... on Mannequin { login } } } }";
 const STATS_CHUNK: usize = 25;
 const STATS_CONCURRENCY: usize = 4;
 const MAX_STATS_REFS: usize = 500;
@@ -418,6 +423,143 @@ impl ChangeRequestResolver {
         Ok(slice)
     }
 
+    /// The conversation t3code reads for the Timeline and the Summary's Comments: comments,
+    /// reviews, review-thread comments, reactions and commits, from one GraphQL read plus up
+    /// to ten pages of review threads in all.
+    pub async fn get_change_request_activity(
+        &self,
+        roots: &[PathBuf],
+        request: &GetChangeRequestRequest,
+    ) -> Result<ChangeRequestActivity, ChangeRequestError> {
+        let identity = self
+            .space_identity(roots, &request.host, &request.repository)
+            .await?;
+        let first = self
+            .github
+            .graphql(
+                &identity,
+                &activity_query(),
+                activity_variables(&identity, request.number, None),
+            )
+            .await?;
+        let first: GhActivityResponse =
+            serde_json::from_slice(&first).map_err(|_| ChangeRequestError::Decode)?;
+        let mut data = first.data.ok_or(ChangeRequestError::Decode)?;
+        let pull = data
+            .repository
+            .as_mut()
+            .and_then(|repository| repository.pull_request.as_mut())
+            .ok_or(ChangeRequestError::Decode)?;
+        let mut threads = std::mem::take(&mut pull.review_threads.nodes);
+        let mut page = pull.review_threads.page_info.clone();
+        let mut pages = 1;
+        while page.has_next_page && pages < REVIEW_THREAD_PAGES {
+            let Some(cursor) = page.end_cursor.clone() else {
+                break;
+            };
+            let next = self
+                .github
+                .graphql(
+                    &identity,
+                    &threads_query(),
+                    activity_variables(&identity, request.number, Some(cursor)),
+                )
+                .await?;
+            let next: GhActivityResponse =
+                serde_json::from_slice(&next).map_err(|_| ChangeRequestError::Decode)?;
+            let connection = next
+                .data
+                .and_then(|data| data.repository)
+                .and_then(|repository| repository.pull_request)
+                .map(|pull| pull.review_threads)
+                .ok_or(ChangeRequestError::Decode)?;
+            threads.extend(connection.nodes);
+            page = connection.page_info;
+            pages += 1;
+        }
+        Ok(to_activity(
+            &identity.remote.host,
+            data,
+            threads,
+            page.has_next_page,
+        ))
+    }
+
+    pub async fn post_change_request_comment(
+        &self,
+        roots: &[PathBuf],
+        request: &PostChangeRequestCommentRequest,
+    ) -> Result<(), ChangeRequestError> {
+        if request.body.trim().is_empty() {
+            return Err(ChangeRequestError::Decode);
+        }
+        let identity = self
+            .space_identity(roots, &request.host, &request.repository)
+            .await?;
+        self.github
+            .run_gh_input(
+                &identity.root,
+                vec![
+                    "pr".into(),
+                    "comment".into(),
+                    request.number.to_string(),
+                    "--repo".into(),
+                    format!("{}/{}", identity.remote.host, identity.name_with_owner()),
+                    "--body-file".into(),
+                    "-".into(),
+                ],
+                GITHUB_TIMEOUT,
+                GITHUB_OUTPUT_LIMIT,
+                Some(request.body.clone().into_bytes()),
+            )
+            .await
+            .map(|_| ())
+    }
+
+    /// Reacts to the pull request itself when no subject is given; any other subject must be
+    /// a comment, review or review comment GitHub places on this same pull request.
+    pub async fn set_change_request_reaction(
+        &self,
+        roots: &[PathBuf],
+        request: &SetChangeRequestReactionRequest,
+    ) -> Result<(), ChangeRequestError> {
+        let identity = self
+            .space_identity(roots, &request.host, &request.repository)
+            .await?;
+        let subject = request
+            .subject_id
+            .clone()
+            .filter(|subject| !subject.is_empty());
+        let mut variables = activity_variables(&identity, request.number, None);
+        variables["subjectId"] = serde_json::Value::String(subject.clone().unwrap_or_default());
+        let query = if subject.is_some() {
+            SUBJECT_SCOPE_QUERY
+        } else {
+            PULL_REQUEST_ID_QUERY
+        };
+        let scope = self.github.graphql(&identity, query, variables).await?;
+        let scope: GhScopeResponse =
+            serde_json::from_slice(&scope).map_err(|_| ChangeRequestError::Decode)?;
+        let subject = subject_in_scope(&scope, subject.as_deref())
+            .ok_or(ChangeRequestError::UnsupportedRepository)?;
+        let mutation = if request.add {
+            "mutation($subjectId: ID!, $content: ReactionContent!) { addReaction(input: { subjectId: $subjectId, content: $content }) { reaction { content } } }"
+        } else {
+            "mutation($subjectId: ID!, $content: ReactionContent!) { removeReaction(input: { subjectId: $subjectId, content: $content }) { reaction { content } } }"
+        };
+        self.github
+            .graphql(
+                &identity,
+                mutation,
+                serde_json::json!({
+                    "subjectId": subject,
+                    "content": reaction_name(request.content),
+                }),
+            )
+            .await
+            .map(|_| ())
+    }
+
     async fn space_identity(
         &self,
         roots: &[PathBuf],
@@ -541,6 +683,7 @@ impl GitHubCli {
             env: vec![("GH_PROMPT_DISABLED".into(), "1".into())],
             timeout: GITHUB_TIMEOUT,
             output_limit: GITHUB_OUTPUT_LIMIT,
+            stdin: None,
         };
         let output = self.runner.run(request).await.map_err(classify_run_error)?;
         if !output.success {
@@ -577,6 +720,7 @@ impl GitHubCli {
             env: vec![("GH_PROMPT_DISABLED".into(), "1".into())],
             timeout: GITHUB_TIMEOUT,
             output_limit: GITHUB_OUTPUT_LIMIT,
+            stdin: None,
         };
         let output = self.runner.run(request).await.ok()?;
         if !output.success || output.stdout_truncated {
@@ -595,6 +739,19 @@ impl GitHubCli {
         timeout: Duration,
         output_limit: usize,
     ) -> Result<Vec<u8>, ChangeRequestError> {
+        self.run_gh_input(cwd, args, timeout, output_limit, None)
+            .await
+    }
+
+    /// User-authored text (comment bodies, GraphQL variables) travels on stdin, never argv.
+    async fn run_gh_input(
+        &self,
+        cwd: &Path,
+        args: Vec<String>,
+        timeout: Duration,
+        output_limit: usize,
+        stdin: Option<Vec<u8>>,
+    ) -> Result<Vec<u8>, ChangeRequestError> {
         let request = ProcessRequest {
             program: "gh".into(),
             args,
@@ -602,6 +759,7 @@ impl GitHubCli {
             env: vec![("GH_PROMPT_DISABLED".into(), "1".into())],
             timeout,
             output_limit,
+            stdin,
         };
         let output = self.runner.run(request).await.map_err(classify_run_error)?;
         if !output.success {
@@ -799,6 +957,40 @@ impl GitHubCli {
             )
             .await?;
         serde_json::from_slice(&stdout).map_err(|_| ChangeRequestError::Decode)
+    }
+
+    async fn graphql(
+        &self,
+        identity: &RepositoryIdentity,
+        query: &str,
+        variables: serde_json::Value,
+    ) -> Result<Vec<u8>, ChangeRequestError> {
+        let input = serde_json::to_vec(&serde_json::json!({
+            "query": query,
+            "variables": variables,
+        }))
+        .map_err(|_| ChangeRequestError::Decode)?;
+        let stdout = self
+            .run_gh_input(
+                &identity.root,
+                vec![
+                    "api".into(),
+                    "graphql".into(),
+                    "--hostname".into(),
+                    identity.remote.host.clone(),
+                    "--input".into(),
+                    "-".into(),
+                ],
+                GITHUB_LIST_TIMEOUT,
+                GITHUB_LIST_OUTPUT_LIMIT,
+                Some(input),
+            )
+            .await?;
+        let errors: GhGraphqlErrors = serde_json::from_slice(&stdout).unwrap_or_default();
+        if !errors.errors.is_empty() {
+            return Err(ChangeRequestError::Decode);
+        }
+        Ok(stdout)
     }
 
     async fn diff_files_page(
@@ -1426,6 +1618,7 @@ impl GitCheckoutInspector {
                 env: Vec::new(),
                 timeout: GIT_TIMEOUT,
                 output_limit: GIT_OUTPUT_LIMIT,
+                stdin: None,
             })
             .await
             .ok()?;
@@ -1711,11 +1904,13 @@ struct GhSearch {
     nodes: Vec<serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GhPageInfo {
     #[serde(default)]
     has_next_page: bool,
+    #[serde(default)]
+    end_cursor: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2005,6 +2200,462 @@ struct GhPullRequestFile {
     deletions: u64,
     #[serde(default)]
     patch: Option<String>,
+}
+
+const PULL_REQUEST_ID_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { id } } }";
+const SUBJECT_SCOPE_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!, $subjectId: ID!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { id } } node(id: $subjectId) { id ... on IssueComment { pullRequest { id } } ... on PullRequestReviewComment { pullRequest { id } } ... on PullRequestReview { pullRequest { id } } } }";
+
+fn threads_fields() -> String {
+    format!(
+        "reviewThreads(first: 100, after: $cursor) {{ pageInfo {{ hasNextPage endCursor }} nodes {{ id isResolved isOutdated path line comments(first: 10) {{ totalCount pageInfo {{ hasNextPage }} nodes {{ id author {{ login }} body createdAt url {REACTION_GROUPS} }} }} }} }}"
+    )
+}
+
+fn activity_query() -> String {
+    format!(
+        "query($owner: String!, $name: String!, $number: Int!, $cursor: String) {{ viewer {{ login }} repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ id viewerCanUpdate {REACTION_GROUPS} {threads} comments(last: 100) {{ totalCount nodes {{ id author {{ login }} body createdAt url {REACTION_GROUPS} }} }} reviews(last: 100) {{ totalCount nodes {{ id author {{ login }} body state submittedAt url {REACTION_GROUPS} }} }} reviewDismissals: timelineItems(itemTypes: [REVIEW_DISMISSED_EVENT], first: 100) {{ nodes {{ ... on ReviewDismissedEvent {{ dismissalMessage review {{ id }} }} }} }} commits(last: 100) {{ nodes {{ commit {{ oid messageHeadline committedDate additions deletions parents(first: 1) {{ totalCount }} authors(first: 1) {{ nodes {{ name user {{ login }} }} }} }} }} }} }} }} }}",
+        threads = threads_fields()
+    )
+}
+
+fn threads_query() -> String {
+    format!(
+        "query($owner: String!, $name: String!, $number: Int!, $cursor: String) {{ repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ {threads} }} }} }}",
+        threads = threads_fields()
+    )
+}
+
+fn activity_variables(
+    identity: &RepositoryIdentity,
+    number: u64,
+    cursor: Option<String>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "owner": identity.remote.owner,
+        "name": identity.remote.repository,
+        "number": number,
+        "cursor": cursor,
+    })
+}
+
+const REACTION_CONTENTS: [(ChangeRequestReactionContent, &str); 8] = [
+    (ChangeRequestReactionContent::ThumbsUp, "THUMBS_UP"),
+    (ChangeRequestReactionContent::ThumbsDown, "THUMBS_DOWN"),
+    (ChangeRequestReactionContent::Laugh, "LAUGH"),
+    (ChangeRequestReactionContent::Hooray, "HOORAY"),
+    (ChangeRequestReactionContent::Confused, "CONFUSED"),
+    (ChangeRequestReactionContent::Heart, "HEART"),
+    (ChangeRequestReactionContent::Rocket, "ROCKET"),
+    (ChangeRequestReactionContent::Eyes, "EYES"),
+];
+
+fn reaction_name(content: ChangeRequestReactionContent) -> &'static str {
+    REACTION_CONTENTS
+        .iter()
+        .find(|(known, _)| *known == content)
+        .map(|(_, name)| *name)
+        .unwrap_or("THUMBS_UP")
+}
+
+fn reaction_content(name: &str) -> Option<ChangeRequestReactionContent> {
+    REACTION_CONTENTS
+        .iter()
+        .find(|(_, known)| *known == name)
+        .map(|(content, _)| *content)
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct GhGraphqlErrors {
+    #[serde(default)]
+    errors: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhScopeResponse {
+    #[serde(default)]
+    data: Option<GhScopeData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhScopeData {
+    #[serde(default)]
+    repository: Option<GhScopeRepository>,
+    #[serde(default)]
+    node: Option<GhScopeNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhScopeRepository {
+    #[serde(default)]
+    pull_request: Option<GhNodeId>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhScopeNode {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    pull_request: Option<GhNodeId>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GhNodeId {
+    id: String,
+}
+
+/// The node to react to: the pull request itself, or a subject GitHub says belongs to it.
+fn subject_in_scope(scope: &GhScopeResponse, subject: Option<&str>) -> Option<String> {
+    let data = scope.data.as_ref()?;
+    let pull = data.repository.as_ref()?.pull_request.as_ref()?.id.clone();
+    let Some(subject) = subject else {
+        return Some(pull);
+    };
+    let node = data.node.as_ref()?;
+    let owner = node.pull_request.as_ref()?.id.as_str();
+    (owner == pull && node.id.as_deref() == Some(subject)).then(|| subject.to_owned())
+}
+
+#[derive(Debug, Deserialize)]
+struct GhActivityResponse {
+    #[serde(default)]
+    data: Option<GhActivityData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhActivityData {
+    #[serde(default)]
+    viewer: Option<GhActor>,
+    #[serde(default)]
+    repository: Option<GhActivityRepository>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhActivityRepository {
+    #[serde(default)]
+    pull_request: Option<GhActivityPull>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhConnection<T> {
+    #[serde(default)]
+    total_count: Option<u64>,
+    #[serde(default)]
+    page_info: GhPageInfo,
+    #[serde(default = "Vec::new")]
+    nodes: Vec<T>,
+}
+
+impl<T> Default for GhConnection<T> {
+    fn default() -> Self {
+        Self {
+            total_count: None,
+            page_info: GhPageInfo::default(),
+            nodes: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhActivityPull {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    viewer_can_update: bool,
+    #[serde(default)]
+    reaction_groups: Vec<GhReactionGroup>,
+    #[serde(default)]
+    review_threads: GhConnection<GhReviewThread>,
+    #[serde(default)]
+    comments: GhConnection<GhActivityComment>,
+    #[serde(default)]
+    reviews: GhConnection<GhActivityComment>,
+    #[serde(default)]
+    review_dismissals: GhConnection<Option<GhDismissal>>,
+    #[serde(default)]
+    commits: GhConnection<GhActivityCommitNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhReactionGroup {
+    content: String,
+    #[serde(default)]
+    viewer_has_reacted: bool,
+    #[serde(default)]
+    reactors: GhConnection<Option<GhActor>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhReviewThread {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    is_resolved: bool,
+    #[serde(default)]
+    is_outdated: bool,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    line: Option<u64>,
+    #[serde(default)]
+    comments: GhConnection<GhActivityComment>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhActivityComment {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    author: Option<GhActor>,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    created_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    submitted_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    reaction_groups: Vec<GhReactionGroup>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhDismissal {
+    #[serde(default)]
+    dismissal_message: Option<String>,
+    #[serde(default)]
+    review: Option<GhNodeId>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhActivityCommitNode {
+    commit: GhActivityCommitInfo,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhActivityCommitInfo {
+    oid: String,
+    #[serde(default)]
+    message_headline: String,
+    #[serde(default)]
+    committed_date: Option<DateTime<Utc>>,
+    #[serde(default)]
+    additions: Option<u64>,
+    #[serde(default)]
+    deletions: Option<u64>,
+    #[serde(default)]
+    parents: GhConnection<serde_json::Value>,
+    #[serde(default)]
+    authors: GhConnection<GhCommitAuthor>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhCommitAuthor {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    user: Option<GhActor>,
+}
+
+fn reactions(groups: Vec<GhReactionGroup>) -> Vec<ChangeRequestReaction> {
+    groups
+        .into_iter()
+        .filter_map(|group| {
+            let count = group.reactors.total_count.unwrap_or(0);
+            if count == 0 {
+                return None;
+            }
+            Some(ChangeRequestReaction {
+                content: reaction_content(&group.content)?,
+                count,
+                viewer_has_reacted: group.viewer_has_reacted,
+                reactors: group
+                    .reactors
+                    .nodes
+                    .into_iter()
+                    .flatten()
+                    .map(|actor| actor.login)
+                    .collect(),
+            })
+        })
+        .collect()
+}
+
+/// True where markdown renders nothing: whitespace, or only HTML comments.
+fn renders_empty(body: &str) -> bool {
+    let mut rest = body;
+    let mut visible = String::new();
+    while let Some(start) = rest.find("<!--") {
+        visible.push_str(&rest[..start]);
+        rest = match rest[start..].find("-->") {
+            Some(end) => &rest[start + end + 3..],
+            None => "",
+        };
+    }
+    visible.push_str(rest);
+    visible.trim().is_empty()
+}
+
+fn is_verdict(state: &str) -> bool {
+    matches!(
+        state.to_ascii_uppercase().as_str(),
+        "APPROVED" | "CHANGES_REQUESTED" | "DISMISSED"
+    )
+}
+
+fn to_activity(
+    host: &str,
+    data: GhActivityData,
+    threads: Vec<GhReviewThread>,
+    threads_remain: bool,
+) -> ChangeRequestActivity {
+    let actor = |author: Option<GhActor>| {
+        author.map(|actor| ChangeRequestActor {
+            avatar_url: avatar_url(host, &actor.login),
+            login: actor.login,
+        })
+    };
+    let viewer = data.viewer.map(|viewer| viewer.login).unwrap_or_default();
+    let Some(pull) = data
+        .repository
+        .and_then(|repository| repository.pull_request)
+    else {
+        return ChangeRequestActivity {
+            viewer,
+            ..Default::default()
+        };
+    };
+    let dismissals: std::collections::HashMap<String, String> = pull
+        .review_dismissals
+        .nodes
+        .into_iter()
+        .flatten()
+        .filter_map(|dismissal| Some((dismissal.review?.id, dismissal.dismissal_message?)))
+        .collect();
+    let comment = |kind, source: GhActivityComment, created_at| ChangeRequestActivityComment {
+        id: source.id,
+        kind,
+        author: actor(source.author),
+        body: source.body,
+        created_at,
+        url: source.url,
+        review_state: None,
+        path: None,
+        line: None,
+        thread_id: None,
+        thread_resolved: false,
+        outdated: false,
+        reactions: reactions(source.reaction_groups),
+    };
+    let issue_read = pull.comments.nodes.len() as u64;
+    let issue_total = pull
+        .comments
+        .total_count
+        .unwrap_or(issue_read)
+        .max(issue_read);
+    let mut truncated = threads_remain || issue_total > issue_read;
+    let mut comments = Vec::new();
+    for source in pull.comments.nodes {
+        if let Some(created_at) = source.created_at {
+            comments.push(comment(
+                ChangeRequestCommentKind::Comment,
+                source,
+                created_at,
+            ));
+        }
+    }
+    let mut kept_reviews = 0;
+    for mut source in pull.reviews.nodes {
+        let state = source.state.take().unwrap_or_default();
+        let Some(submitted_at) = source.submitted_at else {
+            continue;
+        };
+        if source.body.trim().is_empty() && !is_verdict(&state) {
+            continue;
+        }
+        if state.eq_ignore_ascii_case("DISMISSED")
+            && renders_empty(&source.body)
+            && let Some(message) = dismissals.get(&source.id)
+        {
+            source.body = message.clone();
+        }
+        kept_reviews += 1;
+        let mut review = comment(ChangeRequestCommentKind::Review, source, submitted_at);
+        review.review_state = Some(state);
+        comments.push(review);
+    }
+    let mut thread_total = 0;
+    for thread in threads {
+        thread_total += thread
+            .comments
+            .total_count
+            .unwrap_or(thread.comments.nodes.len() as u64);
+        truncated |= thread.comments.page_info.has_next_page;
+        for source in thread.comments.nodes {
+            let Some(created_at) = source.created_at else {
+                continue;
+            };
+            let mut remark = comment(ChangeRequestCommentKind::ReviewComment, source, created_at);
+            remark.path = thread.path.clone();
+            remark.line = thread.line;
+            remark.thread_id = Some(thread.id.clone());
+            remark.thread_resolved = thread.is_resolved;
+            remark.outdated = thread.is_outdated;
+            comments.push(remark);
+        }
+    }
+    comments.sort_by(|left, right| left.created_at.cmp(&right.created_at));
+    let commits = pull
+        .commits
+        .nodes
+        .into_iter()
+        .map(|node| {
+            let commit = node.commit;
+            let merge = commit.parents.total_count.unwrap_or(0) > 1;
+            let author =
+                commit
+                    .authors
+                    .nodes
+                    .into_iter()
+                    .next()
+                    .and_then(|author| match author.user {
+                        Some(user) => actor(Some(user)),
+                        None => author.name.map(|login| ChangeRequestActor {
+                            login,
+                            avatar_url: None,
+                        }),
+                    });
+            ChangeRequestActivityCommit {
+                oid: commit.oid,
+                headline: commit.message_headline,
+                committed_at: commit.committed_date,
+                additions: commit.additions.filter(|_| !merge),
+                deletions: commit.deletions.filter(|_| !merge),
+                author,
+            }
+        })
+        .collect();
+    ChangeRequestActivity {
+        viewer,
+        subject_id: pull.id,
+        reactions: reactions(pull.reaction_groups),
+        comments,
+        comment_count: issue_total + kept_reviews + thread_total,
+        truncated,
+        commits,
+        viewer_can_update: pull.viewer_can_update,
+    }
 }
 
 fn valid_commit_sha(commit: &str) -> bool {
@@ -2494,6 +3145,7 @@ struct ProcessRequest {
     env: Vec<(String, String)>,
     timeout: Duration,
     output_limit: usize,
+    stdin: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2534,7 +3186,11 @@ impl ProcessRunner for SystemProcessRunner {
             .args(&request.args)
             .current_dir(&request.cwd)
             .envs(request.env)
-            .stdin(Stdio::null())
+            .stdin(if request.stdin.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
@@ -2543,8 +3199,17 @@ impl ProcessRunner for SystemProcessRunner {
             .map_err(|error| ProcessRunError::Spawn(error.kind()))?;
         let stdout = child.stdout.take().ok_or(ProcessRunError::Io)?;
         let stderr = child.stderr.take().ok_or(ProcessRunError::Io)?;
+        let stdin = child.stdin.take().zip(request.stdin);
         let completed = tokio::time::timeout(request.timeout, async {
             tokio::try_join!(
+                async {
+                    if let Some((mut pipe, input)) = stdin {
+                        use tokio::io::AsyncWriteExt;
+                        pipe.write_all(&input).await?;
+                        pipe.shutdown().await?;
+                    }
+                    Ok::<_, io::Error>(())
+                },
                 child.wait(),
                 read_capped(stdout, request.output_limit),
                 read_capped(stderr, request.output_limit),
@@ -2552,7 +3217,7 @@ impl ProcessRunner for SystemProcessRunner {
         })
         .await;
 
-        let (status, (stdout, stdout_truncated), (stderr, _stderr_truncated)) = match completed {
+        let (_, status, (stdout, stdout_truncated), (stderr, _stderr_truncated)) = match completed {
             Ok(Ok(output)) => output,
             Ok(Err(_)) => return Err(ProcessRunError::Io),
             Err(_) => {
@@ -4070,6 +4735,261 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
             .filter(|request| request.program == "gh")
             .count();
         assert_eq!(gh_calls, 2);
+    }
+
+    fn stdin_json(request: &ProcessRequest) -> serde_json::Value {
+        serde_json::from_slice(request.stdin.as_deref().expect("stdin")).expect("json stdin")
+    }
+
+    fn reaction(content: &str, count: u64, viewer: bool) -> serde_json::Value {
+        serde_json::json!({
+            "content": content,
+            "viewerHasReacted": viewer,
+            "reactors": {"totalCount": count, "nodes": [{"login": "bob"}]}
+        })
+    }
+
+    fn activity_json(thread_page: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"data": {
+            "viewer": {"login": "alice"},
+            "repository": {"pullRequest": {
+                "id": "PR_1",
+                "viewerCanUpdate": true,
+                "reactionGroups": [reaction("HEART", 2, true), reaction("EYES", 0, false)],
+                "reviewThreads": thread_page,
+                "comments": {"totalCount": 1, "nodes": [
+                    {"id": "IC_1", "author": {"login": "bob"}, "body": "first", "createdAt": "2026-10-01T10:00:00Z", "url": "https://github.com/acme/zeron/pull/7#c1", "reactionGroups": [reaction("THUMBS_UP", 1, false)]}
+                ]},
+                "reviews": {"totalCount": 4, "nodes": [
+                    {"id": "R_1", "author": {"login": "carol"}, "body": "", "state": "COMMENTED", "submittedAt": "2026-10-01T11:00:00Z"},
+                    {"id": "R_2", "author": {"login": "carol"}, "body": "", "state": "APPROVED", "submittedAt": "2026-10-01T12:00:00Z"},
+                    {"id": "R_3", "author": {"login": "dave"}, "body": "<!-- bot -->", "state": "DISMISSED", "submittedAt": "2026-10-01T09:00:00Z"},
+                    {"id": "R_4", "author": {"login": "dave"}, "body": "pending", "state": "PENDING"}
+                ]},
+                "reviewDismissals": {"nodes": [{"dismissalMessage": "stale now", "review": {"id": "R_3"}}, {}]},
+                "commits": {"nodes": [
+                    {"commit": {"oid": "aaa1111", "messageHeadline": "Add", "committedDate": "2026-09-30T10:00:00Z", "additions": 5, "deletions": 1, "parents": {"totalCount": 1}, "authors": {"nodes": [{"name": "Bob", "user": {"login": "bob"}}]}}},
+                    {"commit": {"oid": "bbb2222", "messageHeadline": "Merge main", "committedDate": "2026-10-02T10:00:00Z", "additions": 90, "deletions": 9, "parents": {"totalCount": 2}, "authors": {"nodes": [{"name": "No Login"}]}}}
+                ]}
+            }}
+        }})
+    }
+
+    fn thread(id: &str, at: &str, more: bool) -> serde_json::Value {
+        serde_json::json!({
+            "id": id, "isResolved": id == "T_2", "isOutdated": false, "path": "src/lib.rs", "line": 12,
+            "comments": {"totalCount": if more { 11 } else { 1 }, "pageInfo": {"hasNextPage": more}, "nodes": [
+                {"id": format!("{id}_c"), "author": {"login": "erin"}, "body": "nit", "createdAt": at, "url": null}
+            ]}
+        })
+    }
+
+    #[tokio::test]
+    async fn activity_reads_one_graphql_page_then_follows_review_threads() {
+        let runner = ScriptedRunner::new(|request| {
+            if let Some(output) = git_repo_script(request) {
+                return output;
+            }
+            assert_eq!(
+                request.args,
+                ["api", "graphql", "--hostname", "github.com", "--input", "-"]
+            );
+            let input = stdin_json(request);
+            assert_eq!(input["variables"]["owner"], "acme");
+            assert_eq!(input["variables"]["name"], "zeron");
+            assert_eq!(input["variables"]["number"], 7);
+            let page = match input["variables"]["cursor"].as_str() {
+                None => serde_json::json!({
+                    "pageInfo": {"hasNextPage": true, "endCursor": "C1"},
+                    "nodes": [thread("T_1", "2026-10-01T13:00:00Z", false)]
+                }),
+                Some("C1") => {
+                    return command_success(
+                        serde_json::to_vec(&serde_json::json!({"data": {"repository": {"pullRequest": {"reviewThreads": {
+                            "pageInfo": {"hasNextPage": false},
+                            "nodes": [thread("T_2", "2026-10-01T08:00:00Z", true)]
+                        }}}}}))
+                        .unwrap(),
+                    );
+                }
+                other => panic!("unexpected cursor {other:?}"),
+            };
+            command_success(serde_json::to_vec(&activity_json(page)).unwrap())
+        });
+        let activity = list_resolver(runner.clone())
+            .get_change_request_activity(
+                &[PathBuf::from("/repo")],
+                &GetChangeRequestRequest {
+                    host: "github.com".into(),
+                    repository: "acme/zeron".into(),
+                    number: 7,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(activity.viewer, "alice");
+        assert_eq!(activity.subject_id, "PR_1");
+        assert!(activity.viewer_can_update);
+        assert_eq!(
+            activity
+                .reactions
+                .iter()
+                .map(|reaction| (
+                    reaction.content,
+                    reaction.count,
+                    reaction.viewer_has_reacted
+                ))
+                .collect::<Vec<_>>(),
+            [(ChangeRequestReactionContent::Heart, 2, true)]
+        );
+        let ids: Vec<(&str, ChangeRequestCommentKind)> = activity
+            .comments
+            .iter()
+            .map(|comment| (comment.id.as_str(), comment.kind))
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                ("T_2_c", ChangeRequestCommentKind::ReviewComment),
+                ("R_3", ChangeRequestCommentKind::Review),
+                ("IC_1", ChangeRequestCommentKind::Comment),
+                ("R_2", ChangeRequestCommentKind::Review),
+                ("T_1_c", ChangeRequestCommentKind::ReviewComment),
+            ]
+        );
+        let dismissed = &activity.comments[1];
+        assert_eq!(dismissed.body, "stale now");
+        assert_eq!(dismissed.review_state.as_deref(), Some("DISMISSED"));
+        let remark = &activity.comments[0];
+        assert_eq!(remark.path.as_deref(), Some("src/lib.rs"));
+        assert_eq!(remark.line, Some(12));
+        assert_eq!(remark.thread_id.as_deref(), Some("T_2"));
+        assert!(remark.thread_resolved);
+        assert_eq!(activity.comments[2].reactions.len(), 1);
+        assert_eq!(activity.comment_count, 1 + 2 + 1 + 11);
+        assert!(activity.truncated, "a thread with more comments truncates");
+        assert_eq!(activity.commits.len(), 2);
+        assert_eq!(activity.commits[0].additions, Some(5));
+        assert_eq!(activity.commits[0].author.as_ref().unwrap().login, "bob");
+        assert_eq!(
+            activity.commits[1].additions, None,
+            "merge commits carry no stats"
+        );
+        assert_eq!(
+            activity.commits[1].author.as_ref().unwrap().login,
+            "No Login"
+        );
+    }
+
+    #[tokio::test]
+    async fn comments_and_reactions_send_user_text_on_stdin_and_stay_in_scope() {
+        const BODY: &str = "--body $(touch /tmp/zeron-pwned)";
+        let runner = ScriptedRunner::new(|request| {
+            if let Some(output) = git_repo_script(request) {
+                return output;
+            }
+            if request.args.first().map(String::as_str) == Some("pr") {
+                assert_eq!(
+                    request.args,
+                    [
+                        "pr",
+                        "comment",
+                        "7",
+                        "--repo",
+                        "github.com/acme/zeron",
+                        "--body-file",
+                        "-"
+                    ]
+                );
+                assert_eq!(request.stdin.as_deref(), Some(BODY.as_bytes()));
+                return command_success("");
+            }
+            let input = stdin_json(request);
+            let query = input["query"].as_str().unwrap();
+            if query.starts_with("mutation") {
+                assert!(query.contains("addReaction"));
+                assert_eq!(input["variables"]["subjectId"], "PR_1");
+                assert_eq!(input["variables"]["content"], "ROCKET");
+                return command_success(
+                    r#"{"data":{"addReaction":{"reaction":{"content":"ROCKET"}}}}"#,
+                );
+            }
+            let node = match input["variables"]["subjectId"].as_str() {
+                Some("IC_other") => {
+                    serde_json::json!({"id": "IC_other", "pullRequest": {"id": "PR_9"}})
+                }
+                _ => serde_json::Value::Null,
+            };
+            command_success(
+                serde_json::to_vec(&serde_json::json!({"data": {
+                    "repository": {"pullRequest": {"id": "PR_1"}},
+                    "node": node
+                }}))
+                .unwrap(),
+            )
+        });
+        let resolver = list_resolver(runner.clone());
+        let roots = [PathBuf::from("/repo")];
+        let comment = |body: &str| PostChangeRequestCommentRequest {
+            host: "github.com".into(),
+            repository: "acme/zeron".into(),
+            number: 7,
+            body: body.into(),
+        };
+        resolver
+            .post_change_request_comment(&roots, &comment(BODY))
+            .await
+            .unwrap();
+        assert!(
+            resolver
+                .post_change_request_comment(&roots, &comment("  \n"))
+                .await
+                .is_err()
+        );
+        let reaction = |subject: Option<&str>| SetChangeRequestReactionRequest {
+            host: "github.com".into(),
+            repository: "acme/zeron".into(),
+            number: 7,
+            subject_id: subject.map(str::to_owned),
+            content: ChangeRequestReactionContent::Rocket,
+            add: true,
+        };
+        resolver
+            .set_change_request_reaction(&roots, &reaction(None))
+            .await
+            .unwrap();
+        let foreign = resolver
+            .set_change_request_reaction(&roots, &reaction(Some("IC_other")))
+            .await
+            .unwrap_err();
+        assert_eq!(foreign, ChangeRequestError::UnsupportedRepository);
+        let requests = runner.requests.lock().unwrap();
+        let mutations = requests
+            .iter()
+            .filter(|request| {
+                request
+                    .stdin
+                    .as_deref()
+                    .is_some_and(|stdin| String::from_utf8_lossy(stdin).contains("mutation"))
+            })
+            .count();
+        assert_eq!(
+            mutations, 1,
+            "the out-of-scope subject never reaches a mutation"
+        );
+        assert!(
+            requests
+                .iter()
+                .all(|request| !request.args.iter().any(|arg| arg.contains("zeron-pwned"))),
+            "user text never rides argv"
+        );
+    }
+
+    #[test]
+    fn renders_empty_ignores_html_comments_only() {
+        assert!(renders_empty("  <!-- a -->\n<!-- b -->  "));
+        assert!(renders_empty("<!-- unterminated"));
+        assert!(!renders_empty("<!-- a --> hi"));
     }
 
     fn search_node(number: u64, author: &str, rollup: Option<&str>) -> serde_json::Value {

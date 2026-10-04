@@ -1179,6 +1179,7 @@ pub struct ChangeRequestReviewer {
 pub enum ChangeRequestCommentKind {
     Comment,
     Review,
+    ReviewComment,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1222,6 +1223,106 @@ pub struct ChangeRequestCommit {
     pub headline: String,
     #[serde(default)]
     pub committed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChangeRequestReactionContent {
+    ThumbsUp,
+    ThumbsDown,
+    Laugh,
+    Hooray,
+    Confused,
+    Heart,
+    Rocket,
+    Eyes,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeRequestReaction {
+    pub content: ChangeRequestReactionContent,
+    pub count: u64,
+    pub viewer_has_reacted: bool,
+    #[serde(default)]
+    pub reactors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeRequestActivityComment {
+    pub id: String,
+    pub kind: ChangeRequestCommentKind,
+    pub author: Option<ChangeRequestActor>,
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub review_state: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub line: Option<u64>,
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    #[serde(default)]
+    pub thread_resolved: bool,
+    #[serde(default)]
+    pub outdated: bool,
+    #[serde(default)]
+    pub reactions: Vec<ChangeRequestReaction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeRequestActivityCommit {
+    pub oid: String,
+    pub headline: String,
+    #[serde(default)]
+    pub committed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub additions: Option<u64>,
+    #[serde(default)]
+    pub deletions: Option<u64>,
+    #[serde(default)]
+    pub author: Option<ChangeRequestActor>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeRequestActivity {
+    pub viewer: String,
+    pub subject_id: String,
+    #[serde(default)]
+    pub reactions: Vec<ChangeRequestReaction>,
+    pub comments: Vec<ChangeRequestActivityComment>,
+    pub comment_count: u64,
+    pub truncated: bool,
+    pub commits: Vec<ChangeRequestActivityCommit>,
+    #[serde(default)]
+    pub viewer_can_update: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostChangeRequestCommentRequest {
+    pub host: String,
+    pub repository: String,
+    pub number: u64,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetChangeRequestReactionRequest {
+    pub host: String,
+    pub repository: String,
+    pub number: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_id: Option<String>,
+    pub content: ChangeRequestReactionContent,
+    pub add: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -304,6 +304,10 @@ icon_assets![
     (LUCIDE_SQUARE_DOT, "lucide-square-dot"),
     (LUCIDE_SQUARE_ARROW_RIGHT, "lucide-square-arrow-right"),
     (LUCIDE_ARROW_RIGHT, "lucide-arrow-right"),
+    (LUCIDE_GIT_COMMIT_HORIZONTAL, "lucide-git-commit-horizontal"),
+    (LUCIDE_SEND, "lucide-send"),
+    (LUCIDE_SMILE_PLUS, "lucide-smile-plus"),
+    (LUCIDE_FILE_CODE_2, "lucide-file-code-2"),
 ];
 
 /// Serves both the compact control-icon set and the complete file-identity

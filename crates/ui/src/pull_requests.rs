@@ -1,3 +1,4 @@
+mod activity;
 mod code;
 mod detail;
 mod filters;
@@ -296,6 +297,8 @@ pub struct PullRequestsPage {
     sent_query: String,
     sent: (String, zeron_proto::ChangeRequestListFilters),
     debounce_task: Option<Task<()>>,
+    toasts: Vec<(u64, SharedString)>,
+    toast_seq: u64,
 }
 
 impl EventEmitter<PullRequestsEvent> for PullRequestsPage {}
@@ -342,6 +345,8 @@ impl PullRequestsPage {
             sent_query: String::new(),
             sent: Default::default(),
             debounce_task: None,
+            toasts: Vec::new(),
+            toast_seq: 0,
         };
         page.refresh(cx);
         page
@@ -1301,20 +1306,24 @@ impl PullRequestsPage {
 }
 
 fn avatar(login: &str, theme: &Theme) -> AnyElement {
+    avatar_sized(login, 16.0, theme)
+}
+
+fn avatar_sized(login: &str, size: f32, theme: &Theme) -> AnyElement {
     let initial = login
         .chars()
         .next()
         .map(|c| c.to_uppercase().to_string())
         .unwrap_or_default();
     div()
-        .size(px(16.0))
+        .size(px(size))
         .flex_none()
         .rounded_full()
         .bg(theme.ink(0.08))
         .flex()
         .items_center()
         .justify_center()
-        .text_size(px(8.0))
+        .text_size(px((size / 2.0).max(8.0).min(10.0)))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(theme.text_muted)
         .child(initial)
@@ -1424,6 +1433,53 @@ fn branch_mark(theme: &Theme) -> AnyElement {
         .h(px(80.0))
         .text_color(theme.text_muted.opacity(0.6))
         .into_any_element()
+}
+
+const TOAST_FOR: Duration = Duration::from_secs(4);
+
+impl PullRequestsPage {
+    /// t3code's error toasts, kept on the page because no app-wide toast surface exists.
+    fn toast(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.toast_seq += 1;
+        let id = self.toast_seq;
+        self.toasts.push((id, text.into()));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(TOAST_FOR).await;
+            this.update(cx, |page, cx| {
+                page.toasts.retain(|(toast, _)| *toast != id);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn render_toasts(&self, theme: &Theme) -> Option<AnyElement> {
+        (!self.toasts.is_empty()).then(|| {
+            let popup = theme.for_popup();
+            div()
+                .absolute()
+                .right(px(16.0))
+                .bottom(px(16.0))
+                .flex()
+                .flex_col()
+                .items_end()
+                .gap(px(8.0))
+                .children(self.toasts.iter().map(|(id, text)| {
+                    crate::popover::popover_card(&popup)
+                        .id(("pull-requests-toast", *id as usize))
+                        .role(gpui::Role::Alert)
+                        .aria_label(text.clone())
+                        .px(px(12.0))
+                        .py(px(8.0))
+                        .text_size(px(12.0))
+                        .text_color(popup.text)
+                        .child(text.clone())
+                }))
+                .into_any_element()
+        })
+    }
 }
 
 impl Render for PullRequestsPage {
@@ -1538,6 +1594,7 @@ impl Render for PullRequestsPage {
                     }
                 }),
             )
+            .relative()
             .child(list)
             .children(self.render_checks_popover(&theme, Tones::of(&theme), cx))
             .children(panel.map(|(resizer, panel)| {
@@ -1549,6 +1606,7 @@ impl Render for PullRequestsPage {
                     .child(resizer)
                     .child(panel)
             }))
+            .children(self.render_toasts(&theme))
     }
 }
 
