@@ -262,6 +262,13 @@ pub mod methods {
     pub const GET_CHANGE_REQUEST_ACTIVITY: &str = "GetChangeRequestActivity";
     pub const POST_CHANGE_REQUEST_COMMENT: &str = "PostChangeRequestComment";
     pub const SET_CHANGE_REQUEST_REACTION: &str = "SetChangeRequestReaction";
+    pub const GET_CHANGE_REQUEST_PERMISSIONS: &str = "GetChangeRequestPermissions";
+    pub const RUN_CHANGE_REQUEST_ACTION: &str = "RunChangeRequestAction";
+    pub const UPDATE_CHANGE_REQUEST: &str = "UpdateChangeRequest";
+    pub const LIST_CHANGE_REQUEST_LABEL_CANDIDATES: &str = "ListChangeRequestLabelCandidates";
+    pub const SET_CHANGE_REQUEST_LABEL: &str = "SetChangeRequestLabel";
+    pub const LIST_CHANGE_REQUEST_REVIEWER_CANDIDATES: &str = "ListChangeRequestReviewerCandidates";
+    pub const SET_CHANGE_REQUEST_REVIEWER: &str = "SetChangeRequestReviewer";
     pub const GET_CHECKOUT_DIFF: &str = "GetCheckoutDiff";
     /// Permanently restore one chat-owned checkout to its current HEAD and
     /// remove only its untracked, non-ignored paths.

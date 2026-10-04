@@ -308,6 +308,13 @@ icon_assets![
     (LUCIDE_SEND, "lucide-send"),
     (LUCIDE_SMILE_PLUS, "lucide-smile-plus"),
     (LUCIDE_FILE_CODE_2, "lucide-file-code-2"),
+    (LUCIDE_ELLIPSIS, "lucide-ellipsis"),
+    (LUCIDE_ARROW_UP_RIGHT, "lucide-arrow-up-right"),
+    (LUCIDE_LINK, "lucide-link"),
+    (LUCIDE_ROTATE_CCW, "lucide-rotate-ccw"),
+    (LUCIDE_PLAY, "lucide-play"),
+    (LUCIDE_USER_PLUS, "lucide-user-plus"),
+    (LUCIDE_PENCIL, "lucide-pencil"),
 ];
 
 /// Serves both the compact control-icon set and the complete file-identity

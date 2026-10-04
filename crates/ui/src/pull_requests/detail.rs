@@ -12,6 +12,7 @@ use zeron_proto::{
 };
 use zeron_rpc::methods;
 
+use super::actions::ActionsState;
 use super::activity::ActivityState;
 use super::code::PullRequestCode;
 use super::{
@@ -56,7 +57,7 @@ pub(crate) fn checks_verdict_label(state: ChangeRequestChecksState) -> &'static 
 
 pub(super) struct DetailState {
     seed: ChangeRequestListItem,
-    detail: Loadable<ChangeRequestDetail>,
+    pub(super) detail: Loadable<ChangeRequestDetail>,
     body: Option<BlockTree>,
     scroll: ScrollHandle,
     condensed: bool,
@@ -65,13 +66,19 @@ pub(super) struct DetailState {
     tab: DetailTab,
     code: Option<Entity<PullRequestCode>>,
     pub(super) activity: ActivityState,
+    pub(super) actions: ActionsState,
     _task: Option<Task<()>>,
 }
 
 impl DetailState {
+    pub(super) fn seed_title(&self) -> &str {
+        &self.seed.title
+    }
+
     pub(super) fn new(seed: ChangeRequestListItem, cx: &mut Context<PullRequestsPage>) -> Self {
         Self {
             activity: ActivityState::new(PullRequestKey::of(&seed), cx),
+            actions: ActionsState::default(),
             seed,
             detail: Loadable::Idle,
             body: None,
@@ -270,6 +277,14 @@ impl PullRequestsPage {
             self.load_detail(&key, cx);
         }
         self.ensure_activity(&key, cx);
+        if matches!(
+            self.details
+                .get(&key)
+                .map(|state| &state.actions.permissions),
+            Some(Loadable::Idle)
+        ) {
+            self.load_permissions(&key, cx);
+        }
         self.active = Some(key);
         cx.notify();
     }
@@ -311,6 +326,9 @@ impl PullRequestsPage {
         }
         if self.checks_popover.take().is_some() {
             cx.notify();
+            return true;
+        }
+        if self.dismiss_action_overlay(cx) {
             return true;
         }
         if self.dismiss_reaction_pickers(cx) {
@@ -502,7 +520,7 @@ impl PullRequestsPage {
         cx.notify();
     }
 
-    fn load_detail(&mut self, key: &PullRequestKey, cx: &mut Context<Self>) {
+    pub(super) fn load_detail(&mut self, key: &PullRequestKey, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
@@ -855,26 +873,7 @@ impl PullRequestsPage {
                 )
                 .into_any_element()
         };
-        let state_badge = match item.state {
-            ChangeRequestState::Merged => Some((icons::LUCIDE_GIT_MERGE, "Merged")),
-            ChangeRequestState::Closed => Some((icons::LUCIDE_GIT_PULL_REQUEST_CLOSED, "Closed")),
-            ChangeRequestState::Open => None,
-        }
-        .map(|(glyph, label)| {
-            div()
-                .h(px(24.0))
-                .flex()
-                .items_center()
-                .gap(px(4.0))
-                .px(px(7.0))
-                .rounded(px(6.0))
-                .border_1()
-                .border_color(theme.hairline(0.09))
-                .text_size(px(12.0))
-                .text_color(tone)
-                .child(icon(glyph).size(px(14.0)).text_color(tone))
-                .child(label)
-        });
+        let cluster = self.render_action_cluster(key, item, detail, theme, tones, cx);
         let row_a = div()
             .h(px(28.0))
             .flex()
@@ -883,10 +882,12 @@ impl PullRequestsPage {
             .gap(px(8.0))
             .px(px(16.0))
             .child(div().flex_1().min_w_0().child(row_a_left))
-            .children(state_badge);
+            .child(cluster);
 
         let files = detail.map(|detail| detail.changed_files);
-        let branch = |small: bool| {
+        let title = (!condensed).then(|| self.render_title(key, item, theme, cx));
+        let mut warning = self.render_out_of_date(key, item, theme, cx);
+        let mut branch = |small: bool| {
             let head_key = key.clone();
             let head = item.head_ref.clone();
             let head_copied = copied == Some("head");
@@ -906,6 +907,7 @@ impl PullRequestsPage {
                         .whitespace_nowrap()
                         .child(item.base_ref.clone()),
                 )
+                .children(warning.take())
                 .child(
                     icon(icons::LUCIDE_ARROW_LEFT)
                         .size(px(if small { 12.0 } else { 14.0 }))
@@ -1014,17 +1016,7 @@ impl PullRequestsPage {
                     .mt(px(4.0))
                     .flex()
                     .flex_col()
-                    .child(
-                        div()
-                            .text_size(px(16.0))
-                            .line_height(px(22.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(theme.text)
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .child(item.title.clone()),
-                    )
+                    .children(title)
                     .child(
                         div()
                             .mt(px(8.0))
@@ -1118,7 +1110,12 @@ impl PullRequestsPage {
                         if state.tab == DetailTab::Timeline {
                             el.child(self.render_timeline_controls(key, theme, tones, cx))
                         } else {
-                            el.children(checks_summary)
+                            match detail.and_then(|detail| {
+                                self.render_approve_workflows(key, detail, theme, cx)
+                            }) {
+                                Some(approve) => el.child(approve),
+                                None => el.children(checks_summary),
+                            }
                         }
                     }),
             )
@@ -1231,8 +1228,28 @@ impl PullRequestsPage {
         let meta = div()
             .px(px(16.0))
             .py(px(12.0))
-            .child(meta_row(icons::LUCIDE_USERS, "Reviewers", reviewers))
-            .child(meta_row(icons::LUCIDE_TAG, "Labels", labels))
+            .child(meta_row(
+                icons::LUCIDE_USERS,
+                "Reviewers",
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(reviewers)
+                    .child(self.render_picker(key, false, theme, cx))
+                    .into_any_element(),
+            ))
+            .child(meta_row(
+                icons::LUCIDE_TAG,
+                "Labels",
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(labels)
+                    .child(self.render_picker(key, true, theme, cx))
+                    .into_any_element(),
+            ))
             .child(meta_row(
                 icons::LUCIDE_MESSAGE_SQUARE,
                 "Comments",
@@ -1243,8 +1260,11 @@ impl PullRequestsPage {
             format!("pull-request-body-{}", key.number),
         ));
         options.link = None;
-        let description: AnyElement = match &state.body {
-            Some(tree) => div()
+        let editor = self.description_editor(key, theme, cx);
+        let pencil = self.description_pencil(key, &detail.body, theme, cx);
+        let description: AnyElement = match (&state.body, editor) {
+            (_, Some(editor)) => editor,
+            (Some(tree), None) => div()
                 .child(crate::markdown::render::render_tree(
                     tree,
                     &options,
@@ -1257,7 +1277,7 @@ impl PullRequestsPage {
                         .map(|bar| div().mt(px(8.0)).child(bar)),
                 )
                 .into_any_element(),
-            None => div().into_any_element(),
+            (None, None) => div().into_any_element(),
         };
         let checks: AnyElement = if detail.checks.is_empty() {
             div()
@@ -1318,7 +1338,7 @@ impl PullRequestsPage {
                 Section::Description,
                 "Description",
                 None,
-                None,
+                pencil,
                 description,
                 theme,
                 cx,

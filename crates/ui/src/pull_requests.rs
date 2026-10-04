@@ -1,3 +1,4 @@
+mod actions;
 mod activity;
 mod code;
 mod detail;
@@ -297,7 +298,8 @@ pub struct PullRequestsPage {
     sent_query: String,
     sent: (String, zeron_proto::ChangeRequestListFilters),
     debounce_task: Option<Task<()>>,
-    toasts: Vec<(u64, SharedString)>,
+    toasts: Vec<(u64, SharedString, Option<SharedString>)>,
+    confirm: Option<actions::Confirm>,
     toast_seq: u64,
 }
 
@@ -346,6 +348,7 @@ impl PullRequestsPage {
             sent: Default::default(),
             debounce_task: None,
             toasts: Vec::new(),
+            confirm: None,
             toast_seq: 0,
         };
         page.refresh(cx);
@@ -1440,13 +1443,31 @@ const TOAST_FOR: Duration = Duration::from_secs(4);
 impl PullRequestsPage {
     /// t3code's error toasts, kept on the page because no app-wide toast surface exists.
     fn toast(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.push_toast(text.into(), None, cx);
+    }
+
+    fn toast_with(
+        &mut self,
+        title: impl Into<SharedString>,
+        description: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        self.push_toast(title.into(), Some(description.into()), cx);
+    }
+
+    fn push_toast(
+        &mut self,
+        title: SharedString,
+        description: Option<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
         self.toast_seq += 1;
         let id = self.toast_seq;
-        self.toasts.push((id, text.into()));
+        self.toasts.push((id, title, description));
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(TOAST_FOR).await;
             this.update(cx, |page, cx| {
-                page.toasts.retain(|(toast, _)| *toast != id);
+                page.toasts.retain(|(toast, _, _)| *toast != id);
                 cx.notify();
             })
             .ok();
@@ -1458,7 +1479,7 @@ impl PullRequestsPage {
     fn render_toasts(&self, theme: &Theme) -> Option<AnyElement> {
         (!self.toasts.is_empty()).then(|| {
             let popup = theme.for_popup();
-            div()
+            let stack = div()
                 .absolute()
                 .right(px(16.0))
                 .bottom(px(16.0))
@@ -1466,18 +1487,30 @@ impl PullRequestsPage {
                 .flex_col()
                 .items_end()
                 .gap(px(8.0))
-                .children(self.toasts.iter().map(|(id, text)| {
+                .children(self.toasts.iter().map(|(id, text, description)| {
                     crate::popover::popover_card(&popup)
+                        .bg(popup.surface_dialog)
                         .id(("pull-requests-toast", *id as usize))
                         .role(gpui::Role::Alert)
                         .aria_label(text.clone())
+                        .max_w(px(360.0))
                         .px(px(12.0))
                         .py(px(8.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
                         .text_size(px(12.0))
                         .text_color(popup.text)
-                        .child(text.clone())
-                }))
-                .into_any_element()
+                        .child(
+                            div()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .child(text.clone()),
+                        )
+                        .children(description.clone().map(|description| {
+                            div().text_color(popup.text_muted).child(description)
+                        }))
+                }));
+            gpui::deferred(stack).with_priority(3).into_any_element()
         })
     }
 }
@@ -1606,6 +1639,7 @@ impl Render for PullRequestsPage {
                     .child(resizer)
                     .child(panel)
             }))
+            .children(self.render_confirm(&theme, cx))
             .children(self.render_toasts(&theme))
     }
 }

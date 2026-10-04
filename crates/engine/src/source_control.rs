@@ -15,6 +15,12 @@ use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use zeron_proto::{
+    ChangeRequestAction, ChangeRequestAutoMerge, ChangeRequestLabelCandidate,
+    ChangeRequestLabelCandidates, ChangeRequestMergeMethod, ChangeRequestPermissions,
+    ChangeRequestReviewerCandidate, ChangeRequestReviewerCandidates, RunChangeRequestActionRequest,
+    SetChangeRequestLabelRequest, SetChangeRequestReviewerRequest, UpdateChangeRequestRequest,
+};
+use zeron_proto::{
     ChangeRequestActivity, ChangeRequestActivityComment, ChangeRequestActivityCommit,
     ChangeRequestCommit, ChangeRequestDiffSlice, ChangeRequestFileStat, ChangeRequestReaction,
     ChangeRequestReactionContent, GetChangeRequestDiffRequest, PostChangeRequestCommentRequest,
@@ -39,7 +45,7 @@ const GITHUB_OUTPUT_LIMIT: usize = 1024 * 1024;
 const GITHUB_LIST_OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
 const GITHUB_RESULT_LIMIT: &str = "20";
 const GITHUB_JSON_FIELDS: &str = "number,title,url,state,baseRefName,headRefName,updatedAt,isCrossRepository,headRepositoryOwner";
-const GITHUB_DETAIL_FIELDS: &str = "number,title,url,author,headRefName,baseRefName,state,isDraft,mergeable,reviewDecision,createdAt,updatedAt,mergedAt,reviewRequests,labels,additions,deletions,statusCheckRollup,body,changedFiles,closedAt,isCrossRepository,comments,reviews,latestReviews,commits";
+const GITHUB_DETAIL_FIELDS: &str = "number,title,url,author,headRefName,baseRefName,state,isDraft,mergeable,reviewDecision,createdAt,updatedAt,mergedAt,reviewRequests,labels,additions,deletions,statusCheckRollup,body,changedFiles,closedAt,isCrossRepository,comments,reviews,latestReviews,commits,autoMergeRequest,headRepositoryOwner";
 const GITHUB_LIST_FIELDS: &str = "number,title,url,author,headRefName,baseRefName,state,isDraft,mergeable,reviewDecision,createdAt,updatedAt,mergedAt,reviewRequests,labels";
 const GITHUB_SEARCH_FIELDS: &str = "number title url author { login } headRefName baseRefName state isDraft mergeable reviewDecision createdAt updatedAt mergedAt repository { nameWithOwner } reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login } } } } labels(first: 20) { nodes { name color } } commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }";
 const GITHUB_DIFF_TIMEOUT: Duration = Duration::from_secs(60);
@@ -560,6 +566,406 @@ impl ChangeRequestResolver {
             .map(|_| ())
     }
 
+    /// What the reader may do on this pull request, read fresh from the host (t3code
+    /// `getViewerPermissions`): repository merge strategies and access, and whether the branch
+    /// can be brought up to date.
+    pub async fn get_change_request_permissions(
+        &self,
+        roots: &[PathBuf],
+        request: &GetChangeRequestRequest,
+    ) -> Result<ChangeRequestPermissions, ChangeRequestError> {
+        let identity = self
+            .space_identity(roots, &request.host, &request.repository)
+            .await?;
+        self.permissions(&identity, request.number).await
+    }
+
+    async fn permissions(
+        &self,
+        identity: &RepositoryIdentity,
+        number: u64,
+    ) -> Result<ChangeRequestPermissions, ChangeRequestError> {
+        let raw = self
+            .github
+            .graphql(
+                identity,
+                PERMISSIONS_QUERY,
+                activity_variables(identity, number, None),
+            )
+            .await?;
+        let response: GhPermissionsResponse =
+            serde_json::from_slice(&raw).map_err(|_| ChangeRequestError::Decode)?;
+        let repository = response
+            .data
+            .and_then(|data| data.repository)
+            .ok_or(ChangeRequestError::Decode)?;
+        let flags = repository_flags(&repository);
+        let pull = repository
+            .pull_request
+            .as_ref()
+            .ok_or(ChangeRequestError::Decode)?;
+        let mut permissions = to_permissions(&flags, pull);
+        let open = pull.state.eq_ignore_ascii_case("OPEN");
+        if let (true, Some(owner)) = (open, pull.head_repository_owner.as_ref()) {
+            let mut variables = activity_variables(identity, number, None);
+            variables["headRef"] =
+                serde_json::Value::String(format!("{}:{}", owner.login, pull.head_ref_name));
+            let comparison = self
+                .github
+                .graphql(identity, BASE_COMPARISON_QUERY, variables)
+                .await
+                .ok()
+                .and_then(|raw| serde_json::from_slice::<GhComparisonResponse>(&raw).ok())
+                .and_then(|response| response.data?.repository?.pull_request);
+            if let Some(comparison) = comparison {
+                permissions.can_update_branch = comparison.viewer_can_update_branch == Some(true);
+                permissions.behind_by = comparison
+                    .base_ref
+                    .and_then(|base| base.compare)
+                    .map(|compare| compare.behind_by);
+            }
+        }
+        permissions.default_branch = repository.default_branch_ref.map(|branch| branch.name);
+        Ok(permissions)
+    }
+
+    /// Runs one host action after a fresh permission read; a comment, when given, is posted
+    /// first so a refused close still leaves it on the pull request (t3code `Panel:900-917`).
+    pub async fn run_change_request_action(
+        &self,
+        roots: &[PathBuf],
+        request: &RunChangeRequestActionRequest,
+    ) -> Result<(), ActionError> {
+        let identity = self
+            .space_identity(roots, &request.host, &request.repository)
+            .await?;
+        let permissions = self.permissions(&identity, request.number).await?;
+        action_allowed(request.action, &permissions).map_err(ActionError::Refused)?;
+        let repo = format!("{}/{}", identity.remote.host, identity.name_with_owner());
+        let number = request.number.to_string();
+        if let Some(comment) = request
+            .comment
+            .as_deref()
+            .filter(|comment| !comment.trim().is_empty())
+        {
+            self.github
+                .run_gh_action(
+                    &identity.root,
+                    vec![
+                        "pr".into(),
+                        "comment".into(),
+                        number.clone(),
+                        "--repo".into(),
+                        repo.clone(),
+                        "--body-file".into(),
+                        "-".into(),
+                    ],
+                    Some(comment.as_bytes().to_vec()),
+                )
+                .await?;
+        }
+        let pr = |args: &[&str]| -> Vec<String> {
+            let mut all: Vec<String> = vec!["pr".into()];
+            all.push(args[0].into());
+            all.push(number.clone());
+            all.extend(["--repo".into(), repo.clone()]);
+            all.extend(args[1..].iter().map(|arg| (*arg).to_owned()));
+            all
+        };
+        let args = match request.action {
+            ChangeRequestAction::Merge { method } => pr(&["merge", merge_flag(method)]),
+            ChangeRequestAction::EnableAutoMerge { method } => {
+                pr(&["merge", "--auto", merge_flag(method)])
+            }
+            ChangeRequestAction::DisableAutoMerge => pr(&["merge", "--disable-auto"]),
+            ChangeRequestAction::Ready => pr(&["ready"]),
+            ChangeRequestAction::Draft => pr(&["ready", "--undo"]),
+            ChangeRequestAction::Close => pr(&["close"]),
+            ChangeRequestAction::Reopen => pr(&["reopen"]),
+            ChangeRequestAction::UpdateBranch { rebase } => {
+                if rebase {
+                    pr(&["update-branch", "--rebase"])
+                } else {
+                    pr(&["update-branch"])
+                }
+            }
+            ChangeRequestAction::Revert => {
+                let pull = self.pull_request_id(&identity, request.number).await?;
+                self.github
+                    .graphql_action(
+                        &identity,
+                        "mutation($pullRequestId: ID!) { revertPullRequest(input: { pullRequestId: $pullRequestId }) { revertPullRequest { id } } }",
+                        serde_json::json!({ "pullRequestId": pull }),
+                    )
+                    .await?;
+                return Ok(());
+            }
+            ChangeRequestAction::ApproveWorkflows => {
+                return self.approve_workflows(&identity, request.number).await;
+            }
+        };
+        self.github
+            .run_gh_action(&identity.root, args, None)
+            .await
+            .map(|_| ())
+    }
+
+    /// Fork pull requests only: re-reads the checks so the runs approved are the ones waiting
+    /// now, not the ones the reader saw.
+    async fn approve_workflows(
+        &self,
+        identity: &RepositoryIdentity,
+        number: u64,
+    ) -> Result<(), ActionError> {
+        let view = self.github.view_pull_request(identity, number).await?;
+        if !view.is_cross_repository {
+            return Ok(());
+        }
+        let runs: Vec<String> = view
+            .summary
+            .status_check_rollup
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|check| {
+                let url = check.details_url.or(check.target_url)?;
+                let state = check
+                    .conclusion
+                    .or(check.state)
+                    .unwrap_or_default()
+                    .to_ascii_uppercase();
+                (state == "ACTION_REQUIRED").then_some(())?;
+                workflow_run_id(&url)
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        for run in runs {
+            self.github
+                .run_gh_action(
+                    &identity.root,
+                    vec![
+                        "api".into(),
+                        "--method".into(),
+                        "POST".into(),
+                        "--hostname".into(),
+                        identity.remote.host.clone(),
+                        format!(
+                            "repos/{}/actions/runs/{run}/approve",
+                            identity.name_with_owner()
+                        ),
+                        "--silent".into(),
+                    ],
+                    None,
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn pull_request_id(
+        &self,
+        identity: &RepositoryIdentity,
+        number: u64,
+    ) -> Result<String, ChangeRequestError> {
+        let raw = self
+            .github
+            .graphql(
+                identity,
+                PULL_REQUEST_ID_QUERY,
+                activity_variables(identity, number, None),
+            )
+            .await?;
+        let scope: GhScopeResponse =
+            serde_json::from_slice(&raw).map_err(|_| ChangeRequestError::Decode)?;
+        subject_in_scope(&scope, None).ok_or(ChangeRequestError::Decode)
+    }
+
+    /// Title and description edits; an omitted field is left as it is on the host.
+    pub async fn update_change_request(
+        &self,
+        roots: &[PathBuf],
+        request: &UpdateChangeRequestRequest,
+    ) -> Result<(), ActionError> {
+        let title = request.title.as_deref().map(str::trim);
+        if title.is_some_and(str::is_empty) {
+            return Err(ActionError::Refused("A title cannot be empty.".into()));
+        }
+        if title.is_none() && request.body.is_none() {
+            return Err(ActionError::Refused("Nothing was changed.".into()));
+        }
+        let identity = self
+            .space_identity(roots, &request.host, &request.repository)
+            .await?;
+        let pull = self.pull_request_id(&identity, request.number).await?;
+        let mut variables = serde_json::json!({ "pullRequestId": pull });
+        if let Some(title) = title {
+            variables["title"] = serde_json::Value::String(title.to_owned());
+        }
+        if let Some(body) = &request.body {
+            variables["body"] = serde_json::Value::String(body.clone());
+        }
+        self.github
+            .graphql_action(
+                &identity,
+                "mutation($pullRequestId: ID!, $title: String, $body: String) { updatePullRequest(input: { pullRequestId: $pullRequestId, title: $title, body: $body }) { pullRequest { id } } }",
+                variables,
+            )
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn list_change_request_label_candidates(
+        &self,
+        roots: &[PathBuf],
+        request: &GetChangeRequestRequest,
+    ) -> Result<ChangeRequestLabelCandidates, ChangeRequestError> {
+        let identity = self
+            .space_identity(roots, &request.host, &request.repository)
+            .await?;
+        let raw = self
+            .github
+            .graphql(
+                &identity,
+                LABEL_CANDIDATES_QUERY,
+                activity_variables(&identity, request.number, None),
+            )
+            .await?;
+        let response: GhLabelCandidatesResponse =
+            serde_json::from_slice(&raw).map_err(|_| ChangeRequestError::Decode)?;
+        let repository = response
+            .data
+            .and_then(|data| data.repository)
+            .ok_or(ChangeRequestError::Decode)?;
+        Ok(to_label_candidates(repository))
+    }
+
+    pub async fn set_change_request_label(
+        &self,
+        roots: &[PathBuf],
+        request: &SetChangeRequestLabelRequest,
+    ) -> Result<(), ActionError> {
+        let name = request.name.trim();
+        if name.is_empty() {
+            return Err(ActionError::Refused("A label needs a name.".into()));
+        }
+        let identity = self
+            .space_identity(roots, &request.host, &request.repository)
+            .await?;
+        let permissions = self.permissions(&identity, request.number).await?;
+        if !permissions.can_triage {
+            return Err(ActionError::Refused(
+                "You need triage access on this repository to change its labels.".into(),
+            ));
+        }
+        let path = format!(
+            "repos/{}/issues/{}/labels",
+            identity.name_with_owner(),
+            request.number
+        );
+        let mut args: Vec<String> = vec!["api".into(), "--method".into()];
+        let input = if request.add {
+            args.extend([
+                "POST".into(),
+                "--hostname".into(),
+                identity.remote.host.clone(),
+                path,
+                "--input".into(),
+                "-".into(),
+            ]);
+            Some(
+                serde_json::to_vec(&serde_json::json!({ "labels": [name] }))
+                    .map_err(|_| ActionError::Host(ChangeRequestError::Decode))?,
+            )
+        } else {
+            args.extend([
+                "DELETE".into(),
+                "--hostname".into(),
+                identity.remote.host.clone(),
+                format!("{path}/{}", percent_encode(name)),
+            ]);
+            None
+        };
+        self.github
+            .run_gh_action(&identity.root, args, input)
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn list_change_request_reviewer_candidates(
+        &self,
+        roots: &[PathBuf],
+        request: &GetChangeRequestRequest,
+    ) -> Result<ChangeRequestReviewerCandidates, ChangeRequestError> {
+        let identity = self
+            .space_identity(roots, &request.host, &request.repository)
+            .await?;
+        let raw = self
+            .github
+            .graphql(
+                &identity,
+                REVIEWER_CANDIDATES_QUERY,
+                activity_variables(&identity, request.number, None),
+            )
+            .await?;
+        let response: GhReviewerCandidatesResponse =
+            serde_json::from_slice(&raw).map_err(|_| ChangeRequestError::Decode)?;
+        let repository = response
+            .data
+            .and_then(|data| data.repository)
+            .ok_or(ChangeRequestError::Decode)?;
+        Ok(to_reviewer_candidates(repository))
+    }
+
+    pub async fn set_change_request_reviewer(
+        &self,
+        roots: &[PathBuf],
+        request: &SetChangeRequestReviewerRequest,
+    ) -> Result<(), ActionError> {
+        if !valid_login(&request.login) {
+            return Err(ActionError::Refused(
+                "That reviewer name is not valid.".into(),
+            ));
+        }
+        let identity = self
+            .space_identity(roots, &request.host, &request.repository)
+            .await?;
+        let permissions = self.permissions(&identity, request.number).await?;
+        if !permissions.can_write {
+            return Err(ActionError::Refused(
+                "Asking someone to review needs write access on this repository".into(),
+            ));
+        }
+        let body = if request.team {
+            serde_json::json!({ "team_reviewers": [request.login] })
+        } else {
+            serde_json::json!({ "reviewers": [request.login] })
+        };
+        self.github
+            .run_gh_action(
+                &identity.root,
+                vec![
+                    "api".into(),
+                    "--method".into(),
+                    if request.add { "POST" } else { "DELETE" }.into(),
+                    "--hostname".into(),
+                    identity.remote.host.clone(),
+                    format!(
+                        "repos/{}/pulls/{}/requested_reviewers",
+                        identity.name_with_owner(),
+                        request.number
+                    ),
+                    "--input".into(),
+                    "-".into(),
+                ],
+                Some(
+                    serde_json::to_vec(&body)
+                        .map_err(|_| ActionError::Host(ChangeRequestError::Decode))?,
+                ),
+            )
+            .await
+            .map(|_| ())
+    }
+
     async fn space_identity(
         &self,
         roots: &[PathBuf],
@@ -957,6 +1363,67 @@ impl GitHubCli {
             )
             .await?;
         serde_json::from_slice(&stdout).map_err(|_| ChangeRequestError::Decode)
+    }
+
+    /// A write: the host's own refusal comes back in words rather than as a bare failure class.
+    async fn run_gh_action(
+        &self,
+        cwd: &Path,
+        args: Vec<String>,
+        stdin: Option<Vec<u8>>,
+    ) -> Result<Vec<u8>, ActionError> {
+        let request = ProcessRequest {
+            program: "gh".into(),
+            args,
+            cwd: cwd.to_owned(),
+            env: vec![("GH_PROMPT_DISABLED".into(), "1".into())],
+            timeout: GITHUB_LIST_TIMEOUT,
+            output_limit: GITHUB_OUTPUT_LIMIT,
+            stdin,
+        };
+        let output = self.runner.run(request).await.map_err(classify_run_error)?;
+        if output.success {
+            return Ok(output.stdout);
+        }
+        match classify_github_failure(&output.stderr) {
+            ChangeRequestError::CommandFailed => {
+                Err(ActionError::Refused(readable_failure(&output.stderr)))
+            }
+            other => Err(ActionError::Host(other)),
+        }
+    }
+
+    async fn graphql_action(
+        &self,
+        identity: &RepositoryIdentity,
+        query: &str,
+        variables: serde_json::Value,
+    ) -> Result<Vec<u8>, ActionError> {
+        let input = serde_json::to_vec(&serde_json::json!({
+            "query": query,
+            "variables": variables,
+        }))
+        .map_err(|_| ActionError::Host(ChangeRequestError::Decode))?;
+        let stdout = self
+            .run_gh_action(
+                &identity.root,
+                vec![
+                    "api".into(),
+                    "graphql".into(),
+                    "--hostname".into(),
+                    identity.remote.host.clone(),
+                    "--input".into(),
+                    "-".into(),
+                ],
+                Some(input),
+            )
+            .await?;
+        let errors: GhGraphqlErrors = serde_json::from_slice(&stdout).unwrap_or_default();
+        if let Some(error) = errors.errors.first() {
+            let message = error["message"].as_str().unwrap_or_default();
+            return Err(ActionError::Refused(readable_failure(message.as_bytes())));
+        }
+        Ok(stdout)
     }
 
     async fn graphql(
@@ -2146,6 +2613,17 @@ struct GhDetailPullRequest {
     latest_reviews: Option<Vec<GhReview>>,
     #[serde(default)]
     commits: Option<Vec<GhCommit>>,
+    #[serde(default)]
+    auto_merge_request: Option<GhAutoMergeRequest>,
+    #[serde(default)]
+    head_repository_owner: Option<GhActor>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhAutoMergeRequest {
+    #[serde(default)]
+    merge_method: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2658,6 +3136,424 @@ fn to_activity(
     }
 }
 
+/// A refusal the reader should see in words: a permission gate here, or the host's own message
+/// for a write it turned down. Anything else stays a classified [`ChangeRequestError`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActionError {
+    Refused(String),
+    Host(ChangeRequestError),
+}
+
+impl From<ChangeRequestError> for ActionError {
+    fn from(error: ChangeRequestError) -> Self {
+        Self::Host(error)
+    }
+}
+
+const PERMISSIONS_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed viewerPermission defaultBranchRef { name } pullRequest(number: $number) { state viewerCanUpdate viewerDidAuthor headRefName headRepositoryOwner { login } } } }";
+const BASE_COMPARISON_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!, $headRef: String!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { viewerCanUpdateBranch baseRef { compare(headRef: $headRef) { behindBy } } } } }";
+const LABEL_CANDIDATES_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { labels(first: 100, orderBy: { field: NAME, direction: ASC }) { pageInfo { hasNextPage } nodes { name color description } } pullRequest(number: $number) { labels(first: 100) { nodes { name } } } } }";
+const REVIEWER_CANDIDATES_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { assignableUsers(first: 100) { pageInfo { hasNextPage } nodes { login name } } pullRequest(number: $number) { author { login } reviewRequests(first: 100) { nodes { requestedReviewer { ... on User { login name } ... on Team { slug name } ... on Bot { login } } } } } } }";
+
+#[derive(Debug, Deserialize)]
+struct GhPermissionsResponse {
+    #[serde(default)]
+    data: Option<GhPermissionsData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhPermissionsData {
+    #[serde(default)]
+    repository: Option<GhPermissionsRepository>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhPermissionsRepository {
+    #[serde(default)]
+    merge_commit_allowed: bool,
+    #[serde(default)]
+    squash_merge_allowed: bool,
+    #[serde(default)]
+    rebase_merge_allowed: bool,
+    #[serde(default)]
+    viewer_permission: Option<String>,
+    #[serde(default)]
+    default_branch_ref: Option<GhRefName>,
+    #[serde(default)]
+    pull_request: Option<GhPermissionsPull>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhRefName {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhPermissionsPull {
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    viewer_can_update: Option<bool>,
+    #[serde(default)]
+    viewer_did_author: Option<bool>,
+    #[serde(default)]
+    head_ref_name: String,
+    #[serde(default)]
+    head_repository_owner: Option<GhActor>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhComparisonResponse {
+    #[serde(default)]
+    data: Option<GhComparisonData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhComparisonData {
+    #[serde(default)]
+    repository: Option<GhComparisonRepository>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhComparisonRepository {
+    #[serde(default)]
+    pull_request: Option<GhComparisonPull>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhComparisonPull {
+    #[serde(default)]
+    viewer_can_update_branch: Option<bool>,
+    #[serde(default)]
+    base_ref: Option<GhComparisonBase>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhComparisonBase {
+    #[serde(default)]
+    compare: Option<GhCompare>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhCompare {
+    behind_by: u64,
+}
+
+struct RepositoryFlags {
+    merge: bool,
+    squash: bool,
+    rebase: bool,
+    permission: String,
+}
+
+fn repository_flags(repository: &GhPermissionsRepository) -> RepositoryFlags {
+    RepositoryFlags {
+        merge: repository.merge_commit_allowed,
+        squash: repository.squash_merge_allowed,
+        rebase: repository.rebase_merge_allowed,
+        permission: repository
+            .viewer_permission
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_uppercase(),
+    }
+}
+
+/// t3code S6.5: write is ADMIN/MAINTAIN/WRITE, triage adds TRIAGE, update is unknown-means-yes.
+fn to_permissions(flags: &RepositoryFlags, pull: &GhPermissionsPull) -> ChangeRequestPermissions {
+    let can_write = matches!(flags.permission.as_str(), "ADMIN" | "MAINTAIN" | "WRITE");
+    let merge_methods = [
+        (flags.merge, ChangeRequestMergeMethod::Merge),
+        (flags.squash, ChangeRequestMergeMethod::Squash),
+        (flags.rebase, ChangeRequestMergeMethod::Rebase),
+    ]
+    .into_iter()
+    .filter_map(|(allowed, method)| allowed.then_some(method))
+    .collect();
+    ChangeRequestPermissions {
+        merge_methods,
+        can_write,
+        can_triage: can_write || flags.permission == "TRIAGE",
+        can_update: pull.viewer_can_update != Some(false),
+        did_author: pull.viewer_did_author == Some(true),
+        can_update_branch: false,
+        behind_by: None,
+        default_branch: None,
+    }
+}
+
+fn action_allowed(
+    action: ChangeRequestAction,
+    permissions: &ChangeRequestPermissions,
+) -> Result<(), String> {
+    let method = match action {
+        ChangeRequestAction::Merge { method } | ChangeRequestAction::EnableAutoMerge { method } => {
+            Some(method)
+        }
+        _ => None,
+    };
+    if let Some(method) = method
+        && !permissions.merge_methods.contains(&method)
+    {
+        return Err(format!(
+            "This host cannot merge with the {} strategy.",
+            merge_flag(method).trim_start_matches("--")
+        ));
+    }
+    let allowed = match action {
+        ChangeRequestAction::Merge { .. }
+        | ChangeRequestAction::EnableAutoMerge { .. }
+        | ChangeRequestAction::DisableAutoMerge
+        | ChangeRequestAction::Revert
+        | ChangeRequestAction::ApproveWorkflows => permissions.can_write,
+        ChangeRequestAction::Ready
+        | ChangeRequestAction::Draft
+        | ChangeRequestAction::Close
+        | ChangeRequestAction::Reopen => permissions.can_update,
+        ChangeRequestAction::UpdateBranch { .. } => permissions.can_update_branch,
+    };
+    if allowed {
+        Ok(())
+    } else {
+        Err(match action {
+            ChangeRequestAction::UpdateBranch { .. } => {
+                "This branch cannot be updated from here.".to_string()
+            }
+            ChangeRequestAction::Ready
+            | ChangeRequestAction::Draft
+            | ChangeRequestAction::Close
+            | ChangeRequestAction::Reopen => {
+                "You cannot change this pull request on this repository.".to_string()
+            }
+            _ => "You need write access on this repository to merge.".to_string(),
+        })
+    }
+}
+
+fn merge_flag(method: ChangeRequestMergeMethod) -> &'static str {
+    match method {
+        ChangeRequestMergeMethod::Merge => "--merge",
+        ChangeRequestMergeMethod::Squash => "--squash",
+        ChangeRequestMergeMethod::Rebase => "--rebase",
+    }
+}
+
+/// The run id in `…/actions/runs/<id>[/…]`, digits only.
+fn workflow_run_id(url: &str) -> Option<String> {
+    let (_, rest) = url.split_once("/actions/runs/")?;
+    let id: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    (!id.is_empty()).then_some(id)
+}
+
+/// RFC 3986 unreserved characters pass through; everything else is `%XX`.
+fn percent_encode(value: &str) -> String {
+    value
+        .bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (byte as char).to_string()
+            }
+            other => format!("%{other:02X}"),
+        })
+        .collect()
+}
+
+/// The host's own words for a refused write, capped like t3code's `readableFailure`.
+fn readable_failure(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let text = text.trim();
+    if text.chars().count() > 320 {
+        format!("{}…", text.chars().take(319).collect::<String>())
+    } else {
+        text.to_owned()
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct GhLabelCandidatesResponse {
+    #[serde(default)]
+    data: Option<GhLabelCandidatesData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhLabelCandidatesData {
+    #[serde(default)]
+    repository: Option<GhLabelCandidatesRepository>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhLabelCandidatesRepository {
+    #[serde(default)]
+    labels: GhConnection<GhRepoLabel>,
+    #[serde(default)]
+    pull_request: Option<GhLabelledPull>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhRepoLabel {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    color: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhLabelledPull {
+    #[serde(default)]
+    labels: GhConnection<GhRepoLabel>,
+}
+
+/// Repository labels by name; applied ones the first page missed are put first (t3code
+/// GHJ:2277-2310).
+fn to_label_candidates(repository: GhLabelCandidatesRepository) -> ChangeRequestLabelCandidates {
+    let applied: Vec<String> = repository
+        .pull_request
+        .map(|pull| pull.labels.nodes)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|label| label.name.trim().to_owned())
+        .filter(|name| !name.is_empty())
+        .collect();
+    let mut labels: Vec<ChangeRequestLabelCandidate> = repository
+        .labels
+        .nodes
+        .into_iter()
+        .filter(|label| !label.name.trim().is_empty())
+        .map(|label| ChangeRequestLabelCandidate {
+            applied: applied.iter().any(|name| name == label.name.trim()),
+            name: label.name.trim().to_owned(),
+            color: label.color,
+            description: label.description.filter(|text| !text.trim().is_empty()),
+        })
+        .collect();
+    let missing: Vec<ChangeRequestLabelCandidate> = applied
+        .iter()
+        .filter(|name| !labels.iter().any(|label| &label.name == *name))
+        .map(|name| ChangeRequestLabelCandidate {
+            name: name.clone(),
+            color: None,
+            description: None,
+            applied: true,
+        })
+        .collect();
+    labels.splice(0..0, missing);
+    ChangeRequestLabelCandidates {
+        labels,
+        truncated: repository.labels.page_info.has_next_page,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct GhReviewerCandidatesResponse {
+    #[serde(default)]
+    data: Option<GhReviewerCandidatesData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhReviewerCandidatesData {
+    #[serde(default)]
+    repository: Option<GhReviewerCandidatesRepository>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhReviewerCandidatesRepository {
+    #[serde(default)]
+    assignable_users: GhConnection<GhNamedActor>,
+    #[serde(default)]
+    pull_request: Option<GhRequestedPull>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhNamedActor {
+    #[serde(default)]
+    login: Option<String>,
+    #[serde(default)]
+    slug: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhRequestedPull {
+    #[serde(default)]
+    author: Option<GhActor>,
+    #[serde(default)]
+    review_requests: GhConnection<GhRequestedReviewerNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhRequestedReviewerNode {
+    #[serde(default)]
+    requested_reviewer: Option<GhNamedActor>,
+}
+
+/// Already-requested reviewers first (teams by slug), then everyone with access except the
+/// author and those already listed (t3code GHJ:2162-2203).
+fn to_reviewer_candidates(
+    repository: GhReviewerCandidatesRepository,
+) -> ChangeRequestReviewerCandidates {
+    let pull = repository.pull_request;
+    let author = pull
+        .as_ref()
+        .and_then(|pull| pull.author.as_ref())
+        .map(|author| author.login.clone());
+    let mut reviewers: Vec<ChangeRequestReviewerCandidate> = Vec::new();
+    for node in pull
+        .map(|pull| pull.review_requests.nodes)
+        .unwrap_or_default()
+    {
+        let Some(actor) = node.requested_reviewer else {
+            continue;
+        };
+        let (login, team) = match (actor.login, actor.slug) {
+            (Some(login), _) => (login, false),
+            (None, Some(slug)) => (slug, true),
+            (None, None) => continue,
+        };
+        reviewers.push(ChangeRequestReviewerCandidate {
+            login,
+            name: actor.name.filter(|name| !name.trim().is_empty()),
+            team,
+            requested: true,
+        });
+    }
+    for user in repository.assignable_users.nodes {
+        let Some(login) = user.login else {
+            continue;
+        };
+        let taken = author
+            .as_deref()
+            .is_some_and(|author| author.eq_ignore_ascii_case(&login))
+            || reviewers
+                .iter()
+                .any(|reviewer| !reviewer.team && reviewer.login.eq_ignore_ascii_case(&login));
+        if !taken {
+            reviewers.push(ChangeRequestReviewerCandidate {
+                login,
+                name: user.name.filter(|name| !name.trim().is_empty()),
+                team: false,
+                requested: false,
+            });
+        }
+    }
+    ChangeRequestReviewerCandidates {
+        reviewers,
+        truncated: repository.assignable_users.page_info.has_next_page,
+    }
+}
+
 fn valid_commit_sha(commit: &str) -> bool {
     (7..=64).contains(&commit.len()) && commit.chars().all(|c| c.is_ascii_hexdigit())
 }
@@ -2922,6 +3818,22 @@ fn to_detail(
     let mut item = to_list_item(identity, viewer, view.summary)?;
     item.checks_state = rollup_of(&checks);
     let commits = view.commits.unwrap_or_default();
+    let auto_merge = view
+        .auto_merge_request
+        .map(|request| ChangeRequestAutoMerge {
+            method: match request
+                .merge_method
+                .as_deref()
+                .map(str::to_ascii_uppercase)
+                .as_deref()
+            {
+                Some("MERGE") => Some(ChangeRequestMergeMethod::Merge),
+                Some("SQUASH") => Some(ChangeRequestMergeMethod::Squash),
+                Some("REBASE") => Some(ChangeRequestMergeMethod::Rebase),
+                _ => None,
+            },
+        });
+    let head_owner = view.head_repository_owner.map(|owner| owner.login);
     let newest_commit = commits
         .iter()
         .filter_map(|commit| commit.committed_date)
@@ -3030,6 +3942,8 @@ fn to_detail(
                 committed_at: commit.committed_date,
             })
             .collect(),
+        auto_merge,
+        head_owner,
     })
 }
 
@@ -4990,6 +5904,359 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
         assert!(renders_empty("  <!-- a -->\n<!-- b -->  "));
         assert!(renders_empty("<!-- unterminated"));
         assert!(!renders_empty("<!-- a --> hi"));
+    }
+
+    fn permissions_json(permission: &str, state: &str) -> serde_json::Value {
+        serde_json::json!({"data": {"repository": {
+            "mergeCommitAllowed": true,
+            "squashMergeAllowed": true,
+            "rebaseMergeAllowed": false,
+            "viewerPermission": permission,
+            "defaultBranchRef": {"name": "main"},
+            "pullRequest": {
+                "state": state,
+                "viewerCanUpdate": true,
+                "viewerDidAuthor": false,
+                "headRefName": "feature/x",
+                "headRepositoryOwner": {"login": "fork"}
+            }
+        }}})
+    }
+
+    fn action_runner(
+        permission: &'static str,
+        merge_stderr: Option<&'static str>,
+    ) -> Arc<ScriptedRunner> {
+        ScriptedRunner::new(move |request| {
+            if let Some(output) = git_repo_script(request) {
+                return output;
+            }
+            if request.args[..2] == ["api", "graphql"] {
+                let input = stdin_json(request);
+                let query = input["query"].as_str().unwrap();
+                if query.contains("viewerPermission") {
+                    return command_success(
+                        serde_json::to_vec(&permissions_json(permission, "OPEN")).unwrap(),
+                    );
+                }
+                if query.contains("compare(headRef") {
+                    assert_eq!(input["variables"]["headRef"], "fork:feature/x");
+                    return command_success(
+                        r#"{"data":{"repository":{"pullRequest":{"viewerCanUpdateBranch":true,"baseRef":{"compare":{"behindBy":3}}}}}}"#,
+                    );
+                }
+                panic!("unexpected graphql {query}");
+            }
+            match request.args[1].as_str() {
+                "comment" => command_success(""),
+                "merge" | "close" => match merge_stderr {
+                    Some(stderr) => command_failure(stderr),
+                    None => command_success(""),
+                },
+                other => panic!("unexpected gh pr {other}"),
+            }
+        })
+    }
+
+    fn action(action: ChangeRequestAction, comment: Option<&str>) -> RunChangeRequestActionRequest {
+        RunChangeRequestActionRequest {
+            host: "github.com".into(),
+            repository: "acme/zeron".into(),
+            number: 7,
+            action,
+            comment: comment.map(str::to_owned),
+        }
+    }
+
+    #[tokio::test]
+    async fn permissions_follow_t3code_rules_and_read_the_base_comparison() {
+        let runner = action_runner("WRITE", None);
+        let permissions = list_resolver(runner)
+            .get_change_request_permissions(
+                &[PathBuf::from("/repo")],
+                &GetChangeRequestRequest {
+                    host: "github.com".into(),
+                    repository: "acme/zeron".into(),
+                    number: 7,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            permissions,
+            ChangeRequestPermissions {
+                merge_methods: vec![
+                    ChangeRequestMergeMethod::Merge,
+                    ChangeRequestMergeMethod::Squash
+                ],
+                can_write: true,
+                can_triage: true,
+                can_update: true,
+                did_author: false,
+                can_update_branch: true,
+                behind_by: Some(3),
+                default_branch: Some("main".into()),
+            }
+        );
+        let triage = to_permissions(
+            &RepositoryFlags {
+                merge: false,
+                squash: false,
+                rebase: true,
+                permission: "TRIAGE".into(),
+            },
+            &GhPermissionsPull {
+                state: "OPEN".into(),
+                viewer_can_update: None,
+                viewer_did_author: Some(true),
+                head_ref_name: String::new(),
+                head_repository_owner: None,
+            },
+        );
+        assert!(!triage.can_write && triage.can_triage && triage.can_update && triage.did_author);
+    }
+
+    #[tokio::test]
+    async fn actions_are_gated_post_the_comment_first_and_return_host_words() {
+        let roots = [PathBuf::from("/repo")];
+        let runner = action_runner("WRITE", None);
+        list_resolver(runner.clone())
+            .run_change_request_action(
+                &roots,
+                &action(ChangeRequestAction::Close, Some("closing: superseded")),
+            )
+            .await
+            .unwrap();
+        let writes: Vec<Vec<String>> = runner
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.program == "gh" && request.args[0] == "pr")
+            .map(|request| request.args.clone())
+            .collect();
+        assert_eq!(
+            writes,
+            [
+                vec![
+                    "pr",
+                    "comment",
+                    "7",
+                    "--repo",
+                    "github.com/acme/zeron",
+                    "--body-file",
+                    "-"
+                ],
+                vec!["pr", "close", "7", "--repo", "github.com/acme/zeron"],
+            ]
+            .map(|args| args.into_iter().map(str::to_owned).collect::<Vec<_>>())
+        );
+
+        let refused = list_resolver(action_runner(
+            "WRITE",
+            Some("GraphQL: Pull request is not mergeable (mergePullRequest)\n"),
+        ))
+        .run_change_request_action(
+            &roots,
+            &action(
+                ChangeRequestAction::Merge {
+                    method: ChangeRequestMergeMethod::Squash,
+                },
+                None,
+            ),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            refused,
+            ActionError::Refused(
+                "GraphQL: Pull request is not mergeable (mergePullRequest)".into()
+            )
+        );
+
+        for (permission, request, message) in [
+            (
+                "READ",
+                ChangeRequestAction::Merge {
+                    method: ChangeRequestMergeMethod::Merge,
+                },
+                "You need write access on this repository to merge.",
+            ),
+            (
+                "WRITE",
+                ChangeRequestAction::Merge {
+                    method: ChangeRequestMergeMethod::Rebase,
+                },
+                "This host cannot merge with the rebase strategy.",
+            ),
+        ] {
+            let runner = action_runner(permission, None);
+            let error = list_resolver(runner.clone())
+                .run_change_request_action(&roots, &action(request, None))
+                .await
+                .unwrap_err();
+            assert_eq!(error, ActionError::Refused(message.into()));
+            assert!(
+                runner
+                    .requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|request| request.args[0] != "pr"),
+                "a refused action never reaches gh pr"
+            );
+        }
+    }
+
+    #[test]
+    fn candidates_put_applied_and_requested_first() {
+        let labels: GhLabelCandidatesRepository = serde_json::from_value(serde_json::json!({
+            "labels": {"pageInfo": {"hasNextPage": true}, "nodes": [
+                {"name": "bug", "color": "d73a4a", "description": "Something is broken"},
+                {"name": "docs", "color": "0075ca", "description": ""}
+            ]},
+            "pullRequest": {"labels": {"nodes": [{"name": "docs"}, {"name": "old-label"}]}}
+        }))
+        .unwrap();
+        let labels = to_label_candidates(labels);
+        assert!(labels.truncated);
+        assert_eq!(
+            labels
+                .labels
+                .iter()
+                .map(|label| (
+                    label.name.as_str(),
+                    label.applied,
+                    label.description.is_some()
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("old-label", true, false),
+                ("bug", false, true),
+                ("docs", true, false)
+            ]
+        );
+        let reviewers: GhReviewerCandidatesRepository = serde_json::from_value(serde_json::json!({
+            "assignableUsers": {"pageInfo": {"hasNextPage": false}, "nodes": [
+                {"login": "alice", "name": "Alice"},
+                {"login": "Bob", "name": null},
+                {"login": "carol", "name": "Carol"}
+            ]},
+            "pullRequest": {
+                "author": {"login": "alice"},
+                "reviewRequests": {"nodes": [
+                    {"requestedReviewer": {"slug": "core", "name": "Core"}},
+                    {"requestedReviewer": {"login": "bob", "name": "Bob B"}}
+                ]}
+            }
+        }))
+        .unwrap();
+        let reviewers = to_reviewer_candidates(reviewers);
+        assert_eq!(
+            reviewers
+                .reviewers
+                .iter()
+                .map(|reviewer| (reviewer.login.as_str(), reviewer.team, reviewer.requested))
+                .collect::<Vec<_>>(),
+            [
+                ("core", true, true),
+                ("bob", false, true),
+                ("carol", false, false)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn labels_need_triage_and_encode_names_in_the_delete_path() {
+        let runner = ScriptedRunner::new(|request| {
+            if let Some(output) = git_repo_script(request) {
+                return output;
+            }
+            if request.args[..2] == ["api", "graphql"] {
+                let input = stdin_json(request);
+                let query = input["query"].as_str().unwrap();
+                if query.contains("viewerPermission") {
+                    return command_success(
+                        serde_json::to_vec(&permissions_json("TRIAGE", "CLOSED")).unwrap(),
+                    );
+                }
+                panic!("unexpected graphql");
+            }
+            command_success("")
+        });
+        list_resolver(runner.clone())
+            .set_change_request_label(
+                &[PathBuf::from("/repo")],
+                &SetChangeRequestLabelRequest {
+                    host: "github.com".into(),
+                    repository: "acme/zeron".into(),
+                    number: 7,
+                    name: "good first issue/ä".into(),
+                    add: false,
+                },
+            )
+            .await
+            .unwrap();
+        let delete = runner
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|request| request.args.iter().any(|arg| arg == "DELETE"))
+            .map(|request| request.args.last().unwrap().clone())
+            .unwrap();
+        assert_eq!(
+            delete,
+            "repos/acme/zeron/issues/7/labels/good%20first%20issue%2F%C3%A4"
+        );
+        assert_eq!(
+            workflow_run_id("https://github.com/a/b/actions/runs/123/job/9"),
+            Some("123".into())
+        );
+        assert_eq!(
+            workflow_run_id("https://github.com/a/b/actions/runs/x"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn title_edits_refuse_blank_titles_and_omit_untouched_fields() {
+        let runner = ScriptedRunner::new(|request| {
+            if let Some(output) = git_repo_script(request) {
+                return output;
+            }
+            let input = stdin_json(request);
+            let query = input["query"].as_str().unwrap();
+            if query.starts_with("mutation") {
+                assert!(input["variables"].get("title").is_none());
+                assert_eq!(input["variables"]["body"], "new body");
+                assert_eq!(input["variables"]["pullRequestId"], "PR_1");
+                return command_success(
+                    r#"{"data":{"updatePullRequest":{"pullRequest":{"id":"PR_1"}}}}"#,
+                );
+            }
+            command_success(r#"{"data":{"repository":{"pullRequest":{"id":"PR_1"}}}}"#)
+        });
+        let resolver = list_resolver(runner);
+        let request = |title: Option<&str>, body: Option<&str>| UpdateChangeRequestRequest {
+            host: "github.com".into(),
+            repository: "acme/zeron".into(),
+            number: 7,
+            title: title.map(str::to_owned),
+            body: body.map(str::to_owned),
+        };
+        let roots = [PathBuf::from("/repo")];
+        assert_eq!(
+            resolver
+                .update_change_request(&roots, &request(Some("  "), None))
+                .await
+                .unwrap_err(),
+            ActionError::Refused("A title cannot be empty.".into())
+        );
+        resolver
+            .update_change_request(&roots, &request(None, Some("new body")))
+            .await
+            .unwrap();
     }
 
     fn search_node(number: u64, author: &str, rollup: Option<&str>) -> serde_json::Value {

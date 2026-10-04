@@ -286,6 +286,10 @@ impl ActivityState {
         }
     }
 
+    pub(super) fn composer(&self) -> Entity<ComposerInput> {
+        self.composer.clone()
+    }
+
     pub(super) fn dismiss_picker(&mut self) -> bool {
         self.picker.take().is_some()
     }
@@ -962,7 +966,7 @@ impl PullRequestsPage {
         let state = &self.details[key].activity;
         let empty = state.composer.read(cx).text().trim().is_empty();
         let posting = state.posting;
-        let _ = detail;
+        let close = self.comment_box_actions(key, detail.item.state, empty, theme, cx);
         let key = key.clone();
         div()
             .mt(px(12.0))
@@ -986,26 +990,33 @@ impl PullRequestsPage {
                     .child(state.composer.clone()),
             )
             .child(
-                div().flex().justify_end().gap(px(8.0)).child(
-                    outline_button(
-                        "pr-comment-send",
-                        if posting {
-                            "Posting...".into()
-                        } else {
-                            "Comment".into()
-                        },
-                        theme,
-                    )
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap(px(8.0))
+                    .children(close)
                     .child(
-                        icon(icons::LUCIDE_SEND)
-                            .size(px(12.0))
-                            .text_color(theme.text_muted),
-                    )
-                    .when(empty || posting, |el| el.opacity(0.64).cursor_default())
-                    .when(!empty && !posting, |el| {
-                        el.on_click(cx.listener(move |page, _, _, cx| page.post_comment(&key, cx)))
-                    }),
-                ),
+                        outline_button(
+                            "pr-comment-send",
+                            if posting {
+                                "Posting...".into()
+                            } else {
+                                "Comment".into()
+                            },
+                            theme,
+                        )
+                        .child(
+                            icon(icons::LUCIDE_SEND)
+                                .size(px(12.0))
+                                .text_color(theme.text_muted),
+                        )
+                        .when(empty || posting, |el| el.opacity(0.64).cursor_default())
+                        .when(!empty && !posting, |el| {
+                            el.on_click(
+                                cx.listener(move |page, _, _, cx| page.post_comment(&key, cx)),
+                            )
+                        }),
+                    ),
             )
             .into_any_element()
     }

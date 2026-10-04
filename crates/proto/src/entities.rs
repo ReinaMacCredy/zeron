@@ -1214,6 +1214,134 @@ pub struct ChangeRequestDetail {
     pub commit_count: u64,
     #[serde(default)]
     pub commits: Vec<ChangeRequestCommit>,
+    #[serde(default)]
+    pub auto_merge: Option<ChangeRequestAutoMerge>,
+    #[serde(default)]
+    pub head_owner: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChangeRequestMergeMethod {
+    Merge,
+    Squash,
+    Rebase,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeRequestAutoMerge {
+    #[serde(default)]
+    pub method: Option<ChangeRequestMergeMethod>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeRequestPermissions {
+    pub merge_methods: Vec<ChangeRequestMergeMethod>,
+    pub can_write: bool,
+    pub can_triage: bool,
+    pub can_update: bool,
+    pub did_author: bool,
+    pub can_update_branch: bool,
+    #[serde(default)]
+    pub behind_by: Option<u64>,
+    #[serde(default)]
+    pub default_branch: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum ChangeRequestAction {
+    Merge { method: ChangeRequestMergeMethod },
+    EnableAutoMerge { method: ChangeRequestMergeMethod },
+    DisableAutoMerge,
+    Ready,
+    Draft,
+    Close,
+    Reopen,
+    UpdateBranch { rebase: bool },
+    Revert,
+    ApproveWorkflows,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunChangeRequestActionRequest {
+    pub host: String,
+    pub repository: String,
+    pub number: u64,
+    pub action: ChangeRequestAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateChangeRequestRequest {
+    pub host: String,
+    pub repository: String,
+    pub number: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeRequestLabelCandidate {
+    pub name: String,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub applied: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeRequestLabelCandidates {
+    pub labels: Vec<ChangeRequestLabelCandidate>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetChangeRequestLabelRequest {
+    pub host: String,
+    pub repository: String,
+    pub number: u64,
+    pub name: String,
+    pub add: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeRequestReviewerCandidate {
+    pub login: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    pub team: bool,
+    pub requested: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeRequestReviewerCandidates {
+    pub reviewers: Vec<ChangeRequestReviewerCandidate>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetChangeRequestReviewerRequest {
+    pub host: String,
+    pub repository: String,
+    pub number: u64,
+    pub login: String,
+    pub team: bool,
+    pub add: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

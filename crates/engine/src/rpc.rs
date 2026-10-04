@@ -1614,6 +1614,14 @@ const LOGIN_TUNNEL_TTL: Duration = Duration::from_secs(15 * 60);
 /// ControlRpc methods that honor `targetDeviceId` (feature-inventory §2.1). Extend this
 /// list (plus [`is_stream_method`] for streams) to make more of the surface
 /// device-addressable — the handlers themselves need no changes.
+/// Words for a refusal go through as plain text; a host failure stays a classified failure.
+fn action_failure(error: crate::source_control::ActionError) -> RpcError {
+    match error {
+        crate::source_control::ActionError::Refused(message) => RpcError::Failed(message),
+        crate::source_control::ActionError::Host(error) => change_request_failure(error),
+    }
+}
+
 fn change_request_failure(error: crate::source_control::ChangeRequestError) -> RpcError {
     RpcError::Failed(
         serde_json::to_string(&zeron_proto::ChangeRequestFailure::from(error)).unwrap_or_default(),
@@ -1698,6 +1706,13 @@ fn forwardable(method: &str) -> bool {
             | methods::GET_CHANGE_REQUEST_ACTIVITY
             | methods::POST_CHANGE_REQUEST_COMMENT
             | methods::SET_CHANGE_REQUEST_REACTION
+            | methods::GET_CHANGE_REQUEST_PERMISSIONS
+            | methods::RUN_CHANGE_REQUEST_ACTION
+            | methods::UPDATE_CHANGE_REQUEST
+            | methods::LIST_CHANGE_REQUEST_LABEL_CANDIDATES
+            | methods::SET_CHANGE_REQUEST_LABEL
+            | methods::LIST_CHANGE_REQUEST_REVIEWER_CANDIDATES
+            | methods::SET_CHANGE_REQUEST_REVIEWER
             | methods::GET_CHECKOUT_DIFF
             | methods::DISCARD_WORKING_TREE
             | methods::GET_CHECKOUT_FILE_DIFF_TEXT
@@ -2987,6 +3002,62 @@ impl RpcService for EngineRpc {
                 Ok(RpcReply::Value(
                     serde_json::to_value(detail).map_err(|e| RpcError::Failed(e.to_string()))?,
                 ))
+            }
+            methods::GET_CHANGE_REQUEST_PERMISSIONS => {
+                let p: zeron_proto::GetChangeRequestRequest = parse_params(params)?;
+                let permissions = crate::source_control::ChangeRequestResolver::new()
+                    .get_change_request_permissions(&self.change_request_space_roots(), &p)
+                    .await
+                    .map_err(change_request_failure)?;
+                RpcReply::value(&permissions)
+            }
+            methods::RUN_CHANGE_REQUEST_ACTION => {
+                let p: zeron_proto::RunChangeRequestActionRequest = parse_params(params)?;
+                crate::source_control::ChangeRequestResolver::new()
+                    .run_change_request_action(&self.change_request_space_roots(), &p)
+                    .await
+                    .map_err(action_failure)?;
+                Ok(RpcReply::Value(serde_json::Value::Null))
+            }
+            methods::UPDATE_CHANGE_REQUEST => {
+                let p: zeron_proto::UpdateChangeRequestRequest = parse_params(params)?;
+                crate::source_control::ChangeRequestResolver::new()
+                    .update_change_request(&self.change_request_space_roots(), &p)
+                    .await
+                    .map_err(action_failure)?;
+                Ok(RpcReply::Value(serde_json::Value::Null))
+            }
+            methods::LIST_CHANGE_REQUEST_LABEL_CANDIDATES => {
+                let p: zeron_proto::GetChangeRequestRequest = parse_params(params)?;
+                let candidates = crate::source_control::ChangeRequestResolver::new()
+                    .list_change_request_label_candidates(&self.change_request_space_roots(), &p)
+                    .await
+                    .map_err(change_request_failure)?;
+                RpcReply::value(&candidates)
+            }
+            methods::SET_CHANGE_REQUEST_LABEL => {
+                let p: zeron_proto::SetChangeRequestLabelRequest = parse_params(params)?;
+                crate::source_control::ChangeRequestResolver::new()
+                    .set_change_request_label(&self.change_request_space_roots(), &p)
+                    .await
+                    .map_err(action_failure)?;
+                Ok(RpcReply::Value(serde_json::Value::Null))
+            }
+            methods::LIST_CHANGE_REQUEST_REVIEWER_CANDIDATES => {
+                let p: zeron_proto::GetChangeRequestRequest = parse_params(params)?;
+                let candidates = crate::source_control::ChangeRequestResolver::new()
+                    .list_change_request_reviewer_candidates(&self.change_request_space_roots(), &p)
+                    .await
+                    .map_err(change_request_failure)?;
+                RpcReply::value(&candidates)
+            }
+            methods::SET_CHANGE_REQUEST_REVIEWER => {
+                let p: zeron_proto::SetChangeRequestReviewerRequest = parse_params(params)?;
+                crate::source_control::ChangeRequestResolver::new()
+                    .set_change_request_reviewer(&self.change_request_space_roots(), &p)
+                    .await
+                    .map_err(action_failure)?;
+                Ok(RpcReply::Value(serde_json::Value::Null))
             }
             methods::GET_CHANGE_REQUEST_ACTIVITY => {
                 let p: zeron_proto::GetChangeRequestRequest = parse_params(params)?;
@@ -4676,6 +4747,17 @@ mod tests {
         assert!(forwardable(methods::GET_CHANGE_REQUEST_ACTIVITY));
         assert!(forwardable(methods::POST_CHANGE_REQUEST_COMMENT));
         assert!(forwardable(methods::SET_CHANGE_REQUEST_REACTION));
+        for method in [
+            methods::GET_CHANGE_REQUEST_PERMISSIONS,
+            methods::RUN_CHANGE_REQUEST_ACTION,
+            methods::UPDATE_CHANGE_REQUEST,
+            methods::LIST_CHANGE_REQUEST_LABEL_CANDIDATES,
+            methods::SET_CHANGE_REQUEST_LABEL,
+            methods::LIST_CHANGE_REQUEST_REVIEWER_CANDIDATES,
+            methods::SET_CHANGE_REQUEST_REVIEWER,
+        ] {
+            assert!(forwardable(method), "{method}");
+        }
         assert!(forwardable(methods::DISCARD_WORKING_TREE));
         assert!(forwardable(methods::LIST_WORKSPACE_DIRECTORY));
         assert!(forwardable(methods::SEARCH_WORKSPACE_FILES));
