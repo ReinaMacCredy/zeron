@@ -947,6 +947,24 @@ impl EngineRpc {
         self.file_search_root(p).await
     }
 
+    /// The local project a repository root belongs to. Paths are compared canonically:
+    /// git reports `/private/tmp/...` for a space saved as `/tmp/...`.
+    fn change_request_space_id(&self, root: &str) -> Option<String> {
+        let local_device = self.doc_host.device_id();
+        let spaces = self.workspace.watch_spaces().borrow().clone();
+        let canonical = |path: &str| {
+            std::fs::canonicalize(path).unwrap_or_else(|_| std::path::PathBuf::from(path))
+        };
+        let root = canonical(root);
+        spaces
+            .iter()
+            .filter(|space| space.device_id == local_device && space.git_detected)
+            .map(|space| (space, canonical(&space.path)))
+            .filter(|(_, path)| path.starts_with(&root) || root.starts_with(path))
+            .max_by_key(|(_, path)| path.as_os_str().len())
+            .map(|(space, _)| space.id.clone())
+    }
+
     fn change_request_space_roots(&self) -> Vec<std::path::PathBuf> {
         let local_device = self.doc_host.device_id();
         self.workspace
@@ -1716,6 +1734,7 @@ fn forwardable(method: &str) -> bool {
             | methods::SUBMIT_CHANGE_REQUEST_REVIEW
             | methods::REPLY_TO_CHANGE_REQUEST_THREAD
             | methods::SET_CHANGE_REQUEST_THREAD_RESOLVED
+            | methods::PREPARE_CHANGE_REQUEST_CHAT
             | methods::GET_CHECKOUT_DIFF
             | methods::DISCARD_WORKING_TREE
             | methods::GET_CHECKOUT_FILE_DIFF_TEXT
@@ -3005,6 +3024,19 @@ impl RpcService for EngineRpc {
                 Ok(RpcReply::Value(
                     serde_json::to_value(detail).map_err(|e| RpcError::Failed(e.to_string()))?,
                 ))
+            }
+            methods::PREPARE_CHANGE_REQUEST_CHAT => {
+                let p: zeron_proto::PrepareChangeRequestChatRequest = parse_params(params)?;
+                let mut chat = crate::source_control::ChangeRequestResolver::new()
+                    .prepare_change_request_chat(
+                        &self.change_request_space_roots(),
+                        &crate::repos::default_worktrees_root(),
+                        &p,
+                    )
+                    .await
+                    .map_err(action_failure)?;
+                chat.space_id = self.change_request_space_id(&chat.root);
+                RpcReply::value(&chat)
             }
             methods::SUBMIT_CHANGE_REQUEST_REVIEW => {
                 let p: zeron_proto::SubmitChangeRequestReviewRequest = parse_params(params)?;
@@ -4785,6 +4817,7 @@ mod tests {
             methods::SUBMIT_CHANGE_REQUEST_REVIEW,
             methods::REPLY_TO_CHANGE_REQUEST_THREAD,
             methods::SET_CHANGE_REQUEST_THREAD_RESOLVED,
+            methods::PREPARE_CHANGE_REQUEST_CHAT,
         ] {
             assert!(forwardable(method), "{method}");
         }

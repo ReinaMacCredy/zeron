@@ -316,6 +316,11 @@ icon_assets![
     (LUCIDE_USER_PLUS, "lucide-user-plus"),
     (LUCIDE_PENCIL, "lucide-pencil"),
     (LUCIDE_MESSAGE_SQUARE_OFF, "lucide-message-square-off"),
+    (LUCIDE_GIT_BRANCH, "lucide-git-branch"),
+    (LUCIDE_FOLDER_GIT_2, "lucide-folder-git-2"),
+    (LUCIDE_MESSAGE_CIRCLE_QUESTION, "lucide-message-circle-question"),
+    (LUCIDE_BOOK_OPEN, "lucide-book-open"),
+    (LUCIDE_HAMMER, "lucide-hammer"),
 ];
 
 /// Serves both the compact control-icon set and the complete file-identity

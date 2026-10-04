@@ -36,6 +36,7 @@ use zeron_proto::{
     ChangeRequestStats, ChangeRequestSummary, ChangeRequestVerdict, GetChangeRequestRequest,
     ListChangeRequestStatsRequest, ListChangeRequestsRequest,
 };
+use zeron_proto::{ChangeRequestChat, ChangeRequestCheckoutMode, PrepareChangeRequestChatRequest};
 use zeron_proto::{
     ChangeRequestReviewEvent, ReplyToChangeRequestThreadRequest,
     SetChangeRequestThreadResolvedRequest, SubmitChangeRequestReviewRequest,
@@ -1095,6 +1096,208 @@ impl ChangeRequestResolver {
             )
             .await
             .map(|_| ())
+    }
+
+    /// Where a chat about this pull request runs (t3code `git.preparePullRequestThread`): the
+    /// repository as it is, the repository switched to the PR (`gh pr checkout --force`), or a
+    /// worktree on the PR's head branch. `space_id` is filled in by the RPC layer.
+    pub async fn prepare_change_request_chat(
+        &self,
+        roots: &[PathBuf],
+        worktrees_root: &Path,
+        request: &PrepareChangeRequestChatRequest,
+    ) -> Result<ChangeRequestChat, ActionError> {
+        let identity = self
+            .space_identity(roots, &request.host, &request.repository)
+            .await?;
+        let root = identity.root.to_string_lossy().into_owned();
+        match request.checkout {
+            ChangeRequestCheckoutMode::None => Ok(ChangeRequestChat {
+                root: root.clone(),
+                cwd: root,
+                ..Default::default()
+            }),
+            ChangeRequestCheckoutMode::Local => {
+                self.github
+                    .run_gh_action(
+                        &identity.root,
+                        vec![
+                            "pr".into(),
+                            "checkout".into(),
+                            request.number.to_string(),
+                            "--repo".into(),
+                            format!("{}/{}", identity.remote.host, identity.name_with_owner()),
+                            "--force".into(),
+                        ],
+                        None,
+                    )
+                    .await?;
+                let branch = self
+                    .inspector
+                    .git_run(&identity.root, &["branch", "--show-current"], GIT_TIMEOUT)
+                    .await?;
+                Ok(ChangeRequestChat {
+                    root: root.clone(),
+                    cwd: root,
+                    branch: (!branch.is_empty()).then_some(branch),
+                    worktree: false,
+                    on_head: true,
+                    space_id: None,
+                })
+            }
+            ChangeRequestCheckoutMode::Worktree => {
+                self.prepare_worktree(&identity, worktrees_root, request.number)
+                    .await
+            }
+        }
+    }
+
+    async fn prepare_worktree(
+        &self,
+        identity: &RepositoryIdentity,
+        worktrees_root: &Path,
+        number: u64,
+    ) -> Result<ChangeRequestChat, ActionError> {
+        let view = self.github.view_pull_request(identity, number).await?;
+        let head = view.summary.head_ref_name.clone();
+        let branch = if view.is_cross_repository {
+            format!("pr-{number}")
+        } else {
+            head
+        };
+        if !valid_branch_name(&branch) {
+            return Err(ActionError::Refused(
+                "This pull request's branch name cannot be checked out safely.".into(),
+            ));
+        }
+        let git = &self.inspector;
+        let root = &identity.root;
+        let remotes = git.git_run(root, &["remote", "-v"], GIT_TIMEOUT).await?;
+        let remote = primary_remote(&remotes)
+            .map(|(name, _)| name.to_owned())
+            .ok_or(ActionError::Host(ChangeRequestError::UnsupportedRepository))?;
+        git.git_run(
+            root,
+            &[
+                "fetch",
+                "--quiet",
+                &remote,
+                &format!("refs/pull/{number}/head"),
+            ],
+            GIT_FETCH_TIMEOUT,
+        )
+        .await?;
+        let head_oid = git
+            .git_run(root, &["rev-parse", "FETCH_HEAD"], GIT_TIMEOUT)
+            .await?;
+        let listing = git
+            .git_run(root, &["worktree", "list", "--porcelain"], GIT_TIMEOUT)
+            .await?;
+        let worktrees = parse_worktrees(&listing);
+        let branch_ref = format!("refs/heads/{branch}");
+        if let Some((path, _)) = worktrees.iter().find(|(_, name)| *name == branch_ref) {
+            if Path::new(path) == root.as_path() {
+                return Err(ActionError::Refused(
+                    "This PR branch is already checked out in the main repo. Use Local, or switch the main repo off that branch before creating a worktree thread.".into(),
+                ));
+            }
+            let path = PathBuf::from(path);
+            let clean = git
+                .git_run(&path, &["status", "--porcelain"], GIT_TIMEOUT)
+                .await?
+                .is_empty();
+            let behind = git
+                .git_run(
+                    &path,
+                    &["merge-base", "--is-ancestor", "HEAD", &head_oid],
+                    GIT_TIMEOUT,
+                )
+                .await
+                .is_ok();
+            if clean && behind {
+                git.git_run(
+                    &path,
+                    &["merge", "--ff-only", "--quiet", &head_oid],
+                    GIT_TIMEOUT,
+                )
+                .await?;
+            }
+            let current = git
+                .git_run(&path, &["rev-parse", "HEAD"], GIT_TIMEOUT)
+                .await?;
+            return Ok(ChangeRequestChat {
+                cwd: path.to_string_lossy().into_owned(),
+                branch: Some(branch),
+                worktree: true,
+                root: root.to_string_lossy().into_owned(),
+                on_head: current == head_oid,
+                space_id: None,
+            });
+        }
+        let existing = git
+            .git_run(
+                root,
+                &["rev-parse", "--verify", "--quiet", &branch_ref],
+                GIT_TIMEOUT,
+            )
+            .await
+            .ok();
+        match existing {
+            None => {
+                git.git_run(root, &["branch", "--", &branch, &head_oid], GIT_TIMEOUT)
+                    .await?;
+            }
+            Some(oid) if oid != head_oid => {
+                let fast_forward = git
+                    .git_run(
+                        root,
+                        &["merge-base", "--is-ancestor", &oid, &head_oid],
+                        GIT_TIMEOUT,
+                    )
+                    .await
+                    .is_ok();
+                if fast_forward {
+                    git.git_run(
+                        root,
+                        &["branch", "-f", "--", &branch, &head_oid],
+                        GIT_TIMEOUT,
+                    )
+                    .await?;
+                }
+            }
+            Some(_) => {}
+        }
+        let repo_name = root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "repo".into());
+        let base = worktrees_root.join(repo_name);
+        std::fs::create_dir_all(&base)
+            .map_err(|_| ActionError::Host(ChangeRequestError::RepositoryUnavailable))?;
+        let mut path = base.join(format!("pr-{number}"));
+        let mut suffix = 2;
+        while path.exists() {
+            path = base.join(format!("pr-{number}-{suffix}"));
+            suffix += 1;
+        }
+        let path_text = path.to_string_lossy().into_owned();
+        git.git_run(
+            root,
+            &["worktree", "add", "--quiet", &path_text, &branch],
+            GIT_FETCH_TIMEOUT,
+        )
+        .await?;
+        let current = git
+            .git_run(&path, &["rev-parse", "HEAD"], GIT_TIMEOUT)
+            .await?;
+        Ok(ChangeRequestChat {
+            cwd: path_text,
+            branch: Some(branch),
+            worktree: true,
+            root: root.to_string_lossy().into_owned(),
+            on_head: current == head_oid,
+            space_id: None,
+        })
     }
 
     /// A client-supplied thread id must name a review thread of this pull request.
@@ -2222,6 +2425,32 @@ impl GitCheckoutInspector {
             .ok_or(ChangeRequestError::RepositoryUnavailable)
     }
 
+    /// A write-side git call: the host's own words when it refuses.
+    async fn git_run(
+        &self,
+        cwd: &Path,
+        args: &[&str],
+        timeout: Duration,
+    ) -> Result<String, ActionError> {
+        let output = self
+            .runner
+            .run(ProcessRequest {
+                program: "git".into(),
+                args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+                cwd: cwd.to_owned(),
+                env: vec![("GIT_TERMINAL_PROMPT".into(), "0".into())],
+                timeout,
+                output_limit: GIT_OUTPUT_LIMIT,
+                stdin: None,
+            })
+            .await
+            .map_err(classify_run_error)?;
+        if !output.success {
+            return Err(ActionError::Refused(readable_failure(&output.stderr)));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    }
+
     async fn git_optional(&self, cwd: &Path, args: &[&str]) -> Option<String> {
         self.git(cwd, args).await
     }
@@ -2646,7 +2875,44 @@ impl GhSearchPullRequest {
     }
 }
 
+const GIT_FETCH_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// `git worktree list --porcelain` as (path, branch ref) pairs; detached entries have no branch.
+fn parse_worktrees(listing: &str) -> Vec<(String, String)> {
+    let mut entries = Vec::new();
+    let mut path: Option<String> = None;
+    for line in listing.lines() {
+        if let Some(value) = line.strip_prefix("worktree ") {
+            path = Some(value.to_owned());
+        } else if let (Some(value), Some(current)) = (line.strip_prefix("branch "), &path) {
+            entries.push((current.clone(), value.to_owned()));
+        } else if line.is_empty() {
+            path = None;
+        }
+    }
+    entries
+}
+
+/// A branch name we are willing to hand to git: no option-looking or ref-escaping forms.
+fn valid_branch_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('-')
+        && !name.starts_with('/')
+        && !name.ends_with('/')
+        && !name.ends_with(".lock")
+        && !name.contains("..")
+        && !name.contains("//")
+        && !name.contains("@{")
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
+}
+
 fn primary_fetch_remote(output: &str) -> Option<&str> {
+    primary_remote(output).map(|(_, url)| url)
+}
+
+fn primary_remote(output: &str) -> Option<(&str, &str)> {
     let mut remotes: Vec<(&str, &str)> = output
         .lines()
         .filter_map(|line| {
@@ -2661,7 +2927,7 @@ fn primary_fetch_remote(output: &str) -> Option<&str> {
         .iter()
         .find_map(|preferred| remotes.iter().find(|(name, _)| name == preferred))
         .or_else(|| remotes.first())
-        .map(|(_, url)| *url)
+        .copied()
 }
 
 #[derive(Debug, Deserialize)]
@@ -6561,6 +6827,143 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
                 .all(|request| !request.args.iter().any(|arg| arg.contains("please fix"))),
             "review text never rides argv"
         );
+    }
+
+    fn worktree_runner(
+        listing: &'static str,
+        existing: Option<&'static str>,
+    ) -> Arc<ScriptedRunner> {
+        ScriptedRunner::new(move |request| {
+            if request.program == "gh" {
+                if request.args.first().map(String::as_str) == Some("pr")
+                    && request.args[1] == "view"
+                {
+                    let mut json = detail_json();
+                    json["headRefName"] = serde_json::Value::String("feature/x".into());
+                    json["isCrossRepository"] = serde_json::Value::Bool(false);
+                    return command_success(serde_json::to_vec(&json).unwrap());
+                }
+                return command_success("");
+            }
+            let args: Vec<&str> = request.args.iter().map(String::as_str).collect();
+            match args.as_slice() {
+                ["fetch", "--quiet", "origin", "refs/pull/742/head"] => command_success(""),
+                ["rev-parse", "FETCH_HEAD"] => command_success("abc123\n"),
+                ["worktree", "list", "--porcelain"] => command_success(listing),
+                ["rev-parse", "--verify", "--quiet", "refs/heads/feature/x"] => match existing {
+                    Some(oid) => command_success(oid),
+                    None => command_failure(""),
+                },
+                ["branch", "--", "feature/x", "abc123"] => command_success(""),
+                ["worktree", "add", "--quiet", path, "feature/x"] => {
+                    assert!(path.ends_with("/repo/pr-742"), "{path}");
+                    command_success("")
+                }
+                ["rev-parse", "HEAD"] => command_success("abc123\n"),
+                ["branch", "--show-current"] => command_success("feature/x\n"),
+                _ => git_repo_script(request).expect("unexpected command"),
+            }
+        })
+    }
+
+    fn prepare(checkout: ChangeRequestCheckoutMode) -> PrepareChangeRequestChatRequest {
+        PrepareChangeRequestChatRequest {
+            host: "github.com".into(),
+            repository: "acme/zeron".into(),
+            number: 742,
+            checkout,
+        }
+    }
+
+    #[tokio::test]
+    async fn worktree_checkout_materialises_the_head_branch_and_refuses_the_main_repo() {
+        let roots = [PathBuf::from("/repo")];
+        let worktrees =
+            std::env::temp_dir().join(format!("zeron-pr-worktrees-{}", std::process::id()));
+        let runner = worktree_runner("worktree /repo\nHEAD 1\nbranch refs/heads/main\n\n", None);
+        let chat = list_resolver(runner.clone())
+            .prepare_change_request_chat(
+                &roots,
+                &worktrees,
+                &prepare(ChangeRequestCheckoutMode::Worktree),
+            )
+            .await
+            .unwrap();
+        assert!(chat.worktree && chat.on_head);
+        assert_eq!(chat.branch.as_deref(), Some("feature/x"));
+        assert!(chat.cwd.ends_with("/repo/pr-742"));
+        assert!(
+            runner.requests.lock().unwrap().iter().all(|request| request
+                .args
+                .first()
+                .map(String::as_str)
+                != Some("checkout")),
+            "the main repo is never switched in worktree mode"
+        );
+        let checked_out = worktree_runner(
+            "worktree /repo\nHEAD 1\nbranch refs/heads/feature/x\n\n",
+            Some("abc123"),
+        );
+        let refused = list_resolver(checked_out)
+            .prepare_change_request_chat(
+                &roots,
+                &worktrees,
+                &prepare(ChangeRequestCheckoutMode::Worktree),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(refused, ActionError::Refused(message) if message.contains("already checked out in the main repo"))
+        );
+        let local = worktree_runner("", None);
+        let chat = list_resolver(local.clone())
+            .prepare_change_request_chat(
+                &roots,
+                &worktrees,
+                &prepare(ChangeRequestCheckoutMode::Local),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            (chat.cwd.as_str(), chat.branch.as_deref(), chat.worktree),
+            ("/repo", Some("feature/x"), false)
+        );
+        let gh: Vec<Vec<String>> = local
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.program == "gh")
+            .map(|request| request.args.clone())
+            .collect();
+        assert_eq!(
+            gh,
+            [[
+                "pr",
+                "checkout",
+                "742",
+                "--repo",
+                "github.com/acme/zeron",
+                "--force"
+            ]
+            .map(str::to_owned)
+            .to_vec()]
+        );
+        std::fs::remove_dir_all(&worktrees).ok();
+    }
+
+    #[test]
+    fn worktree_listing_and_branch_names_are_parsed_defensively() {
+        assert_eq!(
+            parse_worktrees(
+                "worktree /a\nHEAD 1\nbranch refs/heads/x\n\nworktree /b\nHEAD 2\ndetached\n\n"
+            ),
+            [("/a".to_string(), "refs/heads/x".to_string())]
+        );
+        assert!(valid_branch_name("feature/x-1.2"));
+        for bad in ["-rf", "a..b", "a b", "x.lock", "/x", "a@{1}", ""] {
+            assert!(!valid_branch_name(bad), "{bad}");
+        }
     }
 
     fn search_node(number: u64, author: &str, rollup: Option<&str>) -> serde_json::Value {

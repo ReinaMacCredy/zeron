@@ -318,6 +318,12 @@ fn action_key(action: ChangeRequestAction) -> &'static str {
 }
 
 impl ActionsState {
+    pub(super) fn close_menus(&mut self) {
+        self.more = Popup::default();
+        self.close_picker(true);
+        self.close_picker(false);
+    }
+
     fn picker_is_open(&self, labels: bool) -> bool {
         if labels {
             self.labels.popup.is_open()
@@ -704,18 +710,30 @@ impl PullRequestsPage {
             )),
             Primary::AutoMergeArmed => None,
             Primary::Resolve => {
-                let url = format!("{}/conflicts", item.url);
+                let busy = self.handoff.as_ref().is_some_and(|(at, kind)| {
+                    at == key && *kind == super::handoff::Handoff::ResolveConflicts
+                });
                 Some(
                     icon_button(
                         "pull-request-resolve",
-                        "Resolve conflicts",
+                        if busy {
+                            "Preparing..."
+                        } else {
+                            "Resolve conflicts"
+                        },
                         Look::DestructiveOutline,
                         theme,
                         icons::LUCIDE_TRIANGLE_ALERT,
                         theme.danger,
                         14.0,
                     )
-                    .on_click(move |_, _, cx| cx.open_url(&url))
+                    .on_click(cx.listener(move |page, _, _, cx| {
+                        page.start_handoff(
+                            &primary_key,
+                            super::handoff::Handoff::ResolveConflicts,
+                            cx,
+                        )
+                    }))
                     .into_any_element(),
                 )
             }
@@ -779,11 +797,14 @@ impl PullRequestsPage {
             ),
         };
         let more = self.render_more_menu(key, item, detail, primary, theme, cx);
+        let checkout = (item.state == ChangeRequestState::Open)
+            .then(|| self.render_checkout_menu(key, theme, cx));
         div()
             .flex()
             .items_center()
             .gap(px(4.0))
             .flex_none()
+            .children(checkout)
             .children(auto_badge)
             .children(primary_element)
             .child(more)
@@ -879,6 +900,7 @@ impl PullRequestsPage {
             }))
             .into_any_element(),
         );
+        rows.extend(self.handoff_rows(key, theme, cx));
         let open = item.state == ChangeRequestState::Open;
         let allowed = |check: fn(&ChangeRequestPermissions) -> bool| permissions.is_some_and(check);
         if open {

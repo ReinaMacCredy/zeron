@@ -1326,6 +1326,39 @@ pub struct SetChangeRequestThreadResolvedRequest {
     pub resolved: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChangeRequestCheckoutMode {
+    #[default]
+    None,
+    Local,
+    Worktree,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrepareChangeRequestChatRequest {
+    pub host: String,
+    pub repository: String,
+    pub number: u64,
+    #[serde(default)]
+    pub checkout: ChangeRequestCheckoutMode,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeRequestChat {
+    #[serde(default)]
+    pub space_id: Option<String>,
+    #[serde(default)]
+    pub root: String,
+    pub cwd: String,
+    #[serde(default)]
+    pub branch: Option<String>,
+    pub worktree: bool,
+    pub on_head: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateChangeRequestRequest {

@@ -3,6 +3,7 @@ mod activity;
 mod code;
 mod detail;
 mod filters;
+mod handoff;
 mod review;
 
 pub use filters::PullRequestListPrefs;
@@ -272,8 +273,11 @@ impl PullRequestKey {
     }
 }
 
+pub use handoff::ChatHandoff;
+
 pub enum PullRequestsEvent {
     Close,
+    OpenChat(ChatHandoff),
 }
 
 pub struct PullRequestsPage {
@@ -301,6 +305,8 @@ pub struct PullRequestsPage {
     debounce_task: Option<Task<()>>,
     toasts: Vec<(u64, SharedString, Option<SharedString>)>,
     confirm: Option<actions::Confirm>,
+    handoff: Option<(PullRequestKey, handoff::Handoff)>,
+    checkout_menu: Option<(PullRequestKey, crate::popover::Popup<()>)>,
     toast_seq: u64,
 }
 
@@ -350,6 +356,8 @@ impl PullRequestsPage {
             debounce_task: None,
             toasts: Vec::new(),
             confirm: None,
+            handoff: None,
+            checkout_menu: None,
             toast_seq: 0,
         };
         page.refresh(cx);

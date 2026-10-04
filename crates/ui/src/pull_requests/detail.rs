@@ -72,6 +72,10 @@ pub(super) struct DetailState {
 }
 
 impl DetailState {
+    pub(super) fn seed(&self) -> &ChangeRequestListItem {
+        &self.seed
+    }
+
     pub(super) fn seed_title(&self) -> &str {
         &self.seed.title
     }
@@ -327,6 +331,10 @@ impl PullRequestsPage {
             return true;
         }
         if self.checks_popover.take().is_some() {
+            cx.notify();
+            return true;
+        }
+        if self.checkout_menu.take().is_some() {
             cx.notify();
             return true;
         }

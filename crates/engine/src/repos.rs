@@ -122,7 +122,7 @@ fn session_home_dir_with(
 /// Where new worktrees live. Deliberately NOT under the backend data dir —
 /// worktrees are user-facing working checkouts. `ZERON_WORKTREES_DIR` overrides
 /// (test isolation); empty reads as unset.
-fn default_worktrees_root() -> PathBuf {
+pub(crate) fn default_worktrees_root() -> PathBuf {
     std::env::var_os("ZERON_WORKTREES_DIR")
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
