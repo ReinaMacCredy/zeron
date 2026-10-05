@@ -2418,12 +2418,6 @@ impl GitTab {
             .id("git-discard-confirm")
             .debug_selector(|| "git-discard-confirm".into())
             .track_focus(&self.confirm_focus)
-            .on_key_down(cx.listener(|tab, event: &KeyDownEvent, _, cx| {
-                if event.keystroke.key == "escape" {
-                    cx.stop_propagation();
-                    tab.cancel_confirm(cx);
-                }
-            }))
             .mx(px(12.0))
             .my(px(2.0))
             .px(px(10.0))
@@ -2697,12 +2691,6 @@ impl GitTab {
                         .id("git-stash-drop-confirm")
                         .debug_selector(|| "git-stash-drop-confirm".into())
                         .track_focus(&self.confirm_focus)
-                        .on_key_down(cx.listener(|tab, event: &KeyDownEvent, _, cx| {
-                            if event.keystroke.key == "escape" {
-                                cx.stop_propagation();
-                                tab.cancel_confirm(cx);
-                            }
-                        }))
                         .my(px(2.0))
                         .px(px(8.0))
                         .py(px(6.0))
@@ -3137,12 +3125,7 @@ impl GitTab {
                             input.replace_text_in_range(None, "\n", window, cx)
                         });
                     }))
-                    .on_key_down(cx.listener(|tab, event: &KeyDownEvent, window, cx| {
-                        if event.keystroke.key == "escape" && tab.writing {
-                            cx.stop_propagation();
-                            tab.stop_writing(window, cx);
-                            return;
-                        }
+                    .on_key_down(cx.listener(|tab, event: &KeyDownEvent, _, cx| {
                         let modifiers = &event.keystroke.modifiers;
                         if event.keystroke.key == "enter"
                             && (modifiers.platform || modifiers.control)
@@ -3474,12 +3457,6 @@ impl GitTab {
                 .id("git-commit-confirm")
                 .debug_selector(|| "git-commit-confirm".into())
                 .track_focus(&self.confirm_focus)
-                .on_key_down(cx.listener(|tab, event: &KeyDownEvent, _, cx| {
-                    if event.keystroke.key == "escape" {
-                        cx.stop_propagation();
-                        tab.cancel_confirm(cx);
-                    }
-                }))
                 .px(px(10.0))
                 .py(px(8.0))
                 .rounded(px(8.0))
@@ -3516,12 +3493,6 @@ impl GitTab {
                 .capture_action(cx.listener(|tab, _: &crate::composer::Submit, _, cx| {
                     cx.stop_propagation();
                     tab.create_branch(cx);
-                }))
-                .on_key_down(cx.listener(|tab, event: &KeyDownEvent, _, cx| {
-                    if event.keystroke.key == "escape" {
-                        cx.stop_propagation();
-                        tab.close_branch_form(cx);
-                    }
                 }))
                 .px(px(10.0))
                 .py(px(8.0))
@@ -4098,12 +4069,6 @@ impl GitTab {
         div()
             .id("git-pr-sheet")
             .debug_selector(|| "git-pr-sheet".into())
-            .on_key_down(cx.listener(|tab, event: &KeyDownEvent, _, cx| {
-                if event.keystroke.key == "escape" {
-                    cx.stop_propagation();
-                    tab.cancel_pr_sheet(cx);
-                }
-            }))
             .px(px(10.0))
             .py(px(10.0))
             .rounded(px(8.0))
@@ -5844,6 +5809,10 @@ mod tests {
         page.read_with(cx, |page, _| page.git_view.clone().unwrap())
     }
 
+    fn press_escape(tab: &Entity<GitTab>, cx: &mut gpui::VisualTestContext) {
+        assert!(tab.update_in(cx, |tab, window, cx| tab.dismiss_overlay(window, cx)));
+    }
+
     fn click(cx: &mut gpui::VisualTestContext, selector: &'static str) {
         let bounds = cx
             .debug_bounds(selector)
@@ -6390,7 +6359,7 @@ mod tests {
             "no commit while a message is being written"
         );
 
-        cx.simulate_keystrokes("escape");
+        press_escape(&tab, cx);
         cx.run_until_parked();
         assert!(!tab.read_with(cx, |tab, _| tab.writing));
         assert!(cx.debug_bounds("git-write-preview").is_none());
@@ -6576,7 +6545,7 @@ mod tests {
         click(cx, "git-changes-discard-1");
         cx.run_until_parked();
         assert!(cx.debug_bounds("git-discard-confirm").is_some());
-        cx.simulate_keystrokes("escape");
+        press_escape(&tab, cx);
         cx.run_until_parked();
         assert!(cx.debug_bounds("git-discard-confirm").is_none());
         assert!(
@@ -6681,7 +6650,7 @@ mod tests {
         click(cx, "git-stash-drop-1");
         cx.run_until_parked();
         assert!(cx.debug_bounds("git-stash-drop-confirm").is_some());
-        cx.simulate_keystrokes("escape");
+        press_escape(&tab, cx);
         cx.run_until_parked();
         assert!(cx.debug_bounds("git-stash-drop-confirm").is_none());
         assert!(
@@ -7611,7 +7580,7 @@ mod tests {
         click(cx, "git-commit-checkout");
         cx.run_until_parked();
         assert!(cx.debug_bounds("git-commit-confirm").is_some());
-        cx.simulate_keystrokes("escape");
+        press_escape(&tab, cx);
         cx.run_until_parked();
         assert!(cx.debug_bounds("git-commit-confirm").is_none());
         click(cx, "git-commit-checkout");
