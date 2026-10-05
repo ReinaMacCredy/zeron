@@ -2,10 +2,12 @@ use std::collections::BTreeSet;
 
 use gpui::{AnyElement, App};
 use zeron_proto::{
-    ChangeRequestCheckStatus, ChangeRequestChecksState, ChangeRequestDetail,
-    ChangeRequestInvolvement, ChangeRequestListItem, ChangeRequestReviewDecision,
-    ChangeRequestState, GetChangeRequestDiffRequest, GetChangeRequestRequest,
-    PrepareChangeRequestChatRequest,
+    ChangeRequestAction, ChangeRequestCheckStatus, ChangeRequestChecksState, ChangeRequestDetail,
+    ChangeRequestInvolvement, ChangeRequestListItem, ChangeRequestMergeMethod,
+    ChangeRequestReviewDecision, ChangeRequestReviewEvent, ChangeRequestState,
+    GetChangeRequestDiffRequest, GetChangeRequestRequest, PostChangeRequestCommentRequest,
+    PrepareChangeRequestChatRequest, ReplyToChangeRequestThreadRequest,
+    RunChangeRequestActionRequest, SubmitChangeRequestReviewRequest,
 };
 
 use super::handoff::bounded;
@@ -60,11 +62,14 @@ impl PullRequestsPage {
                             .iter()
                             .filter_map(|comment| {
                                 let body = super::activity::visible_body(&comment.body)?;
-                                let place = match (comment.path.as_deref(), comment.line) {
+                                let mut place = match (comment.path.as_deref(), comment.line) {
                                     (Some(path), Some(line)) => format!(" on {path}:{line}"),
                                     (Some(path), None) => format!(" on {path}"),
                                     _ => String::new(),
                                 };
+                                if let Some(thread) = comment.thread_id.as_deref() {
+                                    place.push_str(&format!(" [thread:{}]", bounded(thread)));
+                                }
                                 Some((
                                     comment.created_at,
                                     comment_line(comment.author.as_ref(), &place, body),
@@ -610,7 +615,458 @@ impl PrChatContext {
                     .join("\n")
             })
             .collect();
-        Some(format!("\n\n{CONTEXT_HEADER}\n{}", quoted.join("\n\n")))
+        Some(format!(
+            "\n\n{ACTION_NOTE}\n\n{CONTEXT_HEADER}\n{}",
+            quoted.join("\n\n")
+        ))
+    }
+
+    pub fn suggestions(&self, text: &str) -> Vec<Suggestion> {
+        action_blocks(text)
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, block)| {
+                let raw: RawAction = serde_json::from_str(&block).ok()?;
+                let (number, repository) = raw.target();
+                let target = self.target(number, repository)?;
+                let write = raw.write()?;
+                Some(Suggestion {
+                    index,
+                    target,
+                    write,
+                })
+            })
+            .collect()
+    }
+
+    fn target(&self, number: Option<u64>, repository: Option<&str>) -> Option<PullRequestKey> {
+        let same_repo = |item: &ChangeRequestListItem| {
+            repository.is_none_or(|repository| item.repository.eq_ignore_ascii_case(repository))
+        };
+        match self {
+            PrChatContext::PullRequest(pr) => (number.is_none_or(|n| n == pr.key.number)
+                && same_repo(&pr.item))
+            .then(|| pr.key.clone()),
+            PrChatContext::List(list) => {
+                let number = number?;
+                let mut matches = list
+                    .shown
+                    .iter()
+                    .filter(|item| item.number == number && same_repo(item));
+                let item = matches.next()?;
+                matches.next().is_none().then(|| PullRequestKey::of(item))
+            }
+        }
+    }
+}
+
+pub const ACTION_FENCE: &str = "zeron-github-action";
+
+pub const ACTION_NOTE: &str = "GitHub writes from this chat: never run them yourself. To propose one, put a fenced code block with the info string zeron-github-action holding one JSON object in your reply; the user reviews it and posts it with a click. Objects: {\"action\":\"comment\",\"body\":\"...\"}, {\"action\":\"review\",\"event\":\"comment\" or \"approve\" or \"request_changes\",\"body\":\"...\"}, {\"action\":\"reply\",\"threadId\":\"<the id after thread: on a comment>\",\"body\":\"...\"}, {\"action\":\"merge\",\"method\":\"merge\" or \"squash\" or \"rebase\"}, {\"action\":\"close\"}. For a listed pull request add \"number\" (and \"repository\" when numbers repeat).";
+
+const BODY_MAX: usize = 65_536;
+
+fn action_blocks(text: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut open: Option<Vec<&str>> = None;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        match open.as_mut() {
+            None if trimmed
+                .strip_prefix("```")
+                .is_some_and(|info| info.trim() == ACTION_FENCE) =>
+            {
+                open = Some(Vec::new())
+            }
+            None => {}
+            Some(_) if trimmed == "```" => blocks.push(open.take().unwrap_or_default().join("\n")),
+            Some(lines) => lines.push(line),
+        }
+    }
+    blocks
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RawEvent {
+    Comment,
+    Approve,
+    #[serde(alias = "requestChanges")]
+    RequestChanges,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RawMethod {
+    Merge,
+    Squash,
+    Rebase,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+enum RawAction {
+    Comment {
+        body: String,
+        number: Option<u64>,
+        repository: Option<String>,
+    },
+    Review {
+        event: RawEvent,
+        #[serde(default)]
+        body: String,
+        number: Option<u64>,
+        repository: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    Reply {
+        thread_id: String,
+        body: String,
+        number: Option<u64>,
+        repository: Option<String>,
+    },
+    Merge {
+        method: Option<RawMethod>,
+        number: Option<u64>,
+        repository: Option<String>,
+    },
+    Close {
+        number: Option<u64>,
+        repository: Option<String>,
+    },
+}
+
+impl RawAction {
+    fn target(&self) -> (Option<u64>, Option<&str>) {
+        match self {
+            RawAction::Comment {
+                number, repository, ..
+            }
+            | RawAction::Review {
+                number, repository, ..
+            }
+            | RawAction::Reply {
+                number, repository, ..
+            }
+            | RawAction::Merge {
+                number, repository, ..
+            }
+            | RawAction::Close { number, repository } => (*number, repository.as_deref()),
+        }
+    }
+
+    fn write(self) -> Option<GithubWrite> {
+        let body = |body: String| {
+            let body = body.trim().to_owned();
+            (!body.is_empty() && body.len() <= BODY_MAX).then_some(body)
+        };
+        Some(match self {
+            RawAction::Comment { body: text, .. } => GithubWrite::Comment { body: body(text)? },
+            RawAction::Review {
+                event, body: text, ..
+            } => {
+                let event = match event {
+                    RawEvent::Comment => ChangeRequestReviewEvent::Comment,
+                    RawEvent::Approve => ChangeRequestReviewEvent::Approve,
+                    RawEvent::RequestChanges => ChangeRequestReviewEvent::RequestChanges,
+                };
+                let body = match body(text) {
+                    Some(body) => body,
+                    None if event == ChangeRequestReviewEvent::Approve => String::new(),
+                    None => return None,
+                };
+                GithubWrite::Review { event, body }
+            }
+            RawAction::Reply {
+                thread_id,
+                body: text,
+                ..
+            } => {
+                let thread_id = thread_id.trim().to_owned();
+                if thread_id.is_empty() {
+                    return None;
+                }
+                GithubWrite::Reply {
+                    thread_id,
+                    body: body(text)?,
+                }
+            }
+            RawAction::Merge { method, .. } => GithubWrite::Merge {
+                method: method.map(|method| match method {
+                    RawMethod::Merge => ChangeRequestMergeMethod::Merge,
+                    RawMethod::Squash => ChangeRequestMergeMethod::Squash,
+                    RawMethod::Rebase => ChangeRequestMergeMethod::Rebase,
+                }),
+            },
+            RawAction::Close { .. } => GithubWrite::Close,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum GithubWrite {
+    Comment {
+        body: String,
+    },
+    Review {
+        event: ChangeRequestReviewEvent,
+        body: String,
+    },
+    Reply {
+        thread_id: String,
+        body: String,
+    },
+    Merge {
+        method: Option<ChangeRequestMergeMethod>,
+    },
+    Close,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Suggestion {
+    pub index: usize,
+    target: PullRequestKey,
+    pub write: GithubWrite,
+}
+
+pub struct Confirmation {
+    pub title: String,
+    pub description: String,
+    pub button: String,
+    pub destructive: bool,
+}
+
+impl Suggestion {
+    pub fn number(&self) -> u64 {
+        self.target.number
+    }
+
+    pub fn target_label(&self) -> String {
+        format!("#{} {}", self.target.number, self.target.repository)
+    }
+
+    pub fn is_draft(&self) -> bool {
+        !matches!(self.write, GithubWrite::Merge { .. } | GithubWrite::Close)
+    }
+
+    pub fn body(&self) -> Option<&str> {
+        match &self.write {
+            GithubWrite::Comment { body }
+            | GithubWrite::Review { body, .. }
+            | GithubWrite::Reply { body, .. } => Some(body),
+            GithubWrite::Merge { .. } | GithubWrite::Close => None,
+        }
+    }
+
+    pub fn header(&self) -> &'static str {
+        match &self.write {
+            GithubWrite::Comment { .. } => "Draft comment, not posted",
+            GithubWrite::Review {
+                event: ChangeRequestReviewEvent::Comment,
+                ..
+            } => "Draft review comment, not posted",
+            GithubWrite::Review {
+                event: ChangeRequestReviewEvent::Approve,
+                ..
+            } => "Draft approval, not posted",
+            GithubWrite::Review {
+                event: ChangeRequestReviewEvent::RequestChanges,
+                ..
+            } => "Draft change request, not posted",
+            GithubWrite::Reply { .. } => "Draft reply, not posted",
+            GithubWrite::Merge { .. } | GithubWrite::Close => "Suggestion, not run",
+        }
+    }
+
+    pub fn merge_method(&self, last: Option<ChangeRequestMergeMethod>) -> ChangeRequestMergeMethod {
+        match self.write {
+            GithubWrite::Merge { method } => {
+                method.or(last).unwrap_or(ChangeRequestMergeMethod::Merge)
+            }
+            _ => ChangeRequestMergeMethod::Merge,
+        }
+    }
+
+    pub fn summary(&self, last: Option<ChangeRequestMergeMethod>) -> Option<String> {
+        match &self.write {
+            GithubWrite::Merge { .. } => Some(format!(
+                "{} #{}",
+                super::actions::method_label(self.merge_method(last)),
+                self.target.number
+            )),
+            GithubWrite::Close => Some(format!("Close #{} without merging", self.target.number)),
+            _ => None,
+        }
+    }
+
+    pub fn primary_label(&self) -> &'static str {
+        match &self.write {
+            GithubWrite::Comment { .. } => "Post to GitHub",
+            GithubWrite::Review { event, .. } => match event {
+                ChangeRequestReviewEvent::Comment => "Post to GitHub",
+                ChangeRequestReviewEvent::Approve => "Approve",
+                ChangeRequestReviewEvent::RequestChanges => "Request changes",
+            },
+            GithubWrite::Reply { .. } => "Post reply",
+            GithubWrite::Merge { .. } => "Merge...",
+            GithubWrite::Close => "Close...",
+        }
+    }
+
+    pub fn offers_request_changes(&self) -> bool {
+        matches!(
+            self.write,
+            GithubWrite::Review {
+                event: ChangeRequestReviewEvent::Comment,
+                ..
+            }
+        )
+    }
+
+    pub fn posted_label(&self, request_changes: bool) -> String {
+        let number = self.target.number;
+        match &self.write {
+            _ if request_changes => format!("Requested changes on #{number}"),
+            GithubWrite::Comment { .. } => format!("Posted comment to #{number}"),
+            GithubWrite::Review { event, .. } => match event {
+                ChangeRequestReviewEvent::Comment => format!("Posted review comment to #{number}"),
+                ChangeRequestReviewEvent::Approve => format!("Approved #{number}"),
+                ChangeRequestReviewEvent::RequestChanges => {
+                    format!("Requested changes on #{number}")
+                }
+            },
+            GithubWrite::Reply { .. } => format!("Posted reply on #{number}"),
+            GithubWrite::Merge { .. } => format!("Merged #{number}"),
+            GithubWrite::Close => format!("Closed #{number}"),
+        }
+    }
+
+    pub fn confirmation(&self, last: Option<ChangeRequestMergeMethod>) -> Option<Confirmation> {
+        let action = match self.write {
+            GithubWrite::Merge { .. } => ChangeRequestAction::Merge {
+                method: self.merge_method(last),
+            },
+            GithubWrite::Close => ChangeRequestAction::Close,
+            _ => return None,
+        };
+        let (title, description, button, destructive) =
+            super::actions::confirm_copy(action, self.target.number, 0)?;
+        Some(Confirmation {
+            title,
+            description,
+            button,
+            destructive,
+        })
+    }
+
+    pub fn call(
+        &self,
+        edited: Option<&str>,
+        request_changes: bool,
+        last: Option<ChangeRequestMergeMethod>,
+    ) -> Option<ContextCall> {
+        if self.body().is_some() && edited.is_some_and(|text| text.trim().is_empty()) {
+            return None;
+        }
+        let key = &self.target;
+        let body = |body: &str| edited.map(str::trim).unwrap_or(body).to_owned();
+        let (method, params) = match &self.write {
+            GithubWrite::Comment { body: text } => (
+                zeron_rpc::methods::POST_CHANGE_REQUEST_COMMENT,
+                serde_json::to_value(PostChangeRequestCommentRequest {
+                    host: key.host.clone(),
+                    repository: key.repository.clone(),
+                    number: key.number,
+                    body: body(text),
+                }),
+            ),
+            GithubWrite::Review { event, body: text } => (
+                zeron_rpc::methods::SUBMIT_CHANGE_REQUEST_REVIEW,
+                serde_json::to_value(SubmitChangeRequestReviewRequest {
+                    host: key.host.clone(),
+                    repository: key.repository.clone(),
+                    number: key.number,
+                    event: if request_changes {
+                        ChangeRequestReviewEvent::RequestChanges
+                    } else {
+                        *event
+                    },
+                    body: body(text),
+                    comments: Vec::new(),
+                }),
+            ),
+            GithubWrite::Reply {
+                thread_id,
+                body: text,
+            } => (
+                zeron_rpc::methods::REPLY_TO_CHANGE_REQUEST_THREAD,
+                serde_json::to_value(ReplyToChangeRequestThreadRequest {
+                    host: key.host.clone(),
+                    repository: key.repository.clone(),
+                    number: key.number,
+                    thread_id: thread_id.clone(),
+                    body: body(text),
+                }),
+            ),
+            GithubWrite::Merge { .. } | GithubWrite::Close => (
+                zeron_rpc::methods::RUN_CHANGE_REQUEST_ACTION,
+                serde_json::to_value(RunChangeRequestActionRequest {
+                    host: key.host.clone(),
+                    repository: key.repository.clone(),
+                    number: key.number,
+                    action: match self.write {
+                        GithubWrite::Close => ChangeRequestAction::Close,
+                        _ => ChangeRequestAction::Merge {
+                            method: self.merge_method(last),
+                        },
+                    },
+                    comment: None,
+                }),
+            ),
+        };
+        Some(ContextCall {
+            method,
+            params: key.route(params.ok()?),
+        })
+    }
+}
+
+pub fn failure_text(error: &str) -> String {
+    super::actions::readable(error, "GitHub refused it.")
+}
+
+pub fn latest_reply(transcript: &[zeron_doc::SessionMessageEntry]) -> Option<(String, String)> {
+    use zeron_doc::{MessagePart, MessageRole, MessageStatus};
+    let entry = transcript
+        .iter()
+        .rev()
+        .find(|entry| entry.role != MessageRole::System)?;
+    if entry.role != MessageRole::Assistant || entry.status == Some(MessageStatus::Streaming) {
+        return None;
+    }
+    let text = entry
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            MessagePart::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some((entry.id.clone(), text))
+}
+
+impl PullRequestsPage {
+    pub fn reload_after_chat_write(
+        &mut self,
+        suggestion: &Suggestion,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        if self.details.contains_key(&suggestion.target) {
+            self.load_detail(&suggestion.target, cx);
+            self.load_activity(&suggestion.target, cx);
+        }
+        self.refresh(cx);
     }
 }
 
@@ -655,8 +1111,12 @@ pub fn extract_badge(text: &str) -> Option<(String, crate::badges::MessageBadge)
     if details.is_empty() {
         return None;
     }
+    let rest = &text[..at];
+    let rest = rest
+        .strip_suffix(&format!("\n\n{ACTION_NOTE}"))
+        .unwrap_or(rest);
     Some((
-        text[..at].to_string(),
+        rest.to_string(),
         crate::badges::MessageBadge {
             icon: crate::icons::LUCIDE_GIT_PULL_REQUEST,
             label: "PR context".into(),
@@ -856,13 +1316,15 @@ mod tests {
         let patch: String = (0..200).map(file).collect();
         context.set_patch(&patch);
         let block = context.block(&BTreeSet::new()).unwrap();
-        assert!(block.starts_with(&format!("\n\n{CONTEXT_HEADER}\n> Pull request #7")));
+        assert!(block.starts_with(&format!(
+            "\n\n{ACTION_NOTE}\n\n{CONTEXT_HEADER}\n> Pull request #7"
+        )));
         assert!(block.len() < 48 * 1024, "{}", block.len());
         assert!(block.contains("> [patch truncated at 32 KiB;"));
         assert!(
             block
                 .lines()
-                .skip(3)
+                .skip(5)
                 .all(|line| line.is_empty() || line.starts_with('>'))
         );
         assert!(block.contains("> Comments (latest 10 of 12)"));
@@ -916,5 +1378,212 @@ mod tests {
                 "Checks: 1 of 3 passed"
             ]
         );
+    }
+
+    fn fence(json: &str) -> String {
+        format!("```{ACTION_FENCE}\n{json}\n```\n")
+    }
+
+    #[test]
+    fn action_blocks_become_cards_for_the_open_pull_request() {
+        let reply = [
+            "Looks fine, two notes.\n\n".to_string(),
+            fence(r#"{"action":"review","event":"comment","body":"  Two things  "}"#),
+            fence(r#"{"action":"merge","method":"squash"}"#),
+            fence(r#"{"action":"close","number":7}"#),
+            fence(r#"{"action":"reply","threadId":"T_1","body":"Fixed"}"#),
+            fence(r#"{"action":"comment","body":"Thanks","repository":"ACME/zeron"}"#),
+            fence(r#"{"action":"review","event":"approve"}"#),
+        ]
+        .concat();
+        let cards = pull_request().suggestions(&reply);
+        let writes: Vec<(usize, GithubWrite)> = cards
+            .iter()
+            .map(|card| (card.index, card.write.clone()))
+            .collect();
+        assert_eq!(
+            writes,
+            [
+                (
+                    0,
+                    GithubWrite::Review {
+                        event: ChangeRequestReviewEvent::Comment,
+                        body: "Two things".into()
+                    }
+                ),
+                (
+                    1,
+                    GithubWrite::Merge {
+                        method: Some(ChangeRequestMergeMethod::Squash)
+                    }
+                ),
+                (2, GithubWrite::Close),
+                (
+                    3,
+                    GithubWrite::Reply {
+                        thread_id: "T_1".into(),
+                        body: "Fixed".into()
+                    }
+                ),
+                (
+                    4,
+                    GithubWrite::Comment {
+                        body: "Thanks".into()
+                    }
+                ),
+                (
+                    5,
+                    GithubWrite::Review {
+                        event: ChangeRequestReviewEvent::Approve,
+                        body: String::new()
+                    }
+                ),
+            ]
+        );
+        assert!(cards.iter().all(|card| card.number() == 7));
+        assert_eq!(cards[0].header(), "Draft review comment, not posted");
+        assert_eq!(cards[1].header(), "Suggestion, not run");
+        assert!(cards[0].offers_request_changes());
+        assert!(!cards[5].offers_request_changes());
+    }
+
+    #[test]
+    fn malformed_unknown_and_foreign_blocks_stay_plain_text() {
+        let big = "x".repeat(BODY_MAX + 1);
+        let reply = [
+            fence(r#"{"action":"comment","body":"#),
+            fence(r#"{"action":"delete_branch"}"#),
+            fence(r#"{"action":"comment","body":"   "}"#),
+            fence(r#"{"action":"comment"}"#),
+            fence(r#"{"action":"reply","threadId":" ","body":"Fixed"}"#),
+            fence(r#"{"action":"comment","body":"Wrong PR","number":8}"#),
+            fence(r#"{"action":"comment","body":"Wrong repo","repository":"other/repo"}"#),
+            fence(r#"{"action":"review","event":"request_changes","body":""}"#),
+            fence(&format!(r#"{{"action":"comment","body":"{big}"}}"#)),
+            fence(r#"[{"action":"close"}]"#),
+            "```json\n{\"action\":\"close\"}\n```\n".to_string(),
+            fence(r#"{"action":"comment","body":"Kept"}"#),
+            format!("```{ACTION_FENCE}\n{{\"action\":\"close\"}}\n"),
+        ]
+        .concat();
+        let cards = pull_request().suggestions(&reply);
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        assert_eq!(cards[0].index, 10, "indexes count every action fence");
+        assert_eq!(cards[0].body(), Some("Kept"));
+        assert!(pull_request().suggestions("No fences here.").is_empty());
+    }
+
+    #[test]
+    fn list_cards_must_name_one_shown_pull_request() {
+        let mut other = item(2);
+        other.repository = "acme/other".into();
+        let list = PrChatContext::List(ListContext {
+            shown: vec![item(1), item(2), other],
+            filter: "open".into(),
+            repository: None,
+        });
+        let reply = [
+            fence(r#"{"action":"merge"}"#),
+            fence(r#"{"action":"merge","number":9}"#),
+            fence(r#"{"action":"merge","number":2}"#),
+            fence(r#"{"action":"merge","number":2,"repository":"acme/other"}"#),
+            fence(r#"{"action":"close","number":1}"#),
+        ]
+        .concat();
+        let cards = list.suggestions(&reply);
+        let targets: Vec<(usize, String)> = cards
+            .iter()
+            .map(|card| (card.index, card.target_label()))
+            .collect();
+        assert_eq!(
+            targets,
+            [(3, "#2 acme/other".into()), (4, "#1 acme/zeron".into())]
+        );
+    }
+
+    #[test]
+    fn calls_carry_the_edit_and_merge_and_close_confirm_first() {
+        let reply = [
+            fence(r#"{"action":"review","event":"comment","body":"Two things"}"#),
+            fence(r#"{"action":"merge"}"#),
+            fence(r#"{"action":"close"}"#),
+            fence(r#"{"action":"reply","threadId":"T_1","body":"Fixed"}"#),
+        ]
+        .concat();
+        let cards = pull_request().suggestions(&reply);
+        assert!(cards[0].confirmation(None).is_none());
+        let call = cards[0].call(Some("  Edited  "), true, None).unwrap();
+        assert_eq!(
+            call.method,
+            zeron_rpc::methods::SUBMIT_CHANGE_REQUEST_REVIEW
+        );
+        assert_eq!(call.params["event"], "requestChanges");
+        assert_eq!(call.params["body"], "Edited");
+        assert_eq!(call.params["number"], 7);
+        assert_eq!(call.params["repository"], "acme/zeron");
+        assert!(cards[0].call(Some("  "), false, None).is_none());
+        assert_eq!(
+            cards[0].posted_label(true),
+            "Requested changes on #7".to_string()
+        );
+
+        let merge = cards[1]
+            .confirmation(Some(ChangeRequestMergeMethod::Rebase))
+            .unwrap();
+        assert_eq!(merge.title, "Merge pull request?");
+        assert_eq!(merge.description, "This merges #7 using rebase.");
+        assert!(!merge.destructive);
+        let call = cards[1]
+            .call(None, false, Some(ChangeRequestMergeMethod::Rebase))
+            .unwrap();
+        assert_eq!(call.method, zeron_rpc::methods::RUN_CHANGE_REQUEST_ACTION);
+        assert_eq!(
+            call.params["action"],
+            serde_json::json!({ "kind": "merge", "method": "rebase" })
+        );
+        let close = cards[2].confirmation(None).unwrap();
+        assert_eq!(close.title, "Close pull request?");
+        assert!(close.destructive);
+
+        let call = cards[3].call(None, false, None).unwrap();
+        assert_eq!(
+            call.method,
+            zeron_rpc::methods::REPLY_TO_CHANGE_REQUEST_THREAD
+        );
+        assert_eq!(call.params["threadId"], "T_1");
+        assert_eq!(call.params["body"], "Fixed");
+    }
+
+    #[test]
+    fn only_a_settled_reply_after_the_last_prompt_offers_cards() {
+        use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
+        let entry =
+            |id: &str, role: MessageRole, status: Option<MessageStatus>| SessionMessageEntry {
+                id: id.into(),
+                role,
+                parts: vec![MessagePart::Text {
+                    id: format!("{id}-t"),
+                    text: format!("text {id}"),
+                }],
+                created_at: 0,
+                device_id: "local".into(),
+                status,
+                continuation_of: None,
+                from_chat_id: None,
+                fork_import: false,
+                answers_request_id: None,
+                duration_ms: None,
+            };
+        let user = entry("u", MessageRole::User, None);
+        let done = entry("a", MessageRole::Assistant, Some(MessageStatus::Complete));
+        let live = entry("b", MessageRole::Assistant, Some(MessageStatus::Streaming));
+        let note = entry("s", MessageRole::System, None);
+        assert_eq!(
+            latest_reply(&[user.clone(), done.clone(), note.clone()]),
+            Some(("a".into(), "text a".into()))
+        );
+        assert_eq!(latest_reply(&[done.clone(), user.clone()]), None);
+        assert_eq!(latest_reply(&[user, done, live]), None);
+        assert_eq!(latest_reply(&[note]), None);
     }
 }

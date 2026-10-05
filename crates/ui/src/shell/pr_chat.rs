@@ -1,8 +1,8 @@
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::*;
-use crate::pull_requests::{ContextChip, PrChatContext};
-use crate::settings::{PrChatHistory, PrChatSession, PrChatStyle};
+use crate::pull_requests::{ContextChip, PrChatContext, Suggestion};
+use crate::settings::{PrChatHistory, PrChatPosted, PrChatSession, PrChatStyle};
 
 pub(super) const PR_CHAT_WIDTH: f32 = 400.0;
 pub(super) const PR_CHAT_HEIGHT: f32 = 560.0;
@@ -23,6 +23,8 @@ pub(super) struct PrChatPanel {
     minimized: bool,
     earlier: Option<SharedString>,
     sessions_menu: bool,
+    cards: HashMap<CardKey, CardState>,
+    confirm: Option<CardKey>,
     _location: Option<Task<()>>,
     _context: Option<Task<()>>,
     _saved: Option<Subscription>,
@@ -46,6 +48,17 @@ struct ParkedPrChat {
 enum Landing {
     Delete,
     Index(String),
+}
+
+type CardKey = (String, usize);
+
+#[derive(Default)]
+struct CardState {
+    editor: Option<Entity<ComposerInput>>,
+    pending: bool,
+    error: Option<SharedString>,
+    posted: Option<PrChatPosted>,
+    dismissed: bool,
 }
 
 struct SessionRow {
@@ -145,6 +158,8 @@ impl Shell {
             minimized: false,
             earlier,
             sessions_menu: false,
+            cards: HashMap::new(),
+            confirm: None,
             _location: None,
             _context: None,
             _saved: None,
@@ -360,6 +375,8 @@ impl Shell {
             minimized: false,
             earlier: None,
             sessions_menu: false,
+            cards: HashMap::new(),
+            confirm: None,
             _location: Some(location_task),
             _context: Some(context_task),
             _saved: None,
@@ -465,6 +482,7 @@ impl Shell {
                 PrChatSession {
                     chat_id,
                     created_at: Utc::now(),
+                    posted: Vec::new(),
                 },
             )
         });
@@ -558,6 +576,7 @@ impl Shell {
                             PrChatSession {
                                 chat_id: parked.chat_id,
                                 created_at: Utc::now(),
+                                posted: Vec::new(),
                             },
                         )
                     });
@@ -672,6 +691,179 @@ impl Shell {
             })
     }
 
+    fn pr_chat_suggestions(&self, cx: &App) -> Option<(String, Vec<Suggestion>)> {
+        let panel = self.pr_chat.as_ref()?;
+        let tab = self.pr_chat_tab()?;
+        let (entry, text) =
+            crate::pull_requests::latest_chat_reply(&tab.state.read(cx).transcript)?;
+        let suggestions = panel.context.suggestions(&text);
+        (!suggestions.is_empty()).then_some((entry, suggestions))
+    }
+
+    fn pr_chat_suggestion(&self, key: &CardKey, cx: &App) -> Option<Suggestion> {
+        let (entry, suggestions) = self.pr_chat_suggestions(cx)?;
+        if entry != key.0 {
+            return None;
+        }
+        suggestions.into_iter().find(|s| s.index == key.1)
+    }
+
+    fn edit_pr_chat_card(&mut self, key: CardKey, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(suggestion) = self.pr_chat_suggestion(&key, cx) else {
+            return;
+        };
+        let Some(panel) = self.pr_chat.as_mut() else {
+            return;
+        };
+        let card = panel.cards.entry(key).or_default();
+        if card.editor.take().is_none() {
+            let body = suggestion.body().unwrap_or_default().to_owned();
+            let input = cx.new(|cx| {
+                let mut input = ComposerInput::new("Edit before posting", cx);
+                input.set_text(body, cx);
+                input
+            });
+            let handle = gpui::Focusable::focus_handle(input.read(cx), cx);
+            window.focus(&handle, cx);
+            card.editor = Some(input);
+        }
+        cx.notify();
+    }
+
+    fn dismiss_pr_chat_card(&mut self, key: CardKey, cx: &mut Context<Self>) {
+        if let Some(panel) = self.pr_chat.as_mut() {
+            panel.cards.entry(key).or_default().dismissed = true;
+        }
+        cx.notify();
+    }
+
+    fn post_pr_chat_card(&mut self, key: CardKey, request_changes: bool, cx: &mut Context<Self>) {
+        let Some(suggestion) = self.pr_chat_suggestion(&key, cx) else {
+            return;
+        };
+        let last = settings::current(cx).pull_requests_merge_method;
+        if suggestion.confirmation(last).is_some() {
+            if let Some(panel) = self.pr_chat.as_mut() {
+                panel.confirm = Some(key);
+            }
+            cx.notify();
+            return;
+        }
+        self.run_pr_chat_card(key, suggestion, request_changes, cx);
+    }
+
+    fn confirm_pr_chat_card(&mut self, cx: &mut Context<Self>) {
+        let Some(key) = self.pr_chat.as_mut().and_then(|panel| panel.confirm.take()) else {
+            return;
+        };
+        if let Some(suggestion) = self.pr_chat_suggestion(&key, cx) {
+            self.run_pr_chat_card(key, suggestion, false, cx);
+        }
+        cx.notify();
+    }
+
+    fn cancel_pr_chat_confirm(&mut self, cx: &mut Context<Self>) {
+        if let Some(panel) = self.pr_chat.as_mut() {
+            panel.confirm = None;
+        }
+        cx.notify();
+    }
+
+    fn run_pr_chat_card(
+        &mut self,
+        key: CardKey,
+        suggestion: Suggestion,
+        request_changes: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let last = settings::current(cx).pull_requests_merge_method;
+        let Some(panel) = self.pr_chat.as_mut() else {
+            return;
+        };
+        let chat_id = panel.chat_id.clone();
+        let done = settings::pr_chat_posted(&chat_id, cx)
+            .iter()
+            .any(|posted| posted.entry_id == key.0 && posted.index == key.1);
+        let card = panel.cards.entry(key.clone()).or_default();
+        if done || card.pending || card.posted.is_some() {
+            return;
+        }
+        let edited = card
+            .editor
+            .as_ref()
+            .map(|editor| editor.read(cx).text().to_string());
+        let Some(call) = suggestion.call(edited.as_deref(), request_changes, last) else {
+            card.error = Some("Write something before posting.".into());
+            cx.notify();
+            return;
+        };
+        card.pending = true;
+        card.error = None;
+        let label = suggestion.posted_label(request_changes);
+        cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(call.method, call.params)
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string());
+            this.update(cx, |shell, cx| {
+                shell.finish_pr_chat_card(chat_id, key, suggestion, label, result, cx)
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn finish_pr_chat_card(
+        &mut self,
+        chat_id: String,
+        key: CardKey,
+        suggestion: Suggestion,
+        label: String,
+        result: Result<(), String>,
+        cx: &mut Context<Self>,
+    ) {
+        let posted = result.as_ref().ok().map(|_| PrChatPosted {
+            entry_id: key.0.clone(),
+            index: key.1,
+            label,
+            at: Utc::now(),
+        });
+        if let Some(posted) = posted.clone() {
+            settings::update(SavePolicy::Immediate, cx, |settings| {
+                settings.record_pr_chat_post(&chat_id, posted)
+            });
+        }
+        if let Some(card) = self
+            .pr_chat
+            .as_mut()
+            .filter(|panel| panel.chat_id == chat_id)
+            .map(|panel| panel.cards.entry(key).or_default())
+        {
+            card.pending = false;
+            match &result {
+                Ok(()) => {
+                    card.editor = None;
+                    card.posted = posted;
+                }
+                Err(error) => {
+                    card.error = Some(crate::pull_requests::chat_write_failure(error).into())
+                }
+            }
+        }
+        if result.is_ok()
+            && let Some(page) = self.pull_requests_page.clone()
+        {
+            page.update(cx, |page, cx| page.reload_after_chat_write(&suggestion, cx));
+        }
+        cx.notify();
+    }
+
     pub(super) fn render_pr_chat(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.pr_chat.as_ref().is_some_and(|panel| {
             panel
@@ -712,6 +904,12 @@ impl Shell {
             .side
             .and_then(|id| self.side_chats.get(&id))
             .map(|tab| (tab.transcript.clone(), tab.composer.clone()));
+        let cards = self
+            .pr_chat_suggestions(cx)
+            .and_then(|(entry, suggestions)| {
+                self.render_pr_chat_cards(entry, suggestions, &theme, cx)
+            });
+        let confirm = self.render_pr_chat_confirm(&theme, cx);
         let header = div()
             .flex_none()
             .h(px(44.0))
@@ -912,6 +1110,7 @@ impl Shell {
                             })
                             .child(transcript),
                     )
+                    .children(cards)
                     .children(bottom)
                     .child(div().flex_none().child(composer))
                     .into_any_element()
@@ -954,6 +1153,7 @@ impl Shell {
                 .child(header)
                 .children(chip_row)
                 .child(body)
+                .children(confirm)
                 .children(
                     sessions
                         .filter(|_| menu_open)
@@ -1022,6 +1222,291 @@ impl Shell {
             .into_any_element()
     }
 
+    fn render_pr_chat_cards(
+        &self,
+        entry: String,
+        suggestions: Vec<Suggestion>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let panel = self.pr_chat.as_ref()?;
+        let list = matches!(panel.context, PrChatContext::List(_));
+        let posted = settings::pr_chat_posted(&panel.chat_id, cx);
+        let last = settings::current(cx).pull_requests_merge_method;
+        let now = chrono::Local::now();
+        let cards: Vec<AnyElement> = suggestions
+            .into_iter()
+            .filter_map(|suggestion| {
+                let ix = suggestion.index;
+                let key: CardKey = (entry.clone(), ix);
+                let state = panel.cards.get(&key);
+                if state.is_some_and(|state| state.dismissed) {
+                    return None;
+                }
+                let done = state.and_then(|state| state.posted.clone()).or_else(|| {
+                    posted
+                        .iter()
+                        .find(|posted| posted.entry_id == entry && posted.index == ix)
+                        .cloned()
+                });
+                let frame = div()
+                    .id(("pr-chat-card", ix))
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .rounded(px(10.0))
+                    .border_1()
+                    .overflow_hidden()
+                    .text_size(px(12.0));
+                if let Some(done) = done {
+                    let at = done.at.with_timezone(&chrono::Local);
+                    return Some(
+                        frame
+                            .debug_selector(move || format!("pr-chat-card-posted-{ix}"))
+                            .border_color(theme.border)
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .px(px(10.0))
+                                    .py(px(8.0))
+                                    .bg(theme.success.opacity(0.06))
+                                    .text_color(theme.success)
+                                    .child(icon(icons::LUCIDE_CHECK).size(px(13.0)))
+                                    .child(SharedString::from(format!(
+                                        "{} · {} {}",
+                                        done.label,
+                                        day_label(done.at, now),
+                                        at.format("%H:%M")
+                                    ))),
+                            )
+                            .into_any_element(),
+                    );
+                }
+                let pending = state.is_some_and(|state| state.pending);
+                let editor = state.and_then(|state| state.editor.clone());
+                let error = state.and_then(|state| state.error.clone());
+                let header = match list {
+                    true => format!("{} · {}", suggestion.header(), suggestion.target_label()),
+                    false => suggestion.header().to_owned(),
+                };
+                let text = suggestion
+                    .summary(last)
+                    .or_else(|| suggestion.body().map(str::to_owned))
+                    .filter(|text| !text.is_empty());
+                let content = match editor {
+                    Some(editor) => Some(
+                        div()
+                            .id(("pr-chat-card-input", ix))
+                            .debug_selector(move || format!("pr-chat-card-input-{ix}"))
+                            .role(gpui::Role::TextInput)
+                            .aria_label("Edit before posting")
+                            .mx(px(10.0))
+                            .my(px(8.0))
+                            .min_h(px(64.0))
+                            .rounded(px(8.0))
+                            .border_1()
+                            .border_color(theme.hairline(0.14))
+                            .px(px(8.0))
+                            .py(px(6.0))
+                            .child(editor)
+                            .into_any_element(),
+                    ),
+                    None => text.map(|text| {
+                        div()
+                            .id(("pr-chat-card-body", ix))
+                            .debug_selector(move || format!("pr-chat-card-body-{ix}"))
+                            .max_h(px(140.0))
+                            .overflow_y_scroll()
+                            .px(px(10.0))
+                            .py(px(8.0))
+                            .text_color(theme.text.opacity(0.85))
+                            .child(SharedString::from(text))
+                            .into_any_element()
+                    }),
+                };
+                let post_key = key.clone();
+                let mut footer = div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(6.0))
+                    .px(px(10.0))
+                    .py(px(8.0))
+                    .border_t_1()
+                    .border_color(theme.border.opacity(0.6))
+                    .child(
+                        card_button(
+                            format!("pr-chat-card-post-{ix}"),
+                            if pending {
+                                "Posting..."
+                            } else {
+                                suggestion.primary_label()
+                            },
+                            true,
+                            theme,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.post_pr_chat_card(post_key.clone(), false, cx)
+                        })),
+                    );
+                if suggestion.is_draft() {
+                    let edit_key = key.clone();
+                    footer = footer.child(
+                        card_button(
+                            format!("pr-chat-card-edit-{ix}"),
+                            if state.is_some_and(|state| state.editor.is_some()) {
+                                "Cancel edit"
+                            } else {
+                                "Edit"
+                            },
+                            false,
+                            theme,
+                        )
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.edit_pr_chat_card(edit_key.clone(), window, cx)
+                            },
+                        )),
+                    );
+                }
+                if suggestion.offers_request_changes() {
+                    let request_key = key.clone();
+                    footer = footer.child(
+                        card_button(
+                            format!("pr-chat-card-request-changes-{ix}"),
+                            "Request changes",
+                            false,
+                            theme,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.post_pr_chat_card(request_key.clone(), true, cx)
+                        })),
+                    );
+                }
+                if !suggestion.is_draft() {
+                    let dismiss_key = key.clone();
+                    footer = footer.child(
+                        card_button(
+                            format!("pr-chat-card-dismiss-{ix}"),
+                            "Dismiss",
+                            false,
+                            theme,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.dismiss_pr_chat_card(dismiss_key.clone(), cx)
+                        })),
+                    );
+                }
+                Some(
+                    frame
+                        .debug_selector(move || format!("pr-chat-card-{ix}"))
+                        .border_color(theme.accent.opacity(0.3))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .px(px(10.0))
+                                .py(px(8.0))
+                                .bg(theme.accent.opacity(0.08))
+                                .text_color(theme.text_muted)
+                                .child(div().text_color(theme.accent).child("✦"))
+                                .child(SharedString::from(header)),
+                        )
+                        .children(content)
+                        .children(error.map(|error| {
+                            div()
+                                .px(px(10.0))
+                                .pb(px(6.0))
+                                .text_color(theme.danger)
+                                .child(error)
+                        }))
+                        .child(footer)
+                        .into_any_element(),
+                )
+            })
+            .collect();
+        (!cards.is_empty()).then(|| {
+            div()
+                .id("pr-chat-cards")
+                .min_h_0()
+                .max_h(gpui::relative(0.6))
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .px(px(12.0))
+                .pb(px(8.0))
+                .children(cards)
+                .into_any_element()
+        })
+    }
+
+    fn render_pr_chat_confirm(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let key = self.pr_chat.as_ref()?.confirm.clone()?;
+        let last = settings::current(cx).pull_requests_merge_method;
+        let confirm = self.pr_chat_suggestion(&key, cx)?.confirmation(last)?;
+        Some(
+            div()
+                .id("pr-chat-confirm-scrim")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(gpui::hsla(0.0, 0.0, 0.0, 0.3))
+                .child(
+                    crate::popover::popover_card(theme)
+                        .id("pr-chat-confirm")
+                        .debug_selector(|| "pr-chat-confirm".into())
+                        .role(gpui::Role::Dialog)
+                        .aria_label(SharedString::from(confirm.title.clone()))
+                        .bg(theme.surface_dialog)
+                        .w(px(320.0))
+                        .p(px(16.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .text_size(px(14.0))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(theme.text)
+                                .child(confirm.title),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(theme.text_muted)
+                                .child(confirm.description),
+                        )
+                        .child(
+                            div()
+                                .mt(px(8.0))
+                                .flex()
+                                .justify_end()
+                                .gap(px(8.0))
+                                .child(
+                                    card_button("pr-chat-confirm-cancel", "Cancel", false, theme)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.cancel_pr_chat_confirm(cx)
+                                        })),
+                                )
+                                .child(
+                                    card_button("pr-chat-confirm-ok", confirm.button, true, theme)
+                                        .when(confirm.destructive, |el| el.bg(theme.danger))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.confirm_pr_chat_card(cx)
+                                        })),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn render_pr_chat_pill(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         div()
             .id("pr-chat-pill")
@@ -1055,6 +1540,42 @@ impl Shell {
             ))
             .into_any_element()
     }
+}
+
+fn card_button(
+    id: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    primary: bool,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    let id: SharedString = id.into();
+    let label: SharedString = label.into();
+    let selector = id.clone();
+    div()
+        .id(id)
+        .debug_selector(move || selector.to_string())
+        .role(gpui::Role::Button)
+        .aria_label(label.clone())
+        .h(px(26.0))
+        .px(px(10.0))
+        .flex()
+        .flex_none()
+        .items_center()
+        .rounded(px(7.0))
+        .text_size(px(12.0))
+        .cursor_pointer()
+        .map(|el| match primary {
+            true => el
+                .bg(theme.accent)
+                .text_color(gpui::hsla(0.0, 0.0, 1.0, 1.0))
+                .hover(|style| style.opacity(0.9)),
+            false => el
+                .border_1()
+                .border_color(theme.border)
+                .text_color(theme.text.opacity(0.8))
+                .hover(|style| style.bg(theme.ink(0.05))),
+        })
+        .child(label)
 }
 
 fn day_label(at: chrono::DateTime<Utc>, now: chrono::DateTime<chrono::Local>) -> String {
@@ -1191,6 +1712,24 @@ mod tests {
         Wire,
         tempfile::TempDir,
     ) {
+        let (out, frames) = tokio::sync::mpsc::channel::<String>(256);
+        let (replies, inbound) = tokio::sync::mpsc::channel::<String>(256);
+        let (runtime, shell, cx, dir) = boot(cx, |runtime| {
+            let _guard = runtime.enter();
+            zeron_rpc::RpcClient::new(out, inbound)
+        });
+        (runtime, shell, cx, Wire { frames, replies }, dir)
+    }
+
+    fn boot(
+        cx: &mut TestAppContext,
+        client: impl FnOnce(&tokio::runtime::Runtime) -> zeron_rpc::RpcClient,
+    ) -> (
+        tokio::runtime::Runtime,
+        Entity<Shell>,
+        &mut VisualTestContext,
+        tempfile::TempDir,
+    ) {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1210,12 +1749,7 @@ mod tests {
                 cx,
             );
         });
-        let (out, frames) = tokio::sync::mpsc::channel::<String>(256);
-        let (replies, inbound) = tokio::sync::mpsc::channel::<String>(256);
-        let client = {
-            let _guard = runtime.enter();
-            zeron_rpc::RpcClient::new(out, inbound)
-        };
+        let client = client(&runtime);
         let state = cx.new(|_| AppState::new());
         state.update(cx, |state, _| {
             state.set_test_engine(crate::state::EngineHandle::from_test_client(client));
@@ -1247,7 +1781,7 @@ mod tests {
             default_harness: zeron_proto::HarnessId::Mock,
         };
         let (shell, cx) = cx.add_window_view(|_, cx| Shell::new(state, boot, cx));
-        (runtime, shell, cx, Wire { frames, replies }, dir)
+        (runtime, shell, cx, dir)
     }
 
     #[gpui::test]
@@ -1368,7 +1902,8 @@ mod tests {
         let prompt = request["prompt"].as_str().unwrap();
         assert!(
             prompt.starts_with(&format!(
-                "Review this\n\n{}\n> Pull request #7",
+                "Review this\n\n{}\n\n{}\n> Pull request #7",
+                crate::pull_requests::CHAT_ACTION_NOTE,
                 crate::pull_requests::CHAT_CONTEXT_HEADER
             )),
             "{prompt}"
@@ -1658,6 +2193,7 @@ mod tests {
                         PrChatSession {
                             chat_id: (*id).into(),
                             created_at: Utc::now() - chrono::Duration::days(*days),
+                            posted: Vec::new(),
                         },
                     );
                 }
@@ -1980,6 +2516,191 @@ mod tests {
             ["kept", "remote"],
             "another profile's frame lacks these chats"
         );
+    }
+
+    #[derive(Default)]
+    struct Recorder {
+        calls: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl zeron_rpc::RpcService for Recorder {
+        async fn handle(
+            &self,
+            method: &str,
+            params: serde_json::Value,
+        ) -> Result<zeron_rpc::RpcReply, zeron_rpc::RpcError> {
+            use futures::StreamExt;
+            self.calls.lock().unwrap().push((method.to_owned(), params));
+            if method.starts_with("Watch") {
+                return Ok(zeron_rpc::RpcReply::Stream(
+                    futures::stream::pending().boxed(),
+                ));
+            }
+            Ok(zeron_rpc::RpcReply::Value(serde_json::json!({})))
+        }
+    }
+
+    impl Recorder {
+        fn writes(&self) -> Vec<(String, serde_json::Value)> {
+            const WRITES: [&str; 4] = [
+                methods::POST_CHANGE_REQUEST_COMMENT,
+                methods::SUBMIT_CHANGE_REQUEST_REVIEW,
+                methods::REPLY_TO_CHANGE_REQUEST_THREAD,
+                methods::RUN_CHANGE_REQUEST_ACTION,
+            ];
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(method, _)| WRITES.contains(&method.as_str()))
+                .cloned()
+                .collect()
+        }
+    }
+
+    fn reply_entry(text: &str) -> Vec<zeron_doc::SessionMessageEntry> {
+        use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
+        let entry = |id: &str, role, text: &str, status| SessionMessageEntry {
+            id: id.into(),
+            role,
+            parts: vec![MessagePart::Text {
+                id: format!("{id}-t"),
+                text: text.into(),
+            }],
+            created_at: 0,
+            device_id: "local".into(),
+            status,
+            continuation_of: None,
+            from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
+            duration_ms: None,
+        };
+        vec![
+            entry("u1", MessageRole::User, "Review this", None),
+            entry(
+                "a1",
+                MessageRole::Assistant,
+                text,
+                Some(MessageStatus::Complete),
+            ),
+        ]
+    }
+
+    #[gpui::test]
+    fn suggestion_cards_post_only_on_click_and_remember_it(cx: &mut TestAppContext) {
+        let recorder = std::sync::Arc::new(Recorder::default());
+        let service = recorder.clone();
+        let (runtime, shell, cx, _dir) = boot(cx, move |runtime| {
+            let _guard = runtime.enter();
+            zeron_rpc::memory_client(service)
+        });
+        let _guard = runtime.enter();
+        let pump = |cx: &mut VisualTestContext| Wire::pump(&runtime, cx);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.chats.push(row("s7", false, serde_json::json!({})))
+            })
+        });
+        index(cx, "github.com/acme/zeron#7", &[("s7", 1)]);
+        shell.update(cx, |shell, cx| shell.open_pull_requests(cx));
+        let page = shell.read_with(cx, |shell, _| shell.pull_requests_page.clone().unwrap());
+        page.update(cx, |page, cx| page.open_linked(item(), None, cx));
+        pump(cx);
+        let fence = |json: &str| format!("```zeron-github-action\n{json}\n```\n");
+        let reply = [
+            "Two notes before merge.\n\n".to_string(),
+            fence(r#"{"action":"review","event":"comment","body":"Pi returns matches."}"#),
+            fence(r#"{"action":"reply","body":"No thread id"}"#),
+            fence(r#"{"action":"merge","method":"squash"}"#),
+        ]
+        .concat();
+        let inject = |shell: &Entity<Shell>, cx: &mut VisualTestContext| {
+            shell.update(cx, |shell, cx| {
+                shell.toggle_pr_chat(cx);
+                let tab = shell.pr_chat_tab().expect("resumed session");
+                assert_eq!(shell.pr_chat.as_ref().unwrap().chat_id, "s7");
+                tab.state
+                    .update(cx, |state, _| state.apply_transcript(reply_entry(&reply)));
+            });
+            pump(cx);
+        };
+        inject(&shell, cx);
+
+        assert!(cx.debug_bounds("pr-chat-card-0").is_some());
+        assert!(cx.debug_bounds("pr-chat-card-1").is_none(), "malformed");
+        assert!(cx.debug_bounds("pr-chat-card-2").is_some());
+        assert!(cx.debug_bounds("pr-chat-card-request-changes-0").is_some());
+        assert!(cx.debug_bounds("pr-chat-card-edit-2").is_none());
+        assert!(recorder.writes().is_empty(), "nothing before a click");
+
+        click(cx, "pr-chat-card-edit-0");
+        let editor = shell.read_with(cx, |shell, _| {
+            let card = &shell.pr_chat.as_ref().unwrap().cards[&("a1".to_string(), 0)];
+            card.editor.clone().expect("editing")
+        });
+        assert!(cx.debug_bounds("pr-chat-card-input-0").is_some());
+        assert_eq!(
+            cx.update(|_, cx| editor.read(cx).text().to_string()),
+            "Pi returns matches."
+        );
+        cx.update(|_, cx| {
+            editor.update(cx, |input, cx| input.set_text("Pi returns `matches`.", cx))
+        });
+        pump(cx);
+        assert!(recorder.writes().is_empty(), "editing writes nothing");
+        click(cx, "pr-chat-card-request-changes-0");
+        pump(cx);
+        let writes = recorder.writes();
+        assert_eq!(writes.len(), 1, "{writes:?}");
+        assert_eq!(writes[0].0, methods::SUBMIT_CHANGE_REQUEST_REVIEW);
+        assert_eq!(writes[0].1["event"], "requestChanges");
+        assert_eq!(writes[0].1["body"], "Pi returns `matches`.");
+        assert_eq!(writes[0].1["number"], 7);
+        assert_eq!(writes[0].1["repository"], "acme/zeron");
+        assert!(cx.debug_bounds("pr-chat-card-posted-0").is_some());
+        assert!(cx.debug_bounds("pr-chat-card-post-0").is_none());
+
+        click(cx, "pr-chat-card-post-2");
+        assert!(cx.debug_bounds("pr-chat-confirm").is_some());
+        assert_eq!(recorder.writes().len(), 1, "merge waits for the confirm");
+        click(cx, "pr-chat-confirm-cancel");
+        pump(cx);
+        assert!(cx.debug_bounds("pr-chat-confirm").is_none());
+        assert_eq!(recorder.writes().len(), 1, "cancel writes nothing");
+        click(cx, "pr-chat-card-post-2");
+        click(cx, "pr-chat-confirm-ok");
+        pump(cx);
+        let writes = recorder.writes();
+        assert_eq!(writes.len(), 2, "{writes:?}");
+        assert_eq!(writes[1].0, methods::RUN_CHANGE_REQUEST_ACTION);
+        assert_eq!(
+            writes[1].1["action"],
+            serde_json::json!({ "kind": "merge", "method": "squash" })
+        );
+        assert!(cx.debug_bounds("pr-chat-card-posted-2").is_some());
+
+        let posted = cx.update(|_, cx| settings::pr_chat_posted("s7", cx));
+        let saved: Vec<(&str, usize, &str)> = posted
+            .iter()
+            .map(|p| (p.entry_id.as_str(), p.index, p.label.as_str()))
+            .collect();
+        assert_eq!(
+            saved,
+            [("a1", 0, "Requested changes on #7"), ("a1", 2, "Merged #7")]
+        );
+
+        shell.update(cx, |shell, cx| shell.discard_pr_chat(cx));
+        inject(&shell, cx);
+        assert!(
+            cx.debug_bounds("pr-chat-card-posted-0").is_some(),
+            "reopened"
+        );
+        assert!(cx.debug_bounds("pr-chat-card-posted-2").is_some());
+        assert!(cx.debug_bounds("pr-chat-card-post-0").is_none());
+        assert!(cx.debug_bounds("pr-chat-card-post-2").is_none());
+        assert_eq!(recorder.writes().len(), 2);
     }
 
     #[test]
