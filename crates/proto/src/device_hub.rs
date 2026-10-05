@@ -65,8 +65,28 @@ pub struct DeviceHubHost {
     pub label: String,
     #[serde(default)]
     pub platforms: Vec<DevicePlatformAvailability>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<DeviceToolVersions>,
     #[serde(default)]
     pub hub_installed: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceToolVersion {
+    #[serde(default)]
+    pub required: String,
+    #[serde(default)]
+    pub installed: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceToolVersions {
+    #[serde(default)]
+    pub hub: DeviceToolVersion,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -422,5 +442,28 @@ mod tests {
         let state: DeviceHubState = serde_json::from_value(json!({"revision": 3})).unwrap();
         assert_eq!(state.host_status, DeviceHostStatus::Disabled);
         assert!(!state.settings.enabled);
+    }
+
+    #[test]
+    fn host_tool_versions_have_a_stable_wire_shape() {
+        let host = DeviceHubHost {
+            id: "local".into(),
+            tools: Some(DeviceToolVersions {
+                hub: DeviceToolVersion {
+                    required: "0.12.0".into(),
+                    installed: vec!["0.11.0".into(), "0.12.0".into()],
+                    running: Some("0.12.0".into()),
+                },
+            }),
+            ..Default::default()
+        };
+        let wire = json!({
+            "id": "local", "kind": "", "label": "", "platforms": [], "hubInstalled": false,
+            "tools": {"hub": {"required": "0.12.0", "installed": ["0.11.0", "0.12.0"], "running": "0.12.0"}}
+        });
+        assert_eq!(serde_json::to_value(&host).unwrap(), wire);
+        assert_eq!(serde_json::from_value::<DeviceHubHost>(wire).unwrap(), host);
+        let bare: DeviceHubHost = serde_json::from_value(json!({"id": "local"})).unwrap();
+        assert!(bare.tools.is_none());
     }
 }
