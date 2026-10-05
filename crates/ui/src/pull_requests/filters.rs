@@ -2,8 +2,8 @@ use gpui::{AnyElement, Bounds, Context, Pixels, SharedString, div, prelude::*, p
 use serde::{Deserialize, Serialize};
 use zeron_proto::{
     ChangeRequestChecksState, ChangeRequestDraftFilter, ChangeRequestInvolvement,
-    ChangeRequestListFilters, ChangeRequestListItem, ChangeRequestListState,
-    ChangeRequestReviewFilter, ChangeRequestState,
+    ChangeRequestListFilters, ChangeRequestListItem, ChangeRequestListState, ChangeRequestListing,
+    ChangeRequestReviewFilter, ChangeRequestState, ListChangeRequestsRequest,
 };
 
 use super::{PullRequestsPage, avatar, change_size, label_color, rank_by_merge_readiness};
@@ -180,7 +180,11 @@ pub(crate) fn parse_query(raw: &str) -> (String, ChangeRequestListFilters) {
                     filters.checks = checks.or(filters.checks);
                     checks.is_some()
                 }
-                "author" | "draft" | "review" | "status" | "checks" => false,
+                "repo" if !negated => {
+                    filters.repository = Some(clip_qualifier(&value));
+                    true
+                }
+                "author" | "draft" | "review" | "status" | "checks" | "repo" => false,
                 "label" => push_labels(
                     &mut filters,
                     negated,
@@ -211,9 +215,10 @@ pub(crate) fn parse_query(raw: &str) -> (String, ChangeRequestListFilters) {
 }
 
 pub(crate) fn effective_filters(
-    menu: &ChangeRequestListFilters,
+    prefs: &PullRequestListPrefs,
     typed: &ChangeRequestListFilters,
 ) -> ChangeRequestListFilters {
+    let menu = &prefs.filters;
     ChangeRequestListFilters {
         draft: typed.draft.or(menu.draft),
         review: typed.review.or(menu.review),
@@ -229,7 +234,48 @@ pub(crate) fn effective_filters(
         } else {
             typed.excluded_labels.clone()
         },
+        repository: typed
+            .repository
+            .clone()
+            .or_else(|| prefs.repository.clone()),
     }
+}
+
+pub(crate) fn list_request(
+    prefs: &PullRequestListPrefs,
+    text: &str,
+    typed: &ChangeRequestListFilters,
+) -> ListChangeRequestsRequest {
+    ListChangeRequestsRequest {
+        state: prefs.state,
+        involvement: prefs.involvement,
+        limit: None,
+        query: (!text.trim().is_empty()).then(|| text.trim().to_string()),
+        filters: effective_filters(prefs, typed),
+    }
+}
+
+pub(crate) fn project_options(
+    listing: Option<&ChangeRequestListing>,
+    current: Option<&str>,
+) -> Vec<String> {
+    let mut options: Vec<String> = Vec::new();
+    let known = listing.into_iter().flat_map(|listing| {
+        listing
+            .repositories
+            .iter()
+            .chain(listing.items.iter().map(|item| &item.repository))
+    });
+    for repository in current.into_iter().chain(known.map(String::as_str)) {
+        if !options
+            .iter()
+            .any(|option| option.eq_ignore_ascii_case(repository))
+        {
+            options.push(repository.to_string());
+        }
+    }
+    options.sort_by_key(|option| option.to_ascii_lowercase());
+    options
 }
 
 pub(crate) fn score_match(item: &ChangeRequestListItem, query: &str) -> u32 {
@@ -398,6 +444,7 @@ pub(super) enum MenuKind {
     Filters,
     State,
     Involvement,
+    Project,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -586,6 +633,7 @@ fn section_of(kind: MenuKind) -> Option<FilterSection> {
     match kind {
         MenuKind::State => Some(FilterSection::State),
         MenuKind::Involvement => Some(FilterSection::Involvement),
+        MenuKind::Project => Some(FilterSection::Project),
         MenuKind::Sort | MenuKind::Filters => None,
     }
 }
@@ -687,7 +735,9 @@ impl PullRequestsPage {
                 .enumerate()
                 .map(|(index, (value, label, glyph))| {
                     let selected = value == *current;
-                    row(theme, false, format!("{id}-{index}"))
+                    let selector = format!("{id}-{index}");
+                    row(theme, false, selector.clone())
+                        .debug_selector(move || selector.clone())
                         .role(gpui::Role::MenuItemRadio)
                         .aria_label(label.clone())
                         .on_click(cx.listener(move |page, _, _, cx| {
@@ -1275,11 +1325,7 @@ impl PullRequestsPage {
     }
 
     fn render_project_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let repositories: std::collections::BTreeSet<String> = self
-            .listed_items()
-            .iter()
-            .map(|item| item.repository.clone())
-            .collect();
+        let repositories = project_options(self.listing.ready(), self.prefs.repository.as_deref());
         let options = std::iter::once((
             None,
             SharedString::from("All projects"),
@@ -1297,7 +1343,7 @@ impl PullRequestsPage {
             "pull-requests-project",
             options,
             &self.prefs.repository,
-            false,
+            true,
             |prefs, repository| prefs.repository = repository,
             theme,
             cx,
@@ -1375,20 +1421,102 @@ mod tests {
 
     #[test]
     fn typed_qualifiers_override_the_same_menu_filter() {
-        let menu = ChangeRequestListFilters {
-            draft: Some(ChangeRequestDraftFilter::Hide),
-            author: Some("bob".into()),
-            labels: vec![vec!["ui".into()]],
+        let prefs = PullRequestListPrefs {
+            filters: ChangeRequestListFilters {
+                draft: Some(ChangeRequestDraftFilter::Hide),
+                author: Some("bob".into()),
+                labels: vec![vec!["ui".into()]],
+                ..Default::default()
+            },
             ..Default::default()
         };
         let typed = ChangeRequestListFilters {
             author: Some("carol".into()),
             ..Default::default()
         };
-        let merged = effective_filters(&menu, &typed);
+        let merged = effective_filters(&prefs, &typed);
         assert_eq!(merged.author.as_deref(), Some("carol"));
         assert_eq!(merged.draft, Some(ChangeRequestDraftFilter::Hide));
         assert_eq!(merged.labels, [vec!["ui".to_string()]]);
+    }
+
+    #[test]
+    fn a_repo_qualifier_is_the_project_filter_not_a_label() {
+        let (text, filters) = parse_query("fix repo:ReinaMacCredy/maestro label:bug");
+        assert_eq!(text, "fix");
+        assert_eq!(filters.repository.as_deref(), Some("ReinaMacCredy/maestro"));
+        assert_eq!(filters.labels, [vec!["bug".to_string()]]);
+        let (text, negated) = parse_query("-repo:acme/zeron repo:");
+        assert_eq!(text, "-repo:acme/zeron repo:");
+        assert_eq!(negated, ChangeRequestListFilters::default());
+    }
+
+    #[test]
+    fn the_list_request_carries_the_project_and_a_typed_repo_wins() {
+        let prefs = PullRequestListPrefs {
+            repository: Some("ReinaMacCredy/maestro".into()),
+            ..Default::default()
+        };
+        let (text, typed) = parse_query("");
+        let request = list_request(&prefs, &text, &typed);
+        assert_eq!(request.query, None);
+        assert_eq!(
+            serde_json::to_value(&request).unwrap()["filters"],
+            serde_json::json!({"repository": "ReinaMacCredy/maestro"})
+        );
+        let (text, typed) = parse_query(" login repo:getpaseo/paseo ");
+        let request = list_request(&prefs, &text, &typed);
+        assert_eq!(request.query.as_deref(), Some("login"));
+        assert_eq!(
+            request.filters.repository.as_deref(),
+            Some("getpaseo/paseo")
+        );
+        let request = list_request(&PullRequestListPrefs::default(), "", &typed);
+        assert_eq!(
+            request.filters.repository.as_deref(),
+            Some("getpaseo/paseo")
+        );
+    }
+
+    #[test]
+    fn the_project_pref_persists_under_its_own_key() {
+        let prefs = PullRequestListPrefs {
+            repository: Some("ReinaMacCredy/maestro".into()),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&prefs).unwrap();
+        assert_eq!(json["repository"], "ReinaMacCredy/maestro");
+        assert!(json["filters"].get("repository").is_none());
+        let back: PullRequestListPrefs = serde_json::from_value(json).unwrap();
+        assert_eq!(back, prefs);
+        let older: PullRequestListPrefs =
+            serde_json::from_value(serde_json::json!({"repository": "acme/zeron"})).unwrap();
+        assert_eq!(older.repository.as_deref(), Some("acme/zeron"));
+    }
+
+    #[test]
+    fn project_options_list_every_known_project_once_and_keep_the_pick() {
+        let mut paseo = item(1, "a", "x");
+        paseo.repository = "getpaseo/paseo".into();
+        let listing = ChangeRequestListing {
+            items: vec![paseo, item(2, "b", "x")],
+            repositories: vec![
+                "ReinaMacCredy/maestro".into(),
+                "GetPaseo/Paseo".into(),
+                "acme/zeron".into(),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            project_options(Some(&listing), None),
+            ["acme/zeron", "GetPaseo/Paseo", "ReinaMacCredy/maestro"]
+        );
+        assert_eq!(project_options(None, Some("old/project")), ["old/project"]);
+        let older: ChangeRequestListing = serde_json::from_value(serde_json::json!({
+            "viewers": {}, "items": [], "errors": [], "truncated": false
+        }))
+        .unwrap();
+        assert!(older.repositories.is_empty());
     }
 
     #[test]

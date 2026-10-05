@@ -104,6 +104,7 @@ pub(crate) fn merge_listings(
                     }));
                 merged.errors.extend(listing.errors);
                 merged.truncated |= listing.truncated;
+                merged.repositories.extend(listing.repositories);
             }
             Err(error) => {
                 if !device.local {
@@ -124,6 +125,8 @@ pub(crate) fn merge_listings(
     merged
         .items
         .sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    merged.repositories.sort();
+    merged.repositories.dedup();
     Ok(merged)
 }
 
@@ -212,7 +215,8 @@ mod tests {
                     "viewerReviewRequested": false, "labels": []
                 }],
                 "errors": [],
-                "truncated": number == 2
+                "truncated": number == 2,
+                "repositories": ["acme/zeron"]
             }))
             .unwrap()
         };
@@ -232,6 +236,7 @@ mod tests {
         assert_eq!(merged.viewers["studio github.com"], "bob");
         assert_eq!(viewer_key(&merged.items[0]), "studio github.com");
         assert!(merged.truncated);
+        assert_eq!(merged.repositories, ["acme/zeron"]);
         assert_eq!(merged.errors.len(), 1);
         assert_eq!(merged.errors[0].path, "Gone");
         assert_eq!(

@@ -24,7 +24,7 @@ use zeron_proto::{
     ChangeRequestChecksState, ChangeRequestFailure, ChangeRequestInvolvement,
     ChangeRequestListItem, ChangeRequestListing, ChangeRequestMergeability, ChangeRequestRef,
     ChangeRequestReviewDecision, ChangeRequestState, ChangeRequestStats,
-    ListChangeRequestStatsRequest, ListChangeRequestsRequest,
+    ListChangeRequestStatsRequest,
 };
 use zeron_rpc::methods;
 
@@ -444,13 +444,7 @@ impl PullRequestsPage {
             self.listing = Loadable::Loading;
         }
         let (text, typed) = &self.sent;
-        let mut request = ListChangeRequestsRequest {
-            state: self.prefs.state,
-            involvement: self.prefs.involvement,
-            limit: None,
-            query: (!text.trim().is_empty()).then(|| text.trim().to_string()),
-            filters: filters::effective_filters(&self.prefs.filters, typed),
-        };
+        let mut request = filters::list_request(&self.prefs, text, typed);
         let paged_key = serde_json::to_string(&request).unwrap_or_default();
         if paged_key != self.paged_key {
             self.paged_key = paged_key;
@@ -839,6 +833,36 @@ impl PullRequestsPage {
                                 .text_color(theme.text),
                         )
                         .child("Sort"),
+                    theme,
+                    cx,
+                ),
+            )
+            .child(
+                self.menu_trigger(
+                    filters::MenuKind::Project,
+                    menu_button("pull-requests-project", "Project")
+                        .debug_selector(|| "pull-requests-project".into())
+                        .max_w(px(240.0))
+                        .child(icon(icons::LUCIDE_FOLDER).size(px(16.0)).text_color(
+                            if self.prefs.repository.is_some() {
+                                theme.text
+                            } else {
+                                theme.text_muted
+                            },
+                        ))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .child(
+                                    self.prefs
+                                        .repository
+                                        .clone()
+                                        .unwrap_or_else(|| "All projects".into()),
+                                ),
+                        ),
                     theme,
                     cx,
                 ),
@@ -1342,14 +1366,17 @@ impl PullRequestsPage {
         } else {
             self.sent.0.clone()
         };
+        let repository = self
+            .sent
+            .1
+            .repository
+            .as_ref()
+            .or(self.prefs.repository.as_ref());
         let items: Vec<&ChangeRequestListItem> = listing
             .items
             .iter()
             .filter(|item| {
-                self.prefs
-                    .repository
-                    .as_deref()
-                    .is_none_or(|repository| item.repository == repository)
+                repository.is_none_or(|repository| item.repository.eq_ignore_ascii_case(repository))
                     && self
                         .prefs
                         .host
@@ -1956,6 +1983,55 @@ mod tests {
         assert_eq!(ago(3600), "1h ago");
         assert_eq!(ago(86_399), "23h ago");
         assert_eq!(ago(86_400 * 40), "40d ago");
+    }
+
+    #[gpui::test]
+    fn the_project_control_picks_a_known_project_and_persists_it(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let state = cx.new(|_| AppState::new());
+        let (page, cx) = cx.add_window_view(|_, cx| PullRequestsPage::new(state, cx));
+        page.update(cx, |page, cx| {
+            page.listing = Loadable::Ready(ChangeRequestListing {
+                items: vec![item(1, "a")],
+                repositories: vec!["ReinaMacCredy/maestro".into(), "acme/zeron".into()],
+                ..Default::default()
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let control = cx
+            .debug_bounds("pull-requests-project")
+            .expect("project control drawn");
+        cx.simulate_click(control.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        let maestro = cx
+            .debug_bounds("pull-requests-project-2")
+            .expect("project menu lists a project with no loaded pull request");
+        cx.simulate_click(maestro.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        page.update(cx, |page, cx| {
+            assert_eq!(
+                page.prefs.repository.as_deref(),
+                Some("ReinaMacCredy/maestro")
+            );
+            assert_eq!(
+                crate::settings::current(cx)
+                    .pull_requests_list
+                    .repository
+                    .as_deref(),
+                Some("ReinaMacCredy/maestro")
+            );
+            let request = filters::list_request(&page.prefs, &page.sent.0, &page.sent.1);
+            assert_eq!(
+                request.filters.repository.as_deref(),
+                Some("ReinaMacCredy/maestro")
+            );
+        });
     }
 
     #[test]
