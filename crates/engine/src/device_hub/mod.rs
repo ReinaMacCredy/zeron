@@ -1,3 +1,4 @@
+mod agent;
 mod hub_client;
 mod hub_process;
 mod input;
@@ -18,6 +19,7 @@ use zeron_proto::device_hub::{
     DeviceSession, LOCAL_DEVICE_HOST_ID, OpenHubDeviceParams, ShutdownHubDeviceParams,
 };
 
+pub use agent::{AGENT_ACCESS_OFF, BOTH_PLATFORMS, DEVICE_TOOL_INSTRUCTIONS, TOOL_SUPPORT_OFF};
 use hub_client::HubClient;
 use hub_process::{Backoff, HubProcess};
 pub(crate) use stream::FrameSubscription;
@@ -43,8 +45,12 @@ pub struct DeviceHub {
     backoff: Mutex<Backoff>,
     restart: Mutex<Option<tokio::task::JoinHandle<()>>>,
     closed: AtomicBool,
+    agent: Mutex<Option<agent::AgentDaemon>>,
+    agent_start: tokio::sync::Mutex<()>,
     #[cfg(test)]
     test_spawn: Mutex<Option<TestSpawn>>,
+    #[cfg(test)]
+    test_agent: Mutex<Option<agent::AgentTool>>,
 }
 
 #[cfg(test)]
@@ -125,6 +131,9 @@ impl DeviceHub {
         if let Err(error) = std::fs::create_dir_all(&shims) {
             tracing::warn!(%error, "could not create the device tool directory");
         }
+        if !(state.settings.enabled && state.settings.agent_access_enabled) {
+            agent::remove_shim(&shims);
+        }
         zeron_harness::set_child_path_prefix(Some(shims));
         Arc::new_cyclic(|me| Self {
             me: me.clone(),
@@ -140,8 +149,12 @@ impl DeviceHub {
             backoff: Mutex::default(),
             restart: Mutex::new(None),
             closed: AtomicBool::new(false),
+            agent: Mutex::new(None),
+            agent_start: tokio::sync::Mutex::new(()),
             #[cfg(test)]
             test_spawn: Mutex::new(None),
+            #[cfg(test)]
+            test_agent: Mutex::new(None),
             streams: Arc::new(DeviceStreams::with_sink({
                 let me = me.clone();
                 move |streams| {
@@ -402,6 +415,7 @@ impl DeviceHub {
         std::fs::write(self.data_dir.join(SETTINGS_FILE), json)
             .map_err(|e| format!("Could not save device settings: {e}"))?;
         let enabled = settings.enabled;
+        let agent_on = settings.agent_access_enabled;
         let stopped = running_tools(false);
         self.publish(|state| {
             state.settings = settings;
@@ -419,12 +433,22 @@ impl DeviceHub {
                 stopped(state);
             }
         });
+        if !agent_on {
+            self.stop_agent().await;
+        }
         if !enabled {
             self.stop_hub().await;
         }
         drop(settings_lock);
         if enabled {
             self.list(false).await?;
+        }
+        if agent_on
+            && params.agent_access_enabled == Some(true)
+            && let Err(error) = self.ensure_agent().await
+        {
+            tracing::warn!(%error, "agent-device could not be prepared");
+            self.set_status(DeviceHostStatus::Failed, Some(error));
         }
         Ok(self.snapshot())
     }
@@ -844,11 +868,18 @@ impl DeviceHub {
         if let Some(hub) = self.hub_slot().as_ref() {
             hub.signal_stop();
         }
+        if let Some(daemon) = self.agent_slot().as_ref() {
+            daemon.signal_stop();
+        }
     }
 
     pub async fn shutdown(&self) {
         self.closed.store(true, Ordering::SeqCst);
         self.stop_hub().await;
+        let daemon = self.agent_slot().take();
+        if let Some(daemon) = daemon {
+            daemon.stop().await;
+        }
     }
 
     #[cfg(test)]
@@ -905,7 +936,7 @@ mod tests {
     }
 
     #[derive(Clone, Copy)]
-    struct Fake {
+    pub(super) struct Fake {
         list_status: u16,
         booted: bool,
         boot_status: Option<u16>,
@@ -915,7 +946,7 @@ mod tests {
         attach_delay: Duration,
     }
 
-    const HEALTHY: Fake = Fake {
+    pub(super) const HEALTHY: Fake = Fake {
         list_status: 200,
         booted: true,
         boot_status: Some(200),
@@ -925,7 +956,7 @@ mod tests {
         attach_delay: Duration::ZERO,
     };
 
-    async fn fake_hub() -> (String, Requests) {
+    pub(super) async fn fake_hub() -> (String, Requests) {
         fake_hub_with(HEALTHY).await
     }
 
@@ -994,7 +1025,9 @@ mod tests {
         (origin, requests)
     }
 
-    async fn enabled_hub(fake: Fake) -> (tempfile::TempDir, Arc<super::DeviceHub>, String) {
+    pub(super) async fn enabled_hub(
+        fake: Fake,
+    ) -> (tempfile::TempDir, Arc<super::DeviceHub>, String) {
         let dir = tempfile::tempdir().unwrap();
         let hub = super::DeviceHub::start(dir.path());
         let (origin, _) = fake_hub_with(fake).await;
@@ -1015,7 +1048,7 @@ mod tests {
         .unwrap()
     }
 
-    async fn eventually(mut done: impl FnMut() -> bool) {
+    pub(super) async fn eventually(mut done: impl FnMut() -> bool) {
         for _ in 0..500 {
             if done() {
                 return;
