@@ -1583,7 +1583,7 @@ impl Pickers {
         cx.notify();
     }
 
-    fn close(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn close(&mut self, cx: &mut Context<Self>) {
         self.animate_close(cx);
         cx.notify();
     }

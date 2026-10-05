@@ -11202,7 +11202,7 @@ impl Shell {
                 return;
             }
             if event.keystroke.key == "escape" && self.add_space.is_none() {
-                if !self.dismiss_pull_requests_overlay(cx) {
+                if !self.dismiss_pull_requests_overlay(window, cx) {
                     if self.pr_chat_open() {
                         self.minimize_pr_chat(cx);
                     } else {

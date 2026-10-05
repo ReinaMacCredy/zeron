@@ -16,8 +16,8 @@ use super::actions::ActionsState;
 use super::activity::ActivityState;
 use super::code::{CodeEvent, PullRequestCode};
 use super::{
-    PullRequestKey, PullRequestsPage, Tones, avatar, diff_stat, failure_message, label_color,
-    relative_time,
+    PageTab, PullRequestKey, PullRequestsPage, Tones, avatar, diff_stat, failure_message,
+    label_color, relative_time,
 };
 use crate::icons::{self, icon};
 use crate::popover::Loadable;
@@ -285,6 +285,7 @@ impl PullRequestsPage {
         cx: &mut Context<Self>,
     ) {
         item.device_id = device;
+        self.update_prefs(false, cx, |prefs| prefs.tab = PageTab::PullRequests);
         self.open_pull_request(&item, cx);
     }
 
@@ -346,7 +347,7 @@ impl PullRequestsPage {
         cx.notify();
     }
 
-    pub fn dismiss_overlay(&mut self, cx: &mut Context<Self>) -> bool {
+    pub fn dismiss_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.menu.is_open() {
             self.close_menu(cx);
             return true;
@@ -354,6 +355,16 @@ impl PullRequestsPage {
         if self.checks_popover.take().is_some() {
             cx.notify();
             return true;
+        }
+        if self.prefs.tab == PageTab::Git {
+            if self.confirm.take().is_some() {
+                cx.notify();
+                return true;
+            }
+            return self
+                .git_view
+                .clone()
+                .is_some_and(|view| view.update(cx, |tab, cx| tab.dismiss_overlay(window, cx)));
         }
         if self.checkout_menu.take().is_some() {
             cx.notify();

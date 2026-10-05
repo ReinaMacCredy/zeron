@@ -385,6 +385,7 @@ pub struct PullRequestsPage {
     search: Entity<ComposerInput>,
     _search_sub: Subscription,
     listing: Loadable<ChangeRequestListing>,
+    listed_repository: Option<String>,
     refreshing: bool,
     load_task: Option<Task<()>>,
     list_state: gpui::ListState,
@@ -445,6 +446,7 @@ impl PullRequestsPage {
             }
         });
         let prefs = crate::settings::current(cx).pull_requests_list.clone();
+        let listed_repository = prefs.repository.clone();
         let list_state = gpui::ListState::new(0, gpui::ListAlignment::Top, px(240.0));
         list_state.splice_focusable(
             0..0,
@@ -455,6 +457,7 @@ impl PullRequestsPage {
             search,
             _search_sub: search_sub,
             listing: Loadable::Idle,
+            listed_repository,
             refreshing: false,
             load_task: None,
             list_state,
@@ -519,6 +522,7 @@ impl PullRequestsPage {
         }
         request.limit = Some(self.limit);
         let unsearched = request.query.is_none();
+        let searched = request.filters.repository.clone();
         self.last_read = std::time::Instant::now();
         let params = serde_json::to_value(request).unwrap_or(serde_json::Value::Null);
         let devices = devices::chosen_devices(self.list_devices(cx), self.prefs.device.as_deref());
@@ -573,6 +577,7 @@ impl PullRequestsPage {
                                 .cloned()
                         });
                         page.listing = Loadable::Ready(listing);
+                        page.listed_repository = searched;
                         page.load_stats(cx);
                         if let Some(item) = created {
                             page.open_pull_request(&item, cx);
