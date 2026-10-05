@@ -3835,7 +3835,7 @@ impl RpcService for EngineRpc {
                             .into(),
                         ));
                     }
-                    tokio::time::timeout(crate::working_tree::WRITE_TIMEOUT, async {
+                    let reply = tokio::time::timeout(crate::working_tree::WRITE_TIMEOUT, async {
                         let _guard =
                             crate::working_tree::lock_checkout(&workspace.checkout_id).await;
                         let tree =
@@ -3857,7 +3857,7 @@ impl RpcService for EngineRpc {
                     })
                     .await
                     .map_err(|_| RpcError::Failed("the Git action timed out".into()))??;
-                    RpcReply::value(&zeron_proto::WorkingTreeActionReply::default())
+                    RpcReply::value(&reply)
                 })
                 .await
             }
@@ -5537,6 +5537,90 @@ mod tests {
             git(&repo, &["status", "--porcelain"]).replace('"', ""),
             " M a.txt\nA  new file.txt\n"
         );
+
+        for (key, value) in [
+            ("user.name", "Lab"),
+            ("user.email", "lab@example.com"),
+            ("commit.gpgsign", "false"),
+        ] {
+            git(&repo, &["config", key, value]);
+        }
+        let first = git(&repo, &["rev-parse", "HEAD"]);
+        let current = revision(&rpc).await;
+        for (commit, reason) in [
+            (
+                serde_json::json!({"kind": "commit", "message": "All", "all": true}),
+                "SafeOnly refuses commit all while an agent runs",
+            ),
+            (
+                serde_json::json!({"kind": "commit", "message": "Amend", "amend": true}),
+                "SafeOnly refuses amend while an agent runs",
+            ),
+        ] {
+            let error = rpc
+                .handle(
+                    methods::RUN_WORKING_TREE_ACTION,
+                    action(&current, "safeOnly", commit),
+                )
+                .await
+                .err()
+                .expect(reason);
+            assert!(error.to_string().contains("Only stage"), "{error}");
+        }
+        let error = rpc
+            .handle(
+                methods::RUN_WORKING_TREE_ACTION,
+                action(
+                    &current,
+                    "blockAll",
+                    serde_json::json!({"kind": "commit", "message": "Staged"}),
+                ),
+            )
+            .await
+            .err()
+            .expect("BlockAll refuses a commit while an agent runs");
+        assert!(error.to_string().contains("read-only"), "{error}");
+        assert_eq!(git(&repo, &["rev-parse", "HEAD"]), first);
+
+        let reply = through_the_wire(
+            rpc.handle(
+                methods::RUN_WORKING_TREE_ACTION,
+                action(
+                    &current,
+                    "safeOnly",
+                    serde_json::json!({"kind": "commit", "message": "Add the new file\n\nWhy it exists."}),
+                ),
+            )
+            .await
+            .expect("SafeOnly commits staged files while an agent runs"),
+        );
+        let head = git(&repo, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            reply,
+            serde_json::json!({"commit": {
+                "sha": head.trim(), "branch": "main", "subject": "Add the new file",
+            }})
+        );
+        assert_eq!(
+            git(&repo, &["status", "--porcelain"]).replace('"', ""),
+            " M a.txt\n"
+        );
+
+        let current = revision(&rpc).await;
+        let reply = through_the_wire(
+            rpc.handle(
+                methods::RUN_WORKING_TREE_ACTION,
+                action(
+                    &current,
+                    "allowAll",
+                    serde_json::json!({"kind": "commit", "message": "Everything", "all": true}),
+                ),
+            )
+            .await
+            .expect("AllowAll commits everything while an agent runs"),
+        );
+        assert_eq!(reply["commit"]["subject"], "Everything");
+        assert_eq!(git(&repo, &["status", "--porcelain"]), "");
     }
 
     /// Every forwardable unary method gets a bounded reply deadline —
@@ -5567,7 +5651,10 @@ mod tests {
             forward_deadline(methods::RUN_WORKING_TREE_ACTION) > crate::working_tree::WRITE_TIMEOUT,
             "a forwarded write reports the engine's own outcome"
         );
-        assert!(crate::working_tree::WRITE_TIMEOUT >= Duration::from_secs(120 + 20));
+        assert!(
+            crate::working_tree::COMMIT_TIMEOUT + crate::working_tree::READ_TIMEOUT
+                <= crate::working_tree::WRITE_TIMEOUT
+        );
         for method in [
             methods::CLONE_REPO,
             methods::FETCH_ALL,
