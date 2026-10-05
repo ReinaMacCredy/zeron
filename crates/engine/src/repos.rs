@@ -1021,13 +1021,16 @@ impl Repos {
     pub async fn workspace_checkout(&self, repo_path: &Path, candidate: &Path) -> Option<PathBuf> {
         let repo_path = repo_path.to_path_buf();
         let candidate = candidate.to_path_buf();
-        let worktrees: Vec<_> = self
-            .refs(&repo_path)
+        let worktrees: Vec<PathBuf> = self
+            .git(&["worktree", "list", "--porcelain"], Some(&repo_path))
             .await
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|row| row.worktree_path.map(PathBuf::from))
-            .collect();
+            .map(|out| {
+                out.lines()
+                    .filter_map(|line| line.trim().strip_prefix("worktree "))
+                    .map(PathBuf::from)
+                    .collect()
+            })
+            .unwrap_or_default();
         disposable_worker("checkout-auth", move || {
             let candidate = std::fs::canonicalize(candidate).ok()?;
             std::iter::once(repo_path)
@@ -2529,6 +2532,52 @@ tmpfs /run tmpfs rw 0 0
         assert!(
             repos
                 .workspace_checkout(root.path(), sibling.path())
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_checkout_accepts_a_detached_linked_worktree() {
+        let data = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let linked = root.path().join("linked");
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root.path())
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "first"]);
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            linked.to_str().unwrap(),
+        ]);
+        let repos =
+            Repos::with_worktrees_root(data.path(), "device", data.path().join("worktrees"));
+        assert_eq!(
+            repos.workspace_checkout(root.path(), &linked).await,
+            std::fs::canonicalize(&linked).ok()
+        );
+        let outside = tempfile::tempdir().unwrap();
+        assert!(
+            repos
+                .workspace_checkout(root.path(), outside.path())
                 .await
                 .is_none()
         );
