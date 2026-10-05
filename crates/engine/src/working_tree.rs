@@ -33,6 +33,21 @@ pub(crate) async fn git_with(
     max_bytes: usize,
     exit_one_ok: bool,
 ) -> Result<GitOutput, EngineError> {
+    run_git(root, args, max_bytes, exit_one_ok, true).await
+}
+
+async fn git_stash(root: &Path, args: &[&str]) -> Result<GitOutput, EngineError> {
+    // `stash push -u` cleans with a `:/` pathspec; literal pathspecs leave untracked files behind.
+    run_git(root, args, OUTPUT_MAX_BYTES, false, false).await
+}
+
+async fn run_git(
+    root: &Path,
+    args: &[&str],
+    max_bytes: usize,
+    exit_one_ok: bool,
+    literal_pathspecs: bool,
+) -> Result<GitOutput, EngineError> {
     let mut cmd = tokio::process::Command::new("git");
     #[cfg(windows)]
     {
@@ -44,7 +59,10 @@ pub(crate) async fn git_with(
         .arg(root)
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_LITERAL_PATHSPECS", "1")
+        .env(
+            "GIT_LITERAL_PATHSPECS",
+            if literal_pathspecs { "1" } else { "0" },
+        )
         .env("GIT_EDITOR", "true")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(std::process::Stdio::null())
@@ -314,10 +332,21 @@ fn count_untracked(root: &Path, path: &str) -> Option<LineDelta> {
     })
 }
 
-fn revision(status: &Status) -> String {
+fn stamp(root: &Path, path: &str) -> Option<(u64, u128)> {
+    let meta = std::fs::symlink_metadata(root.join(path)).ok()?;
+    let modified = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some((meta.len(), modified))
+}
+
+fn revision(status: &Status, stamps: &[Option<(u64, u128)>]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(
-        serde_json::to_vec(&(&status.head_sha, &status.branch, &status.files))
+        serde_json::to_vec(&(&status.head_sha, &status.branch, &status.files, stamps))
             .expect("working tree serialization"),
     );
     crate::repos::hex(&hasher.finalize())
@@ -372,12 +401,23 @@ pub(crate) async fn read(root: &Path, checkout_id: &str) -> Result<WorkingTree, 
             file.unstaged = unstaged.get(&file.path).copied();
         }
     }
+    let changed: Vec<String> = status
+        .files
+        .iter()
+        .filter(|file| file.worktree != GitFileState::Unchanged)
+        .map(|file| file.path.clone())
+        .collect();
     let counted_root = root.to_path_buf();
-    let counts = tokio::task::spawn_blocking(move || {
-        untracked
+    let (counts, stamps) = tokio::task::spawn_blocking(move || {
+        let counts = untracked
             .into_iter()
             .map(|(index, path)| (index, count_untracked(&counted_root, &path)))
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        let stamps = changed
+            .iter()
+            .map(|path| stamp(&counted_root, path))
+            .collect::<Vec<_>>();
+        (counts, stamps)
     })
     .await
     .unwrap_or_default();
@@ -387,7 +427,7 @@ pub(crate) async fn read(root: &Path, checkout_id: &str) -> Result<WorkingTree, 
     Ok(WorkingTree {
         checkout_id: checkout_id.to_owned(),
         root: root.to_string_lossy().into_owned(),
-        revision: revision(&status),
+        revision: revision(&status, &stamps),
         branch: status.branch,
         head_sha: status.head_sha,
         upstream: status.upstream,
@@ -522,6 +562,17 @@ pub(crate) async fn apply(
             amend,
             all,
         } => return commit(root, tree, message, *amend, *all, COMMIT_TIMEOUT).await,
+        WorkingTreeAction::Discard { paths } => discard(root, tree, paths).await,
+        WorkingTreeAction::StashPush { message } => {
+            stash_push(root, tree, message.as_deref()).await
+        }
+        WorkingTreeAction::StashPop { oid } => return stash_pop(root, tree, oid).await,
+        WorkingTreeAction::StashDrop { oid } => {
+            let selector = stash_selector(root, oid).await?;
+            git_stash(root, &["stash", "drop", "--quiet", &selector])
+                .await
+                .map(drop)
+        }
         _ => Err(EngineError::Other(
             "this Git action is not available yet".into(),
         )),
@@ -531,6 +582,161 @@ pub(crate) async fn apply(
 
 fn refused(message: &str) -> EngineError {
     EngineError::Other(message.into())
+}
+
+fn is_directory(root: &Path, path: &str) -> bool {
+    let path = path.trim_end_matches('/');
+    checked_path(path).is_ok()
+        && std::fs::symlink_metadata(root.join(path)).is_ok_and(|meta| meta.is_dir())
+}
+
+async fn discard(root: &Path, tree: &WorkingTree, paths: &[String]) -> Result<(), EngineError> {
+    if let Some(path) = paths.iter().find(|path| is_directory(root, path)) {
+        return Err(EngineError::Other(format!(
+            "{} is a directory (a submodule or a nested repository). Discard it in a terminal.",
+            path.trim_end_matches('/')
+        )));
+    }
+    let files = listed(
+        tree,
+        paths,
+        |file| file.worktree != GitFileState::Unchanged,
+        "has no unstaged changes",
+    )?;
+    if let Some(file) = files
+        .iter()
+        .find(|file| file.worktree == GitFileState::Unmerged)
+    {
+        return Err(EngineError::Other(format!(
+            "{} has a merge conflict. Resolve it before discarding.",
+            file.path
+        )));
+    }
+    let (untracked, tracked): (Vec<&WorkingTreeFile>, Vec<&WorkingTreeFile>) = files
+        .into_iter()
+        .partition(|file| file.worktree == GitFileState::Untracked);
+    if !tracked.is_empty() {
+        let paths: Vec<&str> = tracked.iter().map(|file| file.path.as_str()).collect();
+        run_with_paths(root, &["restore", "--worktree"], &paths).await?;
+    }
+    if !untracked.is_empty() {
+        let paths: Vec<&str> = untracked.iter().map(|file| file.path.as_str()).collect();
+        run_with_paths(root, &["clean", "-f", "-q"], &paths).await?;
+        for path in paths {
+            let mut parent = root.join(path).parent().map(Path::to_path_buf);
+            while let Some(directory) = parent {
+                if directory == root || std::fs::remove_dir(&directory).is_err() {
+                    break;
+                }
+                parent = directory.parent().map(Path::to_path_buf);
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn stash_push(
+    root: &Path,
+    tree: &WorkingTree,
+    message: Option<&str>,
+) -> Result<(), EngineError> {
+    if tree.files.is_empty() {
+        return Err(refused("There is nothing to stash."));
+    }
+    if tree.head_sha.is_none() {
+        return Err(refused("Stash needs a first commit on this branch."));
+    }
+    if tree
+        .files
+        .iter()
+        .any(|file| file.index == GitFileState::Unmerged || file.worktree == GitFileState::Unmerged)
+    {
+        return Err(refused("Resolve the merge conflicts before stashing."));
+    }
+    if let Some(file) = tree
+        .files
+        .iter()
+        .find(|file| file.worktree == GitFileState::Untracked && is_directory(root, &file.path))
+    {
+        return Err(EngineError::Other(format!(
+            "{} is a nested repository, which a stash would leave behind. Stash in a terminal.",
+            file.path.trim_end_matches('/')
+        )));
+    }
+    let message = message.map(str::trim).filter(|message| !message.is_empty());
+    if message.is_some_and(|message| message.len() > MAX_MESSAGE_BYTES) {
+        return Err(refused("The stash message is too long."));
+    }
+    let message = message.map(|message| format!("--message={message}"));
+    let mut args = vec!["stash", "push", "--include-untracked", "--quiet"];
+    if let Some(message) = message.as_deref() {
+        args.push(message);
+    }
+    git_stash(root, &args).await.map(drop)
+}
+
+async fn stash_selector(root: &Path, oid: &str) -> Result<String, EngineError> {
+    if oid.is_empty() || oid.len() > 64 || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(EngineError::Other(format!("not a stash id: {oid:?}")));
+    }
+    let listed = git(root, &["stash", "list", "-z", "--format=%H"]).await?;
+    let index = listed
+        .stdout
+        .split(|byte| *byte == 0 || *byte == b'\n')
+        .filter(|record| !record.is_empty())
+        .position(|record| record.eq_ignore_ascii_case(oid.as_bytes()))
+        .ok_or_else(|| {
+            refused("That stash is no longer in the list. It may have been popped or dropped elsewhere.")
+        })?;
+    let selector = format!("stash@{{{index}}}");
+    let resolved = git(root, &["rev-parse", "--verify", "--quiet", &selector]).await?;
+    if !String::from_utf8_lossy(&resolved.stdout)
+        .trim()
+        .eq_ignore_ascii_case(oid)
+    {
+        return Err(refused(
+            "The stash list changed while it was read. Try again.",
+        ));
+    }
+    Ok(selector)
+}
+
+async fn stash_pop(
+    root: &Path,
+    tree: &WorkingTree,
+    oid: &str,
+) -> Result<WorkingTreeActionReply, EngineError> {
+    if tree
+        .files
+        .iter()
+        .any(|file| file.index == GitFileState::Unmerged || file.worktree == GitFileState::Unmerged)
+    {
+        return Err(refused(
+            "Resolve the merge conflicts before popping a stash.",
+        ));
+    }
+    let selector = stash_selector(root, oid).await?;
+    let Err(error) = git_stash(root, &["stash", "pop", "--quiet", &selector]).await else {
+        return Ok(WorkingTreeActionReply::default());
+    };
+    let unmerged = git(
+        root,
+        &["diff", "--name-only", "--diff-filter=U", "-z", "--no-color"],
+    )
+    .await?;
+    let conflicts: Vec<String> = unmerged
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .collect();
+    if conflicts.is_empty() {
+        return Err(error);
+    }
+    Ok(WorkingTreeActionReply {
+        commit: None,
+        conflicts,
+    })
 }
 
 fn commit_error(error: EngineError) -> EngineError {
@@ -1464,5 +1670,286 @@ mod tests {
         assert_eq!(tree.branch.as_deref(), Some("trunk"));
         assert_eq!(tree.files[0].index, GitFileState::Added);
         assert_eq!(tree.files[0].staged.map(|d| d.additions), Some(1));
+    }
+
+    fn discard_paths(paths: &[&str]) -> WorkingTreeAction {
+        WorkingTreeAction::Discard {
+            paths: paths.iter().map(|path| (*path).to_owned()).collect(),
+        }
+    }
+
+    fn identified_repo() -> tempfile::TempDir {
+        let dir = committed_repo();
+        for (key, value) in [
+            ("user.name", "Lab"),
+            ("user.email", "lab@example.com"),
+            ("commit.gpgsign", "false"),
+        ] {
+            run(dir.path(), &["config", key, value]);
+        }
+        dir
+    }
+
+    fn stash_oids(root: &Path) -> Vec<String> {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["stash", "list", "--format=%H"])
+            .output()
+            .unwrap();
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn discard_restores_the_unstaged_side_and_removes_exact_untracked_files() {
+        let dir = committed_repo();
+        let root = dir.path();
+        std::fs::write(root.join("tracked.txt"), "staged\n").unwrap();
+        run(root, &["add", "tracked.txt"]);
+        std::fs::write(root.join("tracked.txt"), "staged\nand more\n").unwrap();
+        std::fs::remove_file(root.join("old name.txt")).unwrap();
+        std::fs::create_dir_all(root.join("new dir/deeper")).unwrap();
+        std::fs::write(root.join("new dir/deeper/-a b.txt"), "x\n").unwrap();
+        std::fs::write(root.join("keep.txt"), "keep\n").unwrap();
+        std::fs::write(root.join(":(glob)*"), "bait\n").unwrap();
+
+        let tree = read(root, "c").await.unwrap();
+        apply(
+            root,
+            &tree,
+            &discard_paths(&[
+                "tracked.txt",
+                "old name.txt",
+                "new dir/deeper/-a b.txt",
+                ":(glob)*",
+            ]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("tracked.txt")).unwrap(),
+            "staged\n",
+            "the staged version stays"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("old name.txt")).unwrap(),
+            "rename me\n"
+        );
+        assert!(!root.join("new dir").exists(), "emptied parents are pruned");
+        assert!(root.join("keep.txt").exists());
+        assert_eq!(porcelain(root), "M  tracked.txt\n?? keep.txt\n");
+    }
+
+    #[tokio::test]
+    async fn discard_refuses_directories_conflicts_and_rows_without_unstaged_changes() {
+        let dir = committed_repo();
+        let root = dir.path();
+        run(root, &["init", "-b", "main", "nested"]);
+        std::fs::write(root.join("nested/inner.txt"), "inner\n").unwrap();
+        std::fs::create_dir(root.join("plain dir")).unwrap();
+        std::fs::write(root.join("plain dir/file.txt"), "p\n").unwrap();
+        std::fs::remove_file(root.join("old name.txt")).unwrap();
+        std::fs::create_dir(root.join("old name.txt")).unwrap();
+        std::fs::write(root.join("old name.txt/x"), "x\n").unwrap();
+        std::fs::write(root.join("tracked.txt"), "staged\n").unwrap();
+        run(root, &["add", "tracked.txt"]);
+        let tree = read(root, "c").await.unwrap();
+        assert!(tree.files.iter().any(|file| file.path == "nested/"));
+        let before = porcelain(root);
+
+        for path in ["nested/", "nested", "plain dir", "old name.txt"] {
+            let error = apply(root, &tree, &discard_paths(&[path]))
+                .await
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("is a directory"),
+                "{path}: {error}"
+            );
+        }
+        let error = apply(root, &tree, &discard_paths(&["tracked.txt"]))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("no unstaged changes"), "{error}");
+        for path in ["../x", "nested/inner.txt", "missing.txt"] {
+            assert!(
+                apply(root, &tree, &discard_paths(&[path])).await.is_err(),
+                "{path}"
+            );
+        }
+        assert_eq!(porcelain(root), before);
+        assert!(root.join("nested/inner.txt").exists());
+        assert!(root.join("plain dir/file.txt").exists());
+        assert!(root.join("old name.txt/x").exists());
+
+        let mut conflicted = tree.clone();
+        conflicted.files.push(file(
+            "conflict.txt",
+            None,
+            GitFileState::Unmerged,
+            GitFileState::Unmerged,
+        ));
+        let error = apply(root, &conflicted, &discard_paths(&["conflict.txt"]))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("merge conflict"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_rewrite_with_the_same_line_counts_still_changes_the_revision() {
+        let dir = committed_repo();
+        let root = dir.path();
+        std::fs::write(root.join("tracked.txt"), "two\n").unwrap();
+        let shown = read(root, "c").await.unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(root.join("tracked.txt"), "TWO\n").unwrap();
+        let now = read(root, "c").await.unwrap();
+        assert_eq!(
+            shown.files, now.files,
+            "status and line counts are identical"
+        );
+        assert_ne!(shown.revision, now.revision);
+        assert_eq!(read(root, "c").await.unwrap().revision, now.revision);
+    }
+
+    #[tokio::test]
+    async fn stash_push_takes_untracked_files_and_refuses_what_it_cannot_carry() {
+        let dir = identified_repo();
+        let root = dir.path();
+        let tree = read(root, "c").await.unwrap();
+        let push = |message: Option<&str>| WorkingTreeAction::StashPush {
+            message: message.map(str::to_owned),
+        };
+        let error = apply(root, &tree, &push(None)).await.unwrap_err();
+        assert!(error.to_string().contains("nothing to stash"), "{error}");
+
+        std::fs::write(root.join("tracked.txt"), "changed\n").unwrap();
+        std::fs::write(root.join("-new file.txt"), "n\n").unwrap();
+        let tree = read(root, "c").await.unwrap();
+        apply(root, &tree, &push(Some("  -m sneaky message  ")))
+            .await
+            .unwrap();
+        assert_eq!(porcelain(root), "");
+        let tree = read(root, "c").await.unwrap();
+        assert_eq!(tree.stashes.len(), 1);
+        assert!(
+            tree.stashes[0].message.ends_with(": -m sneaky message"),
+            "{:?}",
+            tree.stashes
+        );
+
+        run(root, &["init", "-b", "main", "nested"]);
+        std::fs::write(root.join("nested/inner.txt"), "inner\n").unwrap();
+        let tree = read(root, "c").await.unwrap();
+        let error = apply(root, &tree, &push(None)).await.unwrap_err();
+        assert!(error.to_string().contains("nested repository"), "{error}");
+        assert_eq!(stash_oids(root).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn drop_and_pop_follow_the_oid_after_another_push_shifts_the_indexes() {
+        let dir = identified_repo();
+        let root = dir.path();
+        std::fs::write(root.join("a.txt"), "first stash\n").unwrap();
+        run(
+            root,
+            &["stash", "push", "--include-untracked", "-m", "first"],
+        );
+        let first = stash_oids(root)[0].clone();
+        let shown = read(root, "c").await.unwrap();
+        std::fs::write(root.join("b.txt"), "second stash\n").unwrap();
+        run(
+            root,
+            &["stash", "push", "--include-untracked", "-m", "second"],
+        );
+        let second = stash_oids(root)[0].clone();
+        assert_eq!(stash_oids(root), [second.clone(), first.clone()]);
+
+        apply(
+            root,
+            &shown,
+            &WorkingTreeAction::StashDrop { oid: first.clone() },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            stash_oids(root),
+            [second.clone()],
+            "the newer stash survived"
+        );
+        let error = apply(root, &shown, &WorkingTreeAction::StashDrop { oid: first })
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("no longer in the list"),
+            "{error}"
+        );
+        for oid in ["", "stash@{0}", "HEAD", "--all"] {
+            let error = apply(
+                root,
+                &shown,
+                &WorkingTreeAction::StashDrop { oid: oid.into() },
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("not a stash id"),
+                "{oid}: {error}"
+            );
+        }
+
+        let tree = read(root, "c").await.unwrap();
+        let reply = apply(root, &tree, &WorkingTreeAction::StashPop { oid: second })
+            .await
+            .unwrap();
+        assert_eq!(reply, WorkingTreeActionReply::default());
+        assert!(stash_oids(root).is_empty());
+        assert_eq!(porcelain(root), "?? b.txt\n");
+    }
+
+    #[tokio::test]
+    async fn a_pop_that_conflicts_keeps_the_stash_and_names_the_files() {
+        let dir = identified_repo();
+        let root = dir.path();
+        std::fs::write(root.join("tracked.txt"), "stashed side\n").unwrap();
+        run(root, &["stash", "push", "-m", "parked"]);
+        let oid = stash_oids(root)[0].clone();
+
+        std::fs::write(root.join("tracked.txt"), "local edit\n").unwrap();
+        let tree = read(root, "c").await.unwrap();
+        let error = apply(
+            root,
+            &tree,
+            &WorkingTreeAction::StashPop { oid: oid.clone() },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().starts_with("git:"), "{error}");
+        assert_eq!(stash_oids(root), [oid.clone()]);
+        assert_eq!(
+            std::fs::read_to_string(root.join("tracked.txt")).unwrap(),
+            "local edit\n"
+        );
+
+        run(root, &["commit", "-am", "committed side"]);
+        let tree = read(root, "c").await.unwrap();
+        let reply = apply(
+            root,
+            &tree,
+            &WorkingTreeAction::StashPop { oid: oid.clone() },
+        )
+        .await
+        .unwrap();
+        assert_eq!(reply.conflicts, ["tracked.txt"]);
+        assert_eq!(stash_oids(root), [oid.clone()], "the stash is kept");
+
+        let tree = read(root, "c").await.unwrap();
+        let error = apply(root, &tree, &WorkingTreeAction::StashPop { oid })
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("merge conflicts"), "{error}");
     }
 }
