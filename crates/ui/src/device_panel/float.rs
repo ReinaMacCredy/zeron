@@ -288,7 +288,11 @@ impl DeviceFloat {
             && let Some(engine) = self.state.read(cx).engine().cloned()
         {
             let id = device_id.clone();
-            self.view = Some(cx.new(|cx| DeviceStreamView::new(engine, id, cx).without_rail()));
+            self.view = Some(cx.new(|cx| {
+                DeviceStreamView::new(engine, id, cx)
+                    .without_rail()
+                    .with_corner_radius(CORNER_RADIUS)
+            }));
         }
         if let Some(view) = &self.view {
             feed_view(view, &hub, host_id, device_id, cx);
@@ -376,12 +380,26 @@ impl DeviceFloat {
                 .child(icon(glyph).size(px(14.0)).text_color(popup.text_muted))
         };
         let expanded = self.handle_hovered || self.gesture.is_some();
+        let shown = if expanded { 1.0 } else { 0.0 };
         div()
             .id("device-float-handle")
             .debug_selector(|| "device-float-handle".into())
             .absolute()
             .top(px(HANDLE_INSET))
             .right(px(HANDLE_INSET))
+            .h(px(32.0))
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .p(px(2.0))
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(gpui::transparent_black())
+            .when(expanded, |el| {
+                el.border_color(popup.border)
+                    .bg(popup.surface_dialog)
+                    .shadow_lg()
+            })
             .cursor_grab()
             .when(self.gesture.is_some(), |el| el.cursor_grabbing())
             .on_hover(cx.listener(|float, hovered: &bool, _, cx| {
@@ -395,43 +413,39 @@ impl DeviceFloat {
                     float.begin(None, event.position, cx);
                 }),
             )
-            .map(|el| {
-                if expanded {
-                    el.h(px(32.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(2.0))
-                        .p(px(2.0))
-                        .rounded(px(8.0))
-                        .border_1()
-                        .border_color(popup.border)
-                        .bg(popup.surface_dialog)
-                        .shadow_lg()
-                        .child(
-                            button(
-                                "device-float-open",
-                                icons::LUCIDE_PANEL_RIGHT,
-                                "Open in right panel",
-                            )
-                            .on_click(move |_, window, cx| open(window, cx)),
-                        )
-                        .child(
-                            button(
-                                "device-float-close",
-                                icons::LUCIDE_X,
-                                "Close floating preview",
-                            )
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(DeviceFloatEvent::Close))),
-                        )
-                } else {
-                    el.size(px(12.0)).flex().items_start().justify_end().child(
+            .child(
+                button(
+                    "device-float-open",
+                    icons::LUCIDE_PANEL_RIGHT,
+                    "Open in right panel",
+                )
+                .opacity(shown)
+                .on_click(move |_, window, cx| open(window, cx)),
+            )
+            .child(
+                button(
+                    "device-float-close",
+                    icons::LUCIDE_X,
+                    "Close floating preview",
+                )
+                .opacity(shown)
+                .on_click(cx.listener(|_, _, _, cx| cx.emit(DeviceFloatEvent::Close))),
+            )
+            .child(
+                div()
+                    .debug_selector(|| "device-float-grip".into())
+                    .self_start()
+                    .size(px(12.0))
+                    .flex()
+                    .justify_end()
+                    .child(
                         div()
                             .size(px(8.0))
                             .rounded_full()
-                            .bg(gpui::white().opacity(0.25)),
-                    )
-                }
-            })
+                            .bg(gpui::white().opacity(0.25))
+                            .opacity(1.0 - shown),
+                    ),
+            )
     }
 }
 
@@ -656,9 +670,13 @@ mod tests {
             (start.x, start.y, start.width, start.height),
             (748.0, 12.0, 240.0, 480.0)
         );
-        assert!(
-            float.read_with(cx, |float, _| float.view.is_some()),
-            "the float streams"
+        assert_eq!(
+            float.read_with(cx, |float, cx| float
+                .view
+                .as_ref()
+                .map(|view| view.read(cx).corner_radius)),
+            Some(CORNER_RADIUS),
+            "the float streams with the frame clipped to the card's corners"
         );
 
         let drag = |cx: &mut VisualTestContext, selector: &'static str, by: Point<Pixels>| {
@@ -668,7 +686,7 @@ mod tests {
             cx.simulate_mouse_up(from + by, MouseButton::Left, Modifiers::default());
             cx.run_until_parked();
         };
-        drag(cx, "device-float-handle", point(px(-300.0), px(100.0)));
+        drag(cx, "device-float-grip", point(px(-300.0), px(100.0)));
         let moved = frame(cx).unwrap();
         assert_eq!((moved.x, moved.y, moved.width), (448.0, 112.0, 240.0));
         drag(cx, "device-float-resize-right", point(px(60.0), px(0.0)));
@@ -696,11 +714,19 @@ mod tests {
                 seen.set(true);
             })
         });
-        assert!(cx.debug_bounds("device-float-open").is_none());
-        let handle = cx.debug_bounds("device-float-handle").unwrap().center();
-        cx.simulate_mouse_move(handle, None, Modifiers::default());
-        wait(cx, |cx| cx.debug_bounds("device-float-open").is_some());
-        let open = cx.debug_bounds("device-float-open").unwrap().center();
+        cx.simulate_mouse_move(point(px(5.0), px(5.0)), None, Modifiers::default());
+        cx.run_until_parked();
+        assert!(!float.read_with(cx, |float, _| float.handle_hovered));
+        let open = cx
+            .debug_bounds("device-float-open")
+            .expect("the hidden pill keeps its buttons in the tree")
+            .center();
+        let close = cx.debug_bounds("device-float-close").unwrap().center();
+        let grip = cx.debug_bounds("device-float-grip").unwrap();
+        assert!(
+            !grip.contains(&open) && !grip.contains(&close),
+            "the drag grip never sits on a button"
+        );
         cx.simulate_click(open, Modifiers::default());
         cx.run_until_parked();
         assert!(
@@ -708,7 +734,6 @@ mod tests {
             "Open in right panel reaches the shell callback"
         );
         assert_eq!(frame(cx), Some(resized), "a button press is not a drag");
-        let close = cx.debug_bounds("device-float-close").unwrap().center();
         cx.simulate_click(close, Modifiers::default());
         cx.run_until_parked();
         assert!(closed.get(), "Close floating preview emits Close");

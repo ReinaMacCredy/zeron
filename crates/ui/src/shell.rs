@@ -12171,7 +12171,6 @@ impl Shell {
                         })
                         .child(self.transcript.clone()),
                 )
-                .children(self.render_device_float(cx))
                 // A departing transcript is visual history, not an active
                 // interaction surface bound to the newly blank route.
                 .when(departing_transcript, |el| {
@@ -12268,6 +12267,29 @@ impl Shell {
                             .band_bottom(bottom_band),
                             terminal_geometry.clone(),
                         ),
+                    )
+                },
+            )
+            .when_some(
+                has_selection
+                    .then(|| self.render_device_float(cx))
+                    .flatten(),
+                |column, float| {
+                    let header = if self.split.is_some() {
+                        split::SPLIT_HEADER_HEIGHT
+                    } else {
+                        0.0
+                    };
+                    column.child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .top(px(Theme::TITLEBAR_HEIGHT + header))
+                            .overflow_hidden()
+                            .child(crate::terminal::dock::above_terminal(
+                                float,
+                                terminal_geometry.clone(),
+                            )),
                     )
                 },
             )
@@ -13545,6 +13567,27 @@ impl Shell {
                                 )
                                 .child(SharedString::from("Terminal")),
                         )
+                        .child({
+                            let row = popover::menu_row(&theme, false, "right-plus-device")
+                                .id("right-plus-device-row")
+                                .debug_selector(|| "right-plus-device-row".into())
+                                .child(
+                                    icon(icons::SMARTPHONE)
+                                        .size(px(13.0))
+                                        .text_color(theme.text_muted),
+                                )
+                                .child(SharedString::from("Device"));
+                            match self.device_surface_unavailable(cx) {
+                                Some(reason) => row
+                                    .opacity(0.5)
+                                    .cursor_default()
+                                    .tooltip(crate::settings::widgets::text_tooltip(reason)),
+                                None => row.on_click(cx.listener(|this, _, window, cx| {
+                                    this.add_device_surface(window, cx);
+                                    this.close_right_plus(cx);
+                                })),
+                            }
+                        })
                         .when(self.sidechat_source_chat(cx).is_some(), |menu| {
                             menu.child(
                                 popover::menu_row(&theme, false, "right-plus-sidechat")

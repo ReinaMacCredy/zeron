@@ -208,6 +208,7 @@ pub struct DeviceStreamView {
     fps: Option<FpsCounter>,
     debug_tap: Option<(f32, f32)>,
     rail_inset: f32,
+    pub(super) corner_radius: f32,
     drain: Task<()>,
     timer: Task<()>,
     _tasks: [Task<()>; 2],
@@ -284,6 +285,7 @@ impl DeviceStreamView {
                 .then(FpsCounter::default),
             debug_tap: debug_tap_from_env(),
             rail_inset: geometry::RAIL_WIDTH,
+            corner_radius: 0.0,
             drain: Task::ready(()),
             timer: Task::ready(()),
             _tasks: [sender, pump],
@@ -294,6 +296,11 @@ impl DeviceStreamView {
 
     pub fn without_rail(mut self) -> Self {
         self.rail_inset = 0.0;
+        self
+    }
+
+    pub fn with_corner_radius(mut self, radius: f32) -> Self {
+        self.corner_radius = radius;
         self
     }
 
@@ -531,6 +538,7 @@ impl Render for DeviceStreamView {
         let frame_box = self.frame_box.clone();
         let fps = self.fps.as_ref().map(|fps| fps.shown);
         let rail_inset = self.rail_inset;
+        let corners = gpui::Corners::all(px(self.corner_radius));
         let dragging = self.pressed.is_some().then(|| cx.entity().downgrade());
         let connecting = self.awaiting_frame && self.video_error.is_none();
         let input_down = (!self.awaiting_frame && self.video_error.is_none() && !self.input_live())
@@ -564,15 +572,11 @@ impl Render for DeviceStreamView {
                         frame_box.set(Some(frame));
                         match image {
                             Some(image) => {
-                                let _ = window.paint_image(
-                                    frame,
-                                    gpui::Corners::default(),
-                                    image,
-                                    0,
-                                    false,
-                                );
+                                let _ = window.paint_image(frame, corners, image, 0, false);
                             }
-                            None => window.paint_quad(gpui::fill(frame, crate::theme::ink(0.04))),
+                            None => window.paint_quad(
+                                gpui::fill(frame, crate::theme::ink(0.04)).corner_radii(corners),
+                            ),
                         }
                         if let Some(view) = dragging {
                             window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {

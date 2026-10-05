@@ -1037,4 +1037,93 @@ mod tests {
         assert_eq!(title(cx), "My phone");
         assert!(cx.debug_bounds("device-tab-rename").is_none());
     }
+
+    #[gpui::test]
+    fn the_plus_menu_device_row_opens_a_picker_tab_and_is_disabled_for_a_remote_chat(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (window, _dir) = device_shell(cx);
+        let shell = window.root(cx).unwrap();
+        let sim = window
+            .update(cx, |shell, window, cx| {
+                let sim = shell.open_device_tab("chat", target("SIM"), false, window, cx);
+                shell.right_plus.open(());
+                sim.unwrap()
+            })
+            .unwrap();
+        let (_, cx) = cx.add_window_view(|_, _| StripHost(shell.clone()));
+        cx.run_until_parked();
+        let row = cx
+            .debug_bounds("right-plus-device-row")
+            .expect("+ lists Device");
+        cx.simulate_click(row.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        shell.read_with(cx, |shell, cx| {
+            let tabs = device_tabs(shell);
+            assert_eq!(tabs.len(), 2, "a picker tab opens beside the bound tab");
+            assert_eq!(shell.device_tab_target(tabs[1], cx), None);
+            assert_eq!(
+                shell.resolved_right_active(cx),
+                RightSurface::Device(tabs[1])
+            );
+            assert_ne!(tabs[1], sim);
+            assert!(
+                shell.right_plus.as_open().is_none(),
+                "choosing Device closes the menu"
+            );
+        });
+
+        cx.update(|_, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.state.update(cx, |state, _| {
+                    state.chats = vec![
+                        serde_json::from_value(serde_json::json!({
+                            "id": "chat",
+                            "deviceId": "other-mac",
+                            "archived": false,
+                            "createdAt": "2026-09-28T00:00:00Z"
+                        }))
+                        .unwrap(),
+                    ];
+                    state.local_device_id = Some("this-mac".into());
+                });
+                shell.right_plus.open(());
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        let row = cx
+            .debug_bounds("right-plus-device-row")
+            .expect("the row stays listed for a remote chat");
+        cx.simulate_click(row.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(
+                device_tabs(shell).len(),
+                2,
+                "a disabled Device row opens nothing"
+            );
+            assert!(shell.right_plus.as_open().is_some());
+        });
+    }
+
+    #[gpui::test]
+    fn the_float_starts_below_the_header_with_the_edge_gap(cx: &mut gpui::TestAppContext) {
+        let (window, _dir) = device_shell(cx);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.debug_gate = Some(GatePhase::Ready);
+                shell.open_device_float("chat".into(), target("SIM"), cx);
+            })
+            .unwrap();
+        let cx = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        crate::device_panel::tests::wait(cx, |cx| cx.debug_bounds("device-float").is_some());
+        let column = cx.debug_bounds("chat-dropzone").unwrap();
+        let card = cx.debug_bounds("device-float").unwrap();
+        assert!(
+            card.top() >= column.top() + px(Theme::TITLEBAR_HEIGHT + 12.0),
+            "the float {card:?} starts below the header of {column:?}"
+        );
+        assert_eq!(card.right(), column.right() - px(12.0));
+    }
 }
