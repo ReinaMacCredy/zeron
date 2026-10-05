@@ -10,7 +10,7 @@ impl Shell {
         self.pull_requests_sub = Some(cx.subscribe(&page, |shell, _, event, cx| match event {
             PullRequestsEvent::Close => shell.close_pull_requests(cx),
             PullRequestsEvent::OpenChat(handoff) => shell.open_pull_request_chat(handoff.clone(), cx),
-            PullRequestsEvent::ToggleChat => {}
+            PullRequestsEvent::ToggleChat => shell.toggle_pr_chat(cx),
             PullRequestsEvent::OpenSettings(section) => {
                 if let Some(page) = &shell.pull_requests_page {
                     page.update(cx, |page, _| page.set_visible(false));
@@ -197,6 +197,7 @@ impl Shell {
             .relative()
             .child(drag)
             .child(page)
+            .children(self.render_pr_chat(cx))
             .children(overlays)
     }
 

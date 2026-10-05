@@ -1067,6 +1067,13 @@ pub enum PrChatHistory {
     Fresh,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrChatSession {
+    pub chat_id: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum GitAgentBusyPolicy {
@@ -1296,6 +1303,7 @@ pub struct UiSettings {
     pub commit_message_model: Option<CommitModelChoice>,
     pub pr_chat_style: PrChatStyle,
     pub pr_chat_history: PrChatHistory,
+    pub pr_chat_sessions: std::collections::BTreeMap<String, Vec<PrChatSession>>,
     pub git_agent_busy_policy: GitAgentBusyPolicy,
     /// Pre-theme settings used `accentColor`. Read it once, migrate to
     /// [`Self::accent`], and never write it again.
@@ -1408,6 +1416,7 @@ impl Default for UiSettings {
             commit_message_model: None,
             pr_chat_style: PrChatStyle::default(),
             pr_chat_history: PrChatHistory::default(),
+            pr_chat_sessions: Default::default(),
             git_agent_busy_policy: GitAgentBusyPolicy::default(),
             legacy_accent_color: None,
         }
@@ -2081,9 +2090,38 @@ impl UiSettings {
             commit_message_model,
             pr_chat_style,
             pr_chat_history,
+            pr_chat_sessions,
             git_agent_busy_policy,
         );
         current
+    }
+
+    pub fn pr_chat_ids(&self) -> impl Iterator<Item = &str> {
+        self.pr_chat_sessions
+            .values()
+            .flatten()
+            .map(|session| session.chat_id.as_str())
+    }
+
+    pub fn pr_chat_indexed(&self, chat_id: &str) -> bool {
+        self.pr_chat_ids().any(|id| id == chat_id)
+    }
+
+    pub fn index_pr_chat(&mut self, scope: &str, session: PrChatSession) {
+        if !self.pr_chat_indexed(&session.chat_id) {
+            self.pr_chat_sessions
+                .entry(scope.to_owned())
+                .or_default()
+                .push(session);
+        }
+    }
+
+    pub fn unindex_pr_chat(&mut self, chat_id: &str) {
+        for sessions in self.pr_chat_sessions.values_mut() {
+            sessions.retain(|session| session.chat_id != chat_id);
+        }
+        self.pr_chat_sessions
+            .retain(|_, sessions| !sessions.is_empty());
     }
 
     pub fn effective_commit_instruction(&self) -> &str {
@@ -2411,6 +2449,31 @@ mod tests {
         assert_eq!(legacy, UiSettings::default());
         let saved = serde_json::to_string(&legacy).unwrap();
         assert!(!saved.contains("commitMessageModel"));
+    }
+
+    #[test]
+    fn the_pr_chat_index_defaults_empty_and_survives_a_concurrent_merge() {
+        let legacy: UiSettings = serde_json::from_str("{}").unwrap();
+        assert!(legacy.pr_chat_sessions.is_empty());
+        let session = |id: &str| PrChatSession {
+            chat_id: id.into(),
+            created_at: chrono::Utc::now(),
+        };
+        let base = UiSettings::default();
+        let mut edited = base.clone();
+        edited.index_pr_chat("github.com/acme/zeron#7", session("one"));
+        edited.index_pr_chat("github.com/acme/zeron#7", session("one"));
+        edited.index_pr_chat("list", session("two"));
+        assert_eq!(edited.pr_chat_ids().collect::<Vec<_>>(), ["one", "two"]);
+        let mut current = base.clone();
+        current.sidebar_width = 333.0;
+        let merged = UiSettings::merge_changes(&base, &edited, current);
+        assert_eq!(merged.sidebar_width, 333.0);
+        assert!(merged.pr_chat_indexed("one") && merged.pr_chat_indexed("two"));
+        let mut pruned = merged.clone();
+        pruned.unindex_pr_chat("two");
+        assert!(!pruned.pr_chat_indexed("two"));
+        assert!(!pruned.pr_chat_sessions.contains_key("list"));
     }
 
     #[test]
@@ -3321,6 +3384,13 @@ mod tests {
             }),
             pr_chat_style: PrChatStyle::BottomBar,
             pr_chat_history: PrChatHistory::Fresh,
+            pr_chat_sessions: std::collections::BTreeMap::from([(
+                "github.com/acme/zeron#7".to_string(),
+                vec![PrChatSession {
+                    chat_id: "pr-chat-1".into(),
+                    created_at: chrono::DateTime::from_timestamp(1_790_000_000, 0).unwrap(),
+                }],
+            )]),
             git_agent_busy_policy: GitAgentBusyPolicy::BlockAll,
             legacy_accent_color: None,
         };
@@ -3331,6 +3401,8 @@ mod tests {
         assert!(json.contains(r#""prChatStyle": "bottom-bar""#));
         assert!(json.contains(r#""prChatHistory": "fresh""#));
         assert!(json.contains(r#""gitAgentBusyPolicy": "block-all""#));
+        assert!(json.contains(r#""github.com/acme/zeron#7": ["#));
+        assert!(json.contains(r#""chatId": "pr-chat-1""#));
         assert!(json.contains(r#""diffWrap": true"#));
         assert_eq!(UiSettings::load(dir.path()), settings);
         assert!(json.contains(r#""codeFencesFitContent": true"#));

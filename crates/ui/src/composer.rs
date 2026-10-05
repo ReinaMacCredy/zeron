@@ -6588,6 +6588,8 @@ pub struct Composer {
     account_usage: Entity<crate::account_usage::AccountUsage>,
     /// A side chat's composer: its footer keeps only the context ring.
     side_chat: bool,
+    pr_chat: bool,
+    pr_context: Option<String>,
     _picker_focus: Subscription,
     _input_events: Subscription,
     _dictation_events: Subscription,
@@ -6876,6 +6878,8 @@ impl Composer {
             _pickers_observe: pickers_observe,
             account_usage,
             side_chat: false,
+            pr_chat: false,
+            pr_context: None,
             _picker_focus: picker_focus,
             _input_events: input_events,
             _dictation_events: dictation_events,
@@ -7168,6 +7172,16 @@ impl Composer {
     pub(crate) fn set_side_chat(&mut self, cx: &mut Context<Self>) {
         self.side_chat = true;
         cx.notify();
+    }
+
+    pub(crate) fn set_pr_chat(&mut self, cx: &mut Context<Self>) {
+        self.side_chat = true;
+        self.pr_chat = true;
+        cx.notify();
+    }
+
+    pub(crate) fn set_pr_context(&mut self, block: Option<String>) {
+        self.pr_context = block;
     }
 
     /// Whether the draft holds anything a close would lose: text, staged
@@ -7940,10 +7954,27 @@ impl Composer {
     fn completion_workspace_params(&self, cx: &App) -> Option<serde_json::Value> {
         let state = self.state.read(cx);
         if let Some(chat) = self.bound_chat_row(cx) {
+            let unsaved = state.side_chat_unsaved();
+            if unsaved && chat.created_by_chat_id.is_none() {
+                let mut params = serde_json::json!({
+                    "spaceId": chat.space_id.clone()?,
+                    "targetDeviceId": chat.device_id,
+                    "cwd": chat.cwd,
+                });
+                let root = chat
+                    .space_id
+                    .as_deref()
+                    .and_then(|id| state.space_row(id))
+                    .map(|space| space.path.as_str());
+                if let Some(cwd) = chat.cwd.as_deref().filter(|cwd| Some(*cwd) != root) {
+                    params["path"] = cwd.into();
+                }
+                return Some(params);
+            }
             let chat_id = chat
                 .created_by_chat_id
                 .as_deref()
-                .filter(|_| state.side_chat_unsaved())
+                .filter(|_| unsaved)
                 .unwrap_or(&chat.id);
             Some(serde_json::json!({
                 "chatId": chat_id,
@@ -10221,6 +10252,15 @@ impl Composer {
             resolved.model_options = config.model_options;
             resolved.permission_mode = config.permission_mode;
         }
+        if self.pr_chat {
+            if resolved.harness.is_none() {
+                self.failure = Some("Pick an agent before sending.".into());
+                self.failure_key = self.bound_chat_id(cx);
+                cx.notify();
+                return;
+            }
+            resolved.permission_mode = zeron_proto::PermissionMode::Ask;
+        }
         let existing_cwd = self.bound_chat_row(cx).and_then(|c| c.cwd.clone());
         // The PROJECT fixes the new chat's device + base folder — sessions are
         // minted onto the project's device, not necessarily this one. With no
@@ -10313,6 +10353,10 @@ impl Composer {
         let typed = text.clone();
         let text = crate::quotes::with_quotes(&text, &quotes);
         let text = crate::comments::with_comments(&text, &comments);
+        let text = match &self.pr_context {
+            Some(block) if create_side_chat.is_some() => format!("{text}{block}"),
+            _ => text,
+        };
         self.preview = None;
         let message_id = uuid::Uuid::new_v4().to_string();
         let created_at = chrono::Utc::now().timestamp_millis();
@@ -13263,7 +13307,7 @@ impl Render for Composer {
                     .update(cx, |pickers, cx| pickers.render_footer(cx))
             });
             let sidechat_pill = self.render_sidechat_pill(&theme, cx);
-            let permission_chip = (session_chrome_opacity > 0.0).then(|| {
+            let permission_chip = (session_chrome_opacity > 0.0 && !self.pr_chat).then(|| {
                 self.pickers
                     .update(cx, |pickers, cx| pickers.render_permission_chip(cx))
             });
