@@ -17,8 +17,8 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, Context, Entity, EventEmitter, Hsla,
-    IntoElement, MouseButton, MouseMoveEvent, ParentElement, Render, ScrollHandle, SharedString,
-    Styled, Subscription, Task, Window, div, percentage, prelude::*, px,
+    IntoElement, MouseButton, MouseMoveEvent, ParentElement, Render, SharedString, Styled,
+    Subscription, Task, Window, div, percentage, prelude::*, px,
 };
 use zeron_proto::{
     ChangeRequestChecksState, ChangeRequestFailure, ChangeRequestInvolvement,
@@ -37,6 +37,7 @@ use crate::theme::{Appearance, Theme, oklch};
 const CONTAINER_MAX_WIDTH: f32 = 1152.0;
 const CONTAINER_PAD_X: f32 = 24.0;
 const GHOST_ROWS: usize = 7;
+const ROW_HEIGHT_HINT: f32 = 74.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PullRequestGroup {
@@ -63,6 +64,36 @@ fn authored_by_viewer(item: &ChangeRequestListItem, viewers: &BTreeMap<String, S
         return false;
     };
     author.login.eq_ignore_ascii_case(viewer)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum ListEntry {
+    Controls,
+    Ghost(usize, Option<String>),
+    State {
+        title: String,
+        description: String,
+        with_mark: bool,
+        clear_search: bool,
+    },
+    Header {
+        group: PullRequestGroup,
+        first: bool,
+    },
+    Row {
+        index: usize,
+        gap: bool,
+    },
+    Notice(ChangeRequestFailure),
+    More,
+}
+
+#[derive(Default)]
+struct ListFrame {
+    row_width: f32,
+    search_text: String,
+    search_busy: bool,
+    devices: Vec<devices::ListDevice>,
 }
 
 pub(crate) fn group_items<'a>(
@@ -337,7 +368,9 @@ pub struct PullRequestsPage {
     listing: Loadable<ChangeRequestListing>,
     refreshing: bool,
     load_task: Option<Task<()>>,
-    scroll: ScrollHandle,
+    list_state: gpui::ListState,
+    entries: Vec<ListEntry>,
+    frame: ListFrame,
     tabs: Vec<PullRequestKey>,
     active: Option<PullRequestKey>,
     details: HashMap<PullRequestKey, detail::DetailState>,
@@ -389,6 +422,11 @@ impl PullRequestsPage {
             }
         });
         let prefs = crate::settings::current(cx).pull_requests_list.clone();
+        let list_state = gpui::ListState::new(0, gpui::ListAlignment::Top, px(240.0));
+        list_state.splice_focusable(
+            0..0,
+            [Some(gpui::Focusable::focus_handle(search.read(cx), cx))],
+        );
         let mut page = Self {
             state,
             search,
@@ -396,7 +434,9 @@ impl PullRequestsPage {
             listing: Loadable::Idle,
             refreshing: false,
             load_task: None,
-            scroll: ScrollHandle::new(),
+            list_state,
+            entries: vec![ListEntry::Controls],
+            frame: ListFrame::default(),
             tabs: Vec::new(),
             active: None,
             details: HashMap::new(),
@@ -609,7 +649,7 @@ impl PullRequestsPage {
     }
 
     pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+        self.list_state.scroll_to(gpui::ListOffset::default());
         let handle = gpui::Focusable::focus_handle(self.search.read(cx), cx);
         window.focus(&handle, cx);
         self.search
@@ -736,7 +776,8 @@ impl PullRequestsPage {
     }
 
     fn list_condensed(&self) -> bool {
-        -f32::from(self.scroll.offset().y) > 64.0
+        let top = self.list_state.logical_scroll_top();
+        top.item_ix > 0 || top.offset_in_item > px(64.0)
     }
 
     fn render_controls(
@@ -914,10 +955,6 @@ impl PullRequestsPage {
             .into_any_element()
     }
 
-    fn render_ghost(&self, theme: &Theme) -> AnyElement {
-        self.render_ghost_rows(theme, GHOST_ROWS, None)
-    }
-
     fn render_ghost_rows(&self, theme: &Theme, rows: usize, caption: Option<String>) -> AnyElement {
         let title = [0.6, 0.4, 0.5, 0.66, 0.4, 0.6, 0.5];
         let meta = [0.4, 0.33, 0.4, 0.25, 0.33, 0.4, 0.33];
@@ -1083,6 +1120,8 @@ impl PullRequestsPage {
         device_label: Option<String>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        #[cfg(test)]
+        tests::ROWS_RENDERED.with(|rows| rows.set(rows.get() + 1));
         let (glyph, glyph_tone, _) = tones.glyph(item);
         let matched_elsewhere =
             !search.trim().is_empty() && filters::score_match(item, search) <= 10;
@@ -1323,41 +1362,47 @@ impl PullRequestsPage {
             .into_any_element()
     }
 
-    fn render_body(
-        &self,
-        theme: &Theme,
-        row_width: f32,
-        busy: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn list_entries(&self, busy: bool, cx: &App) -> (Vec<ListEntry>, String) {
+        let mut entries = vec![ListEntry::Controls];
+        let state = |title: String, description: String, with_mark: bool, clear_search: bool| {
+            ListEntry::State {
+                title,
+                description,
+                with_mark,
+                clear_search,
+            }
+        };
         let listing = match &self.listing {
-            Loadable::Idle | Loadable::Loading => return self.render_ghost(theme),
+            Loadable::Idle | Loadable::Loading => {
+                entries.push(ListEntry::Ghost(GHOST_ROWS, None));
+                return (entries, String::new());
+            }
             Loadable::Error(error) => {
-                return self.render_state(
-                    theme,
+                entries.push(state(
                     "Could not load pull requests".into(),
                     error.clone(),
                     false,
                     false,
-                    cx,
-                );
+                ));
+                return (entries, String::new());
             }
             Loadable::Ready(listing) => listing,
         };
-        let shown_errors: Vec<_> = listing
+        let first_error = listing
             .errors
             .iter()
-            .filter(|error| shown_failure(error.failure))
-            .collect();
-        if listing.items.is_empty() && !shown_errors.is_empty() {
-            return self.render_state(
-                theme,
+            .map(|error| error.failure)
+            .find(|failure| shown_failure(*failure));
+        if listing.items.is_empty()
+            && let Some(failure) = first_error
+        {
+            entries.push(state(
                 "Could not load pull requests".into(),
-                failure_message(shown_errors[0].failure).into(),
+                failure_message(failure).into(),
                 false,
                 false,
-                cx,
-            );
+            ));
+            return (entries, String::new());
         }
         let query = self.query(cx);
         let trimmed = query.trim();
@@ -1387,11 +1432,11 @@ impl PullRequestsPage {
             .collect();
         let shown = crate::rail::truncate_preview(trimmed, 49);
         if items.is_empty() && busy && !search_text.trim().is_empty() {
-            return self.render_ghost_rows(
-                theme,
+            entries.push(ListEntry::Ghost(
                 5,
                 Some(format!("Searching every host for “{shown}”")),
-            );
+            ));
+            return (entries, search_text);
         }
         if items.is_empty() {
             let (title, description) = if !trimmed.is_empty() {
@@ -1411,21 +1456,9 @@ impl PullRequestsPage {
                     "Pull requests from every project in this workspace appear here.".to_string(),
                 )
             };
-            return self.render_state(theme, title, description, true, !trimmed.is_empty(), cx);
+            entries.push(state(title, description, true, !trimmed.is_empty()));
+            return (entries, search_text);
         }
-        let tones = Tones::of(theme);
-        let now = Utc::now();
-        let list_devices = self.list_devices(cx);
-        let device_label = |item: &ChangeRequestListItem| {
-            (list_devices.len() >= 2)
-                .then(|| {
-                    list_devices
-                        .iter()
-                        .find(|device| device.target() == item.device_id)
-                        .map(|device| device.name.clone())
-                })
-                .flatten()
-        };
         let groups: Vec<(Option<PullRequestGroup>, Vec<&ChangeRequestListItem>)> =
             if self.prefs.involvement == ChangeRequestInvolvement::All {
                 group_items(&items, &listing.viewers)
@@ -1435,60 +1468,154 @@ impl PullRequestsPage {
             } else {
                 vec![(None, items)]
             };
-        let mut column = div().flex().flex_col().gap(px(12.0));
-        for (group, mut group_items) in groups {
+        let size = std::mem::size_of::<ChangeRequestListItem>();
+        let base = listing.items.as_ptr().addr();
+        for (position, (group, mut group_items)) in groups.into_iter().enumerate() {
             filters::sort_items(&mut group_items, self.prefs.sort, &search_text);
-            column = column.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .children(group.map(|group| {
-                        div()
-                            .px(px(12.0))
-                            .pb(px(2.0))
-                            .text_size(px(12.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text_muted.opacity(0.7))
-                            .child(group.label())
-                    }))
-                    .children(group_items.into_iter().map(|item| {
-                        self.render_row(
-                            item,
-                            theme,
-                            tones,
-                            row_width,
-                            now,
-                            &search_text,
-                            device_label(item),
-                            cx,
-                        )
-                    })),
+            if let Some(group) = group {
+                entries.push(ListEntry::Header {
+                    group,
+                    first: position == 0,
+                });
+            }
+            let count = group_items.len();
+            entries.extend(
+                group_items
+                    .into_iter()
+                    .enumerate()
+                    .map(|(n, item)| ListEntry::Row {
+                        index: (std::ptr::from_ref(item).addr() - base) / size,
+                        gap: n + 1 < count,
+                    }),
             );
         }
-        if let Some(error) = shown_errors.first() {
-            column = column.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(12.0))
-                    .rounded(px(10.0))
-                    .border_1()
-                    .border_color(tones.pending.opacity(0.3))
-                    .bg(tones.pending.opacity(0.05))
-                    .px(px(12.0))
-                    .py(px(8.0))
-                    .text_size(px(12.0))
-                    .text_color(theme.text)
-                    .child(format!(
-                        "{} Showing the last pull requests loaded.",
-                        failure_message(error.failure)
-                    )),
-            );
+        if let Some(failure) = first_error {
+            entries.push(ListEntry::Notice(failure));
         }
-        column = column.children(self.render_more(listing.truncated, theme, cx));
-        column.into_any_element()
+        if listing.truncated {
+            entries.push(ListEntry::More);
+        }
+        (entries, search_text)
+    }
+
+    fn sync_entries(&mut self, entries: Vec<ListEntry>, cx: &App) {
+        if entries == self.entries {
+            return;
+        }
+        let top = self.list_state.logical_scroll_top();
+        // Unmeasured rows need a height hint, or one scroll event cannot pass the overdraw.
+        self.list_state
+            .reset_with_uniform_height(entries.len(), px(ROW_HEIGHT_HINT));
+        self.list_state.splice_focusable(
+            0..1,
+            [Some(gpui::Focusable::focus_handle(
+                self.search.read(cx),
+                cx,
+            ))],
+        );
+        self.list_state.scroll_to(gpui::ListOffset {
+            item_ix: top.item_ix.min(entries.len() - 1),
+            offset_in_item: top.offset_in_item,
+        });
+        self.entries = entries;
+    }
+
+    fn render_entry(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let Some(entry) = self.entries.get(ix).cloned() else {
+            return div().into_any_element();
+        };
+        let theme = Theme::of(cx).clone();
+        let tones = Tones::of(&theme);
+        let content = match entry {
+            ListEntry::Controls => self.render_controls(&theme, self.frame.search_busy, cx),
+            ListEntry::Ghost(rows, caption) => self.render_ghost_rows(&theme, rows, caption),
+            ListEntry::State {
+                title,
+                description,
+                with_mark,
+                clear_search,
+            } => self.render_state(&theme, title, description, with_mark, clear_search, cx),
+            ListEntry::Header { group, first } => div()
+                .when(!first, |el| el.pt(px(12.0)))
+                .px(px(12.0))
+                .pb(px(4.0))
+                .text_size(px(12.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.text_muted.opacity(0.7))
+                .child(group.label())
+                .into_any_element(),
+            ListEntry::Row { index, gap } => {
+                let Some(item) = self
+                    .listing
+                    .ready()
+                    .and_then(|listing| listing.items.get(index))
+                else {
+                    return div().into_any_element();
+                };
+                let devices = &self.frame.devices;
+                let device_label = (devices.len() >= 2)
+                    .then(|| {
+                        devices
+                            .iter()
+                            .find(|device| device.target() == item.device_id)
+                            .map(|device| device.name.clone())
+                    })
+                    .flatten();
+                let row = self.render_row(
+                    item,
+                    &theme,
+                    tones,
+                    self.frame.row_width,
+                    Utc::now(),
+                    &self.frame.search_text,
+                    device_label,
+                    cx,
+                );
+                div()
+                    .when(gap, |el| el.pb(px(2.0)))
+                    .child(row)
+                    .into_any_element()
+            }
+            ListEntry::Notice(failure) => div()
+                .pt(px(12.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(12.0))
+                        .rounded(px(10.0))
+                        .border_1()
+                        .border_color(tones.pending.opacity(0.3))
+                        .bg(tones.pending.opacity(0.05))
+                        .px(px(12.0))
+                        .py(px(8.0))
+                        .text_size(px(12.0))
+                        .text_color(theme.text)
+                        .child(format!(
+                            "{} Showing the last pull requests loaded.",
+                            failure_message(failure)
+                        )),
+                )
+                .into_any_element(),
+            ListEntry::More => div()
+                .pt(px(12.0))
+                .children(self.render_more(true, &theme, cx))
+                .into_any_element(),
+        };
+        div()
+            .w_full()
+            .child(
+                div()
+                    .mx_auto()
+                    .w_full()
+                    .max_w(px(CONTAINER_MAX_WIDTH))
+                    .px(px(CONTAINER_PAD_X))
+                    .when(ix == 0, |el| el.pt(px(24.0)).pb(px(16.0)))
+                    .when(ix + 1 == self.entries.len(), |el| el.pb(px(48.0)))
+                    .child(content),
+            )
+            .into_any_element()
     }
 }
 
@@ -1716,8 +1843,14 @@ impl Render for PullRequestsPage {
         let row_width = (container - 2.0 * CONTAINER_PAD_X).max(0.0);
         let topbar = self.render_topbar(&theme, window, cx);
         let search_busy = self.search_busy(cx);
-        let controls = self.render_controls(&theme, search_busy, cx);
-        let body = self.render_body(&theme, row_width, search_busy, cx);
+        let (entries, search_text) = self.list_entries(search_busy, cx);
+        self.sync_entries(entries, cx);
+        self.frame = ListFrame {
+            row_width,
+            search_text,
+            search_busy,
+            devices: self.list_devices(cx),
+        };
         let list = div()
             .flex_1()
             .min_w_0()
@@ -1726,26 +1859,12 @@ impl Render for PullRequestsPage {
             .flex_col()
             .child(topbar)
             .child(
-                div()
-                    .id("pull-requests-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll)
-                    .child(
-                        div()
-                            .mx_auto()
-                            .w_full()
-                            .max_w(px(CONTAINER_MAX_WIDTH))
-                            .px(px(CONTAINER_PAD_X))
-                            .pt(px(24.0))
-                            .pb(px(48.0))
-                            .flex()
-                            .flex_col()
-                            .gap(px(16.0))
-                            .child(controls)
-                            .child(body),
-                    ),
+                gpui::list(
+                    self.list_state.clone(),
+                    cx.processor(|page, ix, _, cx| page.render_entry(ix, cx)),
+                )
+                .flex_1()
+                .min_h_0(),
             );
         let panel = panel_width.map(|width| {
             let resizer = div()
@@ -1838,9 +1957,203 @@ impl Render for PullRequestsPage {
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
-    use zeron_proto::ChangeRequestActor;
+    use zeron_proto::{ChangeRequestActor, ChangeRequestLabel};
 
     use super::*;
+
+    thread_local! {
+        pub(super) static ROWS_RENDERED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    fn synthetic_listing(rows: usize) -> ChangeRequestListing {
+        let repositories = ["ReinaMacCredy/maestro", "getpaseo/paseo", "zeronsh/zeron"];
+        let checks = [
+            Some(ChangeRequestChecksState::Passing),
+            Some(ChangeRequestChecksState::Failing),
+            Some(ChangeRequestChecksState::Pending),
+            None,
+        ];
+        let items = (1..=rows as u64)
+            .map(|number| {
+                let mut row = item(
+                    number,
+                    ["alice", "bob", "carol", "paseo-bot"][number as usize % 4],
+                );
+                row.repository = repositories[number as usize % 3].into();
+                row.title = format!("Synthetic pull request {number} with a reasonably long title");
+                row.viewer_review_requested = number % 5 == 0;
+                row.checks_state = checks[number as usize % 4];
+                row.additions = number * 7;
+                row.deletions = number * 3;
+                row.labels = (0..number % 4)
+                    .map(|index| ChangeRequestLabel {
+                        name: format!("label-{index}"),
+                        color: Some("d73a4a".into()),
+                    })
+                    .collect();
+                row.updated_at = Utc.with_ymd_and_hms(2026, 9, 2, 0, 0, 0).unwrap()
+                    + chrono::Duration::minutes(number as i64);
+                row
+            })
+            .collect();
+        ChangeRequestListing {
+            viewers: BTreeMap::from([("github.com".to_string(), "alice".to_string())]),
+            items,
+            truncated: true,
+            ..Default::default()
+        }
+    }
+
+    fn scroll_fixture(
+        cx: &mut gpui::TestAppContext,
+        rows: usize,
+    ) -> (
+        Entity<PullRequestsPage>,
+        &mut gpui::VisualTestContext,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let state = cx.new(|_| AppState::new());
+        let (page, cx) = cx.add_window_view(|_, cx| PullRequestsPage::new(state, cx));
+        cx.simulate_resize(gpui::size(px(1200.0), px(800.0)));
+        page.update(cx, |page, cx| {
+            page.listing = Loadable::Ready(synthetic_listing(rows));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        (page, cx, dir)
+    }
+
+    fn scroll_step(cx: &mut gpui::VisualTestContext, delta: f32) -> (Duration, usize) {
+        ROWS_RENDERED.with(|rows| rows.set(0));
+        let started = std::time::Instant::now();
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: gpui::point(px(600.0), px(500.0)),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(delta))),
+            ..Default::default()
+        });
+        (started.elapsed(), ROWS_RENDERED.with(|rows| rows.get()))
+    }
+
+    #[gpui::test]
+    fn a_long_list_lays_out_only_the_rows_near_the_viewport(cx: &mut gpui::TestAppContext) {
+        let (page, cx, _dir) = scroll_fixture(cx, 300);
+        let (_, rows) = scroll_step(cx, -600.0);
+        assert!(
+            rows > 0 && rows < 40,
+            "{rows} rows laid out for one scroll step"
+        );
+        page.update(cx, |page, _| {
+            assert!(page.list_condensed());
+            let row = page.list_state.logical_scroll_top().item_ix + 1;
+            assert!(matches!(
+                page.entries[row],
+                ListEntry::Row { gap: true, .. }
+            ));
+            let height = f32::from(page.list_state.bounds_for_item(row).unwrap().size.height);
+            assert!((height - ROW_HEIGHT_HINT).abs() < 1.0, "row is {height}px");
+        });
+        for _ in 0..60 {
+            scroll_step(cx, -2000.0);
+        }
+        page.update(cx, |page, _| {
+            let top = page.list_state.logical_scroll_top().item_ix;
+            assert!(
+                top + 20 > page.entries.len(),
+                "{top} of {}",
+                page.entries.len()
+            );
+            assert_eq!(page.entries.last(), Some(&ListEntry::More));
+        });
+        cx.update(|window, cx| page.update(cx, |page, cx| page.focus_search(window, cx)));
+        cx.run_until_parked();
+        page.update(cx, |page, _| {
+            assert_eq!(page.list_state.logical_scroll_top().item_ix, 0);
+            assert!(!page.list_condensed());
+        });
+    }
+
+    #[gpui::test]
+    fn load_more_and_refresh_keep_the_scroll_position(cx: &mut gpui::TestAppContext) {
+        let (page, cx, _dir) = scroll_fixture(cx, 99);
+        scroll_step(cx, -3000.0);
+        let top = |page: &Entity<PullRequestsPage>, cx: &mut gpui::VisualTestContext| {
+            page.update(cx, |page, _| {
+                let top = page.list_state.logical_scroll_top();
+                (top.item_ix, top.offset_in_item)
+            })
+        };
+        let before = top(&page, cx);
+        assert!(before.0 > 10, "{before:?}");
+        for rows in [99, 198] {
+            page.update(cx, |page, cx| {
+                page.listing = Loadable::Ready(synthetic_listing(rows));
+                cx.notify();
+            });
+            cx.run_until_parked();
+            assert_eq!(top(&page, cx), before, "after a {rows}-row listing");
+        }
+        page.update(cx, |page, _| {
+            let rows = page
+                .entries
+                .iter()
+                .filter(|entry| matches!(entry, ListEntry::Row { .. }))
+                .count();
+            assert_eq!(rows, 198);
+        });
+    }
+
+    #[gpui::test]
+    #[ignore = "measurement: cargo test -p zeron-ui --lib scroll_frame_cost -- --ignored --nocapture"]
+    fn scroll_frame_cost(cx: &mut gpui::TestAppContext) {
+        let rows: usize = std::env::var("ZERON_PR_BENCH_ROWS")
+            .ok()
+            .and_then(|rows| rows.parse().ok())
+            .unwrap_or(300);
+        let (_page, cx, _dir) = scroll_fixture(cx, rows);
+        for _ in 0..5 {
+            scroll_step(cx, -40.0);
+        }
+        let mut samples = Vec::new();
+        let mut rendered = Vec::new();
+        for step in 0..120 {
+            let (elapsed, count) = scroll_step(cx, if step < 60 { -60.0 } else { 60.0 });
+            samples.push(elapsed);
+            rendered.push(count);
+        }
+        let mut hovers = Vec::new();
+        for step in 0..60 {
+            let started = std::time::Instant::now();
+            cx.simulate_mouse_move(
+                gpui::point(px(600.0), px(200.0 + (step % 30) as f32 * 17.0)),
+                None,
+                gpui::Modifiers::default(),
+            );
+            hovers.push(started.elapsed());
+        }
+        let stats = |mut samples: Vec<Duration>| {
+            samples.sort();
+            let mean = samples.iter().sum::<Duration>() / samples.len() as u32;
+            (
+                mean,
+                samples[samples.len() / 2],
+                samples[samples.len() * 9 / 10],
+            )
+        };
+        let (mean, median, p90) = stats(samples);
+        let (hover_mean, hover_median, hover_p90) = stats(hovers);
+        rendered.sort();
+        println!(
+            "rows={rows} scroll step: mean={mean:?} median={median:?} p90={p90:?} rows/frame median={} max={}; hover move: mean={hover_mean:?} median={hover_median:?} p90={hover_p90:?}",
+            rendered[rendered.len() / 2],
+            rendered[rendered.len() - 1],
+        );
+    }
 
     fn item(number: u64, author: &str) -> ChangeRequestListItem {
         ChangeRequestListItem {
