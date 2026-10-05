@@ -23,7 +23,7 @@ use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::history::{GitHistory, GitHistoryEvent, GitHistoryTarget};
 use crate::icons::{self, icon};
 use crate::pickers::{CommitModelPicked, Pickers};
-use crate::popover;
+use crate::popover::{self, Loadable};
 use crate::settings::CommitModelChoice;
 use crate::settings::widgets::text_tooltip;
 use crate::state::AppState;
@@ -129,28 +129,10 @@ struct Pending {
     replied: bool,
 }
 
-enum DiffView {
-    Loading,
-    Ready {
-        diff: WorkingTreeFileDiff,
-        parsed: Option<FileDiff>,
-    },
-    Failed(SharedString),
-}
-
 struct Expanded {
     staged: bool,
     path: String,
-    view: DiffView,
-}
-
-enum CommitDiffView {
-    Loading,
-    Ready {
-        diff: CheckoutDiff,
-        parsed: Vec<FileDiff>,
-    },
-    Failed(SharedString),
+    view: Loadable<(WorkingTreeFileDiff, Option<FileDiff>)>,
 }
 
 struct BranchForm {
@@ -161,7 +143,7 @@ struct BranchForm {
 
 struct CommitDetail {
     commit: GitHistoryCommit,
-    diff: CommitDiffView,
+    diff: Loadable<(CheckoutDiff, Vec<FileDiff>)>,
     open_files: HashSet<String>,
     branch_form: Option<BranchForm>,
     outcome: Option<(SharedString, bool)>,
@@ -1125,7 +1107,7 @@ impl GitTab {
         self.detail_task = None;
         self.detail = commit.map(|commit| CommitDetail {
             commit,
-            diff: CommitDiffView::Loading,
+            diff: Loadable::Loading,
             open_files: HashSet::new(),
             branch_form: None,
             outcome: None,
@@ -1166,9 +1148,9 @@ impl GitTab {
                 detail.diff = match result {
                     Ok(diff) => {
                         let parsed = changes::parse_patch(&diff.patch);
-                        CommitDiffView::Ready { diff, parsed }
+                        Loadable::Ready((diff, parsed))
                     }
-                    Err(error) => CommitDiffView::Failed(error.into()),
+                    Err(error) => Loadable::Error(error),
                 };
                 cx.notify();
             })
@@ -1367,7 +1349,7 @@ impl GitTab {
                 }
             }
             None => {
-                let CommitDiffView::Ready { diff, .. } = &detail.diff else {
+                let Some((diff, _)) = detail.diff.ready() else {
                     return;
                 };
                 if detail.open_files.len() == diff.files.len() {
@@ -1923,7 +1905,7 @@ impl GitTab {
         self.expanded = Some(Expanded {
             staged,
             path,
-            view: DiffView::Loading,
+            view: Loadable::Loading,
         });
         self.fetch_diff(cx);
         cx.notify();
@@ -1961,9 +1943,9 @@ impl GitTab {
                 open.view = match result {
                     Ok(diff) => {
                         let parsed = changes::parse_patch(&diff.patch).into_iter().next();
-                        DiffView::Ready { diff, parsed }
+                        Loadable::Ready((diff, parsed))
                     }
-                    Err(error) => DiffView::Failed(error.into()),
+                    Err(error) => Loadable::Error(error),
                 };
                 cx.notify();
             })
@@ -3325,9 +3307,9 @@ impl GitTab {
             .next()
             .filter(|_| tree.is_some());
         let copied = self.history.read(cx).copied_sha() == Some(commit.sha.as_str());
-        let files: &[DiffFileSummary] = match &detail.diff {
-            CommitDiffView::Ready { diff, .. } => &diff.files,
-            _ => &[],
+        let files: &[DiffFileSummary] = match detail.diff.ready() {
+            Some((diff, _)) => &diff.files,
+            None => &[],
         };
         let all_open = !files.is_empty() && detail.open_files.len() == files.len();
         let parents = if commit.parent_shas.is_empty() {
@@ -3518,7 +3500,7 @@ impl GitTab {
         });
         let mut file_rows: Vec<AnyElement> = Vec::new();
         match &detail.diff {
-            CommitDiffView::Loading => file_rows.push(
+            Loadable::Idle | Loadable::Loading => file_rows.push(
                 div()
                     .px(px(12.0))
                     .text_size(px(12.0))
@@ -3526,7 +3508,7 @@ impl GitTab {
                     .child("Reading the commit…")
                     .into_any_element(),
             ),
-            CommitDiffView::Failed(error) => file_rows.push(
+            Loadable::Error(error) => file_rows.push(
                 div()
                     .id("git-commit-files-error")
                     .debug_selector(|| "git-commit-files-error".into())
@@ -3536,7 +3518,7 @@ impl GitTab {
                     .child(error.clone())
                     .into_any_element(),
             ),
-            CommitDiffView::Ready { diff, parsed } => {
+            Loadable::Ready((diff, parsed)) => {
                 for (index, file) in diff.files.iter().enumerate() {
                     file_rows.push(self.render_commit_file(index, file, detail, theme, cx));
                     if detail.open_files.contains(&file.path) {
@@ -4207,9 +4189,9 @@ fn small_button(
 
 fn render_diff(open: &Expanded, theme: &Theme) -> AnyElement {
     let body = match &open.view {
-        DiffView::Loading => DiffBody::Loading,
-        DiffView::Failed(error) => DiffBody::Failed(error.clone()),
-        DiffView::Ready { diff, parsed } => DiffBody::Ready {
+        Loadable::Idle | Loadable::Loading => DiffBody::Loading,
+        Loadable::Error(error) => DiffBody::Failed(error.clone().into()),
+        Loadable::Ready((diff, parsed)) => DiffBody::Ready {
             file: parsed.as_ref(),
             binary: diff.binary,
             truncated: diff.truncated,
@@ -5026,7 +5008,6 @@ mod tests {
     use zeron_rpc::{RpcReply, RpcService};
 
     use super::*;
-    use crate::popover::Loadable;
 
     type Calls = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
 
@@ -5768,7 +5749,7 @@ mod tests {
             tab.read_with(cx, |tab, _| {
                 matches!(
                     tab.expanded.as_ref().map(|open| &open.view),
-                    Some(DiffView::Ready { .. })
+                    Some(Loadable::Ready(_))
                 )
             }) && cx.debug_bounds("git-file-diff").is_some()
         });
@@ -5777,9 +5758,8 @@ mod tests {
             [serde_json::json!({"spaceId": "space-1", "path": "src/a b.rs", "staged": true})]
         );
         tab.read_with(cx, |tab, _| {
-            let Some(DiffView::Ready {
-                parsed: Some(file), ..
-            }) = tab.expanded.as_ref().map(|open| &open.view)
+            let Some(Loadable::Ready((_, Some(file)))) =
+                tab.expanded.as_ref().map(|open| &open.view)
             else {
                 panic!("a parsed diff");
             };
