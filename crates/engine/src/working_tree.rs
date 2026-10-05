@@ -478,7 +478,9 @@ pub(crate) async fn read(root: &Path, checkout_id: &str) -> Result<WorkingTree, 
 struct BranchConfig {
     remotes: Vec<String>,
     push_default: Option<String>,
+    push_mode: Option<String>,
     remote: Option<String>,
+    branch_push_remote: Option<String>,
     merge: Option<String>,
 }
 
@@ -505,8 +507,12 @@ impl BranchConfig {
                 }
             } else if key == "remote.pushdefault" {
                 config.push_default = Some(value);
+            } else if key == "push.default" {
+                config.push_mode = Some(value);
             } else if branch_key(key, ".remote") {
                 config.remote = Some(value);
+            } else if branch_key(key, ".pushremote") {
+                config.branch_push_remote = Some(value);
             } else if branch_key(key, ".merge") {
                 config.merge = Some(value);
             }
@@ -519,13 +525,18 @@ impl BranchConfig {
     }
 
     fn push_remote(&self, tracking: bool) -> Option<String> {
+        if let Some(remote) = self
+            .branch_push_remote
+            .as_ref()
+            .or(self.push_default.as_ref())
+        {
+            return self.known(remote).then(|| remote.clone());
+        }
         if tracking {
             return self.remote.clone().filter(|remote| self.known(remote));
         }
-        self.push_default
-            .clone()
-            .filter(|remote| self.known(remote))
-            .or_else(|| self.known("origin").then(|| "origin".to_owned()))
+        self.known("origin")
+            .then(|| "origin".to_owned())
             .or_else(|| (self.remotes.len() == 1).then(|| self.remotes[0].clone()))
     }
 }
@@ -537,7 +548,7 @@ async fn branch_config(root: &Path, branch: &str) -> BranchConfig {
             "config",
             "-z",
             "--get-regexp",
-            r"^(remote\..*\.url|remote\.pushdefault|branch\..*\.(remote|merge))$",
+            r"^(remote\..*\.url|remote\.pushdefault|push\.default|branch\..*\.(remote|pushremote|merge))$",
         ],
         OUTPUT_MAX_BYTES,
         true,
@@ -1310,18 +1321,43 @@ pub(crate) async fn sync(
     let config = branch_config(root, branch).await;
     match direction {
         SyncDirection::Push { set_upstream } => {
-            let (remote, dest, track) = if tree.upstream.is_some() {
-                let remote = config.push_remote(true).ok_or_else(|| {
-                    refused("This branch tracks something other than a remote branch. Push it from a terminal.")
-                })?;
-                let dest = config
-                    .merge
-                    .clone()
-                    .filter(|merge| merge.starts_with("refs/heads/"))
-                    .ok_or_else(|| {
-                        refused("This branch tracks something other than a remote branch. Push it from a terminal.")
-                    })?;
-                (remote, dest, false)
+            let (remote, dest, track) = if let Some(upstream) = tree.upstream.as_deref() {
+                let not_a_remote_branch = || {
+                    refused(
+                        "This branch tracks something other than a remote branch. Push it from a terminal.",
+                    )
+                };
+                let remote = config.push_remote(true).ok_or_else(not_a_remote_branch)?;
+                let same_name = format!("refs/heads/{branch}");
+                let to_upstream =
+                    matches!(config.push_mode.as_deref(), Some("upstream" | "tracking"));
+                if config.remote.as_deref() != Some(remote.as_str()) {
+                    if to_upstream {
+                        return Err(refused(&format!(
+                            "push.default is upstream, but this branch pushes to {remote}, which is not the remote it tracks. Push it from a terminal."
+                        )));
+                    }
+                    (remote, same_name, false)
+                } else {
+                    let merge = config
+                        .merge
+                        .clone()
+                        .filter(|merge| merge.starts_with("refs/heads/"))
+                        .ok_or_else(not_a_remote_branch)?;
+                    if merge == same_name
+                        || to_upstream
+                        || config.push_mode.as_deref() == Some("current")
+                    {
+                        let dest = if to_upstream { merge } else { same_name };
+                        (remote, dest, false)
+                    } else if set_upstream {
+                        (remote, same_name, true)
+                    } else {
+                        return Err(refused(&format!(
+                            "{branch} tracks {upstream}, a branch with another name, so Push will not send it there. To publish it as its own branch, run `git push -u {remote} {branch}` in a terminal."
+                        )));
+                    }
+                }
             } else {
                 if !set_upstream {
                     return Err(refused(
@@ -2578,6 +2614,116 @@ mod tests {
         assert_eq!(sole.push_remote(false).as_deref(), Some("upstream"));
         let many = config("remote.a.url\n/a|remote.b.url\n/b|", "b");
         assert_eq!(many.push_remote(false), None, "never a guess among remotes");
+
+        let triangular = config(
+            "remote.origin.url\n/r|remote.fork.url\n/f|remote.pushdefault\norigin|push.default\nupstream|branch.Feat.remote\norigin|branch.Feat.pushremote\nfork|branch.Feat.merge\nrefs/heads/main|",
+            "Feat",
+        );
+        assert_eq!(triangular.push_remote(true).as_deref(), Some("fork"));
+        assert_eq!(triangular.push_remote(false).as_deref(), Some("fork"));
+        assert_eq!(triangular.push_mode.as_deref(), Some("upstream"));
+        let pinned_tracked = config(
+            "remote.origin.url\n/r|remote.mine.url\n/m|remote.pushdefault\nmine|branch.b.remote\norigin|",
+            "b",
+        );
+        assert_eq!(pinned_tracked.push_remote(true).as_deref(), Some("mine"));
+        let unknown = config(
+            "remote.origin.url\n/r|branch.b.remote\norigin|branch.b.pushremote\n/some/url|",
+            "b",
+        );
+        assert_eq!(
+            unknown.push_remote(true),
+            None,
+            "never fall back past a pushRemote"
+        );
+    }
+
+    fn branch_from_origin_main(repo: &Path, name: &str) {
+        run(repo, &["fetch", "-q", "origin"]);
+        run(repo, &["switch", "-q", "-c", name, "origin/main"]);
+        commit_file(repo, &format!("{name}.txt"), "x\n");
+    }
+
+    #[tokio::test]
+    async fn push_never_sends_a_branch_to_an_upstream_with_another_name() {
+        let (_dir, remote, repo) = lab();
+        let main = rev(&remote, "refs/heads/main");
+        branch_from_origin_main(&repo, "feat");
+        let tree = read(&repo, "c").await.unwrap();
+        assert_eq!(tree.upstream.as_deref(), Some("origin/main"));
+        assert_eq!(tree.push_remote.as_deref(), Some("origin"));
+
+        let error = sync(&repo, &tree, PUSH, SYNC_TIMEOUT).await.unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("feat tracks origin/main"), "{text}");
+        assert!(text.contains("git push -u origin feat"), "{text}");
+        assert_eq!(rev(&remote, "refs/heads/main"), main);
+        assert_eq!(rev(&remote, "refs/heads/feat"), "");
+
+        assert_eq!(
+            sync(&repo, &tree, PUSH_TRACKING, SYNC_TIMEOUT)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(rev(&remote, "refs/heads/feat"), rev(&repo, "HEAD"));
+        assert_eq!(rev(&remote, "refs/heads/main"), main);
+        let tree = read(&repo, "c").await.unwrap();
+        assert_eq!(tree.upstream.as_deref(), Some("origin/feat"));
+
+        branch_from_origin_main(&repo, "current-mode");
+        run(&repo, &["config", "push.default", "current"]);
+        let tree = read(&repo, "c").await.unwrap();
+        sync(&repo, &tree, PUSH, SYNC_TIMEOUT).await.unwrap();
+        assert_eq!(rev(&remote, "refs/heads/current-mode"), rev(&repo, "HEAD"));
+        assert_eq!(rev(&remote, "refs/heads/main"), main);
+
+        branch_from_origin_main(&repo, "upstream-mode");
+        run(&repo, &["config", "push.default", "upstream"]);
+        let tree = read(&repo, "c").await.unwrap();
+        sync(&repo, &tree, PUSH, SYNC_TIMEOUT).await.unwrap();
+        assert_eq!(
+            rev(&remote, "refs/heads/main"),
+            rev(&repo, "HEAD"),
+            "push.default=upstream asked for the merge ref"
+        );
+    }
+
+    #[tokio::test]
+    async fn push_goes_to_the_branch_push_remote_under_its_own_name() {
+        let (dir, origin, repo) = lab();
+        let fork = dir.path().join("fork.git");
+        run(
+            dir.path(),
+            &["init", "-q", "--bare", "-b", "main", fork.to_str().unwrap()],
+        );
+        run(&repo, &["remote", "add", "fork", fork.to_str().unwrap()]);
+        let main = rev(&origin, "refs/heads/main");
+        branch_from_origin_main(&repo, "feat");
+        run(&repo, &["config", "branch.feat.pushRemote", "fork"]);
+        let tree = read(&repo, "c").await.unwrap();
+        assert_eq!(tree.push_remote.as_deref(), Some("fork"));
+
+        sync(&repo, &tree, PUSH, SYNC_TIMEOUT).await.unwrap();
+        assert_eq!(rev(&fork, "refs/heads/feat"), rev(&repo, "HEAD"));
+        assert_eq!(rev(&fork, "refs/heads/main"), "");
+        assert_eq!(rev(&origin, "refs/heads/main"), main);
+        assert_eq!(rev(&origin, "refs/heads/feat"), "");
+        assert_eq!(
+            read(&repo, "c").await.unwrap().upstream.as_deref(),
+            Some("origin/main"),
+            "pull still comes from the tracked branch"
+        );
+
+        commit_file(&repo, "more.txt", "more\n");
+        run(&repo, &["config", "push.default", "upstream"]);
+        let tree = read(&repo, "c").await.unwrap();
+        let error = sync(&repo, &tree, PUSH, SYNC_TIMEOUT).await.unwrap_err();
+        assert!(
+            error.to_string().contains("not the remote it tracks"),
+            "{error}"
+        );
+        assert_eq!(rev(&origin, "refs/heads/main"), main);
     }
 
     #[tokio::test]
