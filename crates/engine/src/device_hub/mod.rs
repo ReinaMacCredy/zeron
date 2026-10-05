@@ -17,8 +17,8 @@ use tokio::sync::watch;
 use zeron_proto::device_hub::{
     CloseHubDeviceParams, ConfigureDeviceHubParams, DeviceBooting, DeviceHostStatus, DeviceHubHost,
     DeviceHubSettings, DeviceHubState, DeviceInput, DevicePlatform, DevicePlatformAvailability,
-    DeviceSession, LOCAL_DEVICE_HOST_ID, OpenHubDeviceParams, ShutdownHubDeviceParams,
-    StreamLinkStatus,
+    DeviceSession, DeviceVideoCodec, LOCAL_DEVICE_HOST_ID, OpenHubDeviceParams,
+    ShutdownHubDeviceParams, StreamLinkStatus,
 };
 
 pub use actions::DEVICE_ACTION_UNAVAILABLE;
@@ -737,8 +737,12 @@ impl DeviceHub {
             http: &self.http,
             origin,
         };
-        let (on_status, on_first_frame) =
-            self.link_callbacks(device_id, link, client.input_url(device_id));
+        let (on_status, on_first_frame) = self.link_callbacks(
+            device_id,
+            link,
+            DeviceVideoCodec::Mjpeg,
+            client.input_url(device_id),
+        );
         stream::spawn_reader(
             self.http.clone(),
             client.mjpeg_url(device_id),
@@ -759,8 +763,12 @@ impl DeviceHub {
             http: &self.http,
             origin,
         };
-        let (on_status, on_first_frame) =
-            self.link_callbacks(device_id, link, client.input_url(device_id));
+        let (on_status, on_first_frame) = self.link_callbacks(
+            device_id,
+            link,
+            DeviceVideoCodec::H264,
+            client.input_url(device_id),
+        );
         stream::spawn_avcc_reader(
             self.http.clone(),
             client.avcc_url(device_id),
@@ -774,6 +782,7 @@ impl DeviceHub {
         &self,
         device_id: &str,
         link: u64,
+        codec: DeviceVideoCodec,
         input: String,
     ) -> (
         impl Fn(StreamLinkStatus) + Send + 'static,
@@ -784,7 +793,8 @@ impl DeviceHub {
         (
             move |status| {
                 if let Some(hub) = status_hub.upgrade() {
-                    hub.streams.set_status(&status_id, link, Some(status), None);
+                    hub.streams
+                        .set_status(&status_id, link, Some((codec, status)), None);
                 }
             },
             move || {
@@ -1685,6 +1695,15 @@ mod tests {
         assert_eq!(next_tags(&mut tab, 5).await[..4], [4, 1, 2, 3]);
         eventually(|| count("helper/ws?device=SIM-1") > 0).await;
         assert_eq!(count("stream.mjpeg"), 0, "an AVCC read alone opens input");
+        let status = hub.snapshot().streams["SIM-1"].clone();
+        assert_eq!(
+            (status.avcc, status.video),
+            (
+                zeron_proto::device_hub::StreamLinkStatus::Live,
+                zeron_proto::device_hub::StreamLinkStatus::Idle
+            ),
+            "the AVCC read reports on its own status"
+        );
         let mut float = Box::pin(super::avcc_batches(hub.watch_avcc("SIM-1").unwrap()));
         let replay = next_tags(&mut float, 3).await;
         assert_eq!(replay[..2], [1, 2], "description and keyframe first");

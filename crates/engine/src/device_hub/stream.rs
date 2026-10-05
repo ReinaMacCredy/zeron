@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -14,7 +14,12 @@ use super::mjpeg::MjpegParser;
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const AVCC_QUEUE: usize = 256;
-const GOP_CACHE_BYTES: usize = 8 << 20;
+// A 300-frame GOP at 40 fps and the encoder's 6 Mbps is 5.6 MB; the cap doubles that.
+const GOP_CACHE_BYTES: usize = 12 << 20;
+// Base64 turns 3 MiB into 4 MiB per RPC item.
+const AVCC_ITEM_BYTES: usize = 3 << 20;
+// Base64 of 11 MiB stays under tungstenite's 16 MiB frame limit.
+const AVCC_SENDABLE_BYTES: usize = 11 << 20;
 
 pub(crate) struct Frame {
     pub seq: u64,
@@ -57,6 +62,13 @@ impl AvccFeed {
         self.lock().awaiting_keyframe = true;
     }
 
+    fn reset(&self) {
+        *self.lock() = AvccCache {
+            awaiting_keyframe: true,
+            ..Default::default()
+        };
+    }
+
     pub(crate) fn push(&self, envelope: AvccEnvelope) {
         let mut cache = self.lock();
         let envelope = Arc::new(envelope);
@@ -70,6 +82,7 @@ impl AvccFeed {
             AVCC_SEED => cache.seed = Some(envelope.clone()),
             AVCC_KEYFRAME => {
                 cache.awaiting_keyframe = false;
+                cache.seed = None;
                 cache.gop_bytes = envelope.payload.len();
                 cache.gop = vec![envelope.clone()];
             }
@@ -138,6 +151,7 @@ struct Entry {
     avcc: Option<Feed<Arc<AvccFeed>>>,
     input: Option<InputSocket>,
     video_status: StreamLinkStatus,
+    avcc_status: StreamLinkStatus,
     input_status: StreamLinkStatus,
 }
 
@@ -170,7 +184,8 @@ impl Entries {
                 mjpeg: None,
                 avcc: None,
                 input: None,
-                video_status: StreamLinkStatus::Connecting,
+                video_status: StreamLinkStatus::Idle,
+                avcc_status: StreamLinkStatus::Idle,
                 input_status: StreamLinkStatus::Idle,
             }
         })
@@ -227,6 +242,7 @@ impl Drop for Release {
                             .is_some_and(|feed| feed.subscribers == 0)
                         {
                             removed.0 = entry.mjpeg.take();
+                            entry.video_status = StreamLinkStatus::Idle;
                         }
                     }
                     DeviceVideoCodec::H264 => {
@@ -245,6 +261,7 @@ impl Drop for Release {
                                 descriptions.insert(self.device_id.clone(), description);
                             }
                             removed.1 = feed;
+                            entry.avcc_status = StreamLinkStatus::Idle;
                         }
                     }
                 }
@@ -283,6 +300,7 @@ impl DeviceStreams {
                     .map(|(id, entry)| {
                         let status = DeviceStreamStatus {
                             video: entry.video_status.clone(),
+                            avcc: entry.avcc_status.clone(),
                             input: entry.input_status.clone(),
                             subscribers: entry.subscribers() as u32,
                         };
@@ -301,6 +319,9 @@ impl DeviceStreams {
         let mut entries = self.lock();
         let entry = entries.entry(device_id);
         let link = entry.link;
+        if entry.mjpeg.is_none() {
+            entry.video_status = StreamLinkStatus::Connecting;
+        }
         let feed = entry.mjpeg.get_or_insert_with(|| {
             let (frames, _) = watch::channel(None);
             Feed {
@@ -329,6 +350,9 @@ impl DeviceStreams {
         let cached = entries.descriptions.get(device_id).cloned();
         let entry = entries.entry(device_id);
         let link = entry.link;
+        if entry.avcc.is_none() {
+            entry.avcc_status = StreamLinkStatus::Connecting;
+        }
         let feed = entry.avcc.get_or_insert_with(|| {
             let sink = AvccFeed::new(cached);
             Feed {
@@ -365,7 +389,7 @@ impl DeviceStreams {
         &self,
         device_id: &str,
         link: u64,
-        video: Option<StreamLinkStatus>,
+        video: Option<(DeviceVideoCodec, StreamLinkStatus)>,
         input: Option<StreamLinkStatus>,
     ) {
         let mut entries = self.lock();
@@ -376,14 +400,23 @@ impl DeviceStreams {
         else {
             return;
         };
-        let before = (entry.video_status.clone(), entry.input_status.clone());
-        if let Some(video) = video {
-            entry.video_status = video;
+        let snapshot = |entry: &Entry| {
+            (
+                entry.video_status.clone(),
+                entry.avcc_status.clone(),
+                entry.input_status.clone(),
+            )
+        };
+        let before = snapshot(entry);
+        match video {
+            Some((DeviceVideoCodec::Mjpeg, status)) => entry.video_status = status,
+            Some((DeviceVideoCodec::H264, status)) => entry.avcc_status = status,
+            None => {}
         }
         if let Some(input) = input {
             entry.input_status = input;
         }
-        if before != (entry.video_status.clone(), entry.input_status.clone()) {
+        if before != snapshot(entry) {
             self.publish(&entries);
         }
     }
@@ -449,8 +482,9 @@ impl DeviceStreams {
             let Entries {
                 next_generation,
                 by_device,
-                ..
+                descriptions,
             } = &mut *entries;
+            descriptions.clear();
             let mut retired = Vec::new();
             let mut inputs = Vec::new();
             for (device_id, entry) in by_device.iter_mut() {
@@ -459,12 +493,14 @@ impl DeviceStreams {
                 entry.link = link;
                 if let Some(feed) = &mut entry.mjpeg {
                     retired.extend(feed.relink(mjpeg(device_id, feed.sink.clone(), link)));
+                    entry.video_status = StreamLinkStatus::Connecting;
                 }
                 if let Some(feed) = &mut entry.avcc {
+                    feed.sink.reset();
                     retired.extend(feed.relink(avcc(device_id, feed.sink.clone(), link)));
+                    entry.avcc_status = StreamLinkStatus::Connecting;
                 }
                 inputs.extend(entry.input.take());
-                entry.video_status = StreamLinkStatus::Connecting;
                 entry.input_status = StreamLinkStatus::Idle;
             }
             self.publish(&entries);
@@ -498,39 +534,58 @@ pub(crate) fn avcc_batches(
 ) -> impl futures::Stream<Item = Vec<u8>> + Send + 'static {
     let (replay, receiver) = subscription.feed.join();
     futures::stream::unfold(
-        (subscription, receiver, replay),
+        (subscription, receiver, VecDeque::from(replay)),
         |(subscription, mut receiver, mut batch)| async move {
             use broadcast::error::{RecvError, TryRecvError};
             loop {
-                if batch.is_empty() {
+                while batch.is_empty() {
                     match receiver.recv().await {
-                        Ok(envelope) => batch.push(envelope),
+                        Ok(envelope) => batch.push_back(envelope),
                         Err(RecvError::Lagged(_)) => {
-                            (batch, receiver) = subscription.feed.join();
+                            let (replay, live) = subscription.feed.join();
+                            (batch, receiver) = (replay.into(), live);
                         }
                         Err(RecvError::Closed) => return None,
                     }
-                }
-                loop {
-                    match receiver.try_recv() {
-                        Ok(envelope) => batch.push(envelope),
-                        Err(TryRecvError::Lagged(_)) => {
-                            (batch, receiver) = subscription.feed.join();
+                    loop {
+                        match receiver.try_recv() {
+                            Ok(envelope) => batch.push_back(envelope),
+                            Err(TryRecvError::Lagged(_)) => {
+                                let (replay, live) = subscription.feed.join();
+                                (batch, receiver) = (replay.into(), live);
+                            }
+                            Err(_) => break,
                         }
-                        Err(_) => break,
                     }
                 }
-                if !batch.is_empty() {
-                    break;
+                let bytes = pack(&mut batch, &subscription.feed);
+                if !bytes.is_empty() {
+                    return Some((bytes, (subscription, receiver, batch)));
                 }
             }
-            let mut bytes = Vec::new();
-            for envelope in &batch {
-                envelope.encode_into(&mut bytes);
-            }
-            Some((bytes, (subscription, receiver, Vec::new())))
         },
     )
+}
+
+fn pack(batch: &mut VecDeque<Arc<AvccEnvelope>>, feed: &AvccFeed) -> Vec<u8> {
+    let sent = |envelope: &AvccEnvelope| envelope.payload.len() + 5;
+    let mut bytes = Vec::new();
+    while let Some(envelope) = batch.front() {
+        if !bytes.is_empty() && bytes.len() + sent(envelope) > AVCC_ITEM_BYTES {
+            break;
+        }
+        let envelope = batch.pop_front().expect("front exists");
+        if sent(&envelope) <= AVCC_SENDABLE_BYTES {
+            envelope.encode_into(&mut bytes);
+        } else if let Some(description) = feed
+            .description()
+            .filter(|description| sent(description) <= AVCC_SENDABLE_BYTES)
+        {
+            // The description re-arms the view's keyframe gate, so it skips to the next GOP.
+            description.encode_into(&mut bytes);
+        }
+    }
+    bytes
 }
 
 pub(crate) fn spawn_reader(
@@ -766,11 +821,13 @@ mod tests {
             last()["UDID"],
             DeviceStreamStatus {
                 video: StreamLinkStatus::Connecting,
+                avcc: StreamLinkStatus::Idle,
                 input: StreamLinkStatus::Idle,
                 subscribers: 2,
             }
         );
-        streams.set_status("UDID", 1, Some(StreamLinkStatus::Live), None);
+        let live = |codec| Some((codec, StreamLinkStatus::Live));
+        streams.set_status("UDID", 1, live(DeviceVideoCodec::Mjpeg), None);
         streams.set_status(
             "UDID",
             1,
@@ -780,10 +837,34 @@ mod tests {
             }),
         );
         let count = published.lock().unwrap().len();
-        streams.set_status("UDID", 99, Some(StreamLinkStatus::Idle), None);
-        streams.set_status("UDID", 1, Some(StreamLinkStatus::Live), None);
+        streams.set_status(
+            "UDID",
+            99,
+            Some((DeviceVideoCodec::Mjpeg, StreamLinkStatus::Idle)),
+            None,
+        );
+        streams.set_status("UDID", 1, live(DeviceVideoCodec::Mjpeg), None);
         assert_eq!(published.lock().unwrap().len(), count, "no-op changes");
         assert_eq!(last()["UDID"].video, StreamLinkStatus::Live);
+        let avcc =
+            streams.subscribe_avcc("UDID", |_, _| tokio::spawn(std::future::pending::<()>()));
+        assert_eq!(last()["UDID"].avcc, StreamLinkStatus::Connecting);
+        let failed = StreamLinkStatus::Failed {
+            detail: "HTTP 404".into(),
+        };
+        streams.set_status(
+            "UDID",
+            1,
+            Some((DeviceVideoCodec::H264, failed.clone())),
+            None,
+        );
+        assert_eq!(
+            (last()["UDID"].video.clone(), last()["UDID"].avcc.clone()),
+            (StreamLinkStatus::Live, failed),
+            "each reader reports its own status"
+        );
+        drop(avcc);
+        assert_eq!(last()["UDID"].avcc, StreamLinkStatus::Idle);
         assert_eq!(
             last()["UDID"].input,
             StreamLinkStatus::Failed {
@@ -861,9 +942,12 @@ mod tests {
         feed.push(envelope(AVCC_DELTA, &vec![0; GOP_CACHE_BYTES]));
         assert_eq!(
             tags(&feed.join().0),
-            [AVCC_DESCRIPTION, AVCC_SEED],
-            "an oversized GOP is not replayed"
+            [AVCC_DESCRIPTION],
+            "an oversized GOP is not replayed, and the seed it replaced is not either"
         );
+        feed.connected();
+        feed.push(envelope(AVCC_SEED, b"fresh"));
+        assert_eq!(tags(&feed.join().0), [AVCC_DESCRIPTION, AVCC_SEED]);
         feed.push(envelope(AVCC_DESCRIPTION, b"rotated"));
         assert_eq!(feed.join().0[0].payload, b"rotated");
     }
@@ -901,6 +985,78 @@ mod tests {
             resync.len(),
             2 + 1 + AVCC_QUEUE + 10,
             "the whole GOP, in order"
+        );
+    }
+
+    #[tokio::test]
+    async fn avcc_items_stay_under_the_rpc_frame_limit() {
+        let streams = Arc::new(DeviceStreams::default());
+        let idle = |_: Arc<AvccFeed>, _| tokio::spawn(std::future::pending::<()>());
+        let subscription = streams.subscribe_avcc("UDID", idle);
+        let feed = subscription.feed.clone();
+        feed.push(envelope(AVCC_DESCRIPTION, b"avcC"));
+        feed.push(envelope(AVCC_KEYFRAME, &vec![2; AVCC_ITEM_BYTES / 2]));
+        for _ in 0..2 {
+            feed.push(envelope(AVCC_DELTA, &vec![3; AVCC_ITEM_BYTES / 2]));
+        }
+        feed.push(envelope(AVCC_DELTA, &vec![4; AVCC_ITEM_BYTES * 2]));
+        let mut batches = Box::pin(avcc_batches(subscription));
+        let mut demuxer = AvccDemuxer::default();
+        let mut items = Vec::new();
+        while items.iter().map(Vec::len).sum::<usize>() < 5 {
+            let bytes = batches.next().await.unwrap();
+            items.push(demuxer.push(&bytes).unwrap());
+            assert!(
+                bytes.len() <= AVCC_ITEM_BYTES || items.last().unwrap().len() == 1,
+                "{} bytes",
+                bytes.len()
+            );
+        }
+        let sizes: Vec<Vec<(u8, usize)>> = items
+            .iter()
+            .map(|item| item.iter().map(|e| (e.tag, e.payload.len())).collect())
+            .collect();
+        let half = AVCC_ITEM_BYTES / 2;
+        assert_eq!(
+            sizes,
+            [
+                vec![(AVCC_DESCRIPTION, 4), (AVCC_KEYFRAME, half)],
+                vec![(AVCC_DELTA, half)],
+                vec![(AVCC_DELTA, half)],
+                vec![(AVCC_DELTA, AVCC_ITEM_BYTES * 2)],
+            ][..],
+            "the replay is carried across items in order; a big envelope rides alone"
+        );
+
+        feed.push(envelope(AVCC_DELTA, &vec![5; AVCC_SENDABLE_BYTES]));
+        feed.push(envelope(AVCC_DELTA, b"p"));
+        let resync = demuxer.push(&batches.next().await.unwrap()).unwrap();
+        assert_eq!(
+            resync,
+            [
+                envelope(AVCC_DESCRIPTION, b"avcC"),
+                envelope(AVCC_DELTA, b"p")
+            ],
+            "an envelope over the frame limit becomes the description, re-arming the keyframe gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hub_pause_forgets_every_cached_description() {
+        let streams = Arc::new(DeviceStreams::default());
+        let idle = |_: Arc<AvccFeed>, _| tokio::spawn(std::future::pending::<()>());
+        let parked = streams.subscribe_avcc("PARKED", idle);
+        parked.feed.push(envelope(AVCC_DESCRIPTION, b"old"));
+        drop(parked);
+        let live = streams.subscribe_avcc("LIVE", idle);
+        live.feed.push(envelope(AVCC_DESCRIPTION, b"old"));
+        live.feed.push(envelope(AVCC_KEYFRAME, b"idr"));
+        streams.pause();
+        assert!(live.feed.join().0.is_empty(), "the live feed starts over");
+        let parked = streams.subscribe_avcc("PARKED", idle);
+        assert!(
+            parked.feed.join().0.is_empty(),
+            "the parked description is gone"
         );
     }
 

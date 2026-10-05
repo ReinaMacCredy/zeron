@@ -1084,6 +1084,7 @@ pub(crate) mod tests {
             "SIM".into(),
             DeviceStreamStatus {
                 video: StreamLinkStatus::Live,
+                avcc: StreamLinkStatus::Live,
                 input,
                 subscribers: 1,
             },

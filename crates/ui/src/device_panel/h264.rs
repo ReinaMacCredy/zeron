@@ -1,7 +1,11 @@
+use std::time::{Duration, Instant};
+
 use zeron_proto::device_hub::{AVCC_DELTA, AVCC_KEYFRAME};
 
 pub const MAX_PENDING_FRAMES: usize = 8;
 pub const MAX_DECODE_ERRORS: u32 = 3;
+// Catching up on a full 300-frame GOP replay at native resolution takes about 1.2 s.
+pub const BACKLOG_WINDOW: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParameterSets {
@@ -57,6 +61,7 @@ pub enum FallbackReason {
     DecodeErrors,
     Backlog,
     RotationFailed,
+    LinkFailed,
 }
 
 impl FallbackReason {
@@ -67,6 +72,7 @@ impl FallbackReason {
             FallbackReason::DecodeErrors => "H.264 decoding failed repeatedly",
             FallbackReason::Backlog => "the H.264 decoder fell behind",
             FallbackReason::RotationFailed => "the H.264 frame could not be rotated",
+            FallbackReason::LinkFailed => "the H.264 stream is unavailable",
         }
     }
 }
@@ -77,13 +83,13 @@ pub enum DecodeEvent {
     VideoWithoutDescription,
     DecodeFailed,
     Decoded,
-    Pending(usize),
+    Pending(usize, Instant),
 }
 
 #[derive(Debug, Default)]
 pub struct Health {
     errors: u32,
-    backlogs: u32,
+    backlog_since: Option<Instant>,
 }
 
 impl Health {
@@ -99,12 +105,12 @@ impl Health {
                 self.errors = 0;
                 None
             }
-            DecodeEvent::Pending(frames) if frames > MAX_PENDING_FRAMES => {
-                self.backlogs += 1;
-                (self.backlogs >= 2).then_some(FallbackReason::Backlog)
+            DecodeEvent::Pending(frames, now) if frames > MAX_PENDING_FRAMES => {
+                let since = *self.backlog_since.get_or_insert(now);
+                (now.duration_since(since) >= BACKLOG_WINDOW).then_some(FallbackReason::Backlog)
             }
-            DecodeEvent::Pending(_) => {
-                self.backlogs = 0;
+            DecodeEvent::Pending(..) => {
+                self.backlog_since = None;
                 None
             }
         }
@@ -487,6 +493,7 @@ mod decoder {
         gate: KeyframeGate,
         health: Health,
         rotator: Option<Rotator>,
+        decoded: bool,
     }
 
     // SAFETY: the pipeline owns its CoreMedia and VideoToolbox objects outright and is only ever
@@ -495,13 +502,15 @@ mod decoder {
 
     impl Pipeline {
         pub fn pending(&mut self, frames: usize) -> Option<FallbackReason> {
-            self.health.record(DecodeEvent::Pending(frames))
+            self.health
+                .record(DecodeEvent::Pending(frames, std::time::Instant::now()))
         }
 
         pub fn feed(&mut self, envelopes: Vec<AvccEnvelope>, rotation: DeviceOrientation) -> Batch {
             let mut batch = Batch::default();
             for AvccEnvelope { tag, payload } in envelopes {
                 match tag {
+                    AVCC_SEED if self.decoded => {}
                     AVCC_SEED => {
                         batch.seed = Some(payload);
                         batch.picture = None;
@@ -538,6 +547,7 @@ mod decoder {
                             Ok(picture) => {
                                 self.health.record(DecodeEvent::Decoded);
                                 if picture.is_some() {
+                                    self.decoded = true;
                                     batch.picture = picture;
                                     batch.seed = None;
                                 }
@@ -628,6 +638,12 @@ mod tests {
 
     #[test]
     fn fallback_decision_table() {
+        let start = Instant::now();
+        let at = |frames, seconds: f32| {
+            DecodeEvent::Pending(frames, start + Duration::from_secs_f32(seconds))
+        };
+        let behind = MAX_PENDING_FRAMES + 1;
+        let window = BACKLOG_WINDOW.as_secs_f32();
         let cases: &[(&[DecodeEvent], Option<FallbackReason>)] = &[
             (
                 &[DecodeEvent::DecoderFailed],
@@ -659,24 +675,23 @@ mod tests {
                 ],
                 None,
             ),
-            (&[DecodeEvent::Pending(MAX_PENDING_FRAMES)], None),
-            (&[DecodeEvent::Pending(MAX_PENDING_FRAMES + 1)], None),
+            (&[at(MAX_PENDING_FRAMES, 0.0)], None),
+            (&[at(behind, 0.0)], None),
+            (&[at(behind, 0.0), at(behind, 0.3), at(behind, 1.5)], None),
             (
-                &[
-                    DecodeEvent::Pending(MAX_PENDING_FRAMES + 1),
-                    DecodeEvent::Pending(MAX_PENDING_FRAMES + 1),
-                ],
+                &[at(behind, 0.0), at(behind, 1.0), at(behind, window)],
                 Some(FallbackReason::Backlog),
             ),
             (
                 &[
-                    DecodeEvent::Pending(MAX_PENDING_FRAMES + 1),
-                    DecodeEvent::Pending(0),
-                    DecodeEvent::Pending(MAX_PENDING_FRAMES + 1),
+                    at(behind, 0.0),
+                    at(0, 1.0),
+                    at(behind, 2.0),
+                    at(behind, window),
                 ],
                 None,
             ),
-            (&[DecodeEvent::Decoded, DecodeEvent::Pending(0)], None),
+            (&[DecodeEvent::Decoded, at(0, 0.0)], None),
         ];
         for (events, expected) in cases {
             let mut health = Health::default();
@@ -779,6 +794,20 @@ mod tests {
                 .picture
                 .map(|picture| (picture.width(), picture.height())),
             Some((588, 1280))
+        );
+        let seed = zeron_proto::device_hub::AvccEnvelope {
+            tag: AVCC_SEED,
+            payload: b"stale jpeg".to_vec(),
+        };
+        let batch = pipeline.feed(
+            vec![envelopes[1].clone(), seed.clone()],
+            DeviceOrientation::Portrait,
+        );
+        assert!(batch.picture.is_some() && batch.seed.is_none());
+        let batch = pipeline.feed(vec![seed], DeviceOrientation::Portrait);
+        assert!(
+            batch.picture.is_none() && batch.seed.is_none(),
+            "a seed never replaces a decoded picture"
         );
     }
 }

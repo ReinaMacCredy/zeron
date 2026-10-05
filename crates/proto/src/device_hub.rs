@@ -151,11 +151,19 @@ pub enum StreamLinkStatus {
     },
 }
 
+impl StreamLinkStatus {
+    pub fn is_idle(&self) -> bool {
+        *self == StreamLinkStatus::Idle
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceStreamStatus {
     #[serde(default)]
     pub video: StreamLinkStatus,
+    #[serde(default, skip_serializing_if = "StreamLinkStatus::is_idle")]
+    pub avcc: StreamLinkStatus,
     #[serde(default)]
     pub input: StreamLinkStatus,
     #[serde(default)]
@@ -826,6 +834,7 @@ mod tests {
                 detail: "closed".into(),
             },
             subscribers: 2,
+            ..Default::default()
         };
         let wire =
             json!({"video": "live", "input": {"failed": {"detail": "closed"}}, "subscribers": 2});
@@ -833,6 +842,17 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<DeviceStreamStatus>(wire).unwrap(),
             status
+        );
+        let both = DeviceStreamStatus {
+            video: StreamLinkStatus::Idle,
+            avcc: StreamLinkStatus::Live,
+            ..status
+        };
+        let wire = json!({"video": "idle", "avcc": "live", "input": {"failed": {"detail": "closed"}}, "subscribers": 2});
+        assert_eq!(serde_json::to_value(&both).unwrap(), wire);
+        assert_eq!(
+            serde_json::from_value::<DeviceStreamStatus>(wire).unwrap(),
+            both
         );
         let close: CloseHubDeviceParams =
             serde_json::from_value(json!({"chatId": "c", "deviceId": "d", "shutdown": true}))
