@@ -61,6 +61,8 @@ pub struct WorkingTree {
     pub truncated: bool,
     #[serde(default)]
     pub agent_active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cherry_pick_head: Option<String>,
     #[serde(default)]
     pub files: Vec<WorkingTreeFile>,
     #[serde(default)]
@@ -166,6 +168,8 @@ pub enum WorkingTreeAction {
     #[serde(rename_all = "camelCase")]
     Checkout {
         target_ref: String,
+        #[serde(default)]
+        detach: bool,
     },
     CherryPick {
         sha: String,
@@ -192,6 +196,10 @@ impl WorkingTreeAction {
                 | Self::Commit {
                     amend: false,
                     all: false,
+                    ..
+                }
+                | Self::CreateBranch {
+                    checkout: false,
                     ..
                 }
         )
@@ -353,6 +361,11 @@ mod tests {
             WorkingTreeAction::StageAll,
             WorkingTreeAction::UnstageAll,
             commit(false, false),
+            WorkingTreeAction::CreateBranch {
+                name: "b".into(),
+                start_point: Some("abc".into()),
+                checkout: false,
+            },
         ];
         let unsafe_actions = [
             commit(false, true),
@@ -365,13 +378,18 @@ mod tests {
             WorkingTreeAction::StashDrop { oid: "o".into() },
             WorkingTreeAction::Checkout {
                 target_ref: "main".into(),
+                detach: false,
+            },
+            WorkingTreeAction::Checkout {
+                target_ref: "abc".into(),
+                detach: true,
             },
             WorkingTreeAction::CherryPick { sha: "s".into() },
             WorkingTreeAction::AbortCherryPick,
             WorkingTreeAction::CreateBranch {
                 name: "b".into(),
                 start_point: None,
-                checkout: false,
+                checkout: true,
             },
         ];
         for action in &safe {
@@ -420,6 +438,7 @@ mod tests {
             revision: "rev-1".into(),
             truncated: false,
             agent_active: true,
+            cherry_pick_head: Some("fed789".into()),
             files: vec![
                 WorkingTreeFile {
                     path: "src/new name.rs".into(),
@@ -460,6 +479,7 @@ mod tests {
         assert_eq!(json["agentActive"], true);
         assert_eq!(json["pushRemote"], "origin");
         assert_eq!(json["defaultBranch"], "main");
+        assert_eq!(json["cherryPickHead"], "fed789");
         assert_eq!(json["files"][0]["oldPath"], "src/old.rs");
         assert_eq!(json["files"][1]["worktree"], "untracked");
         assert!(json["files"][1].get("staged").is_none());
@@ -472,6 +492,7 @@ mod tests {
         assert_eq!((minimal.ahead, minimal.behind), (0, 0));
         assert!(minimal.files.is_empty() && minimal.stashes.is_empty());
         assert!(!minimal.agent_active);
+        assert_eq!(minimal.cherry_pick_head, None);
     }
 
     #[test]
@@ -537,6 +558,7 @@ mod tests {
             (
                 WorkingTreeAction::Checkout {
                     target_ref: "feature/x".into(),
+                    detach: false,
                 },
                 "checkout",
             ),
@@ -567,10 +589,21 @@ mod tests {
             assert_eq!(json["busyPolicy"], "blockAll");
         }
         let json = serde_json::to_value(WorkingTreeAction::Checkout {
-            target_ref: "main".into(),
+            target_ref: "abc123".into(),
+            detach: true,
         })
         .unwrap();
-        assert_eq!(json["targetRef"], "main");
+        assert_eq!(json["targetRef"], "abc123");
+        assert_eq!(json["detach"], true);
+        let attached: WorkingTreeAction =
+            serde_json::from_value(json!({"kind": "checkout", "targetRef": "main"})).unwrap();
+        assert_eq!(
+            attached,
+            WorkingTreeAction::Checkout {
+                target_ref: "main".into(),
+                detach: false,
+            }
+        );
         let json = serde_json::to_value(WorkingTreeAction::CreateBranch {
             name: "b".into(),
             start_point: Some("abc".into()),

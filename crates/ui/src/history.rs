@@ -1189,7 +1189,7 @@ fn visible_ref_count(refs: &[GitHistoryRef], available_width: f32) -> usize {
     visible
 }
 
-fn format_date(value: &str) -> String {
+pub(crate) fn format_date(value: &str) -> String {
     DateTime::parse_from_rfc3339(value)
         .map(|date| date.format("%b %-d, %Y").to_string())
         .unwrap_or_else(|_| "—".to_string())
@@ -2843,7 +2843,11 @@ impl GitHistory {
         }));
     }
 
-    fn copy_sha(&mut self, sha: String, cx: &mut Context<Self>) {
+    pub(crate) fn copied_sha(&self) -> Option<&str> {
+        self.copied_sha.as_deref()
+    }
+
+    pub(crate) fn copy_sha(&mut self, sha: String, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(sha.clone()));
         self.copied_sha = Some(sha);
         self.copy_task = Some(cx.spawn(async move |this, cx| {

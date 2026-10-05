@@ -374,8 +374,13 @@ pub(crate) async fn read(root: &Path, checkout_id: &str) -> Result<WorkingTree, 
         "--no-color",
     ];
     let stash = ["stash", "list", "-z", "--format=%H%x1f%cI%x1f%gs"];
-    let (unstaged, staged, stashes) =
-        tokio::join!(git(root, &numstat), git(root, &cached), git(root, &stash));
+    let picking = ["rev-parse", "--verify", "--quiet", "CHERRY_PICK_HEAD"];
+    let (unstaged, staged, stashes, picking) = tokio::join!(
+        git(root, &numstat),
+        git(root, &cached),
+        git(root, &stash),
+        git_with(root, &picking, 1024, true)
+    );
     let mut status = parse_status(&status_output.stdout, status_output.truncated);
     let mut truncated = !status.complete;
     let unstaged = unstaged
@@ -458,6 +463,10 @@ pub(crate) async fn read(root: &Path, checkout_id: &str) -> Result<WorkingTree, 
         default_branch,
         truncated,
         agent_active: false,
+        cherry_pick_head: picking
+            .ok()
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+            .filter(|sha| !sha.is_empty()),
         files: status.files,
         stashes: stashes
             .map(|out| parse_stashes(&out.stdout))
@@ -679,9 +688,21 @@ pub(crate) async fn apply(
                 .await
                 .map(drop)
         }
-        _ => Err(EngineError::Other(
-            "this Git action is not available yet".into(),
-        )),
+        WorkingTreeAction::Checkout { target_ref, detach } => {
+            checkout(root, tree, target_ref, *detach).await
+        }
+        WorkingTreeAction::CherryPick { sha } => return cherry_pick(root, tree, sha).await,
+        WorkingTreeAction::AbortCherryPick => {
+            if tree.cherry_pick_head.is_none() {
+                return Err(refused("There is no cherry-pick to abort."));
+            }
+            git(root, &["cherry-pick", "--abort"]).await.map(drop)
+        }
+        WorkingTreeAction::CreateBranch {
+            name,
+            start_point,
+            checkout,
+        } => create_branch(root, tree, name, start_point.as_deref(), *checkout).await,
     };
     done.map(|()| WorkingTreeActionReply::default())
 }
@@ -825,17 +846,7 @@ async fn stash_pop(
     let Err(error) = git_stash(root, &["stash", "pop", "--quiet", &selector]).await else {
         return Ok(WorkingTreeActionReply::default());
     };
-    let unmerged = git(
-        root,
-        &["diff", "--name-only", "--diff-filter=U", "-z", "--no-color"],
-    )
-    .await?;
-    let conflicts: Vec<String> = unmerged
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|path| !path.is_empty())
-        .map(|path| String::from_utf8_lossy(path).into_owned())
-        .collect();
+    let conflicts = unmerged_paths(root).await?;
     if conflicts.is_empty() {
         return Err(error);
     }
@@ -953,6 +964,265 @@ async fn commit(
         }),
         conflicts: Vec::new(),
     })
+}
+
+fn has_tracked_changes(tree: &WorkingTree) -> bool {
+    tree.files.iter().any(|file| {
+        !matches!(
+            file.index,
+            GitFileState::Unchanged | GitFileState::Untracked
+        ) || !matches!(
+            file.worktree,
+            GitFileState::Unchanged | GitFileState::Untracked
+        )
+    })
+}
+
+fn ready_to_move(tree: &WorkingTree, doing: &str) -> Result<(), EngineError> {
+    if tree.cherry_pick_head.is_some() {
+        return Err(refused(
+            "A cherry-pick is in progress. Commit the resolved files or abort it first.",
+        ));
+    }
+    if has_tracked_changes(tree) {
+        return Err(EngineError::Other(format!(
+            "This checkout has uncommitted changes. Commit or stash them before {doing}."
+        )));
+    }
+    Ok(())
+}
+
+async fn hooked_git(
+    root: &Path,
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> Result<GitOutput, EngineError> {
+    tokio::time::timeout(timeout, git(root, args))
+        .await
+        .map_err(|_| {
+            EngineError::Other(format!(
+                "Git did not finish within {} s. A hook or a signing prompt may be waiting for input; run it in a terminal instead.",
+                timeout.as_secs()
+            ))
+        })?
+}
+
+async fn resolve_commit(root: &Path, rev: &str) -> Result<String, EngineError> {
+    if rev.len() < 4 || rev.len() > 64 || !rev.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(EngineError::Other(format!("not a commit id: {rev:?}")));
+    }
+    let spec = format!("{rev}^{{commit}}");
+    let out = git_with(
+        root,
+        &["rev-parse", "--verify", "--quiet", &spec],
+        1024,
+        true,
+    )
+    .await?;
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    if sha.is_empty() {
+        return Err(refused("That commit is not in this repository."));
+    }
+    Ok(sha)
+}
+
+async fn local_branch(root: &Path, name: &str) -> Result<Option<String>, EngineError> {
+    let full = format!("refs/heads/{name}");
+    let out = git_with(
+        root,
+        &["rev-parse", "--verify", "--quiet", &full],
+        1024,
+        true,
+    )
+    .await?;
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    Ok((!sha.is_empty()).then_some(sha))
+}
+
+async fn checked_branch_name(root: &Path, name: &str) -> Result<(), EngineError> {
+    let invalid = || EngineError::Other(format!("{name:?} is not a valid branch name."));
+    if name.is_empty()
+        || name.len() > 255
+        || name.starts_with('-')
+        || name.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(invalid());
+    }
+    let out = git(root, &["check-ref-format", "--branch", name])
+        .await
+        .map_err(|_| invalid())?;
+    if String::from_utf8_lossy(&out.stdout).trim() != name {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+async fn checkout(
+    root: &Path,
+    tree: &WorkingTree,
+    target_ref: &str,
+    detach: bool,
+) -> Result<(), EngineError> {
+    ready_to_move(tree, "checking out another commit")?;
+    if detach {
+        let sha = resolve_commit(root, target_ref).await?;
+        if tree.branch.is_none() && tree.head_sha.as_deref() == Some(sha.as_str()) {
+            return Err(refused("HEAD is already detached at that commit."));
+        }
+        hooked_git(
+            root,
+            &["switch", "--quiet", "--detach", &sha],
+            COMMIT_TIMEOUT,
+        )
+        .await
+        .map(drop)
+    } else {
+        checked_branch_name(root, target_ref).await?;
+        if tree.branch.as_deref() == Some(target_ref) {
+            return Err(EngineError::Other(format!(
+                "{target_ref} is already checked out here."
+            )));
+        }
+        if local_branch(root, target_ref).await?.is_none() {
+            return Err(EngineError::Other(format!(
+                "There is no local branch named {target_ref}."
+            )));
+        }
+        hooked_git(
+            root,
+            &["switch", "--quiet", "--no-guess", "--", target_ref],
+            COMMIT_TIMEOUT,
+        )
+        .await
+        .map(drop)
+    }
+}
+
+async fn create_branch(
+    root: &Path,
+    tree: &WorkingTree,
+    name: &str,
+    start_point: Option<&str>,
+    checkout: bool,
+) -> Result<(), EngineError> {
+    checked_branch_name(root, name).await?;
+    let Some(head) = tree.head_sha.as_deref() else {
+        return Err(refused("This branch has no commits yet."));
+    };
+    let start = match start_point {
+        Some(rev) => resolve_commit(root, rev).await?,
+        None => head.to_owned(),
+    };
+    if local_branch(root, name).await?.is_some() {
+        return Err(EngineError::Other(format!(
+            "A branch named {name} already exists."
+        )));
+    }
+    if !checkout {
+        return git(root, &["branch", "--no-track", "--", name, &start])
+            .await
+            .map(drop);
+    }
+    if start == head {
+        if tree.cherry_pick_head.is_some() {
+            return Err(refused(
+                "A cherry-pick is in progress. Commit the resolved files or abort it first.",
+            ));
+        }
+    } else {
+        ready_to_move(tree, "switching to a branch at another commit")?;
+    }
+    hooked_git(
+        root,
+        &["switch", "--quiet", "--no-track", "-c", name, &start],
+        COMMIT_TIMEOUT,
+    )
+    .await
+    .map(drop)
+}
+
+async fn unmerged_paths(root: &Path) -> Result<Vec<String>, EngineError> {
+    let unmerged = git(
+        root,
+        &["diff", "--name-only", "--diff-filter=U", "-z", "--no-color"],
+    )
+    .await?;
+    Ok(unmerged
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .collect())
+}
+
+async fn cherry_pick(
+    root: &Path,
+    tree: &WorkingTree,
+    sha: &str,
+) -> Result<WorkingTreeActionReply, EngineError> {
+    if tree.head_sha.is_none() {
+        return Err(refused("This branch has no commits yet."));
+    }
+    ready_to_move(tree, "cherry-picking")?;
+    let sha = resolve_commit(root, sha).await?;
+    let short: String = sha.chars().take(7).collect();
+    let parents = git(root, &["rev-list", "--parents", "-n", "1", &sha]).await?;
+    if String::from_utf8_lossy(&parents.stdout)
+        .split_whitespace()
+        .count()
+        > 2
+    {
+        return Err(refused(
+            "That is a merge commit. Cherry-picking it needs a parent choice; do it in a terminal.",
+        ));
+    }
+    let range = format!("HEAD..{sha}");
+    let missing = git(root, &["rev-list", "--count", &range]).await?;
+    if String::from_utf8_lossy(&missing.stdout).trim() == "0" {
+        return Err(EngineError::Other(format!(
+            "{short} is already on this branch."
+        )));
+    }
+    let Err(error) = hooked_git(root, &["cherry-pick", &sha], COMMIT_TIMEOUT).await else {
+        let log = git(root, &["log", "-1", "--format=%H%x1f%s"]).await?;
+        let log = String::from_utf8_lossy(&log.stdout);
+        let (new_sha, subject) = log
+            .trim_end_matches('\n')
+            .split_once('\u{1f}')
+            .ok_or_else(|| refused("could not read the new commit"))?;
+        return Ok(WorkingTreeActionReply {
+            commit: Some(CommitSummary {
+                sha: new_sha.to_owned(),
+                branch: tree.branch.clone(),
+                subject: subject.to_owned(),
+            }),
+            conflicts: Vec::new(),
+        });
+    };
+    let conflicts = unmerged_paths(root).await?;
+    if !conflicts.is_empty() {
+        return Ok(WorkingTreeActionReply {
+            commit: None,
+            conflicts,
+        });
+    }
+    let stuck = git_with(
+        root,
+        &["rev-parse", "--verify", "--quiet", "CHERRY_PICK_HEAD"],
+        1024,
+        true,
+    )
+    .await
+    .is_ok_and(|out| !out.stdout.trim_ascii().is_empty());
+    if stuck {
+        git(root, &["cherry-pick", "--abort"]).await?;
+    }
+    if error.to_string().contains("is now empty") {
+        return Err(EngineError::Other(format!(
+            "The changes in {short} are already on this branch, so there is nothing to pick."
+        )));
+    }
+    Err(commit_error(error))
 }
 
 pub(crate) const SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
@@ -1464,7 +1734,10 @@ mod tests {
         let error = apply(root, &tree, &WorkingTreeAction::AbortCherryPick)
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("not available yet"), "{error}");
+        assert!(
+            error.to_string().contains("no cherry-pick to abort"),
+            "{error}"
+        );
         assert_eq!(porcelain(root), " M tracked.txt\n");
         assert!(file_diff(root, "c", &escape, false).await.is_err());
         assert!(
@@ -2447,5 +2720,314 @@ mod tests {
                 .unwrap_err();
             assert!(error.to_string().contains("detached"), "{error}");
         }
+    }
+
+    fn checkout_action(target: &str, detach: bool) -> WorkingTreeAction {
+        WorkingTreeAction::Checkout {
+            target_ref: target.into(),
+            detach,
+        }
+    }
+
+    fn branch_action(name: &str, at: Option<&str>, checkout: bool) -> WorkingTreeAction {
+        WorkingTreeAction::CreateBranch {
+            name: name.into(),
+            start_point: at.map(str::to_owned),
+            checkout,
+        }
+    }
+
+    fn current_branch(root: &Path) -> String {
+        output(root, &["branch", "--show-current"])
+            .trim()
+            .to_owned()
+    }
+
+    #[tokio::test]
+    async fn checkout_needs_a_clean_tracked_tree_and_names_a_branch_or_a_commit() {
+        let dir = identified_repo();
+        let root = dir.path();
+        let first = head(root);
+        run(root, &["switch", "-q", "-c", "side"]);
+        commit_file(root, "side.txt", "side\n");
+        let side = head(root);
+        run(root, &["switch", "-q", "main"]);
+
+        std::fs::write(root.join("tracked.txt"), "edited\n").unwrap();
+        let tree = read(root, "c").await.unwrap();
+        for action in [checkout_action("side", false), checkout_action(&side, true)] {
+            let error = apply(root, &tree, &action).await.unwrap_err();
+            assert!(
+                error.to_string().contains("uncommitted changes"),
+                "{action:?}: {error}"
+            );
+        }
+        run(root, &["add", "tracked.txt"]);
+        let tree = read(root, "c").await.unwrap();
+        let error = apply(root, &tree, &checkout_action("side", false))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("uncommitted changes"), "{error}");
+        assert_eq!(
+            (current_branch(root), head(root)),
+            ("main".into(), first.clone())
+        );
+        run(root, &["reset", "-q", "--hard"]);
+
+        std::fs::write(root.join("note.txt"), "untracked\n").unwrap();
+        let tree = read(root, "c").await.unwrap();
+        apply(root, &tree, &checkout_action("side", false))
+            .await
+            .unwrap();
+        assert_eq!(
+            (current_branch(root), head(root)),
+            ("side".into(), side.clone())
+        );
+        assert!(root.join("note.txt").exists(), "untracked files ride along");
+
+        let tree = read(root, "c").await.unwrap();
+        for (action, expected) in [
+            (checkout_action("side", false), "already checked out"),
+            (checkout_action("nope", false), "no local branch named nope"),
+            (checkout_action("-f", false), "not a valid branch name"),
+            (checkout_action("a..b", false), "not a valid branch name"),
+            (checkout_action("main", true), "not a commit id"),
+            (checkout_action("--orphan", true), "not a commit id"),
+            (checkout_action("deadbeef", true), "not in this repository"),
+        ] {
+            let error = apply(root, &tree, &action).await.unwrap_err();
+            assert!(error.to_string().contains(expected), "{action:?}: {error}");
+        }
+        assert_eq!(current_branch(root), "side");
+
+        apply(root, &tree, &checkout_action(&first, true))
+            .await
+            .unwrap();
+        let tree = read(root, "c").await.unwrap();
+        assert_eq!(
+            (tree.branch.as_deref(), tree.head_sha.as_deref()),
+            (None, Some(first.as_str()))
+        );
+        let error = apply(root, &tree, &checkout_action(&first, true))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("already detached"), "{error}");
+        apply(root, &tree, &checkout_action("main", false))
+            .await
+            .unwrap();
+        assert_eq!(current_branch(root), "main");
+    }
+
+    #[tokio::test]
+    async fn create_branch_checks_the_name_and_moves_head_only_when_asked() {
+        let dir = identified_repo();
+        let root = dir.path();
+        let first = head(root);
+        commit_file(root, "second.txt", "2\n");
+        let second = head(root);
+        std::fs::write(root.join("tracked.txt"), "edited\n").unwrap();
+        let tree = read(root, "c").await.unwrap();
+        for name in [
+            "",
+            "-x",
+            "a..b",
+            "with space",
+            "x.lock",
+            "HEAD",
+            "@{-1}",
+            "tab\tname",
+            "ends/",
+        ] {
+            let error = apply(root, &tree, &branch_action(name, None, false))
+                .await
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("not a valid branch name"),
+                "{name:?}: {error}"
+            );
+        }
+        let error = apply(root, &tree, &branch_action("main", None, false))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("already exists"), "{error}");
+        let error = apply(root, &tree, &branch_action("x", Some("HEAD~1"), false))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("not a commit id"), "{error}");
+
+        apply(
+            root,
+            &tree,
+            &branch_action("feature/old", Some(&first), false),
+        )
+        .await
+        .unwrap();
+        assert_eq!(rev(root, "refs/heads/feature/old"), first);
+        assert_eq!(
+            (current_branch(root), head(root)),
+            ("main".into(), second.clone())
+        );
+        assert_eq!(porcelain(root), " M tracked.txt\n");
+        assert_eq!(
+            output(root, &["config", "--get", "branch.feature/old.merge"]),
+            ""
+        );
+
+        let tree = read(root, "c").await.unwrap();
+        let error = apply(root, &tree, &branch_action("moved", Some(&first), true))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("uncommitted changes"), "{error}");
+        assert_eq!(rev(root, "refs/heads/moved"), "");
+
+        apply(
+            root,
+            &tree,
+            &branch_action("feature/here", Some(&second), true),
+        )
+        .await
+        .unwrap();
+        assert_eq!(current_branch(root), "feature/here");
+        assert_eq!(porcelain(root), " M tracked.txt\n", "the edit stays");
+
+        run(root, &["checkout", "-q", "--", "tracked.txt"]);
+        let tree = read(root, "c").await.unwrap();
+        apply(
+            root,
+            &tree,
+            &branch_action("feature/back", Some(&first), true),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (current_branch(root), head(root)),
+            ("feature/back".into(), first)
+        );
+    }
+
+    #[tokio::test]
+    async fn cherry_pick_adds_the_commit_or_stops_on_conflicts_and_abort_restores() {
+        let dir = identified_repo();
+        let root = dir.path();
+        run(root, &["switch", "-q", "-c", "side"]);
+        commit_file(root, "side.txt", "side\n");
+        let clean = head(root);
+        commit_file(root, "tracked.txt", "side version\n");
+        let clashing = head(root);
+        run(root, &["switch", "-q", "-c", "merged", "main"]);
+        commit_file(root, "m.txt", "m\n");
+        run(
+            root,
+            &["merge", "-q", "--no-ff", "-m", "Merge side", "side"],
+        );
+        let merge = head(root);
+        run(root, &["switch", "-q", "main"]);
+        commit_file(root, "tracked.txt", "main version\n");
+        let base = head(root);
+
+        std::fs::write(root.join("tracked.txt"), "dirty\n").unwrap();
+        let tree = read(root, "c").await.unwrap();
+        let error = apply(
+            root,
+            &tree,
+            &WorkingTreeAction::CherryPick { sha: clean.clone() },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("uncommitted changes"), "{error}");
+        run(root, &["checkout", "-q", "--", "tracked.txt"]);
+
+        let tree = read(root, "c").await.unwrap();
+        for (sha, expected) in [
+            (merge.clone(), "merge commit"),
+            (base.clone(), "already on this branch"),
+            ("side".to_owned(), "not a commit id"),
+        ] {
+            let error = apply(
+                root,
+                &tree,
+                &WorkingTreeAction::CherryPick { sha: sha.clone() },
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains(expected), "{sha}: {error}");
+        }
+        assert_eq!(head(root), base);
+
+        let reply = apply(
+            root,
+            &tree,
+            &WorkingTreeAction::CherryPick { sha: clean.clone() },
+        )
+        .await
+        .unwrap();
+        let picked = reply.commit.expect("the new commit is reported");
+        assert_eq!(picked.sha, head(root));
+        assert_eq!(
+            (picked.branch.as_deref(), picked.subject.as_str()),
+            (Some("main"), "side.txt")
+        );
+        assert_eq!(rev(root, "HEAD~1"), base);
+        assert!(root.join("side.txt").exists());
+        assert!(reply.conflicts.is_empty());
+        assert_eq!(porcelain(root), "");
+
+        let tree = read(root, "c").await.unwrap();
+        let error = apply(root, &tree, &WorkingTreeAction::CherryPick { sha: clean })
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("nothing to pick"), "{error}");
+        assert_eq!(
+            rev(root, "CHERRY_PICK_HEAD"),
+            "",
+            "an empty pick is not left open"
+        );
+        assert_eq!(porcelain(root), "");
+
+        let before = head(root);
+        let tree = read(root, "c").await.unwrap();
+        let reply = apply(
+            root,
+            &tree,
+            &WorkingTreeAction::CherryPick {
+                sha: clashing.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(reply.conflicts, ["tracked.txt"]);
+        assert!(reply.commit.is_none());
+        let tree = read(root, "c").await.unwrap();
+        assert_eq!(tree.cherry_pick_head.as_deref(), Some(clashing.as_str()));
+        for action in [
+            checkout_action("side", false),
+            WorkingTreeAction::CherryPick { sha: merge.clone() },
+            branch_action("elsewhere", Some(&base), true),
+        ] {
+            let error = apply(root, &tree, &action).await.unwrap_err();
+            assert!(
+                error.to_string().contains("cherry-pick is in progress"),
+                "{action:?}: {error}"
+            );
+        }
+
+        apply(root, &tree, &WorkingTreeAction::AbortCherryPick)
+            .await
+            .unwrap();
+        assert_eq!(head(root), before);
+        assert_eq!(porcelain(root), "");
+        assert_eq!(
+            std::fs::read_to_string(root.join("tracked.txt")).unwrap(),
+            "main version\n"
+        );
+        let tree = read(root, "c").await.unwrap();
+        assert_eq!(tree.cherry_pick_head, None);
+        let error = apply(root, &tree, &WorkingTreeAction::AbortCherryPick)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("no cherry-pick to abort"),
+            "{error}"
+        );
     }
 }
