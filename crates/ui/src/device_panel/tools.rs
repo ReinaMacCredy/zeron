@@ -164,6 +164,7 @@ pub struct DeviceControls {
     host_id: String,
     device_id: String,
     platform: DevicePlatform,
+    physical: bool,
     view: WeakEntity<DeviceStreamView>,
     detail: Option<DeviceDetail>,
     error: Option<SharedString>,
@@ -189,6 +190,7 @@ impl DeviceControls {
         host_id: String,
         device_id: String,
         platform: DevicePlatform,
+        physical: bool,
         view: WeakEntity<DeviceStreamView>,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -226,6 +228,7 @@ impl DeviceControls {
             host_id,
             device_id,
             platform,
+            physical,
             view,
             detail: None,
             error: None,
@@ -303,7 +306,6 @@ impl DeviceControls {
                     *foreground_app = self.detail.take().and_then(|old| old.foreground_app);
                 }
                 self.detail = Some(detail);
-                self.error = None;
             }
             Err(error) => self.error = Some(error.into()),
         }
@@ -327,6 +329,13 @@ impl DeviceControls {
                 .map_err(|error| error.to_string());
             this.update(cx, |controls, cx| {
                 controls.apply(revision, keep_foreground, reply);
+                if method == methods::RUN_HUB_DEVICE_ACTION
+                    && revision == controls.revision
+                    && controls.error.is_some()
+                {
+                    let target = controls.target();
+                    controls.send(methods::GET_HUB_DEVICE_DETAIL, target, false, cx);
+                }
                 cx.notify();
             })
             .ok();
@@ -337,6 +346,7 @@ impl DeviceControls {
         if self.pending {
             return;
         }
+        self.error = None;
         self.send(methods::GET_HUB_DEVICE_DETAIL, self.target(), false, cx);
     }
 
@@ -1273,7 +1283,9 @@ impl Render for DeviceControls {
         } else {
             body.child(self.render_emulator(&theme, cx))
         }
-        .child(self.render_location(&theme, cx))
+        .when(!self.physical, |el| {
+            el.child(self.render_location(&theme, cx))
+        })
         .child(self.render_permissions(&theme, cx))
         .when(ios, |el| {
             el.child(self.render_push(&theme, cx))

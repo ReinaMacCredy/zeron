@@ -423,6 +423,7 @@ impl DevicePanel {
         if self.more.get().is_none() {
             return trigger.into_any_element();
         }
+        let physical = self.device(cx).is_some_and(|device| device.physical);
         let popup = theme.for_popup();
         let row = |id: &'static str, glyph: &'static str, label: &'static str, danger: bool| {
             let color = if danger {
@@ -470,19 +471,20 @@ impl DevicePanel {
                     cx.emit(DevicePanelEvent::Close);
                 })),
             )
-            .child(popover::menu_separator())
-            .child(
-                row(
-                    "device-power-off",
-                    icons::LUCIDE_POWER,
-                    "Power off device",
-                    true,
+            .when(!physical, |menu| {
+                menu.child(popover::menu_separator()).child(
+                    row(
+                        "device-power-off",
+                        icons::LUCIDE_POWER,
+                        "Power off device",
+                        true,
+                    )
+                    .on_click(cx.listener(|panel, _, _, cx| {
+                        panel.close_more(cx);
+                        panel.power_off(cx);
+                    })),
                 )
-                .on_click(cx.listener(|panel, _, _, cx| {
-                    panel.close_more(cx);
-                    panel.power_off(cx);
-                })),
-            )
+            })
             .into_any_element();
         trigger
             .child(popover::anchored_menu_below_end(

@@ -305,16 +305,16 @@ impl AvccDemuxer {
 
 const SEMU_MAGIC: [u8; 4] = *b"SEMU";
 
-pub fn semu_payload(message: &[u8]) -> (Option<bool>, &[u8]) {
-    if message.len() > 16 && message[..4] == SEMU_MAGIC {
-        let key = Some(message[5] & 1 == 1);
-        match message[4] {
-            1 => return (key, &message[16..]),
-            2 if message.len() > 24 => return (key, &message[24..]),
-            _ => {}
-        }
+pub fn semu_payload(message: &[u8]) -> Option<(Option<bool>, &[u8])> {
+    if !message.starts_with(&SEMU_MAGIC) {
+        return Some((None, message));
     }
-    (None, message)
+    let key = message.get(5).map(|flags| flags & 1 == 1);
+    match message.get(4) {
+        Some(1) if message.len() > 16 => Some((key, &message[16..])),
+        Some(2) if message.len() > 24 => Some((key, &message[24..])),
+        _ => None,
+    }
 }
 
 pub fn annexb_nals(data: &[u8]) -> Vec<&[u8]> {
@@ -1160,7 +1160,7 @@ mod tests {
                 "the hub-mounted serve-emu writes v1"
             );
             let key = n == 0 || n == 4;
-            let (flag, payload) = semu_payload(message);
+            let (flag, payload) = semu_payload(message).unwrap();
             assert_eq!(flag, Some(key), "message {n}");
             assert_eq!(payload, &message[16..]);
             assert_eq!(&payload[..4], [0, 0, 0, 1]);
@@ -1169,15 +1169,23 @@ mod tests {
             v2[4] = 2;
             v2.extend(1_791_216_912_063_000u64.to_be_bytes());
             v2.extend(payload);
-            assert_eq!(semu_payload(&v2), (Some(key), payload), "message {n} as v2");
+            assert_eq!(
+                semu_payload(&v2),
+                Some((Some(key), payload)),
+                "message {n} as v2"
+            );
         }
         let payload = &captured[1][16..];
-        assert_eq!(semu_payload(payload), (None, payload), "raw Annex-B");
+        assert_eq!(semu_payload(payload), Some((None, payload)), "raw Annex-B");
         let mut unknown = captured[1].to_vec();
         unknown[4] = 3;
-        assert_eq!(semu_payload(&unknown).0, None);
-        let short = &captured[1][..16];
-        assert_eq!(semu_payload(short), (None, short));
+        assert_eq!(
+            semu_payload(&unknown),
+            None,
+            "an unknown version is an error"
+        );
+        assert_eq!(semu_payload(&captured[1][..16]), None, "a bare v1 header");
+        assert_eq!(semu_payload(b"SEMU"), None);
     }
 
     #[test]
@@ -1192,7 +1200,7 @@ mod tests {
                 }
                 Message::Binary(bytes) => bytes,
             };
-            let (key, payload) = semu_payload(bytes);
+            let (key, payload) = semu_payload(bytes).unwrap();
             let nals = annexb_nals(payload);
             for envelope in annexb_to_avcc(payload, key) {
                 tags.push(envelope.tag);

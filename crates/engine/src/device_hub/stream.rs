@@ -8,7 +8,8 @@ use tokio::sync::{broadcast, watch};
 use tokio_tungstenite::tungstenite::{self, Message};
 use zeron_proto::device_hub::{
     AVCC_DELTA, AVCC_DESCRIPTION, AVCC_KEYFRAME, AVCC_SEED, AvccDemuxer, AvccEnvelope,
-    DeviceStreamStatus, DeviceVideoCodec, StreamLinkStatus, annexb_to_avcc, semu_payload,
+    DevicePlatform, DeviceStreamStatus, DeviceVideoCodec, StreamLinkStatus, annexb_to_avcc,
+    semu_payload,
 };
 
 use super::input::{InputSocket, RESET_VIDEO};
@@ -43,10 +44,11 @@ pub(crate) struct AvccFeed {
     cache: Mutex<AvccCache>,
     sender: broadcast::Sender<Arc<AvccEnvelope>>,
     keyframe_wanted: tokio::sync::Notify,
+    pub(crate) platform: DevicePlatform,
 }
 
 impl AvccFeed {
-    fn new(description: Option<Arc<AvccEnvelope>>) -> Arc<Self> {
+    fn new(description: Option<Arc<AvccEnvelope>>, platform: DevicePlatform) -> Arc<Self> {
         Arc::new(Self {
             cache: Mutex::new(AvccCache {
                 description,
@@ -55,6 +57,7 @@ impl AvccFeed {
             }),
             sender: broadcast::channel(AVCC_QUEUE).0,
             keyframe_wanted: tokio::sync::Notify::new(),
+            platform,
         })
     }
 
@@ -348,6 +351,7 @@ impl DeviceStreams {
     pub(crate) fn subscribe_avcc(
         self: &Arc<Self>,
         device_id: &str,
+        platform: DevicePlatform,
         start: impl FnOnce(Arc<AvccFeed>, u64) -> tokio::task::JoinHandle<()>,
     ) -> AvccSubscription {
         let mut entries = self.lock();
@@ -358,7 +362,7 @@ impl DeviceStreams {
             entry.avcc_status = StreamLinkStatus::Connecting;
         }
         let feed = entry.avcc.get_or_insert_with(|| {
-            let sink = AvccFeed::new(cached);
+            let sink = AvccFeed::new(cached, platform);
             Feed {
                 reader: start(sink.clone(), link),
                 sink,
@@ -366,7 +370,7 @@ impl DeviceStreams {
             }
         });
         feed.subscribers += 1;
-        if feed.subscribers > 1 {
+        if feed.subscribers > 1 && feed.sink.lock().gop.is_empty() {
             feed.sink.keyframe_wanted.notify_one();
         }
         let feed = feed.sink.clone();
@@ -689,7 +693,9 @@ pub(crate) fn spawn_semu_reader(
                                 _ = feed.keyframe_wanted.notified() => reset(),
                                 incoming = stream.next() => match incoming {
                                     Some(Ok(Message::Binary(bytes))) => {
-                                        let (key, payload) = semu_payload(&bytes);
+                                        let Some((key, payload)) = semu_payload(&bytes) else {
+                                            break "the video stream sent an unknown frame header";
+                                        };
                                         let envelopes = annexb_to_avcc(payload, key);
                                         let produced = !envelopes.is_empty();
                                         for envelope in envelopes {
@@ -931,8 +937,9 @@ mod tests {
         streams.set_status("UDID", 1, live(DeviceVideoCodec::Mjpeg), None);
         assert_eq!(published.lock().unwrap().len(), count, "no-op changes");
         assert_eq!(last()["UDID"].video, StreamLinkStatus::Live);
-        let avcc =
-            streams.subscribe_avcc("UDID", |_, _| tokio::spawn(std::future::pending::<()>()));
+        let avcc = streams.subscribe_avcc("UDID", DevicePlatform::Ios, |_, _| {
+            tokio::spawn(std::future::pending::<()>())
+        });
         assert_eq!(last()["UDID"].avcc, StreamLinkStatus::Connecting);
         let failed = StreamLinkStatus::Failed {
             detail: "HTTP 404".into(),
@@ -994,7 +1001,7 @@ mod tests {
 
     #[test]
     fn a_new_connection_drops_deltas_until_its_keyframe_and_joiners_get_the_gop() {
-        let feed = AvccFeed::new(None);
+        let feed = AvccFeed::new(None, DevicePlatform::Ios);
         let (_, mut live) = feed.join();
         feed.connected();
         feed.push(envelope(AVCC_SEED, b"jpeg"));
@@ -1041,7 +1048,7 @@ mod tests {
     async fn a_lagging_avcc_batch_stream_resyncs_from_the_cached_gop() {
         let streams = Arc::new(DeviceStreams::default());
         let idle = |_: Arc<AvccFeed>, _| tokio::spawn(std::future::pending::<()>());
-        let subscription = streams.subscribe_avcc("UDID", idle);
+        let subscription = streams.subscribe_avcc("UDID", DevicePlatform::Ios, idle);
         let feed = subscription.feed.clone();
         feed.push(envelope(AVCC_DESCRIPTION, b"avcC"));
         feed.push(envelope(AVCC_KEYFRAME, b"idr"));
@@ -1077,7 +1084,7 @@ mod tests {
     async fn avcc_items_stay_under_the_rpc_frame_limit() {
         let streams = Arc::new(DeviceStreams::default());
         let idle = |_: Arc<AvccFeed>, _| tokio::spawn(std::future::pending::<()>());
-        let subscription = streams.subscribe_avcc("UDID", idle);
+        let subscription = streams.subscribe_avcc("UDID", DevicePlatform::Ios, idle);
         let feed = subscription.feed.clone();
         feed.push(envelope(AVCC_DESCRIPTION, b"avcC"));
         feed.push(envelope(AVCC_KEYFRAME, &vec![2; AVCC_ITEM_BYTES / 2]));
@@ -1130,15 +1137,15 @@ mod tests {
     async fn a_hub_pause_forgets_every_cached_description() {
         let streams = Arc::new(DeviceStreams::default());
         let idle = |_: Arc<AvccFeed>, _| tokio::spawn(std::future::pending::<()>());
-        let parked = streams.subscribe_avcc("PARKED", idle);
+        let parked = streams.subscribe_avcc("PARKED", DevicePlatform::Ios, idle);
         parked.feed.push(envelope(AVCC_DESCRIPTION, b"old"));
         drop(parked);
-        let live = streams.subscribe_avcc("LIVE", idle);
+        let live = streams.subscribe_avcc("LIVE", DevicePlatform::Ios, idle);
         live.feed.push(envelope(AVCC_DESCRIPTION, b"old"));
         live.feed.push(envelope(AVCC_KEYFRAME, b"idr"));
         streams.pause();
         assert!(live.feed.join().0.is_empty(), "the live feed starts over");
-        let parked = streams.subscribe_avcc("PARKED", idle);
+        let parked = streams.subscribe_avcc("PARKED", DevicePlatform::Ios, idle);
         assert!(
             parked.feed.join().0.is_empty(),
             "the parked description is gone"
@@ -1149,7 +1156,7 @@ mod tests {
     async fn the_last_description_outlives_its_feed_until_the_streams_clear() {
         let streams = Arc::new(DeviceStreams::default());
         let idle = |_: Arc<AvccFeed>, _| tokio::spawn(std::future::pending::<()>());
-        let first = streams.subscribe_avcc("UDID", idle);
+        let first = streams.subscribe_avcc("UDID", DevicePlatform::Ios, idle);
         first.feed.push(envelope(AVCC_DESCRIPTION, b"avcC"));
         let mjpeg = streams.subscribe("UDID", |_, _| tokio::spawn(std::future::pending::<()>()));
         assert_eq!(streams.subscribers("UDID"), 2);
@@ -1159,12 +1166,12 @@ mod tests {
             1,
             "the MJPEG watcher keeps the entry"
         );
-        let second = streams.subscribe_avcc("UDID", idle);
+        let second = streams.subscribe_avcc("UDID", DevicePlatform::Ios, idle);
         assert_eq!(tags(&second.feed.join().0), [AVCC_DESCRIPTION]);
         drop((second, mjpeg));
         assert_eq!(streams.subscribers("UDID"), 0);
         streams.clear();
-        let third = streams.subscribe_avcc("UDID", idle);
+        let third = streams.subscribe_avcc("UDID", DevicePlatform::Ios, idle);
         assert!(third.feed.join().0.is_empty());
     }
 }

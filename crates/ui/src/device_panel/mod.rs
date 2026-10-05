@@ -391,6 +391,7 @@ impl DevicePanel {
                     && let Some(engine) = self.state.read(cx).engine().cloned()
                 {
                     let id = device_id.clone();
+                    let physical = self.device(cx).is_some_and(|device| device.physical);
                     let view = cx
                         .new(|cx| DeviceStreamView::new(engine.clone(), id.clone(), platform, cx));
                     let host = self.target.as_ref().map(|(host, _)| host.clone());
@@ -401,6 +402,7 @@ impl DevicePanel {
                             host.unwrap_or_default(),
                             id,
                             platform,
+                            physical,
                             weak,
                             cx,
                         )
@@ -1413,6 +1415,62 @@ pub(crate) mod tests {
             calls_of(&calls, methods::WATCH_HUB_DEVICE_APP_STATE).is_empty(),
             "the foreground app comes from the detail read on Android"
         );
+    }
+
+    #[gpui::test]
+    fn a_failed_android_action_rereads_the_detail_and_keeps_its_error(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let detail = serde_json::json!({
+            "hostId": "local", "deviceId": "SIM", "readAt": "now",
+            "settings": {"networkEnabled": true}
+        });
+        let (_panel, calls, cx) = android_panel(
+            cx,
+            &runtime,
+            Arc::new(move |method| match method {
+                methods::GET_HUB_DEVICE_DETAIL => detail.clone(),
+                _ => serde_json::json!("The device action failed at step 2 of 2"),
+            }),
+        );
+        cx.simulate_resize(gpui::size(gpui::px(900.0), gpui::px(1400.0)));
+        click(cx, "device-tools-toggle");
+        wait(cx, |cx| cx.debug_bounds("device-tool-network").is_some());
+        let reads = calls_of(&calls, methods::GET_HUB_DEVICE_DETAIL).len();
+        click(cx, "device-tool-network");
+        wait(cx, |_| {
+            calls_of(&calls, methods::GET_HUB_DEVICE_DETAIL).len() == reads + 1
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("device-tools-error").is_some());
+    }
+
+    #[gpui::test]
+    fn a_physical_android_device_offers_neither_power_off_nor_location(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let detail = serde_json::json!({
+            "hostId": "local", "deviceId": "SIM", "readAt": "now", "settings": {}
+        });
+        let mut hub = android(streaming(StreamLinkStatus::Live));
+        hub.devices[0].physical = true;
+        let (state, _) = app_state_with(cx, &runtime, hub, Arc::new(move |_| detail.clone()));
+        let (_panel, cx) = cx.add_window_view(|_, cx| {
+            let mut panel = DevicePanel::new(state, "chat".into(), cx);
+            panel.target = Some(("local".into(), "SIM".into()));
+            panel.revision = None;
+            panel.sync(cx);
+            panel
+        });
+        cx.simulate_resize(gpui::size(gpui::px(900.0), gpui::px(1400.0)));
+        wait(cx, |cx| cx.debug_bounds("device-tools-toggle").is_some());
+        click(cx, "device-tools-toggle");
+        wait(cx, |cx| cx.debug_bounds("device-tool-network").is_some());
+        assert!(cx.debug_bounds("device-tool-location-set").is_none());
+        click(cx, "device-more");
+        wait(cx, |cx| cx.debug_bounds("device-close-panel").is_some());
+        assert!(cx.debug_bounds("device-power-off").is_none());
     }
 
     #[gpui::test]

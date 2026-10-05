@@ -56,6 +56,9 @@ pub struct DeviceHub {
     agent_start: tokio::sync::Mutex<()>,
     action_locks: Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     auto_rotate: Mutex<std::collections::HashMap<String, String>>,
+    android_boots: tokio::sync::Mutex<()>,
+    session_avds: Mutex<std::collections::HashMap<String, String>>,
+    refreshing: tokio::sync::Mutex<()>,
     #[cfg(test)]
     test_spawn: Mutex<Option<TestSpawn>>,
     #[cfg(test)]
@@ -130,6 +133,32 @@ fn stopped_avds(
         .collect()
 }
 
+fn android_list_failed(errors: &[String]) -> bool {
+    errors
+        .iter()
+        .any(|message| message.contains("[android-utils]"))
+}
+
+fn reused_serials(
+    names: &mut std::collections::HashMap<String, String>,
+    devices: &[zeron_proto::device_hub::HubDevice],
+) -> Vec<String> {
+    let reused: Vec<String> = devices
+        .iter()
+        .filter(|device| device.platform == DevicePlatform::Android && device.name != device.id)
+        .filter(|device| {
+            names
+                .get(&device.id)
+                .is_some_and(|name| *name != device.name && *name != device.id)
+        })
+        .map(|device| device.id.clone())
+        .collect();
+    for id in &reused {
+        names.remove(id);
+    }
+    reused
+}
+
 enum HubWatch {
     Alive,
     Gone,
@@ -193,6 +222,9 @@ impl DeviceHub {
             agent_start: tokio::sync::Mutex::new(()),
             action_locks: Mutex::default(),
             auto_rotate: Mutex::default(),
+            android_boots: tokio::sync::Mutex::new(()),
+            session_avds: Mutex::default(),
+            refreshing: tokio::sync::Mutex::new(()),
             #[cfg(test)]
             test_spawn: Mutex::new(None),
             #[cfg(test)]
@@ -640,6 +672,7 @@ impl DeviceHub {
         {
             env = platform::android_env(&root, std::env::var_os("PATH").as_deref());
             // Hub 0.12.0 boots AVDs with `-camera-* imagefile:`, which emulator 36.4 rejects; an uncreatable feed dir makes it leave those flags out.
+            #[cfg(unix)]
             env.push(("SERVE_EMU_CAMERA_DIR", "/dev/null/zeron-no-camera".into()));
         }
         hub_process::spawn(
@@ -655,6 +688,7 @@ impl DeviceHub {
     }
 
     async fn refresh(&self, origin: &str) -> Result<(), String> {
+        let _serial = self.refreshing.lock().await;
         let (mut devices, errors) = HubClient {
             http: &self.http,
             origin,
@@ -670,14 +704,35 @@ impl DeviceHub {
                 .collect();
             available(&platforms, DevicePlatform::Android)
         };
-        if android {
+        if android && android_list_failed(&errors) {
+            let known: Vec<_> = self
+                .state
+                .borrow()
+                .devices
+                .iter()
+                .filter(|device| device.platform == DevicePlatform::Android)
+                .filter(|device| !devices.iter().any(|listed| listed.id == device.id))
+                .cloned()
+                .collect();
+            devices.extend(known);
+        } else if android {
             let avds = self.list_avds().await;
             devices.extend(stopped_avds(&avds, &devices));
         }
+        let reused = reused_serials(
+            &mut self
+                .session_avds
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+            &devices,
+        );
         self.publish(|state| {
             if !state.settings.enabled {
                 return;
             }
+            state
+                .sessions
+                .retain(|session| !reused.contains(&session.device_id));
             state.devices = devices;
             state.host_status = DeviceHostStatus::Ready;
             state.host_status_detail = host_diagnostics(errors, android);
@@ -706,15 +761,32 @@ impl DeviceHub {
             .unwrap_or_else(|| LOCAL_DEVICE_HOST_ID.into());
         let origin = self.ensure_ready().await?;
         self.refresh(&origin).await?;
-        let device = self
-            .snapshot()
-            .device(&host_id, &params.device_id)
-            .cloned()
-            .ok_or_else(|| UNKNOWN_DEVICE.to_string())?;
-        if device.platform != params.platform {
-            return Err(UNKNOWN_DEVICE.into());
-        }
+        let resolve = || {
+            let state = self.snapshot();
+            state
+                .device(&host_id, &params.device_id)
+                .or_else(|| {
+                    state.devices.iter().find(|device| {
+                        device.host_id == host_id
+                            && device.platform == DevicePlatform::Android
+                            && device.booted
+                            && device.name == params.device_id
+                    })
+                })
+                .filter(|device| device.platform == params.platform)
+                .cloned()
+                .ok_or_else(|| UNKNOWN_DEVICE.to_string())
+        };
+        let mut device = resolve()?;
         let ios = device.platform == DevicePlatform::Ios;
+        let _android_boot = if !ios && !device.booted && params.boot {
+            let boot = self.android_boots.lock().await;
+            self.refresh(&origin).await?;
+            device = resolve()?;
+            Some(boot)
+        } else {
+            None
+        };
         let client = HubClient {
             http: &self.http,
             origin: &origin,
@@ -746,6 +818,16 @@ impl DeviceHub {
             };
             let id = booted?;
             self.refresh(&origin).await?;
+            if let Some(listed) = self.snapshot().device(&host_id, &id)
+                && !ios
+                && listed.name != device.name
+                && listed.name != id
+            {
+                return Err(format!(
+                    "{id} came up as {}, not {}.",
+                    listed.name, device.name
+                ));
+            }
             id
         } else {
             if device.booted && ios {
@@ -755,6 +837,12 @@ impl DeviceHub {
         };
         if !self.enabled() {
             return Err("Device support was turned off while the device was opening.".into());
+        }
+        if !ios && device.name != device_id {
+            self.session_avds
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(device_id.clone(), device.name.clone());
         }
         let session = DeviceSession {
             chat_id: params.chat_id,
@@ -787,10 +875,12 @@ impl DeviceHub {
     }
 
     pub(crate) fn watch_avcc(&self, device_id: &str) -> Result<AvccSubscription, String> {
+        let platform = self.platform_of(device_id);
         self.with_live_hub(device_id, |origin| {
-            self.streams.subscribe_avcc(device_id, |feed, link| {
-                self.start_avcc_reader(origin, device_id, feed, link)
-            })
+            self.streams
+                .subscribe_avcc(device_id, platform, |feed, link| {
+                    self.start_avcc_reader(origin, device_id, feed, link)
+                })
         })
     }
 
@@ -854,7 +944,7 @@ impl DeviceHub {
             http: &self.http,
             origin,
         };
-        if self.platform_of(device_id) == DevicePlatform::Android {
+        if feed.platform == DevicePlatform::Android {
             return self.start_semu_reader(client.semu_url(device_id), device_id, feed, link);
         }
         let (on_status, on_first_frame) = self.link_callbacks(
@@ -1029,6 +1119,15 @@ impl DeviceHub {
         if !self.known_device(device_id) {
             return Err(UNKNOWN_DEVICE.into());
         }
+        if self
+            .state
+            .borrow()
+            .devices
+            .iter()
+            .any(|device| device.id == device_id && device.physical)
+        {
+            return Err(DEVICE_ACTION_UNAVAILABLE.into());
+        }
         let origin = self
             .live_origin()
             .ok_or_else(|| HUB_NOT_RUNNING.to_string())?;
@@ -1042,14 +1141,17 @@ impl DeviceHub {
         };
         // serve-sim's bare `simctl shutdown` fails for a simulator that is already off.
         if let Err(error) = shut {
-            let (devices, _) = client.list().await.map_err(|_| error.clone())?;
+            let (devices, errors) = client.list().await.map_err(|_| error.clone())?;
             let off = match platform {
                 DevicePlatform::Ios => devices
                     .iter()
                     .any(|device| device.id == device_id && !device.booted),
-                DevicePlatform::Android => !devices
-                    .iter()
-                    .any(|device| device.id == device_id && device.booted),
+                DevicePlatform::Android => {
+                    !android_list_failed(&errors)
+                        && !devices
+                            .iter()
+                            .any(|device| device.id == device_id && device.booted)
+                }
             };
             if !off {
                 return Err(error);
@@ -1177,6 +1279,7 @@ mod tests {
         attach_delay: Duration,
         stall_app_state: bool,
         huge_ax: bool,
+        android_list_error: bool,
     }
 
     const AVCC_RECORD: &[u8] = &[1, 0x64, 0, 0x20, 0xff, 0xe1, 0, 1, 0x67, 1, 0, 1, 0x68];
@@ -1201,6 +1304,7 @@ mod tests {
         attach_delay: Duration::ZERO,
         stall_app_state: false,
         huge_ax: false,
+        android_list_error: false,
     };
 
     pub(super) const STALLED_APP_STATE: Fake = Fake {
@@ -1368,10 +1472,16 @@ mod tests {
                         } else {
                             serde_json::json!([])
                         };
+                        let errors = if fake.android_list_error {
+                            serde_json::json!([{"message": "[android-utils] Failed to run `adb devices -l`: spawn adb ENOENT"}])
+                        } else {
+                            serde_json::json!([])
+                        };
                         let body = serde_json::json!({
                             "simulators": [{"id": "SIM-1", "name": "iPhone 17", "version": "iOS 27.0",
                                 "platform": "ios", "booted": booted.load(SeqCst), "physical": false}],
-                            "emulators": emulators
+                            "emulators": emulators,
+                            "errors": errors
                         });
                         (fake.list_status, body)
                     } else if line.starts_with("POST /vendor/serve-sim/grid/api/shutdown ") {
@@ -1382,14 +1492,22 @@ mod tests {
                     } else if line.starts_with("POST /api/devices/boot ")
                         && body.contains(r#""platform":"android""#)
                     {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
                         emulator.store(true, SeqCst);
                         (
                             200,
                             serde_json::json!({"ok": true, "id": "emulator-5554", "serial": "emulator-5554", "errors": []}),
                         )
                     } else if line.starts_with("POST /api/devices/shutdown ") {
-                        emulator.store(false, SeqCst);
-                        (200, serde_json::json!({"ok": true}))
+                        if fake.android_list_error {
+                            (
+                                200,
+                                serde_json::json!({"ok": false, "error": "adb: device offline"}),
+                            )
+                        } else {
+                            emulator.store(false, SeqCst);
+                            (200, serde_json::json!({"ok": true}))
+                        }
                     } else if line.starts_with("POST /api/devices/boot ") {
                         let Some(status) = fake.boot_status else {
                             std::future::pending::<()>().await;
@@ -2007,16 +2125,36 @@ mod tests {
         );
         assert!(hub.snapshot().device("local", "INFO").is_none());
 
-        let open = serde_json::json!({"chatId": "chat-1", "deviceId": "Pixel_9_API_36", "platform": "android"});
-        let session = hub
-            .open(serde_json::from_value(open).unwrap())
-            .await
-            .unwrap();
+        let open = |chat: &str| {
+            serde_json::from_value(serde_json::json!({"chatId": chat, "deviceId": "Pixel_9_API_36", "platform": "android"}))
+                .unwrap()
+        };
+        let (session, twin) = tokio::join!(hub.open(open("chat-1")), hub.open(open("chat-2")));
+        let (session, twin) = (session.unwrap(), twin.unwrap());
         assert_eq!(
-            session.device_id, "emulator-5554",
+            (session.device_id.as_str(), twin.device_id.as_str()),
+            ("emulator-5554", "emulator-5554"),
             "the AVD name became its serial"
         );
         assert_eq!(session.platform, DevicePlatform::Android);
+        let later = hub.open(open("chat-3")).await.unwrap();
+        assert_eq!(
+            later.device_id, "emulator-5554",
+            "a running AVD opens by its name"
+        );
+        let boots = requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|line| line.starts_with("POST /api/devices/boot "))
+            .count();
+        assert_eq!(boots, 1, "concurrent opens of one AVD boot it once");
+        hub.close(serde_json::from_value(serde_json::json!({"chatId": "chat-2"})).unwrap())
+            .await
+            .unwrap();
+        hub.close(serde_json::from_value(serde_json::json!({"chatId": "chat-3"})).unwrap())
+            .await
+            .unwrap();
         let state = hub.snapshot();
         let named: Vec<_> = state
             .devices
@@ -2095,16 +2233,40 @@ mod tests {
             [1, 2, 3],
             "a late joiner gets the GOP"
         );
-        eventually(|| {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let resets = |requests: &Requests| {
             requests
                 .lock()
                 .unwrap()
                 .iter()
                 .filter(|line| *line == reset)
                 .count()
-                == 3
-        })
-        .await;
+        };
+        assert_eq!(resets(&requests), 2, "a cached GOP needs no new keyframe");
+
+        let listed = hub.snapshot();
+        hub.publish(|state| {
+            state.devices.retain(|device| device.id != "emulator-5554");
+            state.sessions.clear();
+        });
+        let origin = hub.live_origin().unwrap();
+        hub.streams.resume(
+            |device_id, frames, link| hub.start_reader(&origin, device_id, frames, link),
+            |device_id, feed, link| hub.start_avcc_reader(&origin, device_id, feed, link),
+        );
+        let connects = |requests: &Requests| {
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|line| line.starts_with("WS /vendor/serve-emu/ws?"))
+                .count()
+        };
+        eventually(|| connects(&requests) == 2).await;
+        hub.publish(|state| {
+            state.devices = listed.devices.clone();
+            state.sessions = listed.sessions.clone();
+        });
         drop((tab, float));
 
         let close =
@@ -2140,6 +2302,104 @@ mod tests {
                 .is_some_and(|device| !device.booted)
         );
         hub.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_android_listing_keeps_running_emulators_and_never_counts_as_powered_off() {
+        use zeron_proto::device_hub::{
+            DevicePlatform, DevicePlatformAvailability, HubDevice, ShutdownHubDeviceParams,
+        };
+        let (_dir, hub, _) = enabled_hub(Fake {
+            android_list_error: true,
+            ..HEALTHY
+        })
+        .await;
+        hub.use_platforms_for_test(
+            [DevicePlatform::Ios, DevicePlatform::Android]
+                .map(|platform| DevicePlatformAvailability {
+                    platform,
+                    available: true,
+                    reason: None,
+                })
+                .to_vec(),
+        );
+        hub.use_actions_for_test(
+            Arc::new(|_| {
+                Box::pin(async {
+                    super::actions::CommandOutput {
+                        code: 0,
+                        stdout: "Pixel_9_API_36\n".into(),
+                        stderr: String::new(),
+                    }
+                })
+            }),
+            super::actions::Helpers {
+                android_sdk: Some("/sdk".into()),
+                ..Default::default()
+            },
+        );
+        hub.publish(|state| {
+            state.devices.push(HubDevice {
+                host_id: "local".into(),
+                id: "emulator-5554".into(),
+                name: "Pixel_9_API_36".into(),
+                platform: DevicePlatform::Android,
+                booted: true,
+                ..Default::default()
+            })
+        });
+        hub.list(false).await.unwrap();
+        let android: Vec<_> = hub
+            .snapshot()
+            .devices
+            .iter()
+            .filter(|device| device.platform == DevicePlatform::Android)
+            .map(|device| (device.id.clone(), device.booted))
+            .collect();
+        assert_eq!(android, [("emulator-5554".to_string(), true)]);
+        assert_eq!(
+            hub.power_off(ShutdownHubDeviceParams {
+                host_id: None,
+                device_id: "emulator-5554".into(),
+                platform: DevicePlatform::Android,
+            })
+            .await,
+            Err("Shutting the device down failed: adb: device offline".into())
+        );
+        hub.shutdown().await;
+    }
+
+    #[test]
+    fn a_serial_reused_by_another_avd_drops_the_sessions_opened_on_the_old_one() {
+        use zeron_proto::device_hub::{DevicePlatform, HubDevice};
+        let device = |id: &str, name: &str| HubDevice {
+            id: id.into(),
+            name: name.into(),
+            platform: DevicePlatform::Android,
+            booted: true,
+            ..Default::default()
+        };
+        let mut names = std::collections::HashMap::from([
+            ("emulator-5554".to_string(), "Pixel_9".to_string()),
+            ("emulator-5556".to_string(), "Tablet".to_string()),
+            ("emulator-5558".to_string(), "emulator-5558".to_string()),
+        ]);
+        let listed = [
+            device("emulator-5554", "Pixel_9"),
+            device("emulator-5556", "emulator-5556"),
+            device("emulator-5558", "Phone"),
+        ];
+        assert!(
+            super::reused_serials(&mut names, &listed).is_empty(),
+            "a name the hub could not read yet is never a different AVD"
+        );
+        let listed = [device("emulator-5554", "Other_AVD")];
+        assert_eq!(
+            super::reused_serials(&mut names, &listed),
+            ["emulator-5554"]
+        );
+        assert!(!names.contains_key("emulator-5554"));
+        assert!(names.contains_key("emulator-5556"));
     }
 
     #[tokio::test(flavor = "multi_thread")]

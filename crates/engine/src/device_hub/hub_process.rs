@@ -267,6 +267,23 @@ pub(crate) fn scrub_env(
     }
 }
 
+pub(crate) fn scrub_adb_env(
+    command: &mut Command,
+    vars: impl IntoIterator<Item = std::ffi::OsString>,
+) {
+    for name in vars {
+        let text = name.to_string_lossy();
+        if text.starts_with("SERVE_EMU_")
+            || matches!(
+                &*text,
+                "ADB_SERVER_SOCKET" | "ANDROID_ADB_SERVER_ADDRESS" | "ANDROID_SERIAL"
+            )
+        {
+            command.env_remove(&name);
+        }
+    }
+}
+
 fn write_state_file(path: &Path, record: &HubStateFile) {
     use std::io::Write as _;
     let Ok(json) = serde_json::to_string(record) else {
@@ -339,15 +356,17 @@ pub(crate) async fn spawn(
     command
         .args(args)
         .args(["--port", &port.to_string(), "--host", "127.0.0.1"])
-        .args(["--hide-sidebar", "--hide-boot-device"])
-        .env("FORCE_COLOR", "0")
-        .env("NO_COLOR", "1")
-        .envs(env);
+        .args(["--hide-sidebar", "--hide-boot-device"]);
     scrub_env(
         &mut command,
         "EXPO_DEVICE_HUB_",
         std::env::vars_os().map(|(name, _)| name),
     );
+    scrub_adb_env(&mut command, std::env::vars_os().map(|(name, _)| name));
+    command
+        .env("FORCE_COLOR", "0")
+        .env("NO_COLOR", "1")
+        .envs(env);
     let child = command
         .spawn()
         .map_err(|e| format!("starting the device hub: {e}"))?;
@@ -948,6 +967,38 @@ server.listen(port, "127.0.0.1");
             assert_eq!(first_reply(port, &request).await, "", "{request}");
         }
         hub.stop().await;
+    }
+
+    #[test]
+    fn adb_runs_drop_inherited_adb_targets_and_serve_emu_variables() {
+        let mut command = Command::new("/usr/bin/true");
+        scrub_adb_env(
+            &mut command,
+            [
+                "ADB_SERVER_SOCKET",
+                "ANDROID_ADB_SERVER_ADDRESS",
+                "ANDROID_SERIAL",
+                "SERVE_EMU_CAMERA_DIR",
+                "ANDROID_HOME",
+                "PATH",
+            ]
+            .map(std::ffi::OsString::from),
+        );
+        command.env("SERVE_EMU_CAMERA_DIR", "/dev/null/x");
+        let env: Vec<_> = command
+            .as_std()
+            .get_envs()
+            .map(|(name, value)| (name.to_string_lossy().into_owned(), value.is_some()))
+            .collect();
+        assert_eq!(
+            env,
+            [
+                ("ADB_SERVER_SOCKET".to_string(), false),
+                ("ANDROID_ADB_SERVER_ADDRESS".to_string(), false),
+                ("ANDROID_SERIAL".to_string(), false),
+                ("SERVE_EMU_CAMERA_DIR".to_string(), true),
+            ]
+        );
     }
 
     #[test]

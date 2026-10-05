@@ -92,11 +92,12 @@ pub(crate) fn android_env(
     let inherited: Vec<PathBuf> = path
         .map(|path| std::env::split_paths(path).collect())
         .unwrap_or_default();
-    let dirs = [root.join("platform-tools"), root.join("emulator")]
+    let dirs: Vec<PathBuf> = [root.join("platform-tools"), root.join("emulator")]
         .into_iter()
-        .chain(inherited);
-    let path =
-        std::env::join_paths(dirs).unwrap_or_else(|_| path.unwrap_or_default().to_os_string());
+        .chain(inherited)
+        .filter(|dir| std::env::join_paths([dir]).is_ok())
+        .collect();
+    let path = std::env::join_paths(dirs).unwrap_or_default();
     vec![
         ("ANDROID_HOME", root.as_os_str().to_os_string()),
         ("ANDROID_SDK_ROOT", root.as_os_str().to_os_string()),
@@ -149,7 +150,7 @@ fn android_sdk(
     );
     let explicit = set("ANDROID_HOME").or_else(|| set("ANDROID_SDK_ROOT"));
     let mut candidates: Vec<PathBuf> = match &explicit {
-        Some(root) => vec![PathBuf::from(root)],
+        Some(root) => vec![resolve(Path::new(root)).unwrap_or_else(|| PathBuf::from(root))],
         None => vec![
             home.join("Library").join("Android").join("sdk"),
             home.join("Android").join("Sdk"),
@@ -170,6 +171,9 @@ fn android_sdk(
         }
     }
     for root in candidates {
+        if !root.is_absolute() || std::env::join_paths([&root]).is_err() {
+            continue;
+        }
         let adb = root.join("platform-tools").join(exe("adb")).exists();
         let emulator = root.join("emulator").join(exe("emulator")).exists();
         if explicit.is_some() || adb || emulator {
@@ -316,9 +320,21 @@ mod tests {
                 .unwrap()
                 .contains(&format!(
                     "Platform-Tools are missing from {}",
-                    explicit.display()
+                    explicit.canonicalize().unwrap().display()
                 ))
         );
+        let linked = dir.path().join("linked");
+        std::os::unix::fs::symlink(&sdk, &linked).unwrap();
+        let through_link = reason(&[("HOME", &home), ("ANDROID_HOME", &linked.join("."))]);
+        assert_eq!(through_link, None, "an explicit root is resolved");
+        for unusable in ["relative/sdk", "/sdk:with/a/separator"] {
+            assert!(
+                reason(&[("HOME", &home), ("ANDROID_HOME", Path::new(unusable))])
+                    .unwrap()
+                    .starts_with("Android SDK was not found."),
+                "{unusable}"
+            );
+        }
 
         let other_home = dir.path().join("nobody");
         let on_path = dir.path().join("path-sdk");

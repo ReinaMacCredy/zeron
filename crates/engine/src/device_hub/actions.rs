@@ -34,6 +34,7 @@ const EVENT_SUMMARY_LIMIT: usize = 1000;
 const EVENT_FIELD_LIMIT: usize = 64;
 const SCREENSHOT_NAME_TRIES: usize = 100;
 pub(crate) const ACTION_TIMEOUT: Duration = Duration::from_secs(20);
+const OUTPUT_LIMIT: usize = 4 << 20;
 const FOREGROUND_READ: Duration = Duration::from_secs(1);
 pub(crate) const PORTRAIT_LOCKED: &str = "The foreground app is locked to portrait.";
 const ROTATION_SETTLE: Duration = Duration::from_secs(2);
@@ -52,6 +53,46 @@ pub(crate) fn system_runner() -> Runner {
     Arc::new(|argv| Box::pin(run_command(argv)))
 }
 
+async fn read_pipe(
+    pipe: Option<impl tokio::io::AsyncRead + Unpin>,
+    limit: usize,
+) -> std::io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt as _;
+    let mut bytes = Vec::new();
+    if let Some(pipe) = pipe {
+        pipe.take(limit as u64 + 1).read_to_end(&mut bytes).await?;
+    }
+    if bytes.len() > limit {
+        return Err(std::io::Error::other(format!(
+            "the command printed more than {limit} bytes"
+        )));
+    }
+    Ok(bytes)
+}
+
+pub(crate) async fn capped_output(
+    mut command: tokio::process::Command,
+    limit: usize,
+) -> std::io::Result<std::process::Output> {
+    use std::process::Stdio;
+    super::hub_process::scrub_adb_env(&mut command, std::env::vars_os().map(|(name, _)| name));
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let (stdout, stderr) = tokio::try_join!(
+        read_pipe(child.stdout.take(), limit),
+        read_pipe(child.stderr.take(), limit)
+    )?;
+    Ok(std::process::Output {
+        status: child.wait().await?,
+        stdout,
+        stderr,
+    })
+}
+
 async fn run_command(argv: Vec<String>) -> CommandOutput {
     let failed = |stderr: String| CommandOutput {
         code: 127,
@@ -61,11 +102,9 @@ async fn run_command(argv: Vec<String>) -> CommandOutput {
     let Some((program, args)) = argv.split_first() else {
         return failed("no command".into());
     };
-    let run = tokio::process::Command::new(program)
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output();
+    let mut command = tokio::process::Command::new(program);
+    command.args(args);
+    let run = capped_output(command, OUTPUT_LIMIT);
     match tokio::time::timeout(ACTION_TIMEOUT, run).await {
         Err(_) => failed("timed out after 20 s".into()),
         Ok(Err(error)) => failed(error.to_string()),
@@ -454,6 +493,15 @@ pub(crate) fn android_action_argvs(
         ])],
         DeviceAction::SetToggle {
             setting: DeviceToggle::NetworkEnabled,
+            ..
+        }
+        | DeviceAction::SetLocation { .. }
+            if !serial.starts_with("emulator-") =>
+        {
+            return unavailable();
+        }
+        DeviceAction::SetToggle {
+            setting: DeviceToggle::NetworkEnabled,
             enabled,
         } => {
             let state = if *enabled { "enable" } else { "disable" };
@@ -575,10 +623,13 @@ pub(crate) fn android_settings_from(
                 DeviceTextSize::Default
             }
         }),
-        reduce_motion: number(animator).map(|scale| scale == 0.0),
+        reduce_motion: match animator.map(str::trim) {
+            Some("null") => Some(false),
+            animator => number(animator).map(|scale| scale == 0.0),
+        },
         network_enabled: match wifi.map(str::trim) {
-            Some("1") => Some(true),
-            Some("0") => Some(false),
+            Some("1" | "2") => Some(true),
+            Some("0" | "3") => Some(false),
             _ => None,
         },
         ..Default::default()
@@ -964,6 +1015,9 @@ impl DeviceHub {
         // Apps rarely declare every permission of a group; t3code ignores the refusals too.
         let tolerant = device.platform == DevicePlatform::Android
             && matches!(params.action, DeviceAction::SetPermission { .. });
+        let steps = argvs.len();
+        let mut succeeded = 0;
+        let mut refusal = None;
         let rotation = match (&params.action, helpers.adb()) {
             (DeviceAction::SetOrientation { value }, Some(adb))
                 if device.platform == DevicePlatform::Android
@@ -980,17 +1034,33 @@ impl DeviceHub {
         {
             self.save_auto_rotate(&runner, adb, &device.id).await;
         }
-        for argv in argvs {
+        for (step, argv) in argvs.into_iter().enumerate() {
             let output = runner(argv).await;
-            if output.code != 0 && !tolerant {
-                let detail = output.stderr.trim();
-                let detail = if detail.is_empty() {
-                    format!("exit code {}", output.code)
-                } else {
-                    detail.chars().take(400).collect()
-                };
+            if output.code == 0 {
+                succeeded += 1;
+                continue;
+            }
+            let detail = output.stderr.trim();
+            let detail = if detail.is_empty() {
+                format!("exit code {}", output.code)
+            } else {
+                detail.chars().take(400).collect()
+            };
+            if tolerant {
+                refusal = Some(detail);
+            } else if steps > 1 {
+                return Err(format!(
+                    "The device action failed at step {} of {steps}: {detail}",
+                    step + 1
+                ));
+            } else {
                 return Err(format!("The device action failed: {detail}"));
             }
+        }
+        if succeeded == 0
+            && let Some(detail) = refusal
+        {
+            return Err(format!("The device action failed: {detail}"));
         }
         if let Some((value, adb)) = &rotation {
             self.settle_rotation(&runner, adb, &device.id, *value)
@@ -1821,6 +1891,22 @@ mod tests {
             ),
             Err(INVALID_LOCATION.into())
         );
+        for action in [
+            DeviceAction::SetToggle {
+                setting: DeviceToggle::NetworkEnabled,
+                enabled: false,
+            },
+            DeviceAction::SetLocation {
+                lat: 35.0,
+                lon: 139.0,
+            },
+        ] {
+            assert_eq!(
+                run("192.168.1.20:5555", action.clone()),
+                unavailable,
+                "{action:?} on a physical device"
+            );
+        }
     }
 
     #[test]
@@ -1836,11 +1922,19 @@ mod tests {
             DeviceSettingsSnapshot {
                 appearance: Some(DeviceAppearance::Light),
                 text_size: Some(DeviceTextSize::Default),
+                reduce_motion: Some(false),
                 network_enabled: Some(true),
                 ..Default::default()
             },
-            "an unset animator scale is unknown"
+            "an unset animator scale is the default 1, so motion is not reduced"
         );
+        for (wifi_on, enabled) in [("2", true), ("3", false)] {
+            assert_eq!(
+                android_settings_from(None, None, None, Some(wifi_on)).network_enabled,
+                Some(enabled),
+                "wifi_on {wifi_on} (airplane mode states)"
+            );
+        }
         let dark =
             android_settings_from(Some("Night mode: yes"), Some("1.3"), Some("0.0"), Some("0"));
         assert_eq!(
@@ -2316,6 +2410,107 @@ mod hub_tests {
                 "shell settings put system accelerometer_rotation 0",
             ]
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn android_multi_step_actions_name_the_failed_step_and_permissions_fail_only_when_all_do()
+    {
+        use zeron_proto::device_hub::{DevicePermission, DeviceToggle, PermissionDecision};
+        let (_dir, hub, _) = enabled_hub(HEALTHY).await;
+        hub.publish(|state| {
+            state.devices.push(HubDevice {
+                host_id: "local".into(),
+                id: "emulator-5554".into(),
+                name: "Pixel_9".into(),
+                platform: DevicePlatform::Android,
+                booted: true,
+                ..Default::default()
+            })
+        });
+        let refusing: Arc<Mutex<Vec<&'static str>>> = Arc::default();
+        let runner: Runner = {
+            let refusing = refusing.clone();
+            Arc::new(move |argv: Vec<String>| {
+                let refused = refusing
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|word| argv.iter().any(|arg| arg == word));
+                Box::pin(async move {
+                    CommandOutput {
+                        code: if refused { 255 } else { 0 },
+                        stdout: String::new(),
+                        stderr: if refused {
+                            "Error: refused".into()
+                        } else {
+                            String::new()
+                        },
+                    }
+                })
+            })
+        };
+        hub.use_actions_for_test(
+            runner,
+            Helpers {
+                android_sdk: Some("/sdk".into()),
+                ..Default::default()
+            },
+        );
+        let run = |action| {
+            hub.run_action(RunHubDeviceActionParams {
+                host_id: None,
+                device_id: "emulator-5554".into(),
+                action,
+            })
+        };
+        let network_off = DeviceAction::SetToggle {
+            setting: DeviceToggle::NetworkEnabled,
+            enabled: false,
+        };
+        *refusing.lock().unwrap() = vec!["data"];
+        assert_eq!(
+            run(network_off.clone()).await,
+            Err("The device action failed at step 2 of 2: Error: refused".into())
+        );
+        let location = |decision| DeviceAction::SetPermission {
+            app_id: "com.example.app".into(),
+            permission: DevicePermission::Location,
+            decision,
+        };
+        *refusing.lock().unwrap() = vec!["android.permission.ACCESS_COARSE_LOCATION"];
+        run(location(PermissionDecision::Grant))
+            .await
+            .expect("one granted permission of the group is enough");
+        *refusing.lock().unwrap() = vec!["pm"];
+        assert_eq!(
+            run(location(PermissionDecision::Revoke)).await,
+            Err("The device action failed: Error: refused".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn command_output_past_the_cap_is_refused_without_waiting_for_the_command() {
+        let sh = |script: &str| {
+            let mut command = tokio::process::Command::new("/bin/sh");
+            command.args(["-c", script]);
+            command
+        };
+        let output = capped_output(sh("head -c 2048 /dev/zero"), 4096)
+            .await
+            .unwrap();
+        assert_eq!(output.stdout.len(), 2048);
+        assert!(
+            capped_output(sh("head -c 2048 /dev/zero"), 1024)
+                .await
+                .is_err()
+        );
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            capped_output(sh("exec yes"), 1 << 20),
+        )
+        .await
+        .expect("an endless command is cut off at the cap")
+        .unwrap_err();
     }
 
     #[tokio::test(flavor = "multi_thread")]

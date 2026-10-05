@@ -6,8 +6,8 @@ use base64::Engine as _;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use zeron_proto::device_hub::{
-    CloseHubDeviceParams, DeviceHostStatus, DevicePlatform, DeviceToolParams, HubDevice,
-    LOCAL_DEVICE_HOST_ID, OpenHubDeviceParams,
+    CloseHubDeviceParams, DeviceHostStatus, DevicePlatform, DeviceSession, DeviceToolParams,
+    HubDevice, LOCAL_DEVICE_HOST_ID, OpenHubDeviceParams,
 };
 
 use super::hub_process::{self, HubProcess};
@@ -34,6 +34,7 @@ const DAEMON_FILE: &str = "daemon.json";
 const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(30);
 const SCREENSHOT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_SCREENSHOT_SIDE: u32 = 1568;
+const SCREENSHOT_LIMIT: usize = 64 << 20;
 const AGENT_ENV: &str = "AGENT_DEVICE_";
 
 #[derive(Debug, Clone)]
@@ -57,6 +58,7 @@ pub(crate) struct AgentDaemon {
     token: String,
     process: HubProcess,
     tool: AgentTool,
+    android_root: Option<PathBuf>,
 }
 
 impl AgentDaemon {
@@ -124,10 +126,18 @@ async fn stop_foreign_daemon(
 fn daemon_command(
     tool: &AgentTool,
     state_dir: &Path,
-    vars: impl IntoIterator<Item = std::ffi::OsString>,
+    vars: impl IntoIterator<Item = std::ffi::OsString> + Clone,
+    android_root: Option<&Path>,
 ) -> tokio::process::Command {
     let mut command = hub_process::lifeline_command(&tool.node);
-    hub_process::scrub_env(&mut command, AGENT_ENV, vars);
+    hub_process::scrub_env(&mut command, AGENT_ENV, vars.clone());
+    hub_process::scrub_adb_env(&mut command, vars);
+    if let Some(root) = android_root {
+        command.envs(super::platform::android_env(
+            root,
+            std::env::var_os("PATH").as_deref(),
+        ));
+    }
     command
         .arg(tool.daemon_entry())
         .env("AGENT_DEVICE_STATE_DIR", state_dir)
@@ -144,6 +154,7 @@ pub(crate) async fn start_daemon(
     tool: &AgentTool,
     state_dir: &Path,
     timeout: Duration,
+    android_root: Option<PathBuf>,
 ) -> Result<AgentDaemon, String> {
     std::fs::create_dir_all(state_dir).map_err(|e| e.to_string())?;
     let info_path = state_dir.join(DAEMON_FILE);
@@ -154,7 +165,8 @@ pub(crate) async fn start_daemon(
         }
     }
     let _ = std::fs::remove_file(&info_path);
-    let child = daemon_command(tool, state_dir, std::env::vars_os().map(|(name, _)| name))
+    let vars: Vec<_> = std::env::vars_os().map(|(name, _)| name).collect();
+    let child = daemon_command(tool, state_dir, vars, android_root.as_deref())
         .spawn()
         .map_err(|e| format!("starting agent-device: {e}"))?;
     let mut process = HubProcess::owned(String::new(), child);
@@ -169,6 +181,7 @@ pub(crate) async fn start_daemon(
                 token: info.token,
                 process,
                 tool: tool.clone(),
+                android_root,
             });
         }
         if !process.alive() {
@@ -476,11 +489,9 @@ pub(super) async fn capture_device(device: &HubDevice) -> Result<Vec<u8>, String
 }
 
 async fn capture_emulator(adb: &Path, serial: &str) -> Result<Vec<u8>, String> {
-    let run = tokio::process::Command::new(adb)
-        .args(["-s", serial, "exec-out", "screencap", "-p"])
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output();
+    let mut command = tokio::process::Command::new(adb);
+    command.args(["-s", serial, "exec-out", "screencap", "-p"]);
+    let run = super::actions::capped_output(command, SCREENSHOT_LIMIT);
     let output = tokio::time::timeout(SCREENSHOT_TIMEOUT, run)
         .await
         .map_err(|_| "The emulator screenshot timed out.".to_string())?
@@ -554,10 +565,10 @@ impl DeviceHub {
         Ok(AgentTool { node, entry })
     }
 
-    fn live_agent(&self) -> Option<(String, String, AgentTool)> {
+    fn live_agent(&self, android_root: Option<&Path>) -> Option<(String, String, AgentTool)> {
         let mut slot = self.agent_slot();
         let daemon = slot.as_mut()?;
-        if !daemon.alive() {
+        if !daemon.alive() || daemon.android_root.as_deref() != android_root {
             return None;
         }
         Some((
@@ -591,7 +602,11 @@ impl DeviceHub {
 
     async fn provision_agent(&self) -> Result<(), String> {
         let _start = self.agent_start.lock().await;
-        let (base_url, token, tool) = match self.live_agent() {
+        let android_root = tokio::task::spawn_blocking(super::platform::android_root)
+            .await
+            .ok()
+            .flatten();
+        let (base_url, token, tool) = match self.live_agent(android_root.as_deref()) {
             Some(live) => live,
             None => {
                 self.agent_gate()?;
@@ -606,6 +621,7 @@ impl DeviceHub {
                     &tool,
                     &self.device_dir().join("agent-device"),
                     DAEMON_READY_TIMEOUT,
+                    android_root,
                 )
                 .await?;
                 let live = (daemon.base_url.clone(), daemon.token.clone(), tool);
@@ -664,16 +680,15 @@ impl DeviceHub {
             .join(format!("{}.json", key(host_id)))
     }
 
-    async fn agent_target(&self, chat_id: &str, device: &HubDevice) -> Result<Vec<String>, String> {
-        self.ensure_agent().await?;
-        Ok(vec![
+    fn agent_target(&self, session: &DeviceSession) -> Vec<String> {
+        vec![
             "--config".into(),
-            self.host_config(&device.host_id)
+            self.host_config(&session.host_id)
                 .to_string_lossy()
                 .into_owned(),
             "--session".into(),
-            session_name(chat_id, &device.host_id, &device.id),
-        ])
+            session_name(&session.chat_id, &session.host_id, &session.device_id),
+        ]
     }
 
     pub async fn tool_list(&self, params: DeviceToolParams) -> Result<Value, String> {
@@ -709,7 +724,7 @@ impl DeviceHub {
             params.host_id.as_deref(),
         )?
         .clone();
-        let agent_args = self.agent_target(&params.chat_id, &device).await?;
+        self.ensure_agent().await?;
         let session = self
             .open(OpenHubDeviceParams {
                 chat_id: params.chat_id,
@@ -726,7 +741,7 @@ impl DeviceHub {
             .unwrap_or(device);
         let command = self.shim_dir().join(SHIM).to_string_lossy().into_owned();
         let mut args = target_args(&device);
-        args.extend(agent_args);
+        args.extend(self.agent_target(&session));
         Ok(json!({
             "device": device,
             "agentDevice": { "command": command, "targetArgs": args },
@@ -1286,7 +1301,7 @@ if (args[0] === "daemon" && args[1] === "stop") {
         };
         let http = reqwest::Client::builder().no_proxy().build().unwrap();
         let state_dir = dir.path().join("state");
-        let mut foreign = start_daemon(&http, &tool, &state_dir, Duration::from_secs(20))
+        let mut foreign = start_daemon(&http, &tool, &state_dir, Duration::from_secs(20), None)
             .await
             .expect("the daemon writes daemon.json");
         let foreign_pid = daemon_info(&state_dir)["pid"].as_u64().unwrap();
@@ -1296,7 +1311,7 @@ if (args[0] === "daemon" && args[1] === "stop") {
         drop(foreign);
         assert!(pid_alive(foreign_pid), "a daemon nobody here owns");
 
-        let mut daemon = start_daemon(&http, &tool, &state_dir, Duration::from_secs(20))
+        let mut daemon = start_daemon(&http, &tool, &state_dir, Duration::from_secs(20), None)
             .await
             .unwrap();
         let pid = daemon_info(&state_dir)["pid"].as_u64().unwrap();
@@ -1348,29 +1363,42 @@ if (args[0] === "daemon" && args[1] === "stop") {
             node: "/usr/bin/node".into(),
             entry: "/pkg/bin/agent-device.mjs".into(),
         };
-        let command = daemon_command(
-            &tool,
-            Path::new("/state"),
-            [
-                "AGENT_DEVICE_HTTP_AUTH_HOOK",
-                "AGENT_DEVICE_STATE_DIR",
-                "PATH",
-            ]
-            .map(std::ffi::OsString::from),
-        );
-        let env: std::collections::BTreeMap<_, _> = command
+        let env_of = |android_root: Option<&Path>| -> std::collections::BTreeMap<_, _> {
+            daemon_command(
+                &tool,
+                Path::new("/state"),
+                [
+                    "AGENT_DEVICE_HTTP_AUTH_HOOK",
+                    "AGENT_DEVICE_STATE_DIR",
+                    "ANDROID_SERIAL",
+                    "PATH",
+                ]
+                .map(std::ffi::OsString::from),
+                android_root,
+            )
             .as_std()
             .get_envs()
             .map(|(name, value)| {
                 (
                     name.to_string_lossy().into_owned(),
-                    value.map(|v| v.to_owned()),
+                    value.map(|v| v.to_string_lossy().into_owned()),
                 )
             })
-            .collect();
+            .collect()
+        };
+        let env = env_of(None);
         assert_eq!(env["AGENT_DEVICE_HTTP_AUTH_HOOK"], None);
-        assert_eq!(env["AGENT_DEVICE_STATE_DIR"], Some("/state".into()));
-        assert!(!env.contains_key("PATH"));
+        assert_eq!(env["AGENT_DEVICE_STATE_DIR"].as_deref(), Some("/state"));
+        assert_eq!(env["ANDROID_SERIAL"], None);
+        assert!(!env.contains_key("PATH") && !env.contains_key("ANDROID_HOME"));
+        let env = env_of(Some(Path::new("/sdk")));
+        assert_eq!(env["ANDROID_HOME"].as_deref(), Some("/sdk"));
+        assert!(
+            env["PATH"]
+                .as_deref()
+                .is_some_and(|path| path.starts_with("/sdk/platform-tools:/sdk/emulator")),
+            "{env:?}"
+        );
     }
 
     #[test]
@@ -1391,7 +1419,7 @@ if (args[0] === "daemon" && args[1] === "stop") {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn device_open_needs_a_platform_once_simulators_and_emulators_are_both_listed() {
-        let (_dir, hub, _) = enabled_hub(HEALTHY).await;
+        let (dir, hub, _) = enabled_hub(HEALTHY).await;
         hub.use_platforms_for_test(
             [DevicePlatform::Ios, DevicePlatform::Android]
                 .map(
@@ -1447,6 +1475,35 @@ if (args[0] === "daemon" && args[1] === "stop") {
             .await;
         assert_eq!(opened, Err(BOTH_PLATFORMS.into()));
         assert!(hub.snapshot().sessions.is_empty());
+
+        let _serial = PROVISIONING.lock().await;
+        let Some(tool) = fake_agent(dir.path()) else {
+            return;
+        };
+        hub.use_agent_for_test(tool);
+        let opened = hub
+            .tool_open(DeviceToolParams {
+                chat_id: "chat-1".into(),
+                platform: Some(DevicePlatform::Android),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let args: Vec<&str> = opened["agentDevice"]["targetArgs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|arg| arg.as_str().unwrap())
+            .collect();
+        let session = session_name("chat-1", "local", "emulator-5554");
+        assert_eq!(
+            (args[..4].to_vec(), args[7]),
+            (
+                vec!["--platform", "android", "--serial", "emulator-5554"],
+                session.as_str()
+            ),
+            "the agent session follows the serial the AVD booted under"
+        );
         hub.shutdown().await;
     }
 

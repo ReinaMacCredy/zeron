@@ -2230,7 +2230,7 @@ mod tests {
             while let [kind, a, b, c, d, tail @ ..] = rest {
                 let (payload, next) = tail.split_at(u32::from_be_bytes([*a, *b, *c, *d]) as usize);
                 if *kind == 0 {
-                    let (key, annexb) = zeron_proto::device_hub::semu_payload(payload);
+                    let (key, annexb) = zeron_proto::device_hub::semu_payload(payload).unwrap();
                     items.push(zeron_proto::device_hub::annexb_to_avcc(annexb, key));
                 }
                 rest = next;
