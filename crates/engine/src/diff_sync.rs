@@ -979,32 +979,33 @@ fn parse_name_status(value: &[u8]) -> Vec<DiffFileSummary> {
     out
 }
 
-fn apply_numstat(files: &mut [DiffFileSummary], value: &[u8]) {
+pub(crate) fn numstat_records(value: &[u8]) -> impl Iterator<Item = (&str, &str, &[u8])> {
     // With -z, a rename record is `adds<TAB>dels<TAB><NUL>old<NUL>new<NUL>`.
-    let records: Vec<String> = value
-        .split(|b| *b == 0)
-        .map(|part| String::from_utf8_lossy(part).to_string())
-        .collect();
-    let mut i = 0usize;
-    while i < records.len() {
-        let record = &records[i];
-        if record.is_empty() {
-            i += 1;
-            continue;
+    let mut records = value.split(|b| *b == 0);
+    std::iter::from_fn(move || {
+        loop {
+            let record = records.next()?;
+            if record.is_empty() {
+                continue;
+            }
+            let mut parts = record.splitn(3, |b| *b == b'\t');
+            let mut count = || std::str::from_utf8(parts.next().unwrap_or_default()).unwrap_or("");
+            let (adds, dels) = (count(), count());
+            let inline_path = parts.next().unwrap_or_default();
+            let path = if inline_path.is_empty() {
+                records.next();
+                records.next().unwrap_or_default()
+            } else {
+                inline_path
+            };
+            return Some((adds, dels, path));
         }
-        let mut parts = record.splitn(3, '\t');
-        let adds = parts.next().unwrap_or_default().to_string();
-        let dels = parts.next().unwrap_or_default().to_string();
-        let inline_path = parts.next().unwrap_or_default().to_string();
-        let path = if inline_path.is_empty() {
-            // Rename: the next two records are old, new.
-            let new_path = records.get(i + 2).cloned().unwrap_or_default();
-            i += 2;
-            new_path
-        } else {
-            inline_path
-        };
-        i += 1;
+    })
+}
+
+fn apply_numstat(files: &mut [DiffFileSummary], value: &[u8]) {
+    for (adds, dels, path) in numstat_records(value) {
+        let path = String::from_utf8_lossy(path);
         if let Some(file) = files.iter_mut().find(|f| f.path == path) {
             file.additions = adds.parse().unwrap_or(0);
             file.deletions = dels.parse().unwrap_or(0);

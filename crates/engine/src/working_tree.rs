@@ -201,37 +201,16 @@ fn parse_status(bytes: &[u8], truncated: bool) -> Status {
 }
 
 fn parse_numstat(bytes: &[u8]) -> HashMap<String, LineDelta> {
-    let mut deltas = HashMap::new();
-    let mut tokens = bytes.split(|b| *b == 0);
-    while let Some(token) = tokens.next() {
-        let Ok(token) = std::str::from_utf8(token) else {
-            continue;
-        };
-        let mut parts = token.splitn(3, '\t');
-        let (Some(added), Some(deleted), Some(path)) = (parts.next(), parts.next(), parts.next())
-        else {
-            continue;
-        };
-        let path = if path.is_empty() {
-            let _old = tokens.next();
-            match tokens.next().map(std::str::from_utf8) {
-                Some(Ok(new)) => new,
-                _ => continue,
-            }
-        } else {
-            path
-        };
-        let binary = added == "-" || deleted == "-";
-        deltas.insert(
-            path.to_owned(),
-            LineDelta {
+    crate::diff_sync::numstat_records(bytes)
+        .filter_map(|(added, deleted, path)| {
+            let delta = LineDelta {
                 additions: added.parse().unwrap_or(0),
                 deletions: deleted.parse().unwrap_or(0),
-                binary,
-            },
-        );
-    }
-    deltas
+                binary: added == "-" || deleted == "-",
+            };
+            Some((std::str::from_utf8(path).ok()?.to_owned(), delta))
+        })
+        .collect()
 }
 
 fn parse_stashes(bytes: &[u8]) -> Vec<StashEntry> {
