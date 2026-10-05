@@ -849,7 +849,7 @@ impl GitTab {
     }
 
     fn allows(&self, action: &WorkingTreeAction, policy: GitAgentBusyPolicy) -> bool {
-        self.pending.is_none()
+        !self.busy_for_sync()
             && self
                 .tree
                 .as_ref()
@@ -1679,6 +1679,11 @@ impl GitTab {
         }
         if sheet.title.read(cx).text().trim().is_empty() {
             return Some("Give the pull request a title.");
+        }
+        if self.card_commit(cx).is_none() {
+            return Some(
+                "The checked-out branch changed since this commit, or it already has a pull request.",
+            );
         }
         self.push_refusal(tree, busy_policy(cx), cx)
     }
@@ -7889,5 +7894,59 @@ mod tests {
                 .last()
                 .is_some_and(|params| params.get("checkoutPath").is_none())
         });
+    }
+
+    #[gpui::test]
+    fn a_commit_cannot_land_while_push_and_create_is_pushing(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        *lab.tree.lock().unwrap() = Some(new_branch_tree());
+        let (_page, cx, calls, _dir, tab) = open_with_listing(cx, lab_state(), lab.clone());
+        commit_now(cx, &tab, &calls);
+        settle(cx, |cx| cx.debug_bounds("git-pr-card").is_some());
+        click(cx, "git-pr-card-create");
+        cx.run_until_parked();
+        lab.hold_syncs
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        click(cx, "git-pr-confirm");
+        settle(cx, |_| calls_of(&calls, methods::SYNC_BRANCH).len() == 1);
+        set_message(&tab, cx, "Next change");
+        tab.update(cx, |tab, cx| tab.commit(CommitKind::Staged, cx));
+        for _ in 0..20 {
+            cx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(actions(&calls).len(), 1, "no commit while the push runs");
+        lab.release_sync.notify_one();
+        settle(cx, |_| {
+            calls_of(&calls, methods::CREATE_CHANGE_REQUEST).len() == 1
+        });
+    }
+
+    #[gpui::test]
+    fn the_pr_sheet_refuses_once_the_checked_out_branch_moves(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        *lab.tree.lock().unwrap() = Some(new_branch_tree());
+        let (_page, cx, calls, _dir, tab) = open_with_listing(cx, lab_state(), lab.clone());
+        commit_now(cx, &tab, &calls);
+        settle(cx, |cx| cx.debug_bounds("git-pr-card").is_some());
+        click(cx, "git-pr-card-create");
+        cx.run_until_parked();
+        let mut other = new_branch_tree();
+        other["branch"] = "feature/b".into();
+        *lab.tree.lock().unwrap() = Some(other);
+        tab.update(cx, |tab, cx| tab.load(cx));
+        settle(cx, |cx| {
+            tab.read_with(cx, |tab, _| {
+                tab.tree().unwrap().branch.as_deref() == Some("feature/b")
+            })
+        });
+        assert!(cx.debug_bounds("git-pr-refusal").is_some());
+        tab.update(cx, |tab, cx| tab.confirm_pr(cx));
+        cx.run_until_parked();
+        assert!(remote_calls(&calls).is_empty(), "feature/b is not pushed");
     }
 }
