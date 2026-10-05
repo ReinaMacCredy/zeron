@@ -153,8 +153,19 @@ pub struct DeviceScreenConfig {
         deserialize_with = "hinge_degrees"
     )]
     pub hinge_angle: Option<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "known_or_none"
+    )]
     pub hinge_pose: Option<HingePose>,
+}
+
+fn known_or_none<'de, D: serde::Deserializer<'de>, T: serde::de::DeserializeOwned>(
+    deserializer: D,
+) -> Result<Option<T>, D::Error> {
+    Ok(Option::<serde_json::Value>::deserialize(deserializer)?
+        .and_then(|value| serde_json::from_value(value).ok()))
 }
 
 fn hinge_degrees<'de, D: serde::Deserializer<'de>>(
@@ -199,7 +210,7 @@ pub enum FoldPosture {
 pub struct DeviceFoldState {
     #[serde(default)]
     pub supported: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "known_or_none")]
     pub posture: Option<FoldPosture>,
 }
 
@@ -1081,6 +1092,20 @@ mod tests {
         let fractional: DeviceScreenConfig =
             serde_json::from_value(json!({"width": 1, "height": 2, "hingeAngle": 92.6})).unwrap();
         assert_eq!(fractional.hinge_angle, Some(93));
+        let unknown: DeviceScreenConfig = serde_json::from_value(json!({
+            "width": 1398, "height": 2034, "screenId": 1, "hingeAngle": 120, "hingePose": "flat"
+        }))
+        .unwrap();
+        assert_eq!(
+            (
+                unknown.width,
+                unknown.screen_id,
+                unknown.hinge_angle,
+                unknown.hinge_pose
+            ),
+            (1398, Some(1), Some(120), None),
+            "a pose this build does not know keeps the rest of the config"
+        );
         let iphone: DeviceScreenConfig = serde_json::from_value(json!({
             "width": 588, "height": 1280, "orientation": "portrait", "screenId": 1,
             "supportsPhysicalOrientation": false, "supportsHingeAngle": false
@@ -1124,6 +1149,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(unsupported, DeviceFoldState::default());
+        let unknown: DeviceFoldState =
+            serde_json::from_value(json!({"supported": true, "posture": "dual_display"})).unwrap();
+        assert_eq!(
+            unknown,
+            DeviceFoldState {
+                supported: true,
+                posture: None
+            }
+        );
         let session: DeviceSession =
             serde_json::from_value(json!({"chatId": "c", "openedBy": "agent"})).unwrap();
         assert_eq!(session.opened_by, Some(DeviceOpener::Agent));

@@ -1609,6 +1609,8 @@ mod tests {
                             return;
                         };
                         (status, serde_json::json!({"ok": true, "id": "SIM-1"}))
+                    } else if line.contains(" /vendor/serve-emu/api/fold?device=emulator-5558 ") {
+                        (404, serde_json::json!("not found"))
                     } else if line.contains(" /vendor/serve-emu/api/fold?device=emulator-5556 ") {
                         (
                             200,
@@ -2111,7 +2113,7 @@ mod tests {
         .unwrap();
         hub.list(false).await.unwrap();
         hub.publish(|state| {
-            for serial in ["emulator-5554", "emulator-5556"] {
+            for serial in ["emulator-5554", "emulator-5556", "emulator-5558"] {
                 state.devices.push(HubDevice {
                     host_id: "local".into(),
                     id: serial.into(),
@@ -2150,6 +2152,11 @@ mod tests {
             Ok(DeviceFoldState::default())
         );
         assert_eq!(
+            hub.device_fold(fold("emulator-5558", None)).await,
+            Ok(DeviceFoldState::default()),
+            "a hub without the fold route answers 404: no fold, nothing to retry"
+        );
+        assert_eq!(
             hub.device_fold(fold("emulator-5554", Some(FoldPosture::HalfOpened)))
                 .await,
             Err("A device can only be folded or unfolded.".into())
@@ -2172,6 +2179,7 @@ mod tests {
                 r#"POST /vendor/serve-emu/api/fold?device=emulator-5554 HTTP/1.1 {"posture":"closed"}"#,
                 r#"POST /vendor/serve-emu/api/fold?device=emulator-5554 HTTP/1.1 {"posture":"opened"}"#,
                 "GET /vendor/serve-emu/api/fold?device=emulator-5556 HTTP/1.1 ",
+                "GET /vendor/serve-emu/api/fold?device=emulator-5558 HTTP/1.1 ",
             ]
         );
         hub.shutdown().await;

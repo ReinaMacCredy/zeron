@@ -322,15 +322,17 @@ impl InputSocket {
         pose: HingePose,
     ) -> Result<oneshot::Receiver<Result<(), String>>, String> {
         let replies = self.replies.as_ref().ok_or(UNSUPPORTED_INPUT)?;
-        if !self.live.load(Ordering::SeqCst) {
-            return Err("Input disconnected, reconnecting...".into());
-        }
         let id = self.next_request.fetch_add(1, Ordering::SeqCst);
         let (reply, receiver) = oneshot::channel();
         {
             let mut replies = replies.lock().unwrap_or_else(PoisonError::into_inner);
             replies.retain(|_, waiting| !waiting.is_closed());
             replies.insert(id, reply);
+            // Checked after the insert: the reader drops `live` before it clears the waiters.
+            if !self.live.load(Ordering::SeqCst) {
+                replies.remove(&id);
+                return Err("Input disconnected, reconnecting...".into());
+            }
         }
         self.tx
             .send(Message::Binary(hinge_request(id, pose)))
@@ -603,6 +605,15 @@ mod tests {
         assert_eq!(
             semu.hinge(HingePose::Open).err().as_deref(),
             Some(UNSUPPORTED_INPUT)
+        );
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let replies: Arc<Mutex<HashMap<u64, HingeReply>>> = Arc::default();
+        let mut closed = InputSocket::semu(tx, Arc::new(AtomicBool::new(false)));
+        closed.replies = Some(replies.clone());
+        assert!(closed.hinge(HingePose::Open).is_err());
+        assert!(
+            replies.lock().unwrap().is_empty(),
+            "a request on a closed socket leaves no waiter behind"
         );
     }
 

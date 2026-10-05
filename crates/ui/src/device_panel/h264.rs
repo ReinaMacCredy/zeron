@@ -494,6 +494,7 @@ mod decoder {
         health: Health,
         rotator: Option<Rotator>,
         decoded: bool,
+        last: Option<(Surface, DeviceOrientation)>,
     }
 
     // SAFETY: the pipeline owns its CoreMedia and VideoToolbox objects outright and is only ever
@@ -564,6 +565,16 @@ mod decoder {
                     }
                     _ => {}
                 }
+            }
+            // The screen config can arrive after the new display's keyframe; turn the last picture then.
+            if batch.picture.is_none()
+                && let Some((picture, turned)) = &self.last
+                && *turned != rotation
+            {
+                batch.picture = Some(picture.clone());
+            }
+            if let Some(picture) = &batch.picture {
+                self.last = Some((picture.clone(), rotation));
             }
             if rotation != DeviceOrientation::Portrait
                 && let Some(picture) = batch.picture.take()

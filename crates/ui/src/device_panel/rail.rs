@@ -145,6 +145,8 @@ impl DevicePanel {
             .w(px(RAIL_WIDTH))
             .flex()
             .flex_col()
+            .flex_wrap_reverse()
+            .content_start()
             .items_center()
             .justify_center()
             .gap(px(8.0))

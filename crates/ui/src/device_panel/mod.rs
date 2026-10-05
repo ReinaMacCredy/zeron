@@ -1370,6 +1370,45 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
+    fn a_duo_rail_stays_inside_a_short_pane(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (state, _calls) = app_state(cx, &runtime, duo(true));
+        let (_panel, cx) = cx.add_window_view(|_, cx| {
+            let mut panel = DevicePanel::new(state, "chat".into(), cx);
+            panel.target = Some(("local".into(), "SIM".into()));
+            panel.revision = None;
+            panel.sync(cx);
+            panel
+        });
+        cx.simulate_resize(gpui::size(gpui::px(700.0), gpui::px(1200.0)));
+        wait(cx, |cx| cx.debug_bounds("device-pose-tent").is_some());
+        let x =
+            |cx: &mut VisualTestContext, selector| cx.debug_bounds(selector).unwrap().center().x;
+        assert_eq!(
+            x(cx, "device-home"),
+            x(cx, "device-pose-tent"),
+            "one column when it fits"
+        );
+        let size = gpui::size(gpui::px(700.0), gpui::px(400.0));
+        cx.simulate_resize(size);
+        cx.run_until_parked();
+        let window = gpui::Bounds::new(gpui::Point::default(), size);
+        for selector in [
+            "device-home",
+            "device-more",
+            "device-pose-closed",
+            "device-pose-tent",
+        ] {
+            let bounds = cx.debug_bounds(selector).unwrap();
+            assert!(
+                window.contains(&bounds.origin) && window.contains(&bounds.bottom_right()),
+                "{selector} {bounds:?} is outside the 400 px pane"
+            );
+        }
+    }
+
+    #[gpui::test]
     fn android_fold_buttons_show_for_a_foldable_and_send_the_posture(cx: &mut TestAppContext) {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use gpui::{Context, Entity, SharedString, Subscription, Task};
+use gpui::{Context, Entity, SharedString, Subscription, Task, WeakEntity};
 use zeron_proto::device_hub::{
     DeviceFoldState, DevicePlatform, DeviceScreenConfig, FoldPosture, HingePose,
 };
@@ -132,6 +132,7 @@ pub struct FoldControls {
     read_for: Option<Option<(u32, u32)>>,
     error: Option<SharedString>,
     request: Task<()>,
+    view: WeakEntity<DeviceStreamView>,
     _view: Subscription,
 }
 
@@ -162,6 +163,7 @@ impl FoldControls {
             read_for: None,
             error: None,
             request: Task::ready(()),
+            view: view.downgrade(),
             _view: observer,
         }
     }
@@ -187,6 +189,10 @@ impl FoldControls {
     }
 
     fn send_pose(&mut self, pose: HingePose, cx: &mut Context<Self>) {
+        // The hub moves touches to the new display before its screen config says so.
+        self.view
+            .update(cx, |view, cx| view.release_held(true, cx))
+            .ok();
         let engine = self.engine.clone();
         let params = serde_json::json!({ "deviceId": self.device_id, "pose": pose });
         self.request = cx.spawn(async move |this, cx| {

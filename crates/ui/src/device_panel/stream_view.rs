@@ -237,6 +237,7 @@ struct FrameSink {
     codec: Arc<Mutex<DeviceVideoCodec>>,
     avcc_failed: Arc<AtomicBool>,
     failure: Arc<Mutex<Option<String>>>,
+    turns: mpsc::UnboundedReceiver<()>,
 }
 
 impl FrameSink {
@@ -255,18 +256,41 @@ impl FrameSink {
     }
 }
 
-async fn drain_mjpeg(frames: &mut RpcSubscription, sink: &FrameSink) {
-    while let Some(mut item) = frames.recv().await {
-        while let Some(Some(newer)) = futures::FutureExt::now_or_never(frames.recv()) {
-            item = newer;
-        }
-        let Some(frame) = serde_json::from_value::<DeviceFrame>(item)
-            .ok()
-            .and_then(|frame| jpeg_of(&frame))
-            .and_then(|jpeg| decode_jpeg(&jpeg, sink.rotation(), DeviceVideoCodec::Mjpeg))
-        else {
+async fn drain_mjpeg(frames: &mut RpcSubscription, sink: &mut FrameSink) {
+    use futures::future::Either;
+    let mut last: Option<(Vec<u8>, DeviceOrientation)> = None;
+    loop {
+        let item =
+            match futures::future::select(Box::pin(frames.recv()), sink.turns.select_next_some())
+                .await
+            {
+                Either::Left((Some(item), _)) => Some(item),
+                Either::Left((None, _)) => return,
+                Either::Right(_) => None,
+            };
+        let jpeg = match item {
+            Some(mut item) => {
+                while let Some(Some(newer)) = futures::FutureExt::now_or_never(frames.recv()) {
+                    item = newer;
+                }
+                let Some(jpeg) = serde_json::from_value::<DeviceFrame>(item)
+                    .ok()
+                    .and_then(|frame| jpeg_of(&frame))
+                else {
+                    continue;
+                };
+                jpeg
+            }
+            None => match &last {
+                Some((jpeg, turned)) if *turned != sink.rotation() => jpeg.clone(),
+                _ => continue,
+            },
+        };
+        let rotation = sink.rotation();
+        let Some(frame) = decode_jpeg(&jpeg, rotation, DeviceVideoCodec::Mjpeg) else {
             continue;
         };
+        last = Some((jpeg, rotation));
         if !sink.publish(frame) {
             return;
         }
@@ -277,7 +301,7 @@ async fn drain_mjpeg(frames: &mut RpcSubscription, sink: &FrameSink) {
 async fn drain_h264(
     executor: &gpui::BackgroundExecutor,
     frames: &mut RpcSubscription,
-    sink: &FrameSink,
+    sink: &mut FrameSink,
     forced: bool,
 ) -> Option<super::h264::FallbackReason> {
     use super::h264::{FallbackReason, Pipeline};
@@ -288,12 +312,19 @@ async fn drain_h264(
     let mut demuxer = AvccDemuxer::default();
     let mut failed_ticks = 0;
     loop {
-        let item = match futures::future::select(Box::pin(frames.recv()), executor.timer(LINK_TICK))
-            .await
+        let mut items = match futures::future::select(
+            Box::pin(frames.recv()),
+            futures::future::select(executor.timer(LINK_TICK), sink.turns.select_next_some()),
+        )
+        .await
         {
-            Either::Left((Some(item), _)) => item,
+            Either::Left((Some(item), _)) => {
+                failed_ticks = 0;
+                vec![item]
+            }
             Either::Left((None, _)) => return None,
-            Either::Right(_) => {
+            Either::Right((Either::Right(_), _)) => Vec::new(),
+            Either::Right((Either::Left(_), _)) => {
                 if !sink.avcc_failed.load(Ordering::SeqCst) {
                     failed_ticks = 0;
                 } else if !forced {
@@ -305,8 +336,6 @@ async fn drain_h264(
                 continue;
             }
         };
-        failed_ticks = 0;
-        let mut items = vec![item];
         while let Some(Some(more)) = futures::FutureExt::now_or_never(frames.recv()) {
             items.push(more);
         }
@@ -369,7 +398,7 @@ async fn drain_frames(
     executor: gpui::BackgroundExecutor,
     engine: EngineHandle,
     device_id: String,
-    sink: FrameSink,
+    mut sink: FrameSink,
     (mut codec, forced): (DeviceVideoCodec, bool),
     android: bool,
 ) {
@@ -384,7 +413,9 @@ async fn drain_frames(
             match codec {
                 #[cfg(target_os = "macos")]
                 DeviceVideoCodec::H264 => {
-                    if let Some(reason) = drain_h264(&executor, &mut frames, &sink, forced).await {
+                    if let Some(reason) =
+                        drain_h264(&executor, &mut frames, &mut sink, forced).await
+                    {
                         tracing::warn!(
                             device = %device_id,
                             reason = reason.describe(),
@@ -401,7 +432,7 @@ async fn drain_frames(
                     }
                 }
                 _ if android => return sink.fail(undecodable("H.264 decoding needs macOS")),
-                _ => drain_mjpeg(&mut frames, &sink).await,
+                _ => drain_mjpeg(&mut frames, &mut sink).await,
             }
         }
         if sink.nudge.is_closed() {
@@ -424,6 +455,7 @@ pub struct DeviceStreamView {
     slot: Arc<Mutex<Option<DecodedFrame>>>,
     nudge: mpsc::UnboundedSender<()>,
     rotation: Arc<Mutex<DeviceOrientation>>,
+    turned: mpsc::UnboundedSender<()>,
     active_codec: Arc<Mutex<DeviceVideoCodec>>,
     avcc_failed: Arc<AtomicBool>,
     failure: Arc<Mutex<Option<String>>>,
@@ -522,6 +554,7 @@ impl DeviceStreamView {
             slot: Arc::default(),
             nudge,
             rotation: Arc::new(Mutex::new(DeviceOrientation::Portrait)),
+            turned: mpsc::unbounded().0,
             active_codec: Arc::new(Mutex::new(codec.0)),
             avcc_failed: Arc::default(),
             failure: Arc::default(),
@@ -563,6 +596,8 @@ impl DeviceStreamView {
     }
 
     fn subscribe(&mut self, cx: &mut Context<Self>) {
+        let (turned, turns) = mpsc::unbounded();
+        self.turned = turned;
         self.drain = cx.background_spawn(drain_frames(
             cx.background_executor().clone(),
             self.engine.clone(),
@@ -574,6 +609,7 @@ impl DeviceStreamView {
                 codec: self.active_codec.clone(),
                 avcc_failed: self.avcc_failed.clone(),
                 failure: self.failure.clone(),
+                turns,
             },
             self.codec,
             self.platform == DevicePlatform::Android,
@@ -613,8 +649,14 @@ impl DeviceStreamView {
             if self.screen.is_some() && screen_id(&self.screen) != screen_id(&screen) {
                 self.release_held(true, cx);
             }
-            *self.rotation.lock().unwrap_or_else(PoisonError::into_inner) =
-                geometry::display_rotation(screen.as_ref());
+            let rotation = geometry::display_rotation(screen.as_ref());
+            let previous = std::mem::replace(
+                &mut *self.rotation.lock().unwrap_or_else(PoisonError::into_inner),
+                rotation,
+            );
+            if previous != rotation {
+                let _ = self.turned.unbounded_send(());
+            }
             self.screen = screen;
             cx.notify();
         }
@@ -731,7 +773,7 @@ impl DeviceStreamView {
         inputs
     }
 
-    fn release_held(&mut self, touch: bool, cx: &mut Context<Self>) {
+    pub(super) fn release_held(&mut self, touch: bool, cx: &mut Context<Self>) {
         for input in self.release(touch) {
             self.send(input);
         }
@@ -1476,6 +1518,41 @@ mod tests {
             &touches(&inputs),
             &[("begin", 0.5, 0.5), ("move", 0.6, 0.5), ("end", 0.6, 0.5)],
         );
+    }
+
+    #[gpui::test]
+    fn a_pose_request_ends_a_held_touch_before_it_leaves(cx: &mut TestAppContext) {
+        use zeron_proto::device_hub::HingePose;
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        setup(cx);
+        let (engine, inputs) = fake_engine(&runtime);
+        let fold_engine = engine.clone();
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            DeviceStreamView::new(engine, "SIM".into(), DevicePlatform::Ios, cx)
+        });
+        wait(cx, |cx| {
+            view.read_with(cx, |view, _| view.has_frame() && view.frame_box().is_some())
+        });
+        let frame = view.read_with(cx, |view, _| view.frame_box().unwrap());
+        let held = geometry::position_at(frame, 0.5, 0.5);
+        cx.simulate_mouse_down(held, MouseButton::Left, Modifiers::default());
+        wait(cx, |_| inputs.lock().unwrap().len() == 1);
+        let fold = cx.update(|_, cx| {
+            cx.new(|cx| {
+                crate::device_panel::fold::FoldControls::new(
+                    fold_engine,
+                    "local".into(),
+                    "SIM".into(),
+                    DevicePlatform::Ios,
+                    &view,
+                    cx,
+                )
+            })
+        });
+        fold.update(cx, |fold, cx| fold.set_pose(HingePose::Open, cx));
+        wait(cx, |_| inputs.lock().unwrap().len() == 2);
+        assert_touches(&touches(&inputs), &[("begin", 0.5, 0.5), ("end", 0.5, 0.5)]);
     }
 
     fn inputs_of(inputs: &Inputs, kind: &str) -> Vec<Value> {
@@ -2380,6 +2457,77 @@ mod tests {
             );
             assert_eq!(codecs(&watches), [json!("h264")]);
             assert!(view.read_with(cx, |view, _| view.video_error.is_none()));
+        }
+
+        #[gpui::test]
+        fn the_inner_keyframe_before_its_screen_config_turns_upright_when_the_config_lands(
+            cx: &mut TestAppContext,
+        ) {
+            use zeron_proto::device_hub::HingePose;
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let _guard = runtime.enter();
+            setup(cx);
+            let mut screens: Vec<Vec<AvccEnvelope>> = Vec::new();
+            for envelope in AvccDemuxer::default().push(DUO_FOLD).unwrap() {
+                if envelope.tag == zeron_proto::device_hub::AVCC_DESCRIPTION {
+                    screens.push(Vec::new());
+                }
+                screens.last_mut().unwrap().push(envelope);
+            }
+            let (engine, watches) = video_engine(
+                &runtime,
+                vec![item(&screens[0]), json!("pause"), item(&screens[1])],
+            );
+            let (view, cx) = cx.add_window_view(|_, cx| {
+                view_with_screen(engine, duo_screen(1, HingePose::Closed), cx)
+            });
+            wait(cx, |cx| {
+                shown(&view, cx).is_some_and(|shown| (shown.1, shown.2) == (2006, 2852))
+            });
+            view.update(cx, |view, cx| {
+                view.set_screen(Some(duo_screen(3, HingePose::Open)), cx)
+            });
+            wait(cx, |cx| {
+                shown(&view, cx).is_some_and(|shown| (shown.1, shown.2) == (2852, 2006))
+            });
+            assert_eq!(codecs(&watches), [json!("h264")], "no new subscription");
+        }
+
+        #[gpui::test]
+        fn an_mjpeg_frame_turns_when_its_screen_config_lands_after_it(cx: &mut TestAppContext) {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let _guard = runtime.enter();
+            setup(cx);
+            let (engine, watches) = video_engine(&runtime, Vec::new());
+            let (view, cx) = cx.add_window_view(|_, cx| {
+                DeviceStreamView::new(engine, "SIM".into(), DevicePlatform::Ios, cx)
+            });
+            wait(cx, |_| codecs(&watches).len() == 1);
+            let failed = DeviceStreamStatus {
+                avcc: StreamLinkStatus::Failed {
+                    detail: "HTTP 404".into(),
+                },
+                ..Default::default()
+            };
+            view.update(cx, |view, cx| view.set_link(Some(failed), cx));
+            for _ in 0..LINK_FAILED_TICKS {
+                cx.executor().advance_clock(LINK_TICK);
+                cx.run_until_parked();
+            }
+            wait(cx, |cx| {
+                shown(&view, cx) == Some((DeviceVideoCodec::Mjpeg, 18, 39, false))
+            });
+            let landscape = DeviceScreenConfig {
+                width: 18,
+                height: 39,
+                orientation: DeviceOrientation::LandscapeLeft,
+                ..Default::default()
+            };
+            view.update(cx, |view, cx| view.set_screen(Some(landscape), cx));
+            wait(cx, |cx| {
+                shown(&view, cx) == Some((DeviceVideoCodec::Mjpeg, 39, 18, false))
+            });
+            assert_eq!(codecs(&watches), [json!("h264"), json!("mjpeg")]);
         }
 
         fn view_with_screen(

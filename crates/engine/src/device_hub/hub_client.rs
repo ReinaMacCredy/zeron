@@ -240,6 +240,10 @@ impl HubClient<'_> {
             .await
             .map_err(|e| format!("The fold command failed: {}", e.without_url()))?;
         let status = response.status();
+        // The UI retries a failed read; a hub without the route would be asked forever.
+        if posture.is_none() && status.is_client_error() {
+            return Ok(DeviceFoldState::default());
+        }
         let body = read_capped(response.bytes_stream(), FOLD_BODY_LIMIT)
             .await
             .ok()
