@@ -92,6 +92,12 @@ pub(crate) struct ResolvedWorkspace {
     pub root: PathBuf,
 }
 
+impl ResolvedWorkspace {
+    pub(crate) fn is_plain_folder(&self) -> bool {
+        self.checkout_id.starts_with(PLAIN_FOLDER_PREFIX)
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum WorkspaceFilesError {
     #[error("{0}")]
@@ -229,6 +235,8 @@ fn bad_path(message: &str) -> WorkspaceFilesError {
     WorkspaceFilesError::BadParams(message.to_string())
 }
 
+const PLAIN_FOLDER_PREFIX: &str = "folder-";
+
 fn plain_folder_identity(device_id: &str, root: &Path) -> String {
     let mut hasher = Sha256::new();
     hasher.update(device_id.as_bytes());
@@ -236,7 +244,7 @@ fn plain_folder_identity(device_id: &str, root: &Path) -> String {
     hasher.update(b"plain-folder");
     hasher.update([0]);
     hasher.update(root.to_string_lossy().as_bytes());
-    format!("folder-{}", hex(&hasher.finalize()))
+    format!("{PLAIN_FOLDER_PREFIX}{}", hex(&hasher.finalize()))
 }
 
 impl WorkspaceFiles {

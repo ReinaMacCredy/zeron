@@ -992,7 +992,7 @@ impl EngineRpc {
             .resolve_target(target)
             .await
             .map_err(RpcError::from)?;
-        if workspace.checkout_id.starts_with("folder-") {
+        if workspace.is_plain_folder() {
             return Err(RpcError::Failed(
                 "this project is not a Git checkout".into(),
             ));
