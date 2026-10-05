@@ -1650,6 +1650,7 @@ mod sidecar_regressions {
                 .collect::<Vec<_>>()
         };
         click(cx, "sidecar-panel-device-0");
+        assert!(cx.debug_bounds("sidecar-rail-device-0").is_some());
         let tab = shell.read_with(cx, |shell, cx| {
             assert!(shell.right_pane_open(cx));
             let RightSurface::Device(id) = shell.resolved_right_active(cx) else {

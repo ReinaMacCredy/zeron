@@ -610,7 +610,7 @@ impl DeviceStreamView {
                 screen.as_ref().and_then(|screen| screen.screen_id)
             };
             // A fold hands HID to the other display; a press must not continue there.
-            if screen_id(&self.screen) != screen_id(&screen) {
+            if self.screen.is_some() && screen_id(&self.screen) != screen_id(&screen) {
                 self.release_held(true, cx);
             }
             *self.rotation.lock().unwrap_or_else(PoisonError::into_inner) =
@@ -1441,9 +1441,6 @@ mod tests {
         let (view, cx) = cx.add_window_view(|_, cx| {
             DeviceStreamView::new(engine, "SIM".into(), DevicePlatform::Ios, cx)
         });
-        view.update(cx, |view, cx| {
-            view.set_screen(Some(duo_screen(1, HingePose::Closed)), cx)
-        });
         wait(cx, |cx| {
             view.read_with(cx, |view, _| view.has_frame() && view.frame_box().is_some())
         });
@@ -1451,6 +1448,9 @@ mod tests {
         let at = |x, y| geometry::position_at(frame, x, y);
         let none = Modifiers::default();
         cx.simulate_mouse_down(at(0.5, 0.5), MouseButton::Left, none);
+        view.update(cx, |view, cx| {
+            view.set_screen(Some(duo_screen(1, HingePose::Closed)), cx)
+        });
         cx.simulate_mouse_move(at(0.6, 0.5), MouseButton::Left, none);
         wait(cx, |_| inputs.lock().unwrap().len() >= 2);
         let mut tent = duo_screen(1, HingePose::Tent);
