@@ -111,7 +111,8 @@ mod tests {
                     "message-queue-edit-lease-v1",
                     "harness-updates-v1",
                     "pull-requests-page-v1",
-                    "device-hub-v1"
+                    "device-hub-v1",
+                    "source-control-v1"
                 ],
             })
         );
