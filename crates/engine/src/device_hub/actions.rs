@@ -78,6 +78,11 @@ impl Helpers {
         let Some(entry) = toolchain::installed_hub() else {
             return Self::default();
         };
+        let node = toolchain::launch(&entry).ok().map(|(node, _)| node);
+        Self::from_entry(&entry, node)
+    }
+
+    fn from_entry(entry: &Path, node: Option<PathBuf>) -> Self {
         let Some(dist) = entry
             .ancestors()
             .map(|dir| dir.join("vendor/serve-sim/dist"))
@@ -86,9 +91,7 @@ impl Helpers {
             return Self::default();
         };
         let file = |path: PathBuf| path.is_file().then(|| path.to_string_lossy().into_owned());
-        let node = toolchain::launch(&entry)
-            .ok()
-            .map(|(node, _)| node.to_string_lossy().into_owned());
+        let node = node.map(|node| node.to_string_lossy().into_owned());
         Self {
             ax_settings: file(dist.join("simax/serve-sim-ax-settings")),
             serve_sim: node.zip(file(dist.join("serve-sim.js"))),
@@ -487,10 +490,10 @@ impl DeviceHub {
         }
         let lock = self.device_lock(&device.id);
         let _serial = lock.lock().await;
-        Ok(self.read_detail(&device).await)
+        Ok(self.read_detail(&device, true).await)
     }
 
-    async fn read_detail(&self, device: &HubDevice) -> DeviceDetail {
+    async fn read_detail(&self, device: &HubDevice, foreground: bool) -> DeviceDetail {
         let (runner, helpers) = self.action_env();
         let read = |argv: Vec<String>| {
             let run = runner(argv);
@@ -522,7 +525,13 @@ impl DeviceHub {
             simctl_ui("content_size"),
             simctl_ui("increase_contrast"),
             ax_status,
-            self.foreground_once(&device.host_id, &device.id),
+            async {
+                if foreground {
+                    self.foreground_once(&device.host_id, &device.id).await
+                } else {
+                    None
+                }
+            },
         );
         DeviceDetail {
             host_id: device.host_id.clone(),
@@ -577,7 +586,7 @@ impl DeviceHub {
             };
             return Err(format!("The device action failed: {detail}"));
         }
-        Ok(self.read_detail(&device).await)
+        Ok(self.read_detail(&device, false).await)
     }
 
     pub async fn device_screenshot(
@@ -1099,6 +1108,41 @@ mod tests {
         ] {
             assert_eq!(text_size_from_ios(category), Some(size), "{category}");
         }
+    }
+
+    #[test]
+    fn helpers_resolve_from_the_installed_hub_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path().join("node_modules/expo-device-hub");
+        let entry = pkg.join("dist/server/cli.mjs");
+        std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        std::fs::write(&entry, "").unwrap();
+        assert!(
+            Helpers::from_entry(&entry, Some("/bin/node".into()))
+                .ax_settings
+                .is_none()
+        );
+        let dist = pkg.join("vendor/serve-sim/dist");
+        std::fs::create_dir_all(dist.join("simax")).unwrap();
+        std::fs::write(dist.join("simax/serve-sim-ax-settings"), "").unwrap();
+        std::fs::write(dist.join("serve-sim.js"), "").unwrap();
+        let helpers = Helpers::from_entry(&entry, Some("/bin/node".into()));
+        assert_eq!(
+            helpers.ax_settings,
+            Some(
+                dist.join("simax/serve-sim-ax-settings")
+                    .to_string_lossy()
+                    .into_owned()
+            )
+        );
+        assert_eq!(
+            helpers.serve_sim,
+            Some((
+                "/bin/node".into(),
+                dist.join("serve-sim.js").to_string_lossy().into_owned()
+            ))
+        );
+        assert!(Helpers::from_entry(&entry, None).serve_sim.is_none());
     }
 
     #[test]

@@ -287,8 +287,14 @@ impl DeviceControls {
             return;
         }
         self.pending = false;
-        match reply.and_then(|value| serde_json::from_value(value).map_err(|e| e.to_string())) {
-            Ok(detail) => {
+        match reply.and_then(|value| {
+            serde_json::from_value::<DeviceDetail>(value).map_err(|e| e.to_string())
+        }) {
+            Ok(mut detail) => {
+                let DeviceDetail { foreground_app, .. } = &mut detail;
+                if foreground_app.is_none() {
+                    *foreground_app = self.detail.take().and_then(|old| old.foreground_app);
+                }
                 self.detail = Some(detail);
                 self.error = None;
             }
