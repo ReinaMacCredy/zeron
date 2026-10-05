@@ -1118,25 +1118,11 @@ pub fn first_prompt(transcript: &[zeron_doc::SessionMessageEntry]) -> Option<Str
 }
 
 pub fn extract_badge(text: &str) -> Option<(String, crate::badges::MessageBadge)> {
-    let marker = format!("\n\n{CONTEXT_HEADER}\n");
-    let at = text.rfind(&marker)?;
-    let block = &text[at + marker.len()..];
-    if block.is_empty()
-        || !block
-            .lines()
-            .all(|line| line.is_empty() || line.starts_with('>'))
-    {
-        return None;
-    }
-    let details: Vec<crate::badges::BadgeDetail> = block
-        .split("\n\n")
-        .filter(|chunk| !chunk.is_empty())
-        .map(|chunk| {
-            let mut lines = chunk.lines().map(|line| {
-                line.strip_prefix("> ")
-                    .or_else(|| line.strip_prefix('>'))
-                    .unwrap_or(line)
-            });
+    let (rest, chunks) = crate::quotes::quoted_chunks(text, CONTEXT_HEADER)?;
+    let details: Vec<crate::badges::BadgeDetail> = chunks
+        .into_iter()
+        .map(|lines| {
+            let mut lines = lines.into_iter();
             let location = lines.next().unwrap_or_default().to_owned();
             let body = clip(&lines.collect::<Vec<_>>().join("\n"), 600);
             crate::badges::BadgeDetail {
@@ -1146,10 +1132,6 @@ pub fn extract_badge(text: &str) -> Option<(String, crate::badges::MessageBadge)
             }
         })
         .collect();
-    if details.is_empty() {
-        return None;
-    }
-    let rest = &text[..at];
     let rest = rest
         .strip_suffix(&format!("\n\n{ACTION_NOTE}"))
         .unwrap_or(rest);

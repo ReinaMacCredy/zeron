@@ -94,11 +94,10 @@ pub fn extract_terminal_badge(text: &str) -> Option<(String, crate::badges::Mess
     extract_block(text, TERMINAL_BLOCK_HEADER, TERMINAL_LOCATION)
 }
 
-fn extract_block(
-    text: &str,
+pub(crate) fn quoted_chunks<'a>(
+    text: &'a str,
     header: &str,
-    location: &'static str,
-) -> Option<(String, crate::badges::MessageBadge)> {
+) -> Option<(&'a str, Vec<Vec<&'a str>>)> {
     let marker = format!("\n\n{header}\n");
     let at = text.rfind(&marker)?;
     let block = &text[at + marker.len()..];
@@ -109,31 +108,42 @@ fn extract_block(
     {
         return None;
     }
-    let details: Vec<crate::badges::BadgeDetail> = block
+    let chunks: Vec<Vec<&str>> = block
         .split("\n\n")
         .filter(|chunk| !chunk.is_empty())
         .map(|chunk| {
-            let body = chunk
+            chunk
                 .lines()
                 .map(|line| {
                     line.strip_prefix("> ")
                         .or_else(|| line.strip_prefix('>'))
                         .unwrap_or(line)
                 })
-                .collect::<Vec<_>>()
-                .join("\n");
-            crate::badges::BadgeDetail {
-                location: location.into(),
-                tag: None,
-                body: body.into(),
-            }
+                .collect()
         })
         .collect();
-    if details.is_empty() {
+    if chunks.is_empty() {
         return None;
     }
+    Some((&text[..at], chunks))
+}
+
+fn extract_block(
+    text: &str,
+    header: &str,
+    location: &'static str,
+) -> Option<(String, crate::badges::MessageBadge)> {
+    let (rest, chunks) = quoted_chunks(text, header)?;
+    let details: Vec<crate::badges::BadgeDetail> = chunks
+        .into_iter()
+        .map(|lines| crate::badges::BadgeDetail {
+            location: location.into(),
+            tag: None,
+            body: lines.join("\n").into(),
+        })
+        .collect();
     Some((
-        text[..at].to_string(),
+        rest.to_string(),
         crate::badges::MessageBadge {
             icon: crate::icons::WRAP_TEXT,
             label: chip_label(details.len()).into(),
