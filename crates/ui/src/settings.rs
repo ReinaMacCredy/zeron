@@ -1083,6 +1083,16 @@ pub enum GitAgentBusyPolicy {
     AllowAll,
 }
 
+impl From<GitAgentBusyPolicy> for zeron_proto::GitAgentBusyPolicy {
+    fn from(policy: GitAgentBusyPolicy) -> Self {
+        match policy {
+            GitAgentBusyPolicy::SafeOnly => Self::SafeOnly,
+            GitAgentBusyPolicy::BlockAll => Self::BlockAll,
+            GitAgentBusyPolicy::AllowAll => Self::AllowAll,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct UiSettings {
@@ -2449,6 +2459,19 @@ mod tests {
         assert_eq!(legacy, UiSettings::default());
         let saved = serde_json::to_string(&legacy).unwrap();
         assert!(!saved.contains("commitMessageModel"));
+    }
+
+    #[test]
+    fn the_busy_policy_setting_maps_onto_the_wire_policy() {
+        for (setting, saved, wire) in [
+            (GitAgentBusyPolicy::SafeOnly, "safe-only", "safeOnly"),
+            (GitAgentBusyPolicy::BlockAll, "block-all", "blockAll"),
+            (GitAgentBusyPolicy::AllowAll, "allow-all", "allowAll"),
+        ] {
+            assert_eq!(serde_json::to_value(setting).unwrap(), saved);
+            let mapped: zeron_proto::GitAgentBusyPolicy = setting.into();
+            assert_eq!(serde_json::to_value(mapped).unwrap(), wire);
+        }
     }
 
     #[test]

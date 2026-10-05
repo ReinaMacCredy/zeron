@@ -6,15 +6,19 @@ use gpui::{
     prelude::*, px,
 };
 use zeron_proto::{
-    ChangeRequestListItem, ChangeRequestState, GetWorkingTreeRequest, GitFileState, SessionStatus,
-    WorkingTree, WorkingTreeFile, WorkspaceTarget,
+    ChangeRequestListItem, ChangeRequestState, GetWorkingTreeFileDiffRequest,
+    GetWorkingTreeRequest, GitAgentBusyPolicy, GitFileState, RunWorkingTreeActionRequest,
+    SessionStatus, WorkingTree, WorkingTreeAction, WorkingTreeFile, WorkingTreeFileDiff,
+    WorkspaceTarget,
 };
 use zeron_rpc::{RpcError, methods};
 
 use super::{PageTab, PullRequestsPage, filters, routed, top_chip};
+use crate::changes::{self, FileDiff};
 use crate::history::{GitHistory, GitHistoryEvent, GitHistoryTarget};
 use crate::icons::{self, icon};
 use crate::popover;
+use crate::settings::widgets::text_tooltip;
 use crate::state::AppState;
 use crate::theme::Theme;
 
@@ -22,6 +26,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(4);
 const WATCH_RETRY: Duration = Duration::from_secs(2);
 const PANEL_WIDTH: f32 = 360.0;
 const SUBJECT_LIMIT: usize = 72;
+const DIFF_LINE_LIMIT: usize = 400;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct GitSpace {
@@ -42,6 +47,32 @@ pub enum GitTabEvent {
     OpenPullRequest(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PendingTarget {
+    File { staged: bool, path: String },
+    All { staged: bool },
+}
+
+struct Pending {
+    target: PendingTarget,
+    replied: bool,
+}
+
+enum DiffView {
+    Loading,
+    Ready {
+        diff: WorkingTreeFileDiff,
+        parsed: Option<FileDiff>,
+    },
+    Failed(SharedString),
+}
+
+struct Expanded {
+    staged: bool,
+    path: String,
+    view: DiffView,
+}
+
 pub struct GitTab {
     state: Entity<AppState>,
     history: Entity<GitHistory>,
@@ -57,23 +88,59 @@ pub struct GitTab {
     visible: bool,
     window_active: bool,
     activation: Option<Subscription>,
+    pending: Option<Pending>,
+    action_error: Option<SharedString>,
+    action_task: Option<Task<()>>,
+    expanded: Option<Expanded>,
+    diff_task: Option<Task<()>>,
     _history_events: Subscription,
 }
 
 impl EventEmitter<GitTabEvent> for GitTab {}
 
+fn workspace_target(space: &GitSpace, checkout_path: Option<&str>) -> WorkspaceTarget {
+    WorkspaceTarget {
+        chat_id: None,
+        space_id: Some(space.space_id.clone()),
+        checkout_path: checkout_path.map(str::to_owned),
+    }
+}
+
 fn target_params(space: &GitSpace, checkout_path: Option<&str>) -> serde_json::Value {
     let request = GetWorkingTreeRequest {
-        target: WorkspaceTarget {
-            chat_id: None,
-            space_id: Some(space.space_id.clone()),
-            checkout_path: checkout_path.map(str::to_owned),
-        },
+        target: workspace_target(space, checkout_path),
     };
     routed(
         serde_json::to_value(request).unwrap_or_default(),
         space.device.as_deref(),
     )
+}
+
+fn busy_policy(cx: &App) -> GitAgentBusyPolicy {
+    crate::settings::current(cx).git_agent_busy_policy.into()
+}
+
+fn in_section(tree: &WorkingTree, staged: bool, path: &str) -> bool {
+    let rows = if staged {
+        staged_files(tree)
+    } else {
+        changed_files(tree)
+    };
+    rows.iter().any(|file| file.path == path)
+}
+
+fn agent_banner(policy: GitAgentBusyPolicy) -> &'static str {
+    match policy {
+        GitAgentBusyPolicy::SafeOnly => {
+            "An agent is running in this worktree. Stage and unstage still work; other Git actions wait until it stops."
+        }
+        GitAgentBusyPolicy::BlockAll => {
+            "An agent is running in this worktree. Git is read-only here until it stops."
+        }
+        GitAgentBusyPolicy::AllowAll => {
+            "An agent is running in this worktree. Git actions here can collide with its edits."
+        }
+    }
 }
 
 fn same_path(left: &str, right: &str) -> bool {
@@ -234,6 +301,11 @@ impl GitTab {
             visible: true,
             window_active: true,
             activation: None,
+            pending: None,
+            action_error: None,
+            action_task: None,
+            expanded: None,
+            diff_task: None,
             _history_events: history_events,
         }
     }
@@ -291,6 +363,11 @@ impl GitTab {
         self.loading = false;
         self.load_task = None;
         self.watch_task = None;
+        self.pending = None;
+        self.action_error = None;
+        self.action_task = None;
+        self.expanded = None;
+        self.diff_task = None;
         let target = self.space.as_ref().map(|space| GitHistoryTarget::Pinned {
             cwd: self
                 .checkout_path
@@ -330,12 +407,20 @@ impl GitTab {
                     return;
                 }
                 tab.loading = false;
+                if tab.pending.as_ref().is_some_and(|pending| pending.replied) {
+                    tab.pending = None;
+                    cx.notify();
+                }
                 match result {
                     Ok(tree) => {
                         let moved = tab
                             .tree
                             .as_ref()
                             .is_some_and(|previous| previous.head_sha != tree.head_sha);
+                        let revised = tab
+                            .tree
+                            .as_ref()
+                            .is_some_and(|previous| previous.revision != tree.revision);
                         tab.error = None;
                         if tab.tree.as_ref() != Some(&tree) {
                             tab.tree = Some(tree);
@@ -343,6 +428,15 @@ impl GitTab {
                         }
                         if moved {
                             tab.history.update(cx, |history, cx| history.refresh(cx));
+                        }
+                        if let (Some(expanded), Some(tree)) = (&tab.expanded, &tab.tree) {
+                            if !in_section(tree, expanded.staged, &expanded.path) {
+                                tab.expanded = None;
+                                tab.diff_task = None;
+                                cx.notify();
+                            } else if revised {
+                                tab.fetch_diff(cx);
+                            }
                         }
                     }
                     Err(error) => {
@@ -405,6 +499,165 @@ impl GitTab {
         }));
     }
 
+    fn source_control(&self, cx: &App) -> bool {
+        let Some(space) = &self.space else {
+            return false;
+        };
+        let state = self.state.read(cx);
+        space
+            .device
+            .as_deref()
+            .or(state.local_device_id.as_deref())
+            .is_some_and(|device| {
+                state.device_supports(device, zeron_proto::capabilities::SOURCE_CONTROL_V1)
+            })
+    }
+
+    fn allows(&self, action: &WorkingTreeAction, policy: GitAgentBusyPolicy) -> bool {
+        self.pending.is_none()
+            && self
+                .tree
+                .as_ref()
+                .is_some_and(|tree| !tree.agent_active || policy.allows(action))
+    }
+
+    fn run_action(
+        &mut self,
+        action: WorkingTreeAction,
+        target: PendingTarget,
+        cx: &mut Context<Self>,
+    ) {
+        let policy = busy_policy(cx);
+        if !self.allows(&action, policy) || !self.source_control(cx) {
+            return;
+        }
+        let (Some(space), Some(tree)) = (self.space.clone(), self.tree.as_ref()) else {
+            return;
+        };
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let request = RunWorkingTreeActionRequest {
+            target: workspace_target(&space, self.checkout_path.as_deref()),
+            expected_revision: tree.revision.clone(),
+            busy_policy: policy,
+            action,
+        };
+        let params = routed(
+            serde_json::to_value(request).unwrap_or_default(),
+            space.device.as_deref(),
+        );
+        let generation = self.generation;
+        self.pending = Some(Pending {
+            target,
+            replied: false,
+        });
+        self.action_error = None;
+        self.expanded = None;
+        self.diff_task = None;
+        cx.notify();
+        self.action_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::RUN_WORKING_TREE_ACTION, params)
+                .await;
+            this.update(cx, |tab, cx| {
+                if tab.generation != generation {
+                    return;
+                }
+                match result {
+                    Ok(_) => {
+                        if let Some(pending) = tab.pending.as_mut() {
+                            pending.replied = true;
+                        }
+                    }
+                    Err(error) => {
+                        tab.pending = None;
+                        tab.action_error = Some(error.to_string().into());
+                    }
+                }
+                tab.load(cx);
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn toggle_diff(&mut self, staged: bool, path: String, cx: &mut Context<Self>) {
+        if self
+            .expanded
+            .as_ref()
+            .is_some_and(|open| open.staged == staged && open.path == path)
+        {
+            self.expanded = None;
+            self.diff_task = None;
+            cx.notify();
+            return;
+        }
+        if !self.source_control(cx) {
+            return;
+        }
+        self.expanded = Some(Expanded {
+            staged,
+            path,
+            view: DiffView::Loading,
+        });
+        self.fetch_diff(cx);
+        cx.notify();
+    }
+
+    fn fetch_diff(&mut self, cx: &mut Context<Self>) {
+        let (Some(space), Some(open)) = (self.space.clone(), self.expanded.as_ref()) else {
+            return;
+        };
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let (staged, path) = (open.staged, open.path.clone());
+        let request = GetWorkingTreeFileDiffRequest {
+            target: workspace_target(&space, self.checkout_path.as_deref()),
+            path: path.clone(),
+            staged,
+        };
+        let params = routed(
+            serde_json::to_value(request).unwrap_or_default(),
+            space.device.as_deref(),
+        );
+        let generation = self.generation;
+        self.diff_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::GET_WORKING_TREE_FILE_DIFF, params)
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|value| {
+                    serde_json::from_value::<WorkingTreeFileDiff>(value)
+                        .map_err(|error| error.to_string())
+                });
+            this.update(cx, |tab, cx| {
+                if tab.generation != generation {
+                    return;
+                }
+                let Some(open) = tab
+                    .expanded
+                    .as_mut()
+                    .filter(|open| open.staged == staged && open.path == path)
+                else {
+                    return;
+                };
+                open.view = match result {
+                    Ok(diff) => {
+                        let parsed = changes::parse_patch(&diff.patch).into_iter().next();
+                        DiffView::Ready { diff, parsed }
+                    }
+                    Err(error) => DiffView::Failed(error.into()),
+                };
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
     fn render_empty(&self, theme: &Theme) -> AnyElement {
         div()
             .id("pull-requests-git-empty")
@@ -448,6 +701,7 @@ impl GitTab {
             .into_any_element()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_section(
         &self,
         id: &'static str,
@@ -455,8 +709,65 @@ impl GitTab {
         files: &[&WorkingTreeFile],
         staged: bool,
         empty: &'static str,
+        writes: Option<GitAgentBusyPolicy>,
         theme: &Theme,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
+        let all = if staged {
+            WorkingTreeAction::UnstageAll
+        } else {
+            WorkingTreeAction::StageAll
+        };
+        let section_pending = self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.target == PendingTarget::All { staged });
+        let header_action = writes.filter(|_| !files.is_empty()).map(|policy| {
+            let enabled = self.allows(&all, policy);
+            let selector = format!("{id}-all");
+            div()
+                .id(SharedString::from(selector.clone()))
+                .debug_selector(move || selector.clone())
+                .role(gpui::Role::Button)
+                .aria_label(if staged { "Unstage all" } else { "Stage all" })
+                .ml_auto()
+                .px(px(6.0))
+                .rounded(px(5.0))
+                .text_size(px(11.0))
+                .text_color(theme.text_muted)
+                .child(if staged { "Unstage all" } else { "Stage all" })
+                .map(|el| {
+                    if enabled {
+                        el.cursor_pointer()
+                            .hover(|style| style.text_color(theme.text).bg(theme.ink(0.06)))
+                            .on_click(cx.listener(move |tab, _, _, cx| {
+                                tab.run_action(all.clone(), PendingTarget::All { staged }, cx);
+                            }))
+                    } else {
+                        el.opacity(0.45)
+                    }
+                })
+        });
+        let mut rows: Vec<AnyElement> = Vec::with_capacity(files.len());
+        for (index, file) in files.iter().enumerate() {
+            rows.push(self.render_file_row(
+                id,
+                index,
+                file,
+                staged,
+                writes,
+                section_pending,
+                theme,
+                cx,
+            ));
+            if let Some(open) = self
+                .expanded
+                .as_ref()
+                .filter(|open| open.staged == staged && open.path == file.path)
+            {
+                rows.push(render_diff(open, theme));
+            }
+        }
         div()
             .id(id)
             .flex()
@@ -470,7 +781,8 @@ impl GitTab {
                     .text_size(px(12.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(theme.text_muted)
-                    .child(SharedString::from(format!("{title} ({})", files.len()))),
+                    .child(SharedString::from(format!("{title} ({})", files.len())))
+                    .children(header_action),
             )
             .when(files.is_empty(), |el| {
                 el.child(
@@ -484,17 +796,175 @@ impl GitTab {
                         .child(empty),
                 )
             })
-            .children(
-                files
-                    .iter()
-                    .enumerate()
-                    .map(|(index, file)| render_file_row(id, index, file, staged, theme)),
-            )
+            .children(rows)
             .into_any_element()
     }
 
-    fn render_panel(&self, theme: &Theme, cx: &App) -> AnyElement {
+    #[allow(clippy::too_many_arguments)]
+    fn render_file_row(
+        &self,
+        section: &'static str,
+        index: usize,
+        file: &WorkingTreeFile,
+        staged: bool,
+        writes: Option<GitAgentBusyPolicy>,
+        section_pending: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let state = if staged { file.index } else { file.worktree };
+        let delta = if staged { file.staged } else { file.unstaged };
+        let color = match state {
+            GitFileState::Added | GitFileState::Untracked => theme.success,
+            GitFileState::Deleted | GitFileState::Unmerged => theme.danger,
+            GitFileState::Renamed | GitFileState::Copied => theme.accent,
+            _ => theme.warning,
+        };
+        let (dir, name) = match file.path.rsplit_once('/') {
+            Some((dir, name)) => (format!("{dir}/"), name.to_owned()),
+            None => (String::new(), file.path.clone()),
+        };
+        let open = self
+            .expanded
+            .as_ref()
+            .is_some_and(|open| open.staged == staged && open.path == file.path);
+        let pending = section_pending
+            || self.pending.as_ref().is_some_and(|pending| {
+                pending.target
+                    == PendingTarget::File {
+                        staged,
+                        path: file.path.clone(),
+                    }
+            });
+        let selector = format!("{section}-row-{index}");
+        let group = SharedString::from(selector.clone());
+        let toggle = writes.map(|policy| {
+            let path = file.path.clone();
+            let action = if staged {
+                WorkingTreeAction::Unstage {
+                    paths: vec![path.clone()],
+                }
+            } else {
+                WorkingTreeAction::Stage {
+                    paths: vec![path.clone()],
+                }
+            };
+            let enabled = self.allows(&action, policy);
+            let label = if staged { "Unstage" } else { "Stage" };
+            let selector = format!("{section}-toggle-{index}");
+            div()
+                .id(SharedString::from(selector.clone()))
+                .debug_selector(move || selector.clone())
+                .role(gpui::Role::Button)
+                .aria_label(SharedString::from(format!("{label} {}", file.path)))
+                .tooltip(text_tooltip(label))
+                .size(px(20.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(5.0))
+                .font_family(theme.font_mono.clone())
+                .text_size(px(14.0))
+                .text_color(theme.text_muted)
+                .child(if staged { "−" } else { "+" })
+                .map(|el| {
+                    if enabled {
+                        el.opacity(0.0)
+                            .group_hover(group.clone(), |style| style.opacity(1.0))
+                            .cursor_pointer()
+                            .hover(|style| style.text_color(theme.text).bg(theme.ink(0.08)))
+                            .on_click(cx.listener(move |tab, _, _, cx| {
+                                cx.stop_propagation();
+                                tab.run_action(
+                                    action.clone(),
+                                    PendingTarget::File {
+                                        staged,
+                                        path: path.clone(),
+                                    },
+                                    cx,
+                                );
+                            }))
+                    } else {
+                        el.opacity(0.0)
+                            .group_hover(group.clone(), |style| style.opacity(0.3))
+                            .on_click(|_, _, cx| cx.stop_propagation())
+                    }
+                })
+        });
+        let path = file.path.clone();
+        div()
+            .id(SharedString::from(selector.clone()))
+            .debug_selector(move || selector.clone())
+            .group(group.clone())
+            .h(px(26.0))
+            .px(px(12.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .text_size(px(12.0))
+            .when(open, |el| el.bg(theme.ink(0.04)))
+            .when(pending, |el| el.opacity(0.5))
+            .hover(|style| style.bg(theme.ink(0.04)))
+            .when(writes.is_some(), |el| {
+                el.cursor_pointer()
+                    .on_click(cx.listener(move |tab, _, _, cx| {
+                        tab.toggle_diff(staged, path.clone(), cx);
+                    }))
+            })
+            .child(
+                div()
+                    .w(px(12.0))
+                    .flex_none()
+                    .font_family(theme.font_mono.clone())
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(color)
+                    .child(status_letter(state)),
+            )
+            .child(div().flex_1().min_w_0().truncate().child(
+                gpui::StyledText::new(SharedString::from(format!("{dir}{name}"))).with_highlights(
+                    [(
+                        0..dir.len(),
+                        gpui::HighlightStyle {
+                            color: Some(theme.text_muted),
+                            ..Default::default()
+                        },
+                    )],
+                ),
+            ))
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .gap(px(4.0))
+                    .font_family(theme.font_mono.clone())
+                    .text_size(px(11.0))
+                    .map(|el| match delta {
+                        Some(delta) if delta.binary => {
+                            el.text_color(theme.text_muted).child("binary")
+                        }
+                        Some(delta) => el
+                            .child(
+                                div()
+                                    .text_color(theme.success)
+                                    .child(SharedString::from(format!("+{}", delta.additions))),
+                            )
+                            .child(
+                                div()
+                                    .text_color(theme.danger)
+                                    .child(SharedString::from(format!("-{}", delta.deletions))),
+                            ),
+                        None => el,
+                    }),
+            )
+            .children(toggle)
+            .into_any_element()
+    }
+
+    fn render_panel(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let tree = self.tree.as_ref();
+        let policy = busy_policy(cx);
+        let writes = self.source_control(cx).then_some(policy);
         let checkout = self.space.as_ref().and_then(|space| {
             checkout_options(self.state.read(cx), space)
                 .into_iter()
@@ -542,23 +1012,32 @@ impl GitTab {
                             .child("Partial snapshot: only the first files are listed."),
                     )
                 })
-                .when_some(self.error.clone(), |el, error| {
-                    el.child(
-                        div()
-                            .mx(px(12.0))
-                            .mt(px(8.0))
-                            .text_size(px(12.0))
-                            .text_color(theme.danger)
-                            .child(error),
-                    )
-                })
+                .children(
+                    [self.error.clone(), self.action_error.clone()]
+                        .into_iter()
+                        .flatten()
+                        .enumerate()
+                        .map(|(index, error)| {
+                            let selector = format!("git-error-{index}");
+                            div()
+                                .id(SharedString::from(selector.clone()))
+                                .debug_selector(move || selector.clone())
+                                .mx(px(12.0))
+                                .mt(px(8.0))
+                                .text_size(px(12.0))
+                                .text_color(theme.danger)
+                                .child(error)
+                        }),
+                )
                 .child(self.render_section(
                     "git-staged",
                     "Staged",
                     &staged,
                     true,
                     "No staged files",
+                    writes,
                     theme,
+                    cx,
                 ))
                 .child(self.render_section(
                     "git-changes",
@@ -566,7 +1045,9 @@ impl GitTab {
                     &changes,
                     false,
                     "No changes",
+                    writes,
                     theme,
+                    cx,
                 ))
                 .into_any_element(),
         };
@@ -609,6 +1090,7 @@ impl GitTab {
                 el.child(
                     div()
                         .id("git-agent-active")
+                        .debug_selector(|| "git-agent-active".into())
                         .mx(px(12.0))
                         .mt(px(8.0))
                         .px(px(8.0))
@@ -617,7 +1099,7 @@ impl GitTab {
                         .bg(theme.warning.opacity(0.1))
                         .text_size(px(12.0))
                         .text_color(theme.warning)
-                        .child("An agent is running in this worktree."),
+                        .child(agent_banner(policy)),
                 )
             })
             .child(
@@ -633,77 +1115,89 @@ impl GitTab {
     }
 }
 
-fn render_file_row(
-    section: &'static str,
-    index: usize,
-    file: &WorkingTreeFile,
-    staged: bool,
-    theme: &Theme,
-) -> AnyElement {
-    let state = if staged { file.index } else { file.worktree };
-    let delta = if staged { file.staged } else { file.unstaged };
-    let color = match state {
-        GitFileState::Added | GitFileState::Untracked => theme.success,
-        GitFileState::Deleted | GitFileState::Unmerged => theme.danger,
-        GitFileState::Renamed | GitFileState::Copied => theme.accent,
-        _ => theme.warning,
+fn render_diff(open: &Expanded, theme: &Theme) -> AnyElement {
+    let note = |text: SharedString, color: gpui::Hsla| {
+        div()
+            .px(px(8.0))
+            .py(px(6.0))
+            .text_size(px(11.0))
+            .text_color(color)
+            .child(text)
+            .into_any_element()
     };
-    let (dir, name) = match file.path.rsplit_once('/') {
-        Some((dir, name)) => (format!("{dir}/"), name.to_owned()),
-        None => (String::new(), file.path.clone()),
-    };
-    let selector = format!("{section}-row-{index}");
+    let mut body: Vec<AnyElement> = Vec::new();
+    match &open.view {
+        DiffView::Loading => body.push(note("Loading diff…".into(), theme.text_muted)),
+        DiffView::Failed(error) => body.push(note(error.clone(), theme.danger)),
+        DiffView::Ready { diff, parsed } => match parsed.as_ref().filter(|_| !diff.binary) {
+            Some(file) if !file.hunks.is_empty() => {
+                let gutter = changes::gutter_width(file);
+                let mut budget = DIFF_LINE_LIMIT;
+                let mut hidden = 0usize;
+                for hunk in &file.hunks {
+                    if budget == 0 {
+                        hidden += hunk.lines.len();
+                        continue;
+                    }
+                    body.push(
+                        div()
+                            .px(px(8.0))
+                            .bg(theme.ink(0.03))
+                            .font_family(theme.font_mono.clone())
+                            .text_size(px(11.0))
+                            .text_color(theme.text_muted)
+                            .truncate()
+                            .child(SharedString::from(hunk.header.clone()))
+                            .into_any_element(),
+                    );
+                    for line in &hunk.lines {
+                        if budget == 0 {
+                            hidden += 1;
+                            continue;
+                        }
+                        budget -= 1;
+                        body.push(changes::diff_line_row(
+                            line,
+                            &[],
+                            theme,
+                            gutter,
+                            changes::DiffCodeWidth::Wrapped,
+                            None,
+                        ));
+                    }
+                }
+                if hidden > 0 {
+                    body.push(note(
+                        format!("{hidden} more lines not shown").into(),
+                        theme.text_muted,
+                    ));
+                }
+                if diff.truncated {
+                    body.push(note(
+                        "The diff is too large to show in full.".into(),
+                        theme.text_muted,
+                    ));
+                }
+            }
+            _ if diff.binary => {
+                body.push(note("Binary file, no text diff.".into(), theme.text_muted))
+            }
+            _ => body.push(note("No text changes.".into(), theme.text_muted)),
+        },
+    }
     div()
-        .id(SharedString::from(selector.clone()))
-        .debug_selector(move || selector.clone())
-        .h(px(26.0))
-        .px(px(12.0))
+        .id("git-file-diff")
+        .debug_selector(|| "git-file-diff".into())
+        .ml(px(32.0))
+        .mr(px(12.0))
+        .mb(px(6.0))
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(theme.hairline(0.09))
+        .overflow_hidden()
         .flex()
-        .items_center()
-        .gap(px(8.0))
-        .text_size(px(12.0))
-        .hover(|style| style.bg(theme.ink(0.04)))
-        .child(
-            div()
-                .w(px(12.0))
-                .flex_none()
-                .font_family(theme.font_mono.clone())
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(color)
-                .child(status_letter(state)),
-        )
-        .child(div().flex_1().min_w_0().truncate().child(
-            gpui::StyledText::new(SharedString::from(format!("{dir}{name}"))).with_highlights([(
-                0..dir.len(),
-                gpui::HighlightStyle {
-                    color: Some(theme.text_muted),
-                    ..Default::default()
-                },
-            )]),
-        ))
-        .child(
-            div()
-                .flex_none()
-                .flex()
-                .gap(px(4.0))
-                .font_family(theme.font_mono.clone())
-                .text_size(px(11.0))
-                .map(|el| match delta {
-                    Some(delta) if delta.binary => el.text_color(theme.text_muted).child("binary"),
-                    Some(delta) => el
-                        .child(
-                            div()
-                                .text_color(theme.success)
-                                .child(SharedString::from(format!("+{}", delta.additions))),
-                        )
-                        .child(
-                            div()
-                                .text_color(theme.danger)
-                                .child(SharedString::from(format!("-{}", delta.deletions))),
-                        ),
-                    None => el,
-                }),
-        )
+        .flex_col()
+        .children(body)
         .into_any_element()
 }
 
@@ -1300,9 +1794,14 @@ mod tests {
 
     type Calls = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
 
+    #[derive(Default)]
     struct GitLab {
         calls: Calls,
+        tree: Mutex<Option<serde_json::Value>>,
+        action_error: Mutex<Option<String>>,
     }
+
+    const PATCH: &str = "diff --git a/src/a b.rs b/src/a b.rs\n--- a/src/a b.rs\n+++ b/src/a b.rs\n@@ -1,2 +1,3 @@\n one\n-two\n+TWO\n+three\n";
 
     fn listing() -> ChangeRequestListing {
         let item = |number: u64, head: &str, state: &str, repository: &str| {
@@ -1369,7 +1868,22 @@ mod tests {
                     }],
                     "headSha": "aaa", "nextCursor": null, "totalCount": 1, "headCommitCount": 1
                 })),
-                methods::GET_WORKING_TREE => RpcReply::value(&tree()),
+                methods::GET_WORKING_TREE => {
+                    RpcReply::value(&self.tree.lock().unwrap().clone().unwrap_or_else(tree))
+                }
+                methods::RUN_WORKING_TREE_ACTION => {
+                    if let Some(error) = self.action_error.lock().unwrap().clone() {
+                        return Err(RpcError::Failed(error));
+                    }
+                    let mut next = tree();
+                    next["revision"] = "r2".into();
+                    *self.tree.lock().unwrap() = Some(next);
+                    RpcReply::value(&serde_json::json!({}))
+                }
+                methods::GET_WORKING_TREE_FILE_DIFF => RpcReply::value(&serde_json::json!({
+                    "checkoutId": "checkout-1", "path": params["path"],
+                    "staged": params["staged"], "patch": PATCH,
+                })),
                 methods::LIST_CHANGE_REQUESTS => RpcReply::value(&listing()),
                 methods::LIST_CHANGE_REQUEST_STATS => {
                     RpcReply::value(&serde_json::json!({"stats": []}))
@@ -1418,6 +1932,13 @@ mod tests {
                 "Second on same worktree",
             ),
             chat("c-idle", "/lab/worktrees/idle", None, "Idle thread"),
+        ];
+        state.devices = vec![
+            serde_json::from_value(serde_json::json!({
+                "id": "dev-local", "name": "Lab Mac", "platform": "macos",
+                "capabilities": [zeron_proto::capabilities::SOURCE_CONTROL_V1],
+            }))
+            .unwrap(),
         ];
         state.sessions = vec![
             serde_json::from_value::<Session>(serde_json::json!({
@@ -1515,8 +2036,22 @@ mod tests {
         Calls,
         tempfile::TempDir,
     ) {
+        open_lab(cx, state, prefs, Arc::default())
+    }
+
+    fn open_lab(
+        cx: &mut gpui::TestAppContext,
+        state: AppState,
+        prefs: filters::PullRequestListPrefs,
+        lab: Arc<GitLab>,
+    ) -> (
+        Entity<PullRequestsPage>,
+        &mut gpui::VisualTestContext,
+        Calls,
+        tempfile::TempDir,
+    ) {
         let dir = tempfile::tempdir().unwrap();
-        let calls: Calls = Arc::default();
+        let calls = lab.calls.clone();
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
@@ -1532,11 +2067,7 @@ mod tests {
             );
         });
         cx.executor().allow_parking();
-        let engine = crate::state::EngineHandle::from_test_client(zeron_rpc::memory_client(
-            Arc::new(GitLab {
-                calls: calls.clone(),
-            }),
-        ));
+        let engine = crate::state::EngineHandle::from_test_client(zeron_rpc::memory_client(lab));
         let state = cx.new(|_| state);
         state.update(cx, |state, _| state.set_test_engine(engine));
         let (page, cx) = cx.add_window_view(|_, cx| PullRequestsPage::new(state, cx));
@@ -1706,6 +2237,251 @@ mod tests {
                 page.prefs.git_space_id.as_deref(),
                 Some("space-1"),
                 "All projects keeps the Git project"
+            );
+        });
+    }
+
+    fn git_prefs() -> filters::PullRequestListPrefs {
+        filters::PullRequestListPrefs {
+            tab: PageTab::Git,
+            git_space_id: Some("space-1".into()),
+            ..Default::default()
+        }
+    }
+
+    fn calls_of(calls: &Calls, wanted: &str) -> Vec<serde_json::Value> {
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(method, _)| method == wanted)
+            .map(|(_, params)| params.clone())
+            .collect()
+    }
+
+    fn git_tab(
+        page: &Entity<PullRequestsPage>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> Entity<GitTab> {
+        page.read_with(cx, |page, _| page.git_view.clone().unwrap())
+    }
+
+    fn click(cx: &mut gpui::VisualTestContext, selector: &'static str) {
+        let bounds = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} is drawn"));
+        cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+    }
+
+    fn settle_action(
+        cx: &mut gpui::VisualTestContext,
+        tab: &Entity<GitTab>,
+        calls: &Calls,
+        actions: usize,
+    ) {
+        settle(cx, |cx| {
+            calls_of(calls, methods::RUN_WORKING_TREE_ACTION).len() == actions
+                && tab.read_with(cx, |tab, _| tab.pending.is_none() && !tab.loading)
+        });
+    }
+
+    #[gpui::test]
+    fn stage_and_unstage_send_the_shown_revision_and_the_policy_then_reread(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        let (page, cx, calls, _dir) = open_lab(cx, lab_state(), git_prefs(), lab.clone());
+        settle(cx, |cx| cx.debug_bounds("git-changes-toggle-1").is_some());
+        let tab = git_tab(&page, cx);
+
+        let reads_before = calls_of(&calls, methods::GET_WORKING_TREE).len();
+        click(cx, "git-changes-toggle-1");
+        settle_action(cx, &tab, &calls, 1);
+        assert_eq!(
+            calls_of(&calls, methods::RUN_WORKING_TREE_ACTION)[0],
+            serde_json::json!({
+                "spaceId": "space-1", "expectedRevision": "r1", "busyPolicy": "safeOnly",
+                "action": {"kind": "stage", "paths": ["notes/new file.txt"]},
+            })
+        );
+        assert!(calls_of(&calls, methods::GET_WORKING_TREE).len() > reads_before);
+        tab.read_with(cx, |tab, _| {
+            assert_eq!(tab.tree().unwrap().revision, "r2", "the tree is read again");
+        });
+        assert!(
+            calls_of(&calls, methods::GET_WORKING_TREE_FILE_DIFF).is_empty(),
+            "the button click does not expand the row"
+        );
+
+        cx.update(|_, cx| {
+            crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
+                settings.git_agent_busy_policy = crate::settings::GitAgentBusyPolicy::AllowAll;
+            });
+        });
+        click(cx, "git-staged-toggle-0");
+        settle_action(cx, &tab, &calls, 2);
+        click(cx, "git-changes-all");
+        settle_action(cx, &tab, &calls, 3);
+        click(cx, "git-staged-all");
+        settle_action(cx, &tab, &calls, 4);
+        let sent = calls_of(&calls, methods::RUN_WORKING_TREE_ACTION);
+        assert_eq!(
+            sent[1],
+            serde_json::json!({
+                "spaceId": "space-1", "expectedRevision": "r2", "busyPolicy": "allowAll",
+                "action": {"kind": "unstage", "paths": ["src/a b.rs"]},
+            })
+        );
+        assert_eq!(sent[2]["action"], serde_json::json!({"kind": "stageAll"}));
+        assert_eq!(sent[3]["action"], serde_json::json!({"kind": "unstageAll"}));
+    }
+
+    #[gpui::test]
+    fn clicking_a_file_expands_its_diff_and_clicking_again_folds_it(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (page, cx, calls, _dir) = open_page(cx, lab_state(), git_prefs());
+        settle(cx, |cx| cx.debug_bounds("git-staged-row-0").is_some());
+        let tab = git_tab(&page, cx);
+        click(cx, "git-staged-row-0");
+        settle(cx, |cx| {
+            tab.read_with(cx, |tab, _| {
+                matches!(
+                    tab.expanded.as_ref().map(|open| &open.view),
+                    Some(DiffView::Ready { .. })
+                )
+            }) && cx.debug_bounds("git-file-diff").is_some()
+        });
+        assert_eq!(
+            calls_of(&calls, methods::GET_WORKING_TREE_FILE_DIFF),
+            [serde_json::json!({"spaceId": "space-1", "path": "src/a b.rs", "staged": true})]
+        );
+        tab.read_with(cx, |tab, _| {
+            let Some(DiffView::Ready {
+                parsed: Some(file), ..
+            }) = tab.expanded.as_ref().map(|open| &open.view)
+            else {
+                panic!("a parsed diff");
+            };
+            assert_eq!(file.hunks.len(), 1);
+            assert_eq!(file.hunks[0].lines.len(), 4);
+            assert_eq!((file.additions, file.deletions), (2, 1));
+        });
+        assert!(
+            calls_of(&calls, methods::RUN_WORKING_TREE_ACTION).is_empty(),
+            "expanding writes nothing"
+        );
+        click(cx, "git-staged-row-0");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("git-file-diff").is_none());
+    }
+
+    #[gpui::test]
+    fn read_only_while_an_agent_runs_disables_every_write(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        let mut busy = tree();
+        busy["agentActive"] = true.into();
+        *lab.tree.lock().unwrap() = Some(busy);
+        let (page, cx, calls, _dir) = open_lab(cx, lab_state(), git_prefs(), lab);
+        cx.update(|_, cx| {
+            crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
+                settings.git_agent_busy_policy = crate::settings::GitAgentBusyPolicy::BlockAll;
+            });
+        });
+        settle(cx, |cx| cx.debug_bounds("git-agent-active").is_some());
+        let tab = git_tab(&page, cx);
+        for selector in [
+            "git-changes-toggle-1",
+            "git-staged-toggle-0",
+            "git-changes-all",
+            "git-staged-all",
+        ] {
+            click(cx, selector);
+            cx.run_until_parked();
+        }
+        assert!(calls_of(&calls, methods::RUN_WORKING_TREE_ACTION).is_empty());
+        tab.update(cx, |tab, cx| {
+            assert!(!tab.allows(&WorkingTreeAction::StageAll, busy_policy(cx)));
+            assert!(tab.allows(&WorkingTreeAction::StageAll, GitAgentBusyPolicy::SafeOnly));
+            assert!(tab.allows(&WorkingTreeAction::StageAll, GitAgentBusyPolicy::AllowAll));
+            assert!(!tab.allows(
+                &WorkingTreeAction::Discard { paths: vec![] },
+                GitAgentBusyPolicy::SafeOnly
+            ));
+        });
+        assert_eq!(
+            agent_banner(GitAgentBusyPolicy::BlockAll),
+            "An agent is running in this worktree. Git is read-only here until it stops."
+        );
+    }
+
+    #[gpui::test]
+    fn safe_only_still_stages_while_an_agent_runs(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        let mut busy = tree();
+        busy["agentActive"] = true.into();
+        *lab.tree.lock().unwrap() = Some(busy);
+        let (page, cx, calls, _dir) = open_lab(cx, lab_state(), git_prefs(), lab);
+        settle(cx, |cx| cx.debug_bounds("git-agent-active").is_some());
+        let tab = git_tab(&page, cx);
+        click(cx, "git-changes-toggle-0");
+        settle_action(cx, &tab, &calls, 1);
+        assert_eq!(
+            calls_of(&calls, methods::RUN_WORKING_TREE_ACTION)[0]["busyPolicy"],
+            "safeOnly"
+        );
+    }
+
+    #[gpui::test]
+    fn a_device_without_source_control_gets_no_write_controls(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let mut state = lab_state();
+        state.devices[0].capabilities.clear();
+        let (_page, cx, calls, _dir) = open_page(cx, state, git_prefs());
+        settle(cx, |cx| cx.debug_bounds("git-changes-row-1").is_some());
+        for selector in [
+            "git-changes-toggle-0",
+            "git-staged-toggle-0",
+            "git-changes-all",
+            "git-staged-all",
+        ] {
+            assert!(cx.debug_bounds(selector).is_none(), "{selector}");
+        }
+        click(cx, "git-changes-row-1");
+        cx.run_until_parked();
+        assert!(calls_of(&calls, methods::GET_WORKING_TREE_FILE_DIFF).is_empty());
+        assert!(cx.debug_bounds("git-file-diff").is_none());
+    }
+
+    #[gpui::test]
+    fn a_refused_write_shows_the_reason_and_rereads_the_tree(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        *lab.action_error.lock().unwrap() = Some(
+            "The working tree changed since it was shown. Check the refreshed list and try again."
+                .into(),
+        );
+        let (page, cx, calls, _dir) = open_lab(cx, lab_state(), git_prefs(), lab);
+        settle(cx, |cx| cx.debug_bounds("git-changes-toggle-0").is_some());
+        let tab = git_tab(&page, cx);
+        let reads_before = calls_of(&calls, methods::GET_WORKING_TREE).len();
+        click(cx, "git-changes-toggle-0");
+        settle_action(cx, &tab, &calls, 1);
+        settle(cx, |cx| cx.debug_bounds("git-error-0").is_some());
+        assert!(calls_of(&calls, methods::GET_WORKING_TREE).len() > reads_before);
+        tab.read_with(cx, |tab, _| {
+            assert!(
+                tab.action_error
+                    .as_ref()
+                    .is_some_and(|error| error.contains("changed since"))
             );
         });
     }
