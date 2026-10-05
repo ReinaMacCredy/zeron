@@ -706,6 +706,7 @@ pub struct AppState {
     /// no registry row, no doc, until its first send.
     unsaved_side_chat: bool,
     hidden_chats: HashSet<String>,
+    pub vanished_chats: HashSet<String>,
     pub sessions: Vec<Session>,
     /// Synced user/org sidebar pin state. Local workspaces deliberately ignore
     /// this and continue reading their device-local settings entry.
@@ -869,6 +870,7 @@ impl AppState {
             pending_side_chat: None,
             unsaved_side_chat: false,
             hidden_chats: HashSet::new(),
+            vanished_chats: HashSet::new(),
             sessions: Vec::new(),
             sidebar_preferences: SidebarPreferencesState::default(),
             session_presentation: None,
@@ -1157,7 +1159,9 @@ impl AppState {
             .iter()
             .filter(|chat| !chat.archived && !live.contains(chat.id.as_str()))
             .map(|chat| chat.id.clone())
-            .collect();
+            .collect::<Vec<_>>();
+        self.vanished_chats.retain(|id| !live.contains(id.as_str()));
+        self.vanished_chats.extend(gone.iter().cloned());
         self.chats = chats;
         self.link_roots_revision = self.link_roots_revision.wrapping_add(1);
         self.chats_synced = true;
@@ -2306,6 +2310,7 @@ impl AppState {
         self.session_presence_presentation.clear();
         self.spaces.clear();
         self.chats.clear();
+        self.vanished_chats.clear();
         self.pending_side_chat = None;
         self.unsaved_side_chat = false;
         self.sessions.clear();

@@ -626,7 +626,8 @@ impl Shell {
                     .map(|parked| parked.chat_id.as_str()),
             )
             .collect();
-        let stale = settings::current(cx).stale_pr_chats(&state.chats, &live, Utc::now());
+        let stale =
+            settings::current(cx).stale_pr_chats(&state.chats, &state.vanished_chats, &live);
         self.pr_chat_trash.pruned = Some(revision);
         if stale.is_empty() {
             return;
@@ -1902,13 +1903,13 @@ mod tests {
     }
 
     #[gpui::test]
-    fn the_index_drops_deleted_and_archived_chats_once_chats_sync(cx: &mut TestAppContext) {
+    fn the_index_drops_only_chats_the_state_knows_are_deleted_or_archived(cx: &mut TestAppContext) {
         let (runtime, shell, cx, _wire, _dir) = setup(cx);
         let _guard = runtime.enter();
         index(
             cx,
             "github.com/acme/zeron#7",
-            &[("deleted", 2), ("archived", 2), ("kept", 2), ("landing", 0)],
+            &[("deleted", 2), ("archived", 2), ("kept", 2), ("remote", 2)],
         );
         shell.update(cx, |shell, cx| {
             shell.sync_hidden_chats(cx);
@@ -1922,28 +1923,63 @@ mod tests {
                 "nothing pruned before the chats frame"
             )
         });
-        shell.update(cx, |shell, cx| {
-            shell.state.update(cx, |state, cx| {
-                state.apply_chats(vec![
-                    row("wt", false, serde_json::json!({})),
-                    row("archived", true, serde_json::json!({})),
-                    row("kept", false, serde_json::json!({})),
-                ]);
-                cx.notify();
+        let ids = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                settings::current(cx)
+                    .pr_chat_ids()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
             })
-        });
-        cx.run_until_parked();
+        };
+        let frame = |cx: &mut VisualTestContext, rows: Vec<zeron_proto::Chat>| {
+            shell.update(cx, |shell, cx| {
+                shell.state.update(cx, |state, cx| {
+                    state.apply_chats(rows);
+                    cx.notify();
+                })
+            });
+            cx.run_until_parked();
+        };
+        frame(
+            cx,
+            vec![
+                row("wt", false, serde_json::json!({})),
+                row("deleted", false, serde_json::json!({})),
+                row("archived", true, serde_json::json!({})),
+                row("kept", false, serde_json::json!({})),
+            ],
+        );
+        assert_eq!(
+            ids(cx),
+            ["deleted", "kept", "remote"],
+            "a chat this profile does not carry is not proof of a delete"
+        );
+        frame(
+            cx,
+            vec![
+                row("wt", false, serde_json::json!({})),
+                row("kept", false, serde_json::json!({})),
+            ],
+        );
+        assert_eq!(ids(cx), ["kept", "remote"]);
         shell.read_with(cx, |shell, cx| {
-            let ids: Vec<String> = settings::current(cx)
-                .pr_chat_ids()
-                .map(str::to_owned)
-                .collect();
-            assert_eq!(ids, ["kept", "landing"]);
             let state = shell.state.read(cx);
             assert!(state.is_hidden_chat("kept"));
+            assert!(state.is_hidden_chat("remote"));
             assert!(!state.is_hidden_chat("deleted"));
             assert!(!state.is_hidden_chat("archived"));
         });
+        shell.update(cx, |shell, cx| {
+            shell
+                .state
+                .update(cx, |state, cx| state.prepare_runtime_replacement(cx))
+        });
+        frame(cx, vec![row("wt", false, serde_json::json!({}))]);
+        assert_eq!(
+            ids(cx),
+            ["kept", "remote"],
+            "another profile's frame lacks these chats"
+        );
     }
 
     #[test]

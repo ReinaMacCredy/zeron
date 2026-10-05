@@ -2144,21 +2144,20 @@ impl UiSettings {
     pub fn stale_pr_chats(
         &self,
         chats: &[zeron_proto::Chat],
+        vanished: &std::collections::HashSet<String>,
         live: &[&str],
-        now: chrono::DateTime<chrono::Utc>,
     ) -> Vec<String> {
-        // A just-indexed chat can precede the chats frame that carries its row.
-        let grace = chrono::Duration::minutes(5);
+        // A missing row is not proof of deletion: another profile or device may own it.
         self.pr_chat_sessions
             .values()
             .flatten()
             .filter(|session| !live.contains(&session.chat_id.as_str()))
-            .filter(
-                |session| match chats.iter().find(|chat| chat.id == session.chat_id) {
-                    Some(chat) => chat.archived,
-                    None => now - session.created_at > grace,
-                },
-            )
+            .filter(|session| {
+                vanished.contains(&session.chat_id)
+                    || chats
+                        .iter()
+                        .any(|chat| chat.id == session.chat_id && chat.archived)
+            })
             .map(|session| session.chat_id.clone())
             .collect()
     }
