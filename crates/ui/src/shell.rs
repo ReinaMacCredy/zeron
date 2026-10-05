@@ -79,6 +79,7 @@ mod harness_updates;
 mod navigation_focus;
 #[cfg(test)]
 mod navigation_tests;
+mod pr_chat;
 mod project_icon;
 mod pull_requests;
 mod side_chats;
@@ -2150,6 +2151,7 @@ pub struct Shell {
     side_chats: std::collections::HashMap<u64, SideChatTab>,
     side_chat_seq: u64,
     side_chat_creating: bool,
+    pr_chat: Option<pr_chat::PrChatPanel>,
     browsers: std::collections::HashMap<u64, Entity<crate::browser::BrowserSurface>>,
     browser_subs: std::collections::HashMap<u64, Subscription>,
     browser_seq: u64,
@@ -2480,6 +2482,11 @@ impl Shell {
         // minted fresh once the spaces frame lands.
         let restored_drafts = crate::draft_store::sessions(cx);
         state.update(cx, |s, _| s.draft_sessions = restored_drafts);
+        let hidden = settings::current(cx)
+            .pr_chat_ids()
+            .map(str::to_owned)
+            .collect();
+        state.update(cx, |s, cx| s.set_hidden_chats(hidden, cx));
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
         let settings_search =
             cx.new(|cx| ComposerInput::with_context("Search settings…", "PaletteSearch", cx));
@@ -2756,6 +2763,7 @@ impl Shell {
             side_chats: std::collections::HashMap::new(),
             side_chat_seq: 0,
             side_chat_creating: false,
+            pr_chat: None,
             browsers: std::collections::HashMap::new(),
             browser_subs: std::collections::HashMap::new(),
             browser_seq: 0,
@@ -11150,6 +11158,9 @@ impl Shell {
                 cx.stop_propagation();
                 return;
             }
+            if event.keystroke.key == "escape" && self.pr_chat_owns_focus(window, cx) {
+                return;
+            }
             if event.keystroke.key == "escape" && self.add_space.is_none() {
                 if !self.dismiss_pull_requests_overlay(cx) {
                     self.close_pull_requests(cx);
@@ -14601,11 +14612,13 @@ impl Render for Shell {
             // no-ops (zeron __root.tsx gates the hotkey on `!isSettings`, and
             // the terminal panel is only mounted on session routes). The
             // sidebar toggle stays live everywhere, as in the original.
-            .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
-                if matches!(this.route, Route::Chat) {
-                    this.toggle_terminal(window, cx)
-                }
-            }))
+            .on_action(
+                cx.listener(|this, _: &ToggleTerminal, window, cx| match this.route {
+                    Route::Chat => this.toggle_terminal(window, cx),
+                    Route::PullRequests => this.toggle_pr_chat(cx),
+                    Route::Settings(_) => {}
+                }),
+            )
             .on_action(
                 cx.listener(|this, link: &OpenPullRequestLink, window, cx| {
                     this.open_pull_request_link(link.0.clone(), false, window, cx)
@@ -14755,6 +14768,17 @@ impl Render for Shell {
                     self.debug_dialog = None;
                     self.composer
                         .update(cx, |c, cx| c.open_model_menu(window, cx));
+                }
+                if let Some(open_first) = match self.debug_dialog.as_deref() {
+                    Some("pr-chat") => Some(false),
+                    Some("pr-chat-open") => Some(true),
+                    _ => None,
+                } && matches!(self.route, Route::PullRequests)
+                    && let Some(page) = self.pull_requests_page.clone()
+                    && page.update(cx, |page, cx| page.debug_prepare_chat(open_first, cx))
+                {
+                    self.debug_dialog = None;
+                    self.toggle_pr_chat(cx);
                 }
                 // `=user-menu` opens the bottom-of-sidebar account menu (its
                 // Usage section) once the first usage probe has landed.

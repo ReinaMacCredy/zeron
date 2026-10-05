@@ -11,7 +11,10 @@ mod paging;
 mod review;
 mod tabs;
 
-pub use chat::PrChatScope;
+pub use chat::{
+    CONTEXT_HEADER as CHAT_CONTEXT_HEADER, ContextCall, ContextChip, PrChatContext, PrChatScope,
+    extract_badge as extract_chat_context_badge,
+};
 pub use filters::PullRequestListPrefs;
 
 use std::collections::{BTreeMap, HashMap};

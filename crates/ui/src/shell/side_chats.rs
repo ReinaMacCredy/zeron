@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) struct SideChatTab {
     pub state: Entity<AppState>,
-    transcript: Entity<Transcript>,
+    pub(super) transcript: Entity<Transcript>,
     pub(super) composer: Entity<Composer>,
     _events: Vec<Subscription>,
 }
@@ -195,6 +195,25 @@ impl Shell {
             cx.notify();
             return;
         }
+        let tab = self.new_side_chat_tab(chat, unsaved, cx);
+        self.side_chat_seq += 1;
+        let id = self.side_chat_seq;
+        self.side_chats.insert(id, tab);
+        self.right_tabs
+            .entry(key.clone())
+            .or_default()
+            .push(RightSurface::SideChat(id));
+        self.panels
+            .update(&key, |p| p.right_active = RightSurface::SideChat(id));
+        cx.notify();
+    }
+
+    pub(super) fn new_side_chat_tab(
+        &mut self,
+        chat: zeron_proto::Chat,
+        unsaved: bool,
+        cx: &mut Context<Self>,
+    ) -> SideChatTab {
         let chat_id = chat.id.clone();
         let parent = self.state.clone();
         let state = cx.new(|cx| AppState::side_chat_state(&parent, chat, unsaved, cx));
@@ -256,24 +275,12 @@ impl Shell {
                 cx.notify();
             }),
         ];
-        self.side_chat_seq += 1;
-        let id = self.side_chat_seq;
-        self.side_chats.insert(
-            id,
-            SideChatTab {
-                state,
-                transcript,
-                composer,
-                _events: events,
-            },
-        );
-        self.right_tabs
-            .entry(key.clone())
-            .or_default()
-            .push(RightSurface::SideChat(id));
-        self.panels
-            .update(&key, |p| p.right_active = RightSurface::SideChat(id));
-        cx.notify();
+        SideChatTab {
+            state,
+            transcript,
+            composer,
+            _events: events,
+        }
     }
 
     fn remove_deleted_side_chats(&mut self, cx: &mut Context<Self>) {

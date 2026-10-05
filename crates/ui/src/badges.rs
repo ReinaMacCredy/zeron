@@ -38,6 +38,7 @@ pub struct BadgeDetail {
 pub type Extractor = fn(&str) -> Option<(String, MessageBadge)>;
 
 const EXTRACTORS: &[Extractor] = &[
+    crate::pull_requests::extract_chat_context_badge,
     crate::comments::extract_badge,
     crate::quotes::extract_terminal_badge,
     crate::quotes::extract_badge,

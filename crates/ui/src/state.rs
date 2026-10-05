@@ -705,6 +705,7 @@ pub struct AppState {
     /// `pending_side_chat` was started by hand and nothing has minted it:
     /// no registry row, no doc, until its first send.
     unsaved_side_chat: bool,
+    hidden_chats: HashSet<String>,
     pub sessions: Vec<Session>,
     /// Synced user/org sidebar pin state. Local workspaces deliberately ignore
     /// this and continue reading their device-local settings entry.
@@ -867,6 +868,7 @@ impl AppState {
             chats: Vec::new(),
             pending_side_chat: None,
             unsaved_side_chat: false,
+            hidden_chats: HashSet::new(),
             sessions: Vec::new(),
             sidebar_preferences: SidebarPreferencesState::default(),
             session_presentation: None,
@@ -1974,9 +1976,20 @@ impl AppState {
     // ---- queries ----
 
     pub fn visible_chats(&self) -> impl Iterator<Item = &Chat> {
-        self.chats
-            .iter()
-            .filter(|c| !c.archived && c.delegated_by().is_none())
+        self.chats.iter().filter(|c| {
+            !c.archived && c.delegated_by().is_none() && !self.hidden_chats.contains(&c.id)
+        })
+    }
+
+    pub(crate) fn is_hidden_chat(&self, chat_id: &str) -> bool {
+        self.hidden_chats.contains(chat_id)
+    }
+
+    pub(crate) fn set_hidden_chats(&mut self, ids: HashSet<String>, cx: &mut Context<Self>) {
+        if self.hidden_chats != ids {
+            self.hidden_chats = ids;
+            cx.notify();
+        }
     }
 
     pub fn sessions_synced(&self) -> bool {
@@ -2405,6 +2418,7 @@ impl AppState {
             self.focus_chat_sync(chat_id, cx);
             self.start_chat_watches(chat_id.to_owned(), cx);
         }
+        cx.notify();
     }
 
     fn start_chat_watches(&mut self, chat_id: String, cx: &mut Context<Self>) {
