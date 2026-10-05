@@ -6358,7 +6358,15 @@ impl Shell {
             cx.notify();
             return;
         };
-        self.mutate_task = Some(cx.spawn(async move |this, cx| {
+        self.mutate_task = Some(Self::spawn_mutate(engine, params, cx));
+    }
+
+    fn spawn_mutate(
+        engine: crate::state::EngineHandle,
+        params: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        cx.spawn(async move |this, cx| {
             if let Err(err) = engine.client().call(methods::MUTATE, params).await {
                 this.update(cx, |shell, cx| {
                     shell.sidebar_notice = Some(format!("{err}").into());
@@ -6366,7 +6374,7 @@ impl Shell {
                 })
                 .ok();
             }
-        }));
+        })
     }
 
     /// Start editing `chat_id`'s title in place on its row: the sidebar's

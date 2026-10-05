@@ -333,16 +333,7 @@ impl Shell {
         if let Some(engine) = self.state.read(cx).engine().cloned() {
             let params =
                 serde_json::json!({ "op": "renameChat", "chatId": chat_id, "title": title });
-            cx.spawn(async move |this, cx| {
-                if let Err(error) = engine.client().call(methods::MUTATE, params).await {
-                    this.update(cx, |shell, cx| {
-                        shell.sidebar_notice = Some(format!("{error}").into());
-                        cx.notify();
-                    })
-                    .ok();
-                }
-            })
-            .detach();
+            Self::spawn_mutate(engine, params, cx).detach();
         }
         self.close_pull_requests(cx);
         self.open_chat(chat_id, cx);
@@ -673,16 +664,7 @@ impl Shell {
             return;
         };
         let params = serde_json::json!({ "op": "deleteChat", "chatId": chat_id });
-        cx.spawn(async move |this, cx| {
-            if let Err(error) = engine.client().call(methods::MUTATE, params).await {
-                this.update(cx, |shell, cx| {
-                    shell.sidebar_notice = Some(format!("{error}").into());
-                    cx.notify();
-                })
-                .ok();
-            }
-        })
-        .detach();
+        Self::spawn_mutate(engine, params, cx).detach();
     }
 
     fn discard_pr_chat(&mut self, cx: &mut Context<Self>) {
