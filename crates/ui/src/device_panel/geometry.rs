@@ -254,6 +254,17 @@ mod tests {
             assert!(!shifted, "{name}");
             assert!((0x04..=0x52).contains(&usage), "{name}");
         }
+        let shifted = SHIFTED_DIGITS
+            .iter()
+            .chain(PUNCTUATION.iter().map(|(_, shifted, _)| shifted));
+        for name in shifted.map(char::to_string) {
+            let keystroke = Keystroke::parse(&name).unwrap_or_else(|_| panic!("{name}"));
+            assert_eq!(keystroke.key, name);
+            assert!(
+                matches!(hid_usage(&keystroke.key), Some((_, true))),
+                "{name}"
+            );
+        }
         assert_eq!(hid_usage("a"), Some((0x04, false)));
         assert_eq!(hid_usage("z"), Some((0x1D, false)));
         assert_eq!(hid_usage("1"), Some((0x1E, false)));
