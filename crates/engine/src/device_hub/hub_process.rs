@@ -4,12 +4,43 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, Command};
+use tokio::process::{Child, ChildStdin, Command};
 
 pub(crate) const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const STOP_GRACE: Duration = Duration::from_secs(5);
 pub(crate) const MAX_DIMENSION: u32 = 1280;
 const STATE_FILE: &str = "hub.json";
+const RESTART_STABLE_UPTIME: Duration = Duration::from_secs(60);
+const RESTART_MAX_DELAY: Duration = Duration::from_secs(30);
+// The kernel closes our end of stdin however the engine dies, so the watcher SIGTERMs the group.
+#[cfg(unix)]
+const LIFELINE: &str =
+    r#"exec 3<&0 </dev/null; (cat <&3; kill -TERM 0) >/dev/null 2>&1 & exec "$@" 3<&-"#;
+
+#[derive(Debug, Default)]
+pub(crate) struct Backoff {
+    next: Duration,
+}
+
+impl Backoff {
+    pub(crate) fn after_exit(&mut self, uptime: Duration) -> Duration {
+        if uptime >= RESTART_STABLE_UPTIME {
+            self.next = Duration::ZERO;
+            return Duration::ZERO;
+        }
+        let delay = self.next;
+        self.next = if delay.is_zero() {
+            Duration::from_secs(1)
+        } else {
+            (delay * 2).min(RESTART_MAX_DELAY)
+        };
+        delay
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.next = Duration::ZERO;
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -22,7 +53,9 @@ struct HubStateFile {
 pub(crate) struct HubProcess {
     pub origin: String,
     pgid: i32,
+    started: std::time::Instant,
     child: Option<Child>,
+    _lifeline: Option<ChildStdin>,
     state_file: Option<PathBuf>,
 }
 
@@ -32,7 +65,9 @@ impl HubProcess {
         Self {
             origin,
             pgid: 0,
+            started: std::time::Instant::now(),
             child: None,
+            _lifeline: None,
             state_file: None,
         }
     }
@@ -45,9 +80,15 @@ impl HubProcess {
                 .id()
                 .and_then(|pid| i32::try_from(pid).ok())
                 .unwrap_or_default(),
+            started: std::time::Instant::now(),
             child: Some(child),
+            _lifeline: None,
             state_file: None,
         }
+    }
+
+    pub(crate) fn uptime(&self) -> Duration {
+        self.started.elapsed()
     }
 
     pub(crate) fn signal_stop(&self) {
@@ -199,6 +240,13 @@ pub(crate) async fn spawn(
     reap_stale(state_dir, entry);
     std::fs::create_dir_all(state_dir).map_err(|e| e.to_string())?;
     let port = reserve_port().map_err(|e| format!("reserving a port for the device hub: {e}"))?;
+    #[cfg(unix)]
+    let mut command = {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", LIFELINE, "sh"]).arg(program);
+        command
+    };
+    #[cfg(not(unix))]
     let mut command = Command::new(program);
     command
         .args(args)
@@ -207,7 +255,7 @@ pub(crate) async fn spawn(
         .args(["--max-dimension", &MAX_DIMENSION.to_string()])
         .env("FORCE_COLOR", "0")
         .env("NO_COLOR", "1")
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -233,10 +281,13 @@ pub(crate) async fn spawn(
     if let Some(stderr) = child.stderr.take() {
         tokio::spawn(log_lines(stderr));
     }
+    let lifeline = child.stdin.take();
     let mut hub = HubProcess {
         origin: format!("http://127.0.0.1:{port}"),
         pgid: i32::try_from(pid).unwrap_or_default(),
+        started: std::time::Instant::now(),
         child: Some(child),
+        _lifeline: lifeline,
         state_file: Some(state_file),
     };
     let ready = match hub.child.as_mut() {
@@ -590,6 +641,71 @@ http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
                 "pid {pid} port {port} recorded {recorded:?} current {current:?}"
             );
         }
+    }
+
+    #[test]
+    fn restarts_back_off_from_zero_to_thirty_seconds_and_reset_after_a_stable_minute() {
+        let mut backoff = Backoff::default();
+        let quick = Duration::from_secs(5);
+        let delays: Vec<u64> = (0..8)
+            .map(|_| backoff.after_exit(quick).as_secs())
+            .collect();
+        assert_eq!(delays, [0, 1, 2, 4, 8, 16, 30, 30]);
+        assert_eq!(
+            backoff.after_exit(Duration::from_secs(59)),
+            Duration::from_secs(30)
+        );
+        assert_eq!(backoff.after_exit(Duration::from_secs(60)), Duration::ZERO);
+        assert_eq!(backoff.after_exit(quick), Duration::ZERO);
+        assert_eq!(backoff.after_exit(quick), Duration::from_secs(1));
+        backoff.reset();
+        assert_eq!(backoff.after_exit(quick), Duration::ZERO);
+    }
+
+    #[tokio::test]
+    async fn the_hub_group_dies_when_the_engine_side_of_its_lifeline_closes() {
+        let Some(python) = python() else {
+            eprintln!("python3 not found; skipping");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-hub.py");
+        std::fs::write(&script, FAKE_HUB).unwrap();
+        let helper_file = dir.path().join("helper.pid");
+        let args = vec![
+            script.display().to_string(),
+            "0".to_string(),
+            helper_file.display().to_string(),
+        ];
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let mut hub = spawn(
+            &http,
+            &python,
+            &args,
+            &script,
+            &dir.path().join("device"),
+            Duration::from_secs(20),
+        )
+        .await
+        .expect("hub becomes ready");
+        let helper = read_pid(&helper_file).unwrap();
+        let leader = hub.pgid as u32;
+        assert!(command_line(leader).contains(&script.display().to_string()));
+        assert!(pid_alive(leader) && pid_alive(helper));
+        let lifeline = hub._lifeline.take().expect("stdin is the lifeline");
+        let mut leader_child = hub.child.take().unwrap();
+        drop(hub);
+        assert!(pid_alive(leader), "only the lifeline closing may stop it");
+        drop(lifeline);
+        let status = tokio::time::timeout(Duration::from_secs(5), leader_child.wait())
+            .await
+            .expect("the hub exits once its lifeline closes")
+            .unwrap();
+        assert!(!status.success(), "{status:?}");
+        assert!(
+            eventually(|| !pid_alive(helper)).await,
+            "and so does its helper"
+        );
     }
 
     #[test]

@@ -75,5 +75,22 @@ async fn list_hub_devices_is_refused_while_disabled_and_installs_nothing() {
             .is_err(),
         "refusals publish nothing"
     );
+
+    let Ok(RpcReply::Value(inspected)) = rpc
+        .handle(
+            methods::LIST_HUB_DEVICES,
+            serde_json::json!({"inspectOnly": true}),
+        )
+        .await
+    else {
+        panic!("inspectOnly answers while disabled");
+    };
+    let inspected: DeviceHubState = serde_json::from_value(inspected).unwrap();
+    let tools = inspected.hosts[0].tools.clone().expect("versions are read");
+    assert_eq!(tools.hub.required, "0.12.0");
+    assert!(tools.hub.installed.is_empty() && tools.hub.running.is_none());
+    assert_eq!(inspected.host_status, DeviceHostStatus::Disabled);
+    assert!(!adapters.exists(), "inspectOnly installs nothing");
+    assert!(!data.join("device").exists(), "inspectOnly starts nothing");
     core.shutdown().await;
 }
