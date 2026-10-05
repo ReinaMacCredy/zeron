@@ -11,6 +11,7 @@ pub(super) const PR_CHAT_BAR_WIDTH: f32 = 720.0;
 pub(super) const PR_CHAT_BAR_HEIGHT: f32 = 440.0;
 const PR_CHAT_BAR_INSET: f32 = 16.0;
 const PR_CHAT_PILL_INSET: f32 = 22.0;
+const PR_CHAT_REPLY_MIN: f32 = 120.0;
 
 pub(super) struct PrChatPanel {
     pub(super) context: PrChatContext,
@@ -1105,6 +1106,7 @@ impl Shell {
                         div()
                             .flex_1()
                             .min_h_0()
+                            .when(cards.is_some(), |el| el.min_h(px(PR_CHAT_REPLY_MIN)))
                             .when(earlier.is_some(), |el| {
                                 el.opacity(0.6).debug_selector(|| "pr-chat-earlier".into())
                             })
@@ -1273,7 +1275,11 @@ impl Shell {
                                     .py(px(8.0))
                                     .bg(theme.success.opacity(0.06))
                                     .text_color(theme.success)
-                                    .child(icon(icons::LUCIDE_CHECK).size(px(13.0)))
+                                    .child(
+                                        icon(icons::LUCIDE_CHECK)
+                                            .size(px(13.0))
+                                            .text_color(theme.success),
+                                    )
                                     .child(SharedString::from(format!(
                                         "{} · {} {}",
                                         done.label,
@@ -1431,7 +1437,6 @@ impl Shell {
             div()
                 .id("pr-chat-cards")
                 .min_h_0()
-                .max_h(gpui::relative(0.6))
                 .overflow_y_scroll()
                 .flex()
                 .flex_col()
