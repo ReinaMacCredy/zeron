@@ -593,7 +593,7 @@ impl Composer {
             )
         });
         let agents_pill = (rise.is_none() && !agents.is_empty()).then(|| {
-            pill_frame("background-agents-pill", &theme)
+            let pill = pill_frame("background-agents-pill", &theme)
                 .debug_selector(|| "background-agents-pill".into())
                 .child(pill_leading(glyph(
                     "background-agents-glyph",
@@ -609,7 +609,8 @@ impl Composer {
                         popover::reap_popup(cx, |this: &mut Composer| &mut this.background.shells);
                     }
                     cx.notify();
-                }))
+                }));
+            frosted_pill(pill)
         });
         let shell_pill = (!shells.is_empty())
             .then(|| self.render_shell_pill(&shells, stoppable, now_ms, &theme, cx));
@@ -801,21 +802,19 @@ impl Composer {
             .when(!theme.is_frost(), |el| el.shadow_lg())
             .overflow_hidden()
             .pb(px(4.0));
-        match opened {
-            Some(run) => card
-                .p(px(6.0))
-                .child(self.render_agent_detail(
-                    run,
-                    harness,
-                    chat_reasoning,
-                    stoppable,
-                    now_ms,
-                    theme,
-                    cx,
-                ))
-                .into_any_element(),
-            None => card.child(header).children(rows).into_any_element(),
-        }
+        let card = match opened {
+            Some(run) => card.p(px(6.0)).child(self.render_agent_detail(
+                run,
+                harness,
+                chat_reasoning,
+                stoppable,
+                now_ms,
+                theme,
+                cx,
+            )),
+            None => card.child(header).children(rows),
+        };
+        crate::frost::frosted(14.0, crate::frost::MENU_BLUR * rise, card).into_any_element()
     }
 
     fn render_shell_pill(
@@ -983,7 +982,7 @@ impl Composer {
         });
         div()
             .relative()
-            .child(pill)
+            .child(frosted_pill(pill))
             .children(menu)
             .into_any_element()
     }
@@ -1708,6 +1707,10 @@ pub(super) fn pill_frame(id: &'static str, theme: &Theme) -> Stateful<Div> {
         .cursor_pointer()
         .hover(|s| s.border_color(theme.border_strong).text_color(theme.text))
         .active(|s| s.opacity(0.85))
+}
+
+pub(super) fn frosted_pill(pill: impl IntoElement) -> crate::frost::Frosted {
+    crate::frost::frosted(PILL_HEIGHT / 2.0, crate::frost::MENU_BLUR, pill)
 }
 
 pub(super) fn pill_leading(glyph: AnyElement) -> Div {

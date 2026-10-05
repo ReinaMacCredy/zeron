@@ -7,7 +7,7 @@ use gpui::{
 use zeron_proto::{SessionStatus, UserInputAnswer};
 use zeron_rpc::methods;
 
-use super::background::{pill_frame, pill_leading};
+use super::background::{frosted_pill, pill_frame, pill_leading};
 use super::{
     Composer, ComposerEvent, Wizard, WizardHost, WizardStep, pending_input_request, respond_input,
 };
@@ -381,7 +381,7 @@ impl Composer {
             [one] => self.ask_title(one, cx),
             _ => format!("{} questions", visible.len()),
         };
-        pill_frame("ask-pill", theme)
+        let pill = pill_frame("ask-pill", theme)
             .debug_selector(|| "ask-pill".into())
             .border_color(theme.accent.opacity(0.45))
             .text_color(theme.text)
@@ -395,8 +395,8 @@ impl Composer {
             .when(visible.len() == 1, |el| {
                 el.child(div().text_color(theme.text_muted).child("· Input"))
             })
-            .on_click(cx.listener(move |this, _, _, cx| this.open_ask_tray(first.clone(), cx)))
-            .into_any_element()
+            .on_click(cx.listener(move |this, _, _, cx| this.open_ask_tray(first.clone(), cx)));
+        frosted_pill(pill).into_any_element()
     }
 
     fn render_ask_tray(
@@ -524,30 +524,28 @@ impl Composer {
                             }))
                     }))
             });
-        Some(
-            div()
-                .id("ask-tray")
-                .debug_selector(|| "ask-tray".into())
-                .track_focus(&self.ask_focus)
-                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                    this.on_wizard_key(WizardHost::Ask, event, window, cx)
-                }))
-                .occlude()
-                .w_full()
-                .rounded(px(14.0))
-                .border_1()
-                .border_color(theme.border)
-                .bg(popover::surface_bg(theme))
-                .when(!theme.is_frost(), |el| el.shadow_lg())
-                .overflow_hidden()
-                .flex()
-                .flex_col()
-                .child(header)
-                .children(tabs)
-                .child(body)
-                .child(footer)
-                .into_any_element(),
-        )
+        let tray = div()
+            .id("ask-tray")
+            .debug_selector(|| "ask-tray".into())
+            .track_focus(&self.ask_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                this.on_wizard_key(WizardHost::Ask, event, window, cx)
+            }))
+            .occlude()
+            .w_full()
+            .rounded(px(14.0))
+            .border_1()
+            .border_color(theme.border)
+            .bg(popover::surface_bg(theme))
+            .when(!theme.is_frost(), |el| el.shadow_lg())
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .child(header)
+            .children(tabs)
+            .child(body)
+            .child(footer);
+        Some(crate::frost::frosted(14.0, crate::frost::MENU_BLUR, tray).into_any_element())
     }
 }
 
