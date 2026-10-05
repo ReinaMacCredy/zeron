@@ -46,6 +46,7 @@ use crate::theme::{Appearance, Theme, oklch};
 const CONTAINER_MAX_WIDTH: f32 = 1152.0;
 const CONTAINER_PAD_X: f32 = 24.0;
 const GHOST_ROWS: usize = 7;
+const NARROW_TOPBAR_WIDTH: f32 = 1000.0;
 const ROW_HEIGHT_HINT: f32 = 74.0;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -717,6 +718,7 @@ impl PullRequestsPage {
             0.0,
         );
         let condensed = self.prefs.tab == PageTab::PullRequests && self.list_condensed();
+        let narrow = f32::from(window.viewport_size().width) < NARROW_TOPBAR_WIDTH;
         div()
             .h(px(Theme::TITLEBAR_HEIGHT))
             .pt(px(Theme::TITLEBAR_TOP_PAD))
@@ -728,6 +730,7 @@ impl PullRequestsPage {
             .child(
                 div()
                     .id("pull-requests-back")
+                    .debug_selector(|| "pull-requests-back".into())
                     .role(gpui::Role::Button)
                     .aria_label("Back")
                     .flex()
@@ -746,9 +749,9 @@ impl PullRequestsPage {
                             .size(px(14.0))
                             .text_color(theme.text_muted),
                     )
-                    .child("Back"),
+                    .when(!narrow, |el| el.child("Back")),
             )
-            .child(self.render_page_tabs(theme, cx))
+            .child(self.render_page_tabs(condensed || narrow, theme, cx))
             .map(|el| {
                 if self.prefs.tab == PageTab::Git {
                     el.child(self.render_git_project_control(theme, cx))
@@ -762,6 +765,7 @@ impl PullRequestsPage {
                 let compact = |id: &'static str, label: &'static str| {
                     div()
                         .id(id)
+                        .debug_selector(move || id.into())
                         .role(gpui::Role::Button)
                         .aria_label(label)
                         .flex()
@@ -838,7 +842,24 @@ impl PullRequestsPage {
         self.update_prefs(false, cx, |prefs| prefs.tab = tab);
     }
 
-    fn render_page_tabs(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn tab_count(&self, tab: PageTab, cx: &App) -> Option<usize> {
+        match tab {
+            PageTab::PullRequests => self.listing.ready().map(|listing| {
+                listing
+                    .items
+                    .iter()
+                    .filter(|item| self.lists_item(item))
+                    .count()
+            }),
+            PageTab::Git => self
+                .git_view
+                .as_ref()
+                .and_then(|view| view.read(cx).tree().map(|tree| tree.files.len())),
+        }
+        .filter(|count| *count > 0)
+    }
+
+    fn render_page_tabs(&self, compact: bool, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         div()
             .id("pull-requests-page-tabs")
             .role(gpui::Role::TabList)
@@ -857,6 +878,18 @@ impl PullRequestsPage {
                 .map(|(tab, label)| {
                     let active = self.prefs.tab == tab;
                     let selector = format!("pull-requests-tab-{tab:?}");
+                    let count =
+                        (!compact)
+                            .then(|| self.tab_count(tab, cx))
+                            .flatten()
+                            .map(|count| {
+                                let selector = format!("pull-requests-tab-count-{tab:?}");
+                                div()
+                                    .debug_selector(move || selector.clone())
+                                    .text_size(px(11.0))
+                                    .text_color(theme.text_muted)
+                                    .child(count.to_string())
+                            });
                     div()
                         .id(SharedString::from(selector.clone()))
                         .debug_selector(move || selector.clone())
@@ -866,6 +899,7 @@ impl PullRequestsPage {
                         .px(px(12.0))
                         .flex()
                         .items_center()
+                        .gap(px(6.0))
                         .rounded(px(7.0))
                         .text_size(px(13.0))
                         .whitespace_nowrap()
@@ -877,6 +911,7 @@ impl PullRequestsPage {
                                 .on_click(cx.listener(move |page, _, _, cx| page.set_tab(tab, cx)))
                         })
                         .child(label)
+                        .children(count)
                 }),
             )
             .into_any_element()
@@ -1474,6 +1509,21 @@ impl PullRequestsPage {
             .into_any_element()
     }
 
+    fn lists_item(&self, item: &ChangeRequestListItem) -> bool {
+        let repository = self
+            .sent
+            .1
+            .repository
+            .as_ref()
+            .or(self.prefs.repository.as_ref());
+        repository.is_none_or(|repository| item.repository.eq_ignore_ascii_case(repository))
+            && self
+                .prefs
+                .host
+                .as_deref()
+                .is_none_or(|host| item.host == host)
+    }
+
     fn list_entries(&self, busy: bool, cx: &App) -> (Vec<ListEntry>, String) {
         let mut entries = vec![ListEntry::Controls];
         let state = |title: String, description: String, with_mark: bool, clear_search: bool| {
@@ -1523,23 +1573,10 @@ impl PullRequestsPage {
         } else {
             self.sent.0.clone()
         };
-        let repository = self
-            .sent
-            .1
-            .repository
-            .as_ref()
-            .or(self.prefs.repository.as_ref());
         let items: Vec<&ChangeRequestListItem> = listing
             .items
             .iter()
-            .filter(|item| {
-                repository.is_none_or(|repository| item.repository.eq_ignore_ascii_case(repository))
-                    && self
-                        .prefs
-                        .host
-                        .as_deref()
-                        .is_none_or(|host| item.host == host)
-            })
+            .filter(|item| self.lists_item(item))
             .filter(|item| !busy || matches_query(item, &search_text))
             .collect();
         let shown = crate::rail::truncate_preview(trimmed, 49);
@@ -2212,6 +2249,48 @@ mod tests {
             assert_eq!(page.list_state.logical_scroll_top().item_ix, 0);
             assert!(!page.list_condensed());
         });
+    }
+
+    #[gpui::test]
+    fn the_condensed_bar_drops_the_tab_counts_and_fits_a_narrow_window(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (page, cx, _dir) = scroll_fixture(cx, 300);
+        page.read_with(cx, |page, cx| {
+            assert_eq!(page.tab_count(PageTab::PullRequests, cx), Some(300));
+            assert_eq!(page.tab_count(PageTab::Git, cx), None);
+        });
+        assert!(
+            cx.debug_bounds("pull-requests-tab-count-PullRequests")
+                .is_some()
+        );
+        let wide_back = cx.debug_bounds("pull-requests-back").unwrap();
+        scroll_step(cx, -600.0);
+        cx.run_until_parked();
+        page.read_with(cx, |page, _| assert!(page.list_condensed()));
+        assert!(
+            cx.debug_bounds("pull-requests-tab-count-PullRequests")
+                .is_none(),
+            "the condensed bar drops the count"
+        );
+
+        cx.simulate_resize(gpui::size(px(900.0), px(700.0)));
+        cx.run_until_parked();
+        let back = cx.debug_bounds("pull-requests-back").unwrap();
+        assert!(
+            back.size.width < wide_back.size.width,
+            "a narrow window keeps only the arrow: {back:?} {wide_back:?}"
+        );
+        let chat = cx.debug_bounds("pull-requests-chat").unwrap();
+        assert!(chat.size.width > px(40.0), "{chat:?}");
+        assert!(chat.right() <= px(900.0), "{chat:?}");
+        let involvement = cx
+            .debug_bounds("pull-requests-compact-involvement")
+            .unwrap();
+        assert!(
+            involvement.right() < chat.left(),
+            "{involvement:?} {chat:?}"
+        );
     }
 
     #[gpui::test]

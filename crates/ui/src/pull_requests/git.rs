@@ -515,6 +515,7 @@ impl GitTab {
             GitHistoryEvent::OpenRefBadge(branch) => {
                 cx.emit(GitTabEvent::OpenPullRequest(branch.clone()));
             }
+            GitHistoryEvent::SelectWorkingTree => tab.select_commit(None, cx),
             GitHistoryEvent::FetchSucceeded => tab.load(cx),
         });
         let poll_task = cx.spawn(async move |this, cx| {
@@ -3396,40 +3397,6 @@ impl GitTab {
             .into_any_element()
     }
 
-    fn render_working_tree_row(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let selected = self.detail.is_none();
-        let count = self.tree.as_ref().map(|tree| tree.files.len()).unwrap_or(0);
-        div()
-            .id("git-working-tree-row")
-            .debug_selector(|| "git-working-tree-row".into())
-            .role(gpui::Role::Button)
-            .aria_label("Uncommitted changes")
-            .h(px(30.0))
-            .flex_none()
-            .px(px(12.0))
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .border_b_1()
-            .border_color(theme.hairline(0.07))
-            .text_size(px(12.0))
-            .text_color(theme.text)
-            .cursor_pointer()
-            .when(selected, |el| el.bg(theme.ink(0.07)))
-            .hover(|style| style.bg(theme.ink(0.025)))
-            .child(
-                div()
-                    .size(px(9.0))
-                    .flex_none()
-                    .rounded_full()
-                    .border_1()
-                    .border_color(theme.accent),
-            )
-            .child(SharedString::from(format!("Uncommitted changes ({count})")))
-            .on_click(cx.listener(|tab, _, _, cx| tab.select_commit(None, cx)))
-            .into_any_element()
-    }
-
     fn render_detail_panel(
         &self,
         detail: &CommitDetail,
@@ -4510,6 +4477,9 @@ impl Render for GitTab {
                 .size_full()
                 .child(self.render_empty(&theme));
         }
+        let files = self.tree.as_ref().map(|tree| tree.files.len()).unwrap_or(0);
+        self.history
+            .update(cx, |history, cx| history.set_working_tree(Some(files), cx));
         div()
             .id("pull-requests-git")
             .role(gpui::Role::Group)
@@ -4524,7 +4494,6 @@ impl Render for GitTab {
                     .h_full()
                     .flex()
                     .flex_col()
-                    .child(self.render_working_tree_row(&theme, cx))
                     .child(div().flex_1().min_h_0().child(self.history.clone())),
             )
             .child(match &self.detail {
@@ -5825,8 +5794,8 @@ mod tests {
             page.listing = Loadable::Ready(listing());
             cx.notify();
         });
-        settle(cx, |cx| cx.debug_bounds("history-pr-badge-0").is_some());
-        let badge = cx.debug_bounds("history-pr-badge-0").unwrap();
+        settle(cx, |cx| cx.debug_bounds("history-pr-badge-1").is_some());
+        let badge = cx.debug_bounds("history-pr-badge-1").unwrap();
         cx.simulate_click(badge.center(), gpui::Modifiers::default());
         cx.run_until_parked();
         page.update(cx, |page, _| {
@@ -7216,6 +7185,52 @@ mod tests {
                 "Push 1 commit to origin as the new branch feature/new? It will track origin/feature/new."
             )
         });
+    }
+
+    #[gpui::test]
+    fn the_uncommitted_row_and_the_tab_counts_follow_the_tree_and_the_listing(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        let (page, cx, _calls, _dir, tab) = open_with_listing(cx, lab_state(), lab.clone());
+        settle(cx, |cx| cx.debug_bounds("git-working-tree-row").is_some());
+        let history = tab.read_with(cx, |tab, _| tab.history.clone());
+        history.read_with(cx, |history, _| assert_eq!(history.working_tree(), Some(2)));
+        page.read_with(cx, |page, cx| {
+            assert_eq!(page.tab_count(PageTab::Git, cx), Some(2));
+            assert_eq!(page.tab_count(PageTab::PullRequests, cx), Some(4));
+        });
+        assert!(cx.debug_bounds("pull-requests-tab-count-Git").is_some());
+        assert!(
+            cx.debug_bounds("pull-requests-tab-count-PullRequests")
+                .is_some()
+        );
+
+        cx.simulate_resize(gpui::size(px(900.0), px(700.0)));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("pull-requests-tab-count-Git").is_none());
+        let chat = cx.debug_bounds("pull-requests-chat").unwrap();
+        assert!(chat.right() <= px(900.0), "{chat:?}");
+        let push = cx.debug_bounds("pull-requests-git-push").unwrap();
+        assert!(push.right() < chat.left(), "{push:?} {chat:?}");
+        cx.simulate_resize(gpui::size(px(1400.0), px(900.0)));
+        cx.run_until_parked();
+
+        let mut clean = tree();
+        clean["files"] = serde_json::json!([]);
+        *lab.tree.lock().unwrap() = Some(clean);
+        tab.update(cx, |tab, cx| tab.load(cx));
+        settle(cx, |cx| {
+            tab.read_with(cx, |tab, _| tab.tree().unwrap().files.is_empty())
+        });
+        history.read_with(cx, |history, _| assert_eq!(history.working_tree(), Some(0)));
+        assert!(cx.debug_bounds("git-working-tree-row").is_some());
+        assert!(
+            cx.debug_bounds("pull-requests-tab-count-Git").is_none(),
+            "a clean tree shows no count"
+        );
     }
 
     fn tracking_main_tree() -> serde_json::Value {
