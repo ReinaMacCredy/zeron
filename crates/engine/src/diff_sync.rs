@@ -824,21 +824,33 @@ async fn diff_sync_task(
 // Diff capture (exposed for tests)
 // ---------------------------------------------------------------------------
 
-struct Capture {
-    stdout: Vec<u8>,
-    truncated: bool,
+pub(crate) struct Capture {
+    pub stdout: Vec<u8>,
+    pub truncated: bool,
 }
 
 /// Run git capturing stdout under a hard byte ceiling — the child is killed once
 /// the cap is hit, so an arbitrarily large repository diff never buffers fully.
 async fn capture_git(cwd: &Path, args: &[&str], max_bytes: usize) -> Result<Capture, EngineError> {
     let mut cmd = tokio::process::Command::new("git");
+    cmd.arg("-C").arg(cwd).args(args);
+    run_capped(cmd, max_bytes, false, |status| {
+        format!("git exited {status}")
+    })
+    .await
+}
+
+pub(crate) async fn run_capped(
+    mut cmd: tokio::process::Command,
+    max_bytes: usize,
+    exit_one_ok: bool,
+    exited: impl FnOnce(std::process::ExitStatus) -> String,
+) -> Result<Capture, EngineError> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         cmd.as_std_mut().creation_flags(0x08000000);
     }
-    cmd.arg("-C").arg(cwd).args(args);
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
@@ -851,7 +863,7 @@ async fn capture_git(cwd: &Path, args: &[&str], max_bytes: usize) -> Result<Capt
         .take()
         .ok_or_else(|| EngineError::Other("git stdout unavailable".into()))?;
     let mut out: Vec<u8> = Vec::new();
-    let mut buf = [0u8; 64 * 1024];
+    let mut buf = vec![0u8; 64 * 1024];
     let mut truncated = false;
     loop {
         let n = stdout
@@ -874,11 +886,12 @@ async fn capture_git(cwd: &Path, args: &[&str], max_bytes: usize) -> Result<Capt
         .wait_with_output()
         .await
         .map_err(|e| EngineError::Other(format!("git wait failed: {e}")))?;
-    if !output.status.success() && !truncated {
+    let accepted = output.status.success() || (exit_one_ok && output.status.code() == Some(1));
+    if !accepted && !truncated {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let message = stderr.trim();
         return Err(EngineError::Other(if message.is_empty() {
-            format!("git exited {}", output.status)
+            exited(output.status)
         } else {
             format!("git: {message}")
         }));

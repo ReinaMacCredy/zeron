@@ -3,13 +3,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Weak};
 
 use sha2::{Digest, Sha256};
-use tokio::io::AsyncReadExt;
 use zeron_proto::{
     CommitSummary, GitFileState, LineDelta, StashEntry, SyncDirection, WorkingTree,
     WorkingTreeAction, WorkingTreeActionReply, WorkingTreeFile, WorkingTreeFileDiff,
 };
 
 use crate::EngineError;
+use crate::diff_sync::Capture;
 
 pub(crate) const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const OUTPUT_MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -18,12 +18,7 @@ const MAX_UNTRACKED_COUNTED: usize = 200;
 const MAX_UNTRACKED_BYTES: u64 = 1024 * 1024;
 const MAX_STASHES: usize = 50;
 
-pub(crate) struct GitOutput {
-    pub stdout: Vec<u8>,
-    pub truncated: bool,
-}
-
-pub(crate) async fn git(root: &Path, args: &[&str]) -> Result<GitOutput, EngineError> {
+pub(crate) async fn git(root: &Path, args: &[&str]) -> Result<Capture, EngineError> {
     git_with(root, args, OUTPUT_MAX_BYTES, false).await
 }
 
@@ -32,11 +27,11 @@ pub(crate) async fn git_with(
     args: &[&str],
     max_bytes: usize,
     exit_one_ok: bool,
-) -> Result<GitOutput, EngineError> {
+) -> Result<Capture, EngineError> {
     run_git(root, args, max_bytes, exit_one_ok, true).await
 }
 
-async fn git_stash(root: &Path, args: &[&str]) -> Result<GitOutput, EngineError> {
+async fn git_stash(root: &Path, args: &[&str]) -> Result<Capture, EngineError> {
     // `stash push -u` cleans with a `:/` pathspec; literal pathspecs leave untracked files behind.
     run_git(root, args, OUTPUT_MAX_BYTES, false, false).await
 }
@@ -47,13 +42,8 @@ async fn run_git(
     max_bytes: usize,
     exit_one_ok: bool,
     literal_pathspecs: bool,
-) -> Result<GitOutput, EngineError> {
+) -> Result<Capture, EngineError> {
     let mut cmd = tokio::process::Command::new("git");
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.as_std_mut().creation_flags(0x08000000);
-    }
     cmd.arg("--no-optional-locks")
         .arg("-C")
         .arg(root)
@@ -64,60 +54,11 @@ async fn run_git(
             if literal_pathspecs { "1" } else { "0" },
         )
         .env("GIT_EDITOR", "true")
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| EngineError::Other(format!("git spawn failed: {e}")))?;
-    let mut stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| EngineError::Other("git stdout unavailable".into()))?;
-    let mut out = Vec::new();
-    let mut buf = vec![0u8; 64 * 1024];
-    let mut truncated = false;
-    loop {
-        let n = stdout
-            .read(&mut buf)
-            .await
-            .map_err(|e| EngineError::Other(format!("git read failed: {e}")))?;
-        if n == 0 {
-            break;
-        }
-        let remaining = max_bytes.saturating_sub(out.len());
-        if n > remaining {
-            out.extend_from_slice(&buf[..remaining]);
-            truncated = true;
-            let _ = child.start_kill();
-            break;
-        }
-        out.extend_from_slice(&buf[..n]);
-    }
-    let output = child
-        .wait_with_output()
-        .await
-        .map_err(|e| EngineError::Other(format!("git wait failed: {e}")))?;
-    let accepted = output.status.success() || (exit_one_ok && output.status.code() == Some(1));
-    if !accepted && !truncated {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let message = stderr.trim();
-        return Err(EngineError::Other(if message.is_empty() {
-            format!(
-                "git {} exited {}",
-                args.first().unwrap_or(&"?"),
-                output.status
-            )
-        } else {
-            format!("git: {message}")
-        }));
-    }
-    Ok(GitOutput {
-        stdout: out,
-        truncated,
+        .env("GIT_OPTIONAL_LOCKS", "0");
+    crate::diff_sync::run_capped(cmd, max_bytes, exit_one_ok, |status| {
+        format!("git {} exited {status}", args.first().unwrap_or(&"?"))
     })
+    .await
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -1061,7 +1002,7 @@ async fn git_within(
     args: &[&str],
     timeout: std::time::Duration,
     timed_out: String,
-) -> Result<GitOutput, EngineError> {
+) -> Result<Capture, EngineError> {
     tokio::time::timeout(timeout, git(root, args))
         .await
         .map_err(|_| EngineError::Other(timed_out))?
@@ -1071,7 +1012,7 @@ async fn hooked_git(
     root: &Path,
     args: &[&str],
     timeout: std::time::Duration,
-) -> Result<GitOutput, EngineError> {
+) -> Result<Capture, EngineError> {
     let timed_out = format!(
         "Git did not finish within {} s. A hook or a signing prompt may be waiting for input; run it in a terminal instead.",
         timeout.as_secs()
