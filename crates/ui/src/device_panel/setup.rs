@@ -101,7 +101,7 @@ pub fn hub_setup_status(state: &DeviceHubState, pending: bool, compact: bool) ->
 }
 
 pub fn agent_setup_status(state: &DeviceHubState, compact: bool) -> &'static str {
-    match (state.host_status, compact) {
+    match (state.agent_status, compact) {
         (DeviceHostStatus::Installing, false) => "Installing agent tools...",
         (DeviceHostStatus::Installing, true) => "Installing...",
         (DeviceHostStatus::Starting, false) => "Starting agent tools...",
@@ -109,6 +109,15 @@ pub fn agent_setup_status(state: &DeviceHubState, compact: bool) -> &'static str
         (_, false) => "Updating agent access...",
         (_, true) => "Updating...",
     }
+}
+
+pub fn agent_failure(state: &DeviceHubState) -> Option<String> {
+    (state.agent_status == DeviceHostStatus::Failed).then(|| {
+        state
+            .agent_status_detail
+            .clone()
+            .unwrap_or_else(|| "Agent tools could not start.".into())
+    })
 }
 
 pub fn host_update(state: &DeviceHubState) -> Option<(String, String, bool)> {
@@ -231,6 +240,10 @@ pub fn platform_card(
 ) -> AnyElement {
     let (ready, message) = status;
     div()
+        .debug_selector(move || {
+            format!("device-platform-{}", platform_name(platform).to_lowercase())
+        })
+        .min_w_0()
         .flex()
         .gap(px(8.0))
         .when(!compact, |el| {
@@ -491,6 +504,16 @@ impl DevicePanel {
                     )
                     .when(pending == Some(SetupPending::Agent), |el| {
                         el.child(status_line(theme, owner, agent_setup_status(hub, false).into(), true, cx))
+                    })
+                    .when_some(agent_failure(hub), |el, detail| {
+                        el.child(
+                            div()
+                                .id("device-agent-failed")
+                                .role(gpui::Role::Alert)
+                                .text_size(crate::typography::ui_rems(12.0))
+                                .text_color(theme.danger)
+                                .child(SharedString::from(detail)),
+                        )
                     })
                     .child(muted(
                         theme,

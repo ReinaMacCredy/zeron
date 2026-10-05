@@ -12867,6 +12867,7 @@ dependencies = [
  "futures",
  "gethostname",
  "ignore",
+ "image",
  "libc",
  "loro",
  "miniz_oxide",

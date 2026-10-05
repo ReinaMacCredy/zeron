@@ -9,7 +9,7 @@ type DeviceTarget = (String, String);
 pub(super) struct DeviceShellState {
     dismissed: std::collections::HashMap<String, std::collections::HashSet<DeviceTarget>>,
     floats: std::collections::HashMap<String, (Entity<DeviceFloat>, [Subscription; 2])>,
-    seen_sessions: Option<(u64, std::collections::HashSet<(String, DeviceTarget)>)>,
+    seen_sessions: Option<std::collections::HashSet<(String, DeviceTarget)>>,
 }
 
 impl Shell {
@@ -428,16 +428,9 @@ impl Shell {
 
     pub(super) fn auto_open_devices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(hub) = self.state.read(cx).device_hub.as_ref() else {
+            self.device_shell.seen_sessions = None;
             return;
         };
-        if self
-            .device_shell
-            .seen_sessions
-            .as_ref()
-            .is_some_and(|(revision, _)| *revision == hub.revision)
-        {
-            return;
-        }
         let current: std::collections::HashSet<(String, DeviceTarget)> = hub
             .sessions
             .iter()
@@ -449,11 +442,10 @@ impl Shell {
                 )
             })
             .collect();
-        let previous = self
-            .device_shell
-            .seen_sessions
-            .replace((hub.revision, current.clone()));
-        let Some((_, previous)) = previous else {
+        if self.device_shell.seen_sessions.as_ref() == Some(&current) {
+            return;
+        }
+        let Some(previous) = self.device_shell.seen_sessions.replace(current.clone()) else {
             return;
         };
         let mut opened: Vec<_> = current.difference(&previous).cloned().collect();
@@ -888,6 +880,55 @@ mod tests {
                     "auto-float floats the new device; one already in a tab is left alone"
                 );
                 assert_eq!(targets(shell, "chat", cx), ["X", "GHOST", "Z"]);
+
+                let all = [
+                    ("chat", "MINI"),
+                    ("chat", "X"),
+                    ("other", "PAD"),
+                    ("chat", "GHOST"),
+                    ("chat", "Y"),
+                    ("chat", "Z"),
+                ];
+                shell.settings.device_auto_float = false;
+                publish(shell, cx, 9, &["MINI", "X", "GHOST", "Y", "Z"], &all);
+                shell.auto_open_devices(window, cx);
+                assert_eq!(
+                    targets(shell, "chat", cx),
+                    ["X", "GHOST", "Z"],
+                    "a new revision with the same sessions opens nothing"
+                );
+
+                shell.state.update(cx, |state, _| state.device_hub = None);
+                shell.auto_open_devices(window, cx);
+                let mut restarted = all.to_vec();
+                restarted.push(("chat", "W"));
+                publish(
+                    shell,
+                    cx,
+                    1,
+                    &["MINI", "X", "GHOST", "Y", "Z", "W"],
+                    &restarted,
+                );
+                shell.auto_open_devices(window, cx);
+                assert_eq!(
+                    targets(shell, "chat", cx),
+                    ["X", "GHOST", "Z"],
+                    "the first snapshot of a new engine is a fresh baseline"
+                );
+                restarted.push(("chat", "V"));
+                publish(
+                    shell,
+                    cx,
+                    1,
+                    &["MINI", "X", "GHOST", "Y", "Z", "W", "V"],
+                    &restarted,
+                );
+                shell.auto_open_devices(window, cx);
+                assert_eq!(
+                    targets(shell, "chat", cx),
+                    ["X", "GHOST", "Z", "V"],
+                    "a reused revision number still opens the new session"
+                );
             })
             .unwrap();
     }

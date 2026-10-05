@@ -1283,7 +1283,11 @@ impl ThreadTools {
             "device_close" => methods::DEVICE_TOOL_CLOSE,
             _ => methods::DEVICE_TOOL_SCREENSHOT,
         };
-        let mut params = json!({ "chatId": self.chat_id });
+        let secret = self
+            .run_secret
+            .as_deref()
+            .ok_or("device tools need a live Zeron run")?;
+        let mut params = json!({ "chatId": self.chat_id, "runSecret": secret });
         for key in ["hostId", "deviceId", "platform", "shutdown"] {
             if let Some(value) = args.get(key).filter(|value| !value.is_null()) {
                 params[key] = value.clone();
@@ -2153,6 +2157,9 @@ mod tests {
                         .lock()
                         .unwrap()
                         .push((method.to_string(), params.clone()));
+                    if params["runSecret"] != "live" {
+                        return Err(RpcError::Failed("device caller refused".into()));
+                    }
                     let device = json!({ "hostId": "local", "id": "SIM-1", "name": "iPhone 17" });
                     match method {
                         methods::DEVICE_TOOL_OPEN if params.get("platform").is_none() => {
@@ -3053,7 +3060,18 @@ mod tests {
 
     #[tokio::test]
     async fn device_tools_are_chat_scoped_and_the_screenshot_is_an_image_block() {
-        let rig = rig(fixture());
+        let unbound = rig(fixture());
+        assert_eq!(
+            unbound.tools.call("device_list", &json!({})).await,
+            Err("device tools need a live Zeron run".into())
+        );
+        assert!(logged(&unbound.calls, methods::DEVICE_TOOL_LIST).is_empty());
+        let stale = computer_rig(Some("stale"));
+        assert_eq!(
+            stale.tools.call("device_list", &json!({})).await,
+            Err("device caller refused".into())
+        );
+        let rig = computer_rig(Some("live"));
         let mut pipe = Pipe::open(rig.tools);
         let tools = pipe.list().await;
         let open = tools
@@ -3101,11 +3119,13 @@ mod tests {
         assert_eq!(closed["result"]["isError"], false);
         assert_eq!(
             logged(&rig.calls, methods::DEVICE_TOOL_SCREENSHOT),
-            vec![json!({ "chatId": "a" })]
+            vec![json!({ "chatId": "a", "runSecret": "live" })]
         );
         assert_eq!(
             logged(&rig.calls, methods::DEVICE_TOOL_CLOSE),
-            vec![json!({ "chatId": "a", "deviceId": "SIM-1", "shutdown": true })]
+            vec![
+                json!({ "chatId": "a", "runSecret": "live", "deviceId": "SIM-1", "shutdown": true })
+            ]
         );
     }
 

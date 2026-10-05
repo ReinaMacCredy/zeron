@@ -19,7 +19,10 @@ use zeron_proto::device_hub::{
     DeviceSession, LOCAL_DEVICE_HOST_ID, OpenHubDeviceParams, ShutdownHubDeviceParams,
 };
 
-pub use agent::{AGENT_ACCESS_OFF, BOTH_PLATFORMS, DEVICE_TOOL_INSTRUCTIONS, TOOL_SUPPORT_OFF};
+pub use agent::{
+    AGENT_ACCESS_OFF, BOTH_PLATFORMS, DEVICE_CALLER_REFUSED, DEVICE_TOOL_INSTRUCTIONS,
+    TOOL_SUPPORT_OFF,
+};
 use hub_client::HubClient;
 use hub_process::{Backoff, HubProcess};
 pub(crate) use stream::FrameSubscription;
@@ -114,8 +117,14 @@ impl DeviceHub {
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
+        let agent_on = settings.enabled && settings.agent_access_enabled;
         let state = DeviceHubState {
             host_status: if settings.enabled {
+                DeviceHostStatus::Idle
+            } else {
+                DeviceHostStatus::Disabled
+            },
+            agent_status: if agent_on {
                 DeviceHostStatus::Idle
             } else {
                 DeviceHostStatus::Disabled
@@ -127,14 +136,10 @@ impl DeviceHub {
         if let Some(entry) = toolchain::installed_hub() {
             hub_process::reap_stale(&data_dir.join("device"), &entry);
         }
-        let shims = data_dir.join("device").join("bin");
-        if let Err(error) = std::fs::create_dir_all(&shims) {
-            tracing::warn!(%error, "could not create the device tool directory");
+        if !agent_on {
+            agent::remove_agent_files(&data_dir.join("device"));
+            zeron_harness::clear_child_path_prefix(&data_dir.join("device").join("bin"));
         }
-        if !(state.settings.enabled && state.settings.agent_access_enabled) {
-            agent::remove_shim(&shims);
-        }
-        zeron_harness::set_child_path_prefix(Some(shims));
         Arc::new_cyclic(|me| Self {
             me: me.clone(),
             data_dir: data_dir.to_path_buf(),
@@ -191,6 +196,12 @@ impl DeviceHub {
             if !state.settings.enabled {
                 state.host_status = DeviceHostStatus::Disabled;
                 state.host_status_detail = None;
+            }
+            if !(state.settings.enabled && state.settings.agent_access_enabled) {
+                state.agent_status = DeviceHostStatus::Disabled;
+                state.agent_status_detail = None;
+            } else if state.agent_status == DeviceHostStatus::Disabled {
+                state.agent_status = DeviceHostStatus::Idle;
             }
             state.revision += 1;
         });
@@ -448,7 +459,6 @@ impl DeviceHub {
             && let Err(error) = self.ensure_agent().await
         {
             tracing::warn!(%error, "agent-device could not be prepared");
-            self.set_status(DeviceHostStatus::Failed, Some(error));
         }
         Ok(self.snapshot())
     }
@@ -1797,18 +1807,7 @@ mod tests {
         );
         assert!(pids.lock().unwrap().is_empty(), "no hub was spawned");
         assert!(hub.hub_slot().is_none());
-        let device_dir: Vec<_> = std::fs::read_dir(dir.path().join("device"))
-            .unwrap()
-            .flatten()
-            .map(|entry| entry.file_name())
-            .collect();
-        assert_eq!(device_dir, ["bin"], "only the empty shim directory exists");
-        assert_eq!(
-            std::fs::read_dir(dir.path().join("device").join("bin"))
-                .unwrap()
-                .count(),
-            0
-        );
+        assert!(!dir.path().join("device").exists());
     }
 
     #[tokio::test(flavor = "multi_thread")]

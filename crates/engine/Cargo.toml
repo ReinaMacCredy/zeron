@@ -40,6 +40,7 @@ ignore.workspace = true
 nucleo-matcher.workspace = true
 regex = "1"
 miniz_oxide = "0.8"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 
 tempfile.workspace = true
 

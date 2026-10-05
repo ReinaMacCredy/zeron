@@ -334,6 +334,7 @@ impl EngineCore {
         computer.attach(&sessions);
         let device_hub = device_hub::DeviceHub::start(data_dir);
         sessions.set_device_hub(device_hub.clone());
+        device_hub.provision_agent_in_background();
         Ok(Self {
             sessions,
             doc_host,

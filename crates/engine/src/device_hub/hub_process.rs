@@ -234,9 +234,13 @@ pub(crate) fn reap_stale(state_dir: &Path, entry: &Path) {
     let _ = std::fs::remove_file(&path);
 }
 
-fn scrub_hub_env(command: &mut Command, vars: impl IntoIterator<Item = std::ffi::OsString>) {
+pub(crate) fn scrub_env(
+    command: &mut Command,
+    prefix: &str,
+    vars: impl IntoIterator<Item = std::ffi::OsString>,
+) {
     for name in vars {
-        if name.to_string_lossy().starts_with("EXPO_DEVICE_HUB_") {
+        if name.to_string_lossy().starts_with(prefix) {
             command.env_remove(name);
         }
     }
@@ -296,7 +300,11 @@ pub(crate) async fn spawn(
         .args(["--max-dimension", &MAX_DIMENSION.to_string()])
         .env("FORCE_COLOR", "0")
         .env("NO_COLOR", "1");
-    scrub_hub_env(&mut command, std::env::vars_os().map(|(name, _)| name));
+    scrub_env(
+        &mut command,
+        "EXPO_DEVICE_HUB_",
+        std::env::vars_os().map(|(name, _)| name),
+    );
     let child = command
         .spawn()
         .map_err(|e| format!("starting the device hub: {e}"))?;
@@ -768,8 +776,9 @@ http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
     #[test]
     fn hub_env_drops_every_expo_device_hub_variable() {
         let mut command = Command::new("/usr/bin/true");
-        scrub_hub_env(
+        scrub_env(
             &mut command,
+            "EXPO_DEVICE_HUB_",
             [
                 "EXPO_DEVICE_HUB_BASE_PATH",
                 "PATH",

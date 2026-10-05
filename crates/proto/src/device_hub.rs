@@ -196,6 +196,10 @@ pub struct DeviceHubState {
     pub streams: BTreeMap<String, DeviceStreamStatus>,
     #[serde(default)]
     pub screens: BTreeMap<String, DeviceScreenConfig>,
+    #[serde(default)]
+    pub agent_status: DeviceHostStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_status_detail: Option<String>,
 }
 
 impl DeviceHubState {
@@ -335,6 +339,10 @@ pub struct DeviceToolParams {
     pub device_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<DevicePlatform>,
+    #[serde(default)]
+    pub shutdown: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub run_secret: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

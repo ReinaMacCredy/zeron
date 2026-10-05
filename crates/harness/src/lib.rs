@@ -333,10 +333,17 @@ pub fn compose_child_path(cmd: &mut process::Command, exe: &std::path::Path) {
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
+    compose_child_path_with(cmd.as_std_mut(), prefix.as_deref(), exe);
+}
+
+fn compose_child_path_with(
+    cmd: &mut std::process::Command,
+    prefix: Option<&std::path::Path>,
+    exe: &std::path::Path,
+) {
     compose_path(
-        cmd.as_std_mut(),
+        cmd,
         prefix
-            .as_deref()
             .into_iter()
             .chain(exe.parent().filter(|d| !d.as_os_str().is_empty())),
     );
@@ -350,6 +357,15 @@ pub fn set_child_path_prefix(dir: Option<std::path::PathBuf>) {
     *CHILD_PATH_PREFIX
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = dir;
+}
+
+pub fn clear_child_path_prefix(dir: &std::path::Path) {
+    let mut prefix = CHILD_PATH_PREFIX
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if prefix.as_deref() == Some(dir) {
+        *prefix = None;
+    }
 }
 
 fn compose_path<'a>(
@@ -728,11 +744,10 @@ mod tool_server_tests {
 mod child_path_tests {
     use std::path::{Path, PathBuf};
 
-    fn child_path(exe: &Path) -> Vec<PathBuf> {
-        let mut cmd = super::process::Command::new("/bin/true");
-        super::compose_child_path(&mut cmd, exe);
+    fn child_path(prefix: Option<&Path>, exe: &Path) -> Vec<PathBuf> {
+        let mut cmd = std::process::Command::new("/bin/true");
+        super::compose_child_path_with(&mut cmd, prefix, exe);
         let path = cmd
-            .as_std()
             .get_envs()
             .find(|(name, _)| *name == "PATH")
             .and_then(|(_, value)| value)
@@ -743,16 +758,15 @@ mod child_path_tests {
 
     #[test]
     fn the_registered_directory_leads_every_child_path_once() {
-        let shims = PathBuf::from("/tmp/zeron-test-device-bin");
-        super::set_child_path_prefix(Some(shims.clone()));
-        let path = child_path(Path::new("/opt/agents/bin/claude"));
+        let dir = tempfile::tempdir().unwrap();
+        let shims = dir.path().join("bin");
+        let exe = Path::new("/opt/agents/bin/claude");
+        let path = child_path(Some(&shims), exe);
         let inherited = std::env::var_os("PATH")
             .and_then(|path| std::env::split_paths(&path).next())
             .expect("the test process has a PATH");
-        super::set_child_path_prefix(Some(inherited.clone()));
-        let deduped = child_path(Path::new("/opt/agents/bin/claude"));
-        super::set_child_path_prefix(None);
-        let plain = child_path(Path::new("/opt/agents/bin/claude"));
+        let deduped = child_path(Some(&inherited), exe);
+        let plain = child_path(None, exe);
 
         assert_eq!(path[0], shims);
         assert_eq!(path[1], PathBuf::from("/opt/agents/bin"));

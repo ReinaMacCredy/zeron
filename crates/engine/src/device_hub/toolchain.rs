@@ -42,3 +42,7 @@ pub(crate) async fn ensure_agent() -> Result<PathBuf, String> {
         .await
         .map_err(|e| e.to_string())
 }
+
+pub(crate) fn agent_installed() -> bool {
+    zeron_harness::installed_npm_tool(AGENT_PIN, AGENT_BIN).is_some()
+}
