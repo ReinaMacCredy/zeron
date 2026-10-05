@@ -180,7 +180,9 @@ impl Shell {
                     label: session_label(&day_label(at, now), title),
                     detail: match (current, preview) {
                         (true, _) => "Open session".into(),
-                        (false, Some(preview)) => preview.to_owned(),
+                        (false, Some(preview)) => {
+                            preview.split_whitespace().collect::<Vec<_>>().join(" ")
+                        }
                         (false, None) => "No messages".into(),
                     },
                     current,
@@ -986,6 +988,7 @@ impl Shell {
         crate::popover::popover_card(theme)
             .id("pr-chat-sessions-menu")
             .debug_selector(|| "pr-chat-sessions-menu".into())
+            .bg(theme.surface_dialog)
             .occlude()
             .absolute()
             .top(px(40.0))
