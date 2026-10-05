@@ -13,7 +13,7 @@ mod tabs;
 
 pub use chat::{
     ACTION_NOTE as CHAT_ACTION_NOTE, CONTEXT_HEADER as CHAT_CONTEXT_HEADER, ContextCall,
-    ContextChip, GithubWrite, PrChatContext, PrChatScope, Suggestion, chat_shortcut,
+    ContextChip, GithubWrite, PrChatContext, Suggestion, chat_shortcut,
     extract_badge as extract_chat_context_badge, failure_text as chat_write_failure,
     first_prompt as first_chat_prompt, latest_reply as latest_chat_reply,
     live_sessions as live_chat_sessions,
@@ -114,10 +114,24 @@ struct ListFrame {
     devices: Vec<devices::ListDevice>,
 }
 
-pub(crate) fn group_items<'a>(
-    items: &[&'a ChangeRequestListItem],
+#[derive(Clone, Copy)]
+struct Indexed<'a> {
+    index: usize,
+    item: &'a ChangeRequestListItem,
+}
+
+impl std::ops::Deref for Indexed<'_> {
+    type Target = ChangeRequestListItem;
+
+    fn deref(&self) -> &ChangeRequestListItem {
+        self.item
+    }
+}
+
+pub(crate) fn group_items<T: Copy + std::ops::Deref<Target = ChangeRequestListItem>>(
+    items: &[T],
     viewers: &BTreeMap<String, String>,
-) -> Vec<(PullRequestGroup, Vec<&'a ChangeRequestListItem>)> {
+) -> Vec<(PullRequestGroup, Vec<T>)> {
     let mut authored = Vec::new();
     let mut review_requested = Vec::new();
     let mut others = Vec::new();
@@ -162,7 +176,9 @@ pub(crate) fn change_size(item: &ChangeRequestListItem) -> u64 {
     item.additions + item.deletions
 }
 
-pub(crate) fn rank_by_merge_readiness(items: &mut [&ChangeRequestListItem]) {
+pub(crate) fn rank_by_merge_readiness<T: std::ops::Deref<Target = ChangeRequestListItem>>(
+    items: &mut [T],
+) {
     items.sort_by(|left, right| {
         let size = change_size;
         readiness_tier(left)
@@ -918,11 +934,34 @@ impl PullRequestsPage {
     }
 
     fn render_project_control(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let picked = self.prefs.repository.is_some();
-        self.menu_trigger(
+        let label = self
+            .prefs
+            .repository
+            .clone()
+            .unwrap_or_else(|| "All projects".into());
+        self.render_project_chip(
             filters::MenuKind::Project,
-            top_chip("pull-requests-project", "Project", theme)
-                .debug_selector(|| "pull-requests-project".into())
+            "pull-requests-project",
+            label.into(),
+            self.prefs.repository.is_some(),
+            theme,
+            cx,
+        )
+    }
+
+    fn render_project_chip(
+        &self,
+        kind: filters::MenuKind,
+        id: &'static str,
+        label: SharedString,
+        picked: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.menu_trigger(
+            kind,
+            top_chip(id, "Project", theme)
+                .debug_selector(move || id.into())
                 .max_w(px(240.0))
                 .child(
                     icon(icons::LUCIDE_FOLDER)
@@ -936,12 +975,7 @@ impl PullRequestsPage {
                         .overflow_hidden()
                         .text_ellipsis()
                         .whitespace_nowrap()
-                        .child(
-                            self.prefs
-                                .repository
-                                .clone()
-                                .unwrap_or_else(|| "All projects".into()),
-                        ),
+                        .child(label),
                 )
                 .child(
                     icon(icons::LUCIDE_CHEVRON_DOWN)
@@ -1573,9 +1607,11 @@ impl PullRequestsPage {
         } else {
             self.sent.0.clone()
         };
-        let items: Vec<&ChangeRequestListItem> = listing
+        let items: Vec<Indexed> = listing
             .items
             .iter()
+            .enumerate()
+            .map(|(index, item)| Indexed { index, item })
             .filter(|item| self.lists_item(item))
             .filter(|item| !busy || matches_query(item, &search_text))
             .collect();
@@ -1608,7 +1644,7 @@ impl PullRequestsPage {
             entries.push(state(title, description, true, !trimmed.is_empty()));
             return (entries, search_text);
         }
-        let groups: Vec<(Option<PullRequestGroup>, Vec<&ChangeRequestListItem>)> =
+        let groups: Vec<(Option<PullRequestGroup>, Vec<Indexed>)> =
             if self.prefs.involvement == ChangeRequestInvolvement::All {
                 group_items(&items, &listing.viewers)
                     .into_iter()
@@ -1617,8 +1653,6 @@ impl PullRequestsPage {
             } else {
                 vec![(None, items)]
             };
-        let size = std::mem::size_of::<ChangeRequestListItem>();
-        let base = listing.items.as_ptr().addr();
         for (position, (group, mut group_items)) in groups.into_iter().enumerate() {
             filters::sort_items(&mut group_items, self.prefs.sort, &search_text);
             if let Some(group) = group {
@@ -1633,7 +1667,7 @@ impl PullRequestsPage {
                     .into_iter()
                     .enumerate()
                     .map(|(n, item)| ListEntry::Row {
-                        index: (std::ptr::from_ref(item).addr() - base) / size,
+                        index: item.index,
                         gap: n + 1 < count,
                     }),
             );
@@ -1749,7 +1783,7 @@ impl PullRequestsPage {
                 .into_any_element(),
             ListEntry::More => div()
                 .pt(px(12.0))
-                .children(self.render_more(true, &theme, cx))
+                .child(self.render_more(&theme, cx))
                 .into_any_element(),
         };
         div()

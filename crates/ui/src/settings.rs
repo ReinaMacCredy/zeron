@@ -494,6 +494,35 @@ pub fn compact_model_picker(cx: &App) -> bool {
         .is_some_and(|store| store.current.compact_model_picker)
 }
 
+pub fn git_agent_busy_policy(cx: &App) -> GitAgentBusyPolicy {
+    cx.try_global::<SettingsStore>()
+        .map(|store| store.current.git_agent_busy_policy)
+        .unwrap_or_default()
+}
+
+pub fn commit_message_model(cx: &App) -> Option<CommitModelChoice> {
+    cx.try_global::<SettingsStore>()
+        .and_then(|store| store.current.commit_message_model.clone())
+}
+
+pub fn pr_chat_style_and_history(cx: &App) -> (PrChatStyle, PrChatHistory) {
+    cx.try_global::<SettingsStore>()
+        .map(|store| (store.current.pr_chat_style, store.current.pr_chat_history))
+        .unwrap_or_default()
+}
+
+pub fn pull_requests_merge_method(cx: &App) -> Option<zeron_proto::ChangeRequestMergeMethod> {
+    cx.try_global::<SettingsStore>()
+        .and_then(|store| store.current.pull_requests_merge_method)
+}
+
+pub fn shortcut_combo(id: ShortcutId, cx: &App) -> String {
+    match cx.try_global::<SettingsStore>() {
+        Some(store) => store.current.keymap.get(id).to_owned(),
+        None => KeymapConfig::default().get(id).to_owned(),
+    }
+}
+
 pub fn compact_effort_slider(cx: &App) -> EffortSliderStyle {
     cx.try_global::<SettingsStore>()
         .map(|store| store.current.compact_effort_slider)
@@ -727,32 +756,9 @@ pub fn transcript_compact_mode(cx: &App) -> bool {
         .unwrap_or_default()
 }
 
-pub fn pr_chat_posted(chat_id: &str, cx: &App) -> Vec<PrChatPosted> {
+pub fn pr_chat_session(chat_id: &str, cx: &App) -> Option<PrChatSession> {
     cx.try_global::<SettingsStore>()
-        .and_then(|store| {
-            store
-                .current
-                .pr_chat_sessions
-                .values()
-                .flatten()
-                .find(|session| session.chat_id == chat_id)
-                .map(|session| session.posted.clone())
-        })
-        .unwrap_or_default()
-}
-
-pub fn pr_chat_dismissed(chat_id: &str, cx: &App) -> Vec<PrChatCardRef> {
-    cx.try_global::<SettingsStore>()
-        .and_then(|store| {
-            store
-                .current
-                .pr_chat_sessions
-                .values()
-                .flatten()
-                .find(|session| session.chat_id == chat_id)
-                .map(|session| session.dismissed.clone())
-        })
-        .unwrap_or_default()
+        .and_then(|store| store.current.pr_chat_session(chat_id).cloned())
 }
 
 pub fn pr_chat_sessions(scope: &str, cx: &App) -> Vec<PrChatSession> {
@@ -1121,7 +1127,7 @@ pub struct PrChatSession {
     pub fresh: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrChatCardRef {
     pub entry_id: String,
@@ -1131,8 +1137,8 @@ pub struct PrChatCardRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrChatPosted {
-    pub entry_id: String,
-    pub index: usize,
+    #[serde(flatten)]
+    pub card: PrChatCardRef,
     pub label: String,
     pub at: chrono::DateTime<chrono::Utc>,
 }
@@ -2211,27 +2217,30 @@ impl UiSettings {
             .retain(|_, sessions| !sessions.is_empty());
     }
 
-    pub fn record_pr_chat_post(&mut self, chat_id: &str, posted: PrChatPosted) {
-        if let Some(session) = self
-            .pr_chat_sessions
+    fn pr_chat_session(&self, chat_id: &str) -> Option<&PrChatSession> {
+        self.pr_chat_sessions
+            .values()
+            .flatten()
+            .find(|session| session.chat_id == chat_id)
+    }
+
+    fn pr_chat_session_mut(&mut self, chat_id: &str) -> Option<&mut PrChatSession> {
+        self.pr_chat_sessions
             .values_mut()
             .flatten()
             .find(|session| session.chat_id == chat_id)
-            && !session
-                .posted
-                .iter()
-                .any(|p| p.entry_id == posted.entry_id && p.index == posted.index)
+    }
+
+    pub fn record_pr_chat_post(&mut self, chat_id: &str, posted: PrChatPosted) {
+        if let Some(session) = self.pr_chat_session_mut(chat_id)
+            && !session.posted.iter().any(|p| p.card == posted.card)
         {
             session.posted.push(posted);
         }
     }
 
     pub fn record_pr_chat_dismiss(&mut self, chat_id: &str, card: PrChatCardRef) {
-        if let Some(session) = self
-            .pr_chat_sessions
-            .values_mut()
-            .flatten()
-            .find(|session| session.chat_id == chat_id)
+        if let Some(session) = self.pr_chat_session_mut(chat_id)
             && !session.dismissed.contains(&card)
         {
             session.dismissed.push(card);
@@ -2627,8 +2636,10 @@ mod tests {
         assert!(!pruned.pr_chat_sessions.contains_key("list"));
 
         let posted = |index: usize| PrChatPosted {
-            entry_id: "m2".into(),
-            index,
+            card: PrChatCardRef {
+                entry_id: "m2".into(),
+                index,
+            },
             label: "Posted comment".into(),
             at: chrono::Utc::now(),
         };
@@ -2646,6 +2657,20 @@ mod tests {
         let sessions = &pruned.pr_chat_sessions["github.com/acme/zeron#7"];
         assert_eq!(sessions[0].posted.len(), 2);
         assert_eq!(sessions[0].dismissed, [card(1)]);
+    }
+
+    #[test]
+    fn pr_chat_posted_keeps_its_flat_json_shape() {
+        let json = r#"{"entryId":"m2","index":3,"label":"Merged #7","at":"2026-09-21T09:00:00Z"}"#;
+        let posted: PrChatPosted = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            posted.card,
+            PrChatCardRef {
+                entry_id: "m2".into(),
+                index: 3,
+            }
+        );
+        assert_eq!(serde_json::to_string(&posted).unwrap(), json);
     }
 
     #[test]
@@ -3562,8 +3587,10 @@ mod tests {
                     chat_id: "pr-chat-1".into(),
                     created_at: chrono::DateTime::from_timestamp(1_790_000_000, 0).unwrap(),
                     posted: vec![PrChatPosted {
-                        entry_id: "m2".into(),
-                        index: 0,
+                        card: PrChatCardRef {
+                            entry_id: "m2".into(),
+                            index: 0,
+                        },
                         label: "Posted comment".into(),
                         at: chrono::DateTime::from_timestamp(1_790_000_100, 0).unwrap(),
                     }],

@@ -10,23 +10,11 @@ use zeron_proto::{
     RunChangeRequestActionRequest, SubmitChangeRequestReviewRequest,
 };
 
+use super::detail::plural;
 use super::handoff::bounded;
 use super::{ListEntry, PullRequestKey, PullRequestsPage, change_size, filters, group_thousands};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PrChatScope {
-    pub repository: Option<String>,
-    pub pull_request: Option<PullRequestKey>,
-}
-
 impl PullRequestsPage {
-    pub fn chat_scope(&self) -> PrChatScope {
-        PrChatScope {
-            repository: self.prefs.repository.clone(),
-            pull_request: self.active.clone(),
-        }
-    }
-
     pub fn chat_context(&self, cx: &App) -> PrChatContext {
         let listing = self.listing.ready();
         if let Some(key) = &self.active {
@@ -196,8 +184,10 @@ impl PullRequestsPage {
 }
 
 pub fn chat_shortcut(cx: &App) -> String {
-    let keymap = crate::settings::current(cx).keymap;
-    crate::settings::badge_combo(keymap.get(crate::settings::ShortcutId::ToggleTerminal))
+    crate::settings::badge_combo(&crate::settings::shortcut_combo(
+        crate::settings::ShortcutId::ToggleTerminal,
+        cx,
+    ))
 }
 
 pub(super) fn row_badge(
@@ -332,7 +322,7 @@ impl PrChatContext {
                 format!("PR #{}: {}", pr.key.number, pr.item.title.trim())
             }
             PrChatContext::List(_) => match first_prompt
-                .map(|prompt| prompt.split_whitespace().collect::<Vec<_>>().join(" "))
+                .map(crate::transcript::single_line)
                 .filter(|prompt| !prompt.is_empty())
             {
                 Some(prompt) => format!("Pull requests: {}", clip(&prompt, PROMOTED_PROMPT_LIMIT)),
@@ -464,11 +454,7 @@ impl PrChatContext {
                 if comments > 0 {
                     chips.push((
                         ContextChip::Comments,
-                        if comments == 1 {
-                            "1 comment".into()
-                        } else {
-                            format!("{comments} comments")
-                        },
+                        plural(comments, "comment", "comments"),
                     ));
                 }
                 if let Some(detail) = pr.detail.as_ref().filter(|d| !d.checks.is_empty()) {
@@ -489,11 +475,7 @@ impl PrChatContext {
                 vec![
                     (
                         ContextChip::Shown,
-                        if count == 1 {
-                            "1 PR shown".into()
-                        } else {
-                            format!("{count} PRs shown")
-                        },
+                        format!("{} shown", plural(count, "PR", "PRs")),
                     ),
                     (ContextChip::Filter, format!("Filter: {}", list.filter)),
                 ]
@@ -870,10 +852,6 @@ pub struct Confirmation {
 }
 
 impl Suggestion {
-    pub fn number(&self) -> u64 {
-        self.target.number
-    }
-
     pub fn target_label(&self) -> String {
         format!("#{} {}", self.target.number, self.target.repository)
     }
@@ -1142,25 +1120,11 @@ pub fn first_prompt(transcript: &[zeron_doc::SessionMessageEntry]) -> Option<Str
 }
 
 pub fn extract_badge(text: &str) -> Option<(String, crate::badges::MessageBadge)> {
-    let marker = format!("\n\n{CONTEXT_HEADER}\n");
-    let at = text.rfind(&marker)?;
-    let block = &text[at + marker.len()..];
-    if block.is_empty()
-        || !block
-            .lines()
-            .all(|line| line.is_empty() || line.starts_with('>'))
-    {
-        return None;
-    }
-    let details: Vec<crate::badges::BadgeDetail> = block
-        .split("\n\n")
-        .filter(|chunk| !chunk.is_empty())
-        .map(|chunk| {
-            let mut lines = chunk.lines().map(|line| {
-                line.strip_prefix("> ")
-                    .or_else(|| line.strip_prefix('>'))
-                    .unwrap_or(line)
-            });
+    let (rest, chunks) = crate::quotes::quoted_chunks(text, CONTEXT_HEADER)?;
+    let details: Vec<crate::badges::BadgeDetail> = chunks
+        .into_iter()
+        .map(|lines| {
+            let mut lines = lines.into_iter();
             let location = lines.next().unwrap_or_default().to_owned();
             let body = clip(&lines.collect::<Vec<_>>().join("\n"), 600);
             crate::badges::BadgeDetail {
@@ -1170,10 +1134,6 @@ pub fn extract_badge(text: &str) -> Option<(String, crate::badges::MessageBadge)
             }
         })
         .collect();
-    if details.is_empty() {
-        return None;
-    }
-    let rest = &text[..at];
     let rest = rest
         .strip_suffix(&format!("\n\n{ACTION_NOTE}"))
         .unwrap_or(rest);
@@ -1555,7 +1515,7 @@ mod tests {
                 ),
             ]
         );
-        assert!(cards.iter().all(|card| card.number() == 7));
+        assert!(cards.iter().all(|card| card.target.number == 7));
         assert_eq!(cards[0].header(), "Draft review comment, not posted");
         assert_eq!(cards[1].header(), "Suggestion, not run");
         assert!(cards[0].offers_request_changes());

@@ -620,7 +620,7 @@ fn resized_history_column_widths(
     widths
 }
 
-pub(crate) const WORKING_TREE_ROW: &str = "working-tree";
+const WORKING_TREE_ROW: &str = "working-tree";
 
 #[derive(Debug, Clone)]
 struct ActiveLane {
@@ -1336,14 +1336,10 @@ fn decode_history_avatar(encoded: &str) -> Option<Arc<Image>> {
     Some(Arc::new(Image::from_bytes(format, bytes)))
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GitHistoryTarget {
-    #[default]
     SelectedChat,
-    Pinned {
-        cwd: String,
-        device: Option<String>,
-    },
+    Pinned { cwd: String, device: Option<String> },
     Nothing,
 }
 
@@ -3557,12 +3553,16 @@ impl GitHistory {
                     }
                     return;
                 }
+                let any_dashed = rows
+                    .iter()
+                    .any(|row| row.segments.iter().any(|segment| segment.dashed));
                 for pass in 0..pass_count {
                     let selected_pass = focus.is_some() && pass == 1;
                     for (color_index, color, dashed) in palette
                         .iter()
                         .enumerate()
                         .flat_map(|(index, color)| [(index, color, false), (index, color, true)])
+                        .filter(|(_, _, dashed)| !dashed || any_dashed)
                     {
                         let stroke_width = focus
                             .filter(|_| selected_pass)

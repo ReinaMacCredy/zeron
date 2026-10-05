@@ -3,7 +3,7 @@ use gpui::{
     prelude::*, px,
 };
 
-use super::permission_guide::{choice_chip, row};
+use super::permission_guide::{choice_button, row};
 use super::widgets;
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::pickers::{CommitModelPicked, Pickers};
@@ -221,19 +221,7 @@ impl Render for SourceControlPage {
         let accent = theme.accent;
         let current = settings::current(cx);
         let chip = |id: &'static str, label: &'static str, selected: bool| {
-            choice_chip(&theme, selected)
-                .id(id)
-                .debug_selector(move || id.to_string())
-                .role(gpui::Role::Button)
-                .aria_label(label)
-                .aria_toggled(if selected {
-                    gpui::Toggled::True
-                } else {
-                    gpui::Toggled::False
-                })
-                .tab_index(0)
-                .focus_visible(move |style| style.border_2().border_color(accent))
-                .child(label)
+            choice_button(&theme, id, label, selected).debug_selector(move || id.to_string())
         };
 
         let instruction_text = current.commit_message_instruction.trim();

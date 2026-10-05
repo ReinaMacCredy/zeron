@@ -192,7 +192,7 @@ pub(crate) fn strip_html(markdown: &str) -> String {
     out
 }
 
-fn plural(count: usize, one: &str, many: &str) -> String {
+pub(super) fn plural(count: usize, one: &str, many: &str) -> String {
     format!("{count} {}", if count == 1 { one } else { many })
 }
 

@@ -319,7 +319,11 @@ pub(crate) fn score_match(item: &ChangeRequestListItem, query: &str) -> u32 {
     }
 }
 
-pub(crate) fn sort_items(items: &mut Vec<&ChangeRequestListItem>, sort: ListSort, search: &str) {
+pub(crate) fn sort_items<T: std::ops::Deref<Target = ChangeRequestListItem>>(
+    items: &mut [T],
+    sort: ListSort,
+    search: &str,
+) {
     use std::cmp::{Ordering, Reverse};
     if !search.trim().is_empty() {
         items.sort_by_cached_key(|item| {
@@ -618,12 +622,16 @@ pub(super) fn involvement_label(involvement: ChangeRequestInvolvement) -> &'stat
     label_of(&INVOLVEMENTS, involvement)
 }
 
-fn row(theme: &Theme, active: bool, id: impl Into<SharedString>) -> gpui::Stateful<gpui::Div> {
+pub(super) fn row(
+    theme: &Theme,
+    active: bool,
+    id: impl Into<SharedString>,
+) -> gpui::Stateful<gpui::Div> {
     let id = id.into();
     popover::menu_row(theme, active, id.clone()).id(id)
 }
 
-fn radio_dot(selected: bool, theme: &Theme) -> AnyElement {
+pub(super) fn radio_dot(selected: bool, theme: &Theme) -> gpui::Div {
     div()
         .ml_auto()
         .size(px(14.0))
@@ -633,7 +641,6 @@ fn radio_dot(selected: bool, theme: &Theme) -> AnyElement {
         .when(selected, |el| {
             el.child(div().size(px(6.0)).rounded_full().bg(theme.text))
         })
-        .into_any_element()
 }
 
 fn section_of(kind: MenuKind) -> Option<FilterSection> {

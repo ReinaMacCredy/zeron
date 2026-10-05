@@ -22,12 +22,12 @@ pub(super) struct PrChatPanel {
     fresh: bool,
     resumed: bool,
     error: Option<SharedString>,
-    pub(super) open: bool,
-    minimized: bool,
+    view: PanelView,
     earlier: Option<SharedString>,
     sessions_menu: bool,
-    cards: HashMap<CardKey, CardState>,
-    confirm: Option<CardKey>,
+    cards: HashMap<PrChatCardRef, CardState>,
+    confirm: Option<PrChatCardRef>,
+    parsed: std::cell::RefCell<Option<(String, String, Vec<Suggestion>)>>,
     _location: Option<Task<()>>,
     _context: Option<Task<()>>,
     _saved: Option<Subscription>,
@@ -39,7 +39,14 @@ pub(super) struct PrChatTrash {
     parked: Vec<ParkedPrChat>,
     deleted: HashSet<String>,
     pruned: Option<u64>,
-    posting: HashSet<(String, String, usize)>,
+    posting: HashSet<(String, PrChatCardRef)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PanelView {
+    Open,
+    Minimized,
+    Closed,
 }
 
 struct ParkedPrChat {
@@ -54,8 +61,6 @@ enum Landing {
     Index(String, bool),
     Promote,
 }
-
-type CardKey = (String, usize);
 
 #[derive(Default)]
 struct CardState {
@@ -84,7 +89,7 @@ impl Shell {
                 .is_none_or(|id| self.side_chats.contains_key(&id))
         };
         let restore = match self.pr_chat.as_ref().filter(|panel| live(panel)) {
-            Some(panel) if panel.minimized => true,
+            Some(panel) if panel.view == PanelView::Minimized => true,
             Some(panel) => self.pull_requests_page.as_ref().is_some_and(|page| {
                 page.read(cx).chat_context(cx).index_key() == panel.context.index_key()
             }),
@@ -92,8 +97,7 @@ impl Shell {
         };
         if restore {
             if let Some(panel) = self.pr_chat.as_mut() {
-                panel.open = true;
-                panel.minimized = false;
+                panel.view = PanelView::Open;
             }
             self.focus_pr_chat(cx);
         } else {
@@ -162,12 +166,12 @@ impl Shell {
             fresh,
             resumed: true,
             error: None,
-            open: true,
-            minimized: false,
+            view: PanelView::Open,
             earlier,
             sessions_menu: false,
             cards: HashMap::new(),
             confirm: None,
+            parsed: Default::default(),
             _location: None,
             _context: None,
             _saved: None,
@@ -208,9 +212,7 @@ impl Shell {
                     label: session_label(&day_label(at, now), title),
                     detail: match (current, preview) {
                         (true, _) => "Open session".into(),
-                        (false, Some(preview)) => {
-                            preview.split_whitespace().collect::<Vec<_>>().join(" ")
-                        }
+                        (false, Some(preview)) => crate::transcript::single_line(preview),
                         (false, None) => "No messages".into(),
                     },
                     current,
@@ -333,16 +335,7 @@ impl Shell {
         if let Some(engine) = self.state.read(cx).engine().cloned() {
             let params =
                 serde_json::json!({ "op": "renameChat", "chatId": chat_id, "title": title });
-            cx.spawn(async move |this, cx| {
-                if let Err(error) = engine.client().call(methods::MUTATE, params).await {
-                    this.update(cx, |shell, cx| {
-                        shell.sidebar_notice = Some(format!("{error}").into());
-                        cx.notify();
-                    })
-                    .ok();
-                }
-            })
-            .detach();
+            Self::spawn_mutate(engine, params, cx).detach();
         }
         self.close_pull_requests(cx);
         self.open_chat(chat_id, cx);
@@ -350,8 +343,7 @@ impl Shell {
 
     pub(super) fn minimize_pr_chat(&mut self, cx: &mut Context<Self>) {
         if let Some(panel) = self.pr_chat.as_mut() {
-            panel.open = false;
-            panel.minimized = true;
+            panel.view = PanelView::Minimized;
             panel.sessions_menu = false;
         }
         self.sync_pr_chat_button(cx);
@@ -366,7 +358,9 @@ impl Shell {
     }
 
     pub(super) fn pr_chat_open(&self) -> bool {
-        self.pr_chat.as_ref().is_some_and(|panel| panel.open)
+        self.pr_chat
+            .as_ref()
+            .is_some_and(|panel| panel.view == PanelView::Open)
     }
 
     pub(super) fn pr_chat_tab(&self) -> Option<&SideChatTab> {
@@ -442,12 +436,12 @@ impl Shell {
             fresh: settings::current(cx).pr_chat_history == PrChatHistory::Fresh,
             resumed: false,
             error: None,
-            open: true,
-            minimized: false,
+            view: PanelView::Open,
             earlier: None,
             sessions_menu: false,
             cards: HashMap::new(),
             confirm: None,
+            parsed: Default::default(),
             _location: Some(location_task),
             _context: Some(context_task),
             _saved: None,
@@ -588,8 +582,7 @@ impl Shell {
         let Some(panel) = self.pr_chat.as_mut() else {
             return;
         };
-        panel.open = false;
-        panel.minimized = false;
+        panel.view = PanelView::Closed;
         panel.sessions_menu = false;
         if settings::current(cx).pr_chat_history == PrChatHistory::Fresh {
             let chat_id = panel.chat_id.clone();
@@ -674,16 +667,7 @@ impl Shell {
             return;
         };
         let params = serde_json::json!({ "op": "deleteChat", "chatId": chat_id });
-        cx.spawn(async move |this, cx| {
-            if let Err(error) = engine.client().call(methods::MUTATE, params).await {
-                this.update(cx, |shell, cx| {
-                    shell.sidebar_notice = Some(format!("{error}").into());
-                    cx.notify();
-                })
-                .ok();
-            }
-        })
-        .detach();
+        Self::spawn_mutate(engine, params, cx).detach();
     }
 
     fn discard_pr_chat(&mut self, cx: &mut Context<Self>) {
@@ -790,19 +774,35 @@ impl Shell {
         let tab = self.pr_chat_tab()?;
         let (entry, text) =
             crate::pull_requests::latest_chat_reply(&tab.state.read(cx).transcript)?;
-        let suggestions = panel.context.suggestions(&text);
+        let mut parsed = panel.parsed.borrow_mut();
+        if !parsed
+            .as_ref()
+            .is_some_and(|(seen, seen_text, _)| *seen == entry && *seen_text == text)
+        {
+            let suggestions = panel.context.suggestions(&text);
+            *parsed = Some((entry.clone(), text, suggestions));
+        }
+        let suggestions = parsed
+            .as_ref()
+            .map(|(_, _, s)| s.clone())
+            .unwrap_or_default();
         (!suggestions.is_empty()).then_some((entry, suggestions))
     }
 
-    fn pr_chat_suggestion(&self, key: &CardKey, cx: &App) -> Option<Suggestion> {
+    fn pr_chat_suggestion(&self, key: &PrChatCardRef, cx: &App) -> Option<Suggestion> {
         let (entry, suggestions) = self.pr_chat_suggestions(cx)?;
-        if entry != key.0 {
+        if entry != key.entry_id {
             return None;
         }
-        suggestions.into_iter().find(|s| s.index == key.1)
+        suggestions.into_iter().find(|s| s.index == key.index)
     }
 
-    fn edit_pr_chat_card(&mut self, key: CardKey, window: &mut Window, cx: &mut Context<Self>) {
+    fn edit_pr_chat_card(
+        &mut self,
+        key: PrChatCardRef,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(suggestion) = self.pr_chat_suggestion(&key, cx) else {
             return;
         };
@@ -824,15 +824,12 @@ impl Shell {
         cx.notify();
     }
 
-    fn dismiss_pr_chat_card(&mut self, key: CardKey, cx: &mut Context<Self>) {
+    fn dismiss_pr_chat_card(&mut self, key: PrChatCardRef, cx: &mut Context<Self>) {
         let Some(panel) = self.pr_chat.as_mut() else {
             return;
         };
         let chat_id = panel.chat_id.clone();
-        let card = PrChatCardRef {
-            entry_id: key.0.clone(),
-            index: key.1,
-        };
+        let card = key.clone();
         panel.cards.entry(key).or_default().dismissed = true;
         settings::update(SavePolicy::Debounced, cx, |settings| {
             settings.record_pr_chat_dismiss(&chat_id, card)
@@ -840,11 +837,16 @@ impl Shell {
         cx.notify();
     }
 
-    fn post_pr_chat_card(&mut self, key: CardKey, request_changes: bool, cx: &mut Context<Self>) {
+    fn post_pr_chat_card(
+        &mut self,
+        key: PrChatCardRef,
+        request_changes: bool,
+        cx: &mut Context<Self>,
+    ) {
         let Some(suggestion) = self.pr_chat_suggestion(&key, cx) else {
             return;
         };
-        let last = settings::current(cx).pull_requests_merge_method;
+        let last = settings::pull_requests_merge_method(cx);
         if suggestion.confirmation(last).is_some() {
             if let Some(panel) = self.pr_chat.as_mut() {
                 panel.confirm = Some(key);
@@ -876,7 +878,7 @@ impl Shell {
         let open = self
             .pr_chat
             .as_ref()
-            .is_some_and(|panel| panel.open && panel.confirm.is_some());
+            .is_some_and(|panel| panel.view == PanelView::Open && panel.confirm.is_some());
         if open {
             self.cancel_pr_chat_confirm(cx);
         }
@@ -885,7 +887,7 @@ impl Shell {
 
     fn run_pr_chat_card(
         &mut self,
-        key: CardKey,
+        key: PrChatCardRef,
         suggestion: Suggestion,
         request_changes: bool,
         cx: &mut Context<Self>,
@@ -893,15 +895,14 @@ impl Shell {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        let last = settings::current(cx).pull_requests_merge_method;
+        let last = settings::pull_requests_merge_method(cx);
         let Some(panel) = self.pr_chat.as_mut() else {
             return;
         };
         let chat_id = panel.chat_id.clone();
-        let done = settings::pr_chat_posted(&chat_id, cx)
-            .iter()
-            .any(|posted| posted.entry_id == key.0 && posted.index == key.1);
-        let posting = (chat_id.clone(), key.0.clone(), key.1);
+        let done = settings::pr_chat_session(&chat_id, cx)
+            .is_some_and(|session| session.posted.iter().any(|posted| posted.card == key));
+        let posting = (chat_id.clone(), key.clone());
         let card = panel.cards.entry(key.clone()).or_default();
         if done || self.pr_chat_trash.posting.contains(&posting) || card.posted.is_some() {
             return;
@@ -937,21 +938,20 @@ impl Shell {
     fn finish_pr_chat_card(
         &mut self,
         chat_id: String,
-        key: CardKey,
+        key: PrChatCardRef,
         suggestion: Suggestion,
         label: String,
         result: Result<(), String>,
         cx: &mut Context<Self>,
     ) {
         let posted = result.as_ref().ok().map(|_| PrChatPosted {
-            entry_id: key.0.clone(),
-            index: key.1,
+            card: key.clone(),
             label,
             at: Utc::now(),
         });
         self.pr_chat_trash
             .posting
-            .remove(&(chat_id.clone(), key.0.clone(), key.1));
+            .remove(&(chat_id.clone(), key.clone()));
         if let Some(posted) = posted.clone() {
             settings::update(SavePolicy::Immediate, cx, |settings| {
                 settings.record_pr_chat_post(&chat_id, posted)
@@ -990,17 +990,18 @@ impl Shell {
             self.pr_chat = None;
         }
         let theme = Theme::of(cx).clone();
-        let Some(panel) = self.pr_chat.as_ref().filter(|panel| panel.open) else {
+        let Some(panel) = self
+            .pr_chat
+            .as_ref()
+            .filter(|panel| panel.view == PanelView::Open)
+        else {
             let git_tab = self
                 .pull_requests_page
                 .as_ref()
                 .is_some_and(|page| page.read(cx).git_tab_active());
             return (!git_tab).then(|| self.render_pr_chat_pill(&theme, cx));
         };
-        let (style, history) = {
-            let settings = settings::current(cx);
-            (settings.pr_chat_style, settings.pr_chat_history)
-        };
+        let (style, history) = settings::pr_chat_style_and_history(cx);
         let sessions = (history == PrChatHistory::KeepPerPr).then(|| self.pr_chat_session_rows(cx));
         let promotable = self.pr_chat_promotable(cx);
         let menu_open = panel.sessions_menu;
@@ -1373,29 +1374,26 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let panel = self.pr_chat.as_ref()?;
-        let posted = settings::pr_chat_posted(&panel.chat_id, cx);
-        let dismissed = settings::pr_chat_dismissed(&panel.chat_id, cx);
-        let last = settings::current(cx).pull_requests_merge_method;
+        let (posted, dismissed) = settings::pr_chat_session(&panel.chat_id, cx)
+            .map(|session| (session.posted, session.dismissed))
+            .unwrap_or_default();
+        let last = settings::pull_requests_merge_method(cx);
         let now = chrono::Local::now();
         let cards: Vec<AnyElement> = suggestions
             .into_iter()
             .filter_map(|suggestion| {
                 let ix = suggestion.index;
-                let key: CardKey = (entry.clone(), ix);
+                let key = PrChatCardRef {
+                    entry_id: entry.clone(),
+                    index: ix,
+                };
                 let state = panel.cards.get(&key);
-                if state.is_some_and(|state| state.dismissed)
-                    || dismissed
-                        .iter()
-                        .any(|card| card.entry_id == entry && card.index == ix)
-                {
+                if state.is_some_and(|state| state.dismissed) || dismissed.contains(&key) {
                     return None;
                 }
-                let done = state.and_then(|state| state.posted.clone()).or_else(|| {
-                    posted
-                        .iter()
-                        .find(|posted| posted.entry_id == entry && posted.index == ix)
-                        .cloned()
-                });
+                let done = state
+                    .and_then(|state| state.posted.clone())
+                    .or_else(|| posted.iter().find(|posted| posted.card == key).cloned());
                 let frame = div()
                     .id(("pr-chat-card", ix))
                     .flex_none()
@@ -1435,11 +1433,10 @@ impl Shell {
                             .into_any_element(),
                     );
                 }
-                let pending = self.pr_chat_trash.posting.contains(&(
-                    panel.chat_id.clone(),
-                    entry.clone(),
-                    ix,
-                ));
+                let pending = self
+                    .pr_chat_trash
+                    .posting
+                    .contains(&(panel.chat_id.clone(), key.clone()));
                 let editor = state.and_then(|state| state.editor.clone());
                 let error = state.and_then(|state| state.error.clone());
                 let header = suggestion.card_header();
@@ -1596,7 +1593,7 @@ impl Shell {
 
     fn render_pr_chat_confirm(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let key = self.pr_chat.as_ref()?.confirm.clone()?;
-        let last = settings::current(cx).pull_requests_merge_method;
+        let last = settings::pull_requests_merge_method(cx);
         let confirm = self.pr_chat_suggestion(&key, cx)?.confirmation(last)?;
         Some(
             div()
@@ -1983,7 +1980,7 @@ mod tests {
 
         let (side, side_state, chat_id) = shell.update(cx, |shell, cx| {
             let panel = shell.pr_chat.as_ref().expect("panel");
-            assert!(panel.open);
+            assert!(panel.view == PanelView::Open);
             let tab = shell.pr_chat_tab().expect("chat minted locally");
             let chat_id = panel.chat_id.clone();
             let row = tab.state.read(cx).selected_chat_row().cloned().unwrap();
@@ -2884,7 +2881,11 @@ mod tests {
 
         click(cx, "pr-chat-card-edit-0");
         let editor = shell.read_with(cx, |shell, _| {
-            let card = &shell.pr_chat.as_ref().unwrap().cards[&("a1".to_string(), 0)];
+            let key = PrChatCardRef {
+                entry_id: "a1".into(),
+                index: 0,
+            };
+            let card = &shell.pr_chat.as_ref().unwrap().cards[&key];
             card.editor.clone().expect("editing")
         });
         assert!(cx.debug_bounds("pr-chat-card-input-0").is_some());
@@ -2928,10 +2929,13 @@ mod tests {
         );
         assert!(cx.debug_bounds("pr-chat-card-posted-2").is_some());
 
-        let posted = cx.update(|_, cx| settings::pr_chat_posted("s7", cx));
+        let posted = cx
+            .update(|_, cx| settings::pr_chat_session("s7", cx))
+            .map(|session| session.posted)
+            .unwrap_or_default();
         let saved: Vec<(&str, usize, &str)> = posted
             .iter()
-            .map(|p| (p.entry_id.as_str(), p.index, p.label.as_str()))
+            .map(|p| (p.card.entry_id.as_str(), p.card.index, p.label.as_str()))
             .collect();
         assert_eq!(
             saved,

@@ -23,7 +23,7 @@ use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::history::{GitHistory, GitHistoryEvent, GitHistoryTarget};
 use crate::icons::{self, icon};
 use crate::pickers::{CommitModelPicked, Pickers};
-use crate::popover;
+use crate::popover::{self, Loadable};
 use crate::settings::CommitModelChoice;
 use crate::settings::widgets::text_tooltip;
 use crate::state::AppState;
@@ -129,28 +129,10 @@ struct Pending {
     replied: bool,
 }
 
-enum DiffView {
-    Loading,
-    Ready {
-        diff: WorkingTreeFileDiff,
-        parsed: Option<FileDiff>,
-    },
-    Failed(SharedString),
-}
-
 struct Expanded {
     staged: bool,
     path: String,
-    view: DiffView,
-}
-
-enum CommitDiffView {
-    Loading,
-    Ready {
-        diff: CheckoutDiff,
-        parsed: Vec<FileDiff>,
-    },
-    Failed(SharedString),
+    view: Loadable<(WorkingTreeFileDiff, Option<FileDiff>)>,
 }
 
 struct BranchForm {
@@ -161,7 +143,7 @@ struct BranchForm {
 
 struct CommitDetail {
     commit: GitHistoryCommit,
-    diff: CommitDiffView,
+    diff: Loadable<(CheckoutDiff, Vec<FileDiff>)>,
     open_files: HashSet<String>,
     branch_form: Option<BranchForm>,
     outcome: Option<(SharedString, bool)>,
@@ -184,9 +166,7 @@ pub struct GitTab {
     checkout_path: Option<String>,
     tree: Option<WorkingTree>,
     error: Option<SharedString>,
-    loading: bool,
     reload_wanted: bool,
-    generation: u64,
     load_task: Option<Task<()>>,
     watch_task: Option<Task<()>>,
     _poll_task: Task<()>,
@@ -205,8 +185,6 @@ pub struct GitTab {
     stash_menu: bool,
     stash_note: Option<SharedString>,
     last_commit: Option<CommitSummary>,
-    writing: bool,
-    write_generation: u64,
     write_task: Option<Task<()>>,
     write_focus: FocusHandle,
     written: Option<GeneratedCommitMessage>,
@@ -241,18 +219,37 @@ fn workspace_target(space: &GitSpace, checkout_path: Option<&str>) -> WorkspaceT
     }
 }
 
+impl GitSpace {
+    fn route(&self, request: impl serde::Serialize) -> serde_json::Value {
+        routed(
+            serde_json::to_value(request).unwrap_or_default(),
+            self.device.as_deref(),
+        )
+    }
+}
+
 fn target_params(space: &GitSpace, checkout_path: Option<&str>) -> serde_json::Value {
-    let request = GetWorkingTreeRequest {
+    space.route(GetWorkingTreeRequest {
         target: workspace_target(space, checkout_path),
-    };
-    routed(
-        serde_json::to_value(request).unwrap_or_default(),
-        space.device.as_deref(),
-    )
+    })
+}
+
+fn decode<T: serde::de::DeserializeOwned>(
+    reply: Result<serde_json::Value, RpcError>,
+) -> Result<T, String> {
+    reply
+        .map_err(|error| error.to_string())
+        .and_then(|value| serde_json::from_value(value).map_err(|error| error.to_string()))
+}
+
+fn push_direction(tree: &WorkingTree) -> SyncDirection {
+    SyncDirection::Push {
+        set_upstream: push_sets_upstream(tree),
+    }
 }
 
 fn busy_policy(cx: &App) -> GitAgentBusyPolicy {
-    crate::settings::current(cx).git_agent_busy_policy.into()
+    crate::settings::git_agent_busy_policy(cx).into()
 }
 
 fn in_section(tree: &WorkingTree, staged: bool, path: &str) -> bool {
@@ -393,6 +390,15 @@ fn status_letter(state: GitFileState) -> &'static str {
     }
 }
 
+fn state_color(state: GitFileState, theme: &Theme) -> gpui::Hsla {
+    match state {
+        GitFileState::Added | GitFileState::Untracked => theme.success,
+        GitFileState::Deleted | GitFileState::Unmerged => theme.danger,
+        GitFileState::Renamed | GitFileState::Copied => theme.accent,
+        _ => theme.warning,
+    }
+}
+
 pub(super) fn staged_files(tree: &WorkingTree) -> Vec<&WorkingTreeFile> {
     tree.files.iter().filter(|file| file.is_staged()).collect()
 }
@@ -502,7 +508,7 @@ impl GitTab {
             loop {
                 cx.background_executor().timer(POLL_INTERVAL).await;
                 let Ok(()) = this.update(cx, |tab, cx| {
-                    if tab.visible && tab.window_active && !tab.loading {
+                    if tab.visible && tab.window_active && !tab.loading() {
                         tab.load(cx);
                     }
                     if tab.visible && tab.watch_task.is_none() {
@@ -525,13 +531,13 @@ impl GitTab {
         let model_picks = cx.subscribe(
             &model_picker,
             |tab: &mut Self, _, event: &CommitModelPicked, cx| {
-                let default = crate::settings::current(cx).commit_message_model;
+                let default = crate::settings::commit_message_model(cx);
                 tab.model_override = (default.as_ref() != Some(&event.0)).then(|| event.0.clone());
                 cx.notify();
             },
         );
         let settings_changes = cx.observe_global::<crate::settings::SettingsStore>(|tab, cx| {
-            let default = crate::settings::current(cx).commit_message_model;
+            let default = crate::settings::commit_message_model(cx);
             if default != tab.shown_default {
                 tab.shown_default = default;
                 if tab.model_override.is_none() {
@@ -546,9 +552,7 @@ impl GitTab {
             checkout_path: None,
             tree: None,
             error: None,
-            loading: false,
             reload_wanted: false,
-            generation: 0,
             load_task: None,
             watch_task: None,
             _poll_task: poll_task,
@@ -567,8 +571,6 @@ impl GitTab {
             stash_menu: false,
             stash_note: None,
             last_commit: None,
-            writing: false,
-            write_generation: 0,
             write_task: None,
             write_focus: cx.focus_handle(),
             written: None,
@@ -630,7 +632,7 @@ impl GitTab {
             self.watch_task = None;
         }
         if resumed {
-            if !self.loading {
+            if !self.loading() {
                 self.load(cx);
             }
             if self.watch_task.is_none() {
@@ -666,10 +668,8 @@ impl GitTab {
     }
 
     fn retarget(&mut self, cx: &mut Context<Self>) {
-        self.generation = self.generation.wrapping_add(1);
         self.tree = None;
         self.error = None;
-        self.loading = false;
         self.reload_wanted = false;
         self.load_task = None;
         self.watch_task = None;
@@ -714,8 +714,16 @@ impl GitTab {
         cx.notify();
     }
 
+    fn loading(&self) -> bool {
+        self.load_task.is_some()
+    }
+
+    fn writing(&self) -> bool {
+        self.write_task.is_some()
+    }
+
     fn load_if_idle(&mut self, cx: &mut Context<Self>) {
-        if self.loading {
+        if self.loading() {
             self.reload_wanted = true;
         } else {
             self.load(cx);
@@ -730,23 +738,16 @@ impl GitTab {
             return;
         };
         let params = target_params(&space, self.checkout_path.as_deref());
-        let generation = self.generation;
-        self.loading = true;
         self.reload_wanted = false;
         self.load_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::GET_WORKING_TREE, params)
-                .await
-                .map_err(|error| error.to_string())
-                .and_then(|value| {
-                    serde_json::from_value::<WorkingTree>(value).map_err(|error| error.to_string())
-                });
+            let result = decode::<WorkingTree>(
+                engine
+                    .client()
+                    .call(methods::GET_WORKING_TREE, params)
+                    .await,
+            );
             this.update(cx, |tab, cx| {
-                if tab.generation != generation {
-                    return;
-                }
-                tab.loading = false;
+                tab.load_task = None;
                 if tab.pending.as_ref().is_some_and(|pending| pending.replied) {
                     tab.pending = None;
                     cx.notify();
@@ -900,11 +901,7 @@ impl GitTab {
             busy_policy: policy,
             action,
         };
-        let params = routed(
-            serde_json::to_value(request).unwrap_or_default(),
-            space.device.as_deref(),
-        );
-        let generation = self.generation;
+        let params = space.route(request);
         let committing = target == PendingTarget::Commit;
         let stashing = target == PendingTarget::Stash;
         let detailed = target == PendingTarget::Detail;
@@ -929,9 +926,6 @@ impl GitTab {
                 .call(methods::RUN_WORKING_TREE_ACTION, params)
                 .await;
             this.update(cx, |tab, cx| {
-                if tab.generation != generation {
-                    return;
-                }
                 match result {
                     Ok(value) => {
                         if let Some(pending) = tab.pending.as_mut() {
@@ -986,7 +980,7 @@ impl GitTab {
             CommitKind::All => !tree.files.is_empty(),
         };
         ready
-            && !self.writing
+            && !self.writing()
             && !self.message.read(cx).text().trim().is_empty()
             && self.allows(&kind.action(String::new()), policy, cx)
     }
@@ -1033,7 +1027,7 @@ impl GitTab {
             self.cancel_confirm(cx);
             return true;
         }
-        if self.writing {
+        if self.writing() {
             self.stop_writing(window, cx);
             return true;
         }
@@ -1113,7 +1107,7 @@ impl GitTab {
         self.detail_task = None;
         self.detail = commit.map(|commit| CommitDetail {
             commit,
-            diff: CommitDiffView::Loading,
+            diff: Loadable::Loading,
             open_files: HashSet::new(),
             branch_form: None,
             outcome: None,
@@ -1134,24 +1128,16 @@ impl GitTab {
             .checkout_path
             .clone()
             .unwrap_or_else(|| space.path.clone());
-        let params = routed(
-            serde_json::json!({"cwd": cwd, "mode": "commit", "commitSha": sha}),
-            space.device.as_deref(),
-        );
-        let generation = self.generation;
+        let params =
+            space.route(serde_json::json!({"cwd": cwd, "mode": "commit", "commitSha": sha}));
         self.detail_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::GET_CHECKOUT_DIFF, params)
-                .await
-                .map_err(|error| error.to_string())
-                .and_then(|value| {
-                    serde_json::from_value::<CheckoutDiff>(value).map_err(|error| error.to_string())
-                });
+            let result = decode::<CheckoutDiff>(
+                engine
+                    .client()
+                    .call(methods::GET_CHECKOUT_DIFF, params)
+                    .await,
+            );
             this.update(cx, |tab, cx| {
-                if tab.generation != generation {
-                    return;
-                }
                 let Some(detail) = tab
                     .detail
                     .as_mut()
@@ -1162,9 +1148,9 @@ impl GitTab {
                 detail.diff = match result {
                     Ok(diff) => {
                         let parsed = changes::parse_patch(&diff.patch);
-                        CommitDiffView::Ready { diff, parsed }
+                        Loadable::Ready((diff, parsed))
                     }
-                    Err(error) => CommitDiffView::Failed(error.into()),
+                    Err(error) => Loadable::Error(error),
                 };
                 cx.notify();
             })
@@ -1363,7 +1349,7 @@ impl GitTab {
                 }
             }
             None => {
-                let CommitDiffView::Ready { diff, .. } = &detail.diff else {
+                let Some((diff, _)) = detail.diff.ready() else {
                     return;
                 };
                 if detail.open_files.len() == diff.files.len() {
@@ -1609,42 +1595,17 @@ impl GitTab {
             return;
         };
         let (direction, destination) = match kind {
-            SyncKind::Push => (
-                SyncDirection::Push {
-                    set_upstream: push_sets_upstream(&tree),
-                },
-                publish_destination(&tree),
-            ),
+            SyncKind::Push => (push_direction(&tree), publish_destination(&tree)),
             SyncKind::Pull => (SyncDirection::Pull, None),
         };
-        let request = SyncBranchRequest {
-            target: workspace_target(&space, self.checkout_path.as_deref()),
-            expected_head_sha: head,
-            busy_policy: busy_policy(cx),
-            direction,
-        };
-        let params = routed(
-            serde_json::to_value(request).unwrap_or_default(),
-            space.device.as_deref(),
-        );
-        let generation = self.generation;
+        let params = space.route(self.sync_request(&space, head, direction, cx));
         self.syncing = Some(kind);
         self.sync_outcome = None;
         cx.notify();
         self.sync_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::SYNC_BRANCH, params)
-                .await
-                .map_err(|error| error.to_string())
-                .and_then(|value| {
-                    serde_json::from_value::<SyncBranchReply>(value)
-                        .map_err(|error| error.to_string())
-                });
+            let result =
+                decode::<SyncBranchReply>(engine.client().call(methods::SYNC_BRANCH, params).await);
             this.update(cx, |tab, cx| {
-                if tab.generation != generation {
-                    return;
-                }
                 tab.syncing = None;
                 tab.sync_outcome = Some(match result {
                     Ok(reply) => SyncOutcome {
@@ -1759,42 +1720,22 @@ impl GitTab {
         let draft = sheet.draft;
         sheet.step = Some(PrStep::Pushing);
         sheet.error = None;
-        let workspace = workspace_target(&space, self.checkout_path.as_deref());
-        let push = routed(
-            serde_json::to_value(SyncBranchRequest {
-                target: workspace.clone(),
-                expected_head_sha: head,
-                busy_policy: busy_policy(cx),
-                direction: SyncDirection::Push {
-                    set_upstream: push_sets_upstream(&tree),
-                },
-            })
-            .unwrap_or_default(),
-            space.device.as_deref(),
-        );
-        let create = routed(
-            serde_json::to_value(CreateChangeRequestRequest {
-                target: workspace,
-                host: target.host,
-                repository: target.repository,
-                head: branch,
-                base: tree.default_branch.clone(),
-                title,
-                body: String::new(),
-                draft,
-            })
-            .unwrap_or_default(),
-            space.device.as_deref(),
-        );
-        let generation = self.generation;
+        let push = space.route(self.sync_request(&space, head, push_direction(&tree), cx));
+        let create = space.route(CreateChangeRequestRequest {
+            target: workspace_target(&space, self.checkout_path.as_deref()),
+            host: target.host,
+            repository: target.repository,
+            head: branch,
+            base: tree.default_branch.clone(),
+            title,
+            body: String::new(),
+            draft,
+        });
         cx.notify();
         self.pr_task = Some(cx.spawn(async move |this, cx| {
             let pushed = engine.client().call(methods::SYNC_BRANCH, push).await;
             let pushed = this
                 .update(cx, |tab, cx| {
-                    if tab.generation != generation {
-                        return false;
-                    }
                     let Some(sheet) = tab.pr_sheet.as_mut() else {
                         return false;
                     };
@@ -1817,19 +1758,13 @@ impl GitTab {
             if !pushed {
                 return;
             }
-            let created = engine
-                .client()
-                .call(methods::CREATE_CHANGE_REQUEST, create)
-                .await
-                .map_err(|error| error.to_string())
-                .and_then(|value| {
-                    serde_json::from_value::<CreatedChangeRequest>(value)
-                        .map_err(|error| error.to_string())
-                });
+            let created = decode::<CreatedChangeRequest>(
+                engine
+                    .client()
+                    .call(methods::CREATE_CHANGE_REQUEST, create)
+                    .await,
+            );
             this.update(cx, |tab, cx| {
-                if tab.generation != generation {
-                    return;
-                }
                 match created {
                     Ok(created) => {
                         tab.pr_sheet = None;
@@ -1847,6 +1782,21 @@ impl GitTab {
             })
             .ok();
         }));
+    }
+
+    fn sync_request(
+        &self,
+        space: &GitSpace,
+        head: String,
+        direction: SyncDirection,
+        cx: &App,
+    ) -> SyncBranchRequest {
+        SyncBranchRequest {
+            target: workspace_target(space, self.checkout_path.as_deref()),
+            expected_head_sha: head,
+            busy_policy: busy_policy(cx),
+            direction,
+        }
     }
 
     fn reset_model_override(&mut self, cx: &mut Context<Self>) {
@@ -1870,7 +1820,7 @@ impl GitTab {
     }
 
     fn write_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.writing {
+        if self.writing() {
             self.stop_writing(window, cx);
             return;
         }
@@ -1895,32 +1845,20 @@ impl GitTab {
             harness: choice.as_ref().map(|choice| choice.harness),
             model: choice.map(|choice| choice.model),
         };
-        let params = routed(
-            serde_json::to_value(request).unwrap_or_default(),
-            space.device.as_deref(),
-        );
-        self.write_generation = self.write_generation.wrapping_add(1);
-        let generation = self.write_generation;
-        self.writing = true;
+        let params = space.route(request);
         self.write_error = None;
         self.commit_menu = false;
         window.focus(&self.write_focus, cx);
         cx.notify();
         self.write_task = Some(cx.spawn_in(window, async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::GENERATE_COMMIT_MESSAGE, params)
-                .await
-                .map_err(|error| error.to_string())
-                .and_then(|value| {
-                    serde_json::from_value::<GeneratedCommitMessage>(value)
-                        .map_err(|error| error.to_string())
-                });
+            let result = decode::<GeneratedCommitMessage>(
+                engine
+                    .client()
+                    .call(methods::GENERATE_COMMIT_MESSAGE, params)
+                    .await,
+            );
             this.update_in(cx, |tab, window, cx| {
-                if tab.write_generation != generation {
-                    return;
-                }
-                tab.writing = false;
+                tab.write_task = None;
                 match result {
                     Ok(generated) => {
                         tab.message.update(cx, |input, cx| {
@@ -1938,12 +1876,11 @@ impl GitTab {
     }
 
     fn cancel_writing(&mut self) {
-        self.write_generation = self.write_generation.wrapping_add(1);
-        self.writing = false;
+        self.write_task = None;
     }
 
     fn stop_writing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.writing {
+        if !self.writing() {
             return;
         }
         self.cancel_writing();
@@ -1968,7 +1905,7 @@ impl GitTab {
         self.expanded = Some(Expanded {
             staged,
             path,
-            view: DiffView::Loading,
+            view: Loadable::Loading,
         });
         self.fetch_diff(cx);
         cx.notify();
@@ -1987,25 +1924,15 @@ impl GitTab {
             path: path.clone(),
             staged,
         };
-        let params = routed(
-            serde_json::to_value(request).unwrap_or_default(),
-            space.device.as_deref(),
-        );
-        let generation = self.generation;
+        let params = space.route(request);
         self.diff_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::GET_WORKING_TREE_FILE_DIFF, params)
-                .await
-                .map_err(|error| error.to_string())
-                .and_then(|value| {
-                    serde_json::from_value::<WorkingTreeFileDiff>(value)
-                        .map_err(|error| error.to_string())
-                });
+            let result = decode::<WorkingTreeFileDiff>(
+                engine
+                    .client()
+                    .call(methods::GET_WORKING_TREE_FILE_DIFF, params)
+                    .await,
+            );
             this.update(cx, |tab, cx| {
-                if tab.generation != generation {
-                    return;
-                }
                 let Some(open) = tab
                     .expanded
                     .as_mut()
@@ -2016,9 +1943,9 @@ impl GitTab {
                 open.view = match result {
                     Ok(diff) => {
                         let parsed = changes::parse_patch(&diff.patch).into_iter().next();
-                        DiffView::Ready { diff, parsed }
+                        Loadable::Ready((diff, parsed))
                     }
-                    Err(error) => DiffView::Failed(error.into()),
+                    Err(error) => Loadable::Error(error),
                 };
                 cx.notify();
             })
@@ -2179,12 +2106,7 @@ impl GitTab {
     ) -> AnyElement {
         let state = if staged { file.index } else { file.worktree };
         let delta = if staged { file.staged } else { file.unstaged };
-        let color = match state {
-            GitFileState::Added | GitFileState::Untracked => theme.success,
-            GitFileState::Deleted | GitFileState::Unmerged => theme.danger,
-            GitFileState::Renamed | GitFileState::Copied => theme.accent,
-            _ => theme.warning,
-        };
+        let color = state_color(state, theme);
         let (dir, name) = match file.path.rsplit_once('/') {
             Some((dir, name)) => (format!("{dir}/"), name.to_owned()),
             None => (String::new(), file.path.clone()),
@@ -2418,12 +2340,6 @@ impl GitTab {
             .id("git-discard-confirm")
             .debug_selector(|| "git-discard-confirm".into())
             .track_focus(&self.confirm_focus)
-            .on_key_down(cx.listener(|tab, event: &KeyDownEvent, _, cx| {
-                if event.keystroke.key == "escape" {
-                    cx.stop_propagation();
-                    tab.cancel_confirm(cx);
-                }
-            }))
             .mx(px(12.0))
             .my(px(2.0))
             .px(px(10.0))
@@ -2697,12 +2613,6 @@ impl GitTab {
                         .id("git-stash-drop-confirm")
                         .debug_selector(|| "git-stash-drop-confirm".into())
                         .track_focus(&self.confirm_focus)
-                        .on_key_down(cx.listener(|tab, event: &KeyDownEvent, _, cx| {
-                            if event.keystroke.key == "escape" {
-                                cx.stop_propagation();
-                                tab.cancel_confirm(cx);
-                            }
-                        }))
                         .my(px(2.0))
                         .px(px(8.0))
                         .py(px(6.0))
@@ -2741,21 +2651,9 @@ impl GitTab {
                 .map(|at| super::relative_time(now, at))
                 .unwrap_or_default();
             let row_button = |selector: String, label: &'static str, enabled: bool| {
-                div()
-                    .id(SharedString::from(selector.clone()))
-                    .debug_selector(move || selector.clone())
-                    .role(gpui::Role::Button)
-                    .aria_label(label)
-                    .flex_none()
-                    .h(px(22.0))
-                    .px(px(8.0))
-                    .rounded(px(6.0))
+                button_shell(selector, label.into(), 22.0, 8.0, 6.0)
                     .border_1()
                     .border_color(popup.hairline(0.12))
-                    .flex()
-                    .items_center()
-                    .text_size(px(12.0))
-                    .child(label)
                     .map(|el| {
                         if enabled {
                             el.cursor_pointer().hover(|style| style.bg(popup.ink(0.06)))
@@ -2910,7 +2808,7 @@ impl GitTab {
             format!("Commit {staged} files")
         };
         let main_enabled = enabled(CommitKind::Staged);
-        let writing = self.writing;
+        let writing = self.writing();
         let write_enabled = writing || self.can_write(cx);
         let write_label = if writing {
             "Writing… Esc to stop"
@@ -3137,12 +3035,7 @@ impl GitTab {
                             input.replace_text_in_range(None, "\n", window, cx)
                         });
                     }))
-                    .on_key_down(cx.listener(|tab, event: &KeyDownEvent, window, cx| {
-                        if event.keystroke.key == "escape" && tab.writing {
-                            cx.stop_propagation();
-                            tab.stop_writing(window, cx);
-                            return;
-                        }
+                    .on_key_down(cx.listener(|tab, event: &KeyDownEvent, _, cx| {
                         let modifiers = &event.keystroke.modifiers;
                         if event.keystroke.key == "enter"
                             && (modifiers.platform || modifiers.control)
@@ -3152,7 +3045,7 @@ impl GitTab {
                         }
                     }))
                     .on_click(cx.listener(|tab, _, window, cx| {
-                        if !tab.writing {
+                        if !tab.writing() {
                             window.focus(&tab.message.focus_handle(cx), cx);
                         }
                     }))
@@ -3234,7 +3127,7 @@ impl GitTab {
                 let Some(commit) = self.last_commit.as_ref() else {
                     return el;
                 };
-                let short: String = commit.sha.chars().take(7).collect();
+                let short = short_sha(&commit.sha);
                 let text = match &commit.branch {
                     Some(branch) => format!("Committed {short} to {branch}"),
                     None => format!("Committed {short}"),
@@ -3414,9 +3307,9 @@ impl GitTab {
             .next()
             .filter(|_| tree.is_some());
         let copied = self.history.read(cx).copied_sha() == Some(commit.sha.as_str());
-        let files: &[DiffFileSummary] = match &detail.diff {
-            CommitDiffView::Ready { diff, .. } => &diff.files,
-            _ => &[],
+        let files: &[DiffFileSummary] = match detail.diff.ready() {
+            Some((diff, _)) => &diff.files,
+            None => &[],
         };
         let all_open = !files.is_empty() && detail.open_files.len() == files.len();
         let parents = if commit.parent_shas.is_empty() {
@@ -3474,12 +3367,6 @@ impl GitTab {
                 .id("git-commit-confirm")
                 .debug_selector(|| "git-commit-confirm".into())
                 .track_focus(&self.confirm_focus)
-                .on_key_down(cx.listener(|tab, event: &KeyDownEvent, _, cx| {
-                    if event.keystroke.key == "escape" {
-                        cx.stop_propagation();
-                        tab.cancel_confirm(cx);
-                    }
-                }))
                 .px(px(10.0))
                 .py(px(8.0))
                 .rounded(px(8.0))
@@ -3516,12 +3403,6 @@ impl GitTab {
                 .capture_action(cx.listener(|tab, _: &crate::composer::Submit, _, cx| {
                     cx.stop_propagation();
                     tab.create_branch(cx);
-                }))
-                .on_key_down(cx.listener(|tab, event: &KeyDownEvent, _, cx| {
-                    if event.keystroke.key == "escape" {
-                        cx.stop_propagation();
-                        tab.close_branch_form(cx);
-                    }
                 }))
                 .px(px(10.0))
                 .py(px(8.0))
@@ -3619,7 +3500,7 @@ impl GitTab {
         });
         let mut file_rows: Vec<AnyElement> = Vec::new();
         match &detail.diff {
-            CommitDiffView::Loading => file_rows.push(
+            Loadable::Idle | Loadable::Loading => file_rows.push(
                 div()
                     .px(px(12.0))
                     .text_size(px(12.0))
@@ -3627,7 +3508,7 @@ impl GitTab {
                     .child("Reading the commit…")
                     .into_any_element(),
             ),
-            CommitDiffView::Failed(error) => file_rows.push(
+            Loadable::Error(error) => file_rows.push(
                 div()
                     .id("git-commit-files-error")
                     .debug_selector(|| "git-commit-files-error".into())
@@ -3637,7 +3518,7 @@ impl GitTab {
                     .child(error.clone())
                     .into_any_element(),
             ),
-            CommitDiffView::Ready { diff, parsed } => {
+            Loadable::Ready((diff, parsed)) => {
                 for (index, file) in diff.files.iter().enumerate() {
                     file_rows.push(self.render_commit_file(index, file, detail, theme, cx));
                     if detail.open_files.contains(&file.path) {
@@ -3919,19 +3800,14 @@ impl GitTab {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let letter = match file.status.as_str() {
-            "added" | "untracked" => "A",
-            "deleted" => "D",
-            "renamed" => "R",
-            "copied" => "C",
-            _ => "M",
+        let state = match file.status.as_str() {
+            "added" | "untracked" => GitFileState::Added,
+            "deleted" => GitFileState::Deleted,
+            "renamed" => GitFileState::Renamed,
+            "copied" => GitFileState::Copied,
+            _ => GitFileState::Modified,
         };
-        let color = match letter {
-            "A" => theme.success,
-            "D" => theme.danger,
-            "R" | "C" => theme.accent,
-            _ => theme.warning,
-        };
+        let (letter, color) = (status_letter(state), state_color(state, theme));
         let (dir, name) = match file.path.rsplit_once('/') {
             Some((dir, name)) => (format!("{dir}/"), name.to_owned()),
             None => (String::new(), file.path.clone()),
@@ -4007,7 +3883,7 @@ impl GitTab {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let short: String = commit.sha.chars().take(7).collect();
+        let short = short_sha(&commit.sha);
         let branch = commit.branch.clone().unwrap_or_default();
         let text = format!("Committed {short} to {branch}. No pull request yet.");
         let bold = |start: usize, len: usize| {
@@ -4098,12 +3974,6 @@ impl GitTab {
         div()
             .id("git-pr-sheet")
             .debug_selector(|| "git-pr-sheet".into())
-            .on_key_down(cx.listener(|tab, event: &KeyDownEvent, _, cx| {
-                if event.keystroke.key == "escape" {
-                    cx.stop_propagation();
-                    tab.cancel_pr_sheet(cx);
-                }
-            }))
             .px(px(10.0))
             .py(px(10.0))
             .rounded(px(8.0))
@@ -4234,27 +4104,38 @@ fn render_agent_banner(policy: GitAgentBusyPolicy, theme: &Theme) -> AnyElement 
         .into_any_element()
 }
 
+fn button_shell(
+    selector: impl Into<SharedString>,
+    label: SharedString,
+    height: f32,
+    padding: f32,
+    radius: f32,
+) -> gpui::Stateful<gpui::Div> {
+    let selector = selector.into();
+    div()
+        .id(selector.clone())
+        .debug_selector(move || selector.to_string())
+        .role(gpui::Role::Button)
+        .aria_label(label.clone())
+        .flex_none()
+        .h(px(height))
+        .px(px(padding))
+        .rounded(px(radius))
+        .flex()
+        .items_center()
+        .text_size(px(12.0))
+        .child(label)
+}
+
 fn detail_button(
     selector: &'static str,
     label: impl Into<SharedString>,
     enabled: bool,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
-    let label = label.into();
-    div()
-        .id(selector)
-        .debug_selector(move || selector.into())
-        .role(gpui::Role::Button)
-        .aria_label(label.clone())
-        .flex_none()
-        .h(px(26.0))
-        .px(px(10.0))
-        .rounded(px(7.0))
+    button_shell(selector, label.into(), 26.0, 10.0, 7.0)
         .border_1()
         .border_color(theme.hairline(0.12))
-        .flex()
-        .items_center()
-        .text_size(px(12.0))
         .text_color(theme.text)
         .map(|el| {
             if enabled {
@@ -4263,7 +4144,6 @@ fn detail_button(
                 el.opacity(0.45)
             }
         })
-        .child(label)
 }
 
 fn accent_button(
@@ -4272,18 +4152,7 @@ fn accent_button(
     enabled: bool,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(selector)
-        .debug_selector(move || selector.into())
-        .role(gpui::Role::Button)
-        .aria_label(label)
-        .flex_none()
-        .h(px(24.0))
-        .px(px(9.0))
-        .rounded(px(6.0))
-        .flex()
-        .items_center()
-        .text_size(px(12.0))
+    button_shell(selector, label.into(), 24.0, 9.0, 6.0)
         .font_weight(gpui::FontWeight::MEDIUM)
         .bg(theme.accent_strong)
         .text_color(theme.on_accent)
@@ -4294,7 +4163,6 @@ fn accent_button(
                 el.opacity(0.45)
             }
         })
-        .child(label)
 }
 
 fn small_button(
@@ -4303,18 +4171,7 @@ fn small_button(
     danger: bool,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(selector)
-        .debug_selector(move || selector.into())
-        .role(gpui::Role::Button)
-        .aria_label(label)
-        .flex_none()
-        .h(px(24.0))
-        .px(px(9.0))
-        .rounded(px(6.0))
-        .flex()
-        .items_center()
-        .text_size(px(12.0))
+    button_shell(selector, label.into(), 24.0, 9.0, 6.0)
         .cursor_pointer()
         .map(|el| {
             if danger {
@@ -4328,14 +4185,13 @@ fn small_button(
                     .hover(|style| style.bg(theme.ink(0.06)))
             }
         })
-        .child(label)
 }
 
 fn render_diff(open: &Expanded, theme: &Theme) -> AnyElement {
     let body = match &open.view {
-        DiffView::Loading => DiffBody::Loading,
-        DiffView::Failed(error) => DiffBody::Failed(error.clone()),
-        DiffView::Ready { diff, parsed } => DiffBody::Ready {
+        Loadable::Idle | Loadable::Loading => DiffBody::Loading,
+        Loadable::Error(error) => DiffBody::Failed(error.clone().into()),
+        Loadable::Ready((diff, parsed)) => DiffBody::Ready {
             file: parsed.as_ref(),
             binary: diff.binary,
             truncated: diff.truncated,
@@ -4443,7 +4299,7 @@ impl Render for GitTab {
             self.activation = Some(cx.observe_window_activation(window, |tab, window, cx| {
                 let resumed = window.is_window_active() && !tab.window_active;
                 tab.window_active = window.is_window_active();
-                if resumed && tab.visible && !tab.loading {
+                if resumed && tab.visible && !tab.loading() {
                     tab.load(cx);
                 }
             }));
@@ -4889,39 +4745,14 @@ impl PullRequestsPage {
                     .map(|candidate| SharedString::from(candidate.display_name().to_string()))
             })
             .unwrap_or_else(|| "Pick a project".into());
-        self.menu_trigger(
+        self.render_project_chip(
             filters::MenuKind::GitProject,
-            top_chip("pull-requests-git-project", "Project", theme)
-                .debug_selector(|| "pull-requests-git-project".into())
-                .max_w(px(240.0))
-                .child(
-                    icon(icons::LUCIDE_FOLDER)
-                        .size(px(14.0))
-                        .flex_none()
-                        .text_color(if space.is_some() {
-                            theme.text
-                        } else {
-                            theme.text_muted
-                        }),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .child(label),
-                )
-                .child(
-                    icon(icons::LUCIDE_CHEVRON_DOWN)
-                        .size(px(12.0))
-                        .flex_none()
-                        .text_color(theme.text_muted.opacity(0.7)),
-                ),
+            "pull-requests-git-project",
+            label,
+            space.is_some(),
             theme,
             cx,
         )
-        .into_any_element()
     }
 
     pub(super) fn render_git_project_menu(
@@ -5138,9 +4969,7 @@ fn menu_option(
     live: bool,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
-    let id = SharedString::from(selector.clone());
-    popover::menu_row(theme, false, id.clone())
-        .id(id)
+    filters::row(theme, false, selector.clone())
         .debug_selector(move || selector.clone())
         .role(gpui::Role::MenuItemRadio)
         .aria_label(label.clone())
@@ -5168,18 +4997,7 @@ fn menu_option(
                         .child(detail),
                 ),
         )
-        .child(
-            div()
-                .ml_auto()
-                .size(px(14.0))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .when(selected, |el| {
-                    el.child(div().size(px(6.0)).rounded_full().bg(theme.text))
-                }),
-        )
+        .child(filters::radio_dot(selected, theme).flex_none())
 }
 
 #[cfg(test)]
@@ -5190,7 +5008,6 @@ mod tests {
     use zeron_rpc::{RpcReply, RpcService};
 
     use super::*;
-    use crate::popover::Loadable;
 
     type Calls = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
 
@@ -5844,6 +5661,10 @@ mod tests {
         page.read_with(cx, |page, _| page.git_view.clone().unwrap())
     }
 
+    fn press_escape(tab: &Entity<GitTab>, cx: &mut gpui::VisualTestContext) {
+        assert!(tab.update_in(cx, |tab, window, cx| tab.dismiss_overlay(window, cx)));
+    }
+
     fn click(cx: &mut gpui::VisualTestContext, selector: &'static str) {
         let bounds = cx
             .debug_bounds(selector)
@@ -5859,7 +5680,7 @@ mod tests {
     ) {
         settle(cx, |cx| {
             calls_of(calls, methods::RUN_WORKING_TREE_ACTION).len() == actions
-                && tab.read_with(cx, |tab, _| tab.pending.is_none() && !tab.loading)
+                && tab.read_with(cx, |tab, _| tab.pending.is_none() && !tab.loading())
         });
     }
 
@@ -5928,7 +5749,7 @@ mod tests {
             tab.read_with(cx, |tab, _| {
                 matches!(
                     tab.expanded.as_ref().map(|open| &open.view),
-                    Some(DiffView::Ready { .. })
+                    Some(Loadable::Ready(_))
                 )
             }) && cx.debug_bounds("git-file-diff").is_some()
         });
@@ -5937,9 +5758,8 @@ mod tests {
             [serde_json::json!({"spaceId": "space-1", "path": "src/a b.rs", "staged": true})]
         );
         tab.read_with(cx, |tab, _| {
-            let Some(DiffView::Ready {
-                parsed: Some(file), ..
-            }) = tab.expanded.as_ref().map(|open| &open.view)
+            let Some(Loadable::Ready((_, Some(file)))) =
+                tab.expanded.as_ref().map(|open| &open.view)
             else {
                 panic!("a parsed diff");
             };
@@ -6299,7 +6119,7 @@ mod tests {
             })]
         );
         tab.read_with(cx, |tab, _| {
-            assert!(!tab.writing);
+            assert!(!tab.writing());
             let written = tab.written.as_ref().expect("the reply is kept");
             assert_eq!(written.model, "claude-haiku-4-5");
         });
@@ -6326,7 +6146,7 @@ mod tests {
         assert!(cx.debug_bounds("git-write-model-override").is_some());
         click(cx, "git-write-ai");
         settle(cx, |_| writes(&calls).len() == 2);
-        settle(cx, |cx| tab.read_with(cx, |tab, _| !tab.writing));
+        settle(cx, |cx| tab.read_with(cx, |tab, _| !tab.writing()));
         assert_eq!(
             writes(&calls)[1],
             serde_json::json!({
@@ -6381,7 +6201,7 @@ mod tests {
         click(cx, "git-write-ai");
         settle(cx, |_| writes(&calls).len() == 1);
         cx.run_until_parked();
-        assert!(tab.read_with(cx, |tab, _| tab.writing));
+        assert!(tab.read_with(cx, |tab, _| tab.writing()));
         assert!(cx.debug_bounds("git-write-preview").is_some());
         cx.simulate_keystrokes("cmd-enter");
         cx.run_until_parked();
@@ -6390,9 +6210,9 @@ mod tests {
             "no commit while a message is being written"
         );
 
-        cx.simulate_keystrokes("escape");
+        press_escape(&tab, cx);
         cx.run_until_parked();
-        assert!(!tab.read_with(cx, |tab, _| tab.writing));
+        assert!(!tab.read_with(cx, |tab, _| tab.writing()));
         assert!(cx.debug_bounds("git-write-preview").is_none());
 
         lab.release_write.notify_one();
@@ -6407,7 +6227,7 @@ mod tests {
         }
         assert_eq!(message(&tab, cx), "My own words");
         tab.read_with(cx, |tab, _| {
-            assert!(tab.written.is_none() && tab.write_error.is_none() && !tab.writing);
+            assert!(tab.written.is_none() && tab.write_error.is_none() && !tab.writing());
         });
         assert!(calls_of(&calls, methods::RUN_WORKING_TREE_ACTION).is_empty());
     }
@@ -6576,7 +6396,7 @@ mod tests {
         click(cx, "git-changes-discard-1");
         cx.run_until_parked();
         assert!(cx.debug_bounds("git-discard-confirm").is_some());
-        cx.simulate_keystrokes("escape");
+        press_escape(&tab, cx);
         cx.run_until_parked();
         assert!(cx.debug_bounds("git-discard-confirm").is_none());
         assert!(
@@ -6616,7 +6436,7 @@ mod tests {
         changed["revision"] = "r-edited".into();
         *lab.tree.lock().unwrap() = Some(changed);
         tab.update(cx, |tab, cx| tab.load(cx));
-        settle(cx, |cx| tab.read_with(cx, |tab, _| !tab.loading));
+        settle(cx, |cx| tab.read_with(cx, |tab, _| !tab.loading()));
         cx.run_until_parked();
         assert!(
             cx.debug_bounds("git-discard-confirm").is_none(),
@@ -6681,7 +6501,7 @@ mod tests {
         click(cx, "git-stash-drop-1");
         cx.run_until_parked();
         assert!(cx.debug_bounds("git-stash-drop-confirm").is_some());
-        cx.simulate_keystrokes("escape");
+        press_escape(&tab, cx);
         cx.run_until_parked();
         assert!(cx.debug_bounds("git-stash-drop-confirm").is_none());
         assert!(
@@ -7611,7 +7431,7 @@ mod tests {
         click(cx, "git-commit-checkout");
         cx.run_until_parked();
         assert!(cx.debug_bounds("git-commit-confirm").is_some());
-        cx.simulate_keystrokes("escape");
+        press_escape(&tab, cx);
         cx.run_until_parked();
         assert!(cx.debug_bounds("git-commit-confirm").is_none());
         click(cx, "git-commit-checkout");
@@ -8033,7 +7853,7 @@ mod tests {
         let (page, cx, calls, _dir) = open_lab(cx, lab_state(), git_prefs(), lab.clone());
         settle(cx, |cx| cx.debug_bounds("git-staged-row-0").is_some());
         let tab = git_tab(&page, cx);
-        settle(cx, |cx| tab.read_with(cx, |tab, _| !tab.loading));
+        settle(cx, |cx| tab.read_with(cx, |tab, _| !tab.loading()));
         frames.send(watch_frame("w0")).unwrap();
         cx.run_until_parked();
         lab.hold_trees
@@ -8057,7 +7877,7 @@ mod tests {
             .store(false, std::sync::atomic::Ordering::SeqCst);
         lab.release_tree.notify_one();
         settle(cx, |cx| {
-            tree_reads(&calls) == before + 2 && tab.read_with(cx, |tab, _| !tab.loading)
+            tree_reads(&calls) == before + 2 && tab.read_with(cx, |tab, _| !tab.loading())
         });
         for _ in 0..10 {
             cx.run_until_parked();
@@ -8323,7 +8143,7 @@ mod tests {
 
         *lab.tree.lock().unwrap() = Some(clean_tree());
         tab.update(cx, |tab, cx| tab.load(cx));
-        settle(cx, |cx| tab.read_with(cx, |tab, _| !tab.loading));
+        settle(cx, |cx| tab.read_with(cx, |tab, _| !tab.loading()));
         *lab.action_error.lock().unwrap() = Some("Git refused the checkout.".into());
         show_commit(cx, &tab, history_commit(PICKED, &["feature/x"], 1));
         click(cx, "git-commit-checkout");

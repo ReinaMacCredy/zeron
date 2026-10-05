@@ -6330,14 +6330,11 @@ impl Shell {
                     .into_any_element()
             }
             SettingsSection::SourceControl => {
-                if self.source_control_page.is_none() {
-                    let state = self.state.clone();
-                    self.source_control_page = Some(cx.new(|cx| SourceControlPage::new(state, cx)));
-                }
-                match &self.source_control_page {
-                    Some(page) => page.clone().into_any_element(),
-                    None => Empty.into_any_element(),
-                }
+                let state = self.state.clone();
+                self.source_control_page
+                    .get_or_insert_with(|| cx.new(|cx| SourceControlPage::new(state, cx)))
+                    .clone()
+                    .into_any_element()
             }
             SettingsSection::Archived => {
                 if self.archived_page.is_none() {
@@ -6361,7 +6358,15 @@ impl Shell {
             cx.notify();
             return;
         };
-        self.mutate_task = Some(cx.spawn(async move |this, cx| {
+        self.mutate_task = Some(Self::spawn_mutate(engine, params, cx));
+    }
+
+    fn spawn_mutate(
+        engine: crate::state::EngineHandle,
+        params: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        cx.spawn(async move |this, cx| {
             if let Err(err) = engine.client().call(methods::MUTATE, params).await {
                 this.update(cx, |shell, cx| {
                     shell.sidebar_notice = Some(format!("{err}").into());
@@ -6369,7 +6374,7 @@ impl Shell {
                 })
                 .ok();
             }
-        }));
+        })
     }
 
     /// Start editing `chat_id`'s title in place on its row: the sidebar's
