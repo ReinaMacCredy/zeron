@@ -181,8 +181,8 @@ async fn resolve(
         }
         return automatic(registry).await;
     };
-    let usable = zeron_harness::supports_titles(harness)
-        && (harness == HarnessId::Mock || registry.enabled_set().contains(&harness));
+    let usable =
+        zeron_harness::supports_titles(harness) && registry.enabled_set().contains(&harness);
     let runner = registry
         .resolve(harness)
         .ok()
