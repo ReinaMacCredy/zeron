@@ -533,6 +533,7 @@ pub fn apply_keymap(
         KeyBinding::new(&platform_combo(&format!("{step}-+")), IncreaseReasoning, None),
     ]);
     crate::browser::bind_keys(cx, keymap);
+    crate::device_panel::stream_view::bind_keys(cx);
     // ⌘1..⌘9 open the sidebar's first nine rows. A slot left unbound (an empty
     // combo in a hand-edited file) binds nothing rather than falling back —
     // the user cleared it on purpose.
@@ -2156,8 +2157,10 @@ pub struct Shell {
     browsers: std::collections::HashMap<u64, Entity<crate::browser::BrowserSurface>>,
     browser_subs: std::collections::HashMap<u64, Subscription>,
     browser_seq: u64,
-    device_panels:
-        std::collections::HashMap<u64, (Entity<crate::device_panel::DevicePanel>, Subscription)>,
+    device_panels: std::collections::HashMap<
+        u64,
+        (Entity<crate::device_panel::DevicePanel>, [Subscription; 2]),
+    >,
     device_seq: u64,
     browser_context: crate::browser::BrowserContext,
     browser_profile: Option<String>,
@@ -12888,8 +12891,8 @@ impl Shell {
                             .cursor_default()
                             .tooltip(crate::settings::widgets::text_tooltip(reason)),
                         None => row("surface-card-device", icons::SMARTPHONE, "Device").on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.add_device_surface(cx);
+                            cx.listener(|this, _, window, cx| {
+                                this.add_device_surface(window, cx);
                             }),
                         ),
                     })
@@ -14832,7 +14835,7 @@ impl Render for Shell {
                     && self.state.read(cx).selected_chat.is_some()
                 {
                     self.debug_dialog = None;
-                    self.add_device_surface(cx);
+                    self.add_device_surface(window, cx);
                     if !self.right_pane_open(cx) {
                         self.toggle_right_pane(cx);
                     }

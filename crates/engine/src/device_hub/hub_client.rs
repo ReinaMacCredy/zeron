@@ -120,6 +120,16 @@ impl HubClient<'_> {
         .map(|_| ())
     }
 
+    pub(crate) async fn shutdown_simulator(&self, udid: &str) -> Result<(), String> {
+        self.post(
+            "/vendor/serve-sim/grid/api/shutdown",
+            serde_json::json!({ "udid": udid }),
+            "Shutting the device down",
+        )
+        .await
+        .map(|_| ())
+    }
+
     pub(crate) fn mjpeg_url(&self, udid: &str) -> String {
         format!(
             "{}/vendor/serve-sim/helper/{}/stream.mjpeg",

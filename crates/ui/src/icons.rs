@@ -312,6 +312,7 @@ icon_assets![
     (LUCIDE_ARROW_UP_RIGHT, "lucide-arrow-up-right"),
     (LUCIDE_LINK, "lucide-link"),
     (LUCIDE_ROTATE_CCW, "lucide-rotate-ccw"),
+    (LUCIDE_POWER, "lucide-power"),
     (LUCIDE_PLAY, "lucide-play"),
     (LUCIDE_USER_PLUS, "lucide-user-plus"),
     (LUCIDE_PENCIL, "lucide-pencil"),
