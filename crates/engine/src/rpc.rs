@@ -1036,25 +1036,26 @@ impl EngineRpc {
 
     async fn agent_active_on_checkout(&self, checkout_id: &str) -> bool {
         let local_device = self.doc_host.device_id();
-        let chats = self.workspace.watch_chats().borrow().clone();
-        for candidate in chats {
-            if candidate.device_id != local_device
-                || !self
-                    .sessions
-                    .session_status(&candidate.id)
-                    .is_some_and(|session| {
-                        matches!(
-                            session.status,
-                            zeron_proto::SessionStatus::Working
-                                | zeron_proto::SessionStatus::AwaitingInput
-                        )
-                    })
-            {
+        let local: Vec<(String, Option<String>, Option<String>)> = self
+            .workspace
+            .watch_chats()
+            .borrow()
+            .iter()
+            .filter(|chat| chat.device_id == local_device)
+            .map(|chat| (chat.id.clone(), chat.checkout_id.clone(), chat.cwd.clone()))
+            .collect();
+        for (id, candidate_checkout, candidate_cwd) in local {
+            if !self.sessions.session_status(&id).is_some_and(|session| {
+                matches!(
+                    session.status,
+                    zeron_proto::SessionStatus::Working | zeron_proto::SessionStatus::AwaitingInput
+                )
+            }) {
                 continue;
             }
-            let same_checkout = if candidate.checkout_id.as_deref() == Some(checkout_id) {
+            let same_checkout = if candidate_checkout.as_deref() == Some(checkout_id) {
                 true
-            } else if let Some(candidate_cwd) = candidate.cwd.as_deref() {
+            } else if let Some(candidate_cwd) = candidate_cwd.as_deref() {
                 self.repos
                     .checkout_identity(std::path::Path::new(candidate_cwd))
                     .await

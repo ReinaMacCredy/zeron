@@ -288,17 +288,13 @@ fn revision(status: &Status, stamps: &[Option<(u64, u128)>]) -> String {
 }
 
 pub(crate) async fn read(root: &Path, checkout_id: &str) -> Result<WorkingTree, EngineError> {
-    let status_output = git(
-        root,
-        &[
-            "status",
-            "--porcelain=v2",
-            "-z",
-            "--branch",
-            "--untracked-files=all",
-        ],
-    )
-    .await?;
+    let status = [
+        "status",
+        "--porcelain=v2",
+        "-z",
+        "--branch",
+        "--untracked-files=all",
+    ];
     let numstat = ["diff", "--numstat", "-z", "--no-ext-diff", "--no-color"];
     let cached = [
         "diff",
@@ -309,12 +305,15 @@ pub(crate) async fn read(root: &Path, checkout_id: &str) -> Result<WorkingTree, 
         "--no-color",
     ];
     let stash = ["stash", "list", "-z", "--format=%H%x1f%cI%x1f%gs"];
-    let (unstaged, staged, stashes, picking) = tokio::join!(
+    let (status_output, unstaged, staged, stashes, picking, config) = tokio::join!(
+        git(root, &status),
         git(root, &numstat),
         git(root, &cached),
         git(root, &stash),
-        verify_rev(root, "CHERRY_PICK_HEAD")
+        verify_rev(root, "CHERRY_PICK_HEAD"),
+        read_branch_config(root)
     );
+    let status_output = status_output?;
     let mut status = parse_status(&status_output.stdout, status_output.truncated);
     let mut truncated = !status.complete;
     let unstaged = unstaged
@@ -346,8 +345,13 @@ pub(crate) async fn read(root: &Path, checkout_id: &str) -> Result<WorkingTree, 
         .filter(|file| file.worktree != GitFileState::Unchanged)
         .map(|file| file.path.clone())
         .collect();
+    let config = match (status.branch.as_deref(), config) {
+        (Some(branch), Ok(out)) => BranchConfig::parse(&out.stdout, branch),
+        _ => BranchConfig::default(),
+    };
+    let push_remote = config.push_remote(status.upstream.is_some());
     let counted_root = root.to_path_buf();
-    let (counts, stamps) = tokio::task::spawn_blocking(move || {
+    let measured = tokio::task::spawn_blocking(move || {
         let counts = untracked
             .into_iter()
             .map(|(index, path)| (index, count_untracked(&counted_root, &path)))
@@ -357,33 +361,33 @@ pub(crate) async fn read(root: &Path, checkout_id: &str) -> Result<WorkingTree, 
             .map(|path| stamp(&counted_root, path))
             .collect::<Vec<_>>();
         (counts, stamps)
-    })
-    .await
-    .unwrap_or_default();
-    for (index, delta) in counts {
-        status.files[index].unstaged = delta;
-    }
-    let config = match status.branch.as_deref() {
-        Some(branch) => branch_config(root, branch).await,
-        None => BranchConfig::default(),
-    };
-    let push_remote = config.push_remote(status.upstream.is_some());
-    let mut ahead = status.ahead;
-    if let (None, Some(remote), Some(_)) = (&status.upstream, &push_remote, &status.head_sha) {
+    });
+    let unpushed = async {
+        let (None, Some(remote), Some(_)) = (&status.upstream, &push_remote, &status.head_sha)
+        else {
+            return status.ahead;
+        };
         let not_on_remote = format!("--remotes={remote}");
-        ahead = git(
+        git(
             root,
             &["rev-list", "--count", "HEAD", "--not", &not_on_remote],
         )
         .await
         .ok()
         .and_then(|out| String::from_utf8_lossy(&out.stdout).trim().parse().ok())
-        .unwrap_or(0);
-    }
-    let default_branch = match &push_remote {
-        Some(remote) => default_branch(root, remote).await,
-        None => None,
+        .unwrap_or(0)
     };
+    let remote_default = async {
+        match &push_remote {
+            Some(remote) => default_branch(root, remote).await,
+            None => None,
+        }
+    };
+    let (measured, ahead, default_branch) = tokio::join!(measured, unpushed, remote_default);
+    let (counts, stamps) = measured.unwrap_or_default();
+    for (index, delta) in counts {
+        status.files[index].unstaged = delta;
+    }
     Ok(WorkingTree {
         checkout_id: checkout_id.to_owned(),
         root: root.to_string_lossy().into_owned(),
@@ -472,7 +476,7 @@ impl BranchConfig {
     }
 }
 
-async fn branch_config(root: &Path, branch: &str) -> BranchConfig {
+async fn read_branch_config(root: &Path) -> Result<Capture, EngineError> {
     git_with(
         root,
         &[
@@ -485,8 +489,13 @@ async fn branch_config(root: &Path, branch: &str) -> BranchConfig {
         true,
     )
     .await
-    .map(|out| BranchConfig::parse(&out.stdout, branch))
-    .unwrap_or_default()
+}
+
+async fn branch_config(root: &Path, branch: &str) -> BranchConfig {
+    read_branch_config(root)
+        .await
+        .map(|out| BranchConfig::parse(&out.stdout, branch))
+        .unwrap_or_default()
 }
 
 async fn default_branch(root: &Path, remote: &str) -> Option<String> {
@@ -999,7 +1008,7 @@ async fn hooked_git(
     git_within(root, args, timeout, timed_out).await
 }
 
-async fn verify_rev(root: &Path, spec: &str) -> Result<Option<String>, EngineError> {
+pub(crate) async fn verify_rev(root: &Path, spec: &str) -> Result<Option<String>, EngineError> {
     let out = git_with(
         root,
         &["rev-parse", "--verify", "--quiet", spec],
