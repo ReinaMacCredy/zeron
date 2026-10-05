@@ -56,6 +56,7 @@ pub enum FallbackReason {
     NoDescription,
     DecodeErrors,
     Backlog,
+    RotationFailed,
 }
 
 impl FallbackReason {
@@ -65,6 +66,7 @@ impl FallbackReason {
             FallbackReason::NoDescription => "video arrived without an H.264 description",
             FallbackReason::DecodeErrors => "H.264 decoding failed repeatedly",
             FallbackReason::Backlog => "the H.264 decoder fell behind",
+            FallbackReason::RotationFailed => "the H.264 frame could not be rotated",
         }
     }
 }
@@ -145,10 +147,10 @@ mod decoder {
         CMVideoFormatDescriptionCreateFromH264ParameterSets, kCMBlockBufferAssureMemoryNowFlag,
     };
     use objc2_core_video::{
-        CVImageBuffer, CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetHeight,
-        CVPixelBufferGetWidth, kCVPixelBufferIOSurfacePropertiesKey,
+        CVImageBuffer, CVPixelBuffer, CVPixelBufferGetHeight, CVPixelBufferGetWidth,
+        CVPixelBufferPool, kCVPixelBufferHeightKey, kCVPixelBufferIOSurfacePropertiesKey,
         kCVPixelBufferMetalCompatibilityKey, kCVPixelBufferPixelFormatTypeKey,
-        kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+        kCVPixelBufferWidthKey, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
     };
     use objc2_video_toolbox::{
         VTDecodeFrameFlags, VTDecodeInfoFlags, VTDecompressionOutputCallbackRecord,
@@ -189,22 +191,29 @@ mod decoder {
         }
     }
 
-    fn output_attributes() -> CFRetained<CFDictionary<CFString, CFType>> {
+    fn output_attributes(size: Option<(u32, u32)>) -> CFRetained<CFDictionary<CFString, CFType>> {
         let format = CFNumber::new_i32(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange as i32);
         let io_surface = CFDictionary::<CFString, CFType>::empty();
+        let dimensions =
+            size.map(|(width, height)| [width, height].map(|side| CFNumber::new_i32(side as i32)));
         // SAFETY: the keys are immutable CoreVideo constants.
-        let keys = unsafe {
-            [
+        let mut keys = unsafe {
+            vec![
                 kCVPixelBufferPixelFormatTypeKey,
                 kCVPixelBufferIOSurfacePropertiesKey,
                 kCVPixelBufferMetalCompatibilityKey,
             ]
         };
-        let values: [&CFType; 3] = [
+        let mut values: Vec<&CFType> = vec![
             format.as_ref(),
             io_surface.as_ref(),
             CFBoolean::new(true).as_ref(),
         ];
+        if let Some([width, height]) = &dimensions {
+            // SAFETY: the keys are immutable CoreVideo constants.
+            keys.extend(unsafe { [kCVPixelBufferWidthKey, kCVPixelBufferHeightKey] });
+            values.extend::<[&CFType; 2]>([width.as_ref(), height.as_ref()]);
+        }
         CFDictionary::from_slices(&keys, &values)
     }
 
@@ -263,7 +272,7 @@ mod decoder {
                 decompressionOutputRefCon: null_mut(),
             };
             let mut session: *mut VTDecompressionSession = null_mut();
-            let attributes = output_attributes();
+            let attributes = output_attributes(None);
             // SAFETY: every pointer outlives the call; the attribute dictionary holds CF types.
             let status = unsafe {
                 VTDecompressionSession::create(
@@ -369,6 +378,7 @@ mod decoder {
     struct Rotator {
         session: CFRetained<VTPixelRotationSession>,
         angle: Option<DeviceOrientation>,
+        pool: Option<((u32, u32), CFRetained<CVPixelBufferPool>)>,
     }
 
     impl Rotator {
@@ -382,6 +392,7 @@ mod decoder {
                 // SAFETY: a successful Create returns a +1 reference.
                 session: unsafe { CFRetained::from_raw(session) },
                 angle: None,
+                pool: None,
             })
         }
 
@@ -415,18 +426,31 @@ mod decoder {
                 }
                 _ => (source.width(), source.height()),
             };
+            if self
+                .pool
+                .as_ref()
+                .is_none_or(|(size, _)| *size != (width, height))
+            {
+                let mut pool: *mut CVPixelBufferPool = null_mut();
+                let attributes = output_attributes(Some((width, height)));
+                // SAFETY: the out pointer and attribute dictionary outlive the call.
+                let status = unsafe {
+                    CVPixelBufferPool::create(
+                        None,
+                        None,
+                        Some(attributes.as_opaque()),
+                        NonNull::from(&mut pool),
+                    )
+                };
+                let pool = NonNull::new(pool).filter(|_| status == 0)?;
+                // SAFETY: a successful Create returns a +1 reference.
+                self.pool = Some(((width, height), unsafe { CFRetained::from_raw(pool) }));
+            }
+            let (_, pool) = self.pool.as_ref()?;
             let mut target: *mut CVPixelBuffer = null_mut();
-            let attributes = output_attributes();
-            // SAFETY: the out pointer and attribute dictionary outlive the call.
+            // SAFETY: the pool is valid and the out pointer outlives the call.
             let status = unsafe {
-                CVPixelBufferCreate(
-                    None,
-                    width as usize,
-                    height as usize,
-                    kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
-                    Some(attributes.as_opaque()),
-                    NonNull::from(&mut target),
-                )
+                CVPixelBufferPool::create_pixel_buffer(None, pool, NonNull::from(&mut target))
             };
             let target = NonNull::new(target).filter(|_| status == 0)?;
             // SAFETY: a successful Create returns a +1 reference.
@@ -535,6 +559,9 @@ mod decoder {
                     .rotator
                     .as_mut()
                     .and_then(|rotator| rotator.rotate(&picture, rotation));
+                if batch.picture.is_none() {
+                    batch.fallback = Some(FallbackReason::RotationFailed);
+                }
             }
             batch
         }

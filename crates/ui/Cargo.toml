@@ -113,7 +113,7 @@ objc2 = "0.6"
 block2 = "0.6"
 objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSHapticFeedback", "NSBitmapImageRep", "NSImage", "NSEvent", "NSResponder", "NSView", "NSWindow", "NSPanel", "NSScreen", "NSColor", "NSControl", "NSTextField", "NSFont", "NSWorkspace", "NSRunningApplication", "NSGraphics", "NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSMenu", "NSMenuItem", "objc2-core-graphics"] }
 objc2-foundation = "0.3.2"
-objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn"] }
+objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferPool", "CVReturn"] }
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFBase", "CFDictionary", "CFNumber", "CFString"] }
 objc2-core-media = { version = "0.3.2", default-features = false, features = ["std", "CMBase", "CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMTime", "objc2-core-video"] }
 objc2-video-toolbox = { version = "0.3.2", default-features = false, features = ["std", "VTBase", "VTDecompressionSession", "VTErrors", "VTSession", "VTPixelRotationProperties", "VTPixelRotationSession", "objc2-core-media", "objc2-core-video"] }
