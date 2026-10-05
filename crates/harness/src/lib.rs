@@ -329,10 +329,43 @@ pub fn compose_login_shell_path(cmd: &mut tokio::process::Command) {
 /// version manager's bin dir, and the CLIs themselves shell out to tools
 /// (git, rg, node) that a GUI/service launch's own PATH may lack.
 pub fn compose_child_path(cmd: &mut process::Command, exe: &std::path::Path) {
+    let prefix = CHILD_PATH_PREFIX
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    compose_child_path_with(cmd.as_std_mut(), prefix.as_deref(), exe);
+}
+
+fn compose_child_path_with(
+    cmd: &mut std::process::Command,
+    prefix: Option<&std::path::Path>,
+    exe: &std::path::Path,
+) {
     compose_path(
-        cmd.as_std_mut(),
-        exe.parent().filter(|d| !d.as_os_str().is_empty()),
+        cmd,
+        prefix
+            .into_iter()
+            .chain(exe.parent().filter(|d| !d.as_os_str().is_empty())),
     );
+}
+
+// A lock, not a OnceLock: a second engine in the same process must be able to replace it.
+static CHILD_PATH_PREFIX: std::sync::RwLock<Option<std::path::PathBuf>> =
+    std::sync::RwLock::new(None);
+
+pub fn set_child_path_prefix(dir: Option<std::path::PathBuf>) {
+    *CHILD_PATH_PREFIX
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = dir;
+}
+
+pub fn clear_child_path_prefix(dir: &std::path::Path) {
+    let mut prefix = CHILD_PATH_PREFIX
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if prefix.as_deref() == Some(dir) {
+        *prefix = None;
+    }
 }
 
 fn compose_path<'a>(
@@ -712,6 +745,43 @@ mod tool_server_tests {
         }
         assert!(is_computer_tool_name("computer_click"));
         assert!(!is_computer_tool_name("list_threads"));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod child_path_tests {
+    use std::path::{Path, PathBuf};
+
+    fn child_path(prefix: Option<&Path>, exe: &Path) -> Vec<PathBuf> {
+        let mut cmd = std::process::Command::new("/bin/true");
+        super::compose_child_path_with(&mut cmd, prefix, exe);
+        let path = cmd
+            .get_envs()
+            .find(|(name, _)| *name == "PATH")
+            .and_then(|(_, value)| value)
+            .expect("PATH is set")
+            .to_os_string();
+        std::env::split_paths(&path).collect()
+    }
+
+    #[test]
+    fn the_registered_directory_leads_every_child_path_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let shims = dir.path().join("bin");
+        let exe = Path::new("/opt/agents/bin/claude");
+        let path = child_path(Some(&shims), exe);
+        let inherited = std::env::var_os("PATH")
+            .and_then(|path| std::env::split_paths(&path).next())
+            .expect("the test process has a PATH");
+        let deduped = child_path(Some(&inherited), exe);
+        let plain = child_path(None, exe);
+
+        assert_eq!(path[0], shims);
+        assert_eq!(path[1], PathBuf::from("/opt/agents/bin"));
+        assert_eq!(deduped[0], inherited);
+        assert_eq!(deduped.iter().filter(|dir| **dir == inherited).count(), 1);
+        assert_eq!(plain[0], PathBuf::from("/opt/agents/bin"));
+        assert!(!plain.contains(&shims));
     }
 }
 

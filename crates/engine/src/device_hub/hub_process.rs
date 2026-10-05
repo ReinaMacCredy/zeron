@@ -89,6 +89,31 @@ impl HubProcess {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn detach_for_test(&mut self) -> (Option<Child>, Option<ChildStdin>) {
+        (self.child.take(), self._lifeline.take())
+    }
+
+    pub(crate) fn owned(origin: String, mut child: Child) -> Self {
+        if let Some(stdout) = child.stdout.take() {
+            tokio::spawn(log_lines(stdout));
+        }
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(log_lines(stderr));
+        }
+        Self {
+            origin,
+            pgid: child
+                .id()
+                .and_then(|pid| i32::try_from(pid).ok())
+                .unwrap_or_default(),
+            started: std::time::Instant::now(),
+            _lifeline: child.stdin.take(),
+            child: Some(child),
+            state_file: None,
+        }
+    }
+
     pub(crate) fn uptime(&self) -> Duration {
         self.started.elapsed()
     }
@@ -209,9 +234,13 @@ pub(crate) fn reap_stale(state_dir: &Path, entry: &Path) {
     let _ = std::fs::remove_file(&path);
 }
 
-fn scrub_hub_env(command: &mut Command, vars: impl IntoIterator<Item = std::ffi::OsString>) {
+pub(crate) fn scrub_env(
+    command: &mut Command,
+    prefix: &str,
+    vars: impl IntoIterator<Item = std::ffi::OsString>,
+) {
     for name in vars {
-        if name.to_string_lossy().starts_with("EXPO_DEVICE_HUB_") {
+        if name.to_string_lossy().starts_with(prefix) {
             command.env_remove(name);
         }
     }
@@ -231,6 +260,27 @@ fn write_state_file(path: &Path, record: &HubStateFile) {
         .and_then(|mut file| file.write_all(json.as_bytes()));
 }
 
+pub(crate) fn lifeline_command(program: &Path) -> Command {
+    #[cfg(unix)]
+    let mut command = {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", LIFELINE, "sh"])
+            .arg(std::process::id().to_string())
+            .arg(program);
+        command.process_group(0);
+        command
+    };
+    #[cfg(not(unix))]
+    let mut command = Command::new(program);
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    command
+}
+
 pub(crate) async fn spawn(
     http: &reqwest::Client,
     program: &Path,
@@ -242,59 +292,33 @@ pub(crate) async fn spawn(
     reap_stale(state_dir, entry);
     std::fs::create_dir_all(state_dir).map_err(|e| e.to_string())?;
     let port = reserve_port().map_err(|e| format!("reserving a port for the device hub: {e}"))?;
-    #[cfg(unix)]
-    let mut command = {
-        let mut command = Command::new("/bin/sh");
-        command
-            .args(["-c", LIFELINE, "sh"])
-            .arg(std::process::id().to_string())
-            .arg(program);
-        command
-    };
-    #[cfg(not(unix))]
-    let mut command = Command::new(program);
+    let mut command = lifeline_command(program);
     command
         .args(args)
         .args(["--port", &port.to_string(), "--host", "127.0.0.1"])
         .args(["--hide-sidebar", "--hide-boot-device"])
         .args(["--max-dimension", &MAX_DIMENSION.to_string()])
         .env("FORCE_COLOR", "0")
-        .env("NO_COLOR", "1")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    #[cfg(unix)]
-    command.process_group(0);
-    scrub_hub_env(&mut command, std::env::vars_os().map(|(name, _)| name));
-    let mut child = command
+        .env("NO_COLOR", "1");
+    scrub_env(
+        &mut command,
+        "EXPO_DEVICE_HUB_",
+        std::env::vars_os().map(|(name, _)| name),
+    );
+    let child = command
         .spawn()
         .map_err(|e| format!("starting the device hub: {e}"))?;
-    let pid = child.id().unwrap_or_default();
+    let mut hub = HubProcess::owned(format!("http://127.0.0.1:{port}"), child);
     let state_file = state_dir.join(STATE_FILE);
     write_state_file(
         &state_file,
         &HubStateFile {
-            pid,
+            pid: u32::try_from(hub.pgid).unwrap_or_default(),
             port,
             entry_path: entry.display().to_string(),
         },
     );
-    if let Some(stdout) = child.stdout.take() {
-        tokio::spawn(log_lines(stdout));
-    }
-    if let Some(stderr) = child.stderr.take() {
-        tokio::spawn(log_lines(stderr));
-    }
-    let lifeline = child.stdin.take();
-    let mut hub = HubProcess {
-        origin: format!("http://127.0.0.1:{port}"),
-        pgid: i32::try_from(pid).unwrap_or_default(),
-        started: std::time::Instant::now(),
-        child: Some(child),
-        _lifeline: lifeline,
-        state_file: Some(state_file),
-    };
+    hub.state_file = Some(state_file);
     let ready = match hub.child.as_mut() {
         Some(child) => wait_ready(http, &hub.origin, child, ready_timeout).await,
         None => Ok(()),
@@ -752,8 +776,9 @@ http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
     #[test]
     fn hub_env_drops_every_expo_device_hub_variable() {
         let mut command = Command::new("/usr/bin/true");
-        scrub_hub_env(
+        scrub_env(
             &mut command,
+            "EXPO_DEVICE_HUB_",
             [
                 "EXPO_DEVICE_HUB_BASE_PATH",
                 "PATH",

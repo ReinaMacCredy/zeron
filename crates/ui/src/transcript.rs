@@ -53,6 +53,9 @@ use crate::computer::presentation::{
     ComputerCall, computer_call, computer_call_app, computer_call_rows, computer_output_hidden,
     describe_computer_call,
 };
+use crate::device_panel::presentation::{
+    device_call, device_call_detail, device_call_label, device_group_label,
+};
 use crate::markdown::mermaid_cache::{self, MermaidCache};
 use crate::markdown::parser::{
     Block, BlockTree, IncrementalParser, InlineRun, InlineStyle, parse_full,
@@ -418,6 +421,7 @@ fn is_agent_tool(item: &ToolItem) -> bool {
 enum ToolGenus {
     Agent,
     Computer,
+    Device,
     Other,
 }
 
@@ -426,6 +430,8 @@ fn tool_genus(item: &ToolItem) -> ToolGenus {
         ToolGenus::Agent
     } else if item.kind == ToolItemKind::Call && computer_call(&item.call).is_some() {
         ToolGenus::Computer
+    } else if item.kind == ToolItemKind::Call && device_call(&item.call).is_some() {
+        ToolGenus::Device
     } else {
         ToolGenus::Other
     }
@@ -2339,10 +2345,15 @@ pub fn tool_group_summary(tools: &[ToolItem]) -> String {
         .with(|forbidden| assert!(!forbidden.get(), "tool summary formatting ran on UI thread"));
     let mut computer_apps: Vec<&str> = Vec::new();
     let mut computer_actions = 0usize;
+    let mut device_calls = 0usize;
     let pairs: Vec<(ToolCall, bool)> = tools
         .iter()
         .filter(|t| t.kind == ToolItemKind::Call)
         .filter(|t| {
+            if device_call(&t.call).is_some() {
+                device_calls += 1;
+                return false;
+            }
             if computer_call(&t.call).is_none() {
                 return true;
             }
@@ -2401,6 +2412,9 @@ pub fn tool_group_summary(tools: &[ToolItem]) -> String {
             format!("{computer_actions} actions")
         };
         segments.push(format!("used {apps} · {actions}"));
+    }
+    if device_calls > 0 {
+        segments.push(device_group_label(device_calls));
     }
     if !base.is_empty() {
         segments.push(base);
@@ -10682,6 +10696,7 @@ fn tool_icon_path(call: &ToolCall) -> &'static str {
         ToolCall::WebFetch { .. } | ToolCall::WebSearch { .. } => crate::icons::GLOBAL,
         ToolCall::Todo { .. } => crate::icons::CHECKLIST,
         call if computer_call(call).is_some() => crate::icons::CURSOR,
+        call if device_call(call).is_some() => crate::icons::SMARTPHONE,
         call if is_agent_call(call) => crate::icons::BOT,
         call if call.is_advisor() => crate::icons::CHAT_ROUND_LINE,
         ToolCall::Unknown { name, .. } if name == "Wait for agents" => crate::icons::BOT,
@@ -10917,6 +10932,22 @@ struct FileBadgeLink {
 /// at the right of the ordinary static detail; done is the ordinary quiet
 /// chip; failed takes the danger tint — no status words, no live text (a
 /// header rewriting itself per stream delta read as noise — user report).
+fn device_chip_content(tool: &ToolItem) -> Option<(SharedString, String)> {
+    let device = device_call(&tool.call)?;
+    let output = match tool.detail.as_deref() {
+        Some(ToolDetail::Output { lines, .. }) => lines
+            .iter()
+            .map(AsRef::as_ref)
+            .collect::<Vec<&str>>()
+            .join("\n"),
+        _ => String::new(),
+    };
+    Some((
+        device_call_label(device, tool.resolved, tool.is_error).into(),
+        device_call_detail(device, &output).unwrap_or_default(),
+    ))
+}
+
 fn chip_header_row(
     tool: &ToolItem,
     trail: Option<ChipTrail>,
@@ -10933,10 +10964,10 @@ fn chip_header_row(
                 describe_computer_call(computer.tool, computer.args).into(),
                 String::new(),
             ),
-            None => {
+            None => device_chip_content(tool).unwrap_or_else(|| {
                 let (label, detail) = tool_chip_content(&tool.call);
                 (label.into(), detail)
-            }
+            }),
         },
     };
     let activity = !is_agent_tool(tool);
@@ -19602,6 +19633,52 @@ mod computer_tests {
         assert!(!lines(&tools[0].invocation).contains(secret));
         assert!(tools[1].detail.is_none(), "the clipboard never expands");
         assert_eq!(tool_icon_path(&tools[0].call), crate::icons::CURSOR);
+    }
+
+    #[test]
+    fn device_calls_group_apart_with_t3code_labels_and_no_image() {
+        let shot = r#"{"device":{"name":"iPhone 17"},"screenshot":{"mimeType":"image/png","width":1206,"height":2622}}"#;
+        let rows = rows_for_entry(
+            &entry(
+                MessageRole::Assistant,
+                vec![
+                    tool_part("p1", "device_open", serde_json::json!({}), "{}", false),
+                    tool_part(
+                        "p2",
+                        "device_screenshot",
+                        serde_json::json!({}),
+                        shot,
+                        false,
+                    ),
+                    tool_part("p3", "list_threads", serde_json::json!({}), "[]", false),
+                ],
+            ),
+            false,
+            false,
+            &mut parse,
+        );
+        let RowKind::ToolGroup { tools, summary, .. } = &rows[0].kind else {
+            panic!("expected a device group");
+        };
+        assert_eq!(tools.len(), 2, "device chips do not share a fold");
+        assert_eq!(summary.as_ref(), "Used device controls 2 times");
+        assert_eq!(
+            device_chip_content(&tools[0]),
+            Some(("Opened a device in the Device panel".into(), String::new()))
+        );
+        assert_eq!(
+            device_chip_content(&tools[1]),
+            Some((
+                "Took a screenshot of the device".into(),
+                "iPhone 17 · 1206x2622 PNG".into()
+            ))
+        );
+        assert_eq!(tool_icon_path(&tools[1].call), crate::icons::SMARTPHONE);
+        let RowKind::ToolGroup { tools, .. } = &rows[1].kind else {
+            panic!("expected the other tool apart");
+        };
+        assert_eq!(tools.len(), 1);
+        assert_eq!(device_chip_content(&tools[0]), None);
     }
 
     #[gpui::test]

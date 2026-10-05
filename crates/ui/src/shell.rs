@@ -14573,6 +14573,7 @@ impl Render for Shell {
             && !restart_required
             && matches!(self.route, Route::Chat)
             && !(self.right_pane_expanded && self.right_pane_open(cx));
+        self.auto_open_devices(window, cx);
         self.sync_device_visibility(chat_visible, browser_active, selected_surface, cx);
 
         // Fullscreen hides the macOS traffic lights — reflow the control

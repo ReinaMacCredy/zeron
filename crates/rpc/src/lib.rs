@@ -258,6 +258,10 @@ pub mod methods {
     pub const SHUTDOWN_HUB_DEVICE: &str = "ShutdownHubDevice";
     pub const WATCH_HUB_DEVICE_FRAMES: &str = "WatchHubDeviceFrames";
     pub const SEND_HUB_DEVICE_INPUT: &str = "SendHubDeviceInput";
+    pub const DEVICE_TOOL_LIST: &str = "DeviceToolList";
+    pub const DEVICE_TOOL_OPEN: &str = "DeviceToolOpen";
+    pub const DEVICE_TOOL_SCREENSHOT: &str = "DeviceToolScreenshot";
+    pub const DEVICE_TOOL_CLOSE: &str = "DeviceToolClose";
     /// Checkout-diff stream for the target device's chats (DataRpc,
     /// relay-forwardable — diffs are produced where the checkout lives).
     pub const WATCH_CHECKOUT_DIFFS: &str = "WatchCheckoutDiffs";

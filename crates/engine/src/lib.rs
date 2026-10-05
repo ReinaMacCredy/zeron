@@ -333,6 +333,8 @@ impl EngineCore {
         let computer = computer::runtime::ComputerRuntime::start(data_dir);
         computer.attach(&sessions);
         let device_hub = device_hub::DeviceHub::start(data_dir);
+        sessions.set_device_hub(device_hub.clone());
+        device_hub.provision_agent_in_background();
         Ok(Self {
             sessions,
             doc_host,
@@ -627,6 +629,10 @@ fn relay_refused(method: &str) -> bool {
             | methods::SHUTDOWN_HUB_DEVICE
             | methods::WATCH_HUB_DEVICE_FRAMES
             | methods::SEND_HUB_DEVICE_INPUT
+            | methods::DEVICE_TOOL_LIST
+            | methods::DEVICE_TOOL_OPEN
+            | methods::DEVICE_TOOL_SCREENSHOT
+            | methods::DEVICE_TOOL_CLOSE
     )
 }
 

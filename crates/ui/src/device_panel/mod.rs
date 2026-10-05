@@ -1,6 +1,7 @@
 pub mod float;
 pub mod geometry;
 pub mod loading;
+pub mod presentation;
 mod rail;
 pub mod setup;
 pub mod stream_view;
@@ -227,6 +228,10 @@ impl DevicePanel {
 
     pub fn is_idle_picker(&self) -> bool {
         self.target.is_none() && self.opening.is_none()
+    }
+
+    pub fn shows(&self, target: &(String, String)) -> bool {
+        self.target.as_ref() == Some(target) || self.opening.as_deref() == Some(target.1.as_str())
     }
 
     pub fn bind(&mut self, host_id: String, device_id: String, cx: &mut Context<Self>) {

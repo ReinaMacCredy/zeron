@@ -435,6 +435,7 @@ struct Inner {
     /// for the Changes pane's "Latest turn" scope. Absent in bare tests.
     turn_listener: OnceLock<TurnListener>,
     computer: Mutex<Option<Arc<ComputerRuntime>>>,
+    device_hub: Mutex<Option<Arc<crate::device_hub::DeviceHub>>>,
 }
 
 /// Turn-start hook: called with `(chat_id, cwd)`.
@@ -461,6 +462,21 @@ impl Inner {
     ) -> Option<zeron_harness::ToolServer> {
         let port = (*lock(&self.tool_server_port))?;
         let command = std::env::current_exe().ok()?.to_string_lossy().into_owned();
+        let mut guidance = match computer_control {
+            true => format!(
+                "{}\n\n{}",
+                crate::computer::tools::guidance::computer_tool_instructions(),
+                crate::doc_host::DELEGATION_GUIDANCE
+            ),
+            false => crate::doc_host::DELEGATION_GUIDANCE.to_string(),
+        };
+        if lock(&self.device_hub)
+            .as_ref()
+            .is_some_and(|hub| hub.agent_access_enabled())
+        {
+            guidance.push_str("\n\n");
+            guidance.push_str(crate::device_hub::DEVICE_TOOL_INSTRUCTIONS);
+        }
         Some(zeron_harness::ToolServer {
             command,
             args: vec![
@@ -471,14 +487,7 @@ impl Inner {
                 port.to_string(),
             ],
             env: vec![(zeron_rpc::COMPUTER_RUN_SECRET_ENV.into(), secret.into())],
-            guidance: Some(match computer_control {
-                true => format!(
-                    "{}\n\n{}",
-                    crate::computer::tools::guidance::computer_tool_instructions(),
-                    crate::doc_host::DELEGATION_GUIDANCE
-                ),
-                false => crate::doc_host::DELEGATION_GUIDANCE.to_string(),
-            }),
+            guidance: Some(guidance),
         })
     }
 
@@ -551,6 +560,7 @@ impl SessionsEngine {
                 generated_images: OnceLock::new(),
                 turn_listener: OnceLock::new(),
                 computer: Mutex::new(None),
+                device_hub: Mutex::new(None),
             }),
         }
     }
@@ -588,6 +598,10 @@ impl SessionsEngine {
 
     pub fn computer(&self) -> Option<Arc<ComputerRuntime>> {
         self.inner.computer()
+    }
+
+    pub fn set_device_hub(&self, hub: Arc<crate::device_hub::DeviceHub>) {
+        *lock(&self.inner.device_hub) = Some(hub);
     }
 
     pub(crate) fn workspace(&self) -> Option<crate::workspace_host::WorkspaceHost> {
@@ -5320,6 +5334,45 @@ mod tests {
         restarted.inner.inject_branch("plain", &mut plain);
         assert_eq!(plain.forked_at, None);
         assert_eq!(plain.branch, None);
+    }
+
+    #[test]
+    fn the_device_prompt_block_rides_the_tool_server_only_while_agents_may_use_devices() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Arc::new(RunJournal::open(dir.path().join("journals")).unwrap());
+        let guidance = |data: &str, settings: Option<&str>| {
+            let data = dir.path().join(data);
+            std::fs::create_dir_all(&data).unwrap();
+            if let Some(settings) = settings {
+                std::fs::write(data.join("device-hub-settings.json"), settings).unwrap();
+            }
+            let sessions = SessionsEngine::new(
+                "host".into(),
+                journal.clone(),
+                Arc::new(HarnessRegistry::new()),
+            );
+            sessions.set_tool_server_port(4242);
+            sessions.set_device_hub(crate::device_hub::DeviceHub::start(&data));
+            [false, true].map(|computer| {
+                sessions
+                    .inner
+                    .tool_server_for("chat", "secret", computer)
+                    .and_then(|server| server.guidance)
+                    .unwrap()
+            })
+        };
+        for text in guidance("off", None) {
+            assert!(!text.contains("## Zeron devices"));
+        }
+        let on = r#"{"enabled": true, "agentAccessEnabled": true}"#;
+        for text in guidance("on", Some(on)) {
+            assert!(
+                text.ends_with(crate::device_hub::DEVICE_TOOL_INSTRUCTIONS),
+                "{text}"
+            );
+            assert!(text.contains(crate::doc_host::DELEGATION_GUIDANCE));
+        }
     }
 
     fn request_with_resume(session: &str) -> RunRequest {

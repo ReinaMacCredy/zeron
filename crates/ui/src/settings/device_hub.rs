@@ -348,7 +348,7 @@ impl Render for DeviceHubPage {
             false,
             "Agent device access",
             setup::AGENT_DEVICE_DESCRIPTION,
-            None,
+            setup::agent_failure(&hub).map(SharedString::from),
             None,
             agent_controls.into_any_element(),
             None,
@@ -497,5 +497,46 @@ mod tests {
         });
         assert!(cx.debug_bounds("settings-device-agent-access").is_some());
         assert!(cx.debug_bounds("settings-device-auto-float").is_some());
+    }
+
+    #[gpui::test]
+    fn a_long_platform_reason_wraps_inside_the_card(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let mut state = hub(true);
+        state.hosts[0].platforms = vec![
+            zeron_proto::device_hub::DevicePlatformAvailability {
+                platform: DevicePlatform::Ios,
+                available: true,
+                reason: None,
+            },
+            zeron_proto::device_hub::DevicePlatformAvailability {
+                platform: DevicePlatform::Android,
+                available: false,
+                reason: Some(
+                    "The Android SDK was not found. Install Android Studio, or set ANDROID_HOME \
+                     to an existing SDK directory, then check again."
+                        .into(),
+                ),
+            },
+        ];
+        let (state, _calls) = app_state(cx, &runtime, state);
+        let (_page, cx) = cx.add_window_view(|_, cx| DeviceHubPage::new(state, cx));
+        cx.simulate_resize(gpui::size(gpui::px(480.0), gpui::px(900.0)));
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        wait(cx, |cx| {
+            cx.debug_bounds("device-platform-android").is_some()
+        });
+        let refresh = cx
+            .debug_bounds("settings-device-platforms-refresh")
+            .unwrap();
+        let android = cx.debug_bounds("device-platform-android").unwrap();
+        assert!(
+            android.right() <= refresh.right(),
+            "the reason runs past the card: {android:?} vs {refresh:?}"
+        );
     }
 }

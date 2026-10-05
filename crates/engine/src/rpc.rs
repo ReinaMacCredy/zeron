@@ -4630,6 +4630,25 @@ impl RpcService for EngineRpc {
                     .map_err(RpcError::Failed)?;
                 RpcReply::value(&serde_json::json!({}))
             }
+            methods::DEVICE_TOOL_LIST
+            | methods::DEVICE_TOOL_OPEN
+            | methods::DEVICE_TOOL_SCREENSHOT
+            | methods::DEVICE_TOOL_CLOSE => {
+                let p: zeron_proto::device_hub::DeviceToolParams = parse_params(params)?;
+                if self.sessions.computer_run(&p.chat_id, &p.run_secret).is_none() {
+                    return Err(RpcError::Failed(
+                        crate::device_hub::DEVICE_CALLER_REFUSED.into(),
+                    ));
+                }
+                let hub = self.device_hub()?;
+                let result = match method {
+                    methods::DEVICE_TOOL_LIST => hub.tool_list(p).await,
+                    methods::DEVICE_TOOL_OPEN => hub.tool_open(p).await,
+                    methods::DEVICE_TOOL_SCREENSHOT => hub.tool_screenshot(p).await,
+                    _ => hub.tool_close(p).await.map(|()| serde_json::json!({})),
+                };
+                RpcReply::value(&result.map_err(RpcError::Failed)?)
+            }
             methods::GET_COMPUTER_SETTINGS => RpcReply::value(&self.computer()?.settings()),
             methods::GET_COMPUTER_STATUS => {
                 let runtime = self.computer()?;

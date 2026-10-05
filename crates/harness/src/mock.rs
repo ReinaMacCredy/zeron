@@ -111,9 +111,20 @@ impl Harness for MockHarness {
 
     async fn run(
         &self,
-        _request: RunRequest,
+        request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        // Dev/testing knob: `ZERON_MOCK_TOOL_SERVER_FILE=<path>` writes the
+        // run's `zeron mcp` server (command, args, run-secret env) as JSON, so
+        // a proof can call the thread tools exactly as a live agent would.
+        if let (Ok(path), Some(server)) = (
+            std::env::var("ZERON_MOCK_TOOL_SERVER_FILE"),
+            request.mcp.as_ref(),
+        ) && let Ok(json) = serde_json::to_vec(server)
+        {
+            let _ = std::fs::write(path, json);
+        }
+
         // Optional pacing knob for demos/manual testing: `ZERON_MOCK_DELAY_MS`
         // spaces the scripted events out so live-run UI states (working
         // indicator, streaming fade, trailing tool-group auto-open) are

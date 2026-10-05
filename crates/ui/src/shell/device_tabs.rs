@@ -9,6 +9,7 @@ type DeviceTarget = (String, String);
 pub(super) struct DeviceShellState {
     dismissed: std::collections::HashMap<String, std::collections::HashSet<DeviceTarget>>,
     floats: std::collections::HashMap<String, (Entity<DeviceFloat>, [Subscription; 2])>,
+    seen_sessions: Option<std::collections::HashSet<(String, DeviceTarget)>>,
 }
 
 impl Shell {
@@ -425,6 +426,47 @@ impl Shell {
         cx.notify();
     }
 
+    pub(super) fn auto_open_devices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(hub) = self.state.read(cx).device_hub.as_ref() else {
+            self.device_shell.seen_sessions = None;
+            return;
+        };
+        let current: std::collections::HashSet<(String, DeviceTarget)> = hub
+            .sessions
+            .iter()
+            .filter(|session| hub.device(&session.host_id, &session.device_id).is_some())
+            .map(|session| {
+                (
+                    session.chat_id.clone(),
+                    (session.host_id.clone(), session.device_id.clone()),
+                )
+            })
+            .collect();
+        if self.device_shell.seen_sessions.as_ref() == Some(&current) {
+            return;
+        }
+        let Some(previous) = self.device_shell.seen_sessions.replace(current.clone()) else {
+            return;
+        };
+        let mut opened: Vec<_> = current.difference(&previous).cloned().collect();
+        opened.sort();
+        for (chat_id, target) in opened {
+            let shown = self.device_tab_ids(&chat_id).into_iter().any(|id| {
+                self.device_panels
+                    .get(&id)
+                    .is_some_and(|(panel, _)| panel.read(cx).shows(&target))
+            });
+            if shown {
+                continue;
+            }
+            if self.settings.device_auto_float {
+                self.open_device_float(chat_id, target, cx);
+            } else {
+                self.open_device_tab(&chat_id, target, true, window, cx);
+            }
+        }
+    }
+
     pub(super) fn sync_device_visibility(
         &mut self,
         chat_visible: bool,
@@ -704,6 +746,189 @@ mod tests {
                     "and removes the open picker"
                 );
                 assert!(!shell.device_panels.contains_key(&pad));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn agent_opened_devices_float_or_open_one_tab_after_the_baseline_skipping_dismissed_ones(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (window, _dir) = device_shell(cx);
+        let publish = |shell: &mut Shell,
+                       cx: &mut Context<Shell>,
+                       revision,
+                       devices: &[&str],
+                       sessions: &[(&str, &str)]| {
+            let mut hub = two_devices(revision);
+            for id in devices {
+                hub.devices.push(HubDevice {
+                    host_id: "local".into(),
+                    id: (*id).into(),
+                    name: (*id).into(),
+                    ..Default::default()
+                });
+            }
+            for (chat_id, device_id) in sessions {
+                hub.sessions.push(DeviceSession {
+                    chat_id: (*chat_id).into(),
+                    host_id: "local".into(),
+                    device_id: (*device_id).into(),
+                    ..Default::default()
+                });
+            }
+            shell
+                .state
+                .update(cx, |state, _| state.device_hub = Some(hub));
+        };
+        let floats = |shell: &Shell, cx: &App| {
+            let mut floats: Vec<_> = shell
+                .device_shell
+                .floats
+                .iter()
+                .map(|(chat, (float, _))| (chat.clone(), float.read(cx).target().1.clone()))
+                .collect();
+            floats.sort();
+            floats
+        };
+        window
+            .update(cx, |shell, window, cx| {
+                shell.settings.device_auto_float = false;
+                shell.auto_open_devices(window, cx);
+                assert!(
+                    device_tabs(shell).is_empty() && shell.device_shell.floats.is_empty(),
+                    "sessions in the first snapshot are a baseline"
+                );
+                let mini = shell
+                    .open_device_tab("chat", target("MINI"), false, window, cx)
+                    .unwrap();
+                shell.close_right_surface(RightSurface::Device(mini), window, cx);
+
+                publish(
+                    shell,
+                    cx,
+                    2,
+                    &["MINI", "X"],
+                    &[
+                        ("chat", "MINI"),
+                        ("chat", "X"),
+                        ("other", "PAD"),
+                        ("chat", "GHOST"),
+                    ],
+                );
+                shell.auto_open_devices(window, cx);
+                let targets = |shell: &Shell, chat: &str, cx: &App| {
+                    shell
+                        .device_tab_ids(chat)
+                        .into_iter()
+                        .filter_map(|id| shell.device_tab_target(id, cx))
+                        .map(|(_, device)| device)
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(
+                    targets(shell, "chat", cx),
+                    ["X"],
+                    "a dismissed device stays closed"
+                );
+                assert_eq!(
+                    targets(shell, "other", cx),
+                    ["PAD"],
+                    "a chat that is not shown gets its tab too"
+                );
+                shell.auto_open_devices(window, cx);
+                assert_eq!(device_tabs(shell).len(), 1, "one tab per new session");
+
+                publish(
+                    shell,
+                    cx,
+                    3,
+                    &["MINI", "X", "GHOST"],
+                    &[
+                        ("chat", "MINI"),
+                        ("chat", "X"),
+                        ("other", "PAD"),
+                        ("chat", "GHOST"),
+                    ],
+                );
+                shell.auto_open_devices(window, cx);
+                assert_eq!(
+                    targets(shell, "chat", cx),
+                    ["X", "GHOST"],
+                    "a session waits for its device summary"
+                );
+
+                shell.settings.device_auto_float = true;
+                shell.open_device_tab("chat", target("Z"), false, window, cx);
+                publish(
+                    shell,
+                    cx,
+                    4,
+                    &["MINI", "X", "GHOST", "Y", "Z"],
+                    &[
+                        ("chat", "MINI"),
+                        ("chat", "X"),
+                        ("other", "PAD"),
+                        ("chat", "GHOST"),
+                        ("chat", "Y"),
+                        ("chat", "Z"),
+                    ],
+                );
+                shell.auto_open_devices(window, cx);
+                assert_eq!(
+                    floats(shell, cx),
+                    [("chat".to_string(), "Y".to_string())],
+                    "auto-float floats the new device; one already in a tab is left alone"
+                );
+                assert_eq!(targets(shell, "chat", cx), ["X", "GHOST", "Z"]);
+
+                let all = [
+                    ("chat", "MINI"),
+                    ("chat", "X"),
+                    ("other", "PAD"),
+                    ("chat", "GHOST"),
+                    ("chat", "Y"),
+                    ("chat", "Z"),
+                ];
+                shell.settings.device_auto_float = false;
+                publish(shell, cx, 9, &["MINI", "X", "GHOST", "Y", "Z"], &all);
+                shell.auto_open_devices(window, cx);
+                assert_eq!(
+                    targets(shell, "chat", cx),
+                    ["X", "GHOST", "Z"],
+                    "a new revision with the same sessions opens nothing"
+                );
+
+                shell.state.update(cx, |state, _| state.device_hub = None);
+                shell.auto_open_devices(window, cx);
+                let mut restarted = all.to_vec();
+                restarted.push(("chat", "W"));
+                publish(
+                    shell,
+                    cx,
+                    1,
+                    &["MINI", "X", "GHOST", "Y", "Z", "W"],
+                    &restarted,
+                );
+                shell.auto_open_devices(window, cx);
+                assert_eq!(
+                    targets(shell, "chat", cx),
+                    ["X", "GHOST", "Z"],
+                    "the first snapshot of a new engine is a fresh baseline"
+                );
+                restarted.push(("chat", "V"));
+                publish(
+                    shell,
+                    cx,
+                    1,
+                    &["MINI", "X", "GHOST", "Y", "Z", "W", "V"],
+                    &restarted,
+                );
+                shell.auto_open_devices(window, cx);
+                assert_eq!(
+                    targets(shell, "chat", cx),
+                    ["X", "GHOST", "Z", "V"],
+                    "a reused revision number still opens the new session"
+                );
             })
             .unwrap();
     }

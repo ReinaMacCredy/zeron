@@ -33,3 +33,16 @@ pub(crate) async fn ensure_hub() -> Result<PathBuf, String> {
 pub(crate) fn launch(entry: &Path) -> Result<(PathBuf, Vec<String>), String> {
     zeron_harness::npm_tool_launch(entry).map_err(|e| e.to_string())
 }
+
+const AGENT_PIN: &str = "agent-device@0.21.12";
+const AGENT_BIN: &str = "agent-device";
+
+pub(crate) async fn ensure_agent() -> Result<PathBuf, String> {
+    zeron_harness::ensure_npm_tool(AGENT_PIN, AGENT_BIN, "agent-device")
+        .await
+        .map_err(|e| e.to_string())
+}
+
+pub(crate) fn agent_installed() -> bool {
+    zeron_harness::installed_npm_tool(AGENT_PIN, AGENT_BIN).is_some()
+}
