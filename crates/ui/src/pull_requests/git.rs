@@ -2669,21 +2669,9 @@ impl GitTab {
                 .map(|at| super::relative_time(now, at))
                 .unwrap_or_default();
             let row_button = |selector: String, label: &'static str, enabled: bool| {
-                div()
-                    .id(SharedString::from(selector.clone()))
-                    .debug_selector(move || selector.clone())
-                    .role(gpui::Role::Button)
-                    .aria_label(label)
-                    .flex_none()
-                    .h(px(22.0))
-                    .px(px(8.0))
-                    .rounded(px(6.0))
+                button_shell(selector, label.into(), 22.0, 8.0, 6.0)
                     .border_1()
                     .border_color(popup.hairline(0.12))
-                    .flex()
-                    .items_center()
-                    .text_size(px(12.0))
-                    .child(label)
                     .map(|el| {
                         if enabled {
                             el.cursor_pointer().hover(|style| style.bg(popup.ink(0.06)))
@@ -4134,27 +4122,38 @@ fn render_agent_banner(policy: GitAgentBusyPolicy, theme: &Theme) -> AnyElement 
         .into_any_element()
 }
 
+fn button_shell(
+    selector: impl Into<SharedString>,
+    label: SharedString,
+    height: f32,
+    padding: f32,
+    radius: f32,
+) -> gpui::Stateful<gpui::Div> {
+    let selector = selector.into();
+    div()
+        .id(selector.clone())
+        .debug_selector(move || selector.to_string())
+        .role(gpui::Role::Button)
+        .aria_label(label.clone())
+        .flex_none()
+        .h(px(height))
+        .px(px(padding))
+        .rounded(px(radius))
+        .flex()
+        .items_center()
+        .text_size(px(12.0))
+        .child(label)
+}
+
 fn detail_button(
     selector: &'static str,
     label: impl Into<SharedString>,
     enabled: bool,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
-    let label = label.into();
-    div()
-        .id(selector)
-        .debug_selector(move || selector.into())
-        .role(gpui::Role::Button)
-        .aria_label(label.clone())
-        .flex_none()
-        .h(px(26.0))
-        .px(px(10.0))
-        .rounded(px(7.0))
+    button_shell(selector, label.into(), 26.0, 10.0, 7.0)
         .border_1()
         .border_color(theme.hairline(0.12))
-        .flex()
-        .items_center()
-        .text_size(px(12.0))
         .text_color(theme.text)
         .map(|el| {
             if enabled {
@@ -4163,7 +4162,6 @@ fn detail_button(
                 el.opacity(0.45)
             }
         })
-        .child(label)
 }
 
 fn accent_button(
@@ -4172,18 +4170,7 @@ fn accent_button(
     enabled: bool,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(selector)
-        .debug_selector(move || selector.into())
-        .role(gpui::Role::Button)
-        .aria_label(label)
-        .flex_none()
-        .h(px(24.0))
-        .px(px(9.0))
-        .rounded(px(6.0))
-        .flex()
-        .items_center()
-        .text_size(px(12.0))
+    button_shell(selector, label.into(), 24.0, 9.0, 6.0)
         .font_weight(gpui::FontWeight::MEDIUM)
         .bg(theme.accent_strong)
         .text_color(theme.on_accent)
@@ -4194,7 +4181,6 @@ fn accent_button(
                 el.opacity(0.45)
             }
         })
-        .child(label)
 }
 
 fn small_button(
@@ -4203,18 +4189,7 @@ fn small_button(
     danger: bool,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(selector)
-        .debug_selector(move || selector.into())
-        .role(gpui::Role::Button)
-        .aria_label(label)
-        .flex_none()
-        .h(px(24.0))
-        .px(px(9.0))
-        .rounded(px(6.0))
-        .flex()
-        .items_center()
-        .text_size(px(12.0))
+    button_shell(selector, label.into(), 24.0, 9.0, 6.0)
         .cursor_pointer()
         .map(|el| {
             if danger {
@@ -4228,7 +4203,6 @@ fn small_button(
                     .hover(|style| style.bg(theme.ink(0.06)))
             }
         })
-        .child(label)
 }
 
 fn render_diff(open: &Expanded, theme: &Theme) -> AnyElement {
