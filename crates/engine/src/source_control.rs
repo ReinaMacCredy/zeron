@@ -220,6 +220,12 @@ impl ChangeRequestResolver {
         for (root, identity) in identities {
             match identity {
                 Ok(identity) => {
+                    listing.projects.push(zeron_proto::ChangeRequestProject {
+                        repository: identity.name_with_owner(),
+                        host: identity.remote.host.clone(),
+                        space_id: String::new(),
+                        path: root.to_string_lossy().into_owned(),
+                    });
                     if !repositories
                         .iter()
                         .any(|known| known.remote.same_repository(&identity.remote))
@@ -7555,6 +7561,14 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
             .await;
         assert!(listing.errors.is_empty(), "{:?}", listing.errors);
         assert_eq!(listing.repositories, ["Acme/Other", "acme/zeron"]);
+        assert_eq!(
+            listing
+                .projects
+                .iter()
+                .map(|project| (project.path.as_str(), project.repository.as_str()))
+                .collect::<Vec<_>>(),
+            [("/repo", "acme/zeron"), ("/other", "Acme/Other")]
+        );
         assert_eq!(
             listing
                 .items

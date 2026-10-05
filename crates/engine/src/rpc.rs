@@ -965,14 +965,56 @@ impl EngineRpc {
             .map(|(space, _)| space.id.clone())
     }
 
+    async fn agent_active_on_checkout(&self, checkout_id: &str) -> bool {
+        let local_device = self.doc_host.device_id();
+        let chats = self.workspace.watch_chats().borrow().clone();
+        for candidate in chats {
+            if candidate.device_id != local_device
+                || !self
+                    .sessions
+                    .session_status(&candidate.id)
+                    .is_some_and(|session| {
+                        matches!(
+                            session.status,
+                            zeron_proto::SessionStatus::Working
+                                | zeron_proto::SessionStatus::AwaitingInput
+                        )
+                    })
+            {
+                continue;
+            }
+            let same_checkout = if candidate.checkout_id.as_deref() == Some(checkout_id) {
+                true
+            } else if let Some(candidate_cwd) = candidate.cwd.as_deref() {
+                self.repos
+                    .checkout_identity(std::path::Path::new(candidate_cwd))
+                    .await
+                    .is_ok_and(|candidate_identity| candidate_identity.id == checkout_id)
+            } else {
+                false
+            };
+            if same_checkout {
+                return true;
+            }
+        }
+        false
+    }
+
     fn change_request_space_roots(&self) -> Vec<std::path::PathBuf> {
+        self.change_request_spaces()
+            .into_iter()
+            .map(|(_, path)| path)
+            .collect()
+    }
+
+    fn change_request_spaces(&self) -> Vec<(String, std::path::PathBuf)> {
         let local_device = self.doc_host.device_id();
         self.workspace
             .watch_spaces()
             .borrow()
             .iter()
             .filter(|space| space.device_id == local_device && space.git_detected)
-            .map(|space| std::path::PathBuf::from(&space.path))
+            .map(|space| (space.id.clone(), std::path::PathBuf::from(&space.path)))
             .collect()
     }
 
@@ -3012,9 +3054,20 @@ impl RpcService for EngineRpc {
                     return Ok(RpcReply::Value(hit));
                 }
                 let p: zeron_proto::ListChangeRequestsRequest = parse_params(params)?;
-                let listing = crate::source_control::ChangeRequestResolver::new()
-                    .list_change_requests(&self.change_request_space_roots(), &p)
+                let spaces = self.change_request_spaces();
+                let roots: Vec<_> = spaces.iter().map(|(_, path)| path.clone()).collect();
+                let mut listing = crate::source_control::ChangeRequestResolver::new()
+                    .list_change_requests(&roots, &p)
                     .await;
+                listing.projects.retain_mut(|project| {
+                    let space = spaces
+                        .iter()
+                        .find(|(_, path)| path.to_string_lossy() == project.path.as_str());
+                    if let Some((space_id, _)) = space {
+                        project.space_id = space_id.clone();
+                    }
+                    space.is_some()
+                });
                 let value =
                     serde_json::to_value(&listing).map_err(|e| RpcError::Failed(e.to_string()))?;
                 if listing.errors.is_empty() {
@@ -3312,40 +3365,10 @@ impl RpcService for EngineRpc {
                     // Refuse the mutation when any local chat on this exact
                     // checkout has a live run. We never interrupt an agent as a
                     // side effect of discarding files.
-                    let chats = self.workspace.watch_chats().borrow().clone();
-                    for candidate in chats {
-                        if candidate.device_id != self.doc_host.device_id() {
-                            continue;
-                        }
-                        let same_checkout =
-                            if candidate.checkout_id.as_deref() == Some(identity.id.as_str()) {
-                                true
-                            } else if let Some(candidate_cwd) = candidate.cwd.as_deref() {
-                                self.repos
-                                    .checkout_identity(std::path::Path::new(candidate_cwd))
-                                    .await
-                                    .is_ok_and(|candidate_identity| {
-                                        candidate_identity.id == identity.id
-                                    })
-                            } else {
-                                false
-                            };
-                        if same_checkout
-                            && self
-                                .sessions
-                                .session_status(&candidate.id)
-                                .is_some_and(|session| {
-                                    matches!(
-                                        session.status,
-                                        zeron_proto::SessionStatus::Working
-                                            | zeron_proto::SessionStatus::AwaitingInput
-                                    )
-                                })
-                        {
-                            return Err(RpcError::Failed(
-                                "an agent is active in this working tree".into(),
-                            ));
-                        }
+                    if self.agent_active_on_checkout(&identity.id).await {
+                        return Err(RpcError::Failed(
+                            "an agent is active in this working tree".into(),
+                        ));
                     }
 
                     let snapshot = self
@@ -3718,6 +3741,36 @@ impl RpcService for EngineRpc {
                 .await
                 .map_err(|_| RpcError::Failed("file search timed out".into()))??;
                 RpcReply::value(&matches)
+            }
+            methods::GET_WORKING_TREE => {
+                Box::pin(async move {
+                    let request: zeron_proto::GetWorkingTreeRequest = parse_params(params)?;
+                    if request.target.chat_id.is_some() || request.target.space_id.is_none() {
+                        return Err(RpcError::Failed(
+                            "working tree reads need a spaceId target".into(),
+                        ));
+                    }
+                    let mut tree = tokio::time::timeout(crate::working_tree::READ_TIMEOUT, async {
+                        let workspace = self
+                            .workspace_files
+                            .resolve_target(&request.target)
+                            .await
+                            .map_err(RpcError::from)?;
+                        if workspace.checkout_id.starts_with("folder-") {
+                            return Err(RpcError::Failed(
+                                "this project is not a Git checkout".into(),
+                            ));
+                        }
+                        crate::working_tree::read(&workspace.root, &workspace.checkout_id)
+                            .await
+                            .map_err(|error| RpcError::Failed(error.to_string()))
+                    })
+                    .await
+                    .map_err(|_| RpcError::Failed("working tree read timed out".into()))??;
+                    tree.agent_active = self.agent_active_on_checkout(&tree.checkout_id).await;
+                    RpcReply::value(&tree)
+                })
+                .await
             }
             methods::LIST_WORKSPACE_DIRECTORY => {
                 let request: zeron_proto::ListWorkspaceDirectoryRequest = parse_params(params)?;
@@ -4925,6 +4978,138 @@ mod tests {
         let received: zeron_rpc::ServerFrame =
             serde_json::from_str(&serde_json::to_string(&frame).unwrap()).unwrap();
         assert!(received.ok.is_some(), "a null `ok` reads back as no reply");
+    }
+
+    #[tokio::test]
+    async fn get_working_tree_reads_space_checkouts_only_and_survives_the_wire() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        let repo = root.join("repo");
+        let linked = root.join("linked");
+        let outside = root.join("outside");
+        let plain = root.join("plain");
+        let data = root.join("data");
+        for path in [&repo, &outside, &plain, &data] {
+            std::fs::create_dir(path).unwrap();
+        }
+        git(&repo, &["init", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "first"]);
+        git(
+            &repo,
+            &["worktree", "add", "-b", "side", linked.to_str().unwrap()],
+        );
+        std::fs::write(repo.join("new file.txt"), "x\n").unwrap();
+        git(&outside, &["init", "-b", "main"]);
+
+        let core = crate::EngineCore::assemble(
+            &data,
+            std::sync::Arc::new(HarnessRegistry::new()),
+            HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        let rpc = core.rpc_service();
+        for (space_id, path, git_detected) in
+            [("space-repo", &repo, true), ("space-plain", &plain, false)]
+        {
+            rpc.handle(
+                methods::MUTATE,
+                serde_json::json!({
+                    "op": "createSpace", "spaceId": space_id, "deviceId": core.device_id,
+                    "path": path, "gitDetected": git_detected,
+                }),
+            )
+            .await
+            .unwrap();
+        }
+
+        let reply = rpc
+            .handle(
+                methods::GET_WORKING_TREE,
+                serde_json::json!({ "spaceId": "space-repo" }),
+            )
+            .await
+            .unwrap();
+        let RpcReply::Value(value) = reply else {
+            panic!("unary reply expected");
+        };
+        let frame = zeron_rpc::ServerFrame {
+            id: 1,
+            ok: Some(value),
+            ..Default::default()
+        };
+        let received: zeron_rpc::ServerFrame =
+            serde_json::from_str(&serde_json::to_string(&frame).unwrap()).unwrap();
+        let tree: zeron_proto::WorkingTree =
+            serde_json::from_value(received.ok.expect("a reply, never null")).unwrap();
+        assert_eq!(tree.branch.as_deref(), Some("main"));
+        assert_eq!(tree.root, repo.to_string_lossy());
+        assert!(!tree.agent_active);
+        assert_eq!(
+            tree.files
+                .iter()
+                .map(|f| f.path.as_str())
+                .collect::<Vec<_>>(),
+            ["new file.txt"]
+        );
+
+        let RpcReply::Value(linked_tree) = rpc
+            .handle(
+                methods::GET_WORKING_TREE,
+                serde_json::json!({ "spaceId": "space-repo", "checkoutPath": linked }),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("unary reply expected");
+        };
+        assert_eq!(linked_tree["branch"], "side");
+        assert_ne!(
+            linked_tree["checkoutId"],
+            serde_json::json!(tree.checkout_id)
+        );
+
+        for (params, expected) in [
+            (
+                serde_json::json!({ "spaceId": "space-repo", "checkoutPath": outside }),
+                "not a workspace checkout",
+            ),
+            (
+                serde_json::json!({ "spaceId": "space-repo", "checkoutPath": root }),
+                "not a workspace checkout",
+            ),
+            (serde_json::json!({ "chatId": "chat-1" }), "spaceId"),
+            (
+                serde_json::json!({ "spaceId": "space-plain" }),
+                "not a Git checkout",
+            ),
+            (serde_json::json!({ "spaceId": "missing" }), "not found"),
+        ] {
+            let error = match rpc.handle(methods::GET_WORKING_TREE, params.clone()).await {
+                Err(error) => error.to_string(),
+                Ok(_) => panic!("{params} must be refused"),
+            };
+            assert!(error.contains(expected), "{params}: {error}");
+        }
     }
 
     /// Every forwardable unary method gets a bounded reply deadline —

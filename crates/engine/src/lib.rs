@@ -45,6 +45,7 @@ mod token_rate;
 mod transcript_history;
 mod turn_clock;
 pub mod uploads;
+mod working_tree;
 pub mod workspace_files;
 pub mod workspace_host;
 
