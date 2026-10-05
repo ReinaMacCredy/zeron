@@ -18,6 +18,7 @@ use zeron_proto::device_hub::{
     CloseHubDeviceParams, ConfigureDeviceHubParams, DeviceBooting, DeviceHostStatus, DeviceHubHost,
     DeviceHubSettings, DeviceHubState, DeviceInput, DevicePlatform, DevicePlatformAvailability,
     DeviceSession, LOCAL_DEVICE_HOST_ID, OpenHubDeviceParams, ShutdownHubDeviceParams,
+    StreamLinkStatus,
 };
 
 pub use actions::DEVICE_ACTION_UNAVAILABLE;
@@ -27,8 +28,8 @@ pub use agent::{
 };
 use hub_client::HubClient;
 use hub_process::{Backoff, HubProcess};
-pub(crate) use stream::FrameSubscription;
-use stream::{DeviceStreams, FrameSlot};
+use stream::{AvccFeed, DeviceStreams, FrameSlot};
+pub(crate) use stream::{AvccSubscription, FrameSubscription, avcc_batches};
 
 const SETTINGS_FILE: &str = "device-hub-settings.json";
 const HUB_POLL: Duration = Duration::from_secs(1);
@@ -395,8 +396,10 @@ impl DeviceHub {
         if slot.as_ref().map(|hub| hub.origin.as_str()) != Some(origin) {
             return Err(HUB_NOT_RUNNING.into());
         }
-        self.streams
-            .resume(|device_id, frames, link| self.start_reader(origin, device_id, frames, link));
+        self.streams.resume(
+            |device_id, frames, link| self.start_reader(origin, device_id, frames, link),
+            |device_id, feed, link| self.start_avcc_reader(origin, device_id, feed, link),
+        );
         drop(slot);
         Ok(())
     }
@@ -685,6 +688,26 @@ impl DeviceHub {
     }
 
     pub(crate) fn watch_frames(&self, device_id: &str) -> Result<FrameSubscription, String> {
+        self.with_live_hub(device_id, |origin| {
+            self.streams.subscribe(device_id, |frames, link| {
+                self.start_reader(origin, device_id, frames, link)
+            })
+        })
+    }
+
+    pub(crate) fn watch_avcc(&self, device_id: &str) -> Result<AvccSubscription, String> {
+        self.with_live_hub(device_id, |origin| {
+            self.streams.subscribe_avcc(device_id, |feed, link| {
+                self.start_avcc_reader(origin, device_id, feed, link)
+            })
+        })
+    }
+
+    fn with_live_hub<T>(
+        &self,
+        device_id: &str,
+        subscribe: impl FnOnce(&str) -> T,
+    ) -> Result<T, String> {
         if !self.enabled() {
             return Err(DEVICE_SUPPORT_OFF.into());
         }
@@ -698,9 +721,7 @@ impl DeviceHub {
         if slot.as_ref().map(|hub| hub.origin.as_str()) != Some(origin.as_str()) {
             return Err(HUB_NOT_RUNNING.into());
         }
-        let subscription = self.streams.subscribe(device_id, |frames, link| {
-            self.start_reader(&origin, device_id, frames, link)
-        });
+        let subscription = subscribe(&origin);
         drop(slot);
         Ok(subscription)
     }
@@ -716,13 +737,51 @@ impl DeviceHub {
             http: &self.http,
             origin,
         };
-        let (video, input) = (client.mjpeg_url(device_id), client.input_url(device_id));
-        let (me, status_hub) = (self.me.clone(), self.me.clone());
-        let (id, status_id) = (device_id.to_string(), device_id.to_string());
+        let (on_status, on_first_frame) =
+            self.link_callbacks(device_id, link, client.input_url(device_id));
         stream::spawn_reader(
             self.http.clone(),
-            video,
+            client.mjpeg_url(device_id),
             frames,
+            on_status,
+            on_first_frame,
+        )
+    }
+
+    fn start_avcc_reader(
+        &self,
+        origin: &str,
+        device_id: &str,
+        feed: Arc<AvccFeed>,
+        link: u64,
+    ) -> tokio::task::JoinHandle<()> {
+        let client = HubClient {
+            http: &self.http,
+            origin,
+        };
+        let (on_status, on_first_frame) =
+            self.link_callbacks(device_id, link, client.input_url(device_id));
+        stream::spawn_avcc_reader(
+            self.http.clone(),
+            client.avcc_url(device_id),
+            feed,
+            on_status,
+            on_first_frame,
+        )
+    }
+
+    fn link_callbacks(
+        &self,
+        device_id: &str,
+        link: u64,
+        input: String,
+    ) -> (
+        impl Fn(StreamLinkStatus) + Send + 'static,
+        impl Fn() + Send + 'static,
+    ) {
+        let (me, status_hub) = (self.me.clone(), self.me.clone());
+        let (id, status_id) = (device_id.to_string(), device_id.to_string());
+        (
             move |status| {
                 if let Some(hub) = status_hub.upgrade() {
                     hub.streams.set_status(&status_id, link, Some(status), None);
@@ -966,6 +1025,18 @@ mod tests {
         huge_ax: bool,
     }
 
+    const AVCC_RECORD: &[u8] = &[1, 0x64, 0, 0x20, 0xff, 0xe1, 0, 1, 0x67, 1, 0, 1, 0x68];
+
+    fn avcc_envelope(tag: u8, payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        zeron_proto::device_hub::AvccEnvelope {
+            tag,
+            payload: payload.to_vec(),
+        }
+        .encode_into(&mut out);
+        out
+    }
+
     pub(super) const HEALTHY: Fake = Fake {
         list_status: 200,
         booted: true,
@@ -1015,6 +1086,23 @@ mod tests {
                         while alive {
                             alive = socket
                                 .write_all(&super::mjpeg::part(fake.frame.as_bytes()))
+                                .await
+                                .is_ok();
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                        }
+                        return;
+                    }
+                    if line.starts_with("GET /vendor/serve-sim/helper/SIM-1/stream.avcc ") {
+                        let mut stream = b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n".to_vec();
+                        for (tag, payload) in [(4, &b"seed"[..]), (1, AVCC_RECORD), (2, b"key")] {
+                            stream.extend(avcc_envelope(tag, payload));
+                        }
+                        let mut alive = socket.write_all(&stream).await.is_ok();
+                        let mut delta = 0u32;
+                        while alive {
+                            delta += 1;
+                            alive = socket
+                                .write_all(&avcc_envelope(3, &delta.to_be_bytes()))
                                 .await
                                 .is_ok();
                             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1550,6 +1638,70 @@ mod tests {
         assert!(
             hub.snapshot().session("chat-1", "local", "SIM-1").is_some(),
             "the session outlives its last watcher"
+        );
+        hub.shutdown().await;
+    }
+
+    async fn next_tags(
+        batches: &mut (impl futures::Stream<Item = Vec<u8>> + Unpin),
+        count: usize,
+    ) -> Vec<u8> {
+        use futures::StreamExt as _;
+        let mut demuxer = zeron_proto::device_hub::AvccDemuxer::default();
+        let mut tags = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while tags.len() < count {
+                let batch = batches.next().await.unwrap();
+                tags.extend(demuxer.push(&batch).unwrap().iter().map(|e| e.tag));
+            }
+        })
+        .await
+        .expect("AVCC envelopes");
+        tags
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn h264_watchers_share_one_avcc_read_late_joiners_get_the_gop_and_input_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = super::DeviceHub::start(dir.path());
+        let (origin, requests) = fake_hub_with(HEALTHY).await;
+        hub.attach_hub_for_test(origin);
+        hub.configure(zeron_proto::device_hub::ConfigureDeviceHubParams {
+            enabled: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        hub.open(open_params("SIM-1")).await.unwrap();
+        let count = |route: &str| {
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|line| line.contains(route))
+                .count()
+        };
+        let mut tab = Box::pin(super::avcc_batches(hub.watch_avcc("SIM-1").unwrap()));
+        assert_eq!(next_tags(&mut tab, 5).await[..4], [4, 1, 2, 3]);
+        eventually(|| count("helper/ws?device=SIM-1") > 0).await;
+        assert_eq!(count("stream.mjpeg"), 0, "an AVCC read alone opens input");
+        let mut float = Box::pin(super::avcc_batches(hub.watch_avcc("SIM-1").unwrap()));
+        let replay = next_tags(&mut float, 3).await;
+        assert_eq!(replay[..2], [1, 2], "description and keyframe first");
+        assert!(replay[2..].iter().all(|tag| *tag == 3), "{replay:?}");
+        let mjpeg = hub.watch_frames("SIM-1").unwrap();
+        let streams = || hub.snapshot().streams.get("SIM-1").cloned();
+        assert_eq!(streams().map(|status| status.subscribers), Some(3));
+        assert_eq!(count("stream.avcc"), 1, "one shared hub read");
+        drop((tab, float));
+        assert_eq!(streams().map(|status| status.subscribers), Some(1));
+        drop(mjpeg);
+        assert_eq!(streams(), None);
+        let mut again = Box::pin(super::avcc_batches(hub.watch_avcc("SIM-1").unwrap()));
+        assert_eq!(
+            next_tags(&mut again, 1).await[0],
+            1,
+            "cached description first"
         );
         hub.shutdown().await;
     }
