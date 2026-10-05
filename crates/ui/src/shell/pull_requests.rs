@@ -108,10 +108,14 @@ impl Shell {
         }
     }
 
-    pub(super) fn dismiss_pull_requests_overlay(&mut self, cx: &mut Context<Self>) -> bool {
+    pub(super) fn dismiss_pull_requests_overlay(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         self.pull_requests_page
             .clone()
-            .is_some_and(|page| page.update(cx, |page, cx| page.dismiss_overlay(cx)))
+            .is_some_and(|page| page.update(cx, |page, cx| page.dismiss_overlay(window, cx)))
     }
 
     /// A new chat in the pull request's project (or its prepared worktree), with the hand-off's
@@ -252,5 +256,167 @@ impl Shell {
                     }),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use gpui::{TestAppContext, VisualTestContext};
+    use zeron_rpc::{RpcError, RpcReply, RpcService};
+
+    use super::*;
+    use crate::pull_requests::{PageTab, PullRequestListPrefs};
+
+    #[derive(Default)]
+    struct GitLab {
+        calls: Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl RpcService for GitLab {
+        async fn handle(
+            &self,
+            method: &str,
+            _params: serde_json::Value,
+        ) -> Result<RpcReply, RpcError> {
+            self.calls.lock().unwrap().push(method.to_string());
+            match method {
+                methods::GET_WORKING_TREE => RpcReply::value(&serde_json::json!({
+                    "checkoutId": "checkout-1", "root": "/repo", "branch": "feature/x",
+                    "headSha": "aaa", "upstream": "origin/feature/x", "ahead": 0, "behind": 0,
+                    "pushRemote": "origin", "defaultBranch": "main", "revision": "r1",
+                    "files": [{"path": "src/lib.rs", "index": "unchanged", "worktree": "modified",
+                               "unstaged": {"additions": 1, "deletions": 0}}],
+                })),
+                methods::LIST_GIT_HISTORY => RpcReply::value(&serde_json::json!({
+                    "commits": [], "headSha": "aaa", "nextCursor": null,
+                    "totalCount": 0, "headCommitCount": 0,
+                })),
+                _ => Err(RpcError::UnknownMethod(method.to_string())),
+            }
+        }
+    }
+
+    fn settle(cx: &mut VisualTestContext, mut done: impl FnMut(&mut VisualTestContext) -> bool) {
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if done(cx) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("condition never settled");
+    }
+
+    fn boot(
+        cx: &mut TestAppContext,
+        lab: Arc<GitLab>,
+    ) -> (Entity<Shell>, &mut VisualTestContext, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::terminal::panel::init(cx);
+            let mut ui = UiSettings::default();
+            ui.pull_requests_list = PullRequestListPrefs {
+                tab: PageTab::Git,
+                git_space_id: Some("s1".into()),
+                ..Default::default()
+            };
+            settings::init(ui, dir.path(), cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+        });
+        cx.executor().allow_parking();
+        let client = zeron_rpc::memory_client(lab);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(client));
+            state.workspace_scope = Some(WorkspaceScope::Local);
+            state.connection = ConnectionStatus::Ready;
+            state.local_device_id = Some("dev-local".into());
+            state.devices = vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "dev-local", "name": "Lab Mac", "platform": "macos",
+                    "capabilities": [
+                        zeron_proto::capabilities::SOURCE_CONTROL_V1,
+                        zeron_proto::capabilities::SOURCE_CONTROL_SYNC_V1,
+                        zeron_proto::capabilities::SOURCE_CONTROL_COMMITS_V1,
+                    ],
+                }))
+                .unwrap(),
+            ];
+            state.spaces = vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "s1", "deviceId": "dev-local", "path": "/repo", "gitDetected": true,
+                    "createdAt": Utc::now(),
+                }))
+                .unwrap(),
+            ];
+        });
+        let boot = EngineBootConfig {
+            data_dir: dir.path().into(),
+            ipc_port: 0,
+            edge_url: "http://127.0.0.1:1".into(),
+            edge_token: None,
+            org_id: None,
+            workos_client_id: None,
+            default_harness: zeron_proto::HarnessId::Mock,
+        };
+        let (shell, cx) = cx.add_window_view(|_, cx| Shell::new(state, boot, cx));
+        (shell, cx, dir)
+    }
+
+    fn click(cx: &mut VisualTestContext, selector: &'static str) {
+        let bounds = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} is drawn"));
+        cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+    }
+
+    fn tree_reads(lab: &GitLab) -> usize {
+        lab.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|method| *method == methods::GET_WORKING_TREE)
+            .count()
+    }
+
+    #[gpui::test]
+    fn escape_on_the_git_tab_cancels_its_confirm_before_it_closes_the_page(
+        cx: &mut TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        let (shell, cx, _dir) = boot(cx, lab.clone());
+        shell.update(cx, |shell, cx| shell.open_pull_requests(cx));
+        settle(cx, |cx| cx.debug_bounds("git-changes-discard-0").is_some());
+
+        click(cx, "git-changes-discard-0");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("git-discard-confirm").is_some());
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        shell.read_with(cx, |shell, _| {
+            assert!(
+                matches!(shell.route, Route::PullRequests),
+                "the first Escape closes the confirm, not the page"
+            );
+        });
+        assert!(cx.debug_bounds("git-discard-confirm").is_none());
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        shell.read_with(cx, |shell, _| assert!(matches!(shell.route, Route::Chat)));
     }
 }

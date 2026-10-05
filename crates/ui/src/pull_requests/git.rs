@@ -953,6 +953,44 @@ impl GitTab {
         }
     }
 
+    pub(super) fn dismiss_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.model_picker.read(cx).is_open() {
+            self.model_picker.update(cx, |picker, cx| picker.close(cx));
+            return true;
+        }
+        if self.confirm.is_some() {
+            self.cancel_confirm(cx);
+            return true;
+        }
+        if self.writing {
+            self.stop_writing(window, cx);
+            return true;
+        }
+        if self.commit_menu || self.stash_menu {
+            self.commit_menu = false;
+            self.stash_menu = false;
+            cx.notify();
+            return true;
+        }
+        if self
+            .detail
+            .as_ref()
+            .is_some_and(|detail| detail.branch_form.is_some())
+        {
+            self.close_branch_form(cx);
+            return true;
+        }
+        if self
+            .pr_sheet
+            .as_ref()
+            .is_some_and(|sheet| sheet.step.is_none())
+        {
+            self.cancel_pr_sheet(cx);
+            return true;
+        }
+        false
+    }
+
     fn confirm_discard(&mut self, cx: &mut Context<Self>) {
         let stale = self.confirm_is_stale();
         let Some(Confirm::Discard { path, .. }) = self.confirm.take() else {
@@ -5092,6 +5130,27 @@ mod tests {
         create_error: Mutex<Option<String>>,
         created: std::sync::atomic::AtomicBool,
         listed: Mutex<Option<ChangeRequestListing>>,
+        hold_trees: std::sync::atomic::AtomicBool,
+        release_tree: tokio::sync::Notify,
+        hold_actions: std::sync::atomic::AtomicBool,
+        release_action: tokio::sync::Notify,
+        hold_syncs: std::sync::atomic::AtomicBool,
+        release_sync: tokio::sync::Notify,
+        watch: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>>>,
+        remote_listing: Mutex<Option<ChangeRequestListing>>,
+    }
+
+    async fn held(hold: &std::sync::atomic::AtomicBool, release: &tokio::sync::Notify) {
+        if hold.load(std::sync::atomic::Ordering::SeqCst) {
+            release.notified().await;
+        }
+    }
+
+    fn watch_frame(revision: &str) -> serde_json::Value {
+        serde_json::json!({"status": {
+            "checkoutId": "checkout-1", "deviceId": "dev-local", "revision": revision,
+            "complete": true, "files": [],
+        }})
     }
 
     const WRITTEN: &str =
@@ -5168,9 +5227,22 @@ mod tests {
                     "headSha": "aaa", "nextCursor": null, "totalCount": 1, "headCommitCount": 1
                 })),
                 methods::GET_WORKING_TREE => {
+                    held(&self.hold_trees, &self.release_tree).await;
                     RpcReply::value(&self.tree.lock().unwrap().clone().unwrap_or_else(tree))
                 }
+                methods::WATCH_WORKSPACE_GIT_STATUS => {
+                    let Some(receiver) = self.watch.lock().unwrap().take() else {
+                        return Err(RpcError::UnknownMethod(method.to_string()));
+                    };
+                    Ok(RpcReply::Stream(Box::pin(futures::stream::unfold(
+                        receiver,
+                        |mut receiver| async move {
+                            receiver.recv().await.map(|frame| (frame, receiver))
+                        },
+                    ))))
+                }
                 methods::RUN_WORKING_TREE_ACTION => {
+                    held(&self.hold_actions, &self.release_action).await;
                     if let Some(error) = self.action_error.lock().unwrap().clone() {
                         return Err(RpcError::Failed(error));
                     }
@@ -5256,6 +5328,7 @@ mod tests {
                     serde_json::json!({"models": [{"id": "gpt-5-mini", "label": "GPT-5 mini"}]})
                 }),
                 methods::SYNC_BRANCH => {
+                    held(&self.hold_syncs, &self.release_sync).await;
                     if let Some(error) = self.sync_error.lock().unwrap().clone() {
                         return Err(RpcError::Failed(error));
                     }
@@ -5290,6 +5363,13 @@ mod tests {
                     }))
                 }
                 methods::LIST_CHANGE_REQUESTS => {
+                    if let Some(remote) = self.remote_listing.lock().unwrap().clone() {
+                        return RpcReply::value(&if params.get("targetDeviceId").is_some() {
+                            remote
+                        } else {
+                            ChangeRequestListing::default()
+                        });
+                    }
                     let mut listing = self.listed.lock().unwrap().clone().unwrap_or_else(listing);
                     if self.created.load(std::sync::atomic::Ordering::SeqCst) {
                         let mut item = listing.items[0].clone();
@@ -7582,5 +7662,46 @@ mod tests {
             cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text())),
             Some(PICKED.to_string())
         );
+    }
+
+    #[gpui::test]
+    fn a_pull_request_link_opens_on_the_pull_requests_tab(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (page, cx, _calls, _dir) = open_page(cx, lab_state(), git_prefs());
+        settle(cx, |cx| cx.debug_bounds("git-staged-row-0").is_some());
+        let item = listing().items[0].clone();
+        page.update(cx, |page, cx| page.open_linked(item, None, cx));
+        cx.run_until_parked();
+        page.read_with(cx, |page, cx| {
+            assert_eq!(page.prefs.tab, PageTab::PullRequests);
+            assert_eq!(
+                crate::settings::current(cx).pull_requests_list.tab,
+                PageTab::PullRequests
+            );
+            assert_eq!(page.active.as_ref().map(|key| key.number), Some(7));
+        });
+        assert!(cx.debug_bounds("git-staged-row-0").is_none());
+    }
+
+    #[gpui::test]
+    fn escape_on_the_git_tab_leaves_hidden_pull_request_state_alone(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (page, cx, _calls, _dir) = open_page(cx, lab_state(), git_prefs());
+        settle(cx, |cx| cx.debug_bounds("git-staged-row-0").is_some());
+        let item = listing().items[0].clone();
+        page.update(cx, |page, cx| {
+            page.open_pull_request(&item, cx);
+            page.prefs.tab = PageTab::Git;
+            page.checkout_menu =
+                Some((super::super::PullRequestKey::of(&item), Default::default()));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let dismissed =
+            cx.update(|window, cx| page.update(cx, |page, cx| page.dismiss_overlay(window, cx)));
+        assert!(!dismissed, "nothing on the Git tab was open");
+        page.read_with(cx, |page, _| assert!(page.checkout_menu.is_some()));
     }
 }
