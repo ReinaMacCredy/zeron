@@ -203,7 +203,7 @@ impl TitleGenerator {
                 harness: harness_id,
                 model,
                 prompt: title_prompt,
-                instructions: None,
+                instructions: zeron_harness::TITLE_INSTRUCTIONS,
                 attempt_timeout: std::time::Duration::from_secs(30),
                 retry_delays_ms: RETRY_DELAYS_MS,
             },
@@ -218,8 +218,7 @@ pub(crate) struct OneShot {
     pub harness: HarnessId,
     pub model: Option<String>,
     pub prompt: String,
-    // None takes `run_title`, which each driver pins to TITLE_INSTRUCTIONS.
-    pub instructions: Option<&'static str>,
+    pub instructions: &'static str,
     pub attempt_timeout: std::time::Duration,
     pub retry_delays_ms: &'static [u64],
 }
@@ -321,7 +320,7 @@ pub(crate) async fn collect_text(
     harness: &dyn zeron_harness::Harness,
     request: RunRequest,
     execution_lease: Option<Arc<tokio::sync::OwnedRwLockReadGuard<()>>>,
-    instructions: Option<&'static str>,
+    instructions: &'static str,
 ) -> Result<String, EngineError> {
     let (steer_tx, steer_rx) = tokio::sync::mpsc::channel::<SteerMessage>(1);
     let interrupt = CancellationToken::new();
@@ -338,14 +337,9 @@ pub(crate) async fn collect_text(
         tool_server: None,
         stop_tasks: None,
     };
-    let mut stream = match instructions {
-        Some(instructions) => {
-            harness
-                .run_one_shot(request, controls, instructions)
-                .await?
-        }
-        None => harness.run_title(request, controls).await?,
-    };
+    let mut stream = harness
+        .run_one_shot(request, controls, instructions)
+        .await?;
     let mut text = String::new();
     let mut completed = false;
     while let Some(event) = stream.next().await {
@@ -444,7 +438,7 @@ mod tests {
             forked_at: None,
             computer_control: false,
         };
-        let result = collect_text(&harness, request, None, None).await;
+        let result = collect_text(&harness, request, None, zeron_harness::TITLE_INSTRUCTIONS).await;
         assert!(
             result
                 .unwrap_err()
@@ -485,10 +479,11 @@ mod tests {
         > {
             panic!("title generation must never call the coding entry point")
         }
-        async fn run_title(
+        async fn run_one_shot(
             &self,
             request: RunRequest,
             _: RunControls,
+            _: &'static str,
         ) -> Result<
             futures::stream::BoxStream<'static, Result<AgentEvent, zeron_harness::HarnessError>>,
             zeron_harness::HarnessError,

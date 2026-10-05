@@ -263,7 +263,7 @@ pub(crate) async fn generate(
             harness: choice.harness,
             model: Some(choice.model.clone()),
             prompt: prompt(request.instruction.as_deref(), &staged),
-            instructions: Some(zeron_harness::COMMIT_MESSAGE_INSTRUCTIONS),
+            instructions: zeron_harness::COMMIT_MESSAGE_INSTRUCTIONS,
             attempt_timeout: ATTEMPT_TIMEOUT,
             retry_delays_ms: RETRY_DELAYS_MS,
         },

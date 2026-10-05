@@ -218,17 +218,6 @@ pub trait Harness: Send + Sync {
         }
         skills::discover(self.id(), cwd).await.map(Some)
     }
-    /// Run an isolated title request. Drivers must opt in with title-specific
-    /// instructions and restrictions; never fall back to an ordinary coding run.
-    async fn run_title(
-        &self,
-        request: RunRequest,
-        controls: RunControls,
-    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        self.run_one_shot(request, controls, TITLE_INSTRUCTIONS)
-            .await
-    }
-
     async fn run_one_shot(
         &self,
         _request: RunRequest,

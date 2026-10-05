@@ -47,7 +47,9 @@ async fn execution_lease_outlives_dropped_run_and_title_streams_until_child_is_r
         let mut req = request("scenario:lease-shutdown");
         req.cwd = temp.path().display().to_string();
         let mut stream = if title_only {
-            harness.run_title(req, controls).await
+            harness
+                .run_one_shot(req, controls, zeron_harness::TITLE_INSTRUCTIONS)
+                .await
         } else {
             harness.run(req, controls).await
         }
@@ -1499,7 +1501,11 @@ async fn thread_tools_ride_codex_config_overrides_on_a_normal_run() {
 async fn title_run_preserves_read_only_and_replaces_coding_instructions() {
     let (controls, _steer, token) = controls("Yes");
     let stream = harness()
-        .run_title(request("scenario:title"), controls)
+        .run_one_shot(
+            request("scenario:title"),
+            controls,
+            zeron_harness::TITLE_INSTRUCTIONS,
+        )
         .await
         .unwrap();
     let events = tokio::time::timeout(Duration::from_secs(10), async {

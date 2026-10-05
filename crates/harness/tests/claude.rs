@@ -920,7 +920,11 @@ async fn live_commands_discovery() {
 async fn title_run_disables_tools_and_denies_unexpected_permissions() {
     let (controls, _steer, token) = controls("Yes");
     let mut stream = harness()
-        .run_title(request("scenario:title"), controls)
+        .run_one_shot(
+            request("scenario:title"),
+            controls,
+            zeron_harness::TITLE_INSTRUCTIONS,
+        )
         .await
         .unwrap();
     let events = tokio::time::timeout(Duration::from_secs(10), async {
