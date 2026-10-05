@@ -61,10 +61,14 @@ fn host_summary(platforms: Vec<DevicePlatformAvailability>, running: bool) -> De
     }
 }
 
-fn mark_running(state: &mut DeviceHubState, running: bool) {
-    for host in &mut state.hosts {
-        host.tools = Some(toolchain::versions(running));
-        host.hub_installed = toolchain::hub_installed();
+fn running_tools(running: bool) -> impl Fn(&mut DeviceHubState) {
+    let tools = toolchain::versions(running);
+    let installed = toolchain::hub_installed();
+    move |state| {
+        for host in &mut state.hosts {
+            host.tools = Some(tools.clone());
+            host.hub_installed = installed;
+        }
     }
 }
 
@@ -166,6 +170,10 @@ impl DeviceHub {
     fn publish(&self, change: impl FnOnce(&mut DeviceHubState)) {
         self.state.send_modify(|state| {
             change(state);
+            if !state.settings.enabled {
+                state.host_status = DeviceHostStatus::Disabled;
+                state.host_status_detail = None;
+            }
             state.revision += 1;
         });
     }
@@ -220,9 +228,15 @@ impl DeviceHub {
         HubWatch::Exited(uptime)
     }
 
-    fn adopt(&self, hub: HubProcess) -> String {
+    fn adopt(&self, hub: HubProcess) -> Result<String, HubProcess> {
         let origin = hub.origin.clone();
-        *self.hub_slot() = Some(hub);
+        {
+            let mut slot = self.hub_slot();
+            if !self.enabled() || self.closed.load(Ordering::SeqCst) {
+                return Err(hub);
+            }
+            *slot = Some(hub);
+        }
         let me = self.me.clone();
         let watched = origin.clone();
         tokio::spawn(async move {
@@ -241,15 +255,20 @@ impl DeviceHub {
                 }
             }
         });
-        origin
+        Ok(origin)
     }
 
     fn restart_after_exit(&self, uptime: Duration) {
+        let stopped = running_tools(false);
+        let mut slot = self.restart_slot();
+        if !self.enabled() || self.closed.load(Ordering::SeqCst) {
+            return;
+        }
         tracing::warn!("the device hub exited");
         self.publish(|state| {
             state.host_status = DeviceHostStatus::Starting;
             state.host_status_detail = None;
-            mark_running(state, false);
+            stopped(state);
         });
         let me = self.me.clone();
         let task = tokio::spawn(async move {
@@ -274,6 +293,7 @@ impl DeviceHub {
                 };
                 let error = match hub.start_hub(true).await {
                     Ok(_) => return,
+                    Err(error) if error == HUB_NOT_RUNNING => return,
                     Err(error) => error,
                 };
                 failures += 1;
@@ -288,12 +308,12 @@ impl DeviceHub {
                 uptime = Duration::ZERO;
             }
         });
-        if let Some(previous) = self.restart_slot().replace(task) {
+        if let Some(previous) = slot.replace(task) {
             previous.abort();
         }
     }
 
-    async fn reattach(&self, origin: &str) {
+    async fn reattach(&self, origin: &str) -> Result<(), String> {
         let before = self.snapshot();
         let mut ids: std::collections::BTreeSet<String> = before
             .sessions
@@ -302,7 +322,7 @@ impl DeviceHub {
             .collect();
         ids.extend(self.streams.device_ids());
         if ids.is_empty() {
-            return;
+            return Ok(());
         }
         if let Err(error) = self.refresh(origin).await {
             tracing::warn!(%error, "device list unavailable after the hub restarted");
@@ -334,8 +354,14 @@ impl DeviceHub {
                 tracing::warn!(%error, "reattaching a device stream failed");
             }
         }
+        let slot = self.hub_slot();
+        if slot.as_ref().map(|hub| hub.origin.as_str()) != Some(origin) {
+            return Err(HUB_NOT_RUNNING.into());
+        }
         self.streams
             .resume(|device_id, frames, link| self.start_reader(origin, device_id, frames, link));
+        drop(slot);
+        Ok(())
     }
 
     fn known_device(&self, device_id: &str) -> bool {
@@ -371,9 +397,7 @@ impl DeviceHub {
         std::fs::write(self.data_dir.join(SETTINGS_FILE), json)
             .map_err(|e| format!("Could not save device settings: {e}"))?;
         let enabled = settings.enabled;
-        if !enabled {
-            self.stop_hub().await;
-        }
+        let stopped = running_tools(false);
         self.publish(|state| {
             state.settings = settings;
             state.host_status = if enabled {
@@ -387,9 +411,12 @@ impl DeviceHub {
                 state.sessions.clear();
                 state.booting.clear();
                 state.screens.clear();
-                mark_running(state, false);
+                stopped(state);
             }
         });
+        if !enabled {
+            self.stop_hub().await;
+        }
         drop(settings_lock);
         if enabled {
             self.list(false).await?;
@@ -424,7 +451,7 @@ impl DeviceHub {
     }
 
     async fn start_hub(&self, restart: bool) -> Result<String, String> {
-        let _lifecycle = self.lifecycle.lock().await;
+        let lifecycle = self.lifecycle.lock().await;
         if let Some(origin) = self.live_origin() {
             return Ok(origin);
         }
@@ -438,7 +465,7 @@ impl DeviceHub {
             }
             error
         };
-        let _settle = (!restart).then(|| {
+        let settle = (!restart).then(|| {
             OnDrop(Some(|| {
                 self.state.send_if_modified(|state| {
                     let pending = matches!(
@@ -454,23 +481,27 @@ impl DeviceHub {
             }))
         });
         let hub = self.spawn_hub().await.map_err(fail)?;
-        if !self.enabled() {
-            hub.stop().await;
-            return Err(DEVICE_SUPPORT_OFF.into());
-        }
-        let origin = self.adopt(hub);
-        self.reattach(&origin).await;
+        let origin = match self.adopt(hub) {
+            Ok(origin) => origin,
+            Err(hub) => {
+                hub.stop().await;
+                return Err(DEVICE_SUPPORT_OFF.into());
+            }
+        };
         if !restart {
             self.backoff
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .reset();
         }
+        let running = running_tools(true);
         self.publish(|state| {
             state.host_status = DeviceHostStatus::Ready;
             state.host_status_detail = None;
-            mark_running(state, true);
+            running(state);
         });
+        drop((settle, lifecycle));
+        self.reattach(&origin).await?;
         Ok(origin)
     }
 
@@ -510,6 +541,9 @@ impl DeviceHub {
         .list()
         .await?;
         self.publish(|state| {
+            if !state.settings.enabled {
+                return;
+            }
             let android = state
                 .hosts
                 .iter()
@@ -787,7 +821,6 @@ impl DeviceHub {
         if let Some(restart) = self.restart_slot().take() {
             restart.abort();
         }
-        let _lifecycle = self.lifecycle.lock().await;
         let hub = {
             let mut slot = self.hub_slot();
             self.streams.clear();
@@ -874,6 +907,7 @@ mod tests {
         shutdown_status: u16,
         shutdown_flips: bool,
         frame: &'static str,
+        attach_delay: Duration,
     }
 
     const HEALTHY: Fake = Fake {
@@ -883,6 +917,7 @@ mod tests {
         shutdown_status: 200,
         shutdown_flips: true,
         frame: "frame",
+        attach_delay: Duration::ZERO,
     };
 
     async fn fake_hub() -> (String, Requests) {
@@ -936,6 +971,9 @@ mod tests {
                             return;
                         };
                         (status, serde_json::json!({"ok": true, "id": "SIM-1"}))
+                    } else if line.starts_with("POST /vendor/serve-sim/grid/api/start ") {
+                        tokio::time::sleep(fake.attach_delay).await;
+                        (200, serde_json::json!({"ok": true}))
                     } else {
                         (200, serde_json::json!({"ok": true}))
                     };
@@ -1528,6 +1566,127 @@ mod tests {
         );
         assert!(hub.hub_slot().is_none());
         eventually(|| !alive(pid)).await;
+    }
+
+    async fn reattaching(
+        attach_delay: Duration,
+    ) -> (
+        tempfile::TempDir,
+        Arc<super::DeviceHub>,
+        Requests,
+        i32,
+        tokio::task::JoinHandle<Result<String, String>>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = super::DeviceHub::start(dir.path());
+        let (origin, requests) = fake_hub_with(Fake {
+            attach_delay,
+            ..HEALTHY
+        })
+        .await;
+        let pids = spawn_fakes(&hub, vec![origin]);
+        hub.state.send_modify(|state| {
+            state.settings.enabled = true;
+            state.host_status = super::DeviceHostStatus::Idle;
+            state.sessions.push(zeron_proto::device_hub::DeviceSession {
+                chat_id: "chat-1".into(),
+                host_id: "local".into(),
+                device_id: "SIM-1".into(),
+                ..Default::default()
+            });
+        });
+        let starting = tokio::spawn({
+            let hub = hub.clone();
+            async move { hub.start_hub(false).await }
+        });
+        eventually(|| {
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.starts_with("POST /vendor/serve-sim/grid/api/start "))
+        })
+        .await;
+        let pid = pids.lock().unwrap()[0];
+        (dir, hub, requests, pid, starting)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn disable_and_shutdown_do_not_wait_behind_a_start_that_is_reattaching() {
+        for shutdown in [false, true] {
+            let (_dir, hub, _, pid, starting) = reattaching(Duration::from_secs(60)).await;
+            let stop = async {
+                if shutdown {
+                    hub.shutdown().await;
+                } else {
+                    hub.configure(zeron_proto::device_hub::ConfigureDeviceHubParams {
+                        enabled: Some(false),
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap();
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(2), stop)
+                .await
+                .expect("stopping does not wait for the reattach");
+            eventually(|| !alive(pid)).await;
+            assert!(hub.hub_slot().is_none());
+            if !shutdown {
+                assert_eq!(
+                    hub.snapshot().host_status,
+                    super::DeviceHostStatus::Disabled
+                );
+            }
+            starting.abort();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_hub_that_dies_while_reattaching_is_neither_resumed_nor_reported_ready() {
+        let (_dir, hub, requests, pid, starting) = reattaching(Duration::from_millis(2500)).await;
+        let _subscription = hub
+            .streams
+            .subscribe("SIM-1", |_, _| tokio::spawn(async {}));
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        let started = starting.await.unwrap();
+        assert_eq!(started.err().as_deref(), Some(super::HUB_NOT_RUNNING));
+        assert_ne!(hub.snapshot().host_status, super::DeviceHostStatus::Ready);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|line| !line.contains("stream.mjpeg")),
+            "no reader was resumed against the dead hub"
+        );
+        hub.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_hub_exit_seen_after_disable_or_shutdown_schedules_no_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = super::DeviceHub::start(dir.path());
+        let (origin, _) = fake_hub().await;
+        let pids = spawn_fakes(&hub, vec![origin]);
+        hub.restart_after_exit(Duration::ZERO);
+        assert!(hub.restart_slot().is_none());
+        hub.set_status(super::DeviceHostStatus::Failed, Some("late".into()));
+        let state = hub.snapshot();
+        assert_eq!(state.host_status, super::DeviceHostStatus::Disabled);
+        assert!(state.host_status_detail.is_none());
+
+        hub.state.send_modify(|state| {
+            state.settings.enabled = true;
+            state.host_status = super::DeviceHostStatus::Idle;
+        });
+        hub.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+        hub.restart_after_exit(Duration::ZERO);
+        assert!(hub.restart_slot().is_none());
+        assert_eq!(hub.snapshot().host_status, super::DeviceHostStatus::Idle);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(pids.lock().unwrap().is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]

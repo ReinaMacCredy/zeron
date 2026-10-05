@@ -14,8 +14,10 @@ const RESTART_STABLE_UPTIME: Duration = Duration::from_secs(60);
 const RESTART_MAX_DELAY: Duration = Duration::from_secs(30);
 // The kernel closes our end of stdin however the engine dies, so the watcher SIGTERMs the group.
 #[cfg(unix)]
-const LIFELINE: &str =
-    r#"exec 3<&0 </dev/null; (cat <&3; kill -TERM 0) >/dev/null 2>&1 & exec "$@" 3<&-"#;
+const LIFELINE: &str = r#"exec 3<&0 </dev/null; p=$1; shift
+(/bin/cat <&3; kill -TERM 0) >/dev/null 2>&1 &
+(while kill -0 "$p" 2>/dev/null; do /bin/sleep 1; done; kill -TERM 0) >/dev/null 2>&1 3<&- &
+exec "$@" 3<&-"#;
 
 #[derive(Debug, Default)]
 pub(crate) struct Backoff {
@@ -25,7 +27,7 @@ pub(crate) struct Backoff {
 impl Backoff {
     pub(crate) fn after_exit(&mut self, uptime: Duration) -> Duration {
         if uptime >= RESTART_STABLE_UPTIME {
-            self.next = Duration::ZERO;
+            self.next = Duration::from_secs(1);
             return Duration::ZERO;
         }
         let delay = self.next;
@@ -243,7 +245,10 @@ pub(crate) async fn spawn(
     #[cfg(unix)]
     let mut command = {
         let mut command = Command::new("/bin/sh");
-        command.args(["-c", LIFELINE, "sh"]).arg(program);
+        command
+            .args(["-c", LIFELINE, "sh"])
+            .arg(std::process::id().to_string())
+            .arg(program);
         command
     };
     #[cfg(not(unix))]
@@ -656,8 +661,8 @@ http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
             Duration::from_secs(30)
         );
         assert_eq!(backoff.after_exit(Duration::from_secs(60)), Duration::ZERO);
-        assert_eq!(backoff.after_exit(quick), Duration::ZERO);
         assert_eq!(backoff.after_exit(quick), Duration::from_secs(1));
+        assert_eq!(backoff.after_exit(quick), Duration::from_secs(2));
         backoff.reset();
         assert_eq!(backoff.after_exit(quick), Duration::ZERO);
     }
@@ -705,6 +710,42 @@ http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
         assert!(
             eventually(|| !pid_alive(helper)).await,
             "and so does its helper"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lifeline_without_path_lives_until_its_engine_pid_is_gone() {
+        let mut engine = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", LIFELINE, "sh"])
+            .arg(engine.id().to_string())
+            .args(["/bin/sleep", "30"])
+            .env("PATH", "/nonexistent")
+            .stdin(Stdio::piped())
+            .process_group(0)
+            .kill_on_drop(true);
+        let mut hub = command.spawn().unwrap();
+        let _lifeline = hub.stdin.take().unwrap();
+        let pgid = hub.id().unwrap() as i32;
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(
+            hub.try_wait().unwrap().is_none(),
+            "the lifeline holds while its engine lives"
+        );
+        engine.kill().unwrap();
+        engine.wait().unwrap();
+        let status = tokio::time::timeout(Duration::from_secs(5), hub.wait())
+            .await
+            .expect("the hub exits once its engine pid is gone")
+            .unwrap();
+        assert!(!status.success(), "{status:?}");
+        assert!(
+            eventually(|| !signal_group(pgid, 0)).await,
+            "and so does the rest of its group"
         );
     }
 

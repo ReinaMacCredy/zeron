@@ -22,20 +22,42 @@ fn availability(platform: DevicePlatform, reason: Option<String>) -> DevicePlatf
 pub(crate) fn ios() -> DevicePlatformAvailability {
     let reason = if !cfg!(target_os = "macos") {
         Some("iOS Simulators need macOS with Xcode.")
-    } else if !on_path("xcrun") {
-        Some("Xcode command line tools were not found.")
-    } else if !std::process::Command::new("xcrun")
-        .args(["--find", "simctl"])
-        .stdout(std::process::Stdio::null())
+    } else {
+        ios_reason(on_path("xcrun"), developer_dir(), || {
+            std::process::Command::new("xcrun")
+                .args(["--find", "simctl"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        })
+    };
+    availability(DevicePlatform::Ios, reason.map(str::to_string))
+}
+
+fn developer_dir() -> Option<PathBuf> {
+    let out = std::process::Command::new("/usr/bin/xcode-select")
+        .arg("-p")
         .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
-    {
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
+}
+
+fn ios_reason(
+    xcrun: bool,
+    developer_dir: Option<PathBuf>,
+    simctl: impl FnOnce() -> bool,
+) -> Option<&'static str> {
+    if !xcrun || !developer_dir.is_some_and(|dir| dir.is_dir()) {
+        Some("Xcode command line tools were not found.")
+    } else if !simctl() {
         Some("iOS Simulators need macOS with Xcode.")
     } else {
         None
-    };
-    availability(DevicePlatform::Ios, reason.map(str::to_string))
+    }
 }
 
 pub(crate) fn android() -> DevicePlatformAvailability {
@@ -189,6 +211,23 @@ mod tests {
         android_reason(&android_sdk(&lookup, &|path| {
             std::fs::canonicalize(path).ok()
         }))
+    }
+
+    #[test]
+    fn simctl_is_probed_only_once_a_developer_dir_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = || -> bool { panic!("xcrun must not run without a developer dir") };
+        let not_found = Some("Xcode command line tools were not found.");
+        assert_eq!(ios_reason(true, None, missing), not_found);
+        assert_eq!(
+            ios_reason(true, Some(dir.path().join("gone")), missing),
+            not_found
+        );
+        assert_eq!(
+            ios_reason(true, Some(dir.path().into()), || false),
+            Some("iOS Simulators need macOS with Xcode.")
+        );
+        assert_eq!(ios_reason(true, Some(dir.path().into()), || true), None);
     }
 
     #[test]
