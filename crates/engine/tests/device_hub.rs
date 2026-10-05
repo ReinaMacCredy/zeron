@@ -8,6 +8,14 @@ use zeron_proto::HarnessId;
 use zeron_proto::device_hub::{DeviceHostStatus, DeviceHubState};
 use zeron_rpc::{RpcError, RpcReply, RpcService, methods};
 
+fn device_dir(data: &std::path::Path) -> Vec<std::ffi::OsString> {
+    std::fs::read_dir(data.join("device"))
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name())
+        .collect()
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn list_hub_devices_is_refused_while_disabled_and_installs_nothing() {
     let dir = tempfile::tempdir().unwrap();
@@ -67,7 +75,7 @@ async fn list_hub_devices_is_refused_while_disabled_and_installs_nothing() {
     assert!(input.is_err());
 
     assert!(!adapters.exists(), "no install was attempted");
-    assert!(!data.join("device").exists(), "no hub was started");
+    assert_eq!(device_dir(&data), ["bin"], "no hub was started");
     assert!(!data.join("device-hub-settings.json").exists());
     assert!(
         tokio::time::timeout(Duration::from_millis(200), watch.next())
@@ -91,6 +99,6 @@ async fn list_hub_devices_is_refused_while_disabled_and_installs_nothing() {
     assert!(tools.hub.installed.is_empty() && tools.hub.running.is_none());
     assert_eq!(inspected.host_status, DeviceHostStatus::Disabled);
     assert!(!adapters.exists(), "inspectOnly installs nothing");
-    assert!(!data.join("device").exists(), "inspectOnly starts nothing");
+    assert_eq!(device_dir(&data), ["bin"], "inspectOnly starts nothing");
     core.shutdown().await;
 }

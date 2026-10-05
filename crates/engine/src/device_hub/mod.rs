@@ -121,6 +121,11 @@ impl DeviceHub {
         if let Some(entry) = toolchain::installed_hub() {
             hub_process::reap_stale(&data_dir.join("device"), &entry);
         }
+        let shims = data_dir.join("device").join("bin");
+        if let Err(error) = std::fs::create_dir_all(&shims) {
+            tracing::warn!(%error, "could not create the device tool directory");
+        }
+        zeron_harness::set_child_path_prefix(Some(shims));
         Arc::new_cyclic(|me| Self {
             me: me.clone(),
             data_dir: data_dir.to_path_buf(),
@@ -1759,7 +1764,18 @@ mod tests {
         );
         assert!(pids.lock().unwrap().is_empty(), "no hub was spawned");
         assert!(hub.hub_slot().is_none());
-        assert!(!dir.path().join("device").exists());
+        let device_dir: Vec<_> = std::fs::read_dir(dir.path().join("device"))
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name())
+            .collect();
+        assert_eq!(device_dir, ["bin"], "only the empty shim directory exists");
+        assert_eq!(
+            std::fs::read_dir(dir.path().join("device").join("bin"))
+                .unwrap()
+                .count(),
+            0
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
