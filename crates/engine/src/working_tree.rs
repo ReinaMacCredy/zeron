@@ -1497,6 +1497,7 @@ pub(crate) async fn file_diff(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commit_messages::tests::git as run;
 
     #[test]
     fn porcelain_v2_reads_headers_renames_conflicts_and_untracked() {
@@ -1575,24 +1576,6 @@ mod tests {
         assert!(deltas["image.png"].binary);
         assert_eq!(deltas["new.rs"].additions, 2);
         assert!(!deltas.contains_key("old.rs"));
-    }
-
-    fn run(cwd: &Path, args: &[&str]) {
-        let output = std::process::Command::new("git")
-            .arg("-C")
-            .arg(cwd)
-            .args(args)
-            .env("GIT_AUTHOR_NAME", "Test")
-            .env("GIT_AUTHOR_EMAIL", "test@example.com")
-            .env("GIT_COMMITTER_NAME", "Test")
-            .env("GIT_COMMITTER_EMAIL", "test@example.com")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
     }
 
     #[tokio::test]
@@ -2259,13 +2242,7 @@ mod tests {
 
     fn identified_repo() -> tempfile::TempDir {
         let dir = committed_repo();
-        for (key, value) in [
-            ("user.name", "Lab"),
-            ("user.email", "lab@example.com"),
-            ("commit.gpgsign", "false"),
-        ] {
-            run(dir.path(), &["config", key, value]);
-        }
+        local_identity(dir.path());
         dir
     }
 

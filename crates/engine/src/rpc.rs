@@ -4723,6 +4723,7 @@ impl RpcService for EngineRpc {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commit_messages::tests::git;
 
     #[test]
     fn a_folded_switch_note_keeps_the_harness_the_chat_left() {
@@ -5308,23 +5309,6 @@ mod tests {
     async fn get_working_tree_reads_space_checkouts_only_and_survives_the_wire() {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
-        let git = |cwd: &std::path::Path, args: &[&str]| {
-            let output = std::process::Command::new("git")
-                .arg("-C")
-                .arg(cwd)
-                .args(args)
-                .env("GIT_AUTHOR_NAME", "Test")
-                .env("GIT_AUTHOR_EMAIL", "test@example.com")
-                .env("GIT_COMMITTER_NAME", "Test")
-                .env("GIT_COMMITTER_EMAIL", "test@example.com")
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        };
         let repo = root.join("repo");
         let linked = root.join("linked");
         let outside = root.join("outside");
@@ -5472,7 +5456,7 @@ mod tests {
 
     #[tokio::test]
     async fn generate_commit_message_reads_the_staged_change_and_replies_through_the_wire() {
-        use crate::commit_messages::tests::{Scripted, git};
+        use crate::commit_messages::tests::Scripted;
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
         let repo = root.join("repo");
@@ -5549,24 +5533,6 @@ mod tests {
     async fn working_tree_actions_check_the_revision_the_target_and_the_busy_policy() {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
-        let git = |cwd: &std::path::Path, args: &[&str]| {
-            let output = std::process::Command::new("git")
-                .arg("-C")
-                .arg(cwd)
-                .args(args)
-                .env("GIT_AUTHOR_NAME", "Test")
-                .env("GIT_AUTHOR_EMAIL", "test@example.com")
-                .env("GIT_COMMITTER_NAME", "Test")
-                .env("GIT_COMMITTER_EMAIL", "test@example.com")
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            String::from_utf8(output.stdout).unwrap()
-        };
         let repo = root.join("repo");
         let outside = root.join("outside");
         let data = root.join("data");
@@ -5864,24 +5830,6 @@ mod tests {
     async fn discard_and_stash_run_by_revision_and_oid_behind_the_busy_policy() {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
-        let git = |cwd: &std::path::Path, args: &[&str]| {
-            let output = std::process::Command::new("git")
-                .arg("-C")
-                .arg(cwd)
-                .args(args)
-                .env("GIT_AUTHOR_NAME", "Test")
-                .env("GIT_AUTHOR_EMAIL", "test@example.com")
-                .env("GIT_COMMITTER_NAME", "Test")
-                .env("GIT_COMMITTER_EMAIL", "test@example.com")
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            String::from_utf8(output.stdout).unwrap()
-        };
         let repo = root.join("repo");
         let data = root.join("data");
         for path in [&repo, &data] {
@@ -6058,24 +6006,7 @@ mod tests {
     async fn checkout_diffs_run_on_their_own_task_for_every_mode() {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
-        let git = |args: &[&str]| {
-            let output = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&root)
-                .args(args)
-                .env("GIT_AUTHOR_NAME", "Test")
-                .env("GIT_AUTHOR_EMAIL", "test@example.com")
-                .env("GIT_COMMITTER_NAME", "Test")
-                .env("GIT_COMMITTER_EMAIL", "test@example.com")
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            String::from_utf8(output.stdout).unwrap().trim().to_owned()
-        };
+        let git = |args: &[&str]| git(&root, args).trim().to_owned();
         git(&["init", "-b", "main"]);
         std::fs::write(root.join("a.txt"), "a\n").unwrap();
         git(&["add", "."]);
@@ -6160,20 +6091,7 @@ mod tests {
         let root = std::fs::canonicalize(dir.path()).unwrap();
         let repo = root.join("repo");
         std::fs::create_dir(&repo).unwrap();
-        let git = |args: &[&str]| {
-            let output = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&repo)
-                .args(args)
-                .env("GIT_AUTHOR_NAME", "Test")
-                .env("GIT_AUTHOR_EMAIL", "test@example.com")
-                .env("GIT_COMMITTER_NAME", "Test")
-                .env("GIT_COMMITTER_EMAIL", "test@example.com")
-                .output()
-                .unwrap();
-            assert!(output.status.success());
-            String::from_utf8(output.stdout).unwrap().trim().to_owned()
-        };
+        let git = |args: &[&str]| git(&repo, args).trim().to_owned();
         git(&["init", "-b", "main"]);
         std::fs::write(repo.join("a.txt"), "a\n").unwrap();
         git(&["add", "."]);
@@ -6226,24 +6144,7 @@ mod tests {
     async fn commit_detail_writes_follow_the_revision_and_the_busy_policy() {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
-        let git = |cwd: &std::path::Path, args: &[&str]| {
-            let output = std::process::Command::new("git")
-                .arg("-C")
-                .arg(cwd)
-                .args(args)
-                .env("GIT_AUTHOR_NAME", "Test")
-                .env("GIT_AUTHOR_EMAIL", "test@example.com")
-                .env("GIT_COMMITTER_NAME", "Test")
-                .env("GIT_COMMITTER_EMAIL", "test@example.com")
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            String::from_utf8(output.stdout).unwrap().trim().to_owned()
-        };
+        let git = |cwd: &std::path::Path, args: &[&str]| git(cwd, args).trim().to_owned();
         let repo = root.join("repo");
         let data = root.join("data");
         for path in [&repo, &data] {
@@ -6457,24 +6358,7 @@ mod tests {
     async fn sync_branch_checks_the_head_and_the_busy_policy_and_replies_through_the_wire() {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
-        let git = |cwd: &std::path::Path, args: &[&str]| {
-            let output = std::process::Command::new("git")
-                .arg("-C")
-                .arg(cwd)
-                .args(args)
-                .env("GIT_AUTHOR_NAME", "Test")
-                .env("GIT_AUTHOR_EMAIL", "test@example.com")
-                .env("GIT_COMMITTER_NAME", "Test")
-                .env("GIT_COMMITTER_EMAIL", "test@example.com")
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            String::from_utf8(output.stdout).unwrap().trim().to_owned()
-        };
+        let git = |cwd: &std::path::Path, args: &[&str]| git(cwd, args).trim().to_owned();
         let remote = root.join("remote.git");
         let repo = root.join("repo");
         let data = root.join("data");

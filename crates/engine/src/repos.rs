@@ -2543,23 +2543,7 @@ tmpfs /run tmpfs rw 0 0
         let data = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
         let linked = root.path().join("linked");
-        let git = |args: &[&str]| {
-            let output = std::process::Command::new("git")
-                .arg("-C")
-                .arg(root.path())
-                .args(args)
-                .env("GIT_AUTHOR_NAME", "Test")
-                .env("GIT_AUTHOR_EMAIL", "test@example.com")
-                .env("GIT_COMMITTER_NAME", "Test")
-                .env("GIT_COMMITTER_EMAIL", "test@example.com")
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        };
+        let git = |args: &[&str]| crate::commit_messages::tests::git(root.path(), args);
         git(&["init", "-q", "-b", "main"]);
         git(&["commit", "-q", "--allow-empty", "-m", "first"]);
         git(&[
