@@ -22,8 +22,7 @@ pub(super) struct PrChatPanel {
     fresh: bool,
     resumed: bool,
     error: Option<SharedString>,
-    pub(super) open: bool,
-    minimized: bool,
+    view: PanelView,
     earlier: Option<SharedString>,
     sessions_menu: bool,
     cards: HashMap<PrChatCardRef, CardState>,
@@ -40,6 +39,13 @@ pub(super) struct PrChatTrash {
     deleted: HashSet<String>,
     pruned: Option<u64>,
     posting: HashSet<(String, PrChatCardRef)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PanelView {
+    Open,
+    Minimized,
+    Closed,
 }
 
 struct ParkedPrChat {
@@ -82,7 +88,7 @@ impl Shell {
                 .is_none_or(|id| self.side_chats.contains_key(&id))
         };
         let restore = match self.pr_chat.as_ref().filter(|panel| live(panel)) {
-            Some(panel) if panel.minimized => true,
+            Some(panel) if panel.view == PanelView::Minimized => true,
             Some(panel) => self.pull_requests_page.as_ref().is_some_and(|page| {
                 page.read(cx).chat_context(cx).index_key() == panel.context.index_key()
             }),
@@ -90,8 +96,7 @@ impl Shell {
         };
         if restore {
             if let Some(panel) = self.pr_chat.as_mut() {
-                panel.open = true;
-                panel.minimized = false;
+                panel.view = PanelView::Open;
             }
             self.focus_pr_chat(cx);
         } else {
@@ -160,8 +165,7 @@ impl Shell {
             fresh,
             resumed: true,
             error: None,
-            open: true,
-            minimized: false,
+            view: PanelView::Open,
             earlier,
             sessions_menu: false,
             cards: HashMap::new(),
@@ -346,8 +350,7 @@ impl Shell {
 
     pub(super) fn minimize_pr_chat(&mut self, cx: &mut Context<Self>) {
         if let Some(panel) = self.pr_chat.as_mut() {
-            panel.open = false;
-            panel.minimized = true;
+            panel.view = PanelView::Minimized;
             panel.sessions_menu = false;
         }
         self.sync_pr_chat_button(cx);
@@ -362,7 +365,9 @@ impl Shell {
     }
 
     pub(super) fn pr_chat_open(&self) -> bool {
-        self.pr_chat.as_ref().is_some_and(|panel| panel.open)
+        self.pr_chat
+            .as_ref()
+            .is_some_and(|panel| panel.view == PanelView::Open)
     }
 
     pub(super) fn pr_chat_tab(&self) -> Option<&SideChatTab> {
@@ -438,8 +443,7 @@ impl Shell {
             fresh: settings::current(cx).pr_chat_history == PrChatHistory::Fresh,
             resumed: false,
             error: None,
-            open: true,
-            minimized: false,
+            view: PanelView::Open,
             earlier: None,
             sessions_menu: false,
             cards: HashMap::new(),
@@ -584,8 +588,7 @@ impl Shell {
         let Some(panel) = self.pr_chat.as_mut() else {
             return;
         };
-        panel.open = false;
-        panel.minimized = false;
+        panel.view = PanelView::Closed;
         panel.sessions_menu = false;
         if settings::current(cx).pr_chat_history == PrChatHistory::Fresh {
             let chat_id = panel.chat_id.clone();
@@ -879,7 +882,7 @@ impl Shell {
         let open = self
             .pr_chat
             .as_ref()
-            .is_some_and(|panel| panel.open && panel.confirm.is_some());
+            .is_some_and(|panel| panel.view == PanelView::Open && panel.confirm.is_some());
         if open {
             self.cancel_pr_chat_confirm(cx);
         }
@@ -991,7 +994,11 @@ impl Shell {
             self.pr_chat = None;
         }
         let theme = Theme::of(cx).clone();
-        let Some(panel) = self.pr_chat.as_ref().filter(|panel| panel.open) else {
+        let Some(panel) = self
+            .pr_chat
+            .as_ref()
+            .filter(|panel| panel.view == PanelView::Open)
+        else {
             let git_tab = self
                 .pull_requests_page
                 .as_ref()
@@ -1980,7 +1987,7 @@ mod tests {
 
         let (side, side_state, chat_id) = shell.update(cx, |shell, cx| {
             let panel = shell.pr_chat.as_ref().expect("panel");
-            assert!(panel.open);
+            assert!(panel.view == PanelView::Open);
             let tab = shell.pr_chat_tab().expect("chat minted locally");
             let chat_id = panel.chat_id.clone();
             let row = tab.state.read(cx).selected_chat_row().cloned().unwrap();
