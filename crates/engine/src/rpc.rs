@@ -3117,15 +3117,14 @@ impl RpcService for EngineRpc {
                 let mut listing = crate::source_control::ChangeRequestResolver::new()
                     .list_change_requests(&roots, &p)
                     .await;
-                listing.projects.retain_mut(|project| {
-                    let space = spaces
+                for project in &mut listing.projects {
+                    if let Some((space_id, _)) = spaces
                         .iter()
-                        .find(|(_, path)| path.to_string_lossy() == project.path.as_str());
-                    if let Some((space_id, _)) = space {
+                        .find(|(_, path)| path.to_string_lossy() == project.path.as_str())
+                    {
                         project.space_id = space_id.clone();
                     }
-                    space.is_some()
-                });
+                }
                 let value =
                     serde_json::to_value(&listing).map_err(|e| RpcError::Failed(e.to_string()))?;
                 if listing.errors.is_empty() {
