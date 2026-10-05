@@ -261,7 +261,7 @@ async fn drain_h264(
     frames: &mut RpcSubscription,
     sink: &FrameSink,
 ) -> Option<super::h264::FallbackReason> {
-    use super::h264::Pipeline;
+    use super::h264::{FallbackReason, Pipeline};
     use zeron_proto::device_hub::{AVCC_DELTA, AVCC_KEYFRAME, AvccDemuxer};
 
     let mut pipeline = Pipeline::default();
@@ -286,7 +286,9 @@ async fn drain_h264(
             let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&frame.avcc) else {
                 continue;
             };
-            let batch = demuxer.push(&bytes)?;
+            let Some(batch) = demuxer.push(&bytes) else {
+                return Some(FallbackReason::DecodeErrors);
+            };
             if !std::mem::take(&mut replay) {
                 pending += batch
                     .iter()
