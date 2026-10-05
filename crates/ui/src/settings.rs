@@ -483,6 +483,11 @@ pub fn current(cx: &App) -> UiSettings {
         .unwrap_or_default()
 }
 
+pub fn device_float_frame(cx: &App) -> Option<crate::device_panel::float::DeviceFloatFrame> {
+    cx.try_global::<SettingsStore>()
+        .and_then(|store| store.current.device_float_frame)
+}
+
 /// Read the picker preference without cloning the full settings for each model row.
 pub fn compact_model_picker(cx: &App) -> bool {
     cx.try_global::<SettingsStore>()
@@ -1372,6 +1377,8 @@ pub struct UiSettings {
     pub pr_chat_sessions: std::collections::BTreeMap<String, Vec<PrChatSession>>,
     pub git_agent_busy_policy: GitAgentBusyPolicy,
     pub device_auto_float: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_float_frame: Option<crate::device_panel::float::DeviceFloatFrame>,
     /// Pre-theme settings used `accentColor`. Read it once, migrate to
     /// [`Self::accent`], and never write it again.
     #[serde(default, rename = "accentColor", skip_serializing)]
@@ -1486,6 +1493,7 @@ impl Default for UiSettings {
             pr_chat_sessions: Default::default(),
             git_agent_busy_policy: GitAgentBusyPolicy::default(),
             device_auto_float: true,
+            device_float_frame: None,
             legacy_accent_color: None,
         }
     }
@@ -2161,6 +2169,7 @@ impl UiSettings {
             pr_chat_sessions,
             git_agent_busy_policy,
             device_auto_float,
+            device_float_frame,
         );
         current
     }
@@ -3556,6 +3565,12 @@ mod tests {
             )]),
             git_agent_busy_policy: GitAgentBusyPolicy::BlockAll,
             device_auto_float: false,
+            device_float_frame: Some(crate::device_panel::float::DeviceFloatFrame {
+                x: 40.0,
+                y: 12.0,
+                width: 240.0,
+                height: 520.0,
+            }),
             legacy_accent_color: None,
         };
         settings.save(dir.path()).unwrap();
@@ -3566,6 +3581,7 @@ mod tests {
         assert!(json.contains(r#""prChatHistory": "fresh""#));
         assert!(json.contains(r#""gitAgentBusyPolicy": "block-all""#));
         assert!(json.contains(r#""deviceAutoFloat": false"#));
+        assert!(json.contains(r#""deviceFloatFrame": {"#));
         assert!(json.contains(r#""github.com/acme/zeron#7": ["#));
         assert!(json.contains(r#""chatId": "pr-chat-1""#));
         assert!(json.contains(r#""entryId": "m2""#));

@@ -322,6 +322,10 @@ icon_assets![
     (LUCIDE_MESSAGE_CIRCLE_QUESTION, "lucide-message-circle-question"),
     (LUCIDE_BOOK_OPEN, "lucide-book-open"),
     (LUCIDE_HAMMER, "lucide-hammer"),
+    (LUCIDE_PICTURE_IN_PICTURE_2, "lucide-picture-in-picture-2"),
+    (LUCIDE_PANEL_RIGHT, "lucide-panel-right"),
+    (APPLE, "apple"),
+    (ANDROID, "android"),
 ];
 
 /// Serves both the compact control-icon set and the complete file-identity

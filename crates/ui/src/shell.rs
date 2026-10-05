@@ -2175,6 +2175,7 @@ pub struct Shell {
         (Entity<crate::device_panel::DevicePanel>, [Subscription; 2]),
     >,
     device_seq: u64,
+    device_shell: device_tabs::DeviceShellState,
     browser_context: crate::browser::BrowserContext,
     browser_profile: Option<String>,
     /// Ordered surface tabs per panel key (drag-reorderable; stale entries —
@@ -2788,6 +2789,7 @@ impl Shell {
             browser_seq: 0,
             device_panels: std::collections::HashMap::new(),
             device_seq: 0,
+            device_shell: Default::default(),
             browser_context: crate::browser::BrowserContext::default(),
             browser_profile: None,
             right_tabs: std::collections::HashMap::new(),
@@ -3048,6 +3050,7 @@ impl Shell {
 
     fn on_state_changed(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) {
         self.prune_file_explorers(cx);
+        self.prune_device_shell(cx);
         self.prune_pr_chat_index(cx);
         self.refresh_harness_update_watch(cx);
         if state.read(cx).engine().is_none() {
@@ -3601,6 +3604,9 @@ impl Shell {
     /// it opens the surface host beside it, and it never hides the explorer —
     /// only the explorer's own toggle undocks that portion.
     fn toggle_right_pane(&mut self, cx: &mut Context<Self>) {
+        if self.right_pane_open(cx) {
+            self.float_active_device_tab(cx);
+        }
         self.set_surfaces_open(!self.right_pane_open(cx), cx);
     }
 
@@ -3744,7 +3750,7 @@ impl Shell {
                 }),
                 RightSurface::Device(id) => self
                     .device_tab_title(*id, cx)
-                    .map(|title| (*surface, title, false, None)),
+                    .map(|title| (*surface, title, false, self.device_tab_detail(*id, cx))),
                 RightSurface::Picker => None,
             })
             .collect()
@@ -5278,9 +5284,7 @@ impl Shell {
                 }
                 self.browser_subs.remove(&id);
             }
-            RightSurface::Device(id) => {
-                self.device_panels.remove(&id);
-            }
+            RightSurface::Device(id) => self.drop_device_tab(id, cx),
             RightSurface::Diff(id) => {
                 // Dropping the entity tears down its diff watch.
                 self.diffs.remove(&id);
@@ -11073,6 +11077,9 @@ impl Shell {
             self.acknowledge_appshot_welcome(cx);
             return true;
         }
+        if self.cancel_device_rename(cx) {
+            return true;
+        }
         if self.sync_flow.has_visible_overlay()
             || self.delete_confirm.is_some()
             || self.delete_space_confirm.is_some()
@@ -11502,6 +11509,7 @@ impl Shell {
                 if !chat_id.is_empty() {
                     menu = menu.child(popover::menu_separator());
                 }
+                menu = menu.children(self.device_rename_menu_row(surface, &theme, cx));
                 for (action, label) in [
                     (TabCloseAction::This, "Close tab"),
                     (TabCloseAction::Others, "Close other tabs"),
@@ -12260,6 +12268,29 @@ impl Shell {
                             .band_bottom(bottom_band),
                             terminal_geometry.clone(),
                         ),
+                    )
+                },
+            )
+            .when_some(
+                has_selection
+                    .then(|| self.render_device_float(cx))
+                    .flatten(),
+                |column, float| {
+                    let header = if self.split.is_some() {
+                        split::SPLIT_HEADER_HEIGHT
+                    } else {
+                        0.0
+                    };
+                    column.child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .top(px(Theme::TITLEBAR_HEIGHT + header))
+                            .overflow_hidden()
+                            .child(crate::terminal::dock::above_terminal(
+                                float,
+                                terminal_geometry.clone(),
+                            )),
                     )
                 },
             )
@@ -13149,7 +13180,7 @@ impl Shell {
                 RightSurface::Sidechat(_) => icons::CHAT_ROUND_LINE,
                 RightSurface::Terminal(_) => icons::TERMINAL,
                 RightSurface::Browser(_) => icons::GLOBE,
-                RightSurface::Device(_) => icons::SMARTPHONE,
+                RightSurface::Device(id) => self.device_tab_icon(id, cx),
                 RightSurface::Picker => icons::PLUS,
             };
             // A live subagent tab swaps its icon for the mini working
@@ -13236,10 +13267,15 @@ impl Shell {
                 .when(!is_active, |el| {
                     el.hover(|s| s.bg(crate::theme::wash(0.06)))
                 })
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    cx.stop_propagation();
-                    this.activate_right_surface(surface, window, cx);
-                }))
+                .on_click(
+                    cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.activate_right_surface(surface, window, cx);
+                        if event.click_count() == 2 {
+                            this.rename_device_tab(surface, window, cx);
+                        }
+                    }),
+                )
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
@@ -13355,7 +13391,7 @@ impl Shell {
                         } else {
                             theme.text_muted
                         })
-                        .child(title),
+                        .child(self.device_tab_label(surface, title, cx)),
                 )
                 .child(
                     // Trailing slot: the unsaved dot normally, ✕ on tab
@@ -13532,6 +13568,27 @@ impl Shell {
                                 )
                                 .child(SharedString::from("Terminal")),
                         )
+                        .child({
+                            let row = popover::menu_row(&theme, false, "right-plus-device")
+                                .id("right-plus-device-row")
+                                .debug_selector(|| "right-plus-device-row".into())
+                                .child(
+                                    icon(icons::SMARTPHONE)
+                                        .size(px(13.0))
+                                        .text_color(theme.text_muted),
+                                )
+                                .child(SharedString::from("Device"));
+                            match self.device_surface_unavailable(cx) {
+                                Some(reason) => row
+                                    .opacity(0.5)
+                                    .cursor_default()
+                                    .tooltip(crate::settings::widgets::text_tooltip(reason)),
+                                None => row.on_click(cx.listener(|this, _, window, cx| {
+                                    this.add_device_surface(window, cx);
+                                    this.close_right_plus(cx);
+                                })),
+                            }
+                        })
                         .when(self.sidechat_source_chat(cx).is_some(), |menu| {
                             menu.child(
                                 popover::menu_row(&theme, false, "right-plus-sidechat")
@@ -14512,6 +14569,11 @@ impl Render for Shell {
                 browser.set_presentation(presentation, cx);
             });
         }
+        let chat_visible = matches!(gate, GatePhase::Ready)
+            && !restart_required
+            && matches!(self.route, Route::Chat)
+            && !(self.right_pane_expanded && self.right_pane_open(cx));
+        self.sync_device_visibility(chat_visible, browser_active, selected_surface, cx);
 
         // Fullscreen hides the macOS traffic lights — reflow the control
         // cluster with a 200ms ease-out tween (§1.1). A fullscreen transition

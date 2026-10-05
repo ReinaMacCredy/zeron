@@ -1,3 +1,4 @@
+pub mod float;
 pub mod geometry;
 pub mod loading;
 mod rail;
@@ -5,14 +6,15 @@ pub mod setup;
 pub mod stream_view;
 
 use gpui::{
-    AnyElement, App, Context, Entity, EventEmitter, SharedString, Subscription, Task, Window, div,
-    prelude::*, px,
+    AnyElement, App, Context, Entity, EventEmitter, Focusable, SharedString, Subscription, Task,
+    Window, div, prelude::*, px,
 };
 use zeron_proto::device_hub::{
     DeviceHostStatus, DeviceHubState, DevicePlatform, DeviceSession, HubDevice,
 };
 use zeron_rpc::methods;
 
+use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::icons;
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -39,6 +41,27 @@ pub fn device_description(hub: &DeviceHubState, device: &HubDevice) -> String {
         .find(|host| host.id == device.host_id)
         .map_or("Device host", |host| host.label.as_str());
     format!("{label} · {}", device.version)
+}
+
+pub(crate) fn feed_view(
+    view: &Entity<DeviceStreamView>,
+    hub: &DeviceHubState,
+    host_id: &str,
+    device_id: &str,
+    cx: &mut App,
+) {
+    let screen = hub.screens.get(device_id).cloned();
+    let link = hub.streams.get(device_id).cloned();
+    let label = hub
+        .device(host_id, device_id)
+        .map(|device| (device.name.clone(), device_description(hub, device)));
+    view.update(cx, |view, cx| {
+        view.set_screen(screen, cx);
+        view.set_link(link, cx);
+        if let Some((name, description)) = label {
+            view.set_label(name, description, cx);
+        }
+    });
 }
 
 pub fn booting_banner(hub: &DeviceHubState, chat_id: &str) -> Option<String> {
@@ -102,12 +125,24 @@ pub fn panel_phase(
 
 pub enum DevicePanelEvent {
     Close,
+    Bound,
+    Float,
+}
+
+struct TabRename {
+    input: Entity<ComposerInput>,
+    initial: String,
+    _subscriptions: [Subscription; 2],
 }
 
 pub struct DevicePanel {
     state: Entity<AppState>,
     chat_id: String,
     target: Option<(String, String)>,
+    custom_title: Option<String>,
+    rename: Option<TabRename>,
+    visible: bool,
+    seen_live: bool,
     opening: Option<String>,
     pending: Option<SetupPending>,
     setup_step: usize,
@@ -133,6 +168,10 @@ impl DevicePanel {
             state,
             chat_id,
             target: None,
+            custom_title: None,
+            rename: None,
+            visible: true,
+            seen_live: false,
             opening: None,
             pending: None,
             setup_step: 0,
@@ -156,12 +195,115 @@ impl DevicePanel {
         self.state.read(cx).device_hub.as_ref()
     }
 
+    fn device<'a>(&self, cx: &'a App) -> Option<&'a HubDevice> {
+        let (host, device) = self.target.as_ref()?;
+        self.hub(cx)?.device(host, device)
+    }
+
     pub fn title(&self, cx: &App) -> SharedString {
-        self.target
-            .as_ref()
-            .and_then(|(host, device)| self.hub(cx)?.device(host, device))
+        if let Some(title) = &self.custom_title {
+            return title.clone().into();
+        }
+        self.device(cx)
             .map(|device| SharedString::from(device.name.clone()))
             .unwrap_or_else(|| "Device".into())
+    }
+
+    pub fn platform(&self, cx: &App) -> Option<DevicePlatform> {
+        self.device(cx).map(|device| device.platform)
+    }
+
+    pub fn description(&self, cx: &App) -> Option<String> {
+        Some(device_description(self.hub(cx)?, self.device(cx)?))
+    }
+
+    pub fn chat_id(&self) -> &str {
+        &self.chat_id
+    }
+
+    pub fn target(&self) -> Option<&(String, String)> {
+        self.target.as_ref()
+    }
+
+    pub fn is_idle_picker(&self) -> bool {
+        self.target.is_none() && self.opening.is_none()
+    }
+
+    pub fn bind(&mut self, host_id: String, device_id: String, cx: &mut Context<Self>) {
+        let target = Some((host_id, device_id));
+        if self.target != target {
+            self.custom_title = None;
+        }
+        self.target = target;
+        self.seen_live = false;
+        self.view = None;
+        self.revision = None;
+        self.sync(cx);
+    }
+
+    pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.visible == visible {
+            return;
+        }
+        self.visible = visible;
+        if visible {
+            self.revision = None;
+            self.sync(cx);
+        } else {
+            self.view = None;
+            cx.notify();
+        }
+    }
+
+    pub fn rename_input(&self) -> Option<Entity<ComposerInput>> {
+        self.rename.as_ref().map(|rename| rename.input.clone())
+    }
+
+    pub fn begin_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.rename.is_some() || self.target.is_none() {
+            return;
+        }
+        let title = self.title(cx).to_string();
+        let input = cx.new(|cx| {
+            ComposerInput::new("Device tab name", cx)
+                .with_single_line()
+                .with_text_metrics(11.5, 16.0)
+                .with_accessibility_role(gpui::Role::TextInput)
+        });
+        input.update(cx, |input, cx| {
+            input.set_text(title.clone(), cx);
+            input.select_all_text(cx);
+        });
+        let submit = cx.subscribe(&input, |panel, _, event, cx| {
+            if matches!(event, ComposerInputEvent::Submitted) {
+                panel.finish_rename(true, cx);
+            }
+        });
+        let focus = input.focus_handle(cx);
+        window.focus(&focus, cx);
+        let blur = cx.on_blur(&focus, window, |panel, _, cx| {
+            panel.finish_rename(true, cx);
+        });
+        self.rename = Some(TabRename {
+            input,
+            initial: title,
+            _subscriptions: [submit, blur],
+        });
+        cx.notify();
+    }
+
+    pub fn finish_rename(&mut self, commit: bool, cx: &mut Context<Self>) -> bool {
+        let Some(rename) = self.rename.take() else {
+            return false;
+        };
+        if commit {
+            let text = rename.input.read(cx).text().trim().to_string();
+            if text != rename.initial {
+                self.custom_title = (!text.is_empty()).then_some(text);
+            }
+        }
+        cx.notify();
+        true
     }
 
     pub fn stream_view(&self) -> Option<&Entity<DeviceStreamView>> {
@@ -187,30 +329,25 @@ impl DevicePanel {
             .map(|session| session.device_id.clone());
         match live {
             Some(device_id) => {
+                self.seen_live = true;
                 if self.view.is_none()
+                    && self.visible
                     && let Some(engine) = self.state.read(cx).engine().cloned()
                 {
                     let id = device_id.clone();
                     self.view = Some(cx.new(|cx| DeviceStreamView::new(engine, id, cx)));
                 }
-                if let Some(view) = &self.view {
-                    let screen = hub.screens.get(&device_id).cloned();
-                    let link = hub.streams.get(&device_id).cloned();
-                    let label = self
-                        .target
-                        .as_ref()
-                        .and_then(|(host, device)| hub.device(host, device))
-                        .map(|device| (device.name.clone(), device_description(&hub, device)));
-                    view.update(cx, |view, cx| {
-                        view.set_screen(screen, cx);
-                        view.set_link(link, cx);
-                        if let Some((name, description)) = label {
-                            view.set_label(name, description, cx);
-                        }
-                    });
+                if let (Some(view), Some((host, _))) = (&self.view, &self.target) {
+                    feed_view(view, &hub, host, &device_id, cx);
                 }
             }
-            None => self.view = None,
+            None => {
+                self.view = None;
+                if self.opening.is_none() && std::mem::take(&mut self.seen_live) {
+                    self.target = None;
+                    self.custom_title = None;
+                }
+            }
         }
         cx.notify();
     }
@@ -250,7 +387,7 @@ impl DevicePanel {
         );
     }
 
-    fn open_device(&mut self, device: HubDevice, cx: &mut Context<Self>) {
+    pub(crate) fn open_device(&mut self, device: HubDevice, cx: &mut Context<Self>) {
         if self.opening.is_some() {
             return;
         }
@@ -268,9 +405,8 @@ impl DevicePanel {
                 serde_json::from_value::<DeviceSession>(value).map_err(|e| e.to_string())
             }) {
                 Ok(session) => {
-                    panel.target = Some((session.host_id, session.device_id));
-                    panel.revision = None;
-                    panel.sync(cx);
+                    panel.bind(session.host_id, session.device_id, cx);
+                    cx.emit(DevicePanelEvent::Bound);
                 }
                 Err(error) => panel.error = Some(error.into()),
             }
@@ -296,6 +432,7 @@ impl DevicePanel {
             match reply {
                 Ok(_) => {
                     panel.target = None;
+                    panel.custom_title = None;
                     panel.view = None;
                     panel.revision = None;
                     panel.sync(cx);
@@ -639,7 +776,15 @@ pub(crate) mod tests {
 
     pub(crate) type Calls = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
 
-    fn fake_engine(runtime: &tokio::runtime::Runtime) -> (crate::state::EngineHandle, Calls) {
+    const CANCEL: &str = "cancel";
+
+    pub(crate) fn open_frame_streams(calls: &Calls) -> usize {
+        calls_of(calls, methods::WATCH_HUB_DEVICE_FRAMES).len() - calls_of(calls, CANCEL).len()
+    }
+
+    pub(crate) fn fake_engine(
+        runtime: &tokio::runtime::Runtime,
+    ) -> (crate::state::EngineHandle, Calls) {
         let (out, mut frames) = tokio::sync::mpsc::channel::<String>(64);
         let (replies, inbound) = tokio::sync::mpsc::channel::<String>(64);
         let calls: Calls = Arc::default();
@@ -647,10 +792,17 @@ pub(crate) mod tests {
         runtime.spawn(async move {
             while let Some(frame) = frames.recv().await {
                 let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
-                let method = frame["method"].as_str().unwrap_or_default().to_string();
+                let method = match frame["method"].as_str() {
+                    Some(method) => method.to_string(),
+                    None if frame["cancel"] == true => CANCEL.to_string(),
+                    None => String::new(),
+                };
                 seen.lock()
                     .unwrap()
                     .push((method.clone(), frame["params"].clone()));
+                if method == methods::WATCH_HUB_DEVICE_FRAMES || method == CANCEL {
+                    continue;
+                }
                 let delay = if method == methods::CONFIGURE_DEVICE_HUB
                     || method == methods::CLOSE_HUB_DEVICE
                 {
@@ -807,14 +959,71 @@ pub(crate) mod tests {
         let seen = closed.clone();
         let _subscription = cx.update(|_, cx| {
             cx.subscribe(&panel, move |_, event: &DevicePanelEvent, _| {
-                let DevicePanelEvent::Close = event;
-                *seen.lock().unwrap() = true;
+                if let DevicePanelEvent::Close = event {
+                    *seen.lock().unwrap() = true;
+                }
             })
         });
         click(cx, "device-more");
         click(cx, "device-close-panel");
         wait(cx, |_| *closed.lock().unwrap());
         assert!(calls_of(&calls, methods::CLOSE_HUB_DEVICE).is_empty());
+    }
+
+    #[gpui::test]
+    fn a_hidden_panel_drops_its_frame_subscription_and_resubscribes_when_shown(
+        cx: &mut TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (_state, panel, calls, cx) = streaming_panel(cx, &runtime, StreamLinkStatus::Live);
+        wait(cx, |_| open_frame_streams(&calls) == 1);
+        panel.update(cx, |panel, cx| panel.set_visible(false, cx));
+        wait(cx, |_| open_frame_streams(&calls) == 0);
+        assert!(panel.read_with(cx, |panel, _| panel.stream_view().is_none()));
+        assert_eq!(calls_of(&calls, methods::WATCH_HUB_DEVICE_FRAMES).len(), 1);
+        cx.run_until_parked();
+        assert_eq!(
+            open_frame_streams(&calls),
+            0,
+            "a hidden panel never resubscribes"
+        );
+        panel.update(cx, |panel, cx| panel.set_visible(true, cx));
+        wait(cx, |_| open_frame_streams(&calls) == 1);
+        assert_eq!(calls_of(&calls, methods::WATCH_HUB_DEVICE_FRAMES).len(), 2);
+        wait(cx, |cx| cx.debug_bounds("device-more").is_some());
+    }
+
+    #[gpui::test]
+    fn renaming_commits_trims_and_an_empty_name_falls_back_to_the_device_name(
+        cx: &mut TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (_state, panel, _calls, cx) = streaming_panel(cx, &runtime, StreamLinkStatus::Live);
+        let rename = |cx: &mut VisualTestContext, text: &str, commit: bool| {
+            cx.update(|window, cx| {
+                panel.update(cx, |panel, cx| panel.begin_rename(window, cx));
+            });
+            let input = panel.read_with(cx, |panel, _| panel.rename_input().unwrap());
+            assert_eq!(
+                input.read_with(cx, |input, _| input.text().to_string()),
+                panel.read_with(cx, |panel, cx| panel.title(cx).to_string()),
+                "the field starts from the current title"
+            );
+            input.update(cx, |input, cx| input.set_text(text, cx));
+            panel.update(cx, |panel, cx| panel.finish_rename(commit, cx));
+            panel.read_with(cx, |panel, cx| panel.title(cx).to_string())
+        };
+        assert_eq!(rename(cx, "iPhone 17", true), "iPhone 17");
+        assert!(
+            panel.read_with(cx, |panel, _| panel.custom_title.is_none()),
+            "an unedited rename does not pin the device name"
+        );
+        assert_eq!(rename(cx, "  My phone ", true), "My phone");
+        assert_eq!(rename(cx, "Discarded", false), "My phone", "Escape reverts");
+        assert_eq!(rename(cx, "   ", true), "iPhone 17");
+        assert!(panel.read_with(cx, |panel, _| panel.rename_input().is_none()));
     }
 
     #[gpui::test]
@@ -834,6 +1043,7 @@ pub(crate) mod tests {
             "the stream gives way to the powering-off message"
         );
         assert!(panel.read_with(cx, |panel, _| panel.target.is_some()));
+        panel.update(cx, |panel, _| panel.custom_title = Some("My phone".into()));
         panel.update(cx, |panel, cx| panel.power_off(cx));
         wait(cx, |cx| {
             panel.read_with(cx, |panel, _| panel.target.is_none())
@@ -853,6 +1063,7 @@ pub(crate) mod tests {
             )
         });
         assert_eq!(phase, PanelPhase::Picker);
+        assert!(panel.read_with(cx, |panel, _| panel.custom_title.is_none()));
         assert!(panel.read_with(cx, |panel, _| panel.stream_view().is_none()));
         assert!(
             state.read_with(cx, |state, _| state.device_hub.is_some()),
@@ -861,6 +1072,48 @@ pub(crate) mod tests {
         assert!(
             cx.debug_bounds("device-more").is_none(),
             "the rail left with the stream"
+        );
+    }
+
+    #[gpui::test]
+    fn a_tab_whose_session_ends_returns_to_the_picker_and_a_new_target_drops_the_custom_title(
+        cx: &mut TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (state, panel, _calls, cx) = streaming_panel(cx, &runtime, StreamLinkStatus::Live);
+        panel.update(cx, |panel, cx| {
+            panel.custom_title = Some("My phone".into());
+            panel.bind("local".into(), "PAD".into(), cx);
+            assert_eq!(panel.custom_title, None, "a new device drops the old name");
+            assert_eq!(
+                panel.target,
+                Some(("local".into(), "PAD".into())),
+                "a session the hub has not published yet keeps the bind"
+            );
+            panel.bind("local".into(), "SIM".into(), cx);
+            panel.custom_title = Some("My phone".into());
+            panel.bind("local".into(), "SIM".into(), cx);
+            assert_eq!(panel.custom_title.as_deref(), Some("My phone"));
+        });
+        state.update(cx, |state, cx| {
+            let mut ended = hub(true);
+            ended.revision = 1;
+            state.device_hub = Some(ended);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, cx| {
+            assert_eq!(panel.target, None, "the session ended elsewhere");
+            assert_eq!(panel.custom_title, None);
+            assert_eq!(panel.title(cx).as_ref(), "Device");
+        });
+        cx.update(|window, cx| {
+            panel.update(cx, |panel, cx| panel.begin_rename(window, cx));
+        });
+        assert!(
+            panel.read_with(cx, |panel, _| panel.rename_input().is_none()),
+            "a picker tab cannot be renamed"
         );
     }
 
@@ -1088,8 +1341,9 @@ pub(crate) mod tests {
         let seen = closed.clone();
         let _subscription = cx.update(|_, cx| {
             cx.subscribe(&panel, move |_, event: &DevicePanelEvent, _| {
-                let DevicePanelEvent::Close = event;
-                *seen.lock().unwrap() = true;
+                if let DevicePanelEvent::Close = event {
+                    *seen.lock().unwrap() = true;
+                }
             })
         });
         click(cx, "device-setup-cancel");
@@ -1124,6 +1378,39 @@ pub(crate) mod tests {
         wait(cx, |cx| cx.debug_bounds("device-setup-check").is_some());
         click(cx, "device-setup-continue");
         inside(cx, "device-agent-access");
+    }
+
+    #[gpui::test]
+    fn the_wizard_footer_stays_inside_the_card_on_every_step(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let mut state = hub(true);
+        state.settings.onboarding_completed = false;
+        let (state, _calls) = app_state(cx, &runtime, state);
+        let (_panel, cx) = cx.add_window_view(|_, cx| DevicePanel::new(state, "chat".into(), cx));
+        cx.simulate_resize(gpui::size(gpui::px(620.0), gpui::px(900.0)));
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        for (back, next) in [
+            ("device-setup-cancel", "device-setup-continue"),
+            ("device-setup-back", "device-setup-continue"),
+            ("device-setup-back", "device-setup-done"),
+        ] {
+            for selector in [back, next] {
+                wait(cx, |cx| cx.debug_bounds(selector).is_some());
+                let card = cx.debug_bounds("device-setup-card").unwrap();
+                let button = cx.debug_bounds(selector).unwrap();
+                assert!(
+                    button.top() >= card.top() && button.bottom() <= card.bottom(),
+                    "{selector} {button:?} is outside the card {card:?}"
+                );
+            }
+            if next == "device-setup-continue" {
+                click(cx, next);
+            }
+        }
     }
 
     #[gpui::test]

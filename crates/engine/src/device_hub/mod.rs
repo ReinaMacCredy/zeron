@@ -1413,6 +1413,39 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn the_published_subscriber_count_follows_frame_watchers_down_to_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = super::DeviceHub::start(dir.path());
+        let (origin, _) = fake_hub().await;
+        let _pids = spawn_fakes(&hub, vec![origin]);
+        hub.configure(zeron_proto::device_hub::ConfigureDeviceHubParams {
+            enabled: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        hub.open(open_params("SIM-1")).await.unwrap();
+        let subscribers = || {
+            hub.snapshot()
+                .streams
+                .get("SIM-1")
+                .map(|status| status.subscribers)
+        };
+        let tab = hub.watch_frames("SIM-1").unwrap();
+        let float = hub.watch_frames("SIM-1").unwrap();
+        assert_eq!(subscribers(), Some(2));
+        drop(tab);
+        assert_eq!(subscribers(), Some(1));
+        drop(float);
+        assert_eq!(subscribers(), None, "no watcher, no stream entry");
+        assert!(
+            hub.snapshot().session("chat-1", "local", "SIM-1").is_some(),
+            "the session outlives its last watcher"
+        );
+        hub.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_restarted_hub_reattaches_its_sessions_and_the_frame_stream_resumes() {
         let dir = tempfile::tempdir().unwrap();
         let hub = super::DeviceHub::start(dir.path());
