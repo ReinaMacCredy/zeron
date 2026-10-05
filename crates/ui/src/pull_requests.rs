@@ -15,7 +15,8 @@ pub use chat::{
     ACTION_NOTE as CHAT_ACTION_NOTE, CONTEXT_HEADER as CHAT_CONTEXT_HEADER, ContextCall,
     ContextChip, GithubWrite, PrChatContext, PrChatScope, Suggestion, chat_shortcut,
     extract_badge as extract_chat_context_badge, failure_text as chat_write_failure,
-    latest_reply as latest_chat_reply,
+    first_prompt as first_chat_prompt, latest_reply as latest_chat_reply,
+    live_sessions as live_chat_sessions,
 };
 pub use filters::PullRequestListPrefs;
 
@@ -1314,7 +1315,7 @@ impl PullRequestsPage {
             .gap(px(8.0))
             .max_w(px(144.0))
             .text_size(px(12.0))
-            .children(chat::row_badge(&key, theme, cx));
+            .children(chat::row_badge(&key, &self.state.read(cx).chats, theme, cx));
         if row_width >= 448.0 {
             match item.review_decision {
                 Some(ChangeRequestReviewDecision::Approved) => {
