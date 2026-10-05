@@ -1399,14 +1399,13 @@ pub(crate) async fn sync(
                         .clone()
                         .filter(|merge| merge.starts_with("refs/heads/"))
                         .ok_or_else(not_a_remote_branch)?;
-                    if merge == same_name
-                        || to_upstream
-                        || config.push_mode.as_deref() == Some("current")
-                    {
-                        let dest = if to_upstream { merge } else { same_name };
-                        (remote, dest, false)
+                    if merge == same_name {
+                        (remote, same_name, false)
                     } else if set_upstream {
                         (remote, same_name, true)
+                    } else if to_upstream || config.push_mode.as_deref() == Some("current") {
+                        let dest = if to_upstream { merge } else { same_name };
+                        (remote, dest, false)
                     } else {
                         return Err(refused(&format!(
                             "{branch} tracks {upstream}, a branch with another name, so Push will not send it there. To publish it as its own branch, run `git push -u {remote} {branch}` in a terminal."
@@ -2751,8 +2750,27 @@ mod tests {
         assert_eq!(rev(&remote, "refs/heads/current-mode"), rev(&repo, "HEAD"));
         assert_eq!(rev(&remote, "refs/heads/main"), main);
 
-        branch_from_origin_main(&repo, "upstream-mode");
+        branch_from_origin_main(&repo, "upstream-publish");
         run(&repo, &["config", "push.default", "upstream"]);
+        let tree = read(&repo, "c").await.unwrap();
+        sync(&repo, &tree, PUSH_TRACKING, SYNC_TIMEOUT)
+            .await
+            .unwrap();
+        assert_eq!(
+            rev(&remote, "refs/heads/upstream-publish"),
+            rev(&repo, "HEAD")
+        );
+        assert_eq!(
+            rev(&remote, "refs/heads/main"),
+            main,
+            "publishing under its own name never lands on the upstream"
+        );
+        assert_eq!(
+            read(&repo, "c").await.unwrap().upstream.as_deref(),
+            Some("origin/upstream-publish")
+        );
+
+        branch_from_origin_main(&repo, "upstream-mode");
         let tree = read(&repo, "c").await.unwrap();
         sync(&repo, &tree, PUSH, SYNC_TIMEOUT).await.unwrap();
         assert_eq!(

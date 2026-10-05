@@ -87,6 +87,7 @@ struct GraphSegment {
     to_lane: usize,
     color_id: usize,
     shape: SegmentShape,
+    dashed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -619,11 +620,14 @@ fn resized_history_column_widths(
     widths
 }
 
+pub(crate) const WORKING_TREE_ROW: &str = "working-tree";
+
 #[derive(Debug, Clone)]
 struct ActiveLane {
     id: usize,
     color_id: usize,
     target_sha: String,
+    dashed: bool,
 }
 
 fn lane_index(lanes: &[ActiveLane], id: usize) -> usize {
@@ -663,7 +667,7 @@ fn layout_graph(commits: &[GitHistoryCommit], head_sha: Option<&str>) -> GraphLa
             .filter(|lane| !resolved_ids.contains(&lane.id))
             .cloned()
             .collect();
-        let mut outgoing: Vec<(usize, usize)> = Vec::new();
+        let mut outgoing: Vec<(usize, usize, bool)> = Vec::new();
 
         let mut primary_outgoing_id = None;
         if let Some(first_parent) = commit.parent_shas.first() {
@@ -676,10 +680,11 @@ fn layout_graph(commits: &[GitHistoryCommit], head_sha: Option<&str>) -> GraphLa
                 id,
                 color_id: node_color_id,
                 target_sha: first_parent.clone(),
+                dashed: commit.sha == WORKING_TREE_ROW,
             };
             next_lanes.insert(node_lane.min(next_lanes.len()), lane.clone());
             primary_outgoing_id = Some(id);
-            outgoing.push((id, lane.color_id));
+            outgoing.push((id, lane.color_id, lane.dashed));
         }
 
         let mut parent_offset = 1usize;
@@ -688,13 +693,14 @@ fn layout_graph(commits: &[GitHistoryCommit], head_sha: Option<&str>) -> GraphLa
                 .iter()
                 .find(|lane| lane.target_sha == *parent_sha)
             {
-                outgoing.push((existing.id, existing.color_id));
+                outgoing.push((existing.id, existing.color_id, false));
                 continue;
             }
             let lane = ActiveLane {
                 id: next_lane_id,
                 color_id: next_color_id,
                 target_sha: parent_sha.clone(),
+                dashed: false,
             };
             next_lane_id += 1;
             next_color_id += 1;
@@ -706,7 +712,7 @@ fn layout_graph(commits: &[GitHistoryCommit], head_sha: Option<&str>) -> GraphLa
                 lane.clone(),
             );
             parent_offset += 1;
-            outgoing.push((lane.id, lane.color_id));
+            outgoing.push((lane.id, lane.color_id, false));
         }
 
         let mut segments: Vec<GraphSegment> = before
@@ -718,6 +724,7 @@ fn layout_graph(commits: &[GitHistoryCommit], head_sha: Option<&str>) -> GraphLa
                 to_lane: lane_index(&next_lanes, lane.id),
                 color_id: lane.color_id,
                 shape: SegmentShape::Through,
+                dashed: lane.dashed,
             })
             .collect();
         segments.extend(incoming.iter().map(|&from_lane| GraphSegment {
@@ -725,13 +732,19 @@ fn layout_graph(commits: &[GitHistoryCommit], head_sha: Option<&str>) -> GraphLa
             to_lane: node_lane,
             color_id: before[from_lane].color_id,
             shape: SegmentShape::Incoming,
+            dashed: before[from_lane].dashed,
         }));
-        segments.extend(outgoing.into_iter().map(|(id, color_id)| GraphSegment {
-            from_lane: node_lane,
-            to_lane: lane_index(&next_lanes, id),
-            color_id,
-            shape: SegmentShape::Outgoing,
-        }));
+        segments.extend(
+            outgoing
+                .into_iter()
+                .map(|(id, color_id, dashed)| GraphSegment {
+                    from_lane: node_lane,
+                    to_lane: lane_index(&next_lanes, id),
+                    color_id,
+                    shape: SegmentShape::Outgoing,
+                    dashed,
+                }),
+        );
 
         max_lane_count = max_lane_count
             .max(before.len())
@@ -1338,6 +1351,7 @@ pub struct GitHistory {
     state: Entity<AppState>,
     target: GitHistoryTarget,
     selected_sha: Option<String>,
+    working_tree: Option<usize>,
     ref_badges: HashMap<String, SharedString>,
     started: bool,
     target_key: Option<String>,
@@ -1402,6 +1416,7 @@ pub enum GitHistoryEvent {
     /// A commit row was clicked — the host opens it as its own diff tab.
     OpenCommit(GitHistoryCommit),
     OpenRefBadge(String),
+    SelectWorkingTree,
 }
 
 impl EventEmitter<GitHistoryEvent> for GitHistory {}
@@ -1991,6 +2006,7 @@ impl GitHistory {
             state,
             target: GitHistoryTarget::SelectedChat,
             selected_sha: None,
+            working_tree: None,
             ref_badges: HashMap::new(),
             started: false,
             target_key: None,
@@ -2064,6 +2080,24 @@ impl GitHistory {
             self.selected_sha = sha;
             cx.notify();
         }
+    }
+
+    pub fn set_working_tree(&mut self, files: Option<usize>, cx: &mut Context<Self>) {
+        if self.working_tree == files {
+            return;
+        }
+        let toggled = self.working_tree.is_some() != files.is_some();
+        self.working_tree = files;
+        if toggled {
+            self.rebuild_view(cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    #[cfg(test)]
+    pub fn working_tree(&self) -> Option<usize> {
+        self.working_tree
     }
 
     #[cfg(test)]
@@ -2268,6 +2302,22 @@ impl GitHistory {
                 );
                 self.visible_commits = visible;
                 self.collapsed_counts = counts;
+                if self.working_tree.is_some()
+                    && let Some(head) = self.head_sha.clone()
+                {
+                    self.visible_commits.insert(
+                        0,
+                        GitHistoryCommit {
+                            sha: WORKING_TREE_ROW.into(),
+                            parent_shas: vec![head],
+                            subject: String::new(),
+                            author_name: String::new(),
+                            author_email: String::new(),
+                            authored_at: String::new(),
+                            refs: Vec::new(),
+                        },
+                    );
+                }
             }
             GitHistoryViewMode::BranchTips => {
                 // Immediate parents generally are not tips themselves. Clear
@@ -3509,7 +3559,11 @@ impl GitHistory {
                 }
                 for pass in 0..pass_count {
                     let selected_pass = focus.is_some() && pass == 1;
-                    for (color_index, color) in palette.iter().enumerate() {
+                    for (color_index, color, dashed) in palette
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(index, color)| [(index, color, false), (index, color, true)])
+                    {
                         let stroke_width = focus
                             .filter(|_| selected_pass)
                             .map(|focus| {
@@ -3519,6 +3573,9 @@ impl GitHistory {
                             })
                             .unwrap_or(HISTORY_STROKE_WIDTH);
                         let mut builder = PathBuilder::stroke(px(stroke_width));
+                        if dashed {
+                            builder = builder.dash_array(&[px(3.0), px(3.0)]);
+                        }
                         let mut has_segments = false;
 
                         for (index, row) in rows.iter().enumerate() {
@@ -3539,6 +3596,7 @@ impl GitHistory {
                                 * (row_height / HISTORY_ROW_HEIGHT).clamp(0.0, 1.0);
                             for segment in row.segments.iter().filter(|segment| {
                                 segment.color_id % palette.len() == color_index
+                                    && segment.dashed == dashed
                                     && focus.is_none_or(|focus| {
                                         (segment.color_id == focus.color_id) == selected_pass
                                     })
@@ -3741,7 +3799,16 @@ impl GitHistory {
             .top(px(HISTORY_ROW_HEIGHT / 2.0 - node_radius))
             .size(px(node_radius * 2.0))
             .rounded_full()
-            .bg(color);
+            .map(|node| {
+                if row.sha == WORKING_TREE_ROW {
+                    node.border_1()
+                        .border_dashed()
+                        .border_color(color)
+                        .bg(theme.bg)
+                } else {
+                    node.bg(color)
+                }
+            });
         div()
             .id(("history-graph-cell", row_index))
             .relative()
@@ -4065,6 +4132,50 @@ impl GitHistory {
             .into_any_element()
     }
 
+    fn render_working_tree_row(
+        &mut self,
+        index: usize,
+        graph_row: GraphRow,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let graph_focus = self.graph_focus(cx);
+        let row_hover_path = graph_row.node_color_id;
+        let files = self.working_tree.unwrap_or_default();
+        div()
+            .id(("history-row", index))
+            .debug_selector(|| "git-working-tree-row".into())
+            .role(gpui::Role::Button)
+            .aria_label("Uncommitted changes")
+            .h(px(HISTORY_ROW_HEIGHT))
+            .w_full()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .cursor_pointer()
+            .when(self.selected_sha.is_none(), |element| {
+                element.bg(crate::theme::ink(0.07))
+            })
+            .hover(|style| style.bg(crate::theme::ink(0.025)))
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                this.set_row_hover((*hovered).then_some(row_hover_path), cx);
+            }))
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(GitHistoryEvent::SelectWorkingTree)))
+            .child(self.graph_cell(index, graph_row, graph_focus, theme, cx))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .pr(px(8.0))
+                    .truncate()
+                    .text_size(px(12.0))
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(format!("Uncommitted changes ({files})"))),
+            )
+            .into_any_element()
+    }
+
     fn render_row(
         &mut self,
         index: usize,
@@ -4150,6 +4261,9 @@ impl GitHistory {
             return gpui::Empty.into_any_element();
         };
         let theme = Theme::of(cx).clone();
+        if commit.sha == WORKING_TREE_ROW {
+            return self.render_working_tree_row(index, graph_row, &theme, cx);
+        }
         let sha = commit.sha.clone();
         let open_commit = commit.clone();
         let copied = self.copied_sha.as_deref() == Some(sha.as_str());
@@ -4743,6 +4857,73 @@ mod tests {
     }
 
     #[test]
+    fn the_working_tree_row_joins_head_on_a_dashed_lane_only_when_the_host_asks() {
+        let mut app = gpui::TestApp::new();
+        app.update(|cx| {
+            let state = cx.new(|_| AppState::new());
+            let history = cx.new(|cx| GitHistory::new(state, cx));
+            history.update(cx, |history, cx| {
+                history.commits = vec![
+                    commit("tip", &["head"]),
+                    commit("head", &["base"]),
+                    commit("base", &[]),
+                ];
+                history.head_sha = Some("head".into());
+                history.recompute_view();
+                assert_eq!(history.visible_commits.len(), 3, "no row until asked");
+
+                history.set_working_tree(Some(2), cx);
+                assert_eq!(history.visible_commits.len(), 4);
+                assert_eq!(history.visible_commits[0].sha, WORKING_TREE_ROW);
+                assert_eq!(history.visible_commits[0].parent_shas, ["head"]);
+                let rows = &history.graph.rows;
+                assert_eq!(rows[0].sha, WORKING_TREE_ROW);
+                assert!(rows[0].segments.iter().all(|segment| segment.dashed));
+                assert!(
+                    rows[1]
+                        .segments
+                        .iter()
+                        .any(|segment| segment.shape == SegmentShape::Through && segment.dashed),
+                    "the lane runs dashed past a newer commit"
+                );
+                assert!(rows[2].is_head);
+                assert!(
+                    rows[2]
+                        .segments
+                        .iter()
+                        .any(|segment| segment.shape == SegmentShape::Incoming && segment.dashed)
+                );
+                assert!(
+                    rows[2]
+                        .segments
+                        .iter()
+                        .filter(|segment| segment.shape == SegmentShape::Outgoing)
+                        .all(|segment| !segment.dashed),
+                    "HEAD's own parent line stays solid"
+                );
+                assert_eq!(history.list.item_count(), 4);
+
+                history.set_working_tree(Some(5), cx);
+                assert_eq!(history.visible_commits.len(), 4);
+
+                history.search_query = "tip".into();
+                history.recompute_view();
+                assert!(
+                    history
+                        .visible_commits
+                        .iter()
+                        .all(|commit| commit.sha != WORKING_TREE_ROW)
+                );
+                history.search_query.clear();
+
+                history.set_working_tree(None, cx);
+                assert_eq!(history.visible_commits.len(), 3);
+                assert_eq!(history.list.item_count(), 3);
+            });
+        });
+    }
+
+    #[test]
     fn history_search_keeps_unicode_engine_result_visible() {
         let mut app = gpui::TestApp::new();
 
@@ -5075,6 +5256,7 @@ mod tests {
                 to_lane: 1,
                 color_id: 7,
                 shape: SegmentShape::Through,
+                dashed: false,
             }],
             is_head: false,
         };
@@ -5088,6 +5270,7 @@ mod tests {
             to_lane: 1,
             color_id: 9,
             shape: SegmentShape::Outgoing,
+            dashed: false,
         };
         let middle = HISTORY_ROW_HEIGHT / 2.0;
         let curve_x = cubic_coordinate(
@@ -5129,6 +5312,7 @@ mod tests {
                 to_lane: 1,
                 color_id: 4,
                 shape: SegmentShape::Incoming,
+                dashed: false,
             }],
             is_head: false,
         };
