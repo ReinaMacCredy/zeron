@@ -970,7 +970,7 @@ impl GitTab {
             && !self.writing
             && !self.message.read(cx).text().trim().is_empty()
             && self.allows(&kind.action(String::new()), policy)
-            && self.source_control(cx)
+            && self.commits_supported(cx)
     }
 
     fn commit(&mut self, kind: CommitKind, cx: &mut Context<Self>) {
@@ -1835,7 +1835,7 @@ impl GitTab {
                 .pending
                 .as_ref()
                 .is_some_and(|pending| pending.target == PendingTarget::Commit)
-            && self.source_control(cx)
+            && self.commits_supported(cx)
     }
 
     fn write_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2226,7 +2226,8 @@ impl GitTab {
                     }
                 })
         });
-        let discard = writes.filter(|_| !staged).map(|policy| {
+        let commits = self.commits_supported(cx);
+        let discard = writes.filter(|_| !staged && commits).map(|policy| {
             let path = file.path.clone();
             let enabled = file.worktree != GitFileState::Unmerged
                 && !path.ends_with('/')
@@ -2431,6 +2432,7 @@ impl GitTab {
         let tree = self.tree.as_ref();
         let policy = busy_policy(cx);
         let writes = self.source_control(cx).then_some(policy);
+        let commits = writes.filter(|_| self.commits_supported(cx));
         let checkout = self.space.as_ref().and_then(|space| {
             checkout_options(self.state.read(cx), space)
                 .into_iter()
@@ -2564,7 +2566,7 @@ impl GitTab {
                             .child(SharedString::from(detail.join(" · "))),
                     )
                     .children(
-                        writes.zip(tree).map(|(policy, tree)| {
+                        commits.zip(tree).map(|(policy, tree)| {
                             self.render_stash_button(tree, policy, theme, cx)
                         }),
                     ),
@@ -2584,7 +2586,7 @@ impl GitTab {
                     .overflow_y_scroll()
                     .child(body),
             )
-            .child(self.render_commit_box(staged.len(), writes, theme, cx))
+            .child(self.render_commit_box(staged.len(), commits, theme, cx))
             .into_any_element()
     }
 
@@ -7279,7 +7281,10 @@ mod tests {
         let lab = Arc::new(GitLab::default());
         *lab.tree.lock().unwrap() = Some(new_branch_tree());
         let mut state = lab_state();
-        state.devices[0].capabilities = vec![zeron_proto::capabilities::SOURCE_CONTROL_V1.into()];
+        state.devices[0].capabilities = vec![
+            zeron_proto::capabilities::SOURCE_CONTROL_V1.into(),
+            zeron_proto::capabilities::SOURCE_CONTROL_COMMITS_V1.into(),
+        ];
         let (_page, cx, calls, _dir, tab) = open_with_listing(cx, state, lab);
         assert!(cx.debug_bounds("pull-requests-git-checkout").is_some());
         assert!(cx.debug_bounds("pull-requests-git-push").is_none());
@@ -8193,5 +8198,35 @@ mod tests {
                     .is_some_and(|error| error.contains("refused the checkout"))
             );
         });
+    }
+
+    #[gpui::test]
+    fn a_device_from_before_commits_stages_but_cannot_commit_discard_or_stash(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        *lab.tree.lock().unwrap() = Some(stashed_tree(false));
+        let mut state = lab_state();
+        state.devices[0].capabilities = vec![zeron_proto::capabilities::SOURCE_CONTROL_V1.into()];
+        let (page, cx, calls, _dir) = open_lab(cx, state, git_prefs(), lab);
+        cx.update(|_, cx| crate::composer::init(cx, Default::default()));
+        settle(cx, |cx| cx.debug_bounds("git-changes-toggle-0").is_some());
+        let tab = git_tab(&page, cx);
+        for selector in ["git-changes-discard-0", "git-stash-button"] {
+            assert!(cx.debug_bounds(selector).is_none(), "{selector}");
+        }
+        set_message(&tab, cx, "Fix the panel");
+        tab.update(cx, |tab, cx| tab.commit(CommitKind::Staged, cx));
+        if cx.debug_bounds("git-write-ai").is_some() {
+            click(cx, "git-write-ai");
+        }
+        cx.run_until_parked();
+        assert!(actions(&calls).is_empty());
+        assert!(writes(&calls).is_empty());
+        click(cx, "git-changes-toggle-0");
+        settle_action(cx, &tab, &calls, 1);
+        assert_eq!(actions(&calls)[0]["action"]["kind"], "stage");
     }
 }
