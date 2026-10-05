@@ -1636,14 +1636,6 @@ where
     Ok(registry.descriptors())
 }
 
-struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
-
-impl<T> Drop for AbortOnDrop<T> {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
 fn forward_deadline(method: &str) -> std::time::Duration {
     use std::time::Duration;
     match method {
@@ -3336,7 +3328,7 @@ impl RpcService for EngineRpc {
                     _ => None,
                 };
                 // A task of its own: under the dispatcher's frame a debug build overflows the 2 MB worker stack.
-                let mut task = AbortOnDrop(tokio::spawn(async move {
+                let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
                     let identity = repos
                         .checkout_identity(std::path::Path::new(&p.cwd))
                         .await
@@ -3390,8 +3382,7 @@ impl RpcService for EngineRpc {
                         updated_at: chrono::Utc::now(),
                     })
                 }));
-                (&mut task.0)
-                    .await
+                task.await
                     .map_err(|e| RpcError::Failed(format!("checkout diff task failed: {e}")))?
             }
             methods::DISCARD_WORKING_TREE => {
@@ -6142,7 +6133,7 @@ mod tests {
     #[tokio::test]
     async fn dropping_a_spawned_rpc_capture_cancels_its_task() {
         let (alive, gone) = tokio::sync::oneshot::channel::<()>();
-        let task = AbortOnDrop(tokio::spawn(async move {
+        let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
             let _alive = alive;
             std::future::pending::<()>().await;
         }));
