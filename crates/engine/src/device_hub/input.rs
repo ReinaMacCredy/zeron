@@ -6,9 +6,15 @@ use futures::{SinkExt, StreamExt};
 use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
-use zeron_proto::device_hub::{DeviceInput, DeviceScreenConfig, TouchPhase};
+use zeron_proto::device_hub::{
+    DeviceButton, DeviceInput, DeviceOrientation, DeviceScreenConfig, KeyPhase, StreamLinkStatus,
+    TouchPhase,
+};
 
 const TOUCH: u8 = 0x03;
+const BUTTON: u8 = 0x04;
+const KEY: u8 = 0x06;
+const ORIENTATION: u8 = 0x07;
 const HARDWARE_KEYBOARD: u8 = 0x0E;
 const SCREEN_CONFIG: u8 = 0x82;
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
@@ -26,6 +32,22 @@ struct Touch {
     y: f32,
 }
 
+#[derive(Serialize)]
+struct Button {
+    button: DeviceButton,
+}
+
+#[derive(Serialize)]
+struct Key {
+    r#type: KeyPhase,
+    usage: u16,
+}
+
+#[derive(Serialize)]
+struct Orientation {
+    orientation: DeviceOrientation,
+}
+
 pub(crate) fn encode(input: &DeviceInput) -> Vec<u8> {
     match *input {
         DeviceInput::Touch { phase, x, y } => message(
@@ -36,6 +58,17 @@ pub(crate) fn encode(input: &DeviceInput) -> Vec<u8> {
                 y: y.clamp(0.0, 1.0),
             },
         ),
+        DeviceInput::Button { button } => message(BUTTON, &Button { button }),
+        DeviceInput::Key { phase, usage } => message(
+            KEY,
+            &Key {
+                r#type: phase,
+                usage,
+            },
+        ),
+        DeviceInput::Orientation { orientation } => {
+            message(ORIENTATION, &Orientation { orientation })
+        }
     }
 }
 
@@ -60,47 +93,61 @@ impl InputSocket {
     pub(crate) fn connect(
         url: String,
         on_screen: impl Fn(DeviceScreenConfig) + Send + Sync + 'static,
+        on_status: impl Fn(StreamLinkStatus) + Send + Sync + 'static,
     ) -> Self {
         let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let live = Arc::new(AtomicBool::new(false));
         let flag = live.clone();
         let task = tokio::spawn(async move {
             loop {
-                if let Ok((socket, _)) = tokio_tungstenite::connect_async(url.as_str()).await {
-                    let (mut sink, mut stream) = socket.split();
-                    // Serve-sim turns the hardware keyboard back on when the
-                    // last socket closes; off lets taps raise the on-screen one.
-                    if sink
-                        .send(Message::Binary(hardware_keyboard_off()))
-                        .await
-                        .is_ok()
-                    {
-                        while rx.try_recv().is_ok() {}
-                        flag.store(true, Ordering::SeqCst);
-                        loop {
-                            tokio::select! {
-                                outgoing = rx.recv() => match outgoing {
-                                    Some(bytes) => {
-                                        if sink.send(Message::Binary(bytes)).await.is_err() {
-                                            break;
+                on_status(StreamLinkStatus::Connecting);
+                let detail = match tokio_tungstenite::connect_async(url.as_str()).await {
+                    Err(_) => "could not connect",
+                    Ok((socket, _)) => {
+                        let (mut sink, mut stream) = socket.split();
+                        // Serve-sim turns the hardware keyboard back on when the
+                        // last socket closes; off lets taps raise the on-screen one.
+                        if sink
+                            .send(Message::Binary(hardware_keyboard_off()))
+                            .await
+                            .is_err()
+                        {
+                            "socket closed"
+                        } else {
+                            while rx.try_recv().is_ok() {}
+                            flag.store(true, Ordering::SeqCst);
+                            on_status(StreamLinkStatus::Live);
+                            let detail = loop {
+                                tokio::select! {
+                                    outgoing = rx.recv() => match outgoing {
+                                        Some(bytes) => {
+                                            if sink.send(Message::Binary(bytes)).await.is_err() {
+                                                break "socket closed";
+                                            }
                                         }
-                                    }
-                                    None => return,
-                                },
-                                incoming = stream.next() => match incoming {
-                                    Some(Ok(Message::Binary(bytes))) => {
-                                        if let Some(screen) = screen_config(&bytes) {
-                                            on_screen(screen);
+                                        None => return,
+                                    },
+                                    incoming = stream.next() => match incoming {
+                                        Some(Ok(Message::Binary(bytes))) => {
+                                            if let Some(screen) = screen_config(&bytes) {
+                                                on_screen(screen);
+                                            }
                                         }
-                                    }
-                                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
-                                    Some(Ok(_)) => {}
-                                },
-                            }
+                                        Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
+                                            break "socket closed";
+                                        }
+                                        Some(Ok(_)) => {}
+                                    },
+                                }
+                            };
+                            flag.store(false, Ordering::SeqCst);
+                            detail
                         }
-                        flag.store(false, Ordering::SeqCst);
                     }
-                }
+                };
+                on_status(StreamLinkStatus::Failed {
+                    detail: detail.into(),
+                });
                 tokio::time::sleep(RECONNECT_DELAY).await;
             }
         });
@@ -144,6 +191,101 @@ mod tests {
         let mut expected = vec![0x0E];
         expected.extend_from_slice(br#"{"enabled":false}"#);
         assert_eq!(hardware_keyboard_off(), expected);
+    }
+
+    #[test]
+    fn buttons_keys_and_orientation_use_the_serve_sim_tags() {
+        let tagged = |tag: u8, json: &[u8]| {
+            let mut bytes = vec![tag];
+            bytes.extend_from_slice(json);
+            bytes
+        };
+        assert_eq!(
+            encode(&DeviceInput::Button {
+                button: DeviceButton::Home
+            }),
+            tagged(0x04, br#"{"button":"home"}"#)
+        );
+        assert_eq!(
+            encode(&DeviceInput::Key {
+                phase: KeyPhase::Up,
+                usage: 0xE1
+            }),
+            tagged(0x06, br#"{"type":"up","usage":225}"#)
+        );
+        assert_eq!(
+            encode(&DeviceInput::Orientation {
+                orientation: DeviceOrientation::PortraitUpsideDown
+            }),
+            tagged(0x07, br#"{"orientation":"portrait_upside_down"}"#)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dropped_socket_reports_failed_and_reconnects() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "ws://{}/vendor/serve-sim/helper/ws?device=SIM",
+            listener.local_addr().unwrap()
+        );
+        let (first_message, mut first_seen) = mpsc::unbounded_channel::<Vec<u8>>();
+        tokio::spawn(async move {
+            let mut connection = 0;
+            loop {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let Ok(mut socket) = tokio_tungstenite::accept_async(tcp).await else {
+                    continue;
+                };
+                connection += 1;
+                if let Some(Ok(Message::Binary(bytes))) = socket.next().await {
+                    let _ = first_message.send(bytes.to_vec());
+                }
+                if connection == 1 {
+                    drop(socket);
+                } else {
+                    tokio::spawn(async move { while socket.next().await.is_some() {} });
+                }
+            }
+        });
+        let (status_tx, mut statuses) = mpsc::unbounded_channel();
+        let socket = InputSocket::connect(
+            url,
+            |_| {},
+            move |status| {
+                let _ = status_tx.send(status);
+            },
+        );
+        let mut seen = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(status) = statuses.recv().await {
+                let live = status == StreamLinkStatus::Live;
+                seen.push(status);
+                if live && seen.len() > 2 {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("reconnected");
+        assert_eq!(
+            seen,
+            vec![
+                StreamLinkStatus::Connecting,
+                StreamLinkStatus::Live,
+                StreamLinkStatus::Failed {
+                    detail: "socket closed".into()
+                },
+                StreamLinkStatus::Connecting,
+                StreamLinkStatus::Live,
+            ]
+        );
+        assert_eq!(first_seen.recv().await.unwrap(), hardware_keyboard_off());
+        assert_eq!(first_seen.recv().await.unwrap(), hardware_keyboard_off());
+        socket
+            .send(&DeviceInput::Button {
+                button: DeviceButton::Home,
+            })
+            .unwrap();
     }
 
     #[test]

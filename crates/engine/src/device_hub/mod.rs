@@ -11,9 +11,9 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use tokio::sync::watch;
 use zeron_proto::device_hub::{
-    ConfigureDeviceHubParams, DeviceBooting, DeviceHostStatus, DeviceHubHost, DeviceHubSettings,
-    DeviceHubState, DeviceInput, DevicePlatform, DeviceSession, LOCAL_DEVICE_HOST_ID,
-    OpenHubDeviceParams,
+    CloseHubDeviceParams, ConfigureDeviceHubParams, DeviceBooting, DeviceHostStatus, DeviceHubHost,
+    DeviceHubSettings, DeviceHubState, DeviceInput, DevicePlatform, DeviceSession,
+    LOCAL_DEVICE_HOST_ID, OpenHubDeviceParams, ShutdownHubDeviceParams,
 };
 
 use hub_client::HubClient;
@@ -24,6 +24,8 @@ pub(crate) use stream::FrameSubscription;
 const SETTINGS_FILE: &str = "device-hub-settings.json";
 const HUB_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 const UNKNOWN_DEVICE: &str = "That device is not available.";
+const IOS_ONLY: &str = "Only iOS Simulators are supported so far.";
+const HUB_NOT_RUNNING: &str = "The device hub is not running.";
 pub const DEVICE_SUPPORT_OFF: &str = "Device support is off. Enable it in the Device panel before installing or starting device tools.";
 
 pub struct DeviceHub {
@@ -87,7 +89,21 @@ impl DeviceHub {
             settings_lock: tokio::sync::Mutex::new(()),
             lifecycle: tokio::sync::Mutex::new(()),
             hub: Mutex::new(None),
-            streams: Arc::default(),
+            streams: Arc::new(DeviceStreams::with_sink({
+                let me = me.clone();
+                move |streams| {
+                    if let Some(hub) = me.upgrade() {
+                        hub.state.send_if_modified(|state| {
+                            let changed = state.streams != streams;
+                            if changed {
+                                state.streams = streams;
+                                state.revision += 1;
+                            }
+                            changed
+                        });
+                    }
+                }
+            })),
         })
     }
 
@@ -313,7 +329,7 @@ impl DeviceHub {
             return Err(DEVICE_SUPPORT_OFF.into());
         }
         if params.platform != DevicePlatform::Ios {
-            return Err("Only iOS Simulators are supported so far.".into());
+            return Err(IOS_ONLY.into());
         }
         if !hub_client::valid_device_id(&params.device_id) {
             return Err(UNKNOWN_DEVICE.into());
@@ -396,10 +412,10 @@ impl DeviceHub {
         }
         let origin = self
             .live_origin()
-            .ok_or_else(|| "The device hub is not running.".to_string())?;
+            .ok_or_else(|| HUB_NOT_RUNNING.to_string())?;
         let slot = self.hub_slot();
         if slot.as_ref().map(|hub| hub.origin.as_str()) != Some(origin.as_str()) {
-            return Err("The device hub is not running.".into());
+            return Err(HUB_NOT_RUNNING.into());
         }
         let client = HubClient {
             http: &self.http,
@@ -409,31 +425,55 @@ impl DeviceHub {
         let me = self.me.clone();
         let http = self.http.clone();
         let id = device_id.to_string();
-        let subscription = self.streams.subscribe(device_id, move |frames| {
-            stream::spawn_reader(http, video, frames, move || {
-                if let Some(hub) = me.upgrade() {
-                    hub.open_input(&id, &input);
-                }
-            })
-        });
+        let subscription = self
+            .streams
+            .subscribe(device_id, move |frames, generation| {
+                let status_hub = me.clone();
+                let status_id = id.clone();
+                stream::spawn_reader(
+                    http,
+                    video,
+                    frames,
+                    move |status| {
+                        if let Some(hub) = status_hub.upgrade() {
+                            hub.streams
+                                .set_status(&status_id, generation, Some(status), None);
+                        }
+                    },
+                    move || {
+                        if let Some(hub) = me.upgrade() {
+                            hub.open_input(&id, generation, &input);
+                        }
+                    },
+                )
+            });
         drop(slot);
         Ok(subscription)
     }
 
-    fn open_input(&self, device_id: &str, url: &str) {
+    fn open_input(&self, device_id: &str, generation: u64, url: &str) {
         if self.streams.has_input(device_id) {
             return;
         }
-        let me = self.me.clone();
-        let id = device_id.to_string();
-        let socket = input::InputSocket::connect(url.to_string(), move |screen| {
-            if let Some(hub) = me.upgrade() {
-                hub.publish(|state| {
-                    state.screens.insert(id.clone(), screen);
-                });
-            }
-        });
-        self.streams.set_input(device_id, socket);
+        let (me, status_hub) = (self.me.clone(), self.me.clone());
+        let (id, status_id) = (device_id.to_string(), device_id.to_string());
+        let socket = input::InputSocket::connect(
+            url.to_string(),
+            move |screen| {
+                if let Some(hub) = me.upgrade() {
+                    hub.publish(|state| {
+                        state.screens.insert(id.clone(), screen);
+                    });
+                }
+            },
+            move |status| {
+                if let Some(hub) = status_hub.upgrade() {
+                    hub.streams
+                        .set_status(&status_id, generation, None, Some(status));
+                }
+            },
+        );
+        self.streams.set_input(device_id, generation, socket);
     }
 
     pub fn send_input(&self, device_id: &str, input: &DeviceInput) -> Result<(), String> {
@@ -441,6 +481,89 @@ impl DeviceHub {
             return Err(UNKNOWN_DEVICE.into());
         }
         self.streams.send_input(device_id, input)
+    }
+
+    pub async fn close(&self, params: CloseHubDeviceParams) -> Result<(), String> {
+        let closes = |session: &DeviceSession| {
+            session.chat_id == params.chat_id
+                && params
+                    .host_id
+                    .as_deref()
+                    .is_none_or(|host| session.host_id == host)
+                && params
+                    .device_id
+                    .as_deref()
+                    .is_none_or(|device| session.device_id == device)
+        };
+        let closing: Vec<DeviceSession> = self
+            .state
+            .borrow()
+            .sessions
+            .iter()
+            .filter(|session| closes(session))
+            .cloned()
+            .collect();
+        if closing.is_empty() {
+            return Ok(());
+        }
+        self.publish(|state| state.sessions.retain(|session| !closes(session)));
+        if params.shutdown {
+            for session in closing {
+                self.shutdown_device(&session.device_id, session.platform)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn power_off(&self, params: ShutdownHubDeviceParams) -> Result<(), String> {
+        self.shutdown_device(&params.device_id, params.platform)
+            .await
+    }
+
+    async fn shutdown_device(
+        &self,
+        device_id: &str,
+        platform: DevicePlatform,
+    ) -> Result<(), String> {
+        if !self.enabled() {
+            return Err(DEVICE_SUPPORT_OFF.into());
+        }
+        if platform != DevicePlatform::Ios {
+            return Err(IOS_ONLY.into());
+        }
+        if !self.known_device(device_id) {
+            return Err(UNKNOWN_DEVICE.into());
+        }
+        let origin = self
+            .live_origin()
+            .ok_or_else(|| HUB_NOT_RUNNING.to_string())?;
+        let client = HubClient {
+            http: &self.http,
+            origin: &origin,
+        };
+        // serve-sim's bare `simctl shutdown` fails for a simulator that is already off.
+        if let Err(error) = client.shutdown_simulator(device_id).await {
+            let (devices, _) = client.list().await.map_err(|_| error.clone())?;
+            if !devices
+                .iter()
+                .any(|device| device.id == device_id && !device.booted)
+            {
+                return Err(error);
+            }
+        }
+        self.publish(|state| {
+            for device in state.devices.iter_mut().filter(|d| d.id == device_id) {
+                device.booted = false;
+            }
+            state
+                .sessions
+                .retain(|session| session.device_id != device_id);
+        });
+        if let Err(error) = self.refresh(&origin).await {
+            tracing::warn!(%error, "device list unavailable after shutdown");
+        }
+        Ok(())
     }
 
     async fn stop_hub(&self) {
@@ -532,21 +655,28 @@ mod tests {
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let requests: Requests = Arc::default();
         let seen = requests.clone();
+        let booted = Arc::new(std::sync::atomic::AtomicBool::new(fake.booted));
         tokio::spawn(async move {
             loop {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let seen = seen.clone();
+                let booted = booted.clone();
                 tokio::spawn(async move {
+                    use std::sync::atomic::Ordering::SeqCst;
                     let request = read_request(&mut socket).await;
                     let line = request.lines().next().unwrap_or_default().to_string();
-                    seen.lock().unwrap().push(line.clone());
+                    let body = request.split("\r\n\r\n").nth(1).unwrap_or_default();
+                    seen.lock().unwrap().push(format!("{line} {body}"));
                     let (status, body) = if line.starts_with("GET /api/devices ") {
                         let body = serde_json::json!({
                             "simulators": [{"id": "SIM-1", "name": "iPhone 17", "version": "iOS 27.0",
-                                "platform": "ios", "booted": fake.booted, "physical": false}],
+                                "platform": "ios", "booted": booted.load(SeqCst), "physical": false}],
                             "emulators": []
                         });
                         (fake.list_status, body)
+                    } else if line.starts_with("POST /vendor/serve-sim/grid/api/shutdown ") {
+                        booted.store(false, SeqCst);
+                        (200, serde_json::json!({"ok": true}))
                     } else if line.starts_with("POST /api/devices/boot ") {
                         let Some(status) = fake.boot_status else {
                             std::future::pending::<()>().await;
@@ -674,6 +804,102 @@ mod tests {
                     && !line.contains("exec-ws")),
             "{requests:?}"
         );
+        core.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn close_keeps_the_simulator_and_power_off_shuts_it_down() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble(
+            dir.path(),
+            Arc::new(crate::HarnessRegistry::new()),
+            zeron_proto::HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        let (origin, requests) = fake_hub().await;
+        core.device_hub.attach_hub_for_test(origin);
+        let rpc = core.rpc_service();
+        rpc.handle(
+            methods::CONFIGURE_DEVICE_HUB,
+            serde_json::json!({"enabled": true}),
+        )
+        .await
+        .unwrap();
+        let open = serde_json::json!({"chatId": "chat-1", "deviceId": "SIM-1", "platform": "ios"});
+        let shutdowns = || {
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|line| line.starts_with("POST /vendor/serve-sim/grid/api/shutdown "))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        rpc.handle(methods::OPEN_HUB_DEVICE, open.clone())
+            .await
+            .unwrap();
+        rpc.handle(
+            methods::OPEN_HUB_DEVICE,
+            serde_json::json!({"chatId": "chat-2", "deviceId": "SIM-1", "platform": "ios"}),
+        )
+        .await
+        .unwrap();
+        rpc.handle(
+            methods::CLOSE_HUB_DEVICE,
+            serde_json::json!({"chatId": "chat-1"}),
+        )
+        .await
+        .unwrap();
+        let state = core.device_hub.snapshot();
+        assert!(state.session("chat-1", "local", "SIM-1").is_none());
+        assert!(state.session("chat-2", "local", "SIM-1").is_some());
+        assert!(state.devices[0].booted);
+        assert!(shutdowns().is_empty(), "closing alone leaves it running");
+
+        rpc.handle(methods::OPEN_HUB_DEVICE, open).await.unwrap();
+        rpc.handle(
+            methods::CLOSE_HUB_DEVICE,
+            serde_json::json!({"chatId": "chat-1", "hostId": "local", "deviceId": "SIM-1", "shutdown": true}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            shutdowns(),
+            vec![r#"POST /vendor/serve-sim/grid/api/shutdown HTTP/1.1 {"udid":"SIM-1"}"#]
+        );
+        let state = core.device_hub.snapshot();
+        assert!(
+            state.sessions.is_empty(),
+            "power off ends every chat's session"
+        );
+        assert!(!state.devices[0].booted, "{state:?}");
+        assert!(
+            requests
+                .lock()
+                .unwrap()
+                .last()
+                .is_some_and(|line| line.starts_with("GET /api/devices ")),
+            "the list is refreshed after the shutdown"
+        );
+
+        let refused = rpc
+            .handle(
+                methods::SHUTDOWN_HUB_DEVICE,
+                serde_json::json!({"deviceId": "../SIM-1", "platform": "ios"}),
+            )
+            .await
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default();
+        assert!(refused.contains(super::UNKNOWN_DEVICE), "{refused}");
+        rpc.handle(
+            methods::SHUTDOWN_HUB_DEVICE,
+            serde_json::json!({"deviceId": "SIM-1", "platform": "ios"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(shutdowns().len(), 2);
         core.shutdown().await;
     }
 
@@ -816,13 +1042,16 @@ mod tests {
         let mut states = hub.watch();
         states.borrow_and_update();
         unsafe { libc::kill(pid, libc::SIGKILL) };
-        tokio::time::timeout(Duration::from_secs(5), states.changed())
-            .await
-            .expect("the death is published")
-            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            states.wait_for(|state| state.sessions.is_empty()),
+        )
+        .await
+        .expect("the death is published")
+        .unwrap();
         let state = hub.snapshot();
         assert!(
-            state.sessions.is_empty() && state.screens.is_empty(),
+            state.sessions.is_empty() && state.screens.is_empty() && state.streams.is_empty(),
             "{state:?}"
         );
         assert_eq!(hub.streams.subscribers("SIM-1"), 0);

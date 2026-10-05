@@ -4372,6 +4372,22 @@ impl RpcService for EngineRpc {
                 let session = self.device_hub()?.open(p).await.map_err(RpcError::Failed)?;
                 RpcReply::value(&session)
             }
+            methods::CLOSE_HUB_DEVICE => {
+                let p: zeron_proto::device_hub::CloseHubDeviceParams = parse_params(params)?;
+                self.device_hub()?
+                    .close(p)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({}))
+            }
+            methods::SHUTDOWN_HUB_DEVICE => {
+                let p: zeron_proto::device_hub::ShutdownHubDeviceParams = parse_params(params)?;
+                self.device_hub()?
+                    .power_off(p)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({}))
+            }
             methods::WATCH_HUB_DEVICE_FRAMES => {
                 use base64::Engine as _;
                 let p: zeron_proto::device_hub::WatchHubDeviceFramesParams = parse_params(params)?;
