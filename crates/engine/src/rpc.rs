@@ -3340,6 +3340,9 @@ impl RpcService for EngineRpc {
                                 .commit_sha
                                 .as_deref()
                                 .ok_or_else(|| RpcError::Failed("commitSha required".into()))?;
+                            crate::working_tree::resolve_commit(root, sha)
+                                .await
+                                .map_err(|e| RpcError::Failed(e.to_string()))?;
                             crate::diff_sync::capture_commit_diff(&repos, root, sha).await
                         }
                         "turn" => {
@@ -3457,6 +3460,9 @@ impl RpcService for EngineRpc {
                                 .commit_sha
                                 .as_deref()
                                 .ok_or_else(|| RpcError::Failed("commitSha required".into()))?;
+                            Box::pin(crate::working_tree::resolve_commit(root, sha))
+                                .await
+                                .map_err(|error| RpcError::Failed(error.to_string()))?;
                             let base =
                                 Box::pin(crate::diff_sync::commit_diff_base(root, sha)).await;
                             let snapshot = Box::pin(crate::diff_sync::capture_commit_diff(
@@ -6080,6 +6086,74 @@ mod tests {
             let error = diff(params).await.err().expect(expected);
             assert!(error.to_string().contains(expected), "{error}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_commit_sha_that_is_a_git_option_never_reaches_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let repo = root.join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        git(&["init", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "first"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        let data = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble(
+            data.path(),
+            std::sync::Arc::new(HarnessRegistry::new()),
+            HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        let rpc = core.rpc_service();
+        let good = through_the_wire(
+            rpc.handle(
+                methods::GET_CHECKOUT_DIFF,
+                serde_json::json!({"cwd": repo, "mode": "commit", "commitSha": head}),
+            )
+            .await
+            .unwrap(),
+        );
+        let target = root.join("pwned");
+        let option = format!("--output={}", target.display());
+        for (method, params) in [
+            (
+                methods::GET_CHECKOUT_DIFF,
+                serde_json::json!({"cwd": repo, "mode": "commit", "commitSha": option}),
+            ),
+            (
+                methods::GET_CHECKOUT_FILE_DIFF_TEXT,
+                serde_json::json!({
+                    "cwd": repo, "checkoutId": good["checkoutId"], "mode": "commit",
+                    "commitSha": option, "path": "a.txt", "diffChecksum": good["checksum"],
+                }),
+            ),
+        ] {
+            let error = rpc
+                .handle(method, params)
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{method} must refuse an option as a commit"));
+            assert!(error.to_string().contains("not a commit id"), "{error}");
+            assert!(!target.exists(), "{method} let git write {target:?}");
+        }
+        core.shutdown().await;
     }
 
     #[tokio::test]

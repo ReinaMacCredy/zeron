@@ -1018,7 +1018,7 @@ async fn hooked_git(
         })?
 }
 
-async fn resolve_commit(root: &Path, rev: &str) -> Result<String, EngineError> {
+pub(crate) async fn resolve_commit(root: &Path, rev: &str) -> Result<String, EngineError> {
     if rev.len() < 4 || rev.len() > 64 || !rev.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(EngineError::Other(format!("not a commit id: {rev:?}")));
     }
