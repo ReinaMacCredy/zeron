@@ -7,12 +7,13 @@ use gpui::{
     percentage, prelude::*, px,
 };
 use zeron_proto::{
-    ChangeRequestListItem, ChangeRequestListing, ChangeRequestState, CommitSummary,
-    CreateChangeRequestRequest, CreatedChangeRequest, GenerateCommitMessageRequest,
-    GeneratedCommitMessage, GetWorkingTreeFileDiffRequest, GetWorkingTreeRequest,
-    GitAgentBusyPolicy, GitFileState, RunWorkingTreeActionRequest, SessionStatus, SyncBranchReply,
-    SyncBranchRequest, SyncDirection, WorkingTree, WorkingTreeAction, WorkingTreeActionReply,
-    WorkingTreeFile, WorkingTreeFileDiff, WorkspaceTarget,
+    ChangeRequestListItem, ChangeRequestListing, ChangeRequestState, CheckoutDiff, CommitSummary,
+    CreateChangeRequestRequest, CreatedChangeRequest, DiffFileSummary,
+    GenerateCommitMessageRequest, GeneratedCommitMessage, GetWorkingTreeFileDiffRequest,
+    GetWorkingTreeRequest, GitAgentBusyPolicy, GitFileState, GitHistoryCommit, GitHistoryRefKind,
+    RunWorkingTreeActionRequest, SessionStatus, SyncBranchReply, SyncBranchRequest, SyncDirection,
+    WorkingTree, WorkingTreeAction, WorkingTreeActionReply, WorkingTreeFile, WorkingTreeFileDiff,
+    WorkspaceTarget,
 };
 use zeron_rpc::{RpcError, methods};
 
@@ -94,12 +95,16 @@ enum PendingTarget {
     All { staged: bool },
     Commit,
     Stash,
+    Detail,
+    AbortPick,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Confirm {
     Discard { path: String, revision: String },
     DropStash { oid: String },
+    Checkout { sha: String },
+    CherryPick { sha: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,6 +142,39 @@ struct Expanded {
     staged: bool,
     path: String,
     view: DiffView,
+}
+
+enum CommitDiffView {
+    Loading,
+    Ready {
+        diff: CheckoutDiff,
+        parsed: Vec<FileDiff>,
+    },
+    Failed(SharedString),
+}
+
+struct BranchForm {
+    name: Entity<ComposerInput>,
+    checkout: bool,
+    _edits: Subscription,
+}
+
+struct CommitDetail {
+    commit: GitHistoryCommit,
+    diff: CommitDiffView,
+    open_files: HashSet<String>,
+    branch_form: Option<BranchForm>,
+    outcome: Option<(SharedString, bool)>,
+}
+
+enum DiffBody<'a> {
+    Loading,
+    Failed(SharedString),
+    Ready {
+        file: Option<&'a FileDiff>,
+        binary: bool,
+        truncated: bool,
+    },
 }
 
 pub struct GitTab {
@@ -183,6 +221,9 @@ pub struct GitTab {
     card_dismissed: bool,
     pr_sheet: Option<PrSheet>,
     pr_task: Option<Task<()>>,
+    detail: Option<CommitDetail>,
+    detail_task: Option<Task<()>>,
+    copy_task: Option<Task<()>>,
     _model_picks: Subscription,
     _settings_changes: Subscription,
     _message_edits: Subscription,
@@ -271,6 +312,37 @@ fn sync_note(kind: SyncKind, branch: &str, reply: &SyncBranchReply) -> String {
             format!("{branch} is already up to date with {upstream}.")
         }
         SyncKind::Pull => format!("Pulled {} into {branch}.", commit_count(reply.commits)),
+    }
+}
+
+fn short_sha(sha: &str) -> String {
+    sha.chars().take(7).collect()
+}
+
+fn has_tracked_changes(tree: &WorkingTree) -> bool {
+    tree.files.iter().any(|file| {
+        !matches!(
+            file.index,
+            GitFileState::Unchanged | GitFileState::Untracked
+        ) || !matches!(
+            file.worktree,
+            GitFileState::Unchanged | GitFileState::Untracked
+        )
+    })
+}
+
+fn checkout_target(commit: &GitHistoryCommit, tree: &WorkingTree) -> Option<(String, bool)> {
+    let on_commit = tree.head_sha.as_deref() == Some(commit.sha.as_str());
+    let branch = commit
+        .refs
+        .iter()
+        .filter(|reference| reference.kind == GitHistoryRefKind::Branch)
+        .map(|reference| reference.label.as_str())
+        .find(|label| !on_commit || tree.branch.as_deref() != Some(*label));
+    match branch {
+        Some(branch) => Some((branch.to_owned(), false)),
+        None if on_commit => None,
+        None => Some((commit.sha.clone(), true)),
     }
 }
 
@@ -395,17 +467,19 @@ impl GitTab {
             history.set_target(GitHistoryTarget::Nothing, cx);
             history
         });
-        let history_events =
-            cx.subscribe(&history, |tab: &mut Self, history, event, cx| match event {
-                GitHistoryEvent::OpenCommit(commit) => {
-                    let sha = commit.sha.clone();
-                    history.update(cx, |history, cx| history.set_selected_sha(Some(sha), cx));
-                }
-                GitHistoryEvent::OpenRefBadge(branch) => {
-                    cx.emit(GitTabEvent::OpenPullRequest(branch.clone()));
-                }
-                GitHistoryEvent::FetchSucceeded => tab.load(cx),
-            });
+        let history_events = cx.subscribe(&history, |tab: &mut Self, _, event, cx| match event {
+            GitHistoryEvent::OpenCommit(commit) => {
+                let again = tab
+                    .detail
+                    .as_ref()
+                    .is_some_and(|detail| detail.commit.sha == commit.sha);
+                tab.select_commit((!again).then(|| commit.clone()), cx);
+            }
+            GitHistoryEvent::OpenRefBadge(branch) => {
+                cx.emit(GitTabEvent::OpenPullRequest(branch.clone()));
+            }
+            GitHistoryEvent::FetchSucceeded => tab.load(cx),
+        });
         let poll_task = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(POLL_INTERVAL).await;
@@ -491,6 +565,9 @@ impl GitTab {
             card_dismissed: false,
             pr_sheet: None,
             pr_task: None,
+            detail: None,
+            detail_task: None,
+            copy_task: None,
             _model_picks: model_picks,
             _settings_changes: settings_changes,
             _message_edits: message_edits,
@@ -567,6 +644,8 @@ impl GitTab {
         self.card_dismissed = false;
         self.pr_sheet = None;
         self.pr_task = None;
+        self.detail = None;
+        self.detail_task = None;
         self.cancel_writing();
         self.written = None;
         self.write_error = None;
@@ -751,6 +830,7 @@ impl GitTab {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
+        let op = action.clone();
         let request = RunWorkingTreeActionRequest {
             target: workspace_target(&space, self.checkout_path.as_deref()),
             expected_revision: tree.revision.clone(),
@@ -763,6 +843,8 @@ impl GitTab {
         );
         let generation = self.generation;
         let committing = target == PendingTarget::Commit;
+        let stashing = target == PendingTarget::Stash;
+        let detailed = target == PendingTarget::Detail;
         self.pending = Some(Pending {
             target,
             replied: false,
@@ -791,8 +873,11 @@ impl GitTab {
                         }
                         let reply: WorkingTreeActionReply =
                             serde_json::from_value(value).unwrap_or_default();
-                        if !reply.conflicts.is_empty() {
+                        if stashing && !reply.conflicts.is_empty() {
                             tab.stash_note = Some(conflict_note(&reply.conflicts).into());
+                        }
+                        if detailed {
+                            tab.finish_detail(&op, &reply, cx);
                         }
                         if committing {
                             tab.last_commit = reply.commit;
@@ -806,7 +891,10 @@ impl GitTab {
                     }
                     Err(error) => {
                         tab.pending = None;
-                        tab.action_error = Some(error.to_string().into());
+                        match tab.detail.as_mut().filter(|_| detailed) {
+                            Some(detail) => detail.outcome = Some((error.to_string().into(), true)),
+                            None => tab.action_error = Some(error.to_string().into()),
+                        }
                     }
                 }
                 tab.load(cx);
@@ -849,7 +937,7 @@ impl GitTab {
         match &self.confirm {
             Some(Confirm::Discard { revision, .. }) => *revision != tree.revision,
             Some(Confirm::DropStash { oid }) => !tree.stashes.iter().any(|stash| stash.oid == *oid),
-            None => false,
+            Some(Confirm::Checkout { .. } | Confirm::CherryPick { .. }) | None => false,
         }
     }
 
@@ -896,6 +984,351 @@ impl GitTab {
             PendingTarget::Stash,
             cx,
         );
+    }
+
+    fn commits_supported(&self, cx: &App) -> bool {
+        self.source_control(cx)
+            && self.supports(zeron_proto::capabilities::SOURCE_CONTROL_COMMITS_V1, cx)
+    }
+
+    fn select_commit(&mut self, commit: Option<GitHistoryCommit>, cx: &mut Context<Self>) {
+        let sha = commit.as_ref().map(|commit| commit.sha.clone());
+        self.history
+            .update(cx, |history, cx| history.set_selected_sha(sha, cx));
+        if matches!(
+            self.confirm,
+            Some(Confirm::Checkout { .. } | Confirm::CherryPick { .. })
+        ) {
+            self.confirm = None;
+        }
+        self.detail_task = None;
+        self.detail = commit.map(|commit| CommitDetail {
+            commit,
+            diff: CommitDiffView::Loading,
+            open_files: HashSet::new(),
+            branch_form: None,
+            outcome: None,
+        });
+        self.fetch_commit_diff(cx);
+        cx.notify();
+    }
+
+    fn fetch_commit_diff(&mut self, cx: &mut Context<Self>) {
+        let (Some(space), Some(detail)) = (self.space.clone(), self.detail.as_ref()) else {
+            return;
+        };
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let sha = detail.commit.sha.clone();
+        let cwd = self
+            .checkout_path
+            .clone()
+            .unwrap_or_else(|| space.path.clone());
+        let params = routed(
+            serde_json::json!({"cwd": cwd, "mode": "commit", "commitSha": sha}),
+            space.device.as_deref(),
+        );
+        let generation = self.generation;
+        self.detail_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::GET_CHECKOUT_DIFF, params)
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|value| {
+                    serde_json::from_value::<CheckoutDiff>(value).map_err(|error| error.to_string())
+                });
+            this.update(cx, |tab, cx| {
+                if tab.generation != generation {
+                    return;
+                }
+                let Some(detail) = tab
+                    .detail
+                    .as_mut()
+                    .filter(|detail| detail.commit.sha == sha)
+                else {
+                    return;
+                };
+                detail.diff = match result {
+                    Ok(diff) => {
+                        let parsed = changes::parse_patch(&diff.patch);
+                        CommitDiffView::Ready { diff, parsed }
+                    }
+                    Err(error) => CommitDiffView::Failed(error.into()),
+                };
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn move_refusal(&self, action: &WorkingTreeAction, cx: &App) -> Option<&'static str> {
+        let Some(tree) = self.tree.as_ref() else {
+            return Some("Reading the working tree…");
+        };
+        if !self.commits_supported(cx) {
+            return Some("The Zeron on this device is too old to check out or cherry-pick here.");
+        }
+        if tree.cherry_pick_head.is_some() {
+            return Some("A cherry-pick is in progress. Finish or abort it first.");
+        }
+        if tree.agent_active && !busy_policy(cx).allows(action) {
+            return Some(
+                "An agent is running in this checkout, so checkout and cherry-pick wait until it stops.",
+            );
+        }
+        if has_tracked_changes(tree) {
+            return Some("Commit or stash your changes to check out or cherry-pick.");
+        }
+        None
+    }
+
+    fn checkout_action(&self) -> Option<WorkingTreeAction> {
+        let (detail, tree) = (self.detail.as_ref()?, self.tree.as_ref()?);
+        checkout_target(&detail.commit, tree)
+            .map(|(target_ref, detach)| WorkingTreeAction::Checkout { target_ref, detach })
+    }
+
+    fn can_checkout(&self, cx: &App) -> bool {
+        self.checkout_action().is_some_and(|action| {
+            self.move_refusal(&action, cx).is_none() && self.allows(&action, busy_policy(cx))
+        })
+    }
+
+    fn can_cherry_pick(&self, cx: &App) -> bool {
+        let (Some(detail), Some(tree)) = (self.detail.as_ref(), self.tree.as_ref()) else {
+            return false;
+        };
+        let action = WorkingTreeAction::CherryPick {
+            sha: detail.commit.sha.clone(),
+        };
+        detail.commit.parent_shas.len() <= 1
+            && tree.head_sha.is_some()
+            && tree.head_sha.as_deref() != Some(detail.commit.sha.as_str())
+            && self.move_refusal(&action, cx).is_none()
+            && self.allows(&action, busy_policy(cx))
+    }
+
+    fn branch_action(&self, checkout: bool, cx: &App) -> Option<WorkingTreeAction> {
+        let detail = self.detail.as_ref()?;
+        let name = detail
+            .branch_form
+            .as_ref()
+            .map(|form| form.name.read(cx).text().trim().to_owned())
+            .unwrap_or_default();
+        Some(WorkingTreeAction::CreateBranch {
+            name,
+            start_point: Some(detail.commit.sha.clone()),
+            checkout,
+        })
+    }
+
+    fn can_branch(&self, checkout: bool, cx: &App) -> bool {
+        let (Some(action), Some(tree), Some(detail)) = (
+            self.branch_action(checkout, cx),
+            self.tree.as_ref(),
+            self.detail.as_ref(),
+        ) else {
+            return false;
+        };
+        let moves = checkout && tree.head_sha.as_deref() != Some(detail.commit.sha.as_str());
+        self.commits_supported(cx)
+            && tree.head_sha.is_some()
+            && self.allows(&action, busy_policy(cx))
+            && (!checkout || tree.cherry_pick_head.is_none())
+            && (!moves || self.move_refusal(&action, cx).is_none())
+    }
+
+    fn start_checkout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_checkout(cx) {
+            return;
+        }
+        match self.checkout_action() {
+            Some(WorkingTreeAction::Checkout {
+                target_ref,
+                detach: true,
+            }) => self.open_confirm(Confirm::Checkout { sha: target_ref }, window, cx),
+            Some(action) => self.run_action(action, PendingTarget::Detail, cx),
+            None => {}
+        }
+    }
+
+    fn start_cherry_pick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_cherry_pick(cx) {
+            return;
+        }
+        if let Some(sha) = self.detail.as_ref().map(|detail| detail.commit.sha.clone()) {
+            self.open_confirm(Confirm::CherryPick { sha }, window, cx);
+        }
+    }
+
+    fn confirm_detail(&mut self, cx: &mut Context<Self>) {
+        let action = match self.confirm.take() {
+            Some(Confirm::Checkout { sha }) if self.can_checkout(cx) => {
+                WorkingTreeAction::Checkout {
+                    target_ref: sha,
+                    detach: true,
+                }
+            }
+            Some(Confirm::CherryPick { sha }) if self.can_cherry_pick(cx) => {
+                WorkingTreeAction::CherryPick { sha }
+            }
+            _ => {
+                cx.notify();
+                return;
+            }
+        };
+        self.run_action(action, PendingTarget::Detail, cx);
+    }
+
+    fn open_branch_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.detail.is_none() || !self.can_branch(false, cx) {
+            return;
+        }
+        let name = cx.new(|cx| ComposerInput::new("Branch name", cx));
+        let edits = cx.subscribe(&name, |_, _, event: &ComposerInputEvent, cx| {
+            if matches!(event, ComposerInputEvent::Edited) {
+                cx.notify();
+            }
+        });
+        window.focus(&name.focus_handle(cx), cx);
+        if let Some(detail) = self.detail.as_mut() {
+            detail.outcome = None;
+            detail.branch_form = Some(BranchForm {
+                name,
+                checkout: false,
+                _edits: edits,
+            });
+        }
+        cx.notify();
+    }
+
+    fn close_branch_form(&mut self, cx: &mut Context<Self>) {
+        if let Some(detail) = self.detail.as_mut()
+            && detail.branch_form.take().is_some()
+        {
+            cx.notify();
+        }
+    }
+
+    fn create_branch(&mut self, cx: &mut Context<Self>) {
+        let checkout = self
+            .detail
+            .as_ref()
+            .and_then(|detail| detail.branch_form.as_ref())
+            .is_some_and(|form| form.checkout);
+        let Some(action) = self.branch_action(checkout, cx) else {
+            return;
+        };
+        if matches!(&action, WorkingTreeAction::CreateBranch { name, .. } if name.is_empty())
+            || !self.can_branch(checkout, cx)
+        {
+            return;
+        }
+        self.run_action(action, PendingTarget::Detail, cx);
+    }
+
+    fn copy_commit_sha(&mut self, cx: &mut Context<Self>) {
+        let Some(sha) = self.detail.as_ref().map(|detail| detail.commit.sha.clone()) else {
+            return;
+        };
+        self.history
+            .update(cx, |history, cx| history.copy_sha(sha, cx));
+        cx.notify();
+        self.copy_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1_300))
+                .await;
+            this.update(cx, |_, cx| cx.notify()).ok();
+        }));
+    }
+
+    fn toggle_commit_file(&mut self, path: Option<String>, cx: &mut Context<Self>) {
+        let Some(detail) = self.detail.as_mut() else {
+            return;
+        };
+        match path {
+            Some(path) => {
+                if !detail.open_files.remove(&path) {
+                    detail.open_files.insert(path);
+                }
+            }
+            None => {
+                let CommitDiffView::Ready { diff, .. } = &detail.diff else {
+                    return;
+                };
+                if detail.open_files.len() == diff.files.len() {
+                    detail.open_files.clear();
+                } else {
+                    detail.open_files = diff.files.iter().map(|file| file.path.clone()).collect();
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn finish_detail(
+        &mut self,
+        op: &WorkingTreeAction,
+        reply: &WorkingTreeActionReply,
+        cx: &mut Context<Self>,
+    ) {
+        self.history.update(cx, |history, cx| history.refresh(cx));
+        let sha = match op {
+            WorkingTreeAction::Checkout { target_ref, .. } => target_ref.as_str(),
+            WorkingTreeAction::CherryPick { sha } => sha.as_str(),
+            WorkingTreeAction::CreateBranch { start_point, .. } => {
+                start_point.as_deref().unwrap_or_default()
+            }
+            _ => return,
+        };
+        let short = short_sha(sha);
+        let text = match op {
+            WorkingTreeAction::Checkout {
+                target_ref,
+                detach: false,
+            } => format!("Checked out {target_ref}."),
+            WorkingTreeAction::Checkout { .. } => format!(
+                "Checked out {short}. HEAD is detached; create a branch here to keep new commits."
+            ),
+            WorkingTreeAction::CreateBranch {
+                name,
+                checkout: true,
+                ..
+            } => format!("Created {name} at {short} and checked it out."),
+            WorkingTreeAction::CreateBranch { name, .. } => format!("Created {name} at {short}."),
+            WorkingTreeAction::CherryPick { .. } if !reply.conflicts.is_empty() => {
+                let subject = self
+                    .detail
+                    .as_ref()
+                    .filter(|detail| detail.commit.sha == sha)
+                    .map(|detail| detail.commit.subject.clone());
+                self.select_commit(None, cx);
+                if let Some(subject) = subject
+                    && self.message.read(cx).text().trim().is_empty()
+                {
+                    self.message
+                        .update(cx, |input, cx| input.set_text(subject, cx));
+                }
+                return;
+            }
+            WorkingTreeAction::CherryPick { .. } => match &reply.commit {
+                Some(commit) => format!(
+                    "Cherry-picked {short} onto {} as {}.",
+                    commit.branch.as_deref().unwrap_or("the detached HEAD"),
+                    short_sha(&commit.sha)
+                ),
+                None => format!("Cherry-picked {short}."),
+            },
+            _ => return,
+        };
+        let Some(detail) = self.detail.as_mut() else {
+            return;
+        };
+        detail.branch_form = None;
+        detail.outcome = Some((text.into(), false));
+        cx.notify();
     }
 
     pub(super) fn set_pull_requests(
@@ -2036,21 +2469,12 @@ impl GitTab {
                     ),
             )
             .when(tree.is_some_and(|tree| tree.agent_active), |el| {
-                el.child(
-                    div()
-                        .id("git-agent-active")
-                        .debug_selector(|| "git-agent-active".into())
-                        .mx(px(12.0))
-                        .mt(px(8.0))
-                        .px(px(8.0))
-                        .py(px(6.0))
-                        .rounded(px(6.0))
-                        .bg(theme.warning.opacity(0.1))
-                        .text_size(px(12.0))
-                        .text_color(theme.warning)
-                        .child(agent_banner(policy)),
-                )
+                el.child(render_agent_banner(policy, theme))
             })
+            .children(
+                tree.and_then(|tree| tree.cherry_pick_head.as_deref())
+                    .map(|sha| self.render_pick_banner(sha, policy, theme, cx)),
+            )
             .child(
                 div()
                     .id("git-working-tree-files")
@@ -2769,6 +3193,708 @@ impl GitTab {
 }
 
 impl GitTab {
+    fn render_pick_banner(
+        &self,
+        sha: &str,
+        policy: GitAgentBusyPolicy,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let enabled =
+            self.commits_supported(cx) && self.allows(&WorkingTreeAction::AbortCherryPick, policy);
+        div()
+            .id("git-cherry-pick-banner")
+            .debug_selector(|| "git-cherry-pick-banner".into())
+            .mx(px(12.0))
+            .mt(px(8.0))
+            .px(px(8.0))
+            .py(px(6.0))
+            .rounded(px(6.0))
+            .bg(theme.warning.opacity(0.1))
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .text_size(px(12.0))
+            .text_color(theme.warning)
+            .child(SharedString::from(format!(
+                "A cherry-pick of {} is in progress. Resolve the conflicts, stage the files and commit to finish it, or abort it.",
+                short_sha(sha)
+            )))
+            .child(
+                div().flex().child(
+                    detail_button("git-cherry-pick-abort", "Abort cherry-pick", enabled, theme)
+                        .when(enabled, |el| {
+                            el.on_click(cx.listener(|tab, _, _, cx| {
+                                tab.run_action(
+                                    WorkingTreeAction::AbortCherryPick,
+                                    PendingTarget::AbortPick,
+                                    cx,
+                                );
+                            }))
+                        }),
+                ),
+            )
+            .into_any_element()
+    }
+
+    fn render_working_tree_row(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let selected = self.detail.is_none();
+        let count = self.tree.as_ref().map(|tree| tree.files.len()).unwrap_or(0);
+        div()
+            .id("git-working-tree-row")
+            .debug_selector(|| "git-working-tree-row".into())
+            .role(gpui::Role::Button)
+            .aria_label("Uncommitted changes")
+            .h(px(30.0))
+            .flex_none()
+            .px(px(12.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .border_b_1()
+            .border_color(theme.hairline(0.07))
+            .text_size(px(12.0))
+            .text_color(theme.text)
+            .cursor_pointer()
+            .when(selected, |el| el.bg(theme.ink(0.07)))
+            .hover(|style| style.bg(theme.ink(0.025)))
+            .child(
+                div()
+                    .size(px(9.0))
+                    .flex_none()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(theme.accent),
+            )
+            .child(SharedString::from(format!("Uncommitted changes ({count})")))
+            .on_click(cx.listener(|tab, _, _, cx| tab.select_commit(None, cx)))
+            .into_any_element()
+    }
+
+    fn render_detail_panel(
+        &self,
+        detail: &CommitDetail,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let commit = &detail.commit;
+        let policy = busy_policy(cx);
+        let tree = self.tree.as_ref();
+        let pending = self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.target == PendingTarget::Detail);
+        let checkout = self.checkout_action();
+        let checkout_label = match &checkout {
+            None => "Checked out".to_string(),
+            Some(WorkingTreeAction::Checkout {
+                target_ref,
+                detach: false,
+            }) => format!("Checkout {target_ref}"),
+            Some(_) => "Checkout".to_string(),
+        };
+        let can_checkout = self.can_checkout(cx);
+        let can_pick = self.can_cherry_pick(cx);
+        let can_branch = detail.branch_form.is_none() && self.can_branch(false, cx);
+        let refusal = (commit.parent_shas.len() > 1)
+            .then_some("Merge commits cannot be cherry-picked here.")
+            .into_iter()
+            .chain(self.move_refusal(
+                &WorkingTreeAction::CherryPick {
+                    sha: commit.sha.clone(),
+                },
+                cx,
+            ))
+            .next()
+            .filter(|_| tree.is_some());
+        let copied = self.history.read(cx).copied_sha() == Some(commit.sha.as_str());
+        let files: &[DiffFileSummary] = match &detail.diff {
+            CommitDiffView::Ready { diff, .. } => &diff.files,
+            _ => &[],
+        };
+        let all_open = !files.is_empty() && detail.open_files.len() == files.len();
+        let parents = if commit.parent_shas.is_empty() {
+            "none".to_string()
+        } else {
+            commit
+                .parent_shas
+                .iter()
+                .map(|sha| short_sha(sha))
+                .collect::<Vec<_>>()
+                .join("  ")
+        };
+        let meta = |name: &'static str, value: String| {
+            div()
+                .flex()
+                .gap(px(10.0))
+                .child(
+                    div()
+                        .w(px(60.0))
+                        .flex_none()
+                        .text_color(theme.text_muted)
+                        .child(name),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .font_family(theme.font_mono.clone())
+                        .text_size(px(11.0))
+                        .text_color(theme.text)
+                        .child(SharedString::from(value)),
+                )
+        };
+        let confirm = match &self.confirm {
+            Some(Confirm::Checkout { sha }) if *sha == commit.sha => Some((
+                format!(
+                    "Check out {} as a detached HEAD? New commits there belong to no branch until you create one.",
+                    short_sha(sha)
+                ),
+                "Check out",
+            )),
+            Some(Confirm::CherryPick { sha }) if *sha == commit.sha => Some((
+                format!(
+                    "Cherry-pick {} onto {}? It adds a new commit with the same changes.",
+                    short_sha(sha),
+                    tree.and_then(|tree| tree.branch.clone())
+                        .unwrap_or_else(|| "the detached HEAD".into())
+                ),
+                "Cherry-pick",
+            )),
+            _ => None,
+        };
+        let confirm = confirm.map(|(text, yes)| {
+            div()
+                .id("git-commit-confirm")
+                .debug_selector(|| "git-commit-confirm".into())
+                .track_focus(&self.confirm_focus)
+                .on_key_down(cx.listener(|tab, event: &KeyDownEvent, _, cx| {
+                    if event.keystroke.key == "escape" {
+                        cx.stop_propagation();
+                        tab.cancel_confirm(cx);
+                    }
+                }))
+                .px(px(10.0))
+                .py(px(8.0))
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(theme.warning.opacity(0.35))
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .text_size(px(12.0))
+                .text_color(theme.text)
+                .child(SharedString::from(text))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(6.0))
+                        .child(
+                            accent_button("git-commit-confirm-yes", yes, true, theme)
+                                .on_click(cx.listener(|tab, _, _, cx| tab.confirm_detail(cx))),
+                        )
+                        .child(
+                            small_button("git-commit-confirm-no", "Cancel", false, theme)
+                                .on_click(cx.listener(|tab, _, _, cx| tab.cancel_confirm(cx))),
+                        ),
+                )
+        });
+        let branch_form = detail.branch_form.as_ref().map(|form| {
+            let named = !form.name.read(cx).text().trim().is_empty();
+            let checkout_allowed = self.can_branch(true, cx);
+            let checked = form.checkout && checkout_allowed;
+            let enabled = named && !pending && self.can_branch(checked, cx);
+            div()
+                .id("git-branch-form")
+                .debug_selector(|| "git-branch-form".into())
+                .capture_action(cx.listener(|tab, _: &crate::composer::Submit, _, cx| {
+                    cx.stop_propagation();
+                    tab.create_branch(cx);
+                }))
+                .on_key_down(cx.listener(|tab, event: &KeyDownEvent, _, cx| {
+                    if event.keystroke.key == "escape" {
+                        cx.stop_propagation();
+                        tab.close_branch_form(cx);
+                    }
+                }))
+                .px(px(10.0))
+                .py(px(8.0))
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(theme.hairline(0.12))
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .text_size(px(12.0))
+                .text_color(theme.text)
+                .child(SharedString::from(format!(
+                    "New branch at {}",
+                    short_sha(&commit.sha)
+                )))
+                .child(
+                    div()
+                        .id("git-branch-name")
+                        .debug_selector(|| "git-branch-name".into())
+                        .role(gpui::Role::TextInput)
+                        .aria_label("Branch name")
+                        .px(px(8.0))
+                        .py(px(5.0))
+                        .rounded(px(6.0))
+                        .border_1()
+                        .border_color(theme.hairline(0.12))
+                        .bg(theme.ink(0.02))
+                        .text_size(px(13.0))
+                        .child(form.name.clone()),
+                )
+                .child(
+                    div()
+                        .id("git-branch-checkout")
+                        .debug_selector(|| "git-branch-checkout".into())
+                        .role(gpui::Role::CheckBox)
+                        .aria_label("Check it out")
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(
+                            div()
+                                .size(px(14.0))
+                                .rounded(px(4.0))
+                                .border_1()
+                                .border_color(if checked {
+                                    theme.accent_strong
+                                } else {
+                                    theme.hairline(0.2)
+                                })
+                                .when(checked, |el| el.bg(theme.accent_strong))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .when(checked, |el| {
+                                    el.child(
+                                        icon(icons::LUCIDE_CHECK)
+                                            .size(px(10.0))
+                                            .text_color(theme.on_accent),
+                                    )
+                                }),
+                        )
+                        .child("Check it out")
+                        .map(|el| {
+                            if checkout_allowed {
+                                el.cursor_pointer().on_click(cx.listener(|tab, _, _, cx| {
+                                    if let Some(form) = tab
+                                        .detail
+                                        .as_mut()
+                                        .and_then(|detail| detail.branch_form.as_mut())
+                                    {
+                                        form.checkout = !form.checkout;
+                                        cx.notify();
+                                    }
+                                }))
+                            } else {
+                                el.opacity(0.45)
+                            }
+                        }),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(6.0))
+                        .child(
+                            accent_button("git-branch-create", "Create branch", enabled, theme)
+                                .when(enabled, |el| {
+                                    el.on_click(cx.listener(|tab, _, _, cx| tab.create_branch(cx)))
+                                }),
+                        )
+                        .child(
+                            small_button("git-branch-cancel", "Cancel", false, theme)
+                                .on_click(cx.listener(|tab, _, _, cx| tab.close_branch_form(cx))),
+                        ),
+                )
+        });
+        let mut file_rows: Vec<AnyElement> = Vec::new();
+        match &detail.diff {
+            CommitDiffView::Loading => file_rows.push(
+                div()
+                    .px(px(12.0))
+                    .text_size(px(12.0))
+                    .text_color(theme.text_muted)
+                    .child("Reading the commit…")
+                    .into_any_element(),
+            ),
+            CommitDiffView::Failed(error) => file_rows.push(
+                div()
+                    .id("git-commit-files-error")
+                    .debug_selector(|| "git-commit-files-error".into())
+                    .px(px(12.0))
+                    .text_size(px(12.0))
+                    .text_color(theme.danger)
+                    .child(error.clone())
+                    .into_any_element(),
+            ),
+            CommitDiffView::Ready { diff, parsed } => {
+                for (index, file) in diff.files.iter().enumerate() {
+                    file_rows.push(self.render_commit_file(index, file, detail, theme, cx));
+                    if detail.open_files.contains(&file.path) {
+                        let position = parsed.iter().position(|parsed| parsed.path == file.path);
+                        let last = position.is_some_and(|at| at + 1 == parsed.len());
+                        file_rows.push(render_diff_body(
+                            format!("git-commit-diff-{index}"),
+                            DiffBody::Ready {
+                                file: position.map(|at| &parsed[at]),
+                                binary: file.binary,
+                                truncated: diff.truncated && (position.is_none() || last),
+                            },
+                            theme,
+                        ));
+                    }
+                }
+                if diff.files.is_empty() {
+                    file_rows.push(
+                        div()
+                            .px(px(12.0))
+                            .text_size(px(12.0))
+                            .text_color(theme.text_muted.opacity(0.6))
+                            .child("No file changes")
+                            .into_any_element(),
+                    );
+                }
+            }
+        }
+        let subject = if commit.subject.is_empty() {
+            "(no subject)".to_string()
+        } else {
+            commit.subject.clone()
+        };
+        div()
+            .id("git-commit-detail")
+            .debug_selector(|| "git-commit-detail".into())
+            .w(px(PANEL_WIDTH))
+            .flex_none()
+            .h_full()
+            .border_l_1()
+            .border_color(theme.hairline(0.07))
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(40.0))
+                    .px(px(12.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .border_b_1()
+                    .border_color(theme.hairline(0.07))
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child("Commit"),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .font_family(theme.font_mono.clone())
+                            .text_size(px(12.0))
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(short_sha(&commit.sha))),
+                    )
+                    .child(
+                        div()
+                            .id("git-commit-close")
+                            .debug_selector(|| "git-commit-close".into())
+                            .role(gpui::Role::Button)
+                            .aria_label("Back to the working tree")
+                            .tooltip(text_tooltip("Back to the working tree"))
+                            .size(px(22.0))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(6.0))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(theme.ink(0.06)))
+                            .child(
+                                icon(icons::CLOSE)
+                                    .size(px(12.0))
+                                    .text_color(theme.text_muted),
+                            )
+                            .on_click(cx.listener(|tab, _, _, cx| tab.select_commit(None, cx))),
+                    ),
+            )
+            .when(tree.is_some_and(|tree| tree.agent_active), |el| {
+                el.child(render_agent_banner(policy, theme))
+            })
+            .child(
+                div()
+                    .id("git-commit-body")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.0))
+                    .pb(px(12.0))
+                    .child(
+                        div()
+                            .px(px(12.0))
+                            .pt(px(12.0))
+                            .flex()
+                            .flex_col()
+                            .gap(px(10.0))
+                            .child(
+                                div()
+                                    .id("git-commit-subject")
+                                    .debug_selector(|| "git-commit-subject".into())
+                                    .text_size(px(14.0))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child(SharedString::from(subject)),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(4.0))
+                                    .text_size(px(12.0))
+                                    .child(meta("Author", commit.author_name.clone()))
+                                    .child(meta(
+                                        "Date",
+                                        crate::history::format_date(&commit.authored_at),
+                                    ))
+                                    .child(meta("Parents", parents))
+                                    .child(meta("SHA", commit.sha.clone())),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .gap(px(6.0))
+                                    .child(
+                                        detail_button(
+                                            "git-commit-checkout",
+                                            checkout_label,
+                                            can_checkout,
+                                            theme,
+                                        )
+                                        .when(
+                                            can_checkout,
+                                            |el| {
+                                                el.on_click(cx.listener(|tab, _, window, cx| {
+                                                    tab.start_checkout(window, cx)
+                                                }))
+                                            },
+                                        ),
+                                    )
+                                    .child(
+                                        detail_button(
+                                            "git-commit-cherry-pick",
+                                            "Cherry-pick",
+                                            can_pick,
+                                            theme,
+                                        )
+                                        .when(
+                                            can_pick,
+                                            |el| {
+                                                el.on_click(cx.listener(|tab, _, window, cx| {
+                                                    tab.start_cherry_pick(window, cx)
+                                                }))
+                                            },
+                                        ),
+                                    )
+                                    .child(
+                                        detail_button(
+                                            "git-commit-copy-sha",
+                                            if copied { "Copied" } else { "Copy SHA" },
+                                            true,
+                                            theme,
+                                        )
+                                        .on_click(
+                                            cx.listener(|tab, _, _, cx| tab.copy_commit_sha(cx)),
+                                        ),
+                                    )
+                                    .child(
+                                        detail_button(
+                                            "git-commit-open-diff",
+                                            if all_open { "Fold diff" } else { "Open diff" },
+                                            !files.is_empty(),
+                                            theme,
+                                        )
+                                        .when(
+                                            !files.is_empty(),
+                                            |el| {
+                                                el.on_click(cx.listener(|tab, _, _, cx| {
+                                                    tab.toggle_commit_file(None, cx)
+                                                }))
+                                            },
+                                        ),
+                                    )
+                                    .child(
+                                        detail_button(
+                                            "git-commit-branch",
+                                            "Create branch",
+                                            can_branch,
+                                            theme,
+                                        )
+                                        .when(
+                                            can_branch,
+                                            |el| {
+                                                el.on_click(cx.listener(|tab, _, window, cx| {
+                                                    tab.open_branch_form(window, cx)
+                                                }))
+                                            },
+                                        ),
+                                    ),
+                            )
+                            .when_some(refusal, |el, reason| {
+                                el.child(
+                                    div()
+                                        .id("git-commit-refusal")
+                                        .debug_selector(|| "git-commit-refusal".into())
+                                        .text_size(px(12.0))
+                                        .text_color(theme.text_muted)
+                                        .child(reason),
+                                )
+                            })
+                            .children(confirm)
+                            .children(branch_form)
+                            .when(pending, |el| {
+                                el.child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .text_color(theme.text_muted)
+                                        .child("Working…"),
+                                )
+                            })
+                            .when_some(detail.outcome.clone(), |el, (text, failed)| {
+                                el.child(
+                                    div()
+                                        .id("git-commit-outcome")
+                                        .debug_selector(|| "git-commit-outcome".into())
+                                        .text_size(px(12.0))
+                                        .text_color(if failed {
+                                            theme.danger
+                                        } else {
+                                            theme.success
+                                        })
+                                        .child(text),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .h(px(30.0))
+                                    .px(px(12.0))
+                                    .flex()
+                                    .items_center()
+                                    .text_size(px(12.0))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(theme.text_muted)
+                                    .child(SharedString::from(format!("Files ({})", files.len()))),
+                            )
+                            .children(file_rows),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_commit_file(
+        &self,
+        index: usize,
+        file: &DiffFileSummary,
+        detail: &CommitDetail,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let letter = match file.status.as_str() {
+            "added" | "untracked" => "A",
+            "deleted" => "D",
+            "renamed" => "R",
+            "copied" => "C",
+            _ => "M",
+        };
+        let color = match letter {
+            "A" => theme.success,
+            "D" => theme.danger,
+            "R" | "C" => theme.accent,
+            _ => theme.warning,
+        };
+        let (dir, name) = match file.path.rsplit_once('/') {
+            Some((dir, name)) => (format!("{dir}/"), name.to_owned()),
+            None => (String::new(), file.path.clone()),
+        };
+        let open = detail.open_files.contains(&file.path);
+        let selector = format!("git-commit-file-{index}");
+        let path = file.path.clone();
+        div()
+            .id(SharedString::from(selector.clone()))
+            .debug_selector(move || selector.clone())
+            .h(px(26.0))
+            .px(px(12.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .text_size(px(12.0))
+            .cursor_pointer()
+            .when(open, |el| el.bg(theme.ink(0.04)))
+            .hover(|style| style.bg(theme.ink(0.04)))
+            .on_click(
+                cx.listener(move |tab, _, _, cx| tab.toggle_commit_file(Some(path.clone()), cx)),
+            )
+            .child(
+                div()
+                    .w(px(12.0))
+                    .flex_none()
+                    .font_family(theme.font_mono.clone())
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(color)
+                    .child(letter),
+            )
+            .child(div().flex_1().min_w_0().truncate().child(
+                gpui::StyledText::new(SharedString::from(format!("{dir}{name}"))).with_highlights(
+                    [(
+                        0..dir.len(),
+                        gpui::HighlightStyle {
+                            color: Some(theme.text_muted),
+                            ..Default::default()
+                        },
+                    )],
+                ),
+            ))
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .gap(px(4.0))
+                    .font_family(theme.font_mono.clone())
+                    .text_size(px(11.0))
+                    .map(|el| {
+                        if file.binary {
+                            el.text_color(theme.text_muted).child("binary")
+                        } else {
+                            el.child(
+                                div()
+                                    .text_color(theme.success)
+                                    .child(SharedString::from(format!("+{}", file.additions))),
+                            )
+                            .child(
+                                div()
+                                    .text_color(theme.danger)
+                                    .child(SharedString::from(format!("-{}", file.deletions))),
+                            )
+                        }
+                    }),
+            )
+            .into_any_element()
+    }
+
     fn render_pr_card(
         &self,
         commit: &CommitSummary,
@@ -2996,6 +4122,54 @@ impl GitTab {
     }
 }
 
+fn render_agent_banner(policy: GitAgentBusyPolicy, theme: &Theme) -> AnyElement {
+    div()
+        .id("git-agent-active")
+        .debug_selector(|| "git-agent-active".into())
+        .mx(px(12.0))
+        .mt(px(8.0))
+        .px(px(8.0))
+        .py(px(6.0))
+        .rounded(px(6.0))
+        .bg(theme.warning.opacity(0.1))
+        .text_size(px(12.0))
+        .text_color(theme.warning)
+        .child(agent_banner(policy))
+        .into_any_element()
+}
+
+fn detail_button(
+    selector: &'static str,
+    label: impl Into<SharedString>,
+    enabled: bool,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    let label = label.into();
+    div()
+        .id(selector)
+        .debug_selector(move || selector.into())
+        .role(gpui::Role::Button)
+        .aria_label(label.clone())
+        .flex_none()
+        .h(px(26.0))
+        .px(px(10.0))
+        .rounded(px(7.0))
+        .border_1()
+        .border_color(theme.hairline(0.12))
+        .flex()
+        .items_center()
+        .text_size(px(12.0))
+        .text_color(theme.text)
+        .map(|el| {
+            if enabled {
+                el.cursor_pointer().hover(|style| style.bg(theme.ink(0.06)))
+            } else {
+                el.opacity(0.45)
+            }
+        })
+        .child(label)
+}
+
 fn accent_button(
     selector: &'static str,
     label: &'static str,
@@ -3062,6 +4236,19 @@ fn small_button(
 }
 
 fn render_diff(open: &Expanded, theme: &Theme) -> AnyElement {
+    let body = match &open.view {
+        DiffView::Loading => DiffBody::Loading,
+        DiffView::Failed(error) => DiffBody::Failed(error.clone()),
+        DiffView::Ready { diff, parsed } => DiffBody::Ready {
+            file: parsed.as_ref(),
+            binary: diff.binary,
+            truncated: diff.truncated,
+        },
+    };
+    render_diff_body("git-file-diff".into(), body, theme)
+}
+
+fn render_diff_body(selector: String, view: DiffBody, theme: &Theme) -> AnyElement {
     let note = |text: SharedString, color: gpui::Hsla| {
         div()
             .px(px(8.0))
@@ -3072,10 +4259,14 @@ fn render_diff(open: &Expanded, theme: &Theme) -> AnyElement {
             .into_any_element()
     };
     let mut body: Vec<AnyElement> = Vec::new();
-    match &open.view {
-        DiffView::Loading => body.push(note("Loading diff…".into(), theme.text_muted)),
-        DiffView::Failed(error) => body.push(note(error.clone(), theme.danger)),
-        DiffView::Ready { diff, parsed } => match parsed.as_ref().filter(|_| !diff.binary) {
+    match view {
+        DiffBody::Loading => body.push(note("Loading diff…".into(), theme.text_muted)),
+        DiffBody::Failed(error) => body.push(note(error, theme.danger)),
+        DiffBody::Ready {
+            file,
+            binary,
+            truncated,
+        } => match file.filter(|_| !binary) {
             Some(file) if !file.hunks.is_empty() => {
                 let gutter = changes::gutter_width(file);
                 let mut budget = DIFF_LINE_LIMIT;
@@ -3118,22 +4309,24 @@ fn render_diff(open: &Expanded, theme: &Theme) -> AnyElement {
                         theme.text_muted,
                     ));
                 }
-                if diff.truncated {
+                if truncated {
                     body.push(note(
                         "The diff is too large to show in full.".into(),
                         theme.text_muted,
                     ));
                 }
             }
-            _ if diff.binary => {
-                body.push(note("Binary file, no text diff.".into(), theme.text_muted))
-            }
+            _ if binary => body.push(note("Binary file, no text diff.".into(), theme.text_muted)),
+            _ if truncated => body.push(note(
+                "The diff is too large to show in full.".into(),
+                theme.text_muted,
+            )),
             _ => body.push(note("No text changes.".into(), theme.text_muted)),
         },
     }
     div()
-        .id("git-file-diff")
-        .debug_selector(|| "git-file-diff".into())
+        .id(SharedString::from(selector.clone()))
+        .debug_selector(move || selector.clone())
         .ml(px(32.0))
         .mr(px(12.0))
         .mb(px(6.0))
@@ -3180,9 +4373,15 @@ impl Render for GitTab {
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    .child(self.history.clone()),
+                    .flex()
+                    .flex_col()
+                    .child(self.render_working_tree_row(&theme, cx))
+                    .child(div().flex_1().min_h_0().child(self.history.clone())),
             )
-            .child(self.render_panel(&theme, cx))
+            .child(match &self.detail {
+                Some(detail) => self.render_detail_panel(detail, &theme, cx),
+                None => self.render_panel(&theme, cx),
+            })
     }
 }
 
@@ -3194,8 +4393,9 @@ pub(super) fn pull_request_scope(
         .projects
         .iter()
         .find(|project| project.space_id == space_id)
+        .filter(|project| listing.viewers.contains_key(&project.host))
     else {
-        return (None, Some(HashSet::new()));
+        return (None, None);
     };
     let target = PrTarget {
         host: project.host.clone(),
@@ -3895,6 +5095,8 @@ mod tests {
 
     const PATCH: &str = "diff --git a/src/a b.rs b/src/a b.rs\n--- a/src/a b.rs\n+++ b/src/a b.rs\n@@ -1,2 +1,3 @@\n one\n-two\n+TWO\n+three\n";
 
+    const COMMIT_PATCH: &str = "diff --git a/src/panel.rs b/src/panel.rs\n--- a/src/panel.rs\n+++ b/src/panel.rs\n@@ -1,2 +1,2 @@\n one\n-two\n+TWO\ndiff --git a/docs/new note.md b/docs/new note.md\nnew file mode 100644\n--- /dev/null\n+++ b/docs/new note.md\n@@ -0,0 +1 @@\n+hello\n";
+
     fn listing() -> ChangeRequestListing {
         let item = |number: u64, head: &str, state: &str, repository: &str| {
             serde_json::json!({
@@ -3970,6 +5172,15 @@ mod tests {
                     }
                     let mut next = self.tree.lock().unwrap().clone().unwrap_or_else(tree);
                     next["revision"] = "r2".into();
+                    match params["action"]["kind"].as_str() {
+                        Some("abortCherryPick") => {
+                            next.as_object_mut().unwrap().remove("cherryPickHead");
+                        }
+                        Some("cherryPick") => {
+                            next["cherryPickHead"] = params["action"]["sha"].clone()
+                        }
+                        _ => {}
+                    }
                     let reply = if params["action"]["kind"] == "commit" {
                         next["headSha"] = "bbb".into();
                         if next["upstream"].is_null() {
@@ -3989,6 +5200,16 @@ mod tests {
                     *self.tree.lock().unwrap() = Some(next);
                     RpcReply::value(&reply)
                 }
+                methods::GET_CHECKOUT_DIFF => RpcReply::value(&serde_json::json!({
+                    "checkoutId": "checkout-1", "deviceId": "dev-local", "cwd": params["cwd"],
+                    "patch": COMMIT_PATCH,
+                    "files": [
+                        {"path": "src/panel.rs", "status": "modified", "additions": 1, "deletions": 1},
+                        {"path": "docs/new note.md", "status": "added", "additions": 1, "deletions": 0}
+                    ],
+                    "additions": 2, "deletions": 1, "truncated": false, "checksum": "x",
+                    "updatedAt": "2026-10-01T00:00:00Z",
+                })),
                 methods::GET_WORKING_TREE_FILE_DIFF => RpcReply::value(&serde_json::json!({
                     "checkoutId": "checkout-1", "path": params["path"],
                     "staged": params["staged"], "patch": PATCH,
@@ -4130,6 +5351,7 @@ mod tests {
                 "capabilities": [
                     zeron_proto::capabilities::SOURCE_CONTROL_V1,
                     zeron_proto::capabilities::SOURCE_CONTROL_SYNC_V1,
+                    zeron_proto::capabilities::SOURCE_CONTROL_COMMITS_V1,
                 ],
             }))
             .unwrap(),
@@ -5459,8 +6681,15 @@ mod tests {
         assert_eq!(heads, Some(HashSet::from(["feature/7".to_string()])));
         assert_eq!(
             pull_request_scope(&listing, "space-2"),
-            (None, Some(HashSet::new())),
-            "a project with no GitHub remote cannot have a pull request"
+            (None, None),
+            "a project with no GitHub remote gets no pull request card"
+        );
+        let mut unknown_host = listing.clone();
+        unknown_host.projects[0].host = "gitlab.example.com".into();
+        assert_eq!(
+            pull_request_scope(&unknown_host, "space-1"),
+            (None, None),
+            "a host the page has no viewer for is not one it can open pull requests on"
         );
         listing.errors = vec![
             serde_json::from_value(serde_json::json!({
@@ -5666,7 +6895,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_project_without_a_github_remote_cannot_confirm(cx: &mut gpui::TestAppContext) {
+    fn a_project_without_a_known_github_remote_gets_the_push_chip_but_no_card(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();
         let lab = Arc::new(GitLab::default());
@@ -5675,14 +6906,21 @@ mod tests {
         let mut bare = listing();
         bare.projects.clear();
         relist(&page, &lab, bare, cx);
-        tab.read_with(cx, |tab, _| assert_eq!(tab.pr_target, None));
+        tab.read_with(cx, |tab, _| {
+            assert_eq!((&tab.pr_target, &tab.pr_heads), (&None, &None))
+        });
         commit_now(cx, &tab, &calls);
-        settle(cx, |cx| cx.debug_bounds("git-pr-card").is_some());
-        click(cx, "git-pr-card-create");
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("git-pr-refusal").is_some());
-        click(cx, "git-pr-confirm");
-        cx.run_until_parked();
+        settle(cx, |cx| cx.debug_bounds("git-last-commit").is_some());
+        assert!(cx.debug_bounds("git-pr-card").is_none());
+        assert!(cx.debug_bounds("pull-requests-git-push").is_some());
+
+        let mut foreign = listing();
+        foreign.projects[0].host = "gitlab.example.com".into();
+        relist(&page, &lab, foreign, cx);
+        commit_again(cx, &tab, &calls);
+        settle(cx, |cx| cx.debug_bounds("git-last-commit").is_some());
+        assert!(cx.debug_bounds("git-pr-card").is_none());
+        assert!(cx.debug_bounds("pull-requests-git-push").is_some());
         assert!(remote_calls(&calls).is_empty());
     }
 
@@ -5868,5 +7106,477 @@ mod tests {
         let staged = cx.debug_bounds("git-staged-count-0").unwrap();
         let changed = cx.debug_bounds("git-changes-count-0").unwrap();
         assert_eq!(staged.right(), changed.right());
+    }
+
+    const PICKED: &str = "c0ffee0000000000000000000000000000000001";
+    const LOOSE: &str = "c0ffee0000000000000000000000000000000002";
+
+    fn history_commit(sha: &str, branches: &[&str], parents: usize) -> GitHistoryCommit {
+        serde_json::from_value(serde_json::json!({
+            "sha": sha,
+            "parentShas": (0..parents).map(|n| format!("{n}a{n}b{n}c{n}d")).collect::<Vec<_>>(),
+            "subject": "Panel: keep the scroll", "authorName": "Alice",
+            "authorEmail": "a@example.com", "authoredAt": "2026-10-01T00:00:00Z",
+            "refs": branches.iter().map(|label| serde_json::json!({"kind": "branch", "label": label})).collect::<Vec<_>>(),
+        }))
+        .unwrap()
+    }
+
+    fn clean_tree() -> serde_json::Value {
+        let mut tree = tree();
+        tree["files"] = serde_json::json!([
+            {"path": "notes/new file.txt", "index": "untracked", "worktree": "untracked",
+             "unstaged": {"additions": 4, "deletions": 0}}
+        ]);
+        tree
+    }
+
+    fn open_detail_lab(
+        cx: &mut gpui::TestAppContext,
+        state: AppState,
+        lab: Arc<GitLab>,
+    ) -> (
+        &mut gpui::VisualTestContext,
+        Calls,
+        tempfile::TempDir,
+        Entity<GitTab>,
+    ) {
+        let (page, cx, calls, dir) = open_lab(cx, state, git_prefs(), lab);
+        settle(cx, |cx| cx.debug_bounds("git-working-tree-row").is_some());
+        let tab = git_tab(&page, cx);
+        settle(cx, |cx| tab.read_with(cx, |tab, _| tab.tree.is_some()));
+        (cx, calls, dir, tab)
+    }
+
+    fn open_commit(
+        cx: &mut gpui::VisualTestContext,
+        tab: &Entity<GitTab>,
+        commit: GitHistoryCommit,
+    ) {
+        let history = tab.read_with(cx, |tab, _| tab.history.clone());
+        history.update(cx, |_, cx| cx.emit(GitHistoryEvent::OpenCommit(commit)));
+        cx.run_until_parked();
+    }
+
+    fn show_commit(
+        cx: &mut gpui::VisualTestContext,
+        tab: &Entity<GitTab>,
+        commit: GitHistoryCommit,
+    ) {
+        open_commit(cx, tab, commit);
+        settle(cx, |cx| cx.debug_bounds("git-commit-file-1").is_some());
+    }
+
+    fn text_of(tab: &Entity<GitTab>, cx: &mut gpui::VisualTestContext) -> Option<(String, bool)> {
+        tab.read_with(cx, |tab, _| {
+            tab.detail
+                .as_ref()
+                .and_then(|detail| detail.outcome.clone())
+                .map(|(text, failed)| (text.to_string(), failed))
+        })
+    }
+
+    #[gpui::test]
+    fn a_selected_commit_shows_its_detail_until_the_working_tree_is_selected_again(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        *lab.tree.lock().unwrap() = Some(clean_tree());
+        let (cx, calls, _dir, tab) = open_detail_lab(cx, lab_state(), lab);
+        assert!(cx.debug_bounds("git-commit-button").is_some());
+
+        show_commit(cx, &tab, history_commit(PICKED, &["feature/x"], 1));
+        assert_eq!(
+            calls_of(&calls, methods::GET_CHECKOUT_DIFF),
+            [serde_json::json!({"cwd": "/lab/repo", "mode": "commit", "commitSha": PICKED})]
+        );
+        assert!(cx.debug_bounds("git-commit-button").is_none());
+        assert!(cx.debug_bounds("git-commit-subject").is_some());
+        let selected = |cx: &mut gpui::VisualTestContext| {
+            let history = tab.read_with(cx, |tab, _| tab.history.clone());
+            history.read_with(cx, |history, _| history.selected_sha().map(str::to_owned))
+        };
+        assert_eq!(selected(cx).as_deref(), Some(PICKED));
+
+        click(cx, "git-commit-file-0");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("git-commit-diff-0").is_some());
+        assert!(cx.debug_bounds("git-commit-diff-1").is_none());
+        click(cx, "git-commit-open-diff");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("git-commit-diff-0").is_some());
+        assert!(cx.debug_bounds("git-commit-diff-1").is_some());
+        click(cx, "git-commit-open-diff");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("git-commit-diff-0").is_none());
+
+        click(cx, "git-commit-copy-sha");
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text())),
+            Some(PICKED.to_string())
+        );
+        tab.read_with(cx, |tab, cx| {
+            assert_eq!(tab.history.read(cx).copied_sha(), Some(PICKED))
+        });
+
+        click(cx, "git-working-tree-row");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("git-commit-button").is_some());
+        assert!(cx.debug_bounds("git-commit-detail").is_none());
+        assert_eq!(selected(cx), None);
+
+        show_commit(cx, &tab, history_commit(PICKED, &[], 1));
+        open_commit(cx, &tab, history_commit(PICKED, &[], 1));
+        assert!(
+            cx.debug_bounds("git-commit-button").is_some(),
+            "clicking the selected row again goes back to the working tree"
+        );
+        show_commit(cx, &tab, history_commit(LOOSE, &[], 1));
+        click(cx, "git-commit-close");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("git-commit-button").is_some());
+        assert!(calls_of(&calls, methods::RUN_WORKING_TREE_ACTION).is_empty());
+    }
+
+    #[gpui::test]
+    fn checkout_switches_to_a_branch_at_once_and_asks_before_detaching(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        *lab.tree.lock().unwrap() = Some(clean_tree());
+        let (cx, calls, _dir, tab) = open_detail_lab(cx, lab_state(), lab);
+
+        show_commit(cx, &tab, history_commit(PICKED, &["feature/x"], 1));
+        click(cx, "git-commit-checkout");
+        settle_action(cx, &tab, &calls, 1);
+        assert_eq!(
+            actions(&calls)[0],
+            serde_json::json!({
+                "spaceId": "space-1", "expectedRevision": "r1", "busyPolicy": "safeOnly",
+                "action": {"kind": "checkout", "targetRef": "feature/x", "detach": false},
+            })
+        );
+        assert_eq!(
+            text_of(&tab, cx),
+            Some(("Checked out feature/x.".into(), false))
+        );
+
+        show_commit(cx, &tab, history_commit(LOOSE, &[], 1));
+        click(cx, "git-commit-checkout");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("git-commit-confirm").is_some());
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("git-commit-confirm").is_none());
+        click(cx, "git-commit-checkout");
+        cx.run_until_parked();
+        click(cx, "git-commit-confirm-no");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("git-commit-confirm").is_none());
+        assert_eq!(
+            actions(&calls).len(),
+            1,
+            "no detached checkout before the confirm"
+        );
+
+        click(cx, "git-commit-checkout");
+        cx.run_until_parked();
+        click(cx, "git-commit-confirm-yes");
+        settle_action(cx, &tab, &calls, 2);
+        assert_eq!(
+            actions(&calls)[1]["action"],
+            serde_json::json!({"kind": "checkout", "targetRef": LOOSE, "detach": true})
+        );
+        assert!(text_of(&tab, cx).unwrap().0.contains("HEAD is detached"));
+
+        let mut on_branch = clean_tree();
+        on_branch["headSha"] = PICKED.into();
+        on_branch["branch"] = "feature/x".into();
+        let tree: WorkingTree = serde_json::from_value(on_branch).unwrap();
+        let commit = history_commit(PICKED, &["feature/x"], 1);
+        assert_eq!(checkout_target(&commit, &tree), None, "already checked out");
+        let commit = history_commit(PICKED, &["feature/x", "feature/y"], 1);
+        assert_eq!(
+            checkout_target(&commit, &tree),
+            Some(("feature/y".into(), false))
+        );
+    }
+
+    #[gpui::test]
+    fn cherry_pick_asks_first_and_a_conflict_opens_the_working_tree_with_abort(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        *lab.tree.lock().unwrap() = Some(clean_tree());
+        *lab.action_reply.lock().unwrap() =
+            Some(serde_json::json!({"conflicts": ["src/panel.rs"]}));
+        let (cx, calls, _dir, tab) = open_detail_lab(cx, lab_state(), lab.clone());
+
+        show_commit(cx, &tab, history_commit(LOOSE, &[], 2));
+        assert!(cx.debug_bounds("git-commit-refusal").is_some());
+        click(cx, "git-commit-cherry-pick");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("git-commit-confirm").is_none(),
+            "a merge commit is not picked"
+        );
+
+        show_commit(cx, &tab, history_commit(PICKED, &[], 1));
+        assert!(cx.debug_bounds("git-commit-refusal").is_none());
+        click(cx, "git-commit-cherry-pick");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("git-commit-confirm").is_some());
+        click(cx, "git-commit-confirm-no");
+        cx.run_until_parked();
+        assert!(actions(&calls).is_empty(), "cancel sends nothing");
+        click(cx, "git-commit-cherry-pick");
+        cx.run_until_parked();
+        click(cx, "git-commit-confirm-yes");
+        settle_action(cx, &tab, &calls, 1);
+        assert_eq!(
+            actions(&calls)[0]["action"],
+            serde_json::json!({"kind": "cherryPick", "sha": PICKED})
+        );
+        settle(cx, |cx| cx.debug_bounds("git-cherry-pick-banner").is_some());
+        assert!(cx.debug_bounds("git-commit-detail").is_none());
+        assert_eq!(message(&tab, cx), "Panel: keep the scroll");
+        tab.read_with(cx, |tab, _| assert!(tab.stash_note.is_none()));
+
+        show_commit(cx, &tab, history_commit(LOOSE, &["feature/x"], 1));
+        let refusal = tab.read_with(cx, |tab, cx| {
+            tab.move_refusal(&WorkingTreeAction::CherryPick { sha: LOOSE.into() }, cx)
+        });
+        assert_eq!(
+            refusal,
+            Some("A cherry-pick is in progress. Finish or abort it first.")
+        );
+        click(cx, "git-commit-checkout");
+        click(cx, "git-commit-cherry-pick");
+        cx.run_until_parked();
+        assert_eq!(actions(&calls).len(), 1);
+
+        click(cx, "git-working-tree-row");
+        cx.run_until_parked();
+        *lab.action_reply.lock().unwrap() = None;
+        click(cx, "git-cherry-pick-abort");
+        settle_action(cx, &tab, &calls, 2);
+        assert_eq!(
+            actions(&calls)[1]["action"],
+            serde_json::json!({"kind": "abortCherryPick"})
+        );
+        settle(cx, |cx| cx.debug_bounds("git-cherry-pick-banner").is_none());
+
+        *lab.action_reply.lock().unwrap() = Some(serde_json::json!({"commit": {
+            "sha": "d00d000000000000000000000000000000000000", "branch": "feature/7",
+            "subject": "Panel: keep the scroll",
+        }}));
+        show_commit(cx, &tab, history_commit(PICKED, &[], 1));
+        click(cx, "git-commit-cherry-pick");
+        cx.run_until_parked();
+        click(cx, "git-commit-confirm-yes");
+        settle_action(cx, &tab, &calls, 3);
+        assert_eq!(
+            text_of(&tab, cx),
+            Some((
+                "Cherry-picked c0ffee0 onto feature/7 as d00d000.".into(),
+                false
+            ))
+        );
+    }
+
+    fn type_branch(tab: &Entity<GitTab>, cx: &mut gpui::VisualTestContext, name: &str) {
+        tab.update(cx, |tab, cx| {
+            let input = tab
+                .detail
+                .as_ref()
+                .unwrap()
+                .branch_form
+                .as_ref()
+                .unwrap()
+                .name
+                .clone();
+            input.update(cx, |input, cx| input.set_text(name, cx));
+            cx.notify();
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn a_dirty_tree_and_the_busy_policy_gate_checkout_and_cherry_pick_but_not_a_new_branch(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        let (cx, calls, _dir, tab) = open_detail_lab(cx, lab_state(), lab.clone());
+
+        show_commit(cx, &tab, history_commit(PICKED, &["feature/x"], 1));
+        assert!(cx.debug_bounds("git-commit-refusal").is_some());
+        tab.read_with(cx, |tab, cx| {
+            assert_eq!(
+                tab.move_refusal(&WorkingTreeAction::CherryPick { sha: PICKED.into() }, cx),
+                Some("Commit or stash your changes to check out or cherry-pick.")
+            )
+        });
+        click(cx, "git-commit-checkout");
+        click(cx, "git-commit-cherry-pick");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("git-commit-confirm").is_none());
+        assert!(actions(&calls).is_empty());
+
+        click(cx, "git-commit-branch");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("git-branch-form").is_some());
+        click(cx, "git-branch-checkout");
+        cx.run_until_parked();
+        tab.read_with(cx, |tab, cx| {
+            assert!(!tab.can_branch(true, cx), "moving HEAD needs a clean tree")
+        });
+        type_branch(&tab, cx, "feature/y");
+        click(cx, "git-branch-create");
+        settle_action(cx, &tab, &calls, 1);
+        assert_eq!(
+            actions(&calls)[0]["action"],
+            serde_json::json!({"kind": "createBranch", "name": "feature/y", "startPoint": PICKED, "checkout": false})
+        );
+        assert_eq!(
+            text_of(&tab, cx),
+            Some(("Created feature/y at c0ffee0.".into(), false))
+        );
+        assert!(cx.debug_bounds("git-branch-form").is_none());
+
+        let mut busy = clean_tree();
+        busy["agentActive"] = true.into();
+        *lab.tree.lock().unwrap() = Some(busy);
+        tab.update(cx, |tab, cx| tab.load(cx));
+        settle(cx, |cx| cx.debug_bounds("git-agent-active").is_some());
+        tab.read_with(cx, |tab, cx| {
+            assert!(
+                !tab.can_checkout(cx) && !tab.can_cherry_pick(cx),
+                "SafeOnly holds both"
+            );
+        });
+        click(cx, "git-commit-branch");
+        cx.run_until_parked();
+        type_branch(&tab, cx, "feature/busy");
+        click(cx, "git-branch-checkout");
+        cx.run_until_parked();
+        click(cx, "git-branch-create");
+        settle_action(cx, &tab, &calls, 2);
+        assert_eq!(
+            actions(&calls)[1]["action"],
+            serde_json::json!({"kind": "createBranch", "name": "feature/busy", "startPoint": PICKED, "checkout": false}),
+            "SafeOnly creates the branch but cannot check it out"
+        );
+
+        for (policy, checkout, branch) in [
+            (crate::settings::GitAgentBusyPolicy::BlockAll, false, false),
+            (crate::settings::GitAgentBusyPolicy::AllowAll, true, true),
+        ] {
+            cx.update(|_, cx| {
+                crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
+                    settings.git_agent_busy_policy = policy;
+                });
+            });
+            tab.update(cx, |_, cx| cx.notify());
+            cx.run_until_parked();
+            tab.read_with(cx, |tab, cx| {
+                assert_eq!(tab.can_checkout(cx), checkout, "{policy:?}");
+                assert_eq!(tab.can_branch(false, cx), branch, "{policy:?}");
+            });
+        }
+        click(cx, "git-commit-checkout");
+        settle_action(cx, &tab, &calls, 3);
+        assert_eq!(actions(&calls)[2]["busyPolicy"], "allowAll");
+        assert_eq!(actions(&calls)[2]["action"]["kind"], "checkout");
+    }
+
+    #[gpui::test]
+    fn create_branch_needs_a_name_and_shows_what_the_engine_refused(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        *lab.tree.lock().unwrap() = Some(clean_tree());
+        let (cx, calls, _dir, tab) = open_detail_lab(cx, lab_state(), lab.clone());
+        show_commit(cx, &tab, history_commit(PICKED, &[], 1));
+        click(cx, "git-commit-branch");
+        cx.run_until_parked();
+        click(cx, "git-branch-create");
+        cx.run_until_parked();
+        assert!(actions(&calls).is_empty(), "no name, nothing sent");
+
+        *lab.action_error.lock().unwrap() = Some("\"bad name\" is not a valid branch name.".into());
+        type_branch(&tab, cx, "bad name");
+        click(cx, "git-branch-create");
+        settle_action(cx, &tab, &calls, 1);
+        settle(cx, |cx| cx.debug_bounds("git-commit-outcome").is_some());
+        assert_eq!(
+            text_of(&tab, cx),
+            Some(("\"bad name\" is not a valid branch name.".into(), true))
+        );
+        assert!(
+            cx.debug_bounds("git-branch-form").is_some(),
+            "the form stays for a fix"
+        );
+        assert!(cx.debug_bounds("git-error-0").is_none());
+
+        *lab.action_error.lock().unwrap() = None;
+        type_branch(&tab, cx, "feature/z");
+        click(cx, "git-branch-checkout");
+        cx.run_until_parked();
+        click(cx, "git-branch-create");
+        settle_action(cx, &tab, &calls, 2);
+        assert_eq!(
+            actions(&calls)[1]["action"],
+            serde_json::json!({"kind": "createBranch", "name": "feature/z", "startPoint": PICKED, "checkout": true})
+        );
+        assert_eq!(
+            text_of(&tab, cx),
+            Some((
+                "Created feature/z at c0ffee0 and checked it out.".into(),
+                false
+            ))
+        );
+    }
+
+    #[gpui::test]
+    fn an_engine_without_commit_actions_still_lists_files_and_copies_the_sha(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        *lab.tree.lock().unwrap() = Some(clean_tree());
+        let mut state = lab_state();
+        state.devices[0].capabilities.retain(|capability| {
+            capability.as_str() != zeron_proto::capabilities::SOURCE_CONTROL_COMMITS_V1
+        });
+        let (cx, calls, _dir, tab) = open_detail_lab(cx, state, lab);
+        show_commit(cx, &tab, history_commit(PICKED, &["feature/x"], 1));
+        assert!(cx.debug_bounds("git-commit-refusal").is_some());
+        for selector in [
+            "git-commit-checkout",
+            "git-commit-cherry-pick",
+            "git-commit-branch",
+        ] {
+            click(cx, selector);
+            cx.run_until_parked();
+        }
+        assert!(cx.debug_bounds("git-commit-confirm").is_none());
+        assert!(cx.debug_bounds("git-branch-form").is_none());
+        assert!(actions(&calls).is_empty());
+        click(cx, "git-commit-copy-sha");
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text())),
+            Some(PICKED.to_string())
+        );
     }
 }
