@@ -69,6 +69,20 @@ pub struct WorkingTree {
     pub stashes: Vec<StashEntry>,
 }
 
+impl WorkingTree {
+    pub fn has_tracked_changes(&self) -> bool {
+        self.files.iter().any(|file| {
+            !matches!(
+                file.index,
+                GitFileState::Unchanged | GitFileState::Untracked
+            ) || !matches!(
+                file.worktree,
+                GitFileState::Unchanged | GitFileState::Untracked
+            )
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkingTreeFile {
@@ -81,6 +95,15 @@ pub struct WorkingTreeFile {
     pub staged: Option<LineDelta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unstaged: Option<LineDelta>,
+}
+
+impl WorkingTreeFile {
+    pub fn is_staged(&self) -> bool {
+        !matches!(
+            self.index,
+            GitFileState::Unchanged | GitFileState::Untracked | GitFileState::Unmerged
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,6 +226,23 @@ impl WorkingTreeAction {
                     ..
                 }
         )
+    }
+
+    pub fn required_capability(&self) -> &'static str {
+        match self {
+            Self::Stage { .. } | Self::Unstage { .. } | Self::StageAll | Self::UnstageAll => {
+                crate::capabilities::SOURCE_CONTROL_V1
+            }
+            Self::Commit { .. }
+            | Self::Discard { .. }
+            | Self::StashPush { .. }
+            | Self::StashPop { .. }
+            | Self::StashDrop { .. }
+            | Self::Checkout { .. }
+            | Self::CherryPick { .. }
+            | Self::AbortCherryPick
+            | Self::CreateBranch { .. } => crate::capabilities::SOURCE_CONTROL_COMMITS_V1,
+        }
     }
 }
 

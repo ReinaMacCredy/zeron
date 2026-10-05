@@ -356,18 +356,6 @@ fn short_sha(sha: &str) -> String {
     sha.chars().take(7).collect()
 }
 
-fn has_tracked_changes(tree: &WorkingTree) -> bool {
-    tree.files.iter().any(|file| {
-        !matches!(
-            file.index,
-            GitFileState::Unchanged | GitFileState::Untracked
-        ) || !matches!(
-            file.worktree,
-            GitFileState::Unchanged | GitFileState::Untracked
-        )
-    })
-}
-
 fn checkout_target(commit: &GitHistoryCommit, tree: &WorkingTree) -> Option<(String, bool)> {
     let on_commit = tree.head_sha.as_deref() == Some(commit.sha.as_str());
     let branch = commit
@@ -406,15 +394,7 @@ fn status_letter(state: GitFileState) -> &'static str {
 }
 
 pub(super) fn staged_files(tree: &WorkingTree) -> Vec<&WorkingTreeFile> {
-    tree.files
-        .iter()
-        .filter(|file| {
-            !matches!(
-                file.index,
-                GitFileState::Unchanged | GitFileState::Untracked | GitFileState::Unmerged
-            )
-        })
-        .collect()
+    tree.files.iter().filter(|file| file.is_staged()).collect()
 }
 
 pub(super) fn changed_files(tree: &WorkingTree) -> Vec<&WorkingTreeFile> {
@@ -887,8 +867,10 @@ impl GitTab {
             && self.supports(zeron_proto::capabilities::SOURCE_CONTROL_SYNC_V1, cx)
     }
 
-    fn allows(&self, action: &WorkingTreeAction, policy: GitAgentBusyPolicy) -> bool {
+    fn allows(&self, action: &WorkingTreeAction, policy: GitAgentBusyPolicy, cx: &App) -> bool {
         !self.busy_for_sync()
+            && self.source_control(cx)
+            && self.supports(action.required_capability(), cx)
             && self
                 .tree
                 .as_ref()
@@ -902,7 +884,7 @@ impl GitTab {
         cx: &mut Context<Self>,
     ) {
         let policy = busy_policy(cx);
-        if !self.allows(&action, policy) || !self.source_control(cx) {
+        if !self.allows(&action, policy, cx) {
             return;
         }
         let (Some(space), Some(tree)) = (self.space.clone(), self.tree.as_ref()) else {
@@ -1006,8 +988,7 @@ impl GitTab {
         ready
             && !self.writing
             && !self.message.read(cx).text().trim().is_empty()
-            && self.allows(&kind.action(String::new()), policy)
-            && self.commits_supported(cx)
+            && self.allows(&kind.action(String::new()), policy, cx)
     }
 
     fn commit(&mut self, kind: CommitKind, cx: &mut Context<Self>) {
@@ -1206,7 +1187,7 @@ impl GitTab {
                 "An agent is running in this checkout, so checkout and cherry-pick wait until it stops.",
             );
         }
-        if has_tracked_changes(tree) {
+        if tree.has_tracked_changes() {
             return Some("Commit or stash your changes to check out or cherry-pick.");
         }
         None
@@ -1220,7 +1201,7 @@ impl GitTab {
 
     fn can_checkout(&self, cx: &App) -> bool {
         self.checkout_action().is_some_and(|action| {
-            self.move_refusal(&action, cx).is_none() && self.allows(&action, busy_policy(cx))
+            self.move_refusal(&action, cx).is_none() && self.allows(&action, busy_policy(cx), cx)
         })
     }
 
@@ -1235,7 +1216,7 @@ impl GitTab {
             && tree.head_sha.is_some()
             && tree.head_sha.as_deref() != Some(detail.commit.sha.as_str())
             && self.move_refusal(&action, cx).is_none()
-            && self.allows(&action, busy_policy(cx))
+            && self.allows(&action, busy_policy(cx), cx)
     }
 
     fn branch_action(&self, checkout: bool, cx: &App) -> Option<WorkingTreeAction> {
@@ -1261,9 +1242,8 @@ impl GitTab {
             return false;
         };
         let moves = checkout && tree.head_sha.as_deref() != Some(detail.commit.sha.as_str());
-        self.commits_supported(cx)
-            && tree.head_sha.is_some()
-            && self.allows(&action, busy_policy(cx))
+        tree.head_sha.is_some()
+            && self.allows(&action, busy_policy(cx), cx)
             && (!checkout || tree.cherry_pick_head.is_none())
             && (!moves || self.move_refusal(&action, cx).is_none())
     }
@@ -2111,7 +2091,7 @@ impl GitTab {
             .as_ref()
             .is_some_and(|pending| pending.target == PendingTarget::All { staged });
         let header_action = writes.filter(|_| !files.is_empty()).map(|policy| {
-            let enabled = self.allows(&all, policy);
+            let enabled = self.allows(&all, policy, cx);
             let selector = format!("{id}-all");
             div()
                 .id(SharedString::from(selector.clone()))
@@ -2235,7 +2215,7 @@ impl GitTab {
                     paths: vec![path.clone()],
                 }
             };
-            let enabled = self.allows(&action, policy);
+            let enabled = self.allows(&action, policy, cx);
             let label = if staged { "Unstage" } else { "Stage" };
             let selector = format!("{section}-toggle-{index}");
             div()
@@ -2288,6 +2268,7 @@ impl GitTab {
                         paths: vec![path.clone()],
                     },
                     policy,
+                    cx,
                 );
             let selector = format!("{section}-discard-{index}");
             div()
@@ -2698,7 +2679,7 @@ impl GitTab {
         let popup = theme.for_popup();
         let files = tree.files.len();
         let push = WorkingTreeAction::StashPush { message: None };
-        let push_enabled = files > 0 && self.allows(&push, policy);
+        let push_enabled = files > 0 && self.allows(&push, policy, cx);
         let push_label = if files == 1 {
             "Stash all (1 file)".to_string()
         } else {
@@ -2753,8 +2734,8 @@ impl GitTab {
             let drop = WorkingTreeAction::StashDrop {
                 oid: stash.oid.clone(),
             };
-            let pop_enabled = self.allows(&pop, policy);
-            let drop_enabled = self.allows(&drop, policy);
+            let pop_enabled = self.allows(&pop, policy, cx);
+            let drop_enabled = self.allows(&drop, policy, cx);
             let when = stash
                 .created_at
                 .map(|at| super::relative_time(now, at))
@@ -3360,8 +3341,7 @@ impl GitTab {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let enabled =
-            self.commits_supported(cx) && self.allows(&WorkingTreeAction::AbortCherryPick, policy);
+        let enabled = self.allows(&WorkingTreeAction::AbortCherryPick, policy, cx);
         div()
             .id("git-cherry-pick-banner")
             .debug_selector(|| "git-cherry-pick-banner".into())
@@ -6003,12 +5983,21 @@ mod tests {
         }
         assert!(calls_of(&calls, methods::RUN_WORKING_TREE_ACTION).is_empty());
         tab.update(cx, |tab, cx| {
-            assert!(!tab.allows(&WorkingTreeAction::StageAll, busy_policy(cx)));
-            assert!(tab.allows(&WorkingTreeAction::StageAll, GitAgentBusyPolicy::SafeOnly));
-            assert!(tab.allows(&WorkingTreeAction::StageAll, GitAgentBusyPolicy::AllowAll));
+            assert!(!tab.allows(&WorkingTreeAction::StageAll, busy_policy(cx), cx));
+            assert!(tab.allows(
+                &WorkingTreeAction::StageAll,
+                GitAgentBusyPolicy::SafeOnly,
+                cx
+            ));
+            assert!(tab.allows(
+                &WorkingTreeAction::StageAll,
+                GitAgentBusyPolicy::AllowAll,
+                cx
+            ));
             assert!(!tab.allows(
                 &WorkingTreeAction::Discard { paths: vec![] },
-                GitAgentBusyPolicy::SafeOnly
+                GitAgentBusyPolicy::SafeOnly,
+                cx
             ));
         });
         assert_eq!(

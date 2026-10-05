@@ -547,13 +547,6 @@ pub(crate) async fn lock_checkout_briefly(
         })
 }
 
-pub(crate) fn is_staged(file: &WorkingTreeFile) -> bool {
-    !matches!(
-        file.index,
-        GitFileState::Unchanged | GitFileState::Untracked | GitFileState::Unmerged
-    )
-}
-
 fn checked_path(path: &str) -> Result<(), EngineError> {
     let invalid = path.is_empty()
         || path.len() > MAX_PATH_BYTES
@@ -622,7 +615,7 @@ pub(crate) async fn apply(
             run_with_paths(root, &["add", "-A"], &paths).await
         }
         WorkingTreeAction::Unstage { paths } => {
-            let files = listed(tree, paths, is_staged, "is not staged")?;
+            let files = listed(tree, paths, WorkingTreeFile::is_staged, "is not staged")?;
             let mut paths: Vec<&str> = Vec::with_capacity(files.len());
             for file in &files {
                 paths.push(&file.path);
@@ -899,7 +892,7 @@ async fn commit(
         if tree.files.is_empty() {
             return Err(refused("There is nothing to commit."));
         }
-    } else if !tree.files.iter().any(is_staged) {
+    } else if !tree.files.iter().any(WorkingTreeFile::is_staged) {
         return Err(refused(
             "Nothing is staged. Stage files first, or use Commit all.",
         ));
@@ -963,21 +956,9 @@ fn no_cherry_pick_in_progress(tree: &WorkingTree) -> Result<(), EngineError> {
     Ok(())
 }
 
-fn has_tracked_changes(tree: &WorkingTree) -> bool {
-    tree.files.iter().any(|file| {
-        !matches!(
-            file.index,
-            GitFileState::Unchanged | GitFileState::Untracked
-        ) || !matches!(
-            file.worktree,
-            GitFileState::Unchanged | GitFileState::Untracked
-        )
-    })
-}
-
 fn ready_to_move(tree: &WorkingTree, doing: &str) -> Result<(), EngineError> {
     no_cherry_pick_in_progress(tree)?;
-    if has_tracked_changes(tree) {
+    if tree.has_tracked_changes() {
         return Err(EngineError::Other(format!(
             "This checkout has uncommitted changes. Commit or stash them before {doing}."
         )));
@@ -1366,7 +1347,7 @@ pub(crate) async fn file_diff(
         .find(|file| file.path == path)
         .filter(|file| {
             if staged {
-                is_staged(file)
+                file.is_staged()
             } else {
                 file.worktree != GitFileState::Unchanged
             }
