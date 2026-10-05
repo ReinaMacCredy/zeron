@@ -7174,7 +7174,7 @@ impl Shell {
                         .and_then(|s| state.device_name(&s.device_id))
                         .unwrap_or("its device")
                         .to_string(),
-                    state.chats_in_space(&space_id).len(),
+                    state.chats_removed_with_space(&space_id),
                 )
             };
             let copy = if count == 1 {

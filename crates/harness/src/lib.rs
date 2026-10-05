@@ -596,6 +596,14 @@ pub fn supports_titles(id: HarnessId) -> bool {
     )
 }
 
+// Pi and Cursor never read permission_mode; OpenCode and ACP agents ask only when their own config requests it.
+pub fn asks_before_running_tools(id: HarnessId) -> bool {
+    matches!(
+        id,
+        HarnessId::Codex | HarnessId::ClaudeCode | HarnessId::Mock
+    )
+}
+
 /// The composer writes a skill as `$name` anywhere in the prompt; agents
 /// that load skills by slash command get `/name` instead. Only names in
 /// `skills` are rewritten, so `$path` in a shell snippet stays as typed.

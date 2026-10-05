@@ -792,6 +792,7 @@ pub struct Pickers {
     /// `config.harness` then only tracks the tab being browsed.
     title: Option<TitleSettings>,
     commit_binding: bool,
+    asks_only: bool,
     /// Sticky last-used picks (zeron `zeron.composer.defaults:v1`): seeds the
     /// new-chat chips and is rewritten on every new-chat pick.
     defaults: ComposerDefaults,
@@ -939,6 +940,12 @@ impl Pickers {
         let mut pickers = Self::build(state, Some(commit_title_settings(choice)), cx);
         pickers.commit_binding = true;
         pickers
+    }
+
+    pub fn set_asks_only(&mut self, cx: &mut Context<Self>) {
+        self.asks_only = true;
+        self.catalog_rev += 1;
+        cx.notify();
     }
 
     pub fn set_commit_model(&mut self, choice: Option<&CommitModelChoice>, cx: &mut Context<Self>) {
@@ -1109,6 +1116,7 @@ impl Pickers {
             config: DraftConfig::default(),
             title,
             commit_binding: false,
+            asks_only: false,
             defaults,
             data_dir,
             draft_owner,
@@ -1262,6 +1270,9 @@ impl Pickers {
         if self.title.is_some() {
             offered.retain(|d| zeron_harness::supports_titles(d.id) && d.id != HarnessId::Mock);
         }
+        if self.asks_only {
+            offered.retain(|d| zeron_harness::asks_before_running_tools(d.id));
+        }
         offered
     }
 
@@ -1308,8 +1319,9 @@ impl Pickers {
         // disabled it in Settings → Providers since).
         if let Some(harness) = self.defaults.harness {
             let offered = match self.harnesses.ready() {
-                Some(list) => offered_harnesses(list).iter().any(|d| d.id == harness),
-                None => true, // catalog not loaded yet — trust the memory
+                Some(list) => self.offered(list).iter().any(|d| d.id == harness),
+                // catalog not loaded yet — trust the memory
+                None => !self.asks_only || zeron_harness::asks_before_running_tools(harness),
             };
             if offered {
                 return Some(harness);
@@ -1321,7 +1333,7 @@ impl Pickers {
         // model (it stays available under `ZERON_HARNESS=mock`).
         self.harnesses
             .ready()
-            .and_then(|list| offered_harnesses(list).first().map(|d| d.id))
+            .and_then(|list| self.offered(list).first().map(|d| d.id))
     }
 
     /// Effective model id: the draft pick, the selected chat's config, or (on
@@ -2757,6 +2769,7 @@ impl Pickers {
         };
         let mut descriptors = self.offered(list);
         if let Some(effective) = self.effective_harness(cx)
+            && !self.asks_only
             && !descriptors.iter().any(|d| d.id == effective)
             && let Some(descriptor) = list.iter().find(|d| d.id == effective && d.installed)
         {
@@ -4878,10 +4891,13 @@ impl Pickers {
                         .text_size(crate::typography::ui_rems(12.0))
                         .text_color(theme.text_muted)
                         .text_center()
-                        .child(SharedString::from(
+                        .child(SharedString::from(if self.asks_only {
+                            "This chat needs Claude Code or Codex, the agents that ask \
+                             before running commands."
+                        } else {
                             "Enable an installed agent in Settings → Providers, \
-                             or install an agent CLI.",
-                        )),
+                             or install an agent CLI."
+                        })),
                 )
                 .into_any_element();
         }
@@ -7844,6 +7860,38 @@ mod tests {
                 missing.installed = false;
                 pickers.harnesses = Loadable::Ready(vec![missing]);
                 assert!(pickers.rail_descriptors(cx).is_empty());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn an_asks_only_picker_offers_only_agents_that_ask_before_running_tools(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            let state = cx.new(|_| AppState::new());
+            let pickers = cx.new(|cx| Pickers::new(state, cx));
+            pickers.update(cx, |pickers, cx| {
+                pickers.harnesses = Loadable::Ready(vec![
+                    descriptor(HarnessId::Pi, "Pi"),
+                    descriptor(HarnessId::Opencode, "OpenCode"),
+                    descriptor(HarnessId::Cursor, "Cursor"),
+                    descriptor(HarnessId::Grok, "Grok"),
+                    descriptor(HarnessId::ClaudeCode, "Claude Code"),
+                    descriptor(HarnessId::Codex, "Codex"),
+                ]);
+                pickers.defaults.harness = Some(HarnessId::Pi);
+                assert_eq!(pickers.effective_harness(cx), Some(HarnessId::Pi));
+                pickers.set_asks_only(cx);
+                let ids: Vec<HarnessId> =
+                    pickers.rail_descriptors(cx).iter().map(|d| d.id).collect();
+                assert_eq!(ids, [HarnessId::ClaudeCode, HarnessId::Codex]);
+                assert_eq!(pickers.effective_harness(cx), Some(HarnessId::ClaudeCode));
+                pickers.config.harness = Some(HarnessId::Pi);
+                let ids: Vec<HarnessId> =
+                    pickers.rail_descriptors(cx).iter().map(|d| d.id).collect();
+                assert_eq!(ids, [HarnessId::ClaudeCode, HarnessId::Codex]);
             });
         });
     }

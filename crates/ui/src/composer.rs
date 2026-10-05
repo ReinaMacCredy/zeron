@@ -7179,6 +7179,8 @@ impl Composer {
     pub(crate) fn set_pr_chat(&mut self, placeholder: &'static str, cx: &mut Context<Self>) {
         self.side_chat = true;
         self.pr_chat = true;
+        self.pickers
+            .update(cx, |pickers, cx| pickers.set_asks_only(cx));
         self.idle_placeholder = placeholder.into();
         if self.wizard.is_none() {
             self.input
@@ -10266,8 +10268,17 @@ impl Composer {
             resolved.permission_mode = config.permission_mode;
         }
         if self.pr_chat {
-            if resolved.harness.is_none() {
+            let Some(harness) = resolved.harness else {
                 self.failure = Some("Pick an agent before sending.".into());
+                self.failure_key = self.bound_chat_id(cx);
+                cx.notify();
+                return;
+            };
+            if !zeron_harness::asks_before_running_tools(harness) {
+                self.failure = Some(
+                    "This agent can't ask before running commands. Pick Claude Code or Codex for this chat."
+                        .into(),
+                );
                 self.failure_key = self.bound_chat_id(cx);
                 cx.notify();
                 return;

@@ -19,6 +19,8 @@ pub(super) struct PrChatPanel {
     pub(super) chat_id: String,
     pub(super) side: Option<u64>,
     indexed: bool,
+    fresh: bool,
+    resumed: bool,
     error: Option<SharedString>,
     pub(super) open: bool,
     minimized: bool,
@@ -37,6 +39,7 @@ pub(super) struct PrChatTrash {
     parked: Vec<ParkedPrChat>,
     deleted: HashSet<String>,
     pruned: Option<u64>,
+    posting: HashSet<(String, String, usize)>,
 }
 
 struct ParkedPrChat {
@@ -48,7 +51,7 @@ struct ParkedPrChat {
 
 enum Landing {
     Delete,
-    Index(String),
+    Index(String, bool),
     Promote,
 }
 
@@ -57,7 +60,6 @@ type CardKey = (String, usize);
 #[derive(Default)]
 struct CardState {
     editor: Option<Entity<ComposerInput>>,
-    pending: bool,
     error: Option<SharedString>,
     posted: Option<PrChatPosted>,
     dismissed: bool,
@@ -131,6 +133,7 @@ impl Shell {
         let placeholder = context.placeholder();
         let earlier = earlier_session(&row, chrono::Local::now());
         let chat_id = row.id.clone();
+        let fresh = settings::current(cx).pr_chat_fresh(&chat_id);
         let tab = self.new_side_chat_tab(row, false, cx);
         tab.composer.update(cx, |composer, cx| {
             composer.set_pr_chat(placeholder, cx);
@@ -156,6 +159,8 @@ impl Shell {
             chat_id,
             side: Some(id),
             indexed: true,
+            fresh,
+            resumed: true,
             error: None,
             open: true,
             minimized: false,
@@ -434,6 +439,8 @@ impl Shell {
             chat_id,
             side: None,
             indexed: false,
+            fresh: settings::current(cx).pr_chat_history == PrChatHistory::Fresh,
+            resumed: false,
             error: None,
             open: true,
             minimized: false,
@@ -539,6 +546,7 @@ impl Shell {
         }
         let chat_id = panel.chat_id.clone();
         let scope = panel.context.index_key();
+        let fresh = panel.fresh;
         if let Some(panel) = self.pr_chat.as_mut() {
             panel.indexed = true;
         }
@@ -550,6 +558,7 @@ impl Shell {
                     created_at: Utc::now(),
                     posted: Vec::new(),
                     dismissed: Vec::new(),
+                    fresh,
                 },
             )
         });
@@ -584,7 +593,7 @@ impl Shell {
         panel.sessions_menu = false;
         if settings::current(cx).pr_chat_history == PrChatHistory::Fresh {
             let chat_id = panel.chat_id.clone();
-            if settings::current(cx).pr_chat_indexed(&chat_id) {
+            if panel.fresh && settings::current(cx).pr_chat_indexed(&chat_id) {
                 if let Some(side) = panel.side.take() {
                     self.side_chats.remove(&side);
                 }
@@ -637,7 +646,7 @@ impl Shell {
             match parked.landing {
                 Landing::Delete => self.delete_pr_chat(parked.chat_id, cx),
                 Landing::Promote => {}
-                Landing::Index(scope) => {
+                Landing::Index(scope, fresh) => {
                     settings::update(SavePolicy::Debounced, cx, |settings| {
                         settings.index_pr_chat(
                             &scope,
@@ -646,6 +655,7 @@ impl Shell {
                                 created_at: Utc::now(),
                                 posted: Vec::new(),
                                 dismissed: Vec::new(),
+                                fresh,
                             },
                         )
                     });
@@ -685,9 +695,10 @@ impl Shell {
                 .get(&side)
                 .is_some_and(|tab| tab.composer.read(cx).is_sending());
             if sending {
-                let landing = match settings::current(cx).pr_chat_history {
-                    PrChatHistory::Fresh => Landing::Delete,
-                    PrChatHistory::KeepPerPr => Landing::Index(panel.context.index_key()),
+                let fresh_mode = settings::current(cx).pr_chat_history == PrChatHistory::Fresh;
+                let landing = match fresh_mode && panel.fresh {
+                    true => Landing::Delete,
+                    false => Landing::Index(panel.context.index_key(), panel.fresh),
                 };
                 self.park_pr_chat(panel.chat_id, side, landing, cx);
             } else {
@@ -714,8 +725,18 @@ impl Shell {
                     .map(|parked| parked.chat_id.as_str()),
             )
             .collect();
-        let stale =
-            settings::current(cx).stale_pr_chats(&state.chats, &state.vanished_chats, &live);
+        let current = settings::current(cx);
+        let mut stale = current.stale_pr_chats(&state.chats, &state.vanished_chats, &live);
+        if current.pr_chat_history == PrChatHistory::Fresh {
+            stale.extend(
+                current
+                    .pr_chat_sessions
+                    .values()
+                    .flatten()
+                    .filter(|session| session.fresh && !live.contains(&session.chat_id.as_str()))
+                    .map(|session| session.chat_id.clone()),
+            );
+        }
         self.pr_chat_trash.pruned = Some(revision);
         if stale.is_empty() {
             return;
@@ -763,6 +784,9 @@ impl Shell {
 
     fn pr_chat_suggestions(&self, cx: &App) -> Option<(String, Vec<Suggestion>)> {
         let panel = self.pr_chat.as_ref()?;
+        if panel.resumed && matches!(panel.context, PrChatContext::List(_)) {
+            return None;
+        }
         let tab = self.pr_chat_tab()?;
         let (entry, text) =
             crate::pull_requests::latest_chat_reply(&tab.state.read(cx).transcript)?;
@@ -877,8 +901,9 @@ impl Shell {
         let done = settings::pr_chat_posted(&chat_id, cx)
             .iter()
             .any(|posted| posted.entry_id == key.0 && posted.index == key.1);
+        let posting = (chat_id.clone(), key.0.clone(), key.1);
         let card = panel.cards.entry(key.clone()).or_default();
-        if done || card.pending || card.posted.is_some() {
+        if done || self.pr_chat_trash.posting.contains(&posting) || card.posted.is_some() {
             return;
         }
         let edited = card
@@ -890,7 +915,7 @@ impl Shell {
             cx.notify();
             return;
         };
-        card.pending = true;
+        self.pr_chat_trash.posting.insert(posting);
         card.error = None;
         let label = suggestion.posted_label(request_changes);
         cx.spawn(async move |this, cx| {
@@ -924,6 +949,9 @@ impl Shell {
             label,
             at: Utc::now(),
         });
+        self.pr_chat_trash
+            .posting
+            .remove(&(chat_id.clone(), key.0.clone(), key.1));
         if let Some(posted) = posted.clone() {
             settings::update(SavePolicy::Immediate, cx, |settings| {
                 settings.record_pr_chat_post(&chat_id, posted)
@@ -935,7 +963,6 @@ impl Shell {
             .filter(|panel| panel.chat_id == chat_id)
             .map(|panel| panel.cards.entry(key).or_default())
         {
-            card.pending = false;
             match &result {
                 Ok(()) => {
                     card.editor = None;
@@ -1346,7 +1373,6 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let panel = self.pr_chat.as_ref()?;
-        let list = matches!(panel.context, PrChatContext::List(_));
         let posted = settings::pr_chat_posted(&panel.chat_id, cx);
         let dismissed = settings::pr_chat_dismissed(&panel.chat_id, cx);
         let last = settings::current(cx).pull_requests_merge_method;
@@ -1409,13 +1435,14 @@ impl Shell {
                             .into_any_element(),
                     );
                 }
-                let pending = state.is_some_and(|state| state.pending);
+                let pending = self.pr_chat_trash.posting.contains(&(
+                    panel.chat_id.clone(),
+                    entry.clone(),
+                    ix,
+                ));
                 let editor = state.and_then(|state| state.editor.clone());
                 let error = state.and_then(|state| state.error.clone());
-                let header = match list {
-                    true => format!("{} · {}", suggestion.header(), suggestion.target_label()),
-                    false => suggestion.header().to_owned(),
-                };
+                let header = suggestion.card_header();
                 let text = suggestion
                     .summary(last)
                     .or_else(|| suggestion.body().map(str::to_owned))
@@ -2086,13 +2113,67 @@ mod tests {
             });
             shell.close_pr_chat(cx);
             assert!(shell.pr_chat.is_none());
-            assert!(!settings::current(cx).pr_chat_indexed(&chat_id));
+            assert!(
+                settings::current(cx).pr_chat_indexed(&chat_id),
+                "a chat kept under Keep per PR stays kept"
+            );
+            assert!(shell.state.read(cx).is_hidden_chat(&chat_id));
         });
         let frames = wire.serve(&runtime, cx, |_, _| Some(serde_json::json!({})));
-        let deletes = calls(&frames, methods::MUTATE);
-        assert_eq!(deletes.len(), 1, "{frames:?}");
-        assert_eq!(deletes[0].params["op"], "deleteChat");
-        assert_eq!(deletes[0].params["chatId"], chat_id.as_str());
+        assert!(
+            calls(&frames, methods::MUTATE)
+                .iter()
+                .all(|frame| frame.params["op"] != "deleteChat"),
+            "{frames:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn under_fresh_a_chat_no_panel_holds_comes_back_as_a_thread(cx: &mut TestAppContext) {
+        let (runtime, shell, cx, mut wire, _dir) = setup(cx);
+        let _guard = runtime.enter();
+        cx.update(|_, cx| {
+            settings::update(SavePolicy::Debounced, cx, |settings| {
+                settings.pr_chat_history = PrChatHistory::Fresh;
+                for (id, fresh) in [("orphan", true), ("kept", false)] {
+                    settings.index_pr_chat(
+                        "github.com/acme/zeron#7",
+                        PrChatSession {
+                            chat_id: id.into(),
+                            created_at: Utc::now(),
+                            posted: Vec::new(),
+                            dismissed: Vec::new(),
+                            fresh,
+                        },
+                    );
+                }
+            })
+        });
+        shell.update(cx, |shell, cx| {
+            shell.sync_hidden_chats(cx);
+            shell.state.update(cx, |state, cx| {
+                state.apply_chats(vec![
+                    row("wt", false, serde_json::json!({})),
+                    row("orphan", false, serde_json::json!({})),
+                    row("kept", false, serde_json::json!({})),
+                ]);
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        shell.read_with(cx, |shell, cx| {
+            let settings = settings::current(cx);
+            assert!(!settings.pr_chat_indexed("orphan"));
+            assert!(settings.pr_chat_indexed("kept"), "made under Keep per PR");
+            let state = shell.state.read(cx);
+            assert!(state.visible_chats().any(|chat| chat.id == "orphan"));
+            assert!(state.is_hidden_chat("kept"));
+        });
+
+        let (chat_id, _) = send_review(&runtime, &shell, cx, &mut wire);
+        shell.read_with(cx, |_, cx| {
+            assert!(settings::current(cx).pr_chat_fresh(&chat_id))
+        });
     }
 
     fn open_pr_chat(
@@ -2126,6 +2207,37 @@ mod tests {
                 tab.state.clone(),
             )
         })
+    }
+
+    #[gpui::test]
+    fn the_mini_chat_refuses_agents_that_do_not_ask_before_running_commands(
+        cx: &mut TestAppContext,
+    ) {
+        let (runtime, shell, cx, mut wire, _dir) = setup(cx);
+        let _guard = runtime.enter();
+        let (chat_id, composer, side_state) = open_pr_chat(&runtime, &shell, cx, &mut wire);
+        for harness in ["pi", "opencode", "cursor", "grok"] {
+            let config: zeron_proto::ChatConfig = serde_json::from_value(serde_json::json!({
+                "harness": harness, "sandbox": "workspace-write",
+            }))
+            .unwrap();
+            side_state.update(cx, |state, _| state.apply_chat_config(&chat_id, config));
+            composer.update(cx, |composer, cx| {
+                composer.send_prompt("Approve and merge it".into(), cx)
+            });
+            let frames = wire.serve(&runtime, cx, |_, _| Some(serde_json::json!({})));
+            assert!(
+                calls(&frames, methods::MUTATE).is_empty()
+                    && calls(&frames, methods::QUEUE_COMMAND).is_empty(),
+                "{harness}: {frames:?}"
+            );
+            assert!(
+                composer.read_with(cx, |composer, _| composer
+                    .failure()
+                    .is_some_and(|failure| failure.contains("can't ask"))),
+                "{harness}"
+            );
+        }
     }
 
     #[gpui::test]
@@ -2328,6 +2440,7 @@ mod tests {
                             created_at: Utc::now() - chrono::Duration::days(*days),
                             posted: Vec::new(),
                             dismissed: Vec::new(),
+                            fresh: false,
                         },
                     );
                 }
@@ -3088,6 +3201,91 @@ mod tests {
             "still dismissed"
         );
         assert!(recorder.writes().is_empty());
+    }
+
+    #[gpui::test]
+    fn a_post_in_flight_is_not_offered_again_after_the_panel_is_rebuilt(cx: &mut TestAppContext) {
+        let (runtime, shell, cx, mut wire, _dir) = setup(cx);
+        let _guard = runtime.enter();
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.chats.push(row("s7", false, serde_json::json!({})))
+            })
+        });
+        index(cx, "github.com/acme/zeron#7", &[("s7", 1)]);
+        shell.update(cx, |shell, cx| shell.open_pull_requests(cx));
+        let page = shell.read_with(cx, |shell, _| shell.pull_requests_page.clone().unwrap());
+        page.update(cx, |page, cx| page.open_linked(item(), None, cx));
+        wire.serve(&runtime, cx, |method, _| {
+            (method == methods::GET_CHANGE_REQUEST).then(detail)
+        });
+        inject_cards(&runtime, &shell, cx);
+        click(cx, "pr-chat-card-post-0");
+        let frames = wire.serve(&runtime, cx, |_, _| None);
+        let posts = calls(&frames, methods::SUBMIT_CHANGE_REQUEST_REVIEW);
+        assert_eq!(posts.len(), 1, "{frames:?}");
+        let post_id = posts[0].id.clone();
+
+        shell.update(cx, |shell, cx| shell.discard_pr_chat(cx));
+        inject_cards(&runtime, &shell, cx);
+        click(cx, "pr-chat-card-post-0");
+        let frames = wire.serve(&runtime, cx, |_, _| None);
+        assert!(
+            calls(&frames, methods::SUBMIT_CHANGE_REQUEST_REVIEW).is_empty(),
+            "{frames:?}"
+        );
+
+        let reply = ServerFrame {
+            id: post_id,
+            ok: Some(serde_json::json!({})),
+            ..Default::default()
+        };
+        wire.replies
+            .try_send(serde_json::to_string(&reply).unwrap())
+            .unwrap();
+        wire.serve(&runtime, cx, |_, _| None);
+        assert!(cx.debug_bounds("pr-chat-card-posted-0").is_some());
+        shell.read_with(cx, |shell, _| {
+            assert!(shell.pr_chat_trash.posting.is_empty())
+        });
+    }
+
+    #[gpui::test]
+    fn a_resumed_list_session_offers_no_cards(cx: &mut TestAppContext) {
+        let (runtime, shell, cx, mut wire, _dir) = setup(cx);
+        let _guard = runtime.enter();
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state
+                    .chats
+                    .push(row("list-1", false, serde_json::json!({})))
+            })
+        });
+        index(cx, "list", &[("list-1", 1)]);
+        shell.update(cx, |shell, cx| shell.open_pull_requests(cx));
+        wire.serve(&runtime, cx, |method, _| {
+            (method == methods::LIST_CHANGE_REQUESTS).then(|| {
+                serde_json::json!({
+                    "viewers": {}, "items": [item_n(7), item_n(8)],
+                    "errors": [], "truncated": false,
+                })
+            })
+        });
+        let reply = "```zeron-github-action\n{\"action\":\"merge\",\"number\":7}\n```\n";
+        shell.update(cx, |shell, cx| {
+            shell.toggle_pr_chat(cx);
+            assert_eq!(shell.pr_chat.as_ref().unwrap().chat_id, "list-1");
+            let tab = shell.pr_chat_tab().expect("resumed session");
+            tab.state
+                .update(cx, |state, _| state.apply_transcript(reply_entry(reply)));
+        });
+        wire.serve(&runtime, cx, |_, _| None);
+        shell.read_with(cx, |shell, cx| {
+            let panel = shell.pr_chat.as_ref().unwrap();
+            assert_eq!(panel.context.suggestions(reply).len(), 1);
+            assert!(shell.pr_chat_suggestions(cx).is_none());
+        });
+        assert!(cx.debug_bounds("pr-chat-card-0").is_none());
     }
 
     #[gpui::test]

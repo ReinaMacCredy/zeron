@@ -1989,6 +1989,21 @@ impl AppState {
         self.hidden_chats.contains(chat_id)
     }
 
+    pub(crate) fn notifies_for(&self, chat_id: &str) -> bool {
+        !self.is_hidden_chat(chat_id)
+            && self
+                .chats
+                .iter()
+                .any(|chat| chat.id == chat_id && chat.is_person_opened())
+    }
+
+    pub(crate) fn chats_removed_with_space(&self, space_id: &str) -> usize {
+        self.chats
+            .iter()
+            .filter(|chat| !chat.archived && chat.space_id.as_deref() == Some(space_id))
+            .count()
+    }
+
     pub(crate) fn set_hidden_chats(&mut self, ids: HashSet<String>, cx: &mut Context<Self>) {
         if self.hidden_chats != ids {
             self.hidden_chats = ids;
@@ -5295,6 +5310,46 @@ mod tests {
             .map(|(_, c)| c.id.as_str())
             .collect();
         assert_eq!(overview, ["old", "new", "dangling"]);
+    }
+
+    #[test]
+    fn removing_a_project_counts_its_hidden_chats_too() {
+        let mut state = AppState::new();
+        let in_space = |id: &str| {
+            let mut chat = chat(id, 0, None);
+            chat.space_id = Some("s1".into());
+            chat
+        };
+        let mut archived = in_space("gone");
+        archived.archived = true;
+        state.apply_chats(vec![
+            in_space("thread"),
+            in_space("pr-chat"),
+            archived,
+            chat("elsewhere", 0, None),
+        ]);
+        state.hidden_chats = HashSet::from(["pr-chat".to_string()]);
+        assert_eq!(state.chats_in_space("s1").len(), 1);
+        assert_eq!(state.chats_removed_with_space("s1"), 2);
+    }
+
+    #[test]
+    fn hidden_chats_never_notify() {
+        let mut state = AppState::new();
+        let mut side = chat("side", 0, None);
+        side.created_by_chat_id = Some("thread".into());
+        state.apply_chats(vec![
+            chat("thread", 0, None),
+            chat("pr-chat", 0, None),
+            side,
+        ]);
+        assert!(state.notifies_for("thread"));
+        assert!(state.notifies_for("pr-chat"));
+        assert!(!state.notifies_for("side"));
+        assert!(!state.notifies_for("missing"));
+        state.hidden_chats = HashSet::from(["pr-chat".to_string()]);
+        assert!(!state.notifies_for("pr-chat"));
+        assert!(state.notifies_for("thread"));
     }
 
     #[test]

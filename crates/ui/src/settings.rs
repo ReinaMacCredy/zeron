@@ -1117,6 +1117,8 @@ pub struct PrChatSession {
     pub posted: Vec<PrChatPosted>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dismissed: Vec<PrChatCardRef>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fresh: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2185,6 +2187,13 @@ impl UiSettings {
         self.pr_chat_ids().any(|id| id == chat_id)
     }
 
+    pub fn pr_chat_fresh(&self, chat_id: &str) -> bool {
+        self.pr_chat_sessions
+            .values()
+            .flatten()
+            .any(|session| session.chat_id == chat_id && session.fresh)
+    }
+
     pub fn index_pr_chat(&mut self, scope: &str, session: PrChatSession) {
         if !self.pr_chat_indexed(&session.chat_id) {
             self.pr_chat_sessions
@@ -2599,6 +2608,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             posted: Vec::new(),
             dismissed: Vec::new(),
+            fresh: false,
         };
         let base = UiSettings::default();
         let mut edited = base.clone();
@@ -3561,6 +3571,7 @@ mod tests {
                         entry_id: "m3".into(),
                         index: 1,
                     }],
+                    fresh: true,
                 }],
             )]),
             git_agent_busy_policy: GitAgentBusyPolicy::BlockAll,

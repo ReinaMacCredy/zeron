@@ -3202,7 +3202,7 @@ impl Shell {
                         let send_pending = state.send_pending(&s.chat_id, now);
                         let chat = state.chats.iter().find(|c| c.id == s.chat_id);
                         let title = chat.and_then(|c| c.title.clone());
-                        let notify = chat.is_some_and(|c| c.is_person_opened());
+                        let notify = state.notifies_for(&s.chat_id);
                         (s.chat_id.clone(), status, send_pending, title, notify)
                     })
                     .collect();
