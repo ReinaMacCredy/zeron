@@ -408,6 +408,15 @@ fn status_letter(state: GitFileState) -> &'static str {
     }
 }
 
+fn state_color(state: GitFileState, theme: &Theme) -> gpui::Hsla {
+    match state {
+        GitFileState::Added | GitFileState::Untracked => theme.success,
+        GitFileState::Deleted | GitFileState::Unmerged => theme.danger,
+        GitFileState::Renamed | GitFileState::Copied => theme.accent,
+        _ => theme.warning,
+    }
+}
+
 pub(super) fn staged_files(tree: &WorkingTree) -> Vec<&WorkingTreeFile> {
     tree.files.iter().filter(|file| file.is_staged()).collect()
 }
@@ -2115,12 +2124,7 @@ impl GitTab {
     ) -> AnyElement {
         let state = if staged { file.index } else { file.worktree };
         let delta = if staged { file.staged } else { file.unstaged };
-        let color = match state {
-            GitFileState::Added | GitFileState::Untracked => theme.success,
-            GitFileState::Deleted | GitFileState::Unmerged => theme.danger,
-            GitFileState::Renamed | GitFileState::Copied => theme.accent,
-            _ => theme.warning,
-        };
+        let color = state_color(state, theme);
         let (dir, name) = match file.path.rsplit_once('/') {
             Some((dir, name)) => (format!("{dir}/"), name.to_owned()),
             None => (String::new(), file.path.clone()),
@@ -3153,7 +3157,7 @@ impl GitTab {
                 let Some(commit) = self.last_commit.as_ref() else {
                     return el;
                 };
-                let short: String = commit.sha.chars().take(7).collect();
+                let short = short_sha(&commit.sha);
                 let text = match &commit.branch {
                     Some(branch) => format!("Committed {short} to {branch}"),
                     None => format!("Committed {short}"),
@@ -3826,19 +3830,14 @@ impl GitTab {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let letter = match file.status.as_str() {
-            "added" | "untracked" => "A",
-            "deleted" => "D",
-            "renamed" => "R",
-            "copied" => "C",
-            _ => "M",
+        let state = match file.status.as_str() {
+            "added" | "untracked" => GitFileState::Added,
+            "deleted" => GitFileState::Deleted,
+            "renamed" => GitFileState::Renamed,
+            "copied" => GitFileState::Copied,
+            _ => GitFileState::Modified,
         };
-        let color = match letter {
-            "A" => theme.success,
-            "D" => theme.danger,
-            "R" | "C" => theme.accent,
-            _ => theme.warning,
-        };
+        let (letter, color) = (status_letter(state), state_color(state, theme));
         let (dir, name) = match file.path.rsplit_once('/') {
             Some((dir, name)) => (format!("{dir}/"), name.to_owned()),
             None => (String::new(), file.path.clone()),
@@ -3914,7 +3913,7 @@ impl GitTab {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let short: String = commit.sha.chars().take(7).collect();
+        let short = short_sha(&commit.sha);
         let branch = commit.branch.clone().unwrap_or_default();
         let text = format!("Committed {short} to {branch}. No pull request yet.");
         let bold = |start: usize, len: usize| {
@@ -5039,9 +5038,7 @@ fn menu_option(
     live: bool,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
-    let id = SharedString::from(selector.clone());
-    popover::menu_row(theme, false, id.clone())
-        .id(id)
+    filters::row(theme, false, selector.clone())
         .debug_selector(move || selector.clone())
         .role(gpui::Role::MenuItemRadio)
         .aria_label(label.clone())
@@ -5069,18 +5066,7 @@ fn menu_option(
                         .child(detail),
                 ),
         )
-        .child(
-            div()
-                .ml_auto()
-                .size(px(14.0))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .when(selected, |el| {
-                    el.child(div().size(px(6.0)).rounded_full().bg(theme.text))
-                }),
-        )
+        .child(filters::radio_dot(selected, theme).flex_none())
 }
 
 #[cfg(test)]

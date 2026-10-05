@@ -208,9 +208,7 @@ impl Shell {
                     label: session_label(&day_label(at, now), title),
                     detail: match (current, preview) {
                         (true, _) => "Open session".into(),
-                        (false, Some(preview)) => {
-                            preview.split_whitespace().collect::<Vec<_>>().join(" ")
-                        }
+                        (false, Some(preview)) => crate::transcript::single_line(preview),
                         (false, None) => "No messages".into(),
                     },
                     current,

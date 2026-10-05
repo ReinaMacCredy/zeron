@@ -10,6 +10,7 @@ use zeron_proto::{
     RunChangeRequestActionRequest, SubmitChangeRequestReviewRequest,
 };
 
+use super::detail::plural;
 use super::handoff::bounded;
 use super::{ListEntry, PullRequestKey, PullRequestsPage, change_size, filters, group_thousands};
 
@@ -319,7 +320,7 @@ impl PrChatContext {
                 format!("PR #{}: {}", pr.key.number, pr.item.title.trim())
             }
             PrChatContext::List(_) => match first_prompt
-                .map(|prompt| prompt.split_whitespace().collect::<Vec<_>>().join(" "))
+                .map(crate::transcript::single_line)
                 .filter(|prompt| !prompt.is_empty())
             {
                 Some(prompt) => format!("Pull requests: {}", clip(&prompt, PROMOTED_PROMPT_LIMIT)),
@@ -451,11 +452,7 @@ impl PrChatContext {
                 if comments > 0 {
                     chips.push((
                         ContextChip::Comments,
-                        if comments == 1 {
-                            "1 comment".into()
-                        } else {
-                            format!("{comments} comments")
-                        },
+                        plural(comments, "comment", "comments"),
                     ));
                 }
                 if let Some(detail) = pr.detail.as_ref().filter(|d| !d.checks.is_empty()) {
@@ -476,11 +473,7 @@ impl PrChatContext {
                 vec![
                     (
                         ContextChip::Shown,
-                        if count == 1 {
-                            "1 PR shown".into()
-                        } else {
-                            format!("{count} PRs shown")
-                        },
+                        format!("{} shown", plural(count, "PR", "PRs")),
                     ),
                     (ContextChip::Filter, format!("Filter: {}", list.filter)),
                 ]

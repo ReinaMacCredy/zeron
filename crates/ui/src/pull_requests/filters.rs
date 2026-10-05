@@ -618,12 +618,16 @@ pub(super) fn involvement_label(involvement: ChangeRequestInvolvement) -> &'stat
     label_of(&INVOLVEMENTS, involvement)
 }
 
-fn row(theme: &Theme, active: bool, id: impl Into<SharedString>) -> gpui::Stateful<gpui::Div> {
+pub(super) fn row(
+    theme: &Theme,
+    active: bool,
+    id: impl Into<SharedString>,
+) -> gpui::Stateful<gpui::Div> {
     let id = id.into();
     popover::menu_row(theme, active, id.clone()).id(id)
 }
 
-fn radio_dot(selected: bool, theme: &Theme) -> AnyElement {
+pub(super) fn radio_dot(selected: bool, theme: &Theme) -> gpui::Div {
     div()
         .ml_auto()
         .size(px(14.0))
@@ -633,7 +637,6 @@ fn radio_dot(selected: bool, theme: &Theme) -> AnyElement {
         .when(selected, |el| {
             el.child(div().size(px(6.0)).rounded_full().bg(theme.text))
         })
-        .into_any_element()
 }
 
 fn section_of(kind: MenuKind) -> Option<FilterSection> {
