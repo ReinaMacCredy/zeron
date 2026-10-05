@@ -27,6 +27,7 @@ pub(super) struct PrChatPanel {
     sessions_menu: bool,
     cards: HashMap<PrChatCardRef, CardState>,
     confirm: Option<PrChatCardRef>,
+    parsed: std::cell::RefCell<Option<(String, String, Vec<Suggestion>)>>,
     _location: Option<Task<()>>,
     _context: Option<Task<()>>,
     _saved: Option<Subscription>,
@@ -170,6 +171,7 @@ impl Shell {
             sessions_menu: false,
             cards: HashMap::new(),
             confirm: None,
+            parsed: Default::default(),
             _location: None,
             _context: None,
             _saved: None,
@@ -439,6 +441,7 @@ impl Shell {
             sessions_menu: false,
             cards: HashMap::new(),
             confirm: None,
+            parsed: Default::default(),
             _location: Some(location_task),
             _context: Some(context_task),
             _saved: None,
@@ -771,7 +774,18 @@ impl Shell {
         let tab = self.pr_chat_tab()?;
         let (entry, text) =
             crate::pull_requests::latest_chat_reply(&tab.state.read(cx).transcript)?;
-        let suggestions = panel.context.suggestions(&text);
+        let mut parsed = panel.parsed.borrow_mut();
+        if !parsed
+            .as_ref()
+            .is_some_and(|(seen, seen_text, _)| *seen == entry && *seen_text == text)
+        {
+            let suggestions = panel.context.suggestions(&text);
+            *parsed = Some((entry.clone(), text, suggestions));
+        }
+        let suggestions = parsed
+            .as_ref()
+            .map(|(_, _, s)| s.clone())
+            .unwrap_or_default();
         (!suggestions.is_empty()).then_some((entry, suggestions))
     }
 
