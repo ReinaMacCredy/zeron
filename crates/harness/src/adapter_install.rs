@@ -145,6 +145,19 @@ fn installed_entry_in(root: &Path, pin: &NpmPin, bin_name: &str) -> Option<PathB
     bin_entry(&dir, pin, bin_name)
 }
 
+fn installed_versions_in(root: &Path, pin: &NpmPin) -> Vec<String> {
+    let Ok(dirs) = std::fs::read_dir(root.join(pin.dir_name())) else {
+        return Vec::new();
+    };
+    let mut versions: Vec<String> = dirs
+        .flatten()
+        .filter(|dir| dir.path().join(OK_MARKER).is_file())
+        .filter_map(|dir| dir.file_name().into_string().ok())
+        .collect();
+    versions.sort();
+    versions
+}
+
 fn npm_cli_for_node(node: &Path) -> Option<PathBuf> {
     let cli = node
         .parent()?
@@ -283,6 +296,12 @@ fn launch_for_entry_with_node(
 
 pub fn installed_npm_tool(pin: &'static str, bin_name: &str) -> Option<PathBuf> {
     installed_entry(&NpmPin::parse(pin), bin_name)
+}
+
+pub fn installed_npm_versions(pin: &'static str) -> Vec<String> {
+    adapters_root()
+        .map(|root| installed_versions_in(&root, &NpmPin::parse(pin)))
+        .unwrap_or_default()
 }
 
 pub async fn ensure_npm_tool(
@@ -704,6 +723,24 @@ mod tests {
         assert_eq!(
             installed_entry_in(&root, &pin, "tool"),
             Some(installed_pkg.join("dist.js"))
+        );
+    }
+
+    #[test]
+    fn installed_versions_are_the_marked_install_dirs() {
+        let root = tempfile::tempdir().unwrap();
+        let pin = NpmPin::parse("@scope/tool@1.0.0");
+        assert!(installed_versions_in(root.path(), &pin).is_empty());
+        let tool = root.path().join(pin.dir_name());
+        for (version, marked) in [("1.0.0", true), ("0.9.0", true), (".staging-1", false)] {
+            std::fs::create_dir_all(tool.join(version)).unwrap();
+            if marked {
+                std::fs::write(tool.join(version).join(OK_MARKER), version).unwrap();
+            }
+        }
+        assert_eq!(
+            installed_versions_in(root.path(), &pin),
+            vec!["0.9.0".to_string(), "1.0.0".to_string()]
         );
     }
 

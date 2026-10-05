@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use zeron_proto::device_hub::{DeviceToolVersion, DeviceToolVersions};
+
 const HUB_PIN: &str = "expo-device-hub@0.12.0";
 const HUB_BIN: &str = "expo-device-hub";
 
@@ -9,6 +11,17 @@ pub(crate) fn installed_hub() -> Option<PathBuf> {
 
 pub(crate) fn hub_installed() -> bool {
     installed_hub().is_some()
+}
+
+pub(crate) fn versions(running: bool) -> DeviceToolVersions {
+    let required = HUB_PIN.rsplit_once('@').map_or("", |(_, v)| v).to_string();
+    DeviceToolVersions {
+        hub: DeviceToolVersion {
+            installed: zeron_harness::installed_npm_versions(HUB_PIN),
+            running: running.then(|| required.clone()),
+            required,
+        },
+    }
 }
 
 pub(crate) async fn ensure_hub() -> Result<PathBuf, String> {

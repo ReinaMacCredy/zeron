@@ -22,6 +22,7 @@ pub mod archived;
 pub mod composer;
 pub mod computer;
 pub mod delegation;
+pub mod device_hub;
 pub mod devices;
 pub mod files;
 pub mod harnesses;
@@ -1370,6 +1371,7 @@ pub struct UiSettings {
     pub pr_chat_history: PrChatHistory,
     pub pr_chat_sessions: std::collections::BTreeMap<String, Vec<PrChatSession>>,
     pub git_agent_busy_policy: GitAgentBusyPolicy,
+    pub device_auto_float: bool,
     /// Pre-theme settings used `accentColor`. Read it once, migrate to
     /// [`Self::accent`], and never write it again.
     #[serde(default, rename = "accentColor", skip_serializing)]
@@ -1483,6 +1485,7 @@ impl Default for UiSettings {
             pr_chat_history: PrChatHistory::default(),
             pr_chat_sessions: Default::default(),
             git_agent_busy_policy: GitAgentBusyPolicy::default(),
+            device_auto_float: true,
             legacy_accent_color: None,
         }
     }
@@ -2157,6 +2160,7 @@ impl UiSettings {
             pr_chat_history,
             pr_chat_sessions,
             git_agent_busy_policy,
+            device_auto_float,
         );
         current
     }
@@ -3551,6 +3555,7 @@ mod tests {
                 }],
             )]),
             git_agent_busy_policy: GitAgentBusyPolicy::BlockAll,
+            device_auto_float: false,
             legacy_accent_color: None,
         };
         settings.save(dir.path()).unwrap();
@@ -3560,6 +3565,7 @@ mod tests {
         assert!(json.contains(r#""prChatStyle": "bottom-bar""#));
         assert!(json.contains(r#""prChatHistory": "fresh""#));
         assert!(json.contains(r#""gitAgentBusyPolicy": "block-all""#));
+        assert!(json.contains(r#""deviceAutoFloat": false"#));
         assert!(json.contains(r#""github.com/acme/zeron#7": ["#));
         assert!(json.contains(r#""chatId": "pr-chat-1""#));
         assert!(json.contains(r#""entryId": "m2""#));

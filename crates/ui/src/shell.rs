@@ -43,6 +43,7 @@ use crate::settings::accounts::{self as accounts, AccountsPage};
 use crate::settings::appearance::{AppearancePage, AppearanceSettingsEvent};
 use crate::settings::archived::ArchivedPage;
 use crate::settings::computer::ComputerPage;
+use crate::settings::device_hub::DeviceHubPage;
 use crate::settings::devices::DevicesPage;
 use crate::settings::files::{FilesSettingsEvent, FilesSettingsPage};
 use crate::settings::harnesses::HarnessesPage;
@@ -570,13 +571,14 @@ pub enum SettingsSection {
     General,
     Appshots,
     Computer,
+    DeviceHub,
     SourceControl,
     Archived,
 }
 
 impl SettingsSection {
     /// Sections shown in Settings. `Agents` is a legacy Accounts route alias.
-    pub const ALL: [SettingsSection; 12] = [
+    pub const ALL: [SettingsSection; 13] = [
         SettingsSection::General,
         SettingsSection::Appearance,
         SettingsSection::Notifications,
@@ -587,6 +589,7 @@ impl SettingsSection {
         SettingsSection::Files,
         SettingsSection::Appshots,
         SettingsSection::Computer,
+        SettingsSection::DeviceHub,
         SettingsSection::SourceControl,
         SettingsSection::Archived,
     ];
@@ -631,6 +634,7 @@ impl SettingsSection {
             SettingsSection::General => "general",
             SettingsSection::Appshots => "appshots",
             SettingsSection::Computer => "computer",
+            SettingsSection::DeviceHub => "device-hub",
             SettingsSection::SourceControl => "source-control",
             SettingsSection::Archived => "archived",
         }
@@ -650,6 +654,7 @@ impl SettingsSection {
             "general" | "conversations" => SettingsSection::General,
             "appshots" => SettingsSection::Appshots,
             "computer" => SettingsSection::Computer,
+            "device-hub" => SettingsSection::DeviceHub,
             "source-control" => SettingsSection::SourceControl,
             "archived" => SettingsSection::Archived,
             _ => return None,
@@ -677,6 +682,7 @@ impl SettingsSection {
             SettingsSection::General => "General",
             SettingsSection::Appshots => "Appshots",
             SettingsSection::Computer => "Computer",
+            SettingsSection::DeviceHub => "Device hub",
             SettingsSection::SourceControl => "Source Control",
             SettingsSection::Archived => "Archived sessions",
         }
@@ -694,6 +700,7 @@ impl SettingsSection {
             SettingsSection::Shortcuts => &["keyboard", "keybinding"],
             SettingsSection::Appshots => &["screenshot", "capture"],
             SettingsSection::Computer => &["computer use", "desktop", "cursor", "permission"],
+            SettingsSection::DeviceHub => &["simulator", "emulator", "ios", "android"],
             SettingsSection::SourceControl => &["git", "commit", "pull request"],
             SettingsSection::Archived => &["archive", "old sessions"],
             _ => &[],
@@ -770,6 +777,12 @@ impl SettingsSection {
                 ("Getting started", &[]),
                 ("Recent Computer actions", &["history", "audit"]),
                 ("Advanced", &["permission", "driver"]),
+            ],
+            SettingsSection::DeviceHub => &[
+                ("Device hub", &["simulator", "emulator", "version"]),
+                ("Platform support", &["xcode", "android sdk"]),
+                ("Agent device access", &["agent"]),
+                ("Auto-show floating preview", &["float"]),
             ],
             SettingsSection::SourceControl => &[
                 ("Instruction", &["commit message", "prompt", "conventional"]),
@@ -2221,6 +2234,7 @@ pub struct Shell {
     notifications_page: Option<Entity<NotificationsPage>>,
     shortcuts_page: Option<Entity<ShortcutsPage>>,
     computer_page: Option<Entity<ComputerPage>>,
+    device_hub_page: Option<Entity<DeviceHubPage>>,
     pending_computer_guide: Option<Vec<zeron_proto::computer::ComputerPermission>>,
     accounts_page: Option<Entity<AccountsPage>>,
     /// This device's agent logins + usage for the sidebar user row and its
@@ -2811,6 +2825,7 @@ impl Shell {
             notifications_page: None,
             shortcuts_page: None,
             computer_page: None,
+            device_hub_page: None,
             pending_computer_guide: None,
             accounts_page: None,
             account_usage: None,
@@ -6303,6 +6318,13 @@ impl Shell {
                 }
                 page.into_any_element()
             }
+            SettingsSection::DeviceHub => {
+                let state = self.state.clone();
+                self.device_hub_page
+                    .get_or_insert_with(|| cx.new(|cx| DeviceHubPage::new(state, cx)))
+                    .clone()
+                    .into_any_element()
+            }
             SettingsSection::SourceControl => {
                 if self.source_control_page.is_none() {
                     let state = self.state.clone();
@@ -8355,6 +8377,7 @@ impl Shell {
             SettingsSection::General => icons::SETTINGS,
             SettingsSection::Appshots => icons::SCREEN_CAPTURE,
             SettingsSection::Computer => icons::CURSOR,
+            SettingsSection::DeviceHub => icons::SMARTPHONE,
             SettingsSection::SourceControl => icons::GIT_BRANCH,
             SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
         };
@@ -19432,6 +19455,26 @@ mod settings_modal_regressions {
     }
 
     #[test]
+    fn every_settings_section_round_trips_its_slug_and_device_hub_follows_computer() {
+        for section in SettingsSection::ALL {
+            assert_eq!(SettingsSection::from_slug(section.slug()), Some(section));
+            let json = serde_json::to_string(&section).unwrap();
+            assert_eq!(serde_json::from_str::<SettingsSection>(&json).unwrap(), section);
+        }
+        assert_eq!(SettingsSection::DeviceHub.slug(), "device-hub");
+        assert_eq!(SettingsSection::DeviceHub.label(), "Device hub");
+        assert_eq!(SettingsSection::Devices.label(), "Devices");
+        let computer = SettingsSection::ALL
+            .iter()
+            .position(|section| *section == SettingsSection::Computer)
+            .unwrap();
+        assert_eq!(
+            SettingsSection::ALL[computer + 1],
+            SettingsSection::DeviceHub
+        );
+    }
+
+    #[test]
     fn open_route_names_a_section_or_reopens_the_remembered_one() {
         let remembered = SettingsSection::Notifications;
         assert_eq!(
@@ -19453,6 +19496,7 @@ mod settings_modal_regressions {
             ("settings/files", SettingsSection::Files),
             ("settings/appshots", SettingsSection::Appshots),
             ("settings/computer", SettingsSection::Computer),
+            ("settings/device-hub", SettingsSection::DeviceHub),
             ("settings/source-control", SettingsSection::SourceControl),
             ("settings/archived", SettingsSection::Archived),
         ] {

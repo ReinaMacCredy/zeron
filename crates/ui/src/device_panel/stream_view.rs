@@ -19,6 +19,7 @@ use zeron_proto::device_hub::{
 use zeron_rpc::methods;
 
 use super::geometry::{self, KeyPress};
+use super::loading::{self, LoadingStage, LoadingView};
 use crate::state::EngineHandle;
 use crate::theme::Theme;
 
@@ -186,6 +187,7 @@ async fn drain_frames(
 pub struct DeviceStreamView {
     engine: EngineHandle,
     device_id: String,
+    label: (SharedString, SharedString),
     image: Option<DecodedFrame>,
     painted: bool,
     retired: Vec<Arc<RenderImage>>,
@@ -255,6 +257,10 @@ impl DeviceStreamView {
         });
         let mut view = Self {
             engine,
+            label: (
+                SharedString::from(device_id.clone()),
+                SharedString::default(),
+            ),
             device_id,
             image: None,
             painted: false,
@@ -324,6 +330,14 @@ impl DeviceStreamView {
             *self.rotation.lock().unwrap_or_else(PoisonError::into_inner) =
                 geometry::display_rotation(screen.as_ref());
             self.screen = screen;
+            cx.notify();
+        }
+    }
+
+    pub fn set_label(&mut self, name: String, description: String, cx: &mut Context<Self>) {
+        let label = (SharedString::from(name), SharedString::from(description));
+        if self.label != label {
+            self.label = label;
             cx.notify();
         }
     }
@@ -567,57 +581,48 @@ impl Render for DeviceStreamView {
                 .absolute()
                 .inset_0(),
             )
-            .when(connecting, |el| {
-                el.child(
+            .when(connecting || self.video_error.is_some(), |el| {
+                let error = self.video_error.clone();
+                let reconnect = error.is_some().then(|| {
                     div()
-                        .absolute()
-                        .inset_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .when(self.image.is_some(), |el| el.bg(theme.bg.opacity(0.85)))
+                        .id("device-reconnect")
+                        .debug_selector(|| "device-reconnect".into())
+                        .role(gpui::Role::Button)
+                        .aria_label("Reconnect")
+                        .px(px(10.0))
+                        .py(px(4.0))
+                        .rounded(px(8.0))
+                        .border_1()
+                        .border_color(theme.border)
                         .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(theme.text_muted)
-                        .child("Connecting video..."),
-                )
-            })
-            .when_some(self.video_error.clone(), |el, error| {
+                        .text_color(theme.text)
+                        .cursor_pointer()
+                        .hover(|s| s.bg(crate::theme::ink(0.05)))
+                        .child("Reconnect")
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(|this, _, _, cx| this.reconnect(cx)))
+                        .into_any_element()
+                });
                 el.child(
                     div()
                         .absolute()
                         .inset_0()
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .justify_center()
-                        .gap(px(10.0))
-                        .p(px(16.0))
-                        .bg(theme.bg.opacity(0.85))
-                        .child(
-                            div()
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .text_color(theme.danger)
-                                .child(error),
-                        )
-                        .child(
-                            div()
-                                .id("device-reconnect")
-                                .debug_selector(|| "device-reconnect".into())
-                                .role(gpui::Role::Button)
-                                .aria_label("Reconnect")
-                                .px(px(10.0))
-                                .py(px(4.0))
-                                .rounded(px(8.0))
-                                .border_1()
-                                .border_color(theme.border)
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .text_color(theme.text)
-                                .cursor_pointer()
-                                .hover(|s| s.bg(crate::theme::ink(0.05)))
-                                .child("Reconnect")
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                .on_click(cx.listener(|this, _, _, cx| this.reconnect(cx))),
-                        ),
+                        .right(px(geometry::RAIL_WIDTH))
+                        .child(loading::render(
+                            LoadingView {
+                                name: self.label.0.clone(),
+                                description: self.label.1.clone(),
+                                message: error
+                                    .clone()
+                                    .unwrap_or_else(|| "Connecting video...".into()),
+                                stage: LoadingStage::Stream,
+                                error: error.is_some(),
+                            },
+                            &theme,
+                            cx.entity_id(),
+                            reconnect,
+                            cx,
+                        )),
                 )
             })
             .when_some(input_down, |el, text| {

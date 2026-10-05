@@ -290,7 +290,9 @@ pub trait Harness: Send + Sync {
 
 pub mod acp;
 pub(crate) mod adapter_install;
-pub use adapter_install::{ensure_npm_tool, installed_npm_tool, npm_tool_launch};
+pub use adapter_install::{
+    ensure_npm_tool, installed_npm_tool, installed_npm_versions, npm_tool_launch,
+};
 pub mod archive_install;
 mod catalog;
 mod catalog_failure;

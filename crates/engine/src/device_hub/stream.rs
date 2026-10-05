@@ -20,6 +20,7 @@ pub(crate) type FrameSlot = watch::Sender<Option<Arc<Frame>>>;
 
 struct Entry {
     generation: u64,
+    link: u64,
     frames: FrameSlot,
     subscribers: usize,
     reader: tokio::task::JoinHandle<()>,
@@ -128,6 +129,7 @@ impl DeviceStreams {
             *next_generation += 1;
             Entry {
                 generation: *next_generation,
+                link: *next_generation,
                 reader: start(frames.clone(), *next_generation),
                 frames,
                 subscribers: 0,
@@ -154,7 +156,7 @@ impl DeviceStreams {
     pub(crate) fn set_status(
         &self,
         device_id: &str,
-        generation: u64,
+        link: u64,
         video: Option<StreamLinkStatus>,
         input: Option<StreamLinkStatus>,
     ) {
@@ -162,7 +164,7 @@ impl DeviceStreams {
         let Some(entry) = entries
             .by_device
             .get_mut(device_id)
-            .filter(|entry| entry.generation == generation)
+            .filter(|entry| entry.link == link)
         else {
             return;
         };
@@ -185,9 +187,9 @@ impl DeviceStreams {
             .is_some_and(|entry| entry.input.is_some())
     }
 
-    pub(crate) fn set_input(&self, device_id: &str, generation: u64, input: InputSocket) {
+    pub(crate) fn set_input(&self, device_id: &str, link: u64, input: InputSocket) {
         if let Some(entry) = self.lock().by_device.get_mut(device_id)
-            && entry.generation == generation
+            && entry.link == link
             && entry.input.is_none()
         {
             entry.input = Some(input);
@@ -208,6 +210,47 @@ impl DeviceStreams {
             Some(socket) => socket.send(input),
             None => Err("Input is not connected; open the device's video first".into()),
         }
+    }
+
+    pub(crate) fn device_ids(&self) -> Vec<String> {
+        self.lock().by_device.keys().cloned().collect()
+    }
+
+    pub(crate) fn pause(&self) {
+        self.relink(|_, _, _| None);
+    }
+
+    pub(crate) fn resume(
+        &self,
+        start: impl Fn(&str, FrameSlot, u64) -> tokio::task::JoinHandle<()>,
+    ) {
+        self.relink(|device_id, frames, link| Some(start(device_id, frames, link)));
+    }
+
+    fn relink(&self, start: impl Fn(&str, FrameSlot, u64) -> Option<tokio::task::JoinHandle<()>>) {
+        let (retired, inputs) = {
+            let mut entries = self.lock();
+            let Entries {
+                next_generation,
+                by_device,
+            } = &mut *entries;
+            let mut retired = Vec::new();
+            let mut inputs = Vec::new();
+            for (device_id, entry) in by_device.iter_mut() {
+                *next_generation += 1;
+                entry.link = *next_generation;
+                entry.reader.abort();
+                if let Some(reader) = start(device_id, entry.frames.clone(), entry.link) {
+                    retired.push(std::mem::replace(&mut entry.reader, reader));
+                }
+                inputs.extend(entry.input.take());
+                entry.video_status = StreamLinkStatus::Connecting;
+                entry.input_status = StreamLinkStatus::Idle;
+            }
+            self.publish(&entries);
+            (retired, inputs)
+        };
+        drop((retired, inputs));
     }
 
     pub(crate) fn clear(&self) {
@@ -237,7 +280,7 @@ pub(crate) fn spawn_reader(
     on_first_frame: impl Fn() + Send + 'static,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut seq = 0u64;
+        let mut seq = frames.borrow().as_ref().map_or(0, |frame| frame.seq);
         loop {
             on_status(StreamLinkStatus::Connecting);
             let detail = match http
