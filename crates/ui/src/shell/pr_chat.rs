@@ -26,8 +26,8 @@ pub(super) struct PrChatPanel {
     minimized: bool,
     earlier: Option<SharedString>,
     sessions_menu: bool,
-    cards: HashMap<CardKey, CardState>,
-    confirm: Option<CardKey>,
+    cards: HashMap<PrChatCardRef, CardState>,
+    confirm: Option<PrChatCardRef>,
     _location: Option<Task<()>>,
     _context: Option<Task<()>>,
     _saved: Option<Subscription>,
@@ -39,7 +39,7 @@ pub(super) struct PrChatTrash {
     parked: Vec<ParkedPrChat>,
     deleted: HashSet<String>,
     pruned: Option<u64>,
-    posting: HashSet<(String, String, usize)>,
+    posting: HashSet<(String, PrChatCardRef)>,
 }
 
 struct ParkedPrChat {
@@ -54,8 +54,6 @@ enum Landing {
     Index(String, bool),
     Promote,
 }
-
-type CardKey = (String, usize);
 
 #[derive(Default)]
 struct CardState {
@@ -792,15 +790,20 @@ impl Shell {
         (!suggestions.is_empty()).then_some((entry, suggestions))
     }
 
-    fn pr_chat_suggestion(&self, key: &CardKey, cx: &App) -> Option<Suggestion> {
+    fn pr_chat_suggestion(&self, key: &PrChatCardRef, cx: &App) -> Option<Suggestion> {
         let (entry, suggestions) = self.pr_chat_suggestions(cx)?;
-        if entry != key.0 {
+        if entry != key.entry_id {
             return None;
         }
-        suggestions.into_iter().find(|s| s.index == key.1)
+        suggestions.into_iter().find(|s| s.index == key.index)
     }
 
-    fn edit_pr_chat_card(&mut self, key: CardKey, window: &mut Window, cx: &mut Context<Self>) {
+    fn edit_pr_chat_card(
+        &mut self,
+        key: PrChatCardRef,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(suggestion) = self.pr_chat_suggestion(&key, cx) else {
             return;
         };
@@ -822,15 +825,12 @@ impl Shell {
         cx.notify();
     }
 
-    fn dismiss_pr_chat_card(&mut self, key: CardKey, cx: &mut Context<Self>) {
+    fn dismiss_pr_chat_card(&mut self, key: PrChatCardRef, cx: &mut Context<Self>) {
         let Some(panel) = self.pr_chat.as_mut() else {
             return;
         };
         let chat_id = panel.chat_id.clone();
-        let card = PrChatCardRef {
-            entry_id: key.0.clone(),
-            index: key.1,
-        };
+        let card = key.clone();
         panel.cards.entry(key).or_default().dismissed = true;
         settings::update(SavePolicy::Debounced, cx, |settings| {
             settings.record_pr_chat_dismiss(&chat_id, card)
@@ -838,7 +838,12 @@ impl Shell {
         cx.notify();
     }
 
-    fn post_pr_chat_card(&mut self, key: CardKey, request_changes: bool, cx: &mut Context<Self>) {
+    fn post_pr_chat_card(
+        &mut self,
+        key: PrChatCardRef,
+        request_changes: bool,
+        cx: &mut Context<Self>,
+    ) {
         let Some(suggestion) = self.pr_chat_suggestion(&key, cx) else {
             return;
         };
@@ -883,7 +888,7 @@ impl Shell {
 
     fn run_pr_chat_card(
         &mut self,
-        key: CardKey,
+        key: PrChatCardRef,
         suggestion: Suggestion,
         request_changes: bool,
         cx: &mut Context<Self>,
@@ -896,13 +901,9 @@ impl Shell {
             return;
         };
         let chat_id = panel.chat_id.clone();
-        let done = settings::pr_chat_session(&chat_id, cx).is_some_and(|session| {
-            session
-                .posted
-                .iter()
-                .any(|posted| posted.entry_id == key.0 && posted.index == key.1)
-        });
-        let posting = (chat_id.clone(), key.0.clone(), key.1);
+        let done = settings::pr_chat_session(&chat_id, cx)
+            .is_some_and(|session| session.posted.iter().any(|posted| posted.card == key));
+        let posting = (chat_id.clone(), key.clone());
         let card = panel.cards.entry(key.clone()).or_default();
         if done || self.pr_chat_trash.posting.contains(&posting) || card.posted.is_some() {
             return;
@@ -938,21 +939,20 @@ impl Shell {
     fn finish_pr_chat_card(
         &mut self,
         chat_id: String,
-        key: CardKey,
+        key: PrChatCardRef,
         suggestion: Suggestion,
         label: String,
         result: Result<(), String>,
         cx: &mut Context<Self>,
     ) {
         let posted = result.as_ref().ok().map(|_| PrChatPosted {
-            entry_id: key.0.clone(),
-            index: key.1,
+            card: key.clone(),
             label,
             at: Utc::now(),
         });
         self.pr_chat_trash
             .posting
-            .remove(&(chat_id.clone(), key.0.clone(), key.1));
+            .remove(&(chat_id.clone(), key.clone()));
         if let Some(posted) = posted.clone() {
             settings::update(SavePolicy::Immediate, cx, |settings| {
                 settings.record_pr_chat_post(&chat_id, posted)
@@ -1383,21 +1383,17 @@ impl Shell {
             .into_iter()
             .filter_map(|suggestion| {
                 let ix = suggestion.index;
-                let key: CardKey = (entry.clone(), ix);
+                let key = PrChatCardRef {
+                    entry_id: entry.clone(),
+                    index: ix,
+                };
                 let state = panel.cards.get(&key);
-                if state.is_some_and(|state| state.dismissed)
-                    || dismissed
-                        .iter()
-                        .any(|card| card.entry_id == entry && card.index == ix)
-                {
+                if state.is_some_and(|state| state.dismissed) || dismissed.contains(&key) {
                     return None;
                 }
-                let done = state.and_then(|state| state.posted.clone()).or_else(|| {
-                    posted
-                        .iter()
-                        .find(|posted| posted.entry_id == entry && posted.index == ix)
-                        .cloned()
-                });
+                let done = state
+                    .and_then(|state| state.posted.clone())
+                    .or_else(|| posted.iter().find(|posted| posted.card == key).cloned());
                 let frame = div()
                     .id(("pr-chat-card", ix))
                     .flex_none()
@@ -1437,11 +1433,10 @@ impl Shell {
                             .into_any_element(),
                     );
                 }
-                let pending = self.pr_chat_trash.posting.contains(&(
-                    panel.chat_id.clone(),
-                    entry.clone(),
-                    ix,
-                ));
+                let pending = self
+                    .pr_chat_trash
+                    .posting
+                    .contains(&(panel.chat_id.clone(), key.clone()));
                 let editor = state.and_then(|state| state.editor.clone());
                 let error = state.and_then(|state| state.error.clone());
                 let header = suggestion.card_header();
@@ -2886,7 +2881,11 @@ mod tests {
 
         click(cx, "pr-chat-card-edit-0");
         let editor = shell.read_with(cx, |shell, _| {
-            let card = &shell.pr_chat.as_ref().unwrap().cards[&("a1".to_string(), 0)];
+            let key = PrChatCardRef {
+                entry_id: "a1".into(),
+                index: 0,
+            };
+            let card = &shell.pr_chat.as_ref().unwrap().cards[&key];
             card.editor.clone().expect("editing")
         });
         assert!(cx.debug_bounds("pr-chat-card-input-0").is_some());
@@ -2936,7 +2935,7 @@ mod tests {
             .unwrap_or_default();
         let saved: Vec<(&str, usize, &str)> = posted
             .iter()
-            .map(|p| (p.entry_id.as_str(), p.index, p.label.as_str()))
+            .map(|p| (p.card.entry_id.as_str(), p.card.index, p.label.as_str()))
             .collect();
         assert_eq!(
             saved,

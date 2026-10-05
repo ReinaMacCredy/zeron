@@ -1098,7 +1098,7 @@ pub struct PrChatSession {
     pub fresh: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrChatCardRef {
     pub entry_id: String,
@@ -1108,8 +1108,8 @@ pub struct PrChatCardRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrChatPosted {
-    pub entry_id: String,
-    pub index: usize,
+    #[serde(flatten)]
+    pub card: PrChatCardRef,
     pub label: String,
     pub at: chrono::DateTime<chrono::Utc>,
 }
@@ -2204,10 +2204,7 @@ impl UiSettings {
 
     pub fn record_pr_chat_post(&mut self, chat_id: &str, posted: PrChatPosted) {
         if let Some(session) = self.pr_chat_session_mut(chat_id)
-            && !session
-                .posted
-                .iter()
-                .any(|p| p.entry_id == posted.entry_id && p.index == posted.index)
+            && !session.posted.iter().any(|p| p.card == posted.card)
         {
             session.posted.push(posted);
         }
@@ -2610,8 +2607,10 @@ mod tests {
         assert!(!pruned.pr_chat_sessions.contains_key("list"));
 
         let posted = |index: usize| PrChatPosted {
-            entry_id: "m2".into(),
-            index,
+            card: PrChatCardRef {
+                entry_id: "m2".into(),
+                index,
+            },
             label: "Posted comment".into(),
             at: chrono::Utc::now(),
         };
@@ -2629,6 +2628,20 @@ mod tests {
         let sessions = &pruned.pr_chat_sessions["github.com/acme/zeron#7"];
         assert_eq!(sessions[0].posted.len(), 2);
         assert_eq!(sessions[0].dismissed, [card(1)]);
+    }
+
+    #[test]
+    fn pr_chat_posted_keeps_its_flat_json_shape() {
+        let json = r#"{"entryId":"m2","index":3,"label":"Merged #7","at":"2026-09-21T09:00:00Z"}"#;
+        let posted: PrChatPosted = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            posted.card,
+            PrChatCardRef {
+                entry_id: "m2".into(),
+                index: 3,
+            }
+        );
+        assert_eq!(serde_json::to_string(&posted).unwrap(), json);
     }
 
     #[test]
@@ -3545,8 +3558,10 @@ mod tests {
                     chat_id: "pr-chat-1".into(),
                     created_at: chrono::DateTime::from_timestamp(1_790_000_000, 0).unwrap(),
                     posted: vec![PrChatPosted {
-                        entry_id: "m2".into(),
-                        index: 0,
+                        card: PrChatCardRef {
+                            entry_id: "m2".into(),
+                            index: 0,
+                        },
                         label: "Posted comment".into(),
                         at: chrono::DateTime::from_timestamp(1_790_000_100, 0).unwrap(),
                     }],
