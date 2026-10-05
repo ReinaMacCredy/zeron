@@ -5,6 +5,7 @@ use crate::computer::{self, presence::PresenceTone, preview};
 use crate::files::client::{FilesRequestContext, WorkspaceFilesClient};
 use std::rc::Rc;
 use zeron_proto::computer::ComputerPreviewPlacement;
+use zeron_proto::device_hub::{DeviceOpener, DevicePlatform};
 
 pub(super) const SIDECAR_WIDTH: f32 = 260.0;
 pub(super) const SIDECAR_RAIL_WIDTH: f32 = 40.0;
@@ -512,6 +513,30 @@ impl Shell {
                 .action(move |this, _, cx| this.toggle_computer_entry(&chat_id, cx));
             row.thumbnail = entry.thumbnail.then_some(entry.chat_id);
             on.push(row);
+        }
+        if let Some(chat) = chat.as_ref() {
+            on.extend(
+                self.sidecar_devices(&chat.id, cx)
+                    .into_iter()
+                    .take(SECTION_CAP)
+                    .enumerate()
+                    .map(|(ix, (target, name, platform, opener))| {
+                        let glyph = match platform {
+                            DevicePlatform::Ios => icons::APPLE,
+                            DevicePlatform::Android => icons::ANDROID,
+                        };
+                        let opener = opener.map(|opener| match opener {
+                            DeviceOpener::User => SidecarValue::Text("You".into()),
+                            DeviceOpener::Agent => SidecarValue::Text("Agent".into()),
+                        });
+                        let chat_id = chat.id.clone();
+                        SidecarEntry::new("device", ix, glyph, name)
+                            .value(opener)
+                            .action(move |this, window, cx| {
+                                this.focus_device(&chat_id, target.clone(), window, cx)
+                            })
+                    }),
+            );
         }
         sections.push(SidecarSection {
             heading: format!("On {}", project.as_deref().unwrap_or("this session")).into(),
@@ -1533,6 +1558,149 @@ mod sidecar_regressions {
         assert!(!open(cx), "the entry hides an open card");
         click(cx, "sidecar-panel-computer-0");
         assert!(open(cx), "and reopens a hidden one");
+    }
+
+    #[gpui::test]
+    fn a_device_row_shows_the_chats_open_device_and_focuses_its_tab_or_float(
+        cx: &mut TestAppContext,
+    ) {
+        use zeron_proto::device_hub::{
+            DeviceHubSettings, DeviceHubState, DeviceOpener, DevicePlatform, DeviceSession,
+            HubDevice,
+        };
+        let (shell, cx) = setup(cx);
+        assert!(cx.debug_bounds("sidecar-panel-device-0").is_none());
+        let device = |id: &str, name: &str, platform| HubDevice {
+            host_id: "local".into(),
+            id: id.into(),
+            name: name.into(),
+            platform,
+            booted: true,
+            ..Default::default()
+        };
+        let session = |chat: &str, id: &str, opened_by| DeviceSession {
+            chat_id: chat.into(),
+            host_id: "local".into(),
+            device_id: id.into(),
+            opened_by,
+            ..Default::default()
+        };
+        let hub = DeviceHubState {
+            settings: DeviceHubSettings {
+                enabled: true,
+                onboarding_completed: true,
+                ..Default::default()
+            },
+            devices: vec![
+                device("DUO", "iPhone Duo", DevicePlatform::Ios),
+                device("emulator-5554", "Pixel_Fold", DevicePlatform::Android),
+            ],
+            sessions: vec![
+                session("side-a", "DUO", Some(DeviceOpener::User)),
+                session("parent", "DUO", Some(DeviceOpener::Agent)),
+                session("parent", "emulator-5554", None),
+                session("parent", "GONE", Some(DeviceOpener::User)),
+            ],
+            ..Default::default()
+        };
+        shell.update(cx, |shell, cx| {
+            shell
+                .state
+                .update(cx, |state, _| state.device_hub = Some(hub));
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        let rows = shell.update(cx, |shell, cx| {
+            shell
+                .sidecar_devices("parent", cx)
+                .into_iter()
+                .map(|(target, name, platform, opener)| (target.1, name, platform, opener))
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            rows,
+            [
+                (
+                    "DUO".to_string(),
+                    "iPhone Duo".to_string(),
+                    DevicePlatform::Ios,
+                    Some(DeviceOpener::Agent)
+                ),
+                (
+                    "emulator-5554".to_string(),
+                    "Pixel_Fold".to_string(),
+                    DevicePlatform::Android,
+                    None
+                ),
+            ],
+            "only this chat's sessions on listed devices"
+        );
+        assert!(cx.debug_bounds("sidecar-panel-device-0").is_some());
+        assert!(cx.debug_bounds("sidecar-panel-device-1").is_some());
+        assert!(cx.debug_bounds("sidecar-panel-device-2").is_none());
+
+        let device_tabs = |shell: &Shell, cx: &App| {
+            shell
+                .right_surface_rows(cx)
+                .into_iter()
+                .filter_map(|(surface, ..)| match surface {
+                    RightSurface::Device(id) => Some(id),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        click(cx, "sidecar-panel-device-0");
+        let tab = shell.read_with(cx, |shell, cx| {
+            assert!(shell.right_pane_open(cx));
+            let RightSurface::Device(id) = shell.resolved_right_active(cx) else {
+                panic!("the device tab must be active");
+            };
+            assert_eq!(
+                shell.device_panels[&id].0.read(cx).target(),
+                Some(&("local".to_string(), "DUO".to_string()))
+            );
+            id
+        });
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| shell.add_browser_surface(None, window, cx))
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert_ne!(
+            shell.read_with(cx, |shell, cx| shell.resolved_right_active(cx)),
+            RightSurface::Device(tab)
+        );
+        click(cx, "sidecar-expand");
+        click(cx, "sidecar-popover-device-0");
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(shell.resolved_right_active(cx), RightSurface::Device(tab));
+            assert_eq!(device_tabs(shell, cx), [tab], "the shown tab is reused");
+        });
+
+        shell.update(cx, |shell, cx| {
+            shell.toggle_right_pane(cx);
+            shell.open_device_float(
+                "parent".into(),
+                ("local".into(), "emulator-5554".into()),
+                cx,
+            );
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        click(cx, "sidecar-panel-device-1");
+        shell.read_with(cx, |shell, cx| {
+            assert!(!shell.right_pane_open(cx), "the float is the surface");
+            assert_eq!(device_tabs(shell, cx), [tab]);
+        });
+
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                if let Some(hub) = state.device_hub.as_mut() {
+                    hub.sessions.retain(|session| session.chat_id != "parent");
+                }
+            });
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("sidecar-panel-device-0").is_none());
     }
 
     #[gpui::test]

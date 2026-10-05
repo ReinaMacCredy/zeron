@@ -1,7 +1,7 @@
 use super::*;
 use crate::device_panel::float::{DeviceFloat, DeviceFloatEvent};
 use crate::device_panel::{DevicePanel, DevicePanelEvent};
-use zeron_proto::device_hub::DevicePlatform;
+use zeron_proto::device_hub::{DeviceOpener, DevicePlatform};
 
 type DeviceTarget = (String, String);
 
@@ -489,6 +489,56 @@ impl Shell {
                 && shown_target.as_ref() != Some(float.read(cx).target());
             float.update(cx, |float, cx| float.set_visible(visible, cx));
         }
+    }
+
+    pub(super) fn sidecar_devices(
+        &self,
+        chat_id: &str,
+        cx: &App,
+    ) -> Vec<(DeviceTarget, String, DevicePlatform, Option<DeviceOpener>)> {
+        let Some(hub) = self.state.read(cx).device_hub.as_ref() else {
+            return Vec::new();
+        };
+        hub.sessions
+            .iter()
+            .filter(|session| session.chat_id == chat_id)
+            .filter_map(|session| {
+                let device = hub.device(&session.host_id, &session.device_id)?;
+                Some((
+                    (session.host_id.clone(), session.device_id.clone()),
+                    device.name.clone(),
+                    device.platform,
+                    session.opened_by,
+                ))
+            })
+            .collect()
+    }
+
+    pub(super) fn focus_device(
+        &mut self,
+        chat_id: &str,
+        target: DeviceTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let shown = self
+            .device_tab_ids(chat_id)
+            .into_iter()
+            .any(|id| self.device_tab_target(id, cx).as_ref() == Some(&target));
+        let floating = self
+            .device_shell
+            .floats
+            .get(chat_id)
+            .map(|(float, _)| float.clone())
+            .filter(|float| float.read(cx).target() == &target);
+        if let Some(float) = floating.filter(|_| !shown) {
+            float.update(cx, |float, cx| float.focus(window, cx));
+            return;
+        }
+        if !self.right_pane_open(cx) {
+            self.toggle_right_pane(cx);
+        }
+        self.open_device_tab(chat_id, target, false, window, cx);
     }
 
     pub(super) fn render_device_float(&self, cx: &App) -> Option<AnyElement> {

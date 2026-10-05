@@ -253,6 +253,13 @@ impl DeviceFloat {
         self.visible
     }
 
+    pub fn focus(&self, window: &mut Window, cx: &mut App) {
+        if let Some(view) = &self.view {
+            let focus = view.read(cx).focus_handle();
+            window.focus(&focus, cx);
+        }
+    }
+
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         if self.visible == visible {
             return;
