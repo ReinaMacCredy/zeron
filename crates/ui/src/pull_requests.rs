@@ -420,6 +420,7 @@ pub struct PullRequestsPage {
     tab_menu: crate::popover::Popup<(PullRequestKey, gpui::Point<gpui::Pixels>)>,
     git_view: Option<Entity<git::GitTab>>,
     git_events: Vec<Subscription>,
+    open_when_listed: Option<zeron_proto::CreatedChangeRequest>,
     chat_open: bool,
 }
 
@@ -489,6 +490,7 @@ impl PullRequestsPage {
             tab_menu: Default::default(),
             git_view: None,
             git_events: Vec::new(),
+            open_when_listed: None,
             chat_open: false,
         };
         if let Some(listing) = paging::snapshot_dir(cx).and_then(|dir| paging::load_list(&dir)) {
@@ -559,8 +561,22 @@ impl PullRequestsPage {
                         {
                             paging::save_list(&dir, &listing);
                         }
+                        let created = page.open_when_listed.take().and_then(|wanted| {
+                            listing
+                                .items
+                                .iter()
+                                .find(|item| {
+                                    item.number == wanted.number
+                                        && item.host.eq_ignore_ascii_case(&wanted.host)
+                                        && item.repository.eq_ignore_ascii_case(&wanted.repository)
+                                })
+                                .cloned()
+                        });
                         page.listing = Loadable::Ready(listing);
                         page.load_stats(cx);
+                        if let Some(item) = created {
+                            page.open_pull_request(&item, cx);
+                        }
                     }
                     Err(error) if !matches!(page.listing, Loadable::Ready(_)) => {
                         page.listing = Loadable::Error(error)
@@ -732,6 +748,7 @@ impl PullRequestsPage {
                 if self.prefs.tab == PageTab::Git {
                     el.child(self.render_git_project_control(theme, cx))
                         .children(self.render_git_checkout_control(theme, cx))
+                        .children(self.render_git_sync_controls(theme, cx))
                 } else {
                     el.child(self.render_project_control(theme, cx))
                 }

@@ -450,6 +450,8 @@ pub(super) enum MenuKind {
     Project,
     GitProject,
     GitCheckout,
+    GitPush,
+    GitPull,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -639,7 +641,12 @@ fn section_of(kind: MenuKind) -> Option<FilterSection> {
         MenuKind::State => Some(FilterSection::State),
         MenuKind::Involvement => Some(FilterSection::Involvement),
         MenuKind::Project => Some(FilterSection::Project),
-        MenuKind::Sort | MenuKind::Filters | MenuKind::GitProject | MenuKind::GitCheckout => None,
+        MenuKind::Sort
+        | MenuKind::Filters
+        | MenuKind::GitProject
+        | MenuKind::GitCheckout
+        | MenuKind::GitPush
+        | MenuKind::GitPull => None,
     }
 }
 
@@ -648,6 +655,17 @@ impl PullRequestsPage {
         &self,
         kind: MenuKind,
         trigger: gpui::Stateful<gpui::Div>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        self.menu_trigger_with(kind, trigger, |_, _| {}, theme, cx)
+    }
+
+    pub(super) fn menu_trigger_with(
+        &self,
+        kind: MenuKind,
+        trigger: gpui::Stateful<gpui::Div>,
+        on_open: impl Fn(&mut Self, &mut Context<Self>) + 'static,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
@@ -669,6 +687,7 @@ impl PullRequestsPage {
                         submenu: None,
                         submenu_bounds: None,
                     });
+                    on_open(page, cx);
                     cx.notify();
                 }
             }));
@@ -798,6 +817,9 @@ impl PullRequestsPage {
             }
             (MenuKind::GitProject, _) => self.render_git_project_menu(theme, cx),
             (MenuKind::GitCheckout, _) => self.render_git_checkout_menu(theme, cx),
+            (MenuKind::GitPush | MenuKind::GitPull, _) => {
+                self.render_git_sync_menu(kind, theme, cx)
+            }
             (_, Some(section)) => div()
                 .min_w(px(160.0))
                 .child(self.render_filter_section(section, theme, cx))

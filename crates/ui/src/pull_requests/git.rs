@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use gpui::{
@@ -7,11 +7,12 @@ use gpui::{
     percentage, prelude::*, px,
 };
 use zeron_proto::{
-    ChangeRequestListItem, ChangeRequestState, CommitSummary, GenerateCommitMessageRequest,
+    ChangeRequestListItem, ChangeRequestListing, ChangeRequestState, CommitSummary,
+    CreateChangeRequestRequest, CreatedChangeRequest, GenerateCommitMessageRequest,
     GeneratedCommitMessage, GetWorkingTreeFileDiffRequest, GetWorkingTreeRequest,
-    GitAgentBusyPolicy, GitFileState, RunWorkingTreeActionRequest, SessionStatus, WorkingTree,
-    WorkingTreeAction, WorkingTreeActionReply, WorkingTreeFile, WorkingTreeFileDiff,
-    WorkspaceTarget,
+    GitAgentBusyPolicy, GitFileState, RunWorkingTreeActionRequest, SessionStatus, SyncBranchReply,
+    SyncBranchRequest, SyncDirection, WorkingTree, WorkingTreeAction, WorkingTreeActionReply,
+    WorkingTreeFile, WorkingTreeFileDiff, WorkspaceTarget,
 };
 use zeron_rpc::{RpcError, methods};
 
@@ -51,6 +52,40 @@ pub(super) struct CheckoutOption {
 pub enum GitTabEvent {
     OpenPullRequest(String),
     OpenSourceControlSettings,
+    ChangeRequestCreated(CreatedChangeRequest),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SyncKind {
+    Push,
+    Pull,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SyncOutcome {
+    pub kind: SyncKind,
+    pub text: SharedString,
+    pub failed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PrTarget {
+    pub host: String,
+    pub repository: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrStep {
+    Pushing,
+    Creating,
+}
+
+struct PrSheet {
+    title: Entity<ComposerInput>,
+    draft: bool,
+    step: Option<PrStep>,
+    error: Option<SharedString>,
+    _title_edits: Subscription,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,6 +175,14 @@ pub struct GitTab {
     model_override: Option<CommitModelChoice>,
     shown_default: Option<CommitModelChoice>,
     model_picker: Entity<Pickers>,
+    syncing: Option<SyncKind>,
+    sync_outcome: Option<SyncOutcome>,
+    sync_task: Option<Task<()>>,
+    pr_target: Option<PrTarget>,
+    pr_heads: Option<HashSet<String>>,
+    card_dismissed: bool,
+    pr_sheet: Option<PrSheet>,
+    pr_task: Option<Task<()>>,
     _model_picks: Subscription,
     _settings_changes: Subscription,
     _message_edits: Subscription,
@@ -209,6 +252,26 @@ fn conflict_note(conflicts: &[String]) -> String {
     format!(
         "The pop stopped on conflicts in {count} ({files}). The stash is kept; resolve the conflicts, then delete it."
     )
+}
+
+fn commit_count(count: u32) -> String {
+    if count == 1 {
+        "1 commit".to_string()
+    } else {
+        format!("{count} commits")
+    }
+}
+
+fn sync_note(kind: SyncKind, branch: &str, reply: &SyncBranchReply) -> String {
+    let upstream = reply.upstream.as_deref().unwrap_or("its upstream");
+    match kind {
+        SyncKind::Push if reply.commits == 0 => format!("Everything was already on {upstream}."),
+        SyncKind::Push => format!("Pushed {} to {upstream}.", commit_count(reply.commits)),
+        SyncKind::Pull if reply.commits == 0 => {
+            format!("{branch} is already up to date with {upstream}.")
+        }
+        SyncKind::Pull => format!("Pulled {} into {branch}.", commit_count(reply.commits)),
+    }
 }
 
 fn subject_chars(message: &str) -> usize {
@@ -420,6 +483,14 @@ impl GitTab {
             model_override: None,
             shown_default,
             model_picker,
+            syncing: None,
+            sync_outcome: None,
+            sync_task: None,
+            pr_target: None,
+            pr_heads: None,
+            card_dismissed: false,
+            pr_sheet: None,
+            pr_task: None,
             _model_picks: model_picks,
             _settings_changes: settings_changes,
             _message_edits: message_edits,
@@ -490,6 +561,12 @@ impl GitTab {
         self.stash_menu = false;
         self.stash_note = None;
         self.last_commit = None;
+        self.syncing = None;
+        self.sync_outcome = None;
+        self.sync_task = None;
+        self.card_dismissed = false;
+        self.pr_sheet = None;
+        self.pr_task = None;
         self.cancel_writing();
         self.written = None;
         self.write_error = None;
@@ -629,7 +706,7 @@ impl GitTab {
         }));
     }
 
-    fn source_control(&self, cx: &App) -> bool {
+    fn supports(&self, capability: &str, cx: &App) -> bool {
         let Some(space) = &self.space else {
             return false;
         };
@@ -638,9 +715,16 @@ impl GitTab {
             .device
             .as_deref()
             .or(state.local_device_id.as_deref())
-            .is_some_and(|device| {
-                state.device_supports(device, zeron_proto::capabilities::SOURCE_CONTROL_V1)
-            })
+            .is_some_and(|device| state.device_supports(device, capability))
+    }
+
+    fn source_control(&self, cx: &App) -> bool {
+        self.supports(zeron_proto::capabilities::SOURCE_CONTROL_V1, cx)
+    }
+
+    pub(super) fn syncs_branches(&self, cx: &App) -> bool {
+        self.source_control(cx)
+            && self.supports(zeron_proto::capabilities::SOURCE_CONTROL_SYNC_V1, cx)
     }
 
     fn allows(&self, action: &WorkingTreeAction, policy: GitAgentBusyPolicy) -> bool {
@@ -712,6 +796,8 @@ impl GitTab {
                         }
                         if committing {
                             tab.last_commit = reply.commit;
+                            tab.card_dismissed = false;
+                            tab.pr_sheet = None;
                             tab.message.update(cx, |input, cx| input.set_text("", cx));
                             tab.written = None;
                             tab.write_error = None;
@@ -810,6 +896,392 @@ impl GitTab {
             PendingTarget::Stash,
             cx,
         );
+    }
+
+    pub(super) fn set_pull_requests(
+        &mut self,
+        target: Option<PrTarget>,
+        heads: Option<HashSet<String>>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pr_target != target || self.pr_heads != heads {
+            self.pr_target = target;
+            self.pr_heads = heads;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn syncing(&self) -> Option<SyncKind> {
+        self.syncing
+    }
+
+    pub(super) fn sync_outcome(&self, kind: SyncKind) -> Option<&SyncOutcome> {
+        self.sync_outcome
+            .as_ref()
+            .filter(|outcome| outcome.kind == kind)
+    }
+
+    fn busy_for_sync(&self) -> bool {
+        self.syncing.is_some()
+            || self.pending.is_some()
+            || self
+                .pr_sheet
+                .as_ref()
+                .is_some_and(|sheet| sheet.step.is_some())
+    }
+
+    fn push_refusal(
+        &self,
+        tree: &WorkingTree,
+        policy: GitAgentBusyPolicy,
+        cx: &App,
+    ) -> Option<&'static str> {
+        if !self.syncs_branches(cx) {
+            return Some("Zeron on this device is too old to push. Update it first.");
+        }
+        if self.busy_for_sync() {
+            return Some("Another Git action is still running.");
+        }
+        if tree.agent_active
+            && !policy.allows_sync(SyncDirection::Push {
+                set_upstream: false,
+            })
+        {
+            return Some(agent_banner(policy));
+        }
+        if tree.branch.is_none() {
+            return Some("HEAD is detached. Check out a branch to push.");
+        }
+        if tree.head_sha.is_none() {
+            return Some("This branch has no commits yet.");
+        }
+        if tree.push_remote.is_none() {
+            return Some(
+                "There is no remote to push to. Add one named origin, or set remote.pushDefault.",
+            );
+        }
+        None
+    }
+
+    pub(super) fn sync_refusal(&self, kind: SyncKind, cx: &App) -> Option<SharedString> {
+        let Some(tree) = self.tree.as_ref() else {
+            return Some("Reading the working tree…".into());
+        };
+        let policy = busy_policy(cx);
+        match kind {
+            SyncKind::Push => {
+                if let Some(reason) = self.push_refusal(tree, policy, cx) {
+                    return Some(reason.into());
+                }
+                match (&tree.upstream, &tree.branch) {
+                    (Some(upstream), Some(branch)) if tree.ahead == 0 => {
+                        Some(format!("Nothing to push. {branch} matches {upstream}.").into())
+                    }
+                    _ => None,
+                }
+            }
+            SyncKind::Pull => {
+                if !self.syncs_branches(cx) {
+                    return Some(
+                        "Zeron on this device is too old to pull. Update it first.".into(),
+                    );
+                }
+                if self.busy_for_sync() {
+                    return Some("Another Git action is still running.".into());
+                }
+                if tree.agent_active && !policy.allows_sync(SyncDirection::Pull) {
+                    return Some(match policy {
+                        GitAgentBusyPolicy::SafeOnly => {
+                            "An agent is running in this worktree. Pull waits until it stops, so it cannot rewrite files under the agent.".into()
+                        }
+                        _ => agent_banner(policy).into(),
+                    });
+                }
+                if tree.branch.is_none() {
+                    return Some("HEAD is detached. Check out a branch to pull.".into());
+                }
+                if tree.upstream.is_none() {
+                    return Some("This branch has no upstream to pull from. Push it first.".into());
+                }
+                None
+            }
+        }
+    }
+
+    pub(super) fn push_prompt(&self) -> Option<SharedString> {
+        let tree = self.tree.as_ref()?;
+        let branch = tree.branch.as_deref()?;
+        let commits = commit_count(tree.ahead);
+        Some(
+            match (&tree.upstream, &tree.push_remote) {
+                (Some(upstream), _) => format!("Push {commits} to {upstream}?"),
+                (None, Some(remote)) => format!(
+                    "Push {commits} to {remote} as the new branch {branch}? It will track {remote}/{branch}."
+                ),
+                (None, None) => return None,
+            }
+            .into(),
+        )
+    }
+
+    pub(super) fn open_sync(&mut self, kind: SyncKind, cx: &mut Context<Self>) {
+        if self
+            .sync_outcome
+            .as_ref()
+            .is_some_and(|outcome| outcome.kind == kind)
+        {
+            self.sync_outcome = None;
+        }
+        if kind == SyncKind::Pull {
+            self.start_sync(SyncKind::Pull, cx);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn start_sync(&mut self, kind: SyncKind, cx: &mut Context<Self>) {
+        if self.sync_refusal(kind, cx).is_some() {
+            return;
+        }
+        let (Some(space), Some(tree)) = (self.space.clone(), self.tree.clone()) else {
+            return;
+        };
+        let (Some(head), Some(branch)) = (tree.head_sha.clone(), tree.branch.clone()) else {
+            return;
+        };
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let direction = match kind {
+            SyncKind::Push => SyncDirection::Push {
+                set_upstream: tree.upstream.is_none(),
+            },
+            SyncKind::Pull => SyncDirection::Pull,
+        };
+        let request = SyncBranchRequest {
+            target: workspace_target(&space, self.checkout_path.as_deref()),
+            expected_head_sha: head,
+            busy_policy: busy_policy(cx),
+            direction,
+        };
+        let params = routed(
+            serde_json::to_value(request).unwrap_or_default(),
+            space.device.as_deref(),
+        );
+        let generation = self.generation;
+        self.syncing = Some(kind);
+        self.sync_outcome = None;
+        cx.notify();
+        self.sync_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::SYNC_BRANCH, params)
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|value| {
+                    serde_json::from_value::<SyncBranchReply>(value)
+                        .map_err(|error| error.to_string())
+                });
+            this.update(cx, |tab, cx| {
+                if tab.generation != generation {
+                    return;
+                }
+                tab.syncing = None;
+                tab.sync_outcome = Some(match result {
+                    Ok(reply) => SyncOutcome {
+                        kind,
+                        text: sync_note(kind, &branch, &reply).into(),
+                        failed: false,
+                    },
+                    Err(error) => SyncOutcome {
+                        kind,
+                        text: error.into(),
+                        failed: true,
+                    },
+                });
+                tab.load(cx);
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn card_commit(&self, cx: &App) -> Option<&CommitSummary> {
+        let commit = self.last_commit.as_ref()?;
+        let branch = commit.branch.as_deref()?;
+        let tree = self.tree.as_ref()?;
+        (!self.card_dismissed
+            && self.syncs_branches(cx)
+            && tree.branch.as_deref() == Some(branch)
+            && tree.default_branch.as_deref() != Some(branch)
+            && self
+                .pr_heads
+                .as_ref()
+                .is_some_and(|heads| !heads.contains(branch)))
+        .then_some(commit)
+    }
+
+    fn open_pr_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(subject) = self.card_commit(cx).map(|commit| commit.subject.clone()) else {
+            return;
+        };
+        let title = cx.new(|cx| {
+            let mut input = ComposerInput::new("Pull request title", cx);
+            input.set_text(subject, cx);
+            input
+        });
+        let title_edits = cx.subscribe(&title, |_, _, event: &ComposerInputEvent, cx| {
+            if matches!(event, ComposerInputEvent::Edited) {
+                cx.notify();
+            }
+        });
+        window.focus(&title.focus_handle(cx), cx);
+        self.pr_sheet = Some(PrSheet {
+            title,
+            draft: true,
+            step: None,
+            error: None,
+            _title_edits: title_edits,
+        });
+        cx.notify();
+    }
+
+    fn cancel_pr_sheet(&mut self, cx: &mut Context<Self>) {
+        if self
+            .pr_sheet
+            .as_ref()
+            .is_some_and(|sheet| sheet.step.is_none())
+        {
+            self.pr_sheet = None;
+            cx.notify();
+        }
+    }
+
+    fn pr_refusal(&self, cx: &App) -> Option<&'static str> {
+        let sheet = self.pr_sheet.as_ref()?;
+        let tree = self.tree.as_ref()?;
+        if self.pr_target.is_none() {
+            return Some(
+                "This project has no GitHub remote, so Zeron cannot open a pull request for it.",
+            );
+        }
+        if sheet.title.read(cx).text().trim().is_empty() {
+            return Some("Give the pull request a title.");
+        }
+        self.push_refusal(tree, busy_policy(cx), cx)
+    }
+
+    fn confirm_pr(&mut self, cx: &mut Context<Self>) {
+        if self.pr_refusal(cx).is_some() {
+            return;
+        }
+        let (Some(space), Some(tree), Some(target)) = (
+            self.space.clone(),
+            self.tree.clone(),
+            self.pr_target.clone(),
+        ) else {
+            return;
+        };
+        let (Some(head), Some(branch)) = (tree.head_sha.clone(), tree.branch.clone()) else {
+            return;
+        };
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let Some(sheet) = self.pr_sheet.as_mut() else {
+            return;
+        };
+        let title = sheet.title.read(cx).text().trim().to_owned();
+        let draft = sheet.draft;
+        sheet.step = Some(PrStep::Pushing);
+        sheet.error = None;
+        let workspace = workspace_target(&space, self.checkout_path.as_deref());
+        let push = routed(
+            serde_json::to_value(SyncBranchRequest {
+                target: workspace.clone(),
+                expected_head_sha: head,
+                busy_policy: busy_policy(cx),
+                direction: SyncDirection::Push {
+                    set_upstream: tree.upstream.is_none(),
+                },
+            })
+            .unwrap_or_default(),
+            space.device.as_deref(),
+        );
+        let create = routed(
+            serde_json::to_value(CreateChangeRequestRequest {
+                target: workspace,
+                host: target.host,
+                repository: target.repository,
+                head: branch,
+                base: tree.default_branch.clone(),
+                title,
+                body: String::new(),
+                draft,
+            })
+            .unwrap_or_default(),
+            space.device.as_deref(),
+        );
+        let generation = self.generation;
+        cx.notify();
+        self.pr_task = Some(cx.spawn(async move |this, cx| {
+            let pushed = engine.client().call(methods::SYNC_BRANCH, push).await;
+            let pushed = this
+                .update(cx, |tab, cx| {
+                    if tab.generation != generation {
+                        return false;
+                    }
+                    let Some(sheet) = tab.pr_sheet.as_mut() else {
+                        return false;
+                    };
+                    let ok = match &pushed {
+                        Ok(_) => {
+                            sheet.step = Some(PrStep::Creating);
+                            true
+                        }
+                        Err(error) => {
+                            sheet.step = None;
+                            sheet.error = Some(error.to_string().into());
+                            false
+                        }
+                    };
+                    tab.load(cx);
+                    cx.notify();
+                    ok
+                })
+                .unwrap_or(false);
+            if !pushed {
+                return;
+            }
+            let created = engine
+                .client()
+                .call(methods::CREATE_CHANGE_REQUEST, create)
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|value| {
+                    serde_json::from_value::<CreatedChangeRequest>(value)
+                        .map_err(|error| error.to_string())
+                });
+            this.update(cx, |tab, cx| {
+                if tab.generation != generation {
+                    return;
+                }
+                match created {
+                    Ok(created) => {
+                        tab.pr_sheet = None;
+                        tab.card_dismissed = true;
+                        cx.emit(GitTabEvent::ChangeRequestCreated(created));
+                    }
+                    Err(error) => {
+                        if let Some(sheet) = tab.pr_sheet.as_mut() {
+                            sheet.step = None;
+                            sheet.error = Some(error.into());
+                        }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     fn reset_model_override(&mut self, cx: &mut Context<Self>) {
@@ -1164,6 +1636,7 @@ impl GitTab {
                     }
             });
         let selector = format!("{section}-row-{index}");
+        let count_selector = format!("{section}-count-{index}");
         let group = SharedString::from(selector.clone());
         let toggle = writes.map(|policy| {
             let path = file.path.clone();
@@ -1321,6 +1794,8 @@ impl GitTab {
             ))
             .child(
                 div()
+                    .id(SharedString::from(count_selector.clone()))
+                    .debug_selector(move || count_selector.clone())
                     .flex_none()
                     .flex()
                     .gap(px(4.0))
@@ -1345,6 +1820,9 @@ impl GitTab {
                     }),
             )
             .children(discard)
+            .when(staged && writes.is_some(), |el| {
+                el.child(div().size(px(20.0)).flex_none())
+            })
             .children(toggle)
             .into_any_element()
     }
@@ -1936,19 +2414,7 @@ impl GitTab {
             .min_w_0()
             .flex()
             .items_center()
-            .gap(px(4.0))
-            .child(self.model_picker.clone())
-            .when(self.model_override.is_some(), |el| {
-                el.child(
-                    div()
-                        .id("git-write-model-override")
-                        .debug_selector(|| "git-write-model-override".into())
-                        .flex_none()
-                        .text_size(px(12.0))
-                        .text_color(theme.text_muted)
-                        .child("· this commit"),
-                )
-            });
+            .child(self.model_picker.clone());
         let settings_button = div()
             .id("git-write-settings")
             .debug_selector(|| "git-write-settings".into())
@@ -2156,6 +2622,16 @@ impl GitTab {
                             ),
                     ),
             )
+            .when(self.model_override.is_some(), |el| {
+                el.child(
+                    div()
+                        .id("git-write-model-override")
+                        .debug_selector(|| "git-write-model-override".into())
+                        .text_size(px(11.0))
+                        .text_color(theme.text_muted)
+                        .child("The model picked above is for this commit only."),
+                )
+            })
             .when_some(self.written.as_ref().filter(|_| !writing), |el, written| {
                 el.child(
                     div()
@@ -2183,7 +2659,16 @@ impl GitTab {
                         ))),
                 )
             })
-            .when_some(self.last_commit.as_ref(), |el, commit| {
+            .map(|el| {
+                if let Some(sheet) = &self.pr_sheet {
+                    return el.child(self.render_pr_sheet(sheet, theme, cx));
+                }
+                if let Some(commit) = self.card_commit(cx) {
+                    return el.child(self.render_pr_card(commit, theme, cx));
+                }
+                let Some(commit) = self.last_commit.as_ref() else {
+                    return el;
+                };
                 let short: String = commit.sha.chars().take(7).collect();
                 let text = match &commit.branch {
                     Some(branch) => format!("Committed {short} to {branch}"),
@@ -2281,6 +2766,265 @@ impl GitTab {
             )
             .into_any_element()
     }
+}
+
+impl GitTab {
+    fn render_pr_card(
+        &self,
+        commit: &CommitSummary,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let short: String = commit.sha.chars().take(7).collect();
+        let branch = commit.branch.clone().unwrap_or_default();
+        let text = format!("Committed {short} to {branch}. No pull request yet.");
+        let bold = |start: usize, len: usize| {
+            (
+                start..start + len,
+                gpui::HighlightStyle {
+                    font_weight: Some(gpui::FontWeight::SEMIBOLD),
+                    ..Default::default()
+                },
+            )
+        };
+        let sha_at = "Committed ".len();
+        let branch_at = sha_at + short.len() + " to ".len();
+        div()
+            .id("git-pr-card")
+            .debug_selector(|| "git-pr-card".into())
+            .px(px(10.0))
+            .py(px(8.0))
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(theme.accent.opacity(0.25))
+            .bg(theme.accent.opacity(0.06))
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .text_size(px(12.0))
+            .text_color(theme.text)
+            .child(
+                gpui::StyledText::new(SharedString::from(text))
+                    .with_highlights([bold(sha_at, short.len()), bold(branch_at, branch.len())]),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(px(6.0))
+                    .child(
+                        accent_button("git-pr-card-create", "Push + create PR", true, theme)
+                            .on_click(
+                                cx.listener(|tab, _, window, cx| tab.open_pr_sheet(window, cx)),
+                            ),
+                    )
+                    .child(
+                        small_button("git-pr-card-later", "Later", false, theme).on_click(
+                            cx.listener(|tab, _, _, cx| {
+                                tab.card_dismissed = true;
+                                cx.notify();
+                            }),
+                        ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_pr_sheet(
+        &self,
+        sheet: &PrSheet,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let tree = self.tree.as_ref();
+        let branch = tree
+            .and_then(|tree| tree.branch.clone())
+            .unwrap_or_default();
+        let remote = tree
+            .and_then(|tree| tree.push_remote.clone())
+            .unwrap_or_else(|| "no remote".into());
+        let ahead = tree.map(|tree| tree.ahead).unwrap_or(0);
+        let destination = match tree.and_then(|tree| tree.upstream.clone()) {
+            Some(upstream) => format!("{upstream} ({} to push)", commit_count(ahead)),
+            None => format!("{remote}/{branch}, a new branch ({})", commit_count(ahead)),
+        };
+        let base = tree
+            .and_then(|tree| tree.default_branch.clone())
+            .unwrap_or_else(|| "the repository's default branch".into());
+        let refusal = self.pr_refusal(cx);
+        let running = sheet.step;
+        let enabled = refusal.is_none() && running.is_none();
+        let label = match running {
+            Some(PrStep::Pushing) => "Pushing…",
+            Some(PrStep::Creating) => "Creating the pull request…",
+            None if sheet.draft => "Push + create draft PR",
+            None => "Push + create PR",
+        };
+        let field = |name: &'static str, value: SharedString| {
+            div()
+                .flex()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .w(px(52.0))
+                        .flex_none()
+                        .text_color(theme.text_muted)
+                        .child(name),
+                )
+                .child(div().flex_1().min_w_0().truncate().child(value))
+        };
+        let draft = sheet.draft;
+        div()
+            .id("git-pr-sheet")
+            .debug_selector(|| "git-pr-sheet".into())
+            .on_key_down(cx.listener(|tab, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" {
+                    cx.stop_propagation();
+                    tab.cancel_pr_sheet(cx);
+                }
+            }))
+            .px(px(10.0))
+            .py(px(10.0))
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(theme.hairline(0.12))
+            .bg(theme.ink(0.02))
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .text_size(px(12.0))
+            .text_color(theme.text)
+            .child(
+                div()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .child("Push and open a pull request"),
+            )
+            .child(field("Push to", destination.into()))
+            .child(field("Base", base.into()))
+            .child(
+                div()
+                    .id("git-pr-title")
+                    .debug_selector(|| "git-pr-title".into())
+                    .role(gpui::Role::TextInput)
+                    .aria_label("Pull request title")
+                    .px(px(8.0))
+                    .py(px(5.0))
+                    .rounded(px(6.0))
+                    .border_1()
+                    .border_color(theme.hairline(0.12))
+                    .bg(theme.ink(0.02))
+                    .text_size(px(13.0))
+                    .child(sheet.title.clone()),
+            )
+            .child(
+                div()
+                    .id("git-pr-draft")
+                    .debug_selector(|| "git-pr-draft".into())
+                    .role(gpui::Role::CheckBox)
+                    .aria_label("Draft")
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .cursor_pointer()
+                    .child(
+                        div()
+                            .size(px(14.0))
+                            .rounded(px(4.0))
+                            .border_1()
+                            .border_color(if draft {
+                                theme.accent_strong
+                            } else {
+                                theme.hairline(0.2)
+                            })
+                            .when(draft, |el| el.bg(theme.accent_strong))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .when(draft, |el| {
+                                el.child(
+                                    icon(icons::LUCIDE_CHECK)
+                                        .size(px(10.0))
+                                        .text_color(theme.on_accent),
+                                )
+                            }),
+                    )
+                    .child("Draft")
+                    .when(running.is_none(), |el| {
+                        el.on_click(cx.listener(|tab, _, _, cx| {
+                            if let Some(sheet) = tab.pr_sheet.as_mut() {
+                                sheet.draft = !sheet.draft;
+                                cx.notify();
+                            }
+                        }))
+                    }),
+            )
+            .when_some(sheet.error.clone(), |el, error| {
+                el.child(
+                    div()
+                        .id("git-pr-error")
+                        .debug_selector(|| "git-pr-error".into())
+                        .text_color(theme.danger)
+                        .child(error),
+                )
+            })
+            .when_some(refusal.filter(|_| running.is_none()), |el, reason| {
+                el.child(
+                    div()
+                        .id("git-pr-refusal")
+                        .debug_selector(|| "git-pr-refusal".into())
+                        .text_color(theme.text_muted)
+                        .child(reason),
+                )
+            })
+            .child(
+                div()
+                    .flex()
+                    .gap(px(6.0))
+                    .child(
+                        accent_button("git-pr-confirm", label, enabled, theme)
+                            .when(enabled, |el| {
+                                el.on_click(cx.listener(|tab, _, _, cx| tab.confirm_pr(cx)))
+                            }),
+                    )
+                    .when(running.is_none(), |el| {
+                        el.child(
+                            small_button("git-pr-cancel", "Cancel", false, theme)
+                                .on_click(cx.listener(|tab, _, _, cx| tab.cancel_pr_sheet(cx))),
+                        )
+                    }),
+            )
+            .into_any_element()
+    }
+}
+
+fn accent_button(
+    selector: &'static str,
+    label: &'static str,
+    enabled: bool,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(selector)
+        .debug_selector(move || selector.into())
+        .role(gpui::Role::Button)
+        .aria_label(label)
+        .flex_none()
+        .h(px(24.0))
+        .px(px(9.0))
+        .rounded(px(6.0))
+        .flex()
+        .items_center()
+        .text_size(px(12.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .bg(theme.accent_strong)
+        .text_color(theme.on_accent)
+        .map(|el| {
+            if enabled {
+                el.cursor_pointer().hover(|style| style.opacity(0.9))
+            } else {
+                el.opacity(0.45)
+            }
+        })
+        .child(label)
 }
 
 fn small_button(
@@ -2442,6 +3186,37 @@ impl Render for GitTab {
     }
 }
 
+pub(super) fn pull_request_scope(
+    listing: &ChangeRequestListing,
+    space_id: &str,
+) -> (Option<PrTarget>, Option<HashSet<String>>) {
+    let Some(project) = listing
+        .projects
+        .iter()
+        .find(|project| project.space_id == space_id)
+    else {
+        return (None, Some(HashSet::new()));
+    };
+    let target = PrTarget {
+        host: project.host.clone(),
+        repository: project.repository.clone(),
+    };
+    let failed = listing.errors.iter().any(|error| {
+        error.path == project.path
+            || error
+                .repository
+                .as_deref()
+                .is_some_and(|repository| repository.eq_ignore_ascii_case(&project.repository))
+    });
+    if failed {
+        return (Some(target), None);
+    }
+    let heads = pr_badges(&listing.items, &project.repository)
+        .into_keys()
+        .collect();
+    (Some(target), Some(heads))
+}
+
 pub(super) fn pr_badges(
     items: &[ChangeRequestListItem],
     repository: &str,
@@ -2475,6 +3250,11 @@ impl PullRequestsPage {
                     cx.emit(super::PullRequestsEvent::OpenSettings(
                         crate::shell::SettingsSection::SourceControl,
                     ))
+                }
+                GitTabEvent::ChangeRequestCreated(created) => {
+                    page.open_when_listed = Some(created.clone());
+                    page.set_tab(PageTab::PullRequests, cx);
+                    page.refresh(cx);
                 }
             }),
             cx.observe(&view, |_, _, cx| cx.notify()),
@@ -2563,13 +3343,176 @@ impl PullRequestsPage {
                 .unwrap_or_default(),
             _ => HashMap::new(),
         };
+        let (target, heads) = match (&space, self.listing.ready()) {
+            (Some(space), Some(listing)) => pull_request_scope(listing, &space.space_id),
+            _ => (None, None),
+        };
         let visible = self.visible;
         view.update(cx, |tab, cx| {
             tab.set_space(space, cx);
             tab.set_visible(visible, cx);
             tab.set_ref_badges(badges, cx);
+            tab.set_pull_requests(target, heads, cx);
         });
         view
+    }
+
+    pub(super) fn render_git_sync_controls(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let view = self.git_view.clone()?;
+        let (ahead, syncing, pull_blocked, push_blocked) = {
+            let tab = view.read(cx);
+            tab.space()?;
+            let tree = tab.tree()?;
+            if !tab.syncs_branches(cx) {
+                return None;
+            }
+            (
+                tree.ahead,
+                tab.syncing(),
+                tab.sync_refusal(SyncKind::Pull, cx).is_some(),
+                tab.sync_refusal(SyncKind::Push, cx).is_some(),
+            )
+        };
+        let chip = |id: &'static str, label: &'static str, text: String, quiet: bool| {
+            top_chip(id, label, theme)
+                .debug_selector(move || id.into())
+                .when(quiet, |el| el.text_color(theme.text_muted))
+                .child(SharedString::from(text))
+        };
+        let pull = chip(
+            "pull-requests-git-pull",
+            "Pull",
+            if syncing == Some(SyncKind::Pull) {
+                "↓ Pulling…".into()
+            } else {
+                "↓ Pull".into()
+            },
+            pull_blocked && syncing != Some(SyncKind::Pull),
+        );
+        let push = chip(
+            "pull-requests-git-push",
+            "Push",
+            match (syncing, ahead) {
+                (Some(SyncKind::Push), _) => "↑ Pushing…".into(),
+                (_, 0) => "↑ Push".into(),
+                (_, ahead) => format!("↑ Push {ahead}"),
+            },
+            push_blocked && syncing != Some(SyncKind::Push),
+        );
+        let opener = |kind: SyncKind| {
+            move |page: &mut Self, cx: &mut Context<Self>| {
+                if let Some(view) = page.git_view.clone() {
+                    view.update(cx, |tab, cx| tab.open_sync(kind, cx));
+                }
+            }
+        };
+        Some(
+            div()
+                .flex_none()
+                .flex()
+                .gap(px(6.0))
+                .child(self.menu_trigger_with(
+                    filters::MenuKind::GitPull,
+                    pull,
+                    opener(SyncKind::Pull),
+                    theme,
+                    cx,
+                ))
+                .child(self.menu_trigger_with(
+                    filters::MenuKind::GitPush,
+                    push,
+                    opener(SyncKind::Push),
+                    theme,
+                    cx,
+                ))
+                .into_any_element(),
+        )
+    }
+
+    pub(super) fn render_git_sync_menu(
+        &self,
+        kind: filters::MenuKind,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(view) = self.git_view.clone() else {
+            return div().into_any_element();
+        };
+        let kind = if kind == filters::MenuKind::GitPush {
+            SyncKind::Push
+        } else {
+            SyncKind::Pull
+        };
+        let (text, failed, confirm) = {
+            let tab = view.read(cx);
+            let branch = tab
+                .tree()
+                .and_then(|tree| tree.branch.clone())
+                .unwrap_or_default();
+            let upstream = tab
+                .tree()
+                .and_then(|tree| tree.upstream.clone())
+                .unwrap_or_default();
+            if tab.syncing() == Some(kind) {
+                let text = match kind {
+                    SyncKind::Push => format!("Pushing {branch}…"),
+                    SyncKind::Pull => format!("Pulling {upstream} into {branch}…"),
+                };
+                (SharedString::from(text), false, false)
+            } else if let Some(outcome) = tab.sync_outcome(kind) {
+                (outcome.text.clone(), outcome.failed, false)
+            } else if let Some(reason) = tab.sync_refusal(kind, cx) {
+                (reason, false, false)
+            } else if kind == SyncKind::Push {
+                (tab.push_prompt().unwrap_or_default(), false, true)
+            } else {
+                (SharedString::default(), false, false)
+            }
+        };
+        let id = match kind {
+            SyncKind::Push => "git-push-popover",
+            SyncKind::Pull => "git-pull-popover",
+        };
+        div()
+            .id(id)
+            .debug_selector(move || id.into())
+            .w(px(300.0))
+            .p(px(4.0))
+            .flex()
+            .flex_col()
+            .gap(px(10.0))
+            .text_size(px(12.0))
+            .child(
+                div()
+                    .id(SharedString::from(format!("{id}-text")))
+                    .debug_selector(move || format!("{id}-text"))
+                    .text_color(if failed { theme.danger } else { theme.text })
+                    .child(text),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(px(6.0))
+                    .when(confirm, |el| {
+                        let view = view.clone();
+                        el.child(
+                            accent_button("git-push-confirm", "Push", true, theme).on_click(
+                                cx.listener(move |_, _, _, cx| {
+                                    view.update(cx, |tab, cx| tab.start_sync(SyncKind::Push, cx));
+                                }),
+                            ),
+                        )
+                    })
+                    .child(
+                        small_button("git-sync-close", "Close", false, theme)
+                            .on_click(cx.listener(|page, _, _, cx| page.close_menu(cx))),
+                    ),
+            )
+            .into_any_element()
     }
 
     pub(super) fn open_branch_pull_request(&mut self, branch: &str, cx: &mut Context<Self>) {
@@ -2941,6 +3884,10 @@ mod tests {
         hold_writes: std::sync::atomic::AtomicBool,
         release_write: tokio::sync::Notify,
         writes_answered: std::sync::atomic::AtomicUsize,
+        sync_error: Mutex<Option<String>>,
+        create_error: Mutex<Option<String>>,
+        created: std::sync::atomic::AtomicBool,
+        listed: Mutex<Option<ChangeRequestListing>>,
     }
 
     const WRITTEN: &str =
@@ -2982,6 +3929,7 @@ mod tests {
         serde_json::json!({
             "checkoutId": "checkout-1", "root": "/lab/repo", "branch": "feature/7",
             "headSha": "aaa", "upstream": "origin/feature/7", "ahead": 2, "behind": 0,
+            "pushRemote": "origin", "defaultBranch": "main",
             "revision": "r1",
             "files": [
                 {"path": "src/a b.rs", "index": "modified", "worktree": "modified",
@@ -3024,9 +3972,12 @@ mod tests {
                     next["revision"] = "r2".into();
                     let reply = if params["action"]["kind"] == "commit" {
                         next["headSha"] = "bbb".into();
+                        if next["upstream"].is_null() {
+                            next["ahead"] = (next["ahead"].as_u64().unwrap_or(0) + 1).into();
+                        }
                         serde_json::json!({"commit": {
                             "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                            "branch": "feature/7", "subject": "Fix the panel",
+                            "branch": next["branch"], "subject": "Fix the panel",
                         }})
                     } else {
                         self.action_reply
@@ -3079,7 +4030,52 @@ mod tests {
                 } else {
                     serde_json::json!({"models": [{"id": "gpt-5-mini", "label": "GPT-5 mini"}]})
                 }),
-                methods::LIST_CHANGE_REQUESTS => RpcReply::value(&listing()),
+                methods::SYNC_BRANCH => {
+                    if let Some(error) = self.sync_error.lock().unwrap().clone() {
+                        return Err(RpcError::Failed(error));
+                    }
+                    let mut next = self.tree.lock().unwrap().clone().unwrap_or_else(tree);
+                    let branch = next["branch"].as_str().unwrap_or_default().to_owned();
+                    let commits = if params["direction"]["kind"] == "push" {
+                        let ahead = next["ahead"].clone();
+                        next["upstream"] = format!("origin/{branch}").into();
+                        next["ahead"] = 0.into();
+                        ahead
+                    } else {
+                        next["headSha"] = "ccc".into();
+                        next["behind"] = 0.into();
+                        2.into()
+                    };
+                    let reply = serde_json::json!({
+                        "headSha": next["headSha"], "upstream": next["upstream"],
+                        "ahead": next["ahead"], "behind": 0, "commits": commits,
+                    });
+                    *self.tree.lock().unwrap() = Some(next);
+                    RpcReply::value(&reply)
+                }
+                methods::CREATE_CHANGE_REQUEST => {
+                    if let Some(error) = self.create_error.lock().unwrap().clone() {
+                        return Err(RpcError::Failed(error));
+                    }
+                    self.created
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    RpcReply::value(&serde_json::json!({
+                        "host": "github.com", "repository": "acme/zeron", "number": 12,
+                        "url": "https://github.com/acme/zeron/pull/12",
+                    }))
+                }
+                methods::LIST_CHANGE_REQUESTS => {
+                    let mut listing = self.listed.lock().unwrap().clone().unwrap_or_else(listing);
+                    if self.created.load(std::sync::atomic::Ordering::SeqCst) {
+                        let mut item = listing.items[0].clone();
+                        item.number = 12;
+                        item.head_ref = "feature/new".into();
+                        item.title = "Fix the panel".into();
+                        item.is_draft = true;
+                        listing.items.insert(0, item);
+                    }
+                    RpcReply::value(&listing)
+                }
                 methods::LIST_CHANGE_REQUEST_STATS => {
                     RpcReply::value(&serde_json::json!({"stats": []}))
                 }
@@ -3131,7 +4127,10 @@ mod tests {
         state.devices = vec![
             serde_json::from_value(serde_json::json!({
                 "id": "dev-local", "name": "Lab Mac", "platform": "macos",
-                "capabilities": [zeron_proto::capabilities::SOURCE_CONTROL_V1],
+                "capabilities": [
+                    zeron_proto::capabilities::SOURCE_CONTROL_V1,
+                    zeron_proto::capabilities::SOURCE_CONTROL_SYNC_V1,
+                ],
             }))
             .unwrap(),
         ];
@@ -4119,7 +5118,13 @@ mod tests {
                 })
             );
         });
-        assert!(cx.debug_bounds("git-write-model-override").is_some());
+        let note = cx
+            .debug_bounds("git-write-model-override")
+            .expect("the override is named");
+        assert!(
+            note.top() >= cx.debug_bounds("git-commit-message").unwrap().bottom(),
+            "the note sits under the box, leaving the chip row to the model name"
+        );
         assert_eq!(message(&tab, cx), "Draft");
 
         std::thread::sleep(Duration::from_millis(500));
@@ -4384,5 +5389,484 @@ mod tests {
         settle_action(cx, &tab, &calls, 1);
         assert_eq!(actions(&calls)[0]["busyPolicy"], "allowAll");
         assert_eq!(actions(&calls)[0]["action"]["kind"], "discard");
+    }
+
+    fn new_branch_tree() -> serde_json::Value {
+        let mut tree = tree();
+        tree["branch"] = "feature/new".into();
+        tree["upstream"] = serde_json::Value::Null;
+        tree["ahead"] = 1.into();
+        tree
+    }
+
+    fn open_with_listing(
+        cx: &mut gpui::TestAppContext,
+        state: AppState,
+        lab: Arc<GitLab>,
+    ) -> (
+        Entity<PullRequestsPage>,
+        &mut gpui::VisualTestContext,
+        Calls,
+        tempfile::TempDir,
+        Entity<GitTab>,
+    ) {
+        let (page, cx, calls, dir) = open_lab(cx, state, git_prefs(), lab);
+        settle(cx, |cx| {
+            page.read_with(cx, |page, _| page.listing.ready().is_some())
+                && cx.debug_bounds("git-commit-button").is_some()
+        });
+        let tab = git_tab(&page, cx);
+        settle(cx, |cx| {
+            tab.read_with(cx, |tab, _| tab.tree.is_some() && tab.pr_heads.is_some())
+        });
+        (page, cx, calls, dir, tab)
+    }
+
+    fn commit_now(cx: &mut gpui::VisualTestContext, tab: &Entity<GitTab>, calls: &Calls) {
+        set_message(tab, cx, "Fix the panel");
+        click(cx, "git-commit-button");
+        settle_action(cx, tab, calls, 1);
+        settle(cx, |cx| {
+            tab.read_with(cx, |tab, _| {
+                tab.tree().unwrap().head_sha.as_deref() == Some("bbb")
+            })
+        });
+    }
+
+    fn remote_calls(calls: &Calls) -> Vec<(String, serde_json::Value)> {
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(method, _)| {
+                method == methods::SYNC_BRANCH || method == methods::CREATE_CHANGE_REQUEST
+            })
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn the_pull_request_scope_knows_open_heads_only_when_the_listing_read_the_project() {
+        let mut listing = listing();
+        let (target, heads) = pull_request_scope(&listing, "space-1");
+        assert_eq!(
+            target,
+            Some(PrTarget {
+                host: "github.com".into(),
+                repository: "acme/zeron".into(),
+            })
+        );
+        assert_eq!(heads, Some(HashSet::from(["feature/7".to_string()])));
+        assert_eq!(
+            pull_request_scope(&listing, "space-2"),
+            (None, Some(HashSet::new())),
+            "a project with no GitHub remote cannot have a pull request"
+        );
+        listing.errors = vec![
+            serde_json::from_value(serde_json::json!({
+                "host": "github.com", "repository": "acme/zeron", "path": "/lab/repo",
+                "failure": "rateLimited"
+            }))
+            .unwrap(),
+        ];
+        assert_eq!(pull_request_scope(&listing, "space-1").1, None);
+    }
+
+    #[gpui::test]
+    fn the_card_appears_only_after_a_commit_on_a_branch_without_a_pull_request(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        *lab.tree.lock().unwrap() = Some(new_branch_tree());
+        let (page, cx, calls, _dir, tab) = open_with_listing(cx, lab_state(), lab.clone());
+        assert!(cx.debug_bounds("git-pr-card").is_none(), "no commit yet");
+
+        commit_now(cx, &tab, &calls);
+        settle(cx, |cx| cx.debug_bounds("git-pr-card").is_some());
+        assert!(
+            cx.debug_bounds("git-last-commit").is_none(),
+            "the card replaces the note"
+        );
+        click(cx, "git-pr-card-later");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("git-pr-card").is_none());
+        assert!(cx.debug_bounds("git-last-commit").is_some());
+        assert!(remote_calls(&calls).is_empty(), "Later sends nothing");
+
+        let mut failed = listing();
+        failed.errors = vec![
+            serde_json::from_value(serde_json::json!({
+                "host": "github.com", "repository": "acme/zeron", "path": "/lab/repo",
+                "failure": "rateLimited"
+            }))
+            .unwrap(),
+        ];
+        relist(&page, &lab, failed, cx);
+        commit_again(cx, &tab, &calls);
+        assert!(
+            cx.debug_bounds("git-pr-card").is_none(),
+            "an unread listing cannot say there is no pull request"
+        );
+    }
+
+    fn relist(
+        page: &Entity<PullRequestsPage>,
+        lab: &GitLab,
+        listing: ChangeRequestListing,
+        cx: &mut gpui::VisualTestContext,
+    ) {
+        *lab.listed.lock().unwrap() = Some(listing.clone());
+        page.update(cx, |page, cx| {
+            page.listing = Loadable::Ready(listing);
+            cx.notify();
+        });
+        cx.run_until_parked();
+    }
+
+    fn commit_again(cx: &mut gpui::VisualTestContext, tab: &Entity<GitTab>, calls: &Calls) {
+        let before = calls_of(calls, methods::RUN_WORKING_TREE_ACTION).len();
+        set_message(tab, cx, "Another");
+        click(cx, "git-commit-button");
+        settle_action(cx, tab, calls, before + 1);
+    }
+
+    #[gpui::test]
+    fn no_card_on_a_branch_with_a_pull_request_or_on_the_default_branch(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        let (_page, cx, calls, _dir, tab) = open_with_listing(cx, lab_state(), lab.clone());
+        commit_now(cx, &tab, &calls);
+        assert!(cx.debug_bounds("git-last-commit").is_some());
+        assert!(cx.debug_bounds("git-pr-card").is_none(), "feature/7 has #7");
+
+        let mut main = new_branch_tree();
+        main["branch"] = "main".into();
+        *lab.tree.lock().unwrap() = Some(main);
+        tab.update(cx, |tab, cx| tab.load(cx));
+        settle(cx, |cx| {
+            tab.read_with(cx, |tab, _| {
+                tab.tree().unwrap().branch.as_deref() == Some("main")
+            })
+        });
+        commit_again(cx, &tab, &calls);
+        tab.read_with(cx, |tab, _| {
+            assert_eq!(
+                tab.last_commit.as_ref().unwrap().branch.as_deref(),
+                Some("main")
+            )
+        });
+        assert!(cx.debug_bounds("git-pr-card").is_none(), "main is the base");
+    }
+
+    #[gpui::test]
+    fn push_and_create_run_only_after_the_confirm_in_that_order_then_open_the_new_row(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        *lab.tree.lock().unwrap() = Some(new_branch_tree());
+        let (page, cx, calls, _dir, tab) = open_with_listing(cx, lab_state(), lab);
+        commit_now(cx, &tab, &calls);
+        settle(cx, |cx| cx.debug_bounds("git-pr-card").is_some());
+
+        click(cx, "git-pr-card-create");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("git-pr-sheet").is_some());
+        tab.read_with(cx, |tab, cx| {
+            let sheet = tab.pr_sheet.as_ref().unwrap();
+            assert_eq!(sheet.title.read(cx).text(), "Fix the panel");
+            assert!(sheet.draft, "draft is on by default");
+        });
+        assert!(
+            remote_calls(&calls).is_empty(),
+            "opening the sheet sends nothing"
+        );
+        click(cx, "git-pr-cancel");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("git-pr-sheet").is_none());
+        assert!(cx.debug_bounds("git-pr-card").is_some());
+        assert!(remote_calls(&calls).is_empty(), "cancel sends nothing");
+
+        click(cx, "git-pr-card-create");
+        cx.run_until_parked();
+        click(cx, "git-pr-confirm");
+        settle(cx, |cx| {
+            page.read_with(cx, |page, _| page.prefs.tab == PageTab::PullRequests)
+        });
+        let sent = remote_calls(&calls);
+        assert_eq!(
+            sent.iter()
+                .map(|(method, _)| method.as_str())
+                .collect::<Vec<_>>(),
+            [methods::SYNC_BRANCH, methods::CREATE_CHANGE_REQUEST],
+            "push first, then create"
+        );
+        assert_eq!(
+            sent[0].1,
+            serde_json::json!({
+                "spaceId": "space-1", "expectedHeadSha": "bbb", "busyPolicy": "safeOnly",
+                "direction": {"kind": "push", "setUpstream": true},
+            })
+        );
+        assert_eq!(
+            sent[1].1,
+            serde_json::json!({
+                "spaceId": "space-1", "host": "github.com", "repository": "acme/zeron",
+                "head": "feature/new", "base": "main", "title": "Fix the panel",
+                "body": "", "draft": true,
+            })
+        );
+        settle(cx, |cx| page.read_with(cx, |page, _| page.active.is_some()));
+        page.read_with(cx, |page, _| {
+            let active = page.active.clone().unwrap();
+            assert_eq!(
+                (active.repository.as_str(), active.number),
+                ("acme/zeron", 12)
+            );
+        });
+        tab.read_with(cx, |tab, _| {
+            assert!(tab.pr_sheet.is_none());
+            assert!(tab.card_dismissed);
+        });
+    }
+
+    #[gpui::test]
+    fn a_failed_push_stops_before_the_pull_request_and_says_why(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        *lab.tree.lock().unwrap() = Some(new_branch_tree());
+        *lab.sync_error.lock().unwrap() = Some(
+            "The remote has commits this branch does not have. Pull first, then push again.".into(),
+        );
+        let (page, cx, calls, _dir, tab) = open_with_listing(cx, lab_state(), lab);
+        commit_now(cx, &tab, &calls);
+        settle(cx, |cx| cx.debug_bounds("git-pr-card").is_some());
+        click(cx, "git-pr-card-create");
+        cx.run_until_parked();
+        click(cx, "git-pr-draft");
+        cx.run_until_parked();
+        tab.read_with(cx, |tab, _| assert!(!tab.pr_sheet.as_ref().unwrap().draft));
+        click(cx, "git-pr-confirm");
+        settle(cx, |cx| cx.debug_bounds("git-pr-error").is_some());
+        assert_eq!(
+            remote_calls(&calls)
+                .iter()
+                .map(|(method, _)| method.as_str())
+                .collect::<Vec<_>>(),
+            [methods::SYNC_BRANCH]
+        );
+        page.read_with(cx, |page, _| assert_eq!(page.prefs.tab, PageTab::Git));
+    }
+
+    #[gpui::test]
+    fn a_project_without_a_github_remote_cannot_confirm(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        *lab.tree.lock().unwrap() = Some(new_branch_tree());
+        let (page, cx, calls, _dir, tab) = open_with_listing(cx, lab_state(), lab.clone());
+        let mut bare = listing();
+        bare.projects.clear();
+        relist(&page, &lab, bare, cx);
+        tab.read_with(cx, |tab, _| assert_eq!(tab.pr_target, None));
+        commit_now(cx, &tab, &calls);
+        settle(cx, |cx| cx.debug_bounds("git-pr-card").is_some());
+        click(cx, "git-pr-card-create");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("git-pr-refusal").is_some());
+        click(cx, "git-pr-confirm");
+        cx.run_until_parked();
+        assert!(remote_calls(&calls).is_empty());
+    }
+
+    #[gpui::test]
+    fn push_asks_first_naming_the_remote_branch_and_count(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (_page, cx, calls, _dir, tab) =
+            open_with_listing(cx, lab_state(), Arc::new(GitLab::default()));
+        click(cx, "pull-requests-git-push");
+        cx.run_until_parked();
+        tab.read_with(cx, |tab, _| {
+            assert_eq!(
+                tab.push_prompt().unwrap().as_ref(),
+                "Push 2 commits to origin/feature/7?"
+            )
+        });
+        assert!(cx.debug_bounds("git-push-popover").is_some());
+        assert!(remote_calls(&calls).is_empty(), "the chip only asks");
+        click(cx, "git-push-confirm");
+        settle(cx, |cx| {
+            tab.read_with(cx, |tab, _| tab.sync_outcome(SyncKind::Push).is_some())
+        });
+        assert_eq!(
+            calls_of(&calls, methods::SYNC_BRANCH),
+            [serde_json::json!({
+                "spaceId": "space-1", "expectedHeadSha": "aaa", "busyPolicy": "safeOnly",
+                "direction": {"kind": "push", "setUpstream": false},
+            })]
+        );
+        tab.read_with(cx, |tab, _| {
+            let outcome = tab.sync_outcome(SyncKind::Push).unwrap();
+            assert_eq!(
+                outcome.text.as_ref(),
+                "Pushed 2 commits to origin/feature/7."
+            );
+            assert!(!outcome.failed);
+        });
+        assert!(
+            remote_calls(&calls)
+                .iter()
+                .all(|(_, params)| !params.to_string().contains("force"))
+        );
+
+        let tree: WorkingTree = serde_json::from_value(new_branch_tree()).unwrap();
+        tab.update(cx, |tab, _| tab.tree = Some(tree));
+        tab.read_with(cx, |tab, _| {
+            assert_eq!(
+                tab.push_prompt().unwrap().as_ref(),
+                "Push 1 commit to origin as the new branch feature/new? It will track origin/feature/new."
+            )
+        });
+    }
+
+    #[gpui::test]
+    fn pull_runs_on_click_and_shows_the_result_or_gits_refusal(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        let (_page, cx, calls, _dir, tab) = open_with_listing(cx, lab_state(), lab.clone());
+        click(cx, "pull-requests-git-pull");
+        settle(cx, |cx| {
+            tab.read_with(cx, |tab, _| tab.sync_outcome(SyncKind::Pull).is_some())
+        });
+        assert_eq!(
+            calls_of(&calls, methods::SYNC_BRANCH),
+            [serde_json::json!({
+                "spaceId": "space-1", "expectedHeadSha": "aaa", "busyPolicy": "safeOnly",
+                "direction": {"kind": "pull"},
+            })]
+        );
+        assert!(cx.debug_bounds("git-pull-popover").is_some());
+        tab.read_with(cx, |tab, _| {
+            assert_eq!(
+                tab.sync_outcome(SyncKind::Pull).unwrap().text.as_ref(),
+                "Pulled 2 commits into feature/7."
+            )
+        });
+
+        *lab.sync_error.lock().unwrap() = Some(
+            "This branch and its upstream have diverged, and Pull only fast-forwards. Merge or rebase in a terminal.\ngit: fatal: Not possible to fast-forward, aborting."
+                .into(),
+        );
+        settle(cx, |cx| {
+            tab.read_with(cx, |tab, _| {
+                tab.tree().unwrap().head_sha.as_deref() == Some("ccc")
+            })
+        });
+        tab.update(cx, |tab, cx| tab.open_sync(SyncKind::Pull, cx));
+        settle(cx, |cx| {
+            tab.read_with(cx, |tab, _| tab.sync_outcome(SyncKind::Pull).is_some())
+        });
+        tab.read_with(cx, |tab, _| {
+            let outcome = tab.sync_outcome(SyncKind::Pull).unwrap();
+            assert!(outcome.failed);
+            assert!(outcome.text.contains("Not possible to fast-forward"));
+        });
+    }
+
+    #[gpui::test]
+    fn the_busy_policy_lets_push_through_safe_only_and_holds_pull(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        let mut busy = tree();
+        busy["agentActive"] = true.into();
+        *lab.tree.lock().unwrap() = Some(busy);
+        let (_page, cx, calls, _dir, tab) = open_with_listing(cx, lab_state(), lab);
+        click(cx, "pull-requests-git-pull");
+        cx.run_until_parked();
+        assert!(calls_of(&calls, methods::SYNC_BRANCH).is_empty());
+        tab.read_with(cx, |tab, cx| {
+            assert!(
+                tab.sync_refusal(SyncKind::Pull, cx)
+                    .unwrap()
+                    .contains("Pull waits")
+            );
+            assert_eq!(tab.sync_refusal(SyncKind::Push, cx), None);
+        });
+        assert!(cx.debug_bounds("git-agent-active").is_some());
+
+        for (policy, push, pull) in [
+            (crate::settings::GitAgentBusyPolicy::BlockAll, false, false),
+            (crate::settings::GitAgentBusyPolicy::AllowAll, true, true),
+        ] {
+            cx.update(|_, cx| {
+                crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
+                    settings.git_agent_busy_policy = policy;
+                });
+            });
+            tab.read_with(cx, |tab, cx| {
+                assert_eq!(
+                    tab.sync_refusal(SyncKind::Push, cx).is_none(),
+                    push,
+                    "{policy:?}"
+                );
+                assert_eq!(
+                    tab.sync_refusal(SyncKind::Pull, cx).is_none(),
+                    pull,
+                    "{policy:?}"
+                );
+            });
+        }
+        cx.update(|_, cx| {
+            crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
+                settings.git_agent_busy_policy = crate::settings::GitAgentBusyPolicy::BlockAll;
+            });
+        });
+        tab.update(cx, |tab, cx| {
+            tab.start_sync(SyncKind::Push, cx);
+            tab.start_sync(SyncKind::Pull, cx);
+        });
+        cx.run_until_parked();
+        assert!(calls_of(&calls, methods::SYNC_BRANCH).is_empty());
+    }
+
+    #[gpui::test]
+    fn an_engine_without_branch_sync_gets_no_push_pull_or_card(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        *lab.tree.lock().unwrap() = Some(new_branch_tree());
+        let mut state = lab_state();
+        state.devices[0].capabilities = vec![zeron_proto::capabilities::SOURCE_CONTROL_V1.into()];
+        let (_page, cx, calls, _dir, tab) = open_with_listing(cx, state, lab);
+        assert!(cx.debug_bounds("pull-requests-git-checkout").is_some());
+        assert!(cx.debug_bounds("pull-requests-git-push").is_none());
+        assert!(cx.debug_bounds("pull-requests-git-pull").is_none());
+        commit_now(cx, &tab, &calls);
+        assert!(cx.debug_bounds("git-pr-card").is_none());
+        assert!(cx.debug_bounds("git-last-commit").is_some());
+        tab.update(cx, |tab, cx| tab.start_sync(SyncKind::Push, cx));
+        cx.run_until_parked();
+        assert!(remote_calls(&calls).is_empty());
+    }
+
+    #[gpui::test]
+    fn line_counts_line_up_across_staged_and_unstaged_rows(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (_page, cx, _calls, _dir) = open_page(cx, lab_state(), git_prefs());
+        settle(cx, |cx| cx.debug_bounds("git-changes-count-0").is_some());
+        let staged = cx.debug_bounds("git-staged-count-0").unwrap();
+        let changed = cx.debug_bounds("git-changes-count-0").unwrap();
+        assert_eq!(staged.right(), changed.right());
     }
 }
