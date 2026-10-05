@@ -1027,6 +1027,7 @@ impl Repos {
             .map(|out| {
                 out.lines()
                     .filter_map(|line| line.trim().strip_prefix("worktree "))
+                    .skip(1)
                     .map(PathBuf::from)
                     .collect()
             })
@@ -2580,6 +2581,17 @@ tmpfs /run tmpfs rw 0 0
                 .workspace_checkout(root.path(), outside.path())
                 .await
                 .is_none()
+        );
+        assert_eq!(
+            repos.workspace_checkout(&linked, &linked).await,
+            std::fs::canonicalize(&linked).ok()
+        );
+        assert!(
+            repos
+                .workspace_checkout(&linked, root.path())
+                .await
+                .is_none(),
+            "a project rooted at a linked worktree does not reach the main checkout"
         );
     }
 
