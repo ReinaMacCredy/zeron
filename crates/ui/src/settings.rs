@@ -727,32 +727,9 @@ pub fn transcript_compact_mode(cx: &App) -> bool {
         .unwrap_or_default()
 }
 
-pub fn pr_chat_posted(chat_id: &str, cx: &App) -> Vec<PrChatPosted> {
+pub fn pr_chat_session(chat_id: &str, cx: &App) -> Option<PrChatSession> {
     cx.try_global::<SettingsStore>()
-        .and_then(|store| {
-            store
-                .current
-                .pr_chat_sessions
-                .values()
-                .flatten()
-                .find(|session| session.chat_id == chat_id)
-                .map(|session| session.posted.clone())
-        })
-        .unwrap_or_default()
-}
-
-pub fn pr_chat_dismissed(chat_id: &str, cx: &App) -> Vec<PrChatCardRef> {
-    cx.try_global::<SettingsStore>()
-        .and_then(|store| {
-            store
-                .current
-                .pr_chat_sessions
-                .values()
-                .flatten()
-                .find(|session| session.chat_id == chat_id)
-                .map(|session| session.dismissed.clone())
-        })
-        .unwrap_or_default()
+        .and_then(|store| store.current.pr_chat_session(chat_id).cloned())
 }
 
 pub fn pr_chat_sessions(scope: &str, cx: &App) -> Vec<PrChatSession> {
@@ -2211,12 +2188,22 @@ impl UiSettings {
             .retain(|_, sessions| !sessions.is_empty());
     }
 
-    pub fn record_pr_chat_post(&mut self, chat_id: &str, posted: PrChatPosted) {
-        if let Some(session) = self
-            .pr_chat_sessions
+    fn pr_chat_session(&self, chat_id: &str) -> Option<&PrChatSession> {
+        self.pr_chat_sessions
+            .values()
+            .flatten()
+            .find(|session| session.chat_id == chat_id)
+    }
+
+    fn pr_chat_session_mut(&mut self, chat_id: &str) -> Option<&mut PrChatSession> {
+        self.pr_chat_sessions
             .values_mut()
             .flatten()
             .find(|session| session.chat_id == chat_id)
+    }
+
+    pub fn record_pr_chat_post(&mut self, chat_id: &str, posted: PrChatPosted) {
+        if let Some(session) = self.pr_chat_session_mut(chat_id)
             && !session
                 .posted
                 .iter()
@@ -2227,11 +2214,7 @@ impl UiSettings {
     }
 
     pub fn record_pr_chat_dismiss(&mut self, chat_id: &str, card: PrChatCardRef) {
-        if let Some(session) = self
-            .pr_chat_sessions
-            .values_mut()
-            .flatten()
-            .find(|session| session.chat_id == chat_id)
+        if let Some(session) = self.pr_chat_session_mut(chat_id)
             && !session.dismissed.contains(&card)
         {
             session.dismissed.push(card);

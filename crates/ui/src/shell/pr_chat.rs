@@ -896,9 +896,12 @@ impl Shell {
             return;
         };
         let chat_id = panel.chat_id.clone();
-        let done = settings::pr_chat_posted(&chat_id, cx)
-            .iter()
-            .any(|posted| posted.entry_id == key.0 && posted.index == key.1);
+        let done = settings::pr_chat_session(&chat_id, cx).is_some_and(|session| {
+            session
+                .posted
+                .iter()
+                .any(|posted| posted.entry_id == key.0 && posted.index == key.1)
+        });
         let posting = (chat_id.clone(), key.0.clone(), key.1);
         let card = panel.cards.entry(key.clone()).or_default();
         if done || self.pr_chat_trash.posting.contains(&posting) || card.posted.is_some() {
@@ -1371,8 +1374,9 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let panel = self.pr_chat.as_ref()?;
-        let posted = settings::pr_chat_posted(&panel.chat_id, cx);
-        let dismissed = settings::pr_chat_dismissed(&panel.chat_id, cx);
+        let (posted, dismissed) = settings::pr_chat_session(&panel.chat_id, cx)
+            .map(|session| (session.posted, session.dismissed))
+            .unwrap_or_default();
         let last = settings::current(cx).pull_requests_merge_method;
         let now = chrono::Local::now();
         let cards: Vec<AnyElement> = suggestions
@@ -2926,7 +2930,10 @@ mod tests {
         );
         assert!(cx.debug_bounds("pr-chat-card-posted-2").is_some());
 
-        let posted = cx.update(|_, cx| settings::pr_chat_posted("s7", cx));
+        let posted = cx
+            .update(|_, cx| settings::pr_chat_session("s7", cx))
+            .map(|session| session.posted)
+            .unwrap_or_default();
         let saved: Vec<(&str, usize, &str)> = posted
             .iter()
             .map(|p| (p.entry_id.as_str(), p.index, p.label.as_str()))
