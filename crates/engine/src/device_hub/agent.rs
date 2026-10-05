@@ -6,8 +6,8 @@ use base64::Engine as _;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use zeron_proto::device_hub::{
-    CloseHubDeviceParams, DeviceHostStatus, DevicePlatform, DeviceSession, DeviceToolParams,
-    HubDevice, LOCAL_DEVICE_HOST_ID, OpenHubDeviceParams,
+    CloseHubDeviceParams, DeviceHostStatus, DeviceOpener, DevicePlatform, DeviceSession,
+    DeviceToolParams, HubDevice, LOCAL_DEVICE_HOST_ID, OpenHubDeviceParams,
 };
 
 use super::hub_process::{self, HubProcess};
@@ -726,13 +726,16 @@ impl DeviceHub {
         .clone();
         self.ensure_agent().await?;
         let session = self
-            .open(OpenHubDeviceParams {
-                chat_id: params.chat_id,
-                host_id: Some(device.host_id.clone()),
-                device_id: device.id.clone(),
-                platform: device.platform,
-                boot: true,
-            })
+            .open_as(
+                OpenHubDeviceParams {
+                    chat_id: params.chat_id,
+                    host_id: Some(device.host_id.clone()),
+                    device_id: device.id.clone(),
+                    platform: device.platform,
+                    boot: true,
+                },
+                DeviceOpener::Agent,
+            )
             .await?;
         let device = self
             .snapshot()
@@ -1529,6 +1532,10 @@ if (args[0] === "daemon" && args[1] === "stop") {
             .join("25bf8e1a2393f1108d37029b.json");
         let command = device_dir.join("bin").join(SHIM);
         assert_eq!(opened["device"]["id"], "SIM-1");
+        assert_eq!(
+            hub.snapshot().sessions[0].opened_by,
+            Some(DeviceOpener::Agent)
+        );
         assert_eq!(opened["agentDevice"]["command"], json!(command));
         assert_eq!(
             opened["agentDevice"]["targetArgs"],

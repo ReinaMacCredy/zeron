@@ -464,6 +464,22 @@ impl DeviceStreams {
         }
     }
 
+    pub(crate) fn hinge(
+        &self,
+        device_id: &str,
+        pose: zeron_proto::device_hub::HingePose,
+    ) -> Result<tokio::sync::oneshot::Receiver<Result<(), String>>, String> {
+        match self
+            .lock()
+            .by_device
+            .get(device_id)
+            .and_then(|entry| entry.input.as_ref())
+        {
+            Some(socket) => socket.hinge(pose),
+            None => Err("Input is not connected; open the device's video first".into()),
+        }
+    }
+
     pub(crate) fn device_ids(&self) -> Vec<String> {
         self.lock().by_device.keys().cloned().collect()
     }

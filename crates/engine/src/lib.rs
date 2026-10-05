@@ -629,6 +629,8 @@ fn relay_refused(method: &str) -> bool {
             | methods::SHUTDOWN_HUB_DEVICE
             | methods::WATCH_HUB_DEVICE_FRAMES
             | methods::SEND_HUB_DEVICE_INPUT
+            | methods::SET_HUB_DEVICE_HINGE
+            | methods::HUB_DEVICE_FOLD
             | methods::GET_HUB_DEVICE_DETAIL
             | methods::RUN_HUB_DEVICE_ACTION
             | methods::HUB_DEVICE_SCREENSHOT

@@ -1,14 +1,15 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
-use serde::Serialize;
-use tokio::sync::mpsc;
+use serde::{Deserialize, Serialize};
+use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message;
 use zeron_proto::device_hub::{
-    DeviceButton, DeviceInput, DeviceOrientation, DeviceScreenConfig, KeyPhase, StreamLinkStatus,
-    TouchPhase,
+    DeviceButton, DeviceInput, DeviceOrientation, DeviceScreenConfig, HingePose, KeyPhase,
+    StreamLinkStatus, TouchPhase,
 };
 
 const TOUCH: u8 = 0x03;
@@ -16,7 +17,9 @@ const BUTTON: u8 = 0x04;
 const KEY: u8 = 0x06;
 const ORIENTATION: u8 = 0x07;
 const HARDWARE_KEYBOARD: u8 = 0x0E;
+const HINGE: u8 = 0x10;
 const SCREEN_CONFIG: u8 = 0x82;
+const CONTROL_REPLY: u8 = 0x90;
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
 fn message(tag: u8, body: &impl Serialize) -> Vec<u8> {
@@ -146,12 +149,65 @@ pub(crate) fn screen_config(bytes: &[u8]) -> Option<DeviceScreenConfig> {
         .flatten()
 }
 
+#[derive(Serialize)]
+struct HingeCommand {
+    control: &'static str,
+    value: HingePose,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HingeRequest {
+    request_id: u64,
+    command: HingeCommand,
+}
+
+pub(crate) fn hinge_request(request_id: u64, pose: HingePose) -> Vec<u8> {
+    message(
+        HINGE,
+        &HingeRequest {
+            request_id,
+            command: HingeCommand {
+                control: "pose",
+                value: pose,
+            },
+        },
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlReply {
+    request_id: u64,
+    ok: bool,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+fn control_reply(bytes: &[u8]) -> Option<(u64, Result<(), String>)> {
+    let (&tag, body) = bytes.split_first()?;
+    let reply: ControlReply = (tag == CONTROL_REPLY)
+        .then(|| serde_json::from_slice(body).ok())
+        .flatten()?;
+    let result = match reply.ok {
+        true => Ok(()),
+        false => Err(reply
+            .error
+            .unwrap_or_else(|| "Device control failed. Its position is unknown.".into())),
+    };
+    Some((reply.request_id, result))
+}
+
 pub(crate) const UNSUPPORTED_INPUT: &str = "This device does not accept that input.";
+
+type HingeReply = oneshot::Sender<Result<(), String>>;
 
 pub(crate) struct InputSocket {
     tx: mpsc::UnboundedSender<Message>,
     live: Arc<AtomicBool>,
     encode: fn(&DeviceInput) -> Option<Message>,
+    replies: Option<Arc<Mutex<HashMap<u64, HingeReply>>>>,
+    next_request: AtomicU64,
     task: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -164,6 +220,8 @@ impl InputSocket {
         let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
         let live = Arc::new(AtomicBool::new(false));
         let flag = live.clone();
+        let replies: Arc<Mutex<HashMap<u64, HingeReply>>> = Arc::default();
+        let waiting = replies.clone();
         let task = tokio::spawn(async move {
             loop {
                 on_status(StreamLinkStatus::Connecting);
@@ -197,6 +255,13 @@ impl InputSocket {
                                         Some(Ok(Message::Binary(bytes))) => {
                                             if let Some(screen) = screen_config(&bytes) {
                                                 on_screen(screen);
+                                            } else if let Some((id, result)) = control_reply(&bytes)
+                                                && let Some(reply) = waiting
+                                                    .lock()
+                                                    .unwrap_or_else(PoisonError::into_inner)
+                                                    .remove(&id)
+                                            {
+                                                let _ = reply.send(result);
                                             }
                                         }
                                         Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
@@ -207,6 +272,10 @@ impl InputSocket {
                                 }
                             };
                             flag.store(false, Ordering::SeqCst);
+                            waiting
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner)
+                                .clear();
                             detail
                         }
                     }
@@ -221,6 +290,8 @@ impl InputSocket {
             tx,
             live,
             encode: |input| encode(input).map(Message::Binary),
+            replies: Some(replies),
+            next_request: AtomicU64::new(1),
             task: Some(task),
         }
     }
@@ -230,6 +301,8 @@ impl InputSocket {
             tx,
             live,
             encode: |input| encode_semu(input).map(Message::Text),
+            replies: None,
+            next_request: AtomicU64::new(1),
             task: None,
         }
     }
@@ -242,6 +315,27 @@ impl InputSocket {
         self.tx
             .send(message)
             .map_err(|_| "Input disconnected".to_string())
+    }
+
+    pub(crate) fn hinge(
+        &self,
+        pose: HingePose,
+    ) -> Result<oneshot::Receiver<Result<(), String>>, String> {
+        let replies = self.replies.as_ref().ok_or(UNSUPPORTED_INPUT)?;
+        if !self.live.load(Ordering::SeqCst) {
+            return Err("Input disconnected, reconnecting...".into());
+        }
+        let id = self.next_request.fetch_add(1, Ordering::SeqCst);
+        let (reply, receiver) = oneshot::channel();
+        {
+            let mut replies = replies.lock().unwrap_or_else(PoisonError::into_inner);
+            replies.retain(|_, waiting| !waiting.is_closed());
+            replies.insert(id, reply);
+        }
+        self.tx
+            .send(Message::Binary(hinge_request(id, pose)))
+            .map_err(|_| "Input disconnected".to_string())?;
+        Ok(receiver)
     }
 }
 
@@ -463,6 +557,116 @@ mod tests {
                 button: DeviceButton::Home,
             })
             .unwrap();
+    }
+
+    #[test]
+    fn hinge_poses_go_out_as_tag_0x10_and_replies_come_back_as_tag_0x90() {
+        let mut expected = vec![0x10];
+        expected
+            .extend_from_slice(br#"{"requestId":7,"command":{"control":"pose","value":"closed"}}"#);
+        assert_eq!(hinge_request(7, HingePose::Closed), expected);
+        for (pose, wire) in [
+            (HingePose::Book, "book"),
+            (HingePose::Open, "open"),
+            (HingePose::Laptop, "laptop"),
+            (HingePose::Tent, "tent"),
+        ] {
+            let bytes = hinge_request(1, pose);
+            let body: serde_json::Value = serde_json::from_slice(&bytes[1..]).unwrap();
+            assert_eq!(body["command"]["value"], wire);
+        }
+        let tagged = |tag: u8, json: &str| [&[tag], json.as_bytes()].concat();
+        assert_eq!(
+            control_reply(&tagged(0x90, r#"{"requestId":1,"ok":true}"#)),
+            Some((1, Ok(())))
+        );
+        assert_eq!(
+            control_reply(&tagged(
+                0x90,
+                r#"{"requestId":6,"ok":false,"error":"Invalid hinge control request."}"#
+            )),
+            Some((6, Err("Invalid hinge control request.".into())))
+        );
+        assert_eq!(
+            control_reply(&tagged(0x90, r#"{"requestId":2,"ok":false}"#)),
+            Some((
+                2,
+                Err("Device control failed. Its position is unknown.".into())
+            ))
+        );
+        assert_eq!(
+            control_reply(&tagged(0x82, r#"{"requestId":1,"ok":true}"#)),
+            None
+        );
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let semu = InputSocket::semu(tx, Arc::new(AtomicBool::new(true)));
+        assert_eq!(
+            semu.hinge(HingePose::Open).err().as_deref(),
+            Some(UNSUPPORTED_INPUT)
+        );
+    }
+
+    #[tokio::test]
+    async fn hinge_replies_resolve_their_own_request_and_a_closed_socket_fails_the_rest() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/", listener.local_addr().unwrap());
+        let (seen_tx, mut seen) = mpsc::unbounded_channel::<Vec<u8>>();
+        tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            let mut hinges = 0;
+            while let Some(Ok(Message::Binary(bytes))) = socket.next().await {
+                let _ = seen_tx.send(bytes.to_vec());
+                if bytes[0] != 0x10 {
+                    continue;
+                }
+                hinges += 1;
+                let id =
+                    serde_json::from_slice::<serde_json::Value>(&bytes[1..]).unwrap()["requestId"]
+                        .as_u64()
+                        .unwrap();
+                let reply = match hinges {
+                    1 => format!(r#"{{"requestId":{id},"ok":true}}"#),
+                    2 => format!(
+                        r#"{{"requestId":{id},"ok":false,"error":"Simulator could not change the device pose."}}"#
+                    ),
+                    _ => return,
+                };
+                let mut out = vec![0x90];
+                out.extend(reply.into_bytes());
+                socket.send(Message::Binary(out.into())).await.unwrap();
+            }
+        });
+        let socket = InputSocket::connect(url, |_| {}, |_| {});
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !socket.live.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(socket.hinge(HingePose::Closed).unwrap().await, Ok(Ok(())));
+        assert_eq!(
+            socket.hinge(HingePose::Tent).unwrap().await,
+            Ok(Err("Simulator could not change the device pose.".into()))
+        );
+        let dropped = socket.hinge(HingePose::Open).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), dropped)
+                .await
+                .unwrap()
+                .is_err(),
+            "a closed socket fails the waiting request"
+        );
+        assert_eq!(seen.recv().await.unwrap(), hardware_keyboard_off());
+        assert_eq!(
+            seen.recv().await.unwrap(),
+            hinge_request(1, HingePose::Closed)
+        );
+        assert_eq!(
+            seen.recv().await.unwrap(),
+            hinge_request(2, HingePose::Tent)
+        );
     }
 
     #[test]

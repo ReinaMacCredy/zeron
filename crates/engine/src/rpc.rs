@@ -4650,6 +4650,23 @@ impl RpcService for EngineRpc {
                     .map_err(RpcError::Failed)?;
                 RpcReply::value(&serde_json::json!({}))
             }
+            methods::SET_HUB_DEVICE_HINGE => {
+                let p: zeron_proto::device_hub::SetHubDeviceHingeParams = parse_params(params)?;
+                self.device_hub()?
+                    .set_hinge(p)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({}))
+            }
+            methods::HUB_DEVICE_FOLD => {
+                let p: zeron_proto::device_hub::HubDeviceFoldParams = parse_params(params)?;
+                let fold = self
+                    .device_hub()?
+                    .device_fold(p)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&fold)
+            }
             methods::GET_HUB_DEVICE_DETAIL => {
                 let p: zeron_proto::device_hub::HubDeviceTargetParams = parse_params(params)?;
                 let detail = self

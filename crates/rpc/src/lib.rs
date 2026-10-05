@@ -258,6 +258,8 @@ pub mod methods {
     pub const SHUTDOWN_HUB_DEVICE: &str = "ShutdownHubDevice";
     pub const WATCH_HUB_DEVICE_FRAMES: &str = "WatchHubDeviceFrames";
     pub const SEND_HUB_DEVICE_INPUT: &str = "SendHubDeviceInput";
+    pub const SET_HUB_DEVICE_HINGE: &str = "SetHubDeviceHinge";
+    pub const HUB_DEVICE_FOLD: &str = "HubDeviceFold";
     pub const GET_HUB_DEVICE_DETAIL: &str = "GetHubDeviceDetail";
     pub const RUN_HUB_DEVICE_ACTION: &str = "RunHubDeviceAction";
     pub const HUB_DEVICE_SCREENSHOT: &str = "HubDeviceScreenshot";

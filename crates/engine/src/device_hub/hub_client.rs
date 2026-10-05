@@ -4,7 +4,8 @@ use std::time::Duration;
 use futures::StreamExt;
 use serde::Deserialize;
 use zeron_proto::device_hub::{
-    AxRect, DeviceAxNode, DevicePlatform, HubDevice, LOCAL_DEVICE_HOST_ID,
+    AxRect, DeviceAxNode, DeviceFoldState, DevicePlatform, FoldPosture, HubDevice,
+    LOCAL_DEVICE_HOST_ID,
 };
 
 const LIST_TIMEOUT: Duration = Duration::from_secs(15);
@@ -219,6 +220,45 @@ impl HubClient<'_> {
         }
     }
 
+    pub(crate) async fn fold(
+        &self,
+        serial: &str,
+        posture: Option<FoldPosture>,
+    ) -> Result<DeviceFoldState, String> {
+        let url = format!("{}/vendor/serve-emu/api/fold", self.origin);
+        let request = match posture {
+            Some(posture) => self
+                .http
+                .post(url)
+                .json(&serde_json::json!({ "posture": posture })),
+            None => self.http.get(url),
+        };
+        let response = request
+            .query(&[("device", serial)])
+            .timeout(FOLD_TIMEOUT)
+            .send()
+            .await
+            .map_err(|e| format!("The fold command failed: {}", e.without_url()))?;
+        let status = response.status();
+        let body = read_capped(response.bytes_stream(), FOLD_BODY_LIMIT)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let reply: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+        if !status.is_success() {
+            return Err(reply["error"]
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("Fold command failed ({}).", status.as_u16())));
+        }
+        match reply["ok"].as_bool() {
+            Some(true) => serde_json::from_value(reply["fold"].clone())
+                .map_err(|_| "Unexpected Android fold response.".to_string()),
+            _ => Err("Unexpected Android fold response.".into()),
+        }
+    }
+
     pub(crate) async fn app_state(&self, udid: &str) -> Result<SseStream, String> {
         self.sse(format!(
             "/vendor/serve-sim/appstate?device={}",
@@ -269,6 +309,9 @@ impl HubClient<'_> {
 pub(crate) type SseStream = futures::stream::BoxStream<'static, serde_json::Value>;
 
 const AX_TIMEOUT: Duration = Duration::from_secs(10);
+// serve-emu runs `adb emu fold` and polls the posture for up to 2 s; t3code waits 12 s.
+const FOLD_TIMEOUT: Duration = Duration::from_secs(12);
+const FOLD_BODY_LIMIT: usize = 64 << 10;
 pub(crate) const AX_NODE_LIMIT: usize = 500;
 pub(crate) const AX_BODY_LIMIT: usize = 4 << 20;
 pub(crate) const AX_TOO_LARGE: &str = "The accessibility tree is too large to show.";

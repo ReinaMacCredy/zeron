@@ -16,9 +16,9 @@ use std::time::Duration;
 use tokio::sync::watch;
 use zeron_proto::device_hub::{
     CloseHubDeviceParams, ConfigureDeviceHubParams, DeviceBooting, DeviceHostStatus, DeviceHubHost,
-    DeviceHubSettings, DeviceHubState, DeviceInput, DevicePlatform, DevicePlatformAvailability,
-    DeviceSession, DeviceVideoCodec, LOCAL_DEVICE_HOST_ID, OpenHubDeviceParams,
-    ShutdownHubDeviceParams, StreamLinkStatus,
+    DeviceHubSettings, DeviceHubState, DeviceInput, DeviceOpener, DevicePlatform,
+    DevicePlatformAvailability, DeviceSession, DeviceVideoCodec, LOCAL_DEVICE_HOST_ID,
+    OpenHubDeviceParams, SetHubDeviceHingeParams, ShutdownHubDeviceParams, StreamLinkStatus,
 };
 
 pub use actions::DEVICE_ACTION_UNAVAILABLE;
@@ -38,6 +38,7 @@ const UNKNOWN_DEVICE: &str = "That device is not available.";
 const IOS_ONLY: &str = "Only iOS Simulators support this so far.";
 const ANDROID_H264_ONLY: &str = "Android emulators stream H.264 only.";
 const HUB_NOT_RUNNING: &str = "The device hub is not running.";
+const HINGE_TIMEOUT: Duration = Duration::from_secs(5);
 pub const DEVICE_SUPPORT_OFF: &str = "Device support is off. Enable it in the Device panel before installing or starting device tools.";
 
 pub struct DeviceHub {
@@ -741,6 +742,14 @@ impl DeviceHub {
     }
 
     pub async fn open(&self, params: OpenHubDeviceParams) -> Result<DeviceSession, String> {
+        self.open_as(params, DeviceOpener::User).await
+    }
+
+    pub(crate) async fn open_as(
+        &self,
+        params: OpenHubDeviceParams,
+        opener: DeviceOpener,
+    ) -> Result<DeviceSession, String> {
         if !self.enabled() {
             return Err(DEVICE_SUPPORT_OFF.into());
         }
@@ -850,6 +859,7 @@ impl DeviceHub {
             device_id,
             platform: device.platform,
             opened_at: chrono::Utc::now().to_rfc3339(),
+            opened_by: Some(opener),
         };
         let added = session.clone();
         self.publish(|state| {
@@ -1054,6 +1064,30 @@ impl DeviceHub {
             return Err(UNKNOWN_DEVICE.into());
         }
         self.streams.send_input(device_id, input)
+    }
+
+    pub async fn set_hinge(&self, params: SetHubDeviceHingeParams) -> Result<(), String> {
+        if !self.enabled() {
+            return Err(DEVICE_SUPPORT_OFF.into());
+        }
+        if !self.known_device(&params.device_id) {
+            return Err(UNKNOWN_DEVICE.into());
+        }
+        let hinged = self
+            .state
+            .borrow()
+            .screens
+            .get(&params.device_id)
+            .is_some_and(|screen| screen.supports_hinge_angle == Some(true));
+        if !hinged {
+            return Err("This device has no hinge.".into());
+        }
+        let reply = self.streams.hinge(&params.device_id, params.pose)?;
+        match tokio::time::timeout(HINGE_TIMEOUT, reply).await {
+            Err(_) => Err("Device control timed out. Its position is unknown.".into()),
+            Ok(Err(_)) => Err("Device is disconnected.".into()),
+            Ok(Ok(result)) => result,
+        }
     }
 
     pub async fn close(&self, params: CloseHubDeviceParams) -> Result<(), String> {
@@ -1280,6 +1314,7 @@ mod tests {
         stall_app_state: bool,
         huge_ax: bool,
         android_list_error: bool,
+        duo: bool,
     }
 
     const AVCC_RECORD: &[u8] = &[1, 0x64, 0, 0x20, 0xff, 0xe1, 0, 1, 0x67, 1, 0, 1, 0x68];
@@ -1305,6 +1340,7 @@ mod tests {
         stall_app_state: false,
         huge_ax: false,
         android_list_error: false,
+        duo: false,
     };
 
     pub(super) const STALLED_APP_STATE: Fake = Fake {
@@ -1316,6 +1352,61 @@ mod tests {
         huge_ax: true,
         ..HEALTHY
     };
+
+    const DUO: Fake = Fake {
+        duo: true,
+        ..HEALTHY
+    };
+
+    async fn serve_duo_helper(socket: tokio::net::TcpStream, seen: Requests) {
+        use futures::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+        let Ok(mut ws) = tokio_tungstenite::accept_async(socket).await else {
+            return;
+        };
+        let tagged = |tag: u8, body: serde_json::Value| {
+            Message::Binary([&[tag][..], body.to_string().as_bytes()].concat())
+        };
+        let config = |pose: Option<&str>| {
+            let (screen, width, height) = match pose {
+                None | Some("closed") => (1, 1398, 2034),
+                _ => (3, 2006, 2852),
+            };
+            tagged(
+                0x82,
+                serde_json::json!({"width": width, "height": height, "orientation": "portrait",
+                    "screenId": screen, "supportsPhysicalOrientation": true,
+                    "supportsHingeAngle": true, "hingePose": pose}),
+            )
+        };
+        if ws.send(config(None)).await.is_err() {
+            return;
+        }
+        while let Some(Ok(Message::Binary(bytes))) = ws.next().await {
+            let body = String::from_utf8_lossy(&bytes[1..]).to_string();
+            seen.lock()
+                .unwrap()
+                .push(format!("HID {:#04x} {body}", bytes[0]));
+            if bytes[0] != 0x10 {
+                continue;
+            }
+            let request: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let id = request["requestId"].clone();
+            let pose = request["command"]["value"].as_str().unwrap_or_default();
+            let reply = if pose == "tent" {
+                serde_json::json!({"requestId": id, "ok": false,
+                    "error": "Simulator could not change the device pose."})
+            } else {
+                if ws.send(config(Some(pose))).await.is_err() {
+                    return;
+                }
+                serde_json::json!({"requestId": id, "ok": true})
+            };
+            if ws.send(tagged(0x90, reply)).await.is_err() {
+                return;
+            }
+        }
+    }
 
     pub(super) async fn fake_hub() -> (String, Requests) {
         fake_hub_with(HEALTHY).await
@@ -1390,6 +1481,10 @@ mod tests {
                     let n = socket.peek(&mut head).await.unwrap_or(0);
                     if head[..n].starts_with(b"GET /vendor/serve-emu/ws") {
                         serve_semu(socket, seen).await;
+                        return;
+                    }
+                    if fake.duo && head[..n].starts_with(b"GET /vendor/serve-sim/helper/ws") {
+                        serve_duo_helper(socket, seen).await;
                         return;
                     }
                     let request = read_request(&mut socket).await;
@@ -1514,6 +1609,36 @@ mod tests {
                             return;
                         };
                         (status, serde_json::json!({"ok": true, "id": "SIM-1"}))
+                    } else if line.contains(" /vendor/serve-emu/api/fold?device=emulator-5556 ") {
+                        (
+                            200,
+                            serde_json::json!({"ok": true, "fold": {"supported": false,
+                                "posture": null, "hingeAngle": null}}),
+                        )
+                    } else if line
+                        .starts_with("GET /vendor/serve-emu/api/fold?device=emulator-5554 ")
+                    {
+                        (
+                            200,
+                            serde_json::json!({"ok": true, "fold": {"supported": true,
+                                "posture": "opened", "hingeAngle": 180}}),
+                        )
+                    } else if line
+                        .starts_with("POST /vendor/serve-emu/api/fold?device=emulator-5554 ")
+                    {
+                        if body.contains(r#""posture":"closed""#) {
+                            (
+                                200,
+                                serde_json::json!({"ok": true, "fold": {"supported": true,
+                                    "posture": "closed", "hingeAngle": 0}}),
+                            )
+                        } else {
+                            (
+                                400,
+                                serde_json::json!({"ok": false,
+                                    "error": "Emulator did not confirm opened posture"}),
+                            )
+                        }
                     } else if line.starts_with("POST /vendor/serve-sim/grid/api/start ") {
                         tokio::time::sleep(fake.attach_delay).await;
                         (200, serde_json::json!({"ok": true}))
@@ -1893,6 +2018,162 @@ mod tests {
             Some(super::UNKNOWN_DEVICE)
         );
         assert!(hub.watch_frames("SIM-1").is_ok());
+        hub.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_duo_hinge_pose_goes_out_as_0x10_and_waits_for_its_0x90_reply() {
+        use zeron_proto::device_hub::{DeviceOpener, HingePose, SetHubDeviceHingeParams};
+        let dir = tempfile::tempdir().unwrap();
+        let hub = super::DeviceHub::start(dir.path());
+        let (origin, requests) = fake_hub_with(DUO).await;
+        hub.attach_hub_for_test(origin);
+        hub.configure(zeron_proto::device_hub::ConfigureDeviceHubParams {
+            enabled: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let session = hub.open(open_params("SIM-1")).await.unwrap();
+        assert_eq!(session.opened_by, Some(DeviceOpener::User));
+        let hinge = |device_id: &str, pose| SetHubDeviceHingeParams {
+            device_id: device_id.into(),
+            pose,
+        };
+        assert_eq!(
+            hub.set_hinge(hinge("SIM-1", HingePose::Closed)).await,
+            Err("This device has no hinge.".into()),
+            "no 0x82 has said so yet"
+        );
+        let mut video = Box::pin(super::avcc_batches(hub.watch_avcc("SIM-1").unwrap()));
+        next_tags(&mut video, 3).await;
+        let screen = || {
+            hub.snapshot()
+                .screens
+                .get("SIM-1")
+                .cloned()
+                .unwrap_or_default()
+        };
+        eventually(|| screen().supports_hinge_angle == Some(true)).await;
+        assert_eq!((screen().screen_id, screen().hinge_pose), (Some(1), None));
+        hub.set_hinge(hinge("SIM-1", HingePose::Book))
+            .await
+            .unwrap();
+        eventually(|| screen().screen_id == Some(3)).await;
+        assert_eq!(
+            (screen().width, screen().hinge_pose),
+            (2006, Some(HingePose::Book))
+        );
+        assert_eq!(
+            hub.set_hinge(hinge("SIM-1", HingePose::Tent)).await,
+            Err("Simulator could not change the device pose.".into())
+        );
+        hub.set_hinge(hinge("SIM-1", HingePose::Closed))
+            .await
+            .unwrap();
+        eventually(|| screen().screen_id == Some(1)).await;
+        assert_eq!(
+            hub.set_hinge(hinge("../SIM-1", HingePose::Open)).await,
+            Err(super::UNKNOWN_DEVICE.into())
+        );
+        let sent: Vec<String> = requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|line| line.starts_with("HID 0x10"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            sent,
+            [
+                r#"HID 0x10 {"requestId":1,"command":{"control":"pose","value":"book"}}"#,
+                r#"HID 0x10 {"requestId":2,"command":{"control":"pose","value":"tent"}}"#,
+                r#"HID 0x10 {"requestId":3,"command":{"control":"pose","value":"closed"}}"#,
+            ]
+        );
+        hub.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn android_fold_reads_and_sets_the_posture_through_serve_emu() {
+        use zeron_proto::device_hub::{
+            DeviceFoldState, DevicePlatform, FoldPosture, HubDevice, HubDeviceFoldParams,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let hub = super::DeviceHub::start(dir.path());
+        let (origin, requests) = fake_hub_with(HEALTHY).await;
+        hub.attach_hub_for_test(origin);
+        hub.configure(zeron_proto::device_hub::ConfigureDeviceHubParams {
+            enabled: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        hub.list(false).await.unwrap();
+        hub.publish(|state| {
+            for serial in ["emulator-5554", "emulator-5556"] {
+                state.devices.push(HubDevice {
+                    host_id: "local".into(),
+                    id: serial.into(),
+                    platform: DevicePlatform::Android,
+                    booted: true,
+                    ..Default::default()
+                });
+            }
+        });
+        let fold = |device_id: &str, posture| HubDeviceFoldParams {
+            device_id: device_id.into(),
+            posture,
+            ..Default::default()
+        };
+        let folded = |posture| DeviceFoldState {
+            supported: true,
+            posture: Some(posture),
+        };
+        assert_eq!(
+            hub.device_fold(fold("emulator-5554", None)).await,
+            Ok(folded(FoldPosture::Opened))
+        );
+        assert_eq!(
+            hub.device_fold(fold("emulator-5554", Some(FoldPosture::Closed)))
+                .await,
+            Ok(folded(FoldPosture::Closed))
+        );
+        assert_eq!(
+            hub.device_fold(fold("emulator-5554", Some(FoldPosture::Opened)))
+                .await,
+            Err("Emulator did not confirm opened posture".into()),
+            "a 400 carries serve-emu's error"
+        );
+        assert_eq!(
+            hub.device_fold(fold("emulator-5556", None)).await,
+            Ok(DeviceFoldState::default())
+        );
+        assert_eq!(
+            hub.device_fold(fold("emulator-5554", Some(FoldPosture::HalfOpened)))
+                .await,
+            Err("A device can only be folded or unfolded.".into())
+        );
+        assert_eq!(
+            hub.device_fold(fold("SIM-1", None)).await,
+            Err(super::DEVICE_ACTION_UNAVAILABLE.into())
+        );
+        let sent: Vec<String> = requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|line| line.contains("/api/fold"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            sent,
+            [
+                "GET /vendor/serve-emu/api/fold?device=emulator-5554 HTTP/1.1 ",
+                r#"POST /vendor/serve-emu/api/fold?device=emulator-5554 HTTP/1.1 {"posture":"closed"}"#,
+                r#"POST /vendor/serve-emu/api/fold?device=emulator-5554 HTTP/1.1 {"posture":"opened"}"#,
+                "GET /vendor/serve-emu/api/fold?device=emulator-5556 HTTP/1.1 ",
+            ]
+        );
         hub.shutdown().await;
     }
 

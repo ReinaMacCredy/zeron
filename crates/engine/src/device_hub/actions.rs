@@ -7,10 +7,10 @@ use futures::StreamExt;
 use futures::future::BoxFuture;
 use zeron_proto::device_hub::{
     ColorFilter, DeviceAction, DeviceAppState, DeviceAppearance, DeviceAxTree, DeviceDetail,
-    DeviceEventLogBatch, DeviceEventLogEntry, DeviceOrientation, DevicePermission, DevicePlatform,
-    DeviceSettingsSnapshot, DeviceTextSize, DeviceToggle, ForegroundApp, HubDevice,
-    HubDeviceScreenshot, HubDeviceTargetParams, LOCAL_DEVICE_HOST_ID, LiquidGlass,
-    PermissionDecision, RunHubDeviceActionParams,
+    DeviceEventLogBatch, DeviceEventLogEntry, DeviceFoldState, DeviceOrientation, DevicePermission,
+    DevicePlatform, DeviceSettingsSnapshot, DeviceTextSize, DeviceToggle, FoldPosture,
+    ForegroundApp, HubDevice, HubDeviceFoldParams, HubDeviceScreenshot, HubDeviceTargetParams,
+    LOCAL_DEVICE_HOST_ID, LiquidGlass, PermissionDecision, RunHubDeviceActionParams,
 };
 
 use super::hub_client::{HubClient, SseStream};
@@ -1182,6 +1182,29 @@ impl DeviceHub {
             width,
             height,
         })
+    }
+
+    pub async fn device_fold(
+        &self,
+        params: HubDeviceFoldParams,
+    ) -> Result<DeviceFoldState, String> {
+        let device = self.action_target(params.host_id.as_deref(), &params.device_id)?;
+        if device.platform != DevicePlatform::Android {
+            return Err(DEVICE_ACTION_UNAVAILABLE.into());
+        }
+        if params
+            .posture
+            .is_some_and(|posture| !matches!(posture, FoldPosture::Closed | FoldPosture::Opened))
+        {
+            return Err("A device can only be folded or unfolded.".into());
+        }
+        let origin = self.hub_client_origin()?;
+        HubClient {
+            http: &self.http,
+            origin: &origin,
+        }
+        .fold(&device.id, params.posture)
+        .await
     }
 
     pub async fn device_ax_tree(
