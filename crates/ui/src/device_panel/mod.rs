@@ -1,9 +1,11 @@
 pub mod geometry;
+mod rail;
 mod setup;
 pub mod stream_view;
 
 use gpui::{
-    AnyElement, App, Context, Entity, SharedString, Subscription, Task, Window, div, prelude::*, px,
+    AnyElement, App, Context, Entity, EventEmitter, SharedString, Subscription, Task, Window, div,
+    prelude::*, px,
 };
 use zeron_proto::device_hub::{
     DeviceHostStatus, DeviceHubState, DevicePlatform, DeviceSession, HubDevice,
@@ -63,6 +65,10 @@ pub fn panel_phase(
     }
 }
 
+pub enum DevicePanelEvent {
+    Close,
+}
+
 pub struct DevicePanel {
     state: Entity<AppState>,
     chat_id: String,
@@ -76,8 +82,12 @@ pub struct DevicePanel {
     configure_task: Option<Task<()>>,
     list_task: Option<Task<()>>,
     open_task: Option<Task<()>>,
+    close_task: Option<Task<()>>,
+    more: crate::popover::Popup<()>,
     _state: Subscription,
 }
+
+impl EventEmitter<DevicePanelEvent> for DevicePanel {}
 
 impl DevicePanel {
     pub fn new(state: Entity<AppState>, chat_id: String, cx: &mut Context<Self>) -> Self {
@@ -95,6 +105,8 @@ impl DevicePanel {
             configure_task: None,
             list_task: None,
             open_task: None,
+            close_task: None,
+            more: Default::default(),
             _state: observer,
         };
         panel.sync(cx);
@@ -144,7 +156,11 @@ impl DevicePanel {
                 }
                 if let Some(view) = &self.view {
                     let screen = hub.screens.get(&device_id).cloned();
-                    view.update(cx, |view, cx| view.set_screen(screen, cx));
+                    let link = hub.streams.get(&device_id).cloned();
+                    view.update(cx, |view, cx| {
+                        view.set_screen(screen, cx);
+                        view.set_link(link, cx);
+                    });
                 }
             }
             None => self.view = None,
@@ -229,6 +245,34 @@ impl DevicePanel {
                 Err(error) => panel.error = Some(error.into()),
             }
         });
+    }
+
+    fn power_off(&mut self, cx: &mut Context<Self>) {
+        let Some((host_id, device_id)) = self.target.clone() else {
+            return;
+        };
+        self.error = None;
+        let params = serde_json::json!({
+            "chatId": self.chat_id,
+            "hostId": host_id,
+            "deviceId": device_id,
+            "shutdown": true,
+        });
+        self.close_task =
+            self.call(
+                methods::CLOSE_HUB_DEVICE,
+                params,
+                cx,
+                |panel, reply, cx| match reply {
+                    Ok(_) => {
+                        panel.target = None;
+                        panel.view = None;
+                        panel.revision = None;
+                        panel.sync(cx);
+                    }
+                    Err(error) => panel.error = Some(error.into()),
+                },
+            );
     }
 
     fn render_message(
@@ -424,8 +468,13 @@ impl Render for DevicePanel {
                         .on_click(cx.listener(|panel, _, _, cx| panel.refresh(cx))),
                 )
                 .into_any_element(),
-            PanelPhase::Stream => match &self.view {
-                Some(view) => view.clone().into_any_element(),
+            PanelPhase::Stream => match self.view.clone() {
+                Some(view) => div()
+                    .size_full()
+                    .relative()
+                    .child(view.clone())
+                    .child(self.render_rail(&view, &theme, cx))
+                    .into_any_element(),
                 None => self.render_message(&theme, "Opening device...".into(), true, cx),
             },
             PanelPhase::Picker => self.render_picker(&theme, cx),
@@ -465,9 +514,11 @@ mod tests {
     use gpui::{Modifiers, TestAppContext, VisualTestContext};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
-    use zeron_proto::device_hub::{DeviceBooting, DeviceHubSettings};
+    use zeron_proto::device_hub::{
+        DeviceBooting, DeviceHubSettings, DeviceStreamStatus, StreamLinkStatus,
+    };
 
-    type Calls = Arc<Mutex<Vec<String>>>;
+    type Calls = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
 
     fn fake_engine(runtime: &tokio::runtime::Runtime) -> (crate::state::EngineHandle, Calls) {
         let (out, mut frames) = tokio::sync::mpsc::channel::<String>(64);
@@ -478,7 +529,9 @@ mod tests {
             while let Some(frame) = frames.recv().await {
                 let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
                 let method = frame["method"].as_str().unwrap_or_default().to_string();
-                seen.lock().unwrap().push(method.clone());
+                seen.lock()
+                    .unwrap()
+                    .push((method.clone(), frame["params"].clone()));
                 let delay = if method == methods::CONFIGURE_DEVICE_HUB {
                     Duration::from_millis(200)
                 } else {
@@ -528,13 +581,156 @@ mod tests {
         panic!("condition never held");
     }
 
-    fn lists(calls: &Calls) -> usize {
+    fn calls_of(calls: &Calls, method: &str) -> Vec<serde_json::Value> {
         calls
             .lock()
             .unwrap()
             .iter()
-            .filter(|method| *method == methods::LIST_HUB_DEVICES)
-            .count()
+            .filter(|(called, _)| called == method)
+            .map(|(_, params)| params.clone())
+            .collect()
+    }
+
+    fn lists(calls: &Calls) -> usize {
+        calls_of(calls, methods::LIST_HUB_DEVICES).len()
+    }
+
+    fn streaming(input: StreamLinkStatus) -> DeviceHubState {
+        let mut state = hub(true);
+        state.sessions.push(DeviceSession {
+            chat_id: "chat".into(),
+            host_id: "local".into(),
+            device_id: "SIM".into(),
+            ..Default::default()
+        });
+        state.streams.insert(
+            "SIM".into(),
+            DeviceStreamStatus {
+                video: StreamLinkStatus::Live,
+                input,
+                subscribers: 1,
+            },
+        );
+        state
+    }
+
+    fn streaming_panel<'a>(
+        cx: &'a mut TestAppContext,
+        runtime: &tokio::runtime::Runtime,
+        input: StreamLinkStatus,
+    ) -> (
+        Entity<AppState>,
+        Entity<DevicePanel>,
+        Calls,
+        &'a mut VisualTestContext,
+    ) {
+        let (state, calls) = app_state(cx, runtime, streaming(input));
+        let panel_state = state.clone();
+        let (panel, cx) = cx.add_window_view(|_, cx| {
+            let mut panel = DevicePanel::new(panel_state, "chat".into(), cx);
+            panel.target = Some(("local".into(), "SIM".into()));
+            panel.revision = None;
+            panel.sync(cx);
+            panel
+        });
+        wait(cx, |cx| cx.debug_bounds("device-more").is_some());
+        (state, panel, calls, cx)
+    }
+
+    fn click(cx: &mut VisualTestContext, selector: &'static str) {
+        wait(cx, |cx| cx.debug_bounds(selector).is_some());
+        let bounds = cx.debug_bounds(selector).unwrap();
+        cx.simulate_click(bounds.center(), Modifiers::default());
+    }
+
+    #[gpui::test]
+    fn rail_input_buttons_wait_for_live_input_and_close_only_closes_the_tab(
+        cx: &mut TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (state, panel, calls, cx) = streaming_panel(cx, &runtime, StreamLinkStatus::Connecting);
+        click(cx, "device-home");
+        click(cx, "device-rotate");
+        cx.run_until_parked();
+        assert!(calls_of(&calls, methods::SEND_HUB_DEVICE_INPUT).is_empty());
+
+        state.update(cx, |state, cx| {
+            let mut live = streaming(StreamLinkStatus::Live);
+            live.revision = 1;
+            state.device_hub = Some(live);
+            cx.notify();
+        });
+        click(cx, "device-home");
+        click(cx, "device-rotate");
+        wait(cx, |_| {
+            calls_of(&calls, methods::SEND_HUB_DEVICE_INPUT).len() == 2
+        });
+        let inputs: Vec<_> = calls_of(&calls, methods::SEND_HUB_DEVICE_INPUT)
+            .into_iter()
+            .map(|params| params["input"].clone())
+            .collect();
+        assert_eq!(
+            inputs,
+            vec![
+                serde_json::json!({"button": {"button": "home"}}),
+                serde_json::json!({"orientation": {"orientation": "landscape_left"}}),
+            ]
+        );
+
+        let closed = Arc::new(Mutex::new(false));
+        let seen = closed.clone();
+        let _subscription = cx.update(|_, cx| {
+            cx.subscribe(&panel, move |_, event: &DevicePanelEvent, _| {
+                let DevicePanelEvent::Close = event;
+                *seen.lock().unwrap() = true;
+            })
+        });
+        click(cx, "device-more");
+        click(cx, "device-close-panel");
+        wait(cx, |_| *closed.lock().unwrap());
+        assert!(calls_of(&calls, methods::CLOSE_HUB_DEVICE).is_empty());
+    }
+
+    #[gpui::test]
+    fn power_off_closes_the_session_with_shutdown_and_returns_to_the_picker(
+        cx: &mut TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (state, panel, calls, cx) = streaming_panel(cx, &runtime, StreamLinkStatus::Live);
+        click(cx, "device-more");
+        click(cx, "device-power-off");
+        wait(cx, |_| {
+            !calls_of(&calls, methods::CLOSE_HUB_DEVICE).is_empty()
+        });
+        assert_eq!(
+            calls_of(&calls, methods::CLOSE_HUB_DEVICE),
+            vec![serde_json::json!({
+                "chatId": "chat", "hostId": "local", "deviceId": "SIM", "shutdown": true
+            })]
+        );
+        wait(cx, |cx| {
+            panel.read_with(cx, |panel, _| panel.target.is_none())
+        });
+        let phase = panel.read_with(cx, |panel, cx| {
+            panel_phase(
+                panel.hub(cx),
+                &panel.chat_id,
+                panel.target.as_ref(),
+                panel.opening.as_deref(),
+            )
+        });
+        assert_eq!(phase, PanelPhase::Picker);
+        assert!(panel.read_with(cx, |panel, _| panel.stream_view().is_none()));
+        assert!(
+            state.read_with(cx, |state, _| state.device_hub.is_some()),
+            "the hub state is untouched by the UI"
+        );
+        assert!(
+            cx.debug_bounds("device-more").is_none(),
+            "the rail left with the stream"
+        );
     }
 
     #[gpui::test]

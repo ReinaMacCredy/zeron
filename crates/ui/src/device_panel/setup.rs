@@ -40,6 +40,14 @@ pub fn render_gate(
                 .child(
                     div()
                         .id("device-hub-enable")
+                        .tab_index(0)
+                        .role(gpui::Role::Switch)
+                        .aria_label("Enable device hub")
+                        .aria_toggled(if pending {
+                            gpui::Toggled::True
+                        } else {
+                            gpui::Toggled::False
+                        })
                         .w_full()
                         .h(px(44.0))
                         .px(px(14.0))

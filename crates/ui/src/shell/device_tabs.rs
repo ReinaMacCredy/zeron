@@ -1,5 +1,5 @@
 use super::*;
-use crate::device_panel::DevicePanel;
+use crate::device_panel::{DevicePanel, DevicePanelEvent};
 
 impl Shell {
     pub(super) fn device_surface_unavailable(&self, cx: &App) -> Option<&'static str> {
@@ -23,7 +23,11 @@ impl Shell {
         None
     }
 
-    pub(super) fn add_device_surface(&mut self, cx: &mut Context<Self>) -> Option<u64> {
+    pub(super) fn add_device_surface(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<u64> {
         if self.device_surface_unavailable(cx).is_some() {
             return None;
         }
@@ -34,7 +38,16 @@ impl Shell {
         let state = self.state.clone();
         let panel = cx.new(|cx| DevicePanel::new(state, chat_id, cx));
         let observer = cx.observe(&panel, |_, _, cx| cx.notify());
-        self.device_panels.insert(id, (panel, observer));
+        let events = cx.subscribe_in(
+            &panel,
+            window,
+            move |this, _, event, window, cx| match event {
+                DevicePanelEvent::Close => {
+                    this.close_right_surface(RightSurface::Device(id), window, cx)
+                }
+            },
+        );
+        self.device_panels.insert(id, (panel, [observer, events]));
         self.right_tabs
             .entry(key)
             .or_default()
@@ -98,7 +111,9 @@ mod tests {
                 shell.active_chat = "owner".into();
                 shell.add_browser_surface(None, window, cx);
                 let browser = RightSurface::Browser(shell.browser_seq);
-                let id = shell.add_device_surface(cx).expect("device tab opens");
+                let id = shell
+                    .add_device_surface(window, cx)
+                    .expect("device tab opens");
                 let device = RightSurface::Device(id);
                 assert_eq!(shell.resolved_right_active(cx), device);
                 let rows = shell.right_surface_rows(cx);
@@ -126,13 +141,13 @@ mod tests {
     fn the_device_row_is_unavailable_on_the_new_chat_canvas(cx: &mut gpui::TestAppContext) {
         let (window, _dir) = shell_window(cx);
         window
-            .update(cx, |shell, _, cx| {
+            .update(cx, |shell, window, cx| {
                 shell.active_chat.clear();
                 assert_eq!(
                     shell.device_surface_unavailable(cx),
                     Some("Devices are only available from a thread.")
                 );
-                assert_eq!(shell.add_device_surface(cx), None);
+                assert_eq!(shell.add_device_surface(window, cx), None);
                 assert!(shell.device_panels.is_empty());
                 assert!(
                     shell
