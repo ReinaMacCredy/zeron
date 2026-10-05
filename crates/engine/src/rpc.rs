@@ -1013,6 +1013,27 @@ impl EngineRpc {
         (!folder.as_os_str().is_empty()).then(|| folder.to_string_lossy().replace('\\', "/"))
     }
 
+    async fn refuse_if_agent_busy(
+        &self,
+        checkout_id: &str,
+        allowed: bool,
+        policy: zeron_proto::GitAgentBusyPolicy,
+        safe_only: &str,
+    ) -> Result<(), RpcError> {
+        if allowed || !self.agent_active_on_checkout(checkout_id).await {
+            return Ok(());
+        }
+        Err(RpcError::Failed(
+            match policy {
+                zeron_proto::GitAgentBusyPolicy::BlockAll => {
+                    "An agent is running in this checkout, and Git is read-only while it runs (Settings > Source Control)."
+                }
+                _ => safe_only,
+            }
+            .into(),
+        ))
+    }
+
     async fn agent_active_on_checkout(&self, checkout_id: &str) -> bool {
         let local_device = self.doc_host.device_id();
         let chats = self.workspace.watch_chats().borrow().clone();
@@ -1634,6 +1655,18 @@ where
         .await
         .map_err(|error| RpcError::Failed(error.to_string()))?;
     Ok(registry.descriptors())
+}
+
+async fn read_tree_timed(
+    workspace: &crate::workspace_files::ResolvedWorkspace,
+) -> Result<zeron_proto::WorkingTree, RpcError> {
+    tokio::time::timeout(
+        crate::working_tree::READ_TIMEOUT,
+        crate::working_tree::read(&workspace.root, &workspace.checkout_id),
+    )
+    .await
+    .map_err(|_| RpcError::Failed("working tree read timed out".into()))?
+    .map_err(|error| RpcError::Failed(error.to_string()))
 }
 
 fn forward_deadline(method: &str) -> std::time::Duration {
@@ -3850,21 +3883,13 @@ impl RpcService for EngineRpc {
                             crate::working_tree::lock_checkout_briefly(&workspace.checkout_id)
                                 .await
                                 .map_err(|error| RpcError::Failed(error.to_string()))?;
-                        if self.agent_active_on_checkout(&workspace.checkout_id).await
-                            && !request.busy_policy.allows(&request.action)
-                        {
-                            return Err(RpcError::Failed(
-                                match request.busy_policy {
-                                    zeron_proto::GitAgentBusyPolicy::BlockAll => {
-                                        "An agent is running in this checkout, and Git is read-only while it runs (Settings > Source Control)."
-                                    }
-                                    _ => {
-                                        "An agent is running in this checkout. Only stage, unstage and commit of staged files run until it stops (Settings > Source Control)."
-                                    }
-                                }
-                                .into(),
-                            ));
-                        }
+                        self.refuse_if_agent_busy(
+                            &workspace.checkout_id,
+                            request.busy_policy.allows(&request.action),
+                            request.busy_policy,
+                            "An agent is running in this checkout. Only stage, unstage and commit of staged files run until it stops (Settings > Source Control).",
+                        )
+                        .await?;
                         let tree =
                             crate::working_tree::read(&workspace.root, &workspace.checkout_id)
                                 .await
@@ -3895,31 +3920,14 @@ impl RpcService for EngineRpc {
                     let _guard = crate::working_tree::lock_checkout_briefly(&workspace.checkout_id)
                         .await
                         .map_err(|error| RpcError::Failed(error.to_string()))?;
-                    if self.agent_active_on_checkout(&workspace.checkout_id).await
-                        && !request.busy_policy.allows_sync(request.direction)
-                    {
-                        return Err(RpcError::Failed(
-                            match request.busy_policy {
-                                zeron_proto::GitAgentBusyPolicy::BlockAll => {
-                                    "An agent is running in this checkout, and Git is read-only while it runs (Settings > Source Control)."
-                                }
-                                _ => {
-                                    "An agent is running in this checkout. Pull waits until it stops, so it cannot rewrite files under the agent (Settings > Source Control)."
-                                }
-                            }
-                            .into(),
-                        ));
-                    }
-                    let read = |root: std::path::PathBuf, checkout_id: String| async move {
-                        tokio::time::timeout(
-                            crate::working_tree::READ_TIMEOUT,
-                            crate::working_tree::read(&root, &checkout_id),
-                        )
-                        .await
-                        .map_err(|_| RpcError::Failed("working tree read timed out".into()))?
-                        .map_err(|error| RpcError::Failed(error.to_string()))
-                    };
-                    let tree = read(workspace.root.clone(), workspace.checkout_id.clone()).await?;
+                    self.refuse_if_agent_busy(
+                        &workspace.checkout_id,
+                        request.busy_policy.allows_sync(request.direction),
+                        request.busy_policy,
+                        "An agent is running in this checkout. Pull waits until it stops, so it cannot rewrite files under the agent (Settings > Source Control).",
+                    )
+                    .await?;
+                    let tree = read_tree_timed(&workspace).await?;
                     if tree.head_sha.as_deref() != Some(request.expected_head_sha.as_str()) {
                         return Err(RpcError::Failed(
                             "The branch moved since it was shown. Check the refreshed state and try again."
@@ -3936,7 +3944,7 @@ impl RpcService for EngineRpc {
                     .map_err(|error| RpcError::Failed(error.to_string()));
                     self.diff_sync.sync_all();
                     let commits = result?;
-                    let after = read(workspace.root.clone(), workspace.checkout_id.clone()).await?;
+                    let after = read_tree_timed(&workspace).await?;
                     RpcReply::value(&zeron_proto::SyncBranchReply {
                         head_sha: after.head_sha.unwrap_or_default(),
                         upstream: after.upstream,
