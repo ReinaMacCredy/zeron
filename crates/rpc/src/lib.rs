@@ -249,6 +249,13 @@ pub mod methods {
     pub const SEND_TERMINAL_INPUT: &str = "SendTerminalInput";
     pub const SET_TERMINAL_SELECTION: &str = "SetTerminalSelection";
     pub const WATCH_AGENT_TERMINALS: &str = "WatchAgentTerminals";
+    // Device hub: refused to relay clients; no reply may carry the hub's origin.
+    pub const WATCH_DEVICE_HUB: &str = "WatchDeviceHub";
+    pub const CONFIGURE_DEVICE_HUB: &str = "ConfigureDeviceHub";
+    pub const LIST_HUB_DEVICES: &str = "ListHubDevices";
+    pub const OPEN_HUB_DEVICE: &str = "OpenHubDevice";
+    pub const WATCH_HUB_DEVICE_FRAMES: &str = "WatchHubDeviceFrames";
+    pub const SEND_HUB_DEVICE_INPUT: &str = "SendHubDeviceInput";
     /// Checkout-diff stream for the target device's chats (DataRpc,
     /// relay-forwardable — diffs are produced where the checkout lives).
     pub const WATCH_CHECKOUT_DIFFS: &str = "WatchCheckoutDiffs";

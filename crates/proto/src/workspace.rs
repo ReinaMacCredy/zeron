@@ -16,6 +16,7 @@ pub mod capabilities {
     pub const MESSAGE_QUEUE_EDIT_LEASE_V1: &str = "message-queue-edit-lease-v1";
     pub const HARNESS_UPDATES_V1: &str = "harness-updates-v1";
     pub const PULL_REQUESTS_PAGE_V1: &str = "pull-requests-page-v1";
+    pub const DEVICE_HUB_V1: &str = "device-hub-v1";
 
     pub const CURRENT: &[&str] = &[
         COMPOSER_REFERENCES_V1,
@@ -26,6 +27,7 @@ pub mod capabilities {
         MESSAGE_QUEUE_EDIT_LEASE_V1,
         HARNESS_UPDATES_V1,
         PULL_REQUESTS_PAGE_V1,
+        DEVICE_HUB_V1,
     ];
 
     pub fn current() -> Vec<String> {
@@ -106,7 +108,8 @@ mod tests {
                     "message-queue-clean-attachment-text-v1",
                     "message-queue-edit-lease-v1",
                     "harness-updates-v1",
-                    "pull-requests-page-v1"
+                    "pull-requests-page-v1",
+                    "device-hub-v1"
                 ],
             })
         );

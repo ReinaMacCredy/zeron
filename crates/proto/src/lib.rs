@@ -5,6 +5,7 @@
 
 pub mod agent;
 pub mod computer;
+pub mod device_hub;
 pub mod entities;
 pub mod file_mentions;
 pub mod invocation;
