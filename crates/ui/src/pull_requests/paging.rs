@@ -98,8 +98,9 @@ impl PullRequestsPage {
         }));
     }
 
-    pub fn set_visible(&mut self, visible: bool) {
+    pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         self.visible = visible;
+        self.sync_git_visibility(cx);
     }
 
     /// Focus and poll reads go through the engine's cache; only the refresh button busts it.

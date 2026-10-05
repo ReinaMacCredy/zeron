@@ -13,7 +13,7 @@ impl Shell {
             PullRequestsEvent::ToggleChat => shell.toggle_pr_chat(cx),
             PullRequestsEvent::OpenSettings(section) => {
                 if let Some(page) = &shell.pull_requests_page {
-                    page.update(cx, |page, _| page.set_visible(false));
+                    page.update(cx, |page, cx| page.set_visible(false, cx));
                 }
                 shell.open_settings(*section, cx);
             }
@@ -30,7 +30,7 @@ impl Shell {
             page.update(cx, |page, cx| page.refresh(cx));
         }
         self.route = Route::PullRequests;
-        page.update(cx, |page, _| page.set_visible(true));
+        page.update(cx, |page, cx| page.set_visible(true, cx));
         self.close_user_menu(cx);
         self.close_chat_menu(cx);
         cx.notify();
@@ -164,7 +164,7 @@ impl Shell {
 
     pub(super) fn close_pull_requests(&mut self, cx: &mut Context<Self>) {
         if let Some(page) = &self.pull_requests_page {
-            page.update(cx, |page, _| page.set_visible(false));
+            page.update(cx, |page, cx| page.set_visible(false, cx));
         }
         self.route = Route::Chat;
         self.focus_composer(cx);
@@ -418,5 +418,16 @@ mod tests {
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         shell.read_with(cx, |shell, _| assert!(matches!(shell.route, Route::Chat)));
+        let closed = tree_reads(&lab);
+        for _ in 0..10 {
+            cx.executor().advance_clock(Duration::from_secs(1));
+            cx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            tree_reads(&lab),
+            closed,
+            "a closed page stops polling the working tree"
+        );
     }
 }

@@ -725,6 +725,9 @@ impl PullRequestsPage {
         if self.prefs == before {
             return;
         }
+        if self.prefs.tab != before.tab {
+            self.sync_git_visibility(cx);
+        }
         let prefs = self.prefs.clone();
         crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |settings| {
             settings.pull_requests_list = prefs;

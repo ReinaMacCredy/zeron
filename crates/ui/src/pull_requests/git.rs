@@ -185,6 +185,7 @@ pub struct GitTab {
     tree: Option<WorkingTree>,
     error: Option<SharedString>,
     loading: bool,
+    reload_wanted: bool,
     generation: u64,
     load_task: Option<Task<()>>,
     watch_task: Option<Task<()>>,
@@ -487,7 +488,7 @@ impl GitTab {
                     if tab.visible && tab.window_active && !tab.loading {
                         tab.load(cx);
                     }
-                    if tab.watch_task.is_none() {
+                    if tab.visible && tab.watch_task.is_none() {
                         tab.watch(cx);
                     }
                 }) else {
@@ -529,6 +530,7 @@ impl GitTab {
             tree: None,
             error: None,
             loading: false,
+            reload_wanted: false,
             generation: 0,
             load_task: None,
             watch_task: None,
@@ -607,8 +609,16 @@ impl GitTab {
     pub(super) fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         let resumed = visible && !self.visible;
         self.visible = visible;
-        if resumed && !self.loading {
-            self.load(cx);
+        if !visible {
+            self.watch_task = None;
+        }
+        if resumed {
+            if !self.loading {
+                self.load(cx);
+            }
+            if self.watch_task.is_none() {
+                self.watch(cx);
+            }
         }
     }
 
@@ -626,6 +636,7 @@ impl GitTab {
         self.tree = None;
         self.error = None;
         self.loading = false;
+        self.reload_wanted = false;
         self.load_task = None;
         self.watch_task = None;
         self.pending = None;
@@ -660,9 +671,19 @@ impl GitTab {
         self.history.update(cx, |history, cx| {
             history.set_target(target.unwrap_or(GitHistoryTarget::Nothing), cx)
         });
-        self.load(cx);
-        self.watch(cx);
+        if self.visible {
+            self.load(cx);
+            self.watch(cx);
+        }
         cx.notify();
+    }
+
+    fn load_if_idle(&mut self, cx: &mut Context<Self>) {
+        if self.loading {
+            self.reload_wanted = true;
+        } else {
+            self.load(cx);
+        }
     }
 
     fn load(&mut self, cx: &mut Context<Self>) {
@@ -675,6 +696,7 @@ impl GitTab {
         let params = target_params(&space, self.checkout_path.as_deref());
         let generation = self.generation;
         self.loading = true;
+        self.reload_wanted = false;
         self.load_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
@@ -730,6 +752,9 @@ impl GitTab {
                         cx.notify();
                     }
                 }
+                if std::mem::take(&mut tab.reload_wanted) {
+                    tab.load(cx);
+                }
             })
             .ok();
         }));
@@ -767,7 +792,7 @@ impl GitTab {
                             if first {
                                 continue;
                             }
-                            if this.update(cx, |tab, cx| tab.load(cx)).is_err() {
+                            if this.update(cx, |tab, cx| tab.load_if_idle(cx)).is_err() {
                                 return;
                             }
                         }
@@ -4566,6 +4591,13 @@ impl PullRequestsPage {
         }
     }
 
+    pub(super) fn sync_git_visibility(&mut self, cx: &mut Context<Self>) {
+        let visible = self.visible && self.prefs.tab == PageTab::Git;
+        if let Some(view) = self.git_view.clone() {
+            view.update(cx, |tab, cx| tab.set_visible(visible, cx));
+        }
+    }
+
     pub(super) fn sync_git_tab(&mut self, cx: &mut Context<Self>) -> Entity<GitTab> {
         let view = self.git_tab(cx);
         let space = self.git_space(cx);
@@ -7703,5 +7735,109 @@ mod tests {
             cx.update(|window, cx| page.update(cx, |page, cx| page.dismiss_overlay(window, cx)));
         assert!(!dismissed, "nothing on the Git tab was open");
         page.read_with(cx, |page, _| assert!(page.checkout_menu.is_some()));
+    }
+
+    fn tree_reads(calls: &Calls) -> usize {
+        calls_of(calls, methods::GET_WORKING_TREE).len()
+    }
+
+    fn watched_lab() -> (
+        Arc<GitLab>,
+        tokio::sync::mpsc::UnboundedSender<serde_json::Value>,
+    ) {
+        let lab = Arc::new(GitLab::default());
+        let (frames, receiver) = tokio::sync::mpsc::unbounded_channel();
+        *lab.watch.lock().unwrap() = Some(receiver);
+        (lab, frames)
+    }
+
+    fn idle_for(cx: &mut gpui::VisualTestContext, wait: Duration) {
+        for _ in 0..10 {
+            cx.executor().advance_clock(wait / 10);
+            cx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn the_git_tab_stops_reading_the_working_tree_once_the_page_leaves_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (lab, frames) = watched_lab();
+        let (page, cx, calls, _dir) = open_lab(cx, lab_state(), git_prefs(), lab);
+        let tab = {
+            settle(cx, |cx| cx.debug_bounds("git-staged-row-0").is_some());
+            git_tab(&page, cx)
+        };
+        tab.update(cx, |tab, _| tab.window_active = true);
+        frames.send(watch_frame("w0")).unwrap();
+        cx.run_until_parked();
+        let before = tree_reads(&calls);
+        idle_for(cx, POLL_INTERVAL * 2);
+        assert!(tree_reads(&calls) > before, "the poll reads while shown");
+
+        page.update(cx, |page, cx| page.set_tab(PageTab::PullRequests, cx));
+        cx.run_until_parked();
+        let hidden = tree_reads(&calls);
+        idle_for(cx, POLL_INTERVAL * 3);
+        frames.send(watch_frame("w1")).ok();
+        for _ in 0..10 {
+            cx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            tree_reads(&calls),
+            hidden,
+            "neither the poll nor the watch reads a tab nobody sees"
+        );
+
+        page.update(cx, |page, cx| page.set_tab(PageTab::Git, cx));
+        settle(cx, |_| tree_reads(&calls) > hidden);
+    }
+
+    #[gpui::test]
+    fn watch_frames_during_a_slow_read_queue_one_reread_instead_of_restarting_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (lab, frames) = watched_lab();
+        let (page, cx, calls, _dir) = open_lab(cx, lab_state(), git_prefs(), lab.clone());
+        settle(cx, |cx| cx.debug_bounds("git-staged-row-0").is_some());
+        let tab = git_tab(&page, cx);
+        settle(cx, |cx| tab.read_with(cx, |tab, _| !tab.loading));
+        frames.send(watch_frame("w0")).unwrap();
+        cx.run_until_parked();
+        lab.hold_trees
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let before = tree_reads(&calls);
+        frames.send(watch_frame("w1")).unwrap();
+        settle(cx, |_| tree_reads(&calls) == before + 1);
+        for revision in ["w2", "w3", "w4"] {
+            frames.send(watch_frame(revision)).unwrap();
+            for _ in 0..5 {
+                cx.run_until_parked();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        assert_eq!(
+            tree_reads(&calls),
+            before + 1,
+            "the in-flight read is not restarted"
+        );
+        lab.hold_trees
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        lab.release_tree.notify_one();
+        settle(cx, |cx| {
+            tree_reads(&calls) == before + 2 && tab.read_with(cx, |tab, _| !tab.loading)
+        });
+        for _ in 0..10 {
+            cx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(tree_reads(&calls), before + 2, "one reread, not three");
     }
 }
