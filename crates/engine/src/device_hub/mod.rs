@@ -629,6 +629,7 @@ impl DeviceHub {
         let entry = toolchain::ensure_hub().await?;
         self.set_status(DeviceHostStatus::Starting, None);
         let (program, args) = toolchain::launch(&entry)?;
+        let args = hub_process::guarded_args(&self.device_dir(), &args)?;
         let mut env = Vec::new();
         if let Some(root) = tokio::task::spawn_blocking(platform::android_root)
             .await

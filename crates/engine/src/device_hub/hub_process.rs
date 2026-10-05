@@ -9,6 +9,28 @@ use tokio::process::{Child, ChildStdin, Command};
 pub(crate) const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const STOP_GRACE: Duration = Duration::from_secs(5);
 const STATE_FILE: &str = "hub.json";
+const GUARD_FILE: &str = "hub-guard.mjs";
+// Browsers reach a loopback port with a foreign Host (DNS rebinding) or an Origin; the engine sends neither.
+const GUARD: &str = r#"import http from "node:http";
+const emit = http.Server.prototype.emit;
+const local = (server, request) => {
+  const address = server.address();
+  if (typeof address !== "object" || address === null) return false;
+  const host = String(request.headers.host ?? "").toLowerCase();
+  return [`127.0.0.1:${address.port}`, `localhost:${address.port}`, `[::1]:${address.port}`].includes(host);
+};
+http.Server.prototype.emit = function (event, request, target) {
+  if (["request", "checkContinue", "checkExpectation"].includes(event) && !local(this, request)) {
+    target.writeHead(403, { Connection: "close" }).end();
+    return true;
+  }
+  if (event === "upgrade" && (!local(this, request) || request.headers.origin !== undefined)) {
+    target.destroy();
+    return true;
+  }
+  return emit.apply(this, arguments);
+};
+"#;
 const RESTART_STABLE_UPTIME: Duration = Duration::from_secs(60);
 const RESTART_MAX_DELAY: Duration = Duration::from_secs(30);
 // The kernel closes our end of stdin however the engine dies, so the watcher SIGTERMs the group.
@@ -257,6 +279,27 @@ fn write_state_file(path: &Path, record: &HubStateFile) {
     let _ = options
         .open(path)
         .and_then(|mut file| file.write_all(json.as_bytes()));
+}
+
+pub(crate) fn guarded_args(state_dir: &Path, args: &[String]) -> Result<Vec<String>, String> {
+    use std::io::Write as _;
+    let failed = |e: std::io::Error| format!("writing the device hub guard: {e}");
+    std::fs::create_dir_all(state_dir).map_err(failed)?;
+    let path = state_dir.join(GUARD_FILE);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options
+        .open(&path)
+        .and_then(|mut file| file.write_all(GUARD.as_bytes()))
+        .map_err(failed)?;
+    let url = reqwest::Url::from_file_path(&path)
+        .map_err(|()| format!("{} is not an absolute path", path.display()))?;
+    Ok(["--import".to_string(), url.to_string()]
+        .into_iter()
+        .chain(args.iter().cloned())
+        .collect())
 }
 
 pub(crate) fn lifeline_command(program: &Path) -> Command {
@@ -776,6 +819,135 @@ http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
             eventually(|| !signal_group(pgid, 0)).await,
             "and so does the rest of its group"
         );
+    }
+
+    const FAKE_WS_HUB: &str = r#"import http from "node:http";
+import crypto from "node:crypto";
+const port = Number(process.argv[process.argv.indexOf("--port") + 1]);
+const server = http.createServer((req, res) => { res.writeHead(200); res.end("ok"); });
+server.on("upgrade", (req, socket) => {
+  const accept = crypto.createHash("sha1")
+    .update(req.headers["sec-websocket-key"] + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest("base64");
+  socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+  socket.write(Buffer.from([0x81, 2, 0x68, 0x69]));
+});
+server.listen(port, "127.0.0.1");
+"#;
+
+    fn node() -> Option<PathBuf> {
+        std::env::var_os("PATH")
+            .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+            .unwrap_or_default()
+            .into_iter()
+            .chain(["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from))
+            .map(|dir| dir.join("node"))
+            .find(|node| node.is_file())
+    }
+
+    async fn first_reply(port: u16, request: &str) -> String {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        socket.write_all(request.as_bytes()).await.unwrap();
+        let mut buf = [0u8; 256];
+        let read = tokio::time::timeout(Duration::from_secs(5), socket.read(&mut buf))
+            .await
+            .expect("the hub answers or closes");
+        String::from_utf8_lossy(&buf[..read.unwrap_or(0)]).into_owned()
+    }
+
+    #[tokio::test]
+    async fn the_hub_guard_refuses_foreign_hosts_and_browser_origins_and_passes_the_engine() {
+        use futures::StreamExt as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        let Some(node) = node() else {
+            eprintln!("node not found; skipping");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-hub.mjs");
+        std::fs::write(&script, FAKE_WS_HUB).unwrap();
+        let state_dir = dir.path().join("device dir");
+        let args = guarded_args(&state_dir, &[script.display().to_string()]).unwrap();
+        assert_eq!(args[0], "--import");
+        assert!(
+            args[1].starts_with("file:///") && args[1].ends_with("/device%20dir/hub-guard.mjs")
+        );
+        let guard = state_dir.join(GUARD_FILE);
+        assert_eq!(std::fs::read_to_string(&guard).unwrap(), GUARD);
+        assert_eq!(
+            std::fs::metadata(&guard).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let hub = spawn(
+            &http,
+            &node,
+            &args,
+            &script,
+            &state_dir,
+            Duration::from_secs(20),
+            Vec::new(),
+        )
+        .await
+        .expect("an engine readyz passes the guard");
+        let port: u16 = hub.origin.rsplit(':').next().unwrap().parse().unwrap();
+
+        let reply = http
+            .get(format!("{}/api/devices", hub.origin))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(reply.status().as_u16(), 200);
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/ws"))
+            .await
+            .expect("an engine upgrade passes the guard");
+        assert_eq!(
+            socket.next().await.unwrap().unwrap(),
+            tokio_tungstenite::tungstenite::Message::Text("hi".into())
+        );
+
+        let get = |host: &str| format!("GET /api/devices HTTP/1.1\r\nHost: {host}\r\n\r\n");
+        for host in [format!("localhost:{port}"), format!("[::1]:{port}")] {
+            assert!(
+                first_reply(port, &get(&host))
+                    .await
+                    .starts_with("HTTP/1.1 200"),
+                "{host}"
+            );
+        }
+        for host in [
+            "evil.example".to_string(),
+            format!("evil.example:{port}"),
+            format!("127.0.0.1:{}", port.wrapping_add(1)),
+        ] {
+            assert!(
+                first_reply(port, &get(&host))
+                    .await
+                    .starts_with("HTTP/1.1 403"),
+                "{host}"
+            );
+        }
+        let upgrade = |host: &str, extra: &str| {
+            format!(
+                "GET /ws HTTP/1.1\r\nHost: {host}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n{extra}\r\n"
+            )
+        };
+        let local = format!("127.0.0.1:{port}");
+        assert!(
+            first_reply(port, &upgrade(&local, ""))
+                .await
+                .starts_with("HTTP/1.1 101")
+        );
+        for request in [
+            upgrade(&local, "Origin: http://evil.example\r\n"),
+            upgrade(&local, &format!("Origin: http://{local}\r\n")),
+            upgrade("evil.example", ""),
+        ] {
+            assert_eq!(first_reply(port, &request).await, "", "{request}");
+        }
+        hub.stop().await;
     }
 
     #[test]
