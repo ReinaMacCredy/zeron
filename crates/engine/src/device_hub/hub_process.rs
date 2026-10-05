@@ -8,7 +8,6 @@ use tokio::process::{Child, ChildStdin, Command};
 
 pub(crate) const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const STOP_GRACE: Duration = Duration::from_secs(5);
-pub(crate) const MAX_DIMENSION: u32 = 1280;
 const STATE_FILE: &str = "hub.json";
 const RESTART_STABLE_UPTIME: Duration = Duration::from_secs(60);
 const RESTART_MAX_DELAY: Duration = Duration::from_secs(30);
@@ -297,7 +296,6 @@ pub(crate) async fn spawn(
         .args(args)
         .args(["--port", &port.to_string(), "--host", "127.0.0.1"])
         .args(["--hide-sidebar", "--hide-boot-device"])
-        .args(["--max-dimension", &MAX_DIMENSION.to_string()])
         .env("FORCE_COLOR", "0")
         .env("NO_COLOR", "1");
     scrub_env(
