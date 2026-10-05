@@ -533,6 +533,7 @@ pub fn apply_keymap(
         KeyBinding::new(&platform_combo(&format!("{step}-+")), IncreaseReasoning, None),
     ]);
     crate::browser::bind_keys(cx, keymap);
+    crate::device_panel::stream_view::bind_keys(cx);
     // ⌘1..⌘9 open the sidebar's first nine rows. A slot left unbound (an empty
     // combo in a hand-edited file) binds nothing rather than falling back —
     // the user cleared it on purpose.

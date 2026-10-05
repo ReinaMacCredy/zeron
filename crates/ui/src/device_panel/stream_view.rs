@@ -1,5 +1,5 @@
 use std::cell::Cell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -8,8 +8,9 @@ use base64::Engine as _;
 use futures::StreamExt;
 use futures::channel::mpsc;
 use gpui::{
-    Bounds, Context, FocusHandle, KeyDownEvent, KeyUpEvent, MouseButton, MouseMoveEvent, Pixels,
-    Point, RenderImage, SharedString, Task, Window, div, prelude::*, px,
+    App, Bounds, Context, FocusHandle, KeyDownEvent, KeyUpEvent, ModifiersChangedEvent,
+    MouseButton, MouseMoveEvent, Pixels, Point, RenderImage, SharedString, Subscription, Task,
+    Window, div, prelude::*, px,
 };
 use zeron_proto::device_hub::{
     DeviceButton, DeviceFrame, DeviceInput, DeviceOrientation, DeviceScreenConfig,
@@ -26,10 +27,21 @@ const FPS_LOG_INTERVAL: Duration = Duration::from_secs(5);
 pub const NO_VIDEO_TIMEOUT: Duration = Duration::from_secs(15);
 pub const NO_VIDEO: &str = "No video received from the device. Reconnect to try again.";
 
+gpui::actions!(device_panel, [SendCommandR]);
+
+pub(crate) fn bind_keys(cx: &mut App) {
+    cx.bind_keys([gpui::KeyBinding::new(
+        &crate::settings::platform_combo("mod-r"),
+        SendCommandR,
+        Some("DeviceScreen"),
+    )]);
+}
+
 struct DecodedFrame {
     image: Arc<RenderImage>,
     width: u32,
     height: u32,
+    rotation: DeviceOrientation,
 }
 
 #[derive(Default)]
@@ -131,6 +143,7 @@ fn decode(item: serde_json::Value, rotation: DeviceOrientation) -> Option<Decode
         image: Arc::new(RenderImage::new([image::Frame::new(pixels)])),
         width,
         height,
+        rotation,
     })
 }
 
@@ -185,9 +198,10 @@ pub struct DeviceStreamView {
     video_error: Option<SharedString>,
     wait: u64,
     frame_box: Rc<Cell<Option<Bounds<Pixels>>>>,
-    pressed: bool,
-    held_keys: HashMap<u16, KeyPress>,
+    pressed: Option<(f32, f32)>,
+    held_keys: HashSet<u16>,
     focus: FocusHandle,
+    focus_watch: Option<Subscription>,
     inputs: mpsc::UnboundedSender<DeviceInput>,
     fps: Option<FpsCounter>,
     debug_tap: Option<(f32, f32)>,
@@ -208,6 +222,23 @@ impl DeviceStreamView {
         let (inputs, queued) = mpsc::unbounded::<DeviceInput>();
         let sender = cx.background_spawn(send_inputs(engine.clone(), device_id.clone(), queued));
         cx.on_release(|view: &mut Self, cx| {
+            let held = view.release(true);
+            if !held.is_empty() {
+                let (engine, device_id) = (view.engine.clone(), view.device_id.clone());
+                cx.background_spawn(async move {
+                    for input in held {
+                        let params = serde_json::json!({ "deviceId": device_id, "input": input });
+                        if let Err(error) = engine
+                            .client()
+                            .call(methods::SEND_HUB_DEVICE_INPUT, params)
+                            .await
+                        {
+                            tracing::debug!(%error, "device release not delivered");
+                        }
+                    }
+                })
+                .detach();
+            }
             let current = view.image.take().map(|frame| frame.image);
             for image in current.into_iter().chain(view.retired.drain(..)) {
                 gpui::ImageSource::Render(image).evict(None, cx);
@@ -237,9 +268,10 @@ impl DeviceStreamView {
             video_error: None,
             wait: 0,
             frame_box: Rc::default(),
-            pressed: false,
-            held_keys: HashMap::new(),
+            pressed: None,
+            held_keys: HashSet::new(),
             focus: cx.focus_handle(),
+            focus_watch: None,
             inputs,
             fps: (std::env::var("ZERON_DEVICE_FPS").as_deref() == Ok("1"))
                 .then(FpsCounter::default),
@@ -336,6 +368,25 @@ impl DeviceStreamView {
         let _ = self.inputs.unbounded_send(input);
     }
 
+    fn release(&mut self, touch: bool) -> Vec<DeviceInput> {
+        let mut inputs: Vec<DeviceInput> = self.held_keys.drain().map(geometry::key_up).collect();
+        if touch && let Some((x, y)) = self.pressed.take() {
+            inputs.push(DeviceInput::Touch {
+                phase: TouchPhase::End,
+                x,
+                y,
+            });
+        }
+        inputs
+    }
+
+    fn release_held(&mut self, touch: bool, cx: &mut Context<Self>) {
+        for input in self.release(touch) {
+            self.send(input);
+        }
+        cx.notify();
+    }
+
     fn take_frame(&mut self, cx: &mut Context<Self>) {
         let Some(frame) = self
             .slot
@@ -388,40 +439,33 @@ impl DeviceStreamView {
             TouchPhase::Begin
                 if self.image.is_some()
                     && self.video_error.is_none()
-                    && frame.contains(&position) =>
-            {
-                self.pressed = true
-            }
-            TouchPhase::Move if self.pressed => {}
-            TouchPhase::End if self.pressed => self.pressed = false,
+                    && frame.contains(&position) => {}
+            TouchPhase::Move | TouchPhase::End if self.pressed.is_some() => {}
             _ => return,
         }
+        let rotation = self.image.as_ref().map_or_else(
+            || geometry::display_rotation(self.screen.as_ref()),
+            |shown| shown.rotation,
+        );
         let (x, y) = geometry::normalized(frame, position);
-        let (x, y) = geometry::raw_point(self.screen.as_ref(), x, y);
+        let (x, y) = geometry::raw_point(rotation, x, y);
+        self.pressed = (phase != TouchPhase::End).then_some((x, y));
         self.send(DeviceInput::Touch { phase, x, y });
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
-        if !geometry::forwards_keystroke(&event.keystroke) {
+        if event.keystroke.modifiers.platform {
             return;
         }
-        cx.stop_propagation();
         let Some(press) = KeyPress::from_keystroke(&event.keystroke) else {
             return;
         };
-        if event.is_held || self.held_keys.contains_key(&press.usage) {
+        cx.stop_propagation();
+        if event.is_held || !self.held_keys.insert(press.usage) {
             return;
         }
         for input in press.down() {
             self.send(input);
-        }
-        // macOS sends no key up for a key pressed with Command held.
-        if event.keystroke.modifiers.platform {
-            for input in press.up() {
-                self.send(input);
-            }
-        } else {
-            self.held_keys.insert(press.usage, press);
         }
     }
 
@@ -429,11 +473,16 @@ impl DeviceStreamView {
         let Some((usage, _)) = geometry::hid_usage(&event.keystroke.key) else {
             return;
         };
-        if let Some(press) = self.held_keys.remove(&usage) {
+        if self.held_keys.remove(&usage) {
             cx.stop_propagation();
-            for input in press.up() {
-                self.send(input);
-            }
+            self.send(geometry::key_up(usage));
+        }
+    }
+
+    fn modifiers_changed(&mut self, event: &ModifiersChangedEvent, cx: &mut Context<Self>) {
+        // macOS sends no key up for a key released while Command is held.
+        if event.modifiers.platform && !self.held_keys.is_empty() {
+            self.release_held(false, cx);
         }
     }
 
@@ -448,13 +497,19 @@ impl Render for DeviceStreamView {
         for old in self.retired.drain(..) {
             let _ = window.drop_image(old);
         }
+        if self.focus_watch.is_none() {
+            // gpui also reports window deactivation as a blur of the focused handle.
+            self.focus_watch = Some(cx.on_blur(&self.focus, window, |view, _, cx| {
+                view.release_held(true, cx)
+            }));
+        }
         self.painted = self.image.is_some();
         let theme = Theme::of(cx).clone();
         let image = self.image.as_ref().map(|frame| frame.image.clone());
         let aspect = self.aspect();
         let frame_box = self.frame_box.clone();
         let fps = self.fps.as_ref().map(|fps| fps.shown);
-        let dragging = self.pressed.then(|| cx.entity().downgrade());
+        let dragging = self.pressed.is_some().then(|| cx.entity().downgrade());
         let connecting = self.awaiting_frame && self.video_error.is_none();
         let input_down = (!self.awaiting_frame && self.video_error.is_none() && !self.input_live())
             .then(|| match &self.link.input {
@@ -471,6 +526,14 @@ impl Render for DeviceStreamView {
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| this.key_down(event, cx)))
             .on_key_up(cx.listener(|this, event: &KeyUpEvent, _, cx| this.key_up(event, cx)))
+            .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
+                this.modifiers_changed(event, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SendCommandR, _, _| {
+                for input in geometry::command_r() {
+                    this.send(input);
+                }
+            }))
             .child(
                 gpui::canvas(
                     |_, _, _| (),
@@ -801,7 +864,6 @@ mod tests {
             &[("begin", 0.25, 0.5), ("move", 0.5, 0.5), ("end", 0.75, 0.6)],
         );
 
-        inputs.lock().unwrap().clear();
         view.update(cx, |view, cx| {
             view.set_screen(
                 Some(DeviceScreenConfig {
@@ -814,15 +876,23 @@ mod tests {
             )
         });
         cx.run_until_parked();
-        let frame = view.read_with(cx, |view, _| view.frame_box().unwrap());
-        let at = geometry::position_at(frame, 0.25, 0.75);
-        cx.simulate_mouse_down(at, MouseButton::Left, none);
-        cx.simulate_mouse_up(at, MouseButton::Left, none);
-        wait(cx, |_| inputs.lock().unwrap().len() >= 2);
-        assert_touches(
-            &touches(&inputs),
-            &[("begin", 0.75, 0.75), ("end", 0.75, 0.75)],
-        );
+        let tap = |cx: &mut VisualTestContext| {
+            inputs.lock().unwrap().clear();
+            let frame = view.read_with(cx, |view, _| view.frame_box().unwrap());
+            let at = geometry::position_at(frame, 0.25, 0.75);
+            cx.simulate_mouse_down(at, MouseButton::Left, none);
+            cx.simulate_mouse_up(at, MouseButton::Left, none);
+            wait(cx, |_| inputs.lock().unwrap().len() >= 2);
+            touches(&inputs)
+        };
+        assert_touches(&tap(cx), &[("begin", 0.25, 0.75), ("end", 0.25, 0.75)]);
+        view.update(cx, |view, cx| {
+            let item = json!({ "seq": 2, "jpeg": jpeg() });
+            *view.slot.lock().unwrap() = decode(item, DeviceOrientation::LandscapeLeft);
+            view.take_frame(cx);
+        });
+        cx.run_until_parked();
+        assert_touches(&tap(cx), &[("begin", 0.75, 0.75), ("end", 0.75, 0.75)]);
     }
 
     fn inputs_of(inputs: &Inputs, kind: &str) -> Vec<Value> {
@@ -972,37 +1042,192 @@ mod tests {
         assert!(view.read_with(cx, |view, _| view.video_error.is_none()));
     }
 
+    struct KeyHost {
+        view: Option<Entity<DeviceStreamView>>,
+        passed: Rc<std::cell::RefCell<Vec<String>>>,
+        toggled: Rc<Cell<bool>>,
+    }
+
+    impl Render for KeyHost {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let (passed, toggled) = (self.passed.clone(), self.toggled.clone());
+            div()
+                .size_full()
+                .on_key_down(move |event: &KeyDownEvent, _, _| {
+                    passed.borrow_mut().push(event.keystroke.key.clone())
+                })
+                .on_action(move |_: &crate::shell::ToggleChanges, _, _| toggled.set(true))
+                .children(
+                    self.view
+                        .clone()
+                        .map(|view| div().w(px(300.0)).h(px(400.0)).child(view)),
+                )
+        }
+    }
+
+    fn key_host<'a>(
+        cx: &'a mut TestAppContext,
+        runtime: &tokio::runtime::Runtime,
+    ) -> (
+        Entity<DeviceStreamView>,
+        Entity<KeyHost>,
+        Inputs,
+        &'a mut VisualTestContext,
+    ) {
+        setup(cx);
+        let (engine, inputs) = fake_engine(runtime);
+        let view = cx.new(|cx| DeviceStreamView::new(engine, "SIM".into(), cx));
+        let hosted = view.clone();
+        let (host, cx) = cx.add_window_view(|_, _| KeyHost {
+            view: Some(hosted),
+            passed: Rc::default(),
+            toggled: Rc::default(),
+        });
+        let focus = view.read_with(cx, |view, _| view.focus.clone());
+        cx.update(|window, cx| {
+            window.activate_window();
+            window.focus(&focus, cx)
+        });
+        cx.run_until_parked();
+        (view, host, inputs, cx)
+    }
+
+    fn key(phase: &str, usage: u16) -> Value {
+        json!({ "phase": phase, "usage": usage })
+    }
+
     #[gpui::test]
-    fn keys_on_the_focused_screen_are_forwarded_and_other_cmd_combos_pass_through(
+    fn keys_on_the_focused_screen_are_forwarded_and_other_keys_pass_through(
         cx: &mut TestAppContext,
     ) {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();
-        setup(cx);
-        let (engine, inputs) = fake_engine(&runtime);
-        let (view, cx) =
-            cx.add_window_view(|_, cx| DeviceStreamView::new(engine, "SIM".into(), cx));
-        let focus = view.read_with(cx, |view, _| view.focus.clone());
-        cx.update(|window, cx| window.focus(&focus, cx));
+        let (_view, host, inputs, cx) = key_host(cx, &runtime);
         cx.simulate_keystrokes("shift-a");
         cx.simulate_event(gpui::KeyUpEvent {
             keystroke: Keystroke::parse("shift-a").unwrap(),
         });
-        cx.simulate_keystrokes("cmd-w cmd-r");
-        wait(cx, |_| inputs_of(&inputs, "key").len() >= 8);
-        let key = |phase: &str, usage: u16| json!({ "phase": phase, "usage": usage });
+        cx.simulate_keystrokes("cmd-w f1");
+        wait(cx, |_| inputs_of(&inputs, "key").len() >= 4);
         assert_eq!(
             inputs_of(&inputs, "key"),
             vec![
                 key("down", 0xE1),
                 key("down", 0x04),
-                key("up", 0x04),
                 key("up", 0xE1),
+                key("up", 0x04),
+            ]
+        );
+        assert_eq!(
+            *host.read_with(cx, |host, _| host.passed.clone()).borrow(),
+            vec!["w".to_string(), "f1".to_string()]
+        );
+    }
+
+    #[gpui::test]
+    fn cmd_r_reaches_the_device_over_the_shell_toggle_changes_binding(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (_view, host, inputs, cx) = key_host(cx, &runtime);
+        cx.update(|_, cx| {
+            crate::shell::apply_keymap(
+                cx,
+                &crate::settings::KeymapConfig::default(),
+                crate::settings::ComposerSendBehavior::Enter,
+                Default::default(),
+            )
+        });
+        cx.simulate_keystrokes("cmd-r");
+        wait(cx, |_| inputs_of(&inputs, "key").len() >= 4);
+        assert_eq!(
+            inputs_of(&inputs, "key"),
+            vec![
                 key("down", 0xE3),
                 key("down", 0x15),
                 key("up", 0x15),
                 key("up", 0xE3),
             ]
+        );
+        assert!(!host.read_with(cx, |host, _| host.toggled.get()));
+    }
+
+    fn press_and_hold(
+        view: &Entity<DeviceStreamView>,
+        inputs: &Inputs,
+        cx: &mut VisualTestContext,
+    ) {
+        wait(cx, |cx| {
+            view.read_with(cx, |view, _| view.has_frame() && view.frame_box().is_some())
+        });
+        let frame = view.read_with(cx, |view, _| view.frame_box().unwrap());
+        cx.simulate_mouse_down(
+            geometry::position_at(frame, 0.5, 0.5),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_keystrokes("a");
+        wait(cx, |_| inputs.lock().unwrap().len() >= 2);
+    }
+
+    fn released(inputs: &Inputs) -> bool {
+        let at_centre = |touch: &Value| {
+            touch["phase"] == "end"
+                && (touch["x"].as_f64().unwrap() - 0.5).abs() < 0.01
+                && (touch["y"].as_f64().unwrap() - 0.5).abs() < 0.01
+        };
+        inputs_of(inputs, "key").last() == Some(&key("up", 0x04))
+            && inputs_of(inputs, "touch").last().is_some_and(at_centre)
+    }
+
+    #[gpui::test]
+    fn held_keys_and_the_touch_are_released_when_focus_leaves(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (view, _host, inputs, cx) = key_host(cx, &runtime);
+        press_and_hold(&view, &inputs, cx);
+        cx.update(|window, _| window.blur());
+        wait(cx, |_| released(&inputs));
+    }
+
+    #[gpui::test]
+    fn held_keys_and_the_touch_are_released_when_the_window_deactivates(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (view, _host, inputs, cx) = key_host(cx, &runtime);
+        press_and_hold(&view, &inputs, cx);
+        cx.deactivate_window();
+        wait(cx, |_| released(&inputs));
+    }
+
+    #[gpui::test]
+    fn held_keys_and_the_touch_are_released_when_the_view_is_dropped(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (view, host, inputs, cx) = key_host(cx, &runtime);
+        press_and_hold(&view, &inputs, cx);
+        let weak = view.downgrade();
+        drop(view);
+        host.update(cx, |host, cx| {
+            host.view = None;
+            cx.notify();
+        });
+        wait(cx, |_| released(&inputs));
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[gpui::test]
+    fn command_down_releases_held_keys(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (_view, _host, inputs, cx) = key_host(cx, &runtime);
+        cx.simulate_keystrokes("a");
+        cx.simulate_modifiers_change(Modifiers::command());
+        cx.simulate_modifiers_change(Modifiers::default());
+        cx.simulate_keystrokes("a");
+        wait(cx, |_| inputs_of(&inputs, "key").len() >= 3);
+        assert_eq!(
+            inputs_of(&inputs, "key"),
+            vec![key("down", 0x04), key("up", 0x04), key("down", 0x04)]
         );
     }
 

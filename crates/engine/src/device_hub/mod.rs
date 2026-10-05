@@ -503,15 +503,29 @@ impl DeviceHub {
             .filter(|session| closes(session))
             .cloned()
             .collect();
-        if closing.is_empty() {
+        if !params.shutdown {
+            if !closing.is_empty() {
+                self.publish(|state| state.sessions.retain(|session| !closes(session)));
+            }
             return Ok(());
         }
-        self.publish(|state| state.sessions.retain(|session| !closes(session)));
-        if params.shutdown {
-            for session in closing {
-                self.shutdown_device(&session.device_id, session.platform)
-                    .await?;
-            }
+        let mut targets: Vec<(String, DevicePlatform)> = closing
+            .into_iter()
+            .map(|session| (session.device_id, session.platform))
+            .collect();
+        if targets.is_empty()
+            && let Some(device_id) = params.device_id
+        {
+            let host_id = params.host_id.as_deref().unwrap_or(LOCAL_DEVICE_HOST_ID);
+            let platform = self
+                .snapshot()
+                .device(host_id, &device_id)
+                .map(|device| device.platform)
+                .ok_or_else(|| UNKNOWN_DEVICE.to_string())?;
+            targets.push((device_id, platform));
+        }
+        for (device_id, platform) in targets {
+            self.shutdown_device(&device_id, platform).await?;
         }
         Ok(())
     }
@@ -552,6 +566,9 @@ impl DeviceHub {
                 return Err(error);
             }
         }
+        if let Err(error) = self.refresh(&origin).await {
+            tracing::warn!(%error, "device list unavailable after shutdown");
+        }
         self.publish(|state| {
             for device in state.devices.iter_mut().filter(|d| d.id == device_id) {
                 device.booted = false;
@@ -560,9 +577,6 @@ impl DeviceHub {
                 .sessions
                 .retain(|session| session.device_id != device_id);
         });
-        if let Err(error) = self.refresh(&origin).await {
-            tracing::warn!(%error, "device list unavailable after shutdown");
-        }
         Ok(())
     }
 
@@ -638,12 +652,16 @@ mod tests {
         list_status: u16,
         booted: bool,
         boot_status: Option<u16>,
+        shutdown_status: u16,
+        shutdown_flips: bool,
     }
 
     const HEALTHY: Fake = Fake {
         list_status: 200,
         booted: true,
         boot_status: Some(200),
+        shutdown_status: 200,
+        shutdown_flips: true,
     };
 
     async fn fake_hub() -> (String, Requests) {
@@ -675,8 +693,10 @@ mod tests {
                         });
                         (fake.list_status, body)
                     } else if line.starts_with("POST /vendor/serve-sim/grid/api/shutdown ") {
-                        booted.store(false, SeqCst);
-                        (200, serde_json::json!({"ok": true}))
+                        if fake.shutdown_flips {
+                            booted.store(false, SeqCst);
+                        }
+                        (fake.shutdown_status, serde_json::json!({"ok": true}))
                     } else if line.starts_with("POST /api/devices/boot ") {
                         let Some(status) = fake.boot_status else {
                             std::future::pending::<()>().await;
@@ -901,6 +921,56 @@ mod tests {
         .unwrap();
         assert_eq!(shutdowns().len(), 2);
         core.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn power_off_ends_sessions_only_once_the_simulator_is_off() {
+        let power_off = |device_id: &str| {
+            serde_json::from_value::<zeron_proto::device_hub::CloseHubDeviceParams>(
+                serde_json::json!({"chatId": "chat-1", "deviceId": device_id, "shutdown": true}),
+            )
+            .unwrap()
+        };
+        let (_dir, hub, _) = enabled_hub(Fake {
+            shutdown_status: 500,
+            shutdown_flips: false,
+            ..HEALTHY
+        })
+        .await;
+        hub.open(open_params("SIM-1")).await.unwrap();
+        assert!(hub.close(power_off("SIM-1")).await.is_err());
+        let state = hub.snapshot();
+        assert!(state.session("chat-1", "local", "SIM-1").is_some());
+        assert!(state.devices[0].booted);
+        hub.shutdown().await;
+
+        let (_dir, hub, _) = enabled_hub(Fake {
+            shutdown_flips: false,
+            ..HEALTHY
+        })
+        .await;
+        hub.open(open_params("SIM-1")).await.unwrap();
+        hub.close(power_off("SIM-1")).await.unwrap();
+        let state = hub.snapshot();
+        assert!(state.sessions.is_empty());
+        assert!(
+            !state.devices[0].booted,
+            "a list taken mid-shutdown does not mark it booted again"
+        );
+        hub.shutdown().await;
+
+        let (_dir, hub, _) = enabled_hub(HEALTHY).await;
+        assert!(hub.snapshot().devices[0].booted);
+        hub.close(power_off("SIM-1")).await.unwrap();
+        assert!(
+            !hub.snapshot().devices[0].booted,
+            "power off without a session still shuts the simulator down"
+        );
+        assert_eq!(
+            hub.close(power_off("SIM-2")).await.err().as_deref(),
+            Some(super::UNKNOWN_DEVICE)
+        );
+        hub.shutdown().await;
     }
 
     #[tokio::test(flavor = "multi_thread")]

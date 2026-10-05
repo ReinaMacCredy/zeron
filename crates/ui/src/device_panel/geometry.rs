@@ -84,19 +84,13 @@ impl KeyPress {
         Some(Self { usage, modifiers })
     }
 
+    // Only the bare key stays held, so a modifier never leaks into the next key of a rollover.
     pub fn down(&self) -> Vec<DeviceInput> {
-        self.modifiers
-            .iter()
-            .chain([&self.usage])
+        let downs = self.modifiers.iter().chain([&self.usage]);
+        let ups = self.modifiers.iter().rev();
+        downs
             .map(|&usage| key(KeyPhase::Down, usage))
-            .collect()
-    }
-
-    pub fn up(&self) -> Vec<DeviceInput> {
-        [&self.usage]
-            .into_iter()
-            .chain(self.modifiers.iter().rev())
-            .map(|&usage| key(KeyPhase::Up, usage))
+            .chain(ups.map(|&usage| key(KeyPhase::Up, usage)))
             .collect()
     }
 }
@@ -105,8 +99,17 @@ fn key(phase: KeyPhase, usage: u16) -> DeviceInput {
     DeviceInput::Key { phase, usage }
 }
 
-pub fn forwards_keystroke(keystroke: &Keystroke) -> bool {
-    !keystroke.modifiers.platform || keystroke.key == "r"
+pub fn key_up(usage: u16) -> DeviceInput {
+    key(KeyPhase::Up, usage)
+}
+
+pub fn command_r() -> Vec<DeviceInput> {
+    vec![
+        key(KeyPhase::Down, COMMAND),
+        key(KeyPhase::Down, 0x15),
+        key(KeyPhase::Up, 0x15),
+        key(KeyPhase::Up, COMMAND),
+    ]
 }
 
 pub fn next_orientation(current: DeviceOrientation) -> DeviceOrientation {
@@ -184,11 +187,8 @@ pub fn position_at(frame: Bounds<Pixels>, x: f32, y: f32) -> Point<Pixels> {
     )
 }
 
-pub fn raw_point(screen: Option<&DeviceScreenConfig>, x: f32, y: f32) -> (f32, f32) {
-    let Some(screen) = screen.filter(|screen| screen.width <= screen.height) else {
-        return (x, y);
-    };
-    match screen.orientation {
+pub fn raw_point(rotation: DeviceOrientation, x: f32, y: f32) -> (f32, f32) {
+    match rotation {
         DeviceOrientation::LandscapeLeft => (y, 1.0 - x),
         DeviceOrientation::LandscapeRight => (1.0 - y, x),
         DeviceOrientation::PortraitUpsideDown => (1.0 - x, 1.0 - y),
@@ -279,14 +279,14 @@ mod tests {
     fn shift_wraps_the_key_for_letters_and_shifted_characters() {
         let press = |keystroke: Keystroke| {
             let press = KeyPress::from_keystroke(&keystroke).unwrap();
-            [press.down(), press.up()].concat()
+            [press.down(), vec![key_up(press.usage)]].concat()
         };
         let wrapped = |usage| {
             vec![
                 key(KeyPhase::Down, SHIFT),
                 key(KeyPhase::Down, usage),
-                key(KeyPhase::Up, usage),
                 key(KeyPhase::Up, SHIFT),
+                key(KeyPhase::Up, usage),
             ]
         };
         assert_eq!(press(Keystroke::parse("shift-a").unwrap()), wrapped(0x04));
@@ -309,18 +309,33 @@ mod tests {
             press(typed("a")),
             vec![key(KeyPhase::Down, 0x04), key(KeyPhase::Up, 0x04)]
         );
+    }
+
+    #[test]
+    fn a_shifted_key_held_during_rollover_does_not_shift_the_next_key() {
+        let down = |text: &str| {
+            KeyPress::from_keystroke(&Keystroke::parse(text).unwrap())
+                .unwrap()
+                .down()
+        };
         assert_eq!(
-            press(Keystroke::parse("cmd-r").unwrap()),
+            [down("shift-t"), down("h")].concat(),
             vec![
-                key(KeyPhase::Down, COMMAND),
-                key(KeyPhase::Down, 0x15),
-                key(KeyPhase::Up, 0x15),
-                key(KeyPhase::Up, COMMAND),
+                key(KeyPhase::Down, SHIFT),
+                key(KeyPhase::Down, 0x17),
+                key(KeyPhase::Up, SHIFT),
+                key(KeyPhase::Down, 0x0B),
             ]
         );
-        assert!(forwards_keystroke(&Keystroke::parse("cmd-r").unwrap()));
-        assert!(!forwards_keystroke(&Keystroke::parse("cmd-w").unwrap()));
-        assert!(forwards_keystroke(&Keystroke::parse("shift-a").unwrap()));
+        assert_eq!(
+            [down("!"), down("a")].concat(),
+            vec![
+                key(KeyPhase::Down, SHIFT),
+                key(KeyPhase::Down, 0x1E),
+                key(KeyPhase::Up, SHIFT),
+                key(KeyPhase::Down, 0x04),
+            ]
+        );
     }
 
     #[test]
@@ -368,7 +383,7 @@ mod tests {
                 .unwrap();
             let centre = |at: u32, extent: u32| (at as f32 + 0.5) / extent as f32;
             let (x, y) = raw_point(
-                Some(&screen),
+                display_rotation(Some(&screen)),
                 centre(sx, shown.width()),
                 centre(sy, shown.height()),
             );
@@ -391,15 +406,14 @@ mod tests {
         let right = screen(DeviceOrientation::LandscapeRight, 588, 1280);
         let down = screen(DeviceOrientation::PortraitUpsideDown, 588, 1280);
         let up = screen(DeviceOrientation::Portrait, 588, 1280);
-        assert_eq!(raw_point(Some(&left), 0.25, 0.75), (0.75, 0.75));
-        assert_eq!(raw_point(Some(&right), 0.25, 0.75), (0.25, 0.25));
-        assert_eq!(raw_point(Some(&down), 0.25, 0.75), (0.75, 0.25));
-        assert_eq!(raw_point(Some(&up), 0.25, 0.75), (0.25, 0.75));
-        assert_eq!(raw_point(None, 0.25, 0.75), (0.25, 0.75));
+        let raw =
+            |screen: Option<&DeviceScreenConfig>| raw_point(display_rotation(screen), 0.25, 0.75);
+        assert_eq!(raw(Some(&left)), (0.75, 0.75));
+        assert_eq!(raw(Some(&right)), (0.25, 0.25));
+        assert_eq!(raw(Some(&down)), (0.75, 0.25));
+        assert_eq!(raw(Some(&up)), (0.25, 0.75));
+        assert_eq!(raw(None), (0.25, 0.75));
         let already_landscape = screen(DeviceOrientation::LandscapeLeft, 1280, 588);
-        assert_eq!(
-            raw_point(Some(&already_landscape), 0.25, 0.75),
-            (0.25, 0.75)
-        );
+        assert_eq!(raw(Some(&already_landscape)), (0.25, 0.75));
     }
 }

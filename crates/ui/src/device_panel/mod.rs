@@ -75,6 +75,7 @@ pub struct DevicePanel {
     target: Option<(String, String)>,
     opening: Option<String>,
     enabling: bool,
+    powering_off: bool,
     listed: bool,
     error: Option<SharedString>,
     view: Option<Entity<DeviceStreamView>>,
@@ -98,6 +99,7 @@ impl DevicePanel {
             target: None,
             opening: None,
             enabling: false,
+            powering_off: false,
             listed: false,
             error: None,
             view: None,
@@ -251,6 +253,9 @@ impl DevicePanel {
         let Some((host_id, device_id)) = self.target.clone() else {
             return;
         };
+        if self.powering_off {
+            return;
+        }
         self.error = None;
         let params = serde_json::json!({
             "chatId": self.chat_id,
@@ -258,21 +263,19 @@ impl DevicePanel {
             "deviceId": device_id,
             "shutdown": true,
         });
-        self.close_task =
-            self.call(
-                methods::CLOSE_HUB_DEVICE,
-                params,
-                cx,
-                |panel, reply, cx| match reply {
-                    Ok(_) => {
-                        panel.target = None;
-                        panel.view = None;
-                        panel.revision = None;
-                        panel.sync(cx);
-                    }
-                    Err(error) => panel.error = Some(error.into()),
-                },
-            );
+        self.close_task = self.call(methods::CLOSE_HUB_DEVICE, params, cx, |panel, reply, cx| {
+            panel.powering_off = false;
+            match reply {
+                Ok(_) => {
+                    panel.target = None;
+                    panel.view = None;
+                    panel.revision = None;
+                    panel.sync(cx);
+                }
+                Err(error) => panel.error = Some(error.into()),
+            }
+        });
+        self.powering_off = self.close_task.is_some();
     }
 
     fn render_message(
@@ -437,6 +440,9 @@ impl Render for DevicePanel {
             self.opening.as_deref(),
         );
         let body = match phase {
+            _ if self.powering_off => {
+                self.render_message(&theme, "Powering off device...".into(), true, cx)
+            }
             PanelPhase::Setup => setup::render_gate(
                 &theme,
                 self.enabling,
@@ -532,7 +538,9 @@ mod tests {
                 seen.lock()
                     .unwrap()
                     .push((method.clone(), frame["params"].clone()));
-                let delay = if method == methods::CONFIGURE_DEVICE_HUB {
+                let delay = if method == methods::CONFIGURE_DEVICE_HUB
+                    || method == methods::CLOSE_HUB_DEVICE
+                {
                     Duration::from_millis(200)
                 } else {
                     Duration::ZERO
@@ -704,15 +712,21 @@ mod tests {
         wait(cx, |_| {
             !calls_of(&calls, methods::CLOSE_HUB_DEVICE).is_empty()
         });
+        assert!(
+            cx.debug_bounds("device-more").is_none(),
+            "the stream gives way to the powering-off message"
+        );
+        assert!(panel.read_with(cx, |panel, _| panel.target.is_some()));
+        panel.update(cx, |panel, cx| panel.power_off(cx));
+        wait(cx, |cx| {
+            panel.read_with(cx, |panel, _| panel.target.is_none())
+        });
         assert_eq!(
             calls_of(&calls, methods::CLOSE_HUB_DEVICE),
             vec![serde_json::json!({
                 "chatId": "chat", "hostId": "local", "deviceId": "SIM", "shutdown": true
             })]
         );
-        wait(cx, |cx| {
-            panel.read_with(cx, |panel, _| panel.target.is_none())
-        });
         let phase = panel.read_with(cx, |panel, cx| {
             panel_phase(
                 panel.hub(cx),

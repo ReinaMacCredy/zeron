@@ -150,6 +150,7 @@ impl DevicePanel {
                 .child(label)
         };
         let menu = popover::popover_card(&popup)
+            .bg(popup.surface_dialog)
             .min_w(px(200.0))
             .flex()
             .flex_col()
