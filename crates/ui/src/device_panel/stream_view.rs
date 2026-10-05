@@ -44,10 +44,14 @@ pub struct AxBox {
     pub y: f32,
     pub width: f32,
     pub height: f32,
+    pub oriented: bool,
 }
 
 impl AxBox {
     pub fn displayed(self, rotation: DeviceOrientation) -> AxBox {
+        if self.oriented {
+            return self;
+        }
         let (x0, y0) = geometry::display_point(rotation, self.x, self.y);
         let (x1, y1) = geometry::display_point(rotation, self.x + self.width, self.y + self.height);
         AxBox {
@@ -55,6 +59,7 @@ impl AxBox {
             y: y0.min(y1),
             width: (x1 - x0).abs(),
             height: (y1 - y0).abs(),
+            oriented: true,
         }
     }
 }
@@ -1384,6 +1389,7 @@ mod tests {
             y: 0.2,
             width: 0.3,
             height: 0.4,
+            oriented: false,
         };
         for (rotation, shown) in [
             (DeviceOrientation::Portrait, [0.1, 0.2, 0.3, 0.4]),
@@ -1397,6 +1403,11 @@ mod tests {
                 got.iter().zip(shown).all(|(a, b)| (a - b).abs() < 1e-5),
                 "{rotation:?}: {got:?}"
             );
+            let oriented = AxBox {
+                oriented: true,
+                ..raw
+            };
+            assert_eq!(oriented.displayed(rotation), oriented, "{rotation:?}");
         }
     }
 }

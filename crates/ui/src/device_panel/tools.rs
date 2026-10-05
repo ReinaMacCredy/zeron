@@ -97,6 +97,7 @@ pub fn ax_boxes(tree: &DeviceAxTree) -> Vec<AxBox> {
                     y: top as f32,
                     width: (right - left) as f32,
                     height: (bottom - top) as f32,
+                    oriented: screen.0 > screen.1,
                 });
             }
             visit(&node.children, screen, boxes);
@@ -1445,7 +1446,8 @@ mod tests {
                 x: 0.1,
                 y: 0.1,
                 width: 0.25,
-                height: 0.25
+                height: 0.25,
+                oriented: false,
             }]
         );
         assert_eq!(
@@ -1596,18 +1598,33 @@ mod tests {
                     x: 0.1,
                     y: 0.1,
                     width: 0.5,
-                    height: 0.1
+                    height: 0.1,
+                    oriented: false,
                 },
                 AxBox {
                     x: 0.75,
                     y: 0.0,
                     width: 0.25,
-                    height: 0.1
+                    height: 0.1,
+                    oriented: false,
                 }
             ],
             "a box past the edge is clipped, one fully outside is skipped"
         );
         assert!(ax_boxes(&DeviceAxTree::default()).is_empty());
+        let landscape = DeviceAxTree {
+            nodes: vec![node(
+                0.0,
+                0.0,
+                874.0,
+                402.0,
+                vec![node(72.0, 10.0, 44.0, 44.0, vec![])],
+            )],
+        };
+        assert!(
+            ax_boxes(&landscape).iter().all(|ax| ax.oriented),
+            "a landscape root already reports frames in display orientation"
+        );
 
         let entry = |id: usize| DeviceEventLogEntry {
             id: id.to_string(),
