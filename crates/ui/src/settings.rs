@@ -721,6 +721,13 @@ pub fn transcript_compact_mode(cx: &App) -> bool {
         .unwrap_or_default()
 }
 
+pub fn pr_chat_sessions(scope: &str, cx: &App) -> Vec<PrChatSession> {
+    cx.try_global::<SettingsStore>()
+        .filter(|store| store.current.pr_chat_history == PrChatHistory::KeepPerPr)
+        .and_then(|store| store.current.pr_chat_sessions.get(scope).cloned())
+        .unwrap_or_default()
+}
+
 pub fn set_transcript_compact_mode(enabled: bool, cx: &mut App) {
     if update(SavePolicy::Immediate, cx, |settings| {
         settings.transcript_compact_mode = enabled;
@@ -2122,6 +2129,28 @@ impl UiSettings {
         }
         self.pr_chat_sessions
             .retain(|_, sessions| !sessions.is_empty());
+    }
+
+    pub fn stale_pr_chats(
+        &self,
+        chats: &[zeron_proto::Chat],
+        live: &[&str],
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Vec<String> {
+        // A just-indexed chat can precede the chats frame that carries its row.
+        let grace = chrono::Duration::minutes(5);
+        self.pr_chat_sessions
+            .values()
+            .flatten()
+            .filter(|session| !live.contains(&session.chat_id.as_str()))
+            .filter(
+                |session| match chats.iter().find(|chat| chat.id == session.chat_id) {
+                    Some(chat) => chat.archived,
+                    None => now - session.created_at > grace,
+                },
+            )
+            .map(|session| session.chat_id.clone())
+            .collect()
     }
 
     pub fn effective_commit_instruction(&self) -> &str {

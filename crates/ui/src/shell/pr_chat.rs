@@ -21,21 +21,38 @@ pub(super) struct PrChatPanel {
     error: Option<SharedString>,
     pub(super) open: bool,
     minimized: bool,
+    earlier: Option<SharedString>,
+    sessions_menu: bool,
     _location: Option<Task<()>>,
     _context: Option<Task<()>>,
     _saved: Option<Subscription>,
+    _sent: Option<Subscription>,
 }
 
 #[derive(Default)]
 pub(super) struct PrChatTrash {
-    doomed: Vec<DoomedPrChat>,
+    parked: Vec<ParkedPrChat>,
     deleted: HashSet<String>,
+    pruned: Option<u64>,
 }
 
-struct DoomedPrChat {
+struct ParkedPrChat {
     chat_id: String,
     side: u64,
+    landing: Landing,
     _settled: Subscription,
+}
+
+enum Landing {
+    Delete,
+    Index(String),
+}
+
+struct SessionRow {
+    chat_id: String,
+    label: String,
+    detail: String,
+    current: bool,
 }
 
 impl Shell {
@@ -68,8 +85,179 @@ impl Shell {
             };
             let context = page.read(cx).chat_context(cx);
             self.discard_pr_chat(cx);
-            self.start_pr_chat(context, cx);
+            match self.newest_pr_chat_session(&context.index_key(), cx) {
+                Some(row) => self.resume_pr_chat(context, row, cx),
+                None => self.start_pr_chat(context, cx),
+            }
         }
+        self.sync_pr_chat_button(cx);
+        cx.notify();
+    }
+
+    fn newest_pr_chat_session(&self, scope: &str, cx: &App) -> Option<zeron_proto::Chat> {
+        let mut sessions = settings::pr_chat_sessions(scope, cx);
+        sessions.sort_by_key(|session| std::cmp::Reverse(session.created_at));
+        let state = self.state.read(cx);
+        sessions.iter().find_map(|session| {
+            state
+                .chats
+                .iter()
+                .find(|chat| chat.id == session.chat_id && !chat.archived)
+                .cloned()
+        })
+    }
+
+    fn resume_pr_chat(
+        &mut self,
+        context: PrChatContext,
+        row: zeron_proto::Chat,
+        cx: &mut Context<Self>,
+    ) {
+        let placeholder = context.placeholder();
+        let earlier = earlier_session(&row, chrono::Local::now());
+        let chat_id = row.id.clone();
+        let tab = self.new_side_chat_tab(row, false, cx);
+        tab.composer.update(cx, |composer, cx| {
+            composer.set_pr_chat(placeholder, cx);
+            composer.set_pr_context(None);
+        });
+        let sent = cx.subscribe(&tab.composer, |shell, _, event: &ComposerEvent, cx| {
+            if matches!(
+                event,
+                ComposerEvent::Sent { .. } | ComposerEvent::Queued { .. }
+            ) && let Some(panel) = shell.pr_chat.as_mut()
+                && panel.earlier.take().is_some()
+            {
+                cx.notify();
+            }
+        });
+        self.side_chat_seq += 1;
+        let id = self.side_chat_seq;
+        self.side_chats.insert(id, tab);
+        self.pr_chat = Some(PrChatPanel {
+            context,
+            removed: BTreeSet::new(),
+            chat_id,
+            side: Some(id),
+            indexed: true,
+            error: None,
+            open: true,
+            minimized: false,
+            earlier,
+            sessions_menu: false,
+            _location: None,
+            _context: None,
+            _saved: None,
+            _sent: Some(sent),
+        });
+        self.sync_hidden_chats(cx);
+        self.focus_pr_chat(cx);
+    }
+
+    fn pr_chat_session_rows(&self, cx: &App) -> Vec<SessionRow> {
+        let Some(panel) = self.pr_chat.as_ref() else {
+            return Vec::new();
+        };
+        let now = chrono::Local::now();
+        let mut sessions = settings::pr_chat_sessions(&panel.context.index_key(), cx);
+        sessions.sort_by_key(|session| std::cmp::Reverse(session.created_at));
+        let state = self.state.read(cx);
+        let mut rows: Vec<SessionRow> = sessions
+            .iter()
+            .filter_map(|session| {
+                let chat = state.chats.iter().find(|chat| chat.id == session.chat_id);
+                if chat.is_some_and(|chat| chat.archived) {
+                    return None;
+                }
+                let at = chat
+                    .and_then(|chat| chat.last_message_at)
+                    .unwrap_or(session.created_at);
+                let current = session.chat_id == panel.chat_id;
+                let title = chat.and_then(|chat| chat.title.as_deref());
+                let preview = chat.and_then(|chat| chat.last_message_preview.as_deref());
+                Some(SessionRow {
+                    chat_id: session.chat_id.clone(),
+                    label: session_label(&day_label(at, now), title),
+                    detail: match (current, preview) {
+                        (true, _) => "Open session".into(),
+                        (false, Some(preview)) => preview.to_owned(),
+                        (false, None) => "No messages".into(),
+                    },
+                    current,
+                })
+            })
+            .collect();
+        if !rows.iter().any(|row| row.current) {
+            rows.insert(
+                0,
+                SessionRow {
+                    chat_id: panel.chat_id.clone(),
+                    label: "Today · New session".into(),
+                    detail: "Open session".into(),
+                    current: true,
+                },
+            );
+        }
+        rows
+    }
+
+    fn toggle_pr_chat_sessions_menu(&mut self, cx: &mut Context<Self>) {
+        if let Some(panel) = self.pr_chat.as_mut() {
+            panel.sessions_menu = !panel.sessions_menu;
+        }
+        cx.notify();
+    }
+
+    pub(super) fn show_pr_chat_sessions(&mut self, cx: &mut Context<Self>) {
+        if let Some(panel) = self.pr_chat.as_mut() {
+            panel.sessions_menu = true;
+        }
+        cx.notify();
+    }
+
+    fn switch_pr_chat_session(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        let Some(panel) = self.pr_chat.as_mut() else {
+            return;
+        };
+        panel.sessions_menu = false;
+        if panel.chat_id == chat_id {
+            cx.notify();
+            return;
+        }
+        let context = panel.context.clone();
+        let row = self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id && !chat.archived)
+            .cloned();
+        self.discard_pr_chat(cx);
+        match row {
+            Some(row) => self.resume_pr_chat(context, row, cx),
+            None => self.start_pr_chat(context, cx),
+        }
+        self.sync_pr_chat_button(cx);
+        cx.notify();
+    }
+
+    fn new_pr_chat_session(&mut self, cx: &mut Context<Self>) {
+        let Some(panel) = self.pr_chat.as_mut() else {
+            return;
+        };
+        panel.sessions_menu = false;
+        let unsent = !panel.indexed;
+        let context = panel.context.clone();
+        let sending = self
+            .pr_chat_tab()
+            .is_some_and(|tab| tab.composer.read(cx).is_sending());
+        if unsent && !sending {
+            self.focus_pr_chat(cx);
+            cx.notify();
+            return;
+        }
+        self.discard_pr_chat(cx);
+        self.start_pr_chat(context, cx);
         self.sync_pr_chat_button(cx);
         cx.notify();
     }
@@ -78,6 +266,7 @@ impl Shell {
         if let Some(panel) = self.pr_chat.as_mut() {
             panel.open = false;
             panel.minimized = true;
+            panel.sessions_menu = false;
         }
         self.sync_pr_chat_button(cx);
         cx.notify();
@@ -167,9 +356,12 @@ impl Shell {
             error: None,
             open: true,
             minimized: false,
+            earlier: None,
+            sessions_menu: false,
             _location: Some(location_task),
             _context: Some(context_task),
             _saved: None,
+            _sent: None,
         });
         self.sync_hidden_chats(cx);
     }
@@ -274,6 +466,7 @@ impl Shell {
                 },
             )
         });
+        self.sync_hidden_chats(cx);
     }
 
     fn push_pr_chat_context(&self, cx: &mut Context<Self>) {
@@ -301,19 +494,14 @@ impl Shell {
         };
         panel.open = false;
         panel.minimized = false;
+        panel.sessions_menu = false;
         if settings::current(cx).pr_chat_history == PrChatHistory::Fresh {
             let chat_id = panel.chat_id.clone();
-            let side = panel.side;
-            let sending = self
-                .pr_chat_tab()
-                .is_some_and(|tab| tab.composer.read(cx).is_sending());
             if settings::current(cx).pr_chat_indexed(&chat_id) {
-                self.delete_pr_chat(chat_id, cx);
-            } else if sending && let Some(side) = side {
-                if let Some(panel) = self.pr_chat.as_mut() {
-                    panel.side = None;
+                if let Some(side) = panel.side.take() {
+                    self.side_chats.remove(&side);
                 }
-                self.doom_pr_chat(chat_id, side, cx);
+                self.delete_pr_chat(chat_id, cx);
             }
             self.discard_pr_chat(cx);
         }
@@ -321,38 +509,58 @@ impl Shell {
         cx.notify();
     }
 
-    fn doom_pr_chat(&mut self, chat_id: String, side: u64, cx: &mut Context<Self>) {
+    fn park_pr_chat(
+        &mut self,
+        chat_id: String,
+        side: u64,
+        landing: Landing,
+        cx: &mut Context<Self>,
+    ) {
         let Some(tab) = self.side_chats.get(&side) else {
             return;
         };
         let settled = cx.observe(&tab.composer, move |shell, composer, cx| {
             if !composer.read(cx).is_sending() {
-                shell.settle_doomed_pr_chat(side, cx);
+                shell.settle_parked_pr_chat(side, cx);
             }
         });
-        self.pr_chat_trash.doomed.push(DoomedPrChat {
+        self.pr_chat_trash.parked.push(ParkedPrChat {
             chat_id,
             side,
+            landing,
             _settled: settled,
         });
     }
 
-    fn settle_doomed_pr_chat(&mut self, side: u64, cx: &mut Context<Self>) {
+    fn settle_parked_pr_chat(&mut self, side: u64, cx: &mut Context<Self>) {
         let Some(at) = self
             .pr_chat_trash
-            .doomed
+            .parked
             .iter()
-            .position(|doomed| doomed.side == side)
+            .position(|parked| parked.side == side)
         else {
             return;
         };
-        let doomed = self.pr_chat_trash.doomed.remove(at);
+        let parked = self.pr_chat_trash.parked.remove(at);
         let saved = self
             .side_chats
             .remove(&side)
             .is_some_and(|tab| !tab.state.read(cx).side_chat_unsaved());
         if saved {
-            self.delete_pr_chat(doomed.chat_id, cx);
+            match parked.landing {
+                Landing::Delete => self.delete_pr_chat(parked.chat_id, cx),
+                Landing::Index(scope) => {
+                    settings::update(SavePolicy::Debounced, cx, |settings| {
+                        settings.index_pr_chat(
+                            &scope,
+                            PrChatSession {
+                                chat_id: parked.chat_id,
+                                created_at: Utc::now(),
+                            },
+                        )
+                    });
+                }
+            }
         }
         self.sync_hidden_chats(cx);
     }
@@ -380,10 +588,52 @@ impl Shell {
 
     fn discard_pr_chat(&mut self, cx: &mut Context<Self>) {
         if let Some(panel) = self.pr_chat.take()
-            && let Some(id) = panel.side
+            && let Some(side) = panel.side
         {
-            self.side_chats.remove(&id);
+            let sending = self
+                .side_chats
+                .get(&side)
+                .is_some_and(|tab| tab.composer.read(cx).is_sending());
+            if sending {
+                let landing = match settings::current(cx).pr_chat_history {
+                    PrChatHistory::Fresh => Landing::Delete,
+                    PrChatHistory::KeepPerPr => Landing::Index(panel.context.index_key()),
+                };
+                self.park_pr_chat(panel.chat_id, side, landing, cx);
+            } else {
+                self.side_chats.remove(&side);
+            }
         }
+        self.sync_hidden_chats(cx);
+    }
+
+    pub(super) fn prune_pr_chat_index(&mut self, cx: &mut Context<Self>) {
+        let state = self.state.read(cx);
+        let revision = state.link_roots_revision;
+        if !state.chats_synced || self.pr_chat_trash.pruned == Some(revision) {
+            return;
+        }
+        let live: Vec<&str> = self
+            .pr_chat
+            .iter()
+            .map(|panel| panel.chat_id.as_str())
+            .chain(
+                self.pr_chat_trash
+                    .parked
+                    .iter()
+                    .map(|parked| parked.chat_id.as_str()),
+            )
+            .collect();
+        let stale = settings::current(cx).stale_pr_chats(&state.chats, &live, Utc::now());
+        self.pr_chat_trash.pruned = Some(revision);
+        if stale.is_empty() {
+            return;
+        }
+        settings::update(SavePolicy::Debounced, cx, |settings| {
+            for chat_id in &stale {
+                settings.unindex_pr_chat(chat_id);
+            }
+        });
         self.sync_hidden_chats(cx);
     }
 
@@ -397,13 +647,16 @@ impl Shell {
         }
         hidden.extend(
             self.pr_chat_trash
-                .doomed
+                .parked
                 .iter()
-                .map(|doomed| doomed.chat_id.clone()),
+                .map(|parked| parked.chat_id.clone()),
         );
         hidden.extend(self.pr_chat_trash.deleted.iter().cloned());
         self.state
             .update(cx, |state, cx| state.set_hidden_chats(hidden, cx));
+        if let Some(page) = &self.pull_requests_page {
+            page.update(cx, |_, cx| cx.notify());
+        }
     }
 
     pub(super) fn pr_chat_owns_focus(&self, window: &Window, cx: &App) -> bool {
@@ -432,7 +685,14 @@ impl Shell {
                 .is_some_and(|page| page.read(cx).git_tab_active());
             return (!git_tab).then(|| self.render_pr_chat_pill(&theme, cx));
         };
-        let style = settings::current(cx).pr_chat_style;
+        let (style, history) = {
+            let settings = settings::current(cx);
+            (settings.pr_chat_style, settings.pr_chat_history)
+        };
+        let sessions = (history == PrChatHistory::KeepPerPr).then(|| self.pr_chat_session_rows(cx));
+        let menu_open = panel.sessions_menu;
+        let earlier = panel.earlier.clone();
+        let prompts = panel.context.continue_prompts();
         let width = match style {
             PrChatStyle::Floating => PR_CHAT_WIDTH,
             PrChatStyle::BottomBar => PR_CHAT_BAR_WIDTH,
@@ -471,6 +731,31 @@ impl Shell {
                     .text_color(theme.text_muted)
                     .child(SharedString::from(subtitle)),
             )
+            .children(sessions.as_ref().map(|rows| {
+                let count = rows.len();
+                div()
+                    .id("pr-chat-sessions")
+                    .debug_selector(|| "pr-chat-sessions".into())
+                    .role(gpui::Role::Button)
+                    .aria_label("Chat sessions")
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .h(px(24.0))
+                    .px(px(7.0))
+                    .rounded(px(6.0))
+                    .text_size(px(12.0))
+                    .text_color(theme.text_muted)
+                    .cursor_pointer()
+                    .when(menu_open, |el| el.bg(theme.ink(0.06)))
+                    .hover(|s| s.bg(theme.ink(0.06)).text_color(theme.text))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_pr_chat_sessions_menu(cx)))
+                    .child(SharedString::from(match count {
+                        1 => "1 session".to_string(),
+                        n => format!("{n} sessions"),
+                    }))
+                    .child(icon(icons::LUCIDE_CHEVRON_DOWN).size(px(12.0)))
+            }))
             .child(div().flex_1())
             .child(
                 div()
@@ -556,12 +841,75 @@ impl Shell {
                     composer.set_dock_frame(crate::composer_dock::DockFrame::settled(true), cx);
                     composer.set_available_width(width - 20.0, cx);
                 });
+                let resumed = earlier.as_ref().map(|label| {
+                    let send = composer.clone();
+                    (
+                        day_divider(label.clone(), &theme),
+                        div()
+                            .flex_none()
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.0))
+                            .px(px(12.0))
+                            .pb(px(6.0))
+                            .child(day_divider("Today".into(), &theme))
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(theme.text_muted)
+                                    .child("Continue"),
+                            )
+                            .child(div().flex().flex_wrap().gap(px(6.0)).children(
+                                prompts.iter().enumerate().map(|(ix, prompt)| {
+                                    let send = send.clone();
+                                    let prompt = *prompt;
+                                    div()
+                                        .id(("pr-chat-continue", ix))
+                                        .debug_selector(move || format!("pr-chat-continue-{ix}"))
+                                        .role(gpui::Role::Button)
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(5.0))
+                                        .h(px(26.0))
+                                        .px(px(9.0))
+                                        .rounded(px(13.0))
+                                        .border_1()
+                                        .border_color(theme.border.opacity(0.8))
+                                        .text_size(px(12.0))
+                                        .text_color(theme.text.opacity(0.85))
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(theme.ink(0.05)))
+                                        .on_click(move |_, _, cx| {
+                                            send.update(cx, |composer, cx| {
+                                                composer.send_prompt(prompt.into(), cx)
+                                            })
+                                        })
+                                        .child(div().text_color(theme.accent).child("✦"))
+                                        .child(prompt)
+                                }),
+                            )),
+                    )
+                });
+                let (top, bottom) = match resumed {
+                    Some((top, bottom)) => (Some(top), Some(bottom)),
+                    None => (None, None),
+                };
                 div()
                     .flex_1()
                     .min_h_0()
                     .flex()
                     .flex_col()
-                    .child(div().flex_1().min_h_0().child(transcript))
+                    .children(top.map(|top| div().flex_none().px(px(12.0)).pt(px(8.0)).child(top)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .when(earlier.is_some(), |el| {
+                                el.opacity(0.6).debug_selector(|| "pr-chat-earlier".into())
+                            })
+                            .child(transcript),
+                    )
+                    .children(bottom)
                     .child(div().flex_none().child(composer))
                     .into_any_element()
             }
@@ -603,8 +951,71 @@ impl Shell {
                 .child(header)
                 .children(chip_row)
                 .child(body)
+                .children(
+                    sessions
+                        .filter(|_| menu_open)
+                        .map(|rows| self.render_pr_chat_sessions_menu(rows, &theme, cx)),
+                )
                 .into_any_element(),
         )
+    }
+
+    fn render_pr_chat_sessions_menu(
+        &self,
+        rows: Vec<SessionRow>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let entry = |id: SharedString, active: bool, label: String, detail: String| {
+            crate::popover::menu_row(theme, active, id.clone())
+                .id(id.clone())
+                .debug_selector(move || id.to_string())
+                .flex_col()
+                .items_start()
+                .gap(px(1.0))
+                .child(div().w_full().truncate().child(label))
+                .child(
+                    div()
+                        .w_full()
+                        .truncate()
+                        .text_size(px(11.0))
+                        .text_color(theme.text_muted)
+                        .child(detail),
+                )
+        };
+        crate::popover::popover_card(theme)
+            .id("pr-chat-sessions-menu")
+            .debug_selector(|| "pr-chat-sessions-menu".into())
+            .occlude()
+            .absolute()
+            .top(px(40.0))
+            .left(px(12.0))
+            .w(px(260.0))
+            .flex()
+            .flex_col()
+            .children(rows.into_iter().enumerate().map(|(ix, row)| {
+                let chat_id = row.chat_id;
+                entry(
+                    format!("pr-chat-session-{ix}").into(),
+                    row.current,
+                    row.label,
+                    row.detail,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.switch_pr_chat_session(chat_id.clone(), cx)
+                }))
+            }))
+            .child(crate::popover::menu_separator())
+            .child(
+                entry(
+                    "pr-chat-new-session".into(),
+                    false,
+                    "+ New session".into(),
+                    "Earlier sessions are kept".into(),
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.new_pr_chat_session(cx))),
+            )
+            .into_any_element()
     }
 
     fn render_pr_chat_pill(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -640,6 +1051,45 @@ impl Shell {
             ))
             .into_any_element()
     }
+}
+
+fn day_label(at: chrono::DateTime<Utc>, now: chrono::DateTime<chrono::Local>) -> String {
+    let day = at.with_timezone(&chrono::Local).date_naive();
+    match (now.date_naive() - day).num_days() {
+        ..=0 => "Today".into(),
+        1 => "Yesterday".into(),
+        days @ 2..=6 => format!("{days} days ago"),
+        _ => day.format("%b %-d").to_string(),
+    }
+}
+
+fn session_label(day: &str, title: Option<&str>) -> String {
+    match title.map(str::trim).filter(|title| !title.is_empty()) {
+        Some(title) => format!("{day} · {title}"),
+        None => day.to_owned(),
+    }
+}
+
+fn earlier_session(
+    chat: &zeron_proto::Chat,
+    now: chrono::DateTime<chrono::Local>,
+) -> Option<SharedString> {
+    let at = chat.last_message_at?;
+    let day = day_label(at, now);
+    (day != "Today").then(|| session_label(&day, chat.title.as_deref()).into())
+}
+
+fn day_divider(label: SharedString, theme: &Theme) -> gpui::Div {
+    let rule = || div().flex_1().h(px(1.0)).bg(theme.border.opacity(0.6));
+    div()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .text_size(px(11.0))
+        .text_color(theme.text_muted.opacity(0.7))
+        .child(rule())
+        .child(label)
+        .child(rule())
 }
 
 #[cfg(test)]
@@ -1175,12 +1625,339 @@ mod tests {
         }))
         .unwrap();
         shell.update(cx, |shell, cx| {
-            assert!(shell.pr_chat_trash.doomed.is_empty());
+            assert!(shell.pr_chat_trash.parked.is_empty());
             assert!(!settings::current(cx).pr_chat_indexed(&chat_id));
             shell.state.update(cx, |state, _| state.chats.push(row));
             let state = shell.state.read(cx);
             assert!(state.visible_chats().all(|chat| chat.id != chat_id));
         });
+    }
+
+    fn row(id: &str, archived: bool, extra: serde_json::Value) -> zeron_proto::Chat {
+        let mut row = serde_json::json!({
+            "id": id, "deviceId": "local", "spaceId": "s1", "cwd": "/wt/x",
+            "archived": archived, "createdAt": Utc::now() - chrono::Duration::days(3),
+            "config": { "harness": "mock", "sandbox": "workspace-write" },
+        });
+        row.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(row).unwrap()
+    }
+
+    fn index(cx: &mut VisualTestContext, scope: &str, sessions: &[(&str, i64)]) {
+        cx.update(|_, cx| {
+            settings::update(SavePolicy::Debounced, cx, |settings| {
+                for (id, days) in sessions {
+                    settings.index_pr_chat(
+                        scope,
+                        PrChatSession {
+                            chat_id: (*id).into(),
+                            created_at: Utc::now() - chrono::Duration::days(*days),
+                        },
+                    );
+                }
+            })
+        });
+    }
+
+    fn click(cx: &mut VisualTestContext, selector: &'static str) {
+        let bounds = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} drawn"));
+        cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn keep_per_pr_resumes_the_newest_session_and_switches_between_sessions(
+        cx: &mut TestAppContext,
+    ) {
+        let (runtime, shell, cx, mut wire, _dir) = setup(cx);
+        let _guard = runtime.enter();
+        let yesterday = Utc::now() - chrono::Duration::days(1);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.chats.push(row("older", false, serde_json::json!({})));
+                state.chats.push(row(
+                    "newer",
+                    false,
+                    serde_json::json!({
+                        "title": "Quick review", "lastMessageAt": yesterday,
+                        "lastMessagePreview": "Three points",
+                    }),
+                ));
+            })
+        });
+        index(cx, "github.com/acme/zeron#7", &[("older", 3), ("newer", 1)]);
+        shell.update(cx, |shell, cx| shell.sync_hidden_chats(cx));
+
+        shell.update(cx, |shell, cx| shell.open_pull_requests(cx));
+        wire.serve(&runtime, cx, |method, _| {
+            (method == methods::LIST_CHANGE_REQUESTS).then(|| {
+                serde_json::json!({
+                    "viewers": {}, "items": [item_n(7), item_n(8)],
+                    "errors": [], "truncated": false,
+                })
+            })
+        });
+        assert!(cx.debug_bounds("pr-chat-badge-7").is_some(), "bubble on #7");
+        assert!(
+            cx.debug_bounds("pr-chat-badge-8").is_none(),
+            "#8 has no chat"
+        );
+
+        let page = shell.read_with(cx, |shell, _| shell.pull_requests_page.clone().unwrap());
+        page.update(cx, |page, cx| page.open_linked(item(), None, cx));
+        wire.serve(&runtime, cx, |method, _| {
+            (method == methods::GET_CHANGE_REQUEST).then(detail)
+        });
+        shell.update(cx, |shell, cx| shell.toggle_pr_chat(cx));
+        let frames = wire.serve(&runtime, cx, |_, _| None);
+        assert!(
+            calls(&frames, methods::PREPARE_CHANGE_REQUEST_CHAT).is_empty(),
+            "a resumed session mints nothing: {frames:?}"
+        );
+        shell.read_with(cx, |shell, cx| {
+            let panel = shell.pr_chat.as_ref().unwrap();
+            assert_eq!(panel.chat_id, "newer");
+            assert!(panel.indexed);
+            assert_eq!(panel.earlier.as_deref(), Some("Yesterday · Quick review"));
+            let tab = shell.pr_chat_tab().unwrap();
+            assert!(!tab.state.read(cx).side_chat_unsaved());
+            assert_eq!(tab.state.read(cx).selected_chat.as_deref(), Some("newer"));
+        });
+        assert!(cx.debug_bounds("pr-chat-earlier").is_some());
+        assert!(cx.debug_bounds("pr-chat-continue-1").is_some());
+
+        click(cx, "pr-chat-sessions");
+        assert!(cx.debug_bounds("pr-chat-sessions-menu").is_some());
+        assert!(
+            cx.debug_bounds("pr-chat-session-2").is_none(),
+            "two sessions"
+        );
+        click(cx, "pr-chat-session-1");
+        let frames = wire.serve(&runtime, cx, |_, _| None);
+        assert!(calls(&frames, methods::PREPARE_CHANGE_REQUEST_CHAT).is_empty());
+        assert!(cx.debug_bounds("pr-chat-sessions-menu").is_none());
+        shell.read_with(cx, |shell, _| {
+            let panel = shell.pr_chat.as_ref().unwrap();
+            assert_eq!(panel.chat_id, "older");
+            assert!(panel.earlier.is_none(), "an older session with no messages");
+        });
+
+        click(cx, "pr-chat-sessions");
+        click(cx, "pr-chat-session-0");
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.pr_chat.as_ref().unwrap().chat_id, "newer")
+        });
+        click(cx, "pr-chat-continue-0");
+        let frames = wire.serve(&runtime, cx, |method, _| {
+            (method == methods::QUEUE_COMMAND).then(|| serde_json::json!({}))
+        });
+        assert!(
+            calls(&frames, methods::MUTATE)
+                .iter()
+                .all(|frame| frame.params["op"] == "markChatSeen"),
+            "the session exists already: {frames:?}"
+        );
+        let run = calls(&frames, methods::QUEUE_COMMAND);
+        assert_eq!(run.len(), 1, "{frames:?}");
+        let request = &run[0].params["command"]["request"];
+        assert_eq!(request["prompt"], "What changed since we last talked?");
+        assert_eq!(request["permissionMode"], "ask");
+        shell.read_with(cx, |shell, _| {
+            assert!(shell.pr_chat.as_ref().unwrap().earlier.is_none())
+        });
+        assert!(cx.debug_bounds("pr-chat-earlier").is_none());
+
+        click(cx, "pr-chat-sessions");
+        click(cx, "pr-chat-new-session");
+        let frames = wire.serve(&runtime, cx, |method, _| match method {
+            methods::PREPARE_CHANGE_REQUEST_CHAT => Some(serde_json::json!({
+                "spaceId": "s1", "root": "/repo", "cwd": "/repo",
+                "worktree": false, "onHead": false,
+            })),
+            _ => None,
+        });
+        assert_eq!(
+            calls(&frames, methods::PREPARE_CHANGE_REQUEST_CHAT).len(),
+            1
+        );
+        assert!(
+            calls(&frames, methods::MUTATE)
+                .iter()
+                .all(|frame| frame.params["op"] != "deleteChat"),
+            "nothing deleted: {frames:?}"
+        );
+        shell.read_with(cx, |shell, cx| {
+            let panel = shell.pr_chat.as_ref().unwrap();
+            assert!(panel.chat_id != "newer" && panel.chat_id != "older");
+            assert!(!panel.indexed);
+            let settings = settings::current(cx);
+            assert!(settings.pr_chat_indexed("newer") && settings.pr_chat_indexed("older"));
+            assert_eq!(shell.pr_chat_session_rows(cx).len(), 3);
+        });
+        click(cx, "pr-chat-sessions");
+        assert!(cx.debug_bounds("pr-chat-session-2").is_some());
+
+        cx.update(|_, cx| {
+            settings::update(SavePolicy::Debounced, cx, |settings| {
+                settings.pr_chat_history = PrChatHistory::Fresh
+            })
+        });
+        shell.update(cx, |_, cx| cx.notify());
+        page.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("pr-chat-sessions").is_none());
+        assert!(cx.debug_bounds("pr-chat-sessions-menu").is_none());
+        assert!(cx.debug_bounds("pr-chat-badge-7").is_none());
+    }
+
+    #[gpui::test]
+    fn keep_per_pr_keeps_a_chat_sending_when_its_panel_is_replaced(cx: &mut TestAppContext) {
+        let (runtime, shell, cx, mut wire, _dir) = setup(cx);
+        let _guard = runtime.enter();
+        let (chat_id, composer, side_state) = open_pr_chat(&runtime, &shell, cx, &mut wire);
+        let config: zeron_proto::ChatConfig = serde_json::from_value(serde_json::json!({
+            "harness": "mock", "sandbox": "workspace-write",
+        }))
+        .unwrap();
+        side_state.update(cx, |state, _| state.apply_chat_config(&chat_id, config));
+        composer.update(cx, |composer, cx| {
+            composer.send_prompt("Review this".into(), cx)
+        });
+        let frames = wire.serve(&runtime, cx, |_, _| None);
+        let create = calls(&frames, methods::MUTATE);
+        assert_eq!(create.len(), 1, "{frames:?}");
+        let create_id = create[0].id.clone();
+
+        shell.update(cx, |shell, cx| shell.close_pr_chat(cx));
+        let page = shell.read_with(cx, |shell, _| shell.pull_requests_page.clone().unwrap());
+        page.update(cx, |page, cx| page.open_linked(item_n(8), None, cx));
+        wire.serve(&runtime, cx, |method, _| {
+            (method == methods::GET_CHANGE_REQUEST).then(detail)
+        });
+        shell.update(cx, |shell, cx| shell.toggle_pr_chat(cx));
+        let frames = wire.serve(&runtime, cx, |method, _| match method {
+            methods::PREPARE_CHANGE_REQUEST_CHAT => Some(serde_json::json!({
+                "spaceId": "s1", "root": "/repo", "cwd": "/repo",
+                "worktree": false, "onHead": false,
+            })),
+            _ => None,
+        });
+        assert!(calls(&frames, methods::MUTATE).is_empty(), "{frames:?}");
+        shell.read_with(cx, |shell, cx| {
+            assert_ne!(shell.pr_chat.as_ref().unwrap().chat_id, chat_id);
+            assert!(shell.state.read(cx).is_hidden_chat(&chat_id));
+        });
+
+        let reply = ServerFrame {
+            id: create_id,
+            ok: Some(serde_json::json!({})),
+            ..Default::default()
+        };
+        wire.replies
+            .try_send(serde_json::to_string(&reply).unwrap())
+            .unwrap();
+        let mut frames = wire.serve(&runtime, cx, |method, _| {
+            (method == methods::QUEUE_COMMAND).then(|| serde_json::json!({}))
+        });
+        frames.extend(wire.serve(&runtime, cx, |_, _| None));
+        let run = calls(&frames, methods::QUEUE_COMMAND);
+        assert_eq!(run.len(), 1, "the send still reaches the agent: {frames:?}");
+        assert!(
+            run[0].params["command"]["request"]["prompt"]
+                .as_str()
+                .unwrap()
+                .starts_with("Review this"),
+            "{frames:?}"
+        );
+        assert!(calls(&frames, methods::MUTATE).is_empty(), "{frames:?}");
+
+        let landed = row(&chat_id, false, serde_json::json!({}));
+        shell.update(cx, |shell, cx| {
+            assert!(shell.pr_chat_trash.parked.is_empty());
+            let sessions = settings::current(cx).pr_chat_sessions;
+            assert_eq!(sessions["github.com/acme/zeron#7"][0].chat_id, chat_id);
+            assert!(!sessions.contains_key("github.com/acme/zeron#8"));
+            shell.state.update(cx, |state, _| state.chats.push(landed));
+            let state = shell.state.read(cx);
+            assert!(state.visible_chats().all(|chat| chat.id != chat_id));
+            shell.close_pr_chat(cx);
+        });
+        page.update(cx, |page, cx| page.open_linked(item(), None, cx));
+        wire.serve(&runtime, cx, |method, _| {
+            (method == methods::GET_CHANGE_REQUEST).then(detail)
+        });
+        shell.update(cx, |shell, cx| shell.toggle_pr_chat(cx));
+        let frames = wire.serve(&runtime, cx, |_, _| None);
+        assert!(calls(&frames, methods::PREPARE_CHANGE_REQUEST_CHAT).is_empty());
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.pr_chat.as_ref().unwrap().chat_id, chat_id, "resumed")
+        });
+    }
+
+    #[gpui::test]
+    fn the_index_drops_deleted_and_archived_chats_once_chats_sync(cx: &mut TestAppContext) {
+        let (runtime, shell, cx, _wire, _dir) = setup(cx);
+        let _guard = runtime.enter();
+        index(
+            cx,
+            "github.com/acme/zeron#7",
+            &[("deleted", 2), ("archived", 2), ("kept", 2), ("landing", 0)],
+        );
+        shell.update(cx, |shell, cx| {
+            shell.sync_hidden_chats(cx);
+            shell.state.update(cx, |_, cx| cx.notify());
+        });
+        cx.run_until_parked();
+        shell.read_with(cx, |_, cx| {
+            assert_eq!(
+                settings::current(cx).pr_chat_ids().count(),
+                4,
+                "nothing pruned before the chats frame"
+            )
+        });
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                state.apply_chats(vec![
+                    row("wt", false, serde_json::json!({})),
+                    row("archived", true, serde_json::json!({})),
+                    row("kept", false, serde_json::json!({})),
+                ]);
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        shell.read_with(cx, |shell, cx| {
+            let ids: Vec<String> = settings::current(cx)
+                .pr_chat_ids()
+                .map(str::to_owned)
+                .collect();
+            assert_eq!(ids, ["kept", "landing"]);
+            let state = shell.state.read(cx);
+            assert!(state.is_hidden_chat("kept"));
+            assert!(!state.is_hidden_chat("deleted"));
+            assert!(!state.is_hidden_chat("archived"));
+        });
+    }
+
+    #[test]
+    fn day_labels_count_calendar_days() {
+        let now = chrono::Local::now();
+        let at = |days: i64| (now - chrono::Duration::days(days)).with_timezone(&Utc);
+        assert_eq!(day_label(at(0), now), "Today");
+        assert_eq!(day_label(at(1), now), "Yesterday");
+        assert_eq!(day_label(at(3), now), "3 days ago");
+        assert_eq!(
+            day_label(at(30), now),
+            (now - chrono::Duration::days(30))
+                .format("%b %-d")
+                .to_string()
+        );
+        assert_eq!(session_label("Today", Some(" ")), "Today");
+        assert_eq!(session_label("Yesterday", Some("Fix")), "Yesterday · Fix");
     }
 
     #[gpui::test]

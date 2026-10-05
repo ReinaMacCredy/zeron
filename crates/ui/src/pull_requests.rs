@@ -1312,7 +1312,7 @@ impl PullRequestsPage {
             .gap(px(8.0))
             .max_w(px(144.0))
             .text_size(px(12.0))
-            .children(chat::row_badge(&key));
+            .children(chat::row_badge(&key, theme, cx));
         if row_width >= 448.0 {
             match item.review_decision {
                 Some(ChangeRequestReviewDecision::Approved) => {
