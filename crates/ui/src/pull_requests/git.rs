@@ -4869,10 +4869,14 @@ impl PullRequestsPage {
             .into_iter()
             .find(|option| option.path.as_deref() == view.checkout_path())?;
         let tree = view.tree();
-        let label: SharedString = tree
-            .and_then(|tree| tree.branch.clone())
-            .map(SharedString::from)
-            .unwrap_or_else(|| option.label.clone());
+        let label: SharedString = match tree {
+            Some(tree) if tree.branch.is_some() => tree.branch.clone().unwrap_or_default().into(),
+            Some(WorkingTree {
+                head_sha: Some(head),
+                ..
+            }) => format!("detached at {}", short_sha(head)).into(),
+            _ => option.label.clone(),
+        };
         let ahead = tree.map(|tree| (tree.ahead, tree.behind));
         let agent = option.path.is_some();
         Some(
