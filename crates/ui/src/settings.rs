@@ -28,6 +28,7 @@ pub mod harnesses;
 pub mod notifications;
 pub mod permission_guide;
 pub mod shortcuts;
+pub mod source_control;
 pub mod thread_naming;
 pub mod wallpaper;
 pub mod wallpaper_colors;
@@ -1041,6 +1042,40 @@ pub const SKILL_COMPLETION_HARNESSES: [(zeron_proto::HarnessId, &str); 9] = [
     (zeron_proto::HarnessId::Opencode, "OpenCode"),
 ];
 
+pub const DEFAULT_COMMIT_INSTRUCTION: &str = "Write a short commit message for this staged diff.";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitModelChoice {
+    pub harness: zeron_proto::HarnessId,
+    pub model: String,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PrChatStyle {
+    #[default]
+    Floating,
+    BottomBar,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PrChatHistory {
+    #[default]
+    KeepPerPr,
+    Fresh,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GitAgentBusyPolicy {
+    #[default]
+    SafeOnly,
+    BlockAll,
+    AllowAll,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct UiSettings {
@@ -1256,6 +1291,12 @@ pub struct UiSettings {
     pub reduce_motion: crate::motion::ReduceMotion,
     /// Also snap animations while the main window is not focused.
     pub pause_animations_in_background: bool,
+    pub commit_message_instruction: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit_message_model: Option<CommitModelChoice>,
+    pub pr_chat_style: PrChatStyle,
+    pub pr_chat_history: PrChatHistory,
+    pub git_agent_busy_policy: GitAgentBusyPolicy,
     /// Pre-theme settings used `accentColor`. Read it once, migrate to
     /// [`Self::accent`], and never write it again.
     #[serde(default, rename = "accentColor", skip_serializing)]
@@ -1363,6 +1404,11 @@ impl Default for UiSettings {
             chat_background: ChatBackground::default(),
             reduce_motion: crate::motion::ReduceMotion::System,
             pause_animations_in_background: false,
+            commit_message_instruction: DEFAULT_COMMIT_INSTRUCTION.to_string(),
+            commit_message_model: None,
+            pr_chat_style: PrChatStyle::default(),
+            pr_chat_history: PrChatHistory::default(),
+            git_agent_busy_policy: GitAgentBusyPolicy::default(),
             legacy_accent_color: None,
         }
     }
@@ -2031,8 +2077,20 @@ impl UiSettings {
             sidecar_collapsed,
             frost,
             chat_background,
+            commit_message_instruction,
+            commit_message_model,
+            pr_chat_style,
+            pr_chat_history,
+            git_agent_busy_policy,
         );
         current
+    }
+
+    pub fn effective_commit_instruction(&self) -> &str {
+        match self.commit_message_instruction.trim() {
+            "" => DEFAULT_COMMIT_INSTRUCTION,
+            instruction => instruction,
+        }
     }
 
     /// Clamp widths into their legal ranges (also heals NaN to defaults).
@@ -2337,6 +2395,72 @@ mod tests {
         let saved = serde_json::to_string(&settings).unwrap();
         let loaded: UiSettings = serde_json::from_str(&saved).unwrap();
         assert!(!loaded.compact_model_picker);
+    }
+
+    #[test]
+    fn source_control_settings_default_for_old_files() {
+        let legacy: UiSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            legacy.commit_message_instruction,
+            "Write a short commit message for this staged diff."
+        );
+        assert_eq!(legacy.commit_message_model, None);
+        assert_eq!(legacy.pr_chat_style, PrChatStyle::Floating);
+        assert_eq!(legacy.pr_chat_history, PrChatHistory::KeepPerPr);
+        assert_eq!(legacy.git_agent_busy_policy, GitAgentBusyPolicy::SafeOnly);
+        assert_eq!(legacy, UiSettings::default());
+        let saved = serde_json::to_string(&legacy).unwrap();
+        assert!(!saved.contains("commitMessageModel"));
+    }
+
+    #[test]
+    fn empty_commit_instruction_falls_back_to_the_default() {
+        let mut settings = UiSettings::default();
+        for blank in ["", "   ", "\n\t"] {
+            settings.commit_message_instruction = blank.into();
+            assert_eq!(
+                settings.effective_commit_instruction(),
+                DEFAULT_COMMIT_INSTRUCTION
+            );
+        }
+        settings.commit_message_instruction = "  Use Conventional Commits.\n".into();
+        assert_eq!(
+            settings.effective_commit_instruction(),
+            "Use Conventional Commits."
+        );
+    }
+
+    #[test]
+    fn source_control_edits_survive_a_concurrent_merge() {
+        let base = UiSettings::default();
+        let mut edited = base.clone();
+        edited.commit_message_instruction = "Conventional please.".into();
+        edited.commit_message_model = Some(CommitModelChoice {
+            harness: zeron_proto::HarnessId::ClaudeCode,
+            model: "claude-haiku-4-5".into(),
+        });
+        let mut current = base.clone();
+        current.pr_chat_style = PrChatStyle::BottomBar;
+        current.git_agent_busy_policy = GitAgentBusyPolicy::AllowAll;
+        let merged = UiSettings::merge_changes(&base, &edited, current);
+        assert_eq!(merged.commit_message_instruction, "Conventional please.");
+        assert_eq!(
+            merged
+                .commit_message_model
+                .as_ref()
+                .map(|m| m.model.as_str()),
+            Some("claude-haiku-4-5")
+        );
+        assert_eq!(merged.pr_chat_style, PrChatStyle::BottomBar);
+        assert_eq!(merged.git_agent_busy_policy, GitAgentBusyPolicy::AllowAll);
+        assert_eq!(merged.pr_chat_history, PrChatHistory::KeepPerPr);
+
+        let mut stale = base.clone();
+        stale.pr_chat_history = PrChatHistory::Fresh;
+        let merged = UiSettings::merge_changes(&base, &stale, merged);
+        assert_eq!(merged.pr_chat_history, PrChatHistory::Fresh);
+        assert_eq!(merged.commit_message_instruction, "Conventional please.");
+        assert_eq!(merged.pr_chat_style, PrChatStyle::BottomBar);
     }
 
     #[test]
@@ -3190,10 +3314,23 @@ mod tests {
             },
             reduce_motion: crate::motion::ReduceMotion::On,
             pause_animations_in_background: true,
+            commit_message_instruction: "Use the imperative mood.".into(),
+            commit_message_model: Some(CommitModelChoice {
+                harness: zeron_proto::HarnessId::Codex,
+                model: "gpt-5.6-luna".into(),
+            }),
+            pr_chat_style: PrChatStyle::BottomBar,
+            pr_chat_history: PrChatHistory::Fresh,
+            git_agent_busy_policy: GitAgentBusyPolicy::BlockAll,
             legacy_accent_color: None,
         };
         settings.save(dir.path()).unwrap();
         let json = std::fs::read_to_string(UiSettings::path(dir.path())).unwrap();
+        assert!(json.contains(r#""commitMessageInstruction": "Use the imperative mood.""#));
+        assert!(json.contains(r#""harness": "codex""#));
+        assert!(json.contains(r#""prChatStyle": "bottom-bar""#));
+        assert!(json.contains(r#""prChatHistory": "fresh""#));
+        assert!(json.contains(r#""gitAgentBusyPolicy": "block-all""#));
         assert!(json.contains(r#""diffWrap": true"#));
         assert_eq!(UiSettings::load(dir.path()), settings);
         assert!(json.contains(r#""codeFencesFitContent": true"#));

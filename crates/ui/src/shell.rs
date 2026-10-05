@@ -48,6 +48,7 @@ use crate::settings::files::{FilesSettingsEvent, FilesSettingsPage};
 use crate::settings::harnesses::HarnessesPage;
 use crate::settings::notifications::{NotificationsEvent, NotificationsPage};
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
+use crate::settings::source_control::SourceControlPage;
 use crate::settings::{
     self, CHAT_PANEL_MIN, ComposerSendBehavior, JUMP_SLOTS, KeymapConfig, RIGHT_PANE_DEFAULT,
     RIGHT_PANE_MIN, SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, SPLIT_PANE_MIN, SPLIT_RATIO_DEFAULT,
@@ -566,12 +567,13 @@ pub enum SettingsSection {
     General,
     Appshots,
     Computer,
+    SourceControl,
     Archived,
 }
 
 impl SettingsSection {
     /// Sections shown in Settings. `Agents` is a legacy Accounts route alias.
-    pub const ALL: [SettingsSection; 11] = [
+    pub const ALL: [SettingsSection; 12] = [
         SettingsSection::General,
         SettingsSection::Appearance,
         SettingsSection::Notifications,
@@ -582,6 +584,7 @@ impl SettingsSection {
         SettingsSection::Files,
         SettingsSection::Appshots,
         SettingsSection::Computer,
+        SettingsSection::SourceControl,
         SettingsSection::Archived,
     ];
 
@@ -625,6 +628,7 @@ impl SettingsSection {
             SettingsSection::General => "general",
             SettingsSection::Appshots => "appshots",
             SettingsSection::Computer => "computer",
+            SettingsSection::SourceControl => "source-control",
             SettingsSection::Archived => "archived",
         }
     }
@@ -643,6 +647,7 @@ impl SettingsSection {
             "general" | "conversations" => SettingsSection::General,
             "appshots" => SettingsSection::Appshots,
             "computer" => SettingsSection::Computer,
+            "source-control" => SettingsSection::SourceControl,
             "archived" => SettingsSection::Archived,
             _ => return None,
         })
@@ -669,6 +674,7 @@ impl SettingsSection {
             SettingsSection::General => "General",
             SettingsSection::Appshots => "Appshots",
             SettingsSection::Computer => "Computer",
+            SettingsSection::SourceControl => "Source Control",
             SettingsSection::Archived => "Archived sessions",
         }
     }
@@ -685,6 +691,7 @@ impl SettingsSection {
             SettingsSection::Shortcuts => &["keyboard", "keybinding"],
             SettingsSection::Appshots => &["screenshot", "capture"],
             SettingsSection::Computer => &["computer use", "desktop", "cursor", "permission"],
+            SettingsSection::SourceControl => &["git", "commit", "pull request"],
             SettingsSection::Archived => &["archive", "old sessions"],
             _ => &[],
         }
@@ -760,6 +767,13 @@ impl SettingsSection {
                 ("Getting started", &[]),
                 ("Recent Computer actions", &["history", "audit"]),
                 ("Advanced", &["permission", "driver"]),
+            ],
+            SettingsSection::SourceControl => &[
+                ("Instruction", &["commit message", "prompt", "conventional"]),
+                ("Default model", &["commit message", "haiku"]),
+                ("Style", &["mini chat", "floating", "bottom bar"]),
+                ("Chat history", &["mini chat", "keep per pr", "fresh"]),
+                ("While an agent is running", &["git", "agent", "busy"]),
             ],
             _ => &[],
         }
@@ -2190,6 +2204,7 @@ pub struct Shell {
     nav: NavHistory,
     devices_page: Option<Entity<DevicesPage>>,
     archived_page: Option<Entity<ArchivedPage>>,
+    source_control_page: Option<Entity<SourceControlPage>>,
     appearance_page: Option<Entity<AppearancePage>>,
     files_settings_page: Option<Entity<FilesSettingsPage>>,
     notifications_page: Option<Entity<NotificationsPage>>,
@@ -2757,6 +2772,7 @@ impl Shell {
             nav,
             devices_page: None,
             archived_page: None,
+            source_control_page: None,
             appearance_page: None,
             files_settings_page: None,
             notifications_page: None,
@@ -6243,6 +6259,16 @@ impl Shell {
                 }
                 page.into_any_element()
             }
+            SettingsSection::SourceControl => {
+                if self.source_control_page.is_none() {
+                    let state = self.state.clone();
+                    self.source_control_page = Some(cx.new(|cx| SourceControlPage::new(state, cx)));
+                }
+                match &self.source_control_page {
+                    Some(page) => page.clone().into_any_element(),
+                    None => Empty.into_any_element(),
+                }
+            }
             SettingsSection::Archived => {
                 if self.archived_page.is_none() {
                     let state = self.state.clone();
@@ -8285,6 +8311,7 @@ impl Shell {
             SettingsSection::General => icons::SETTINGS,
             SettingsSection::Appshots => icons::SCREEN_CAPTURE,
             SettingsSection::Computer => icons::CURSOR,
+            SettingsSection::SourceControl => icons::GIT_BRANCH,
             SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
         };
         let query = self.settings_search.read(cx).text().to_string();
@@ -15313,6 +15340,15 @@ mod tests {
                 .matching_rows("archived")
                 .is_empty()
         );
+        assert!(SettingsSection::SourceControl.matches("commit"));
+        assert_eq!(
+            SettingsSection::SourceControl.matching_rows("commit"),
+            vec!["Instruction", "Default model"]
+        );
+        assert_eq!(
+            SettingsSection::SourceControl.matching_rows("mini chat"),
+            vec!["Style", "Chat history"]
+        );
     }
 
     #[test]
@@ -19313,6 +19349,7 @@ mod settings_modal_regressions {
             ("settings/files", SettingsSection::Files),
             ("settings/appshots", SettingsSection::Appshots),
             ("settings/computer", SettingsSection::Computer),
+            ("settings/source-control", SettingsSection::SourceControl),
             ("settings/archived", SettingsSection::Archived),
         ] {
             assert_eq!(

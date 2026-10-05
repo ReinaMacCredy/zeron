@@ -91,6 +91,7 @@ fn workspace_footer_row() -> gpui::Div {
 use crate::composer::{ComposerInput, ComposerInputEvent, harness_display_name};
 use crate::motion;
 use crate::popover::{self, Loadable, MenuKey};
+use crate::settings::CommitModelChoice;
 use crate::settings::composer::ComposerDefaults;
 use crate::state::{AppState, EngineHandle};
 use crate::theme::Theme;
@@ -564,6 +565,17 @@ pub struct TitleModelPicked(pub TitleSettings);
 
 impl gpui::EventEmitter<TitleModelPicked> for Pickers {}
 
+pub struct CommitModelPicked(pub CommitModelChoice);
+
+impl gpui::EventEmitter<CommitModelPicked> for Pickers {}
+
+fn commit_title_settings(choice: Option<&CommitModelChoice>) -> TitleSettings {
+    TitleSettings {
+        harness: choice.map(|choice| choice.harness),
+        model: choice.map(|choice| choice.model.clone()),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ModelSetting {
     Reasoning,
@@ -779,6 +791,7 @@ pub struct Pickers {
     /// emits the local device's title settings instead of a composer draft.
     /// `config.harness` then only tracks the tab being browsed.
     title: Option<TitleSettings>,
+    commit_binding: bool,
     /// Sticky last-used picks (zeron `zeron.composer.defaults:v1`): seeds the
     /// new-chat chips and is rewritten on every new-chat pick.
     defaults: ComposerDefaults,
@@ -916,6 +929,20 @@ impl Pickers {
         cx: &mut Context<Self>,
     ) -> Self {
         Self::build(state, Some(settings), cx)
+    }
+
+    pub fn new_for_commit_messages(
+        state: Entity<AppState>,
+        choice: Option<&CommitModelChoice>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut pickers = Self::build(state, Some(commit_title_settings(choice)), cx);
+        pickers.commit_binding = true;
+        pickers
+    }
+
+    pub fn set_commit_model(&mut self, choice: Option<&CommitModelChoice>, cx: &mut Context<Self>) {
+        self.set_title_settings(commit_title_settings(choice), cx);
     }
 
     pub fn set_title_settings(&mut self, settings: TitleSettings, cx: &mut Context<Self>) {
@@ -1081,6 +1108,7 @@ impl Pickers {
             effort_bounds: None,
             config: DraftConfig::default(),
             title,
+            commit_binding: false,
             defaults,
             data_dir,
             draft_owner,
@@ -1264,9 +1292,12 @@ impl Pickers {
         if let Some(title) = &self.title {
             // Browsing starts on the saved agent, else the first title-capable one.
             return title.harness.or_else(|| {
-                self.harnesses
-                    .ready()
-                    .and_then(|list| self.offered(list).first().map(|d| d.id))
+                let offered = self.offered(self.harnesses.ready()?);
+                offered
+                    .iter()
+                    .find(|d| self.commit_binding && d.id == HarnessId::ClaudeCode)
+                    .or(offered.first())
+                    .map(|d| d.id)
             });
         }
         if let Some(config) = self.chat_row(cx).and_then(|c| c.config.as_ref()) {
@@ -2219,13 +2250,22 @@ impl Pickers {
     fn pick_model(&mut self, model_id: String, cx: &mut Context<Self>) {
         self.setting_menu = None;
         if self.title.is_some() {
+            let harness = self.effective_harness(cx);
             let settings = TitleSettings {
-                harness: self.effective_harness(cx),
-                model: Some(model_id),
+                harness,
+                model: Some(model_id.clone()),
             };
             self.title = Some(settings.clone());
             self.catalog_rev += 1;
-            cx.emit(TitleModelPicked(settings));
+            match harness {
+                Some(harness) if self.commit_binding => {
+                    cx.emit(CommitModelPicked(CommitModelChoice {
+                        harness,
+                        model: model_id,
+                    }))
+                }
+                _ => cx.emit(TitleModelPicked(settings)),
+            }
             self.close(cx);
             return;
         }
@@ -7197,6 +7237,7 @@ impl Render for Pickers {
         let model_label: SharedString = if let Some(title) = &self.title {
             // The saved choice, not the tab being browsed.
             match (title.harness, title.model.as_deref()) {
+                (None, _) if self.commit_binding => "Automatic".into(),
                 (None, _) => "Session agent".into(),
                 (Some(_), None) => "Automatic".into(),
                 (Some(harness), Some(id)) => self
@@ -7607,6 +7648,42 @@ mod tests {
         let rows = vec![bare_model("first", "First")];
         assert_eq!(selected_catalog_model(&rows, None).unwrap().id, "first");
         assert!(selected_catalog_model(&rows, Some("saved")).is_none());
+    }
+
+    #[gpui::test]
+    fn commit_model_picker_browses_claude_code_and_emits_the_pick(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let state = cx.new(|_| AppState::new());
+        let pickers = cx.new(|cx| Pickers::new_for_commit_messages(state, None, cx));
+        let picked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let _sub = cx.update(|cx| {
+            let picked = picked.clone();
+            cx.subscribe(&pickers, move |_, event: &CommitModelPicked, _| {
+                picked.borrow_mut().push(event.0.clone())
+            })
+        });
+        pickers.update(cx, |pickers, cx| {
+            pickers.harnesses = Loadable::Ready(vec![
+                descriptor(HarnessId::Codex, "Codex"),
+                descriptor(HarnessId::ClaudeCode, "Claude Code"),
+            ]);
+            assert_eq!(pickers.effective_harness(cx), Some(HarnessId::ClaudeCode));
+            assert_eq!(pickers.effective_model_id(cx), None);
+            pickers.pick_model("claude-haiku-4-5".into(), cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            picked.borrow().as_slice(),
+            [CommitModelChoice {
+                harness: HarnessId::ClaudeCode,
+                model: "claude-haiku-4-5".into(),
+            }]
+        );
+        pickers.update(cx, |pickers, cx| {
+            assert_eq!(pickers.effective_model_id(cx), Some("claude-haiku-4-5"));
+            pickers.set_commit_model(None, cx);
+            assert_eq!(pickers.effective_model_id(cx), None);
+        });
     }
 
     fn side_chat_picker(unsaved: bool, cx: &mut App) -> (Entity<AppState>, Entity<Pickers>) {
