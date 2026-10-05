@@ -1856,7 +1856,8 @@ impl GitTab {
         let choice = self
             .model_override
             .clone()
-            .or(settings.commit_message_model.clone());
+            .or(settings.commit_message_model.clone())
+            .filter(|_| space.device.is_none());
         let request = GenerateCommitMessageRequest {
             target: workspace_target(&space, self.checkout_path.as_deref()),
             instruction: Some(settings.effective_commit_instruction().to_owned()),
@@ -2941,7 +2942,12 @@ impl GitTab {
             .min_w_0()
             .flex()
             .items_center()
-            .child(self.model_picker.clone());
+            .when(
+                self.space
+                    .as_ref()
+                    .is_some_and(|space| space.device.is_none()),
+                |el| el.child(self.model_picker.clone()),
+            );
         let settings_button = div()
             .id("git-write-settings")
             .debug_selector(|| "git-write-settings".into())
@@ -8228,5 +8234,35 @@ mod tests {
         click(cx, "git-changes-toggle-0");
         settle_action(cx, &tab, &calls, 1);
         assert_eq!(actions(&calls)[0]["action"]["kind"], "stage");
+    }
+
+    #[gpui::test]
+    fn a_remote_project_writes_its_message_with_the_remote_engines_own_pick(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (page, cx, calls, _dir) = open_page(cx, remote_state(), remote_prefs());
+        cx.update(|_, cx| {
+            crate::composer::init(cx, Default::default());
+            crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
+                settings.commit_message_model = Some(CommitModelChoice {
+                    harness: zeron_proto::HarnessId::Codex,
+                    model: "gpt-5-mini".into(),
+                });
+            });
+        });
+        settle(cx, |cx| cx.debug_bounds("git-write-ai").is_some());
+        let tab = git_tab(&page, cx);
+        settle(cx, |cx| tab.read_with(cx, |tab, _| tab.tree.is_some()));
+        assert!(
+            cx.debug_bounds("picker-model").is_none(),
+            "this device's catalog is not offered for another device's project"
+        );
+        click(cx, "git-write-ai");
+        settle(cx, |_| writes(&calls).len() == 1);
+        let sent = &writes(&calls)[0];
+        assert_eq!(sent["targetDeviceId"], "studio");
+        assert!(sent.get("harness").is_none() && sent.get("model").is_none());
     }
 }
