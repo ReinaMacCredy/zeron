@@ -762,6 +762,7 @@ pub struct AppState {
     /// the writes (tab opened / closed).
     pub open_sidechat_tabs: HashSet<String>,
     pub computer_settings: Option<zeron_proto::computer::ComputerSettings>,
+    pub device_hub: Option<zeron_proto::device_hub::DeviceHubState>,
     /// Whether each probed harness can fork or rewind a session (the
     /// `branching` half of the composer's `HarnessCompaction` probe).
     /// Unprobed harnesses are treated as able; the engine has the last word.
@@ -883,6 +884,7 @@ impl AppState {
             compacting_chat: None,
             open_sidechat_tabs: HashSet::new(),
             computer_settings: None,
+            device_hub: None,
             harness_branching: HashMap::new(),
             transcript_replayed: false,
             transcript_baselines: HashMap::new(),
@@ -2543,6 +2545,20 @@ impl AppState {
         ));
         #[cfg(target_os = "macos")]
         watch_tasks.extend(crate::computer::preview::watch_events(handle.clone(), cx));
+        if handle
+            .engine_info()
+            .supports(zeron_proto::capabilities::DEVICE_HUB_V1)
+        {
+            watch_tasks.push(spawn_watch(
+                cx,
+                handle.clone(),
+                methods::WATCH_DEVICE_HUB,
+                |state, hub| {
+                    state.device_hub = Some(hub);
+                    true
+                },
+            ));
+        }
         if supports_harness_updates {
             watch_tasks.push(spawn_watch(
                 cx,

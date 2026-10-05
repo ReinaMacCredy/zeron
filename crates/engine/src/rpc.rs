@@ -767,6 +767,7 @@ pub struct EngineRpc {
     harness_updates: Option<crate::harness_updates::HarnessUpdateCoordinator>,
     local_import: Option<crate::local_import::LocalImporter>,
     computer: Option<std::sync::Arc<ComputerRuntime>>,
+    device_hub: Option<std::sync::Arc<crate::device_hub::DeviceHub>>,
     engine_info: EngineInfo,
 }
 
@@ -813,6 +814,7 @@ impl EngineRpc {
             harness_updates: None,
             local_import: None,
             computer: None,
+            device_hub: None,
             engine_info,
         }
     }
@@ -857,6 +859,17 @@ impl EngineRpc {
     pub fn with_computer(mut self, computer: std::sync::Arc<ComputerRuntime>) -> Self {
         self.computer = Some(computer);
         self
+    }
+
+    pub fn with_device_hub(mut self, hub: std::sync::Arc<crate::device_hub::DeviceHub>) -> Self {
+        self.device_hub = Some(hub);
+        self
+    }
+
+    fn device_hub(&self) -> Result<&std::sync::Arc<crate::device_hub::DeviceHub>, RpcError> {
+        self.device_hub
+            .as_ref()
+            .ok_or_else(|| RpcError::Failed("device hub unavailable".into()))
     }
 
     fn computer(&self) -> Result<&std::sync::Arc<ComputerRuntime>, RpcError> {
@@ -4322,6 +4335,79 @@ impl RpcService for EngineRpc {
                         .await
                         .map_err(RpcError::Failed)?;
                 RpcReply::value(&result)
+            }
+            methods::WATCH_DEVICE_HUB => {
+                let states = self.device_hub()?.watch();
+                Ok(RpcReply::Stream(
+                    futures::stream::unfold((states, true), |(mut states, first)| async move {
+                        if !first {
+                            states.changed().await.ok()?;
+                        }
+                        let value = serde_json::to_value(&*states.borrow_and_update()).ok()?;
+                        Some((value, (states, false)))
+                    })
+                    .boxed(),
+                ))
+            }
+            methods::CONFIGURE_DEVICE_HUB => {
+                let p: zeron_proto::device_hub::ConfigureDeviceHubParams = parse_params(params)?;
+                let state = self
+                    .device_hub()?
+                    .configure(p)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&state)
+            }
+            methods::LIST_HUB_DEVICES => {
+                let p: zeron_proto::device_hub::ListHubDevicesParams = parse_params(params)?;
+                let state = self
+                    .device_hub()?
+                    .list(p.inspect_only)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&state)
+            }
+            methods::OPEN_HUB_DEVICE => {
+                let p: zeron_proto::device_hub::OpenHubDeviceParams = parse_params(params)?;
+                let session = self.device_hub()?.open(p).await.map_err(RpcError::Failed)?;
+                RpcReply::value(&session)
+            }
+            methods::WATCH_HUB_DEVICE_FRAMES => {
+                use base64::Engine as _;
+                let p: zeron_proto::device_hub::WatchHubDeviceFramesParams = parse_params(params)?;
+                let subscription = self
+                    .device_hub()?
+                    .watch_frames(&p.device_id)
+                    .map_err(RpcError::Failed)?;
+                Ok(RpcReply::Stream(
+                    futures::stream::unfold(subscription, |mut subscription| async move {
+                        loop {
+                            subscription.frames.changed().await.ok()?;
+                            let Some(frame) = subscription.frames.borrow_and_update().clone()
+                            else {
+                                continue;
+                            };
+                            let value =
+                                serde_json::to_value(zeron_proto::device_hub::DeviceFrame {
+                                    seq: frame.seq,
+                                    width: None,
+                                    height: None,
+                                    jpeg: base64::engine::general_purpose::STANDARD
+                                        .encode(&frame.jpeg),
+                                })
+                                .ok()?;
+                            return Some((value, subscription));
+                        }
+                    })
+                    .boxed(),
+                ))
+            }
+            methods::SEND_HUB_DEVICE_INPUT => {
+                let p: zeron_proto::device_hub::SendHubDeviceInputParams = parse_params(params)?;
+                self.device_hub()?
+                    .send_input(&p.device_id, &p.input)
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({}))
             }
             methods::GET_COMPUTER_SETTINGS => RpcReply::value(&self.computer()?.settings()),
             methods::GET_COMPUTER_STATUS => {

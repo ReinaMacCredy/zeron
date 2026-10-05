@@ -72,6 +72,7 @@ mod chat_dropzone_tests;
 #[cfg(test)]
 mod chat_rename_tests;
 mod command_palette;
+mod device_tabs;
 mod file_mutations;
 mod files_panel;
 mod harness_updates;
@@ -884,6 +885,7 @@ pub enum RightSurface {
     /// the handle keys [`Shell::sidechat_tabs`].
     Sidechat(u64),
     SideChat(u64),
+    Device(u64),
 }
 
 fn push_unique_right_surface(tabs: &mut Vec<RightSurface>, surface: RightSurface) -> bool {
@@ -2151,6 +2153,9 @@ pub struct Shell {
     browsers: std::collections::HashMap<u64, Entity<crate::browser::BrowserSurface>>,
     browser_subs: std::collections::HashMap<u64, Subscription>,
     browser_seq: u64,
+    device_panels:
+        std::collections::HashMap<u64, (Entity<crate::device_panel::DevicePanel>, Subscription)>,
+    device_seq: u64,
     browser_context: crate::browser::BrowserContext,
     browser_profile: Option<String>,
     /// Ordered surface tabs per panel key (drag-reorderable; stale entries —
@@ -2754,6 +2759,8 @@ impl Shell {
             browsers: std::collections::HashMap::new(),
             browser_subs: std::collections::HashMap::new(),
             browser_seq: 0,
+            device_panels: std::collections::HashMap::new(),
+            device_seq: 0,
             browser_context: crate::browser::BrowserContext::default(),
             browser_profile: None,
             right_tabs: std::collections::HashMap::new(),
@@ -3706,6 +3713,9 @@ impl Shell {
                         browser.page.url.clone().map(Into::into),
                     )
                 }),
+                RightSurface::Device(id) => self
+                    .device_tab_title(*id, cx)
+                    .map(|title| (*surface, title, false, None)),
                 RightSurface::Picker => None,
             })
             .collect()
@@ -3757,7 +3767,8 @@ impl Shell {
             | RightSurface::SideChat(_)
             | RightSurface::Subagent(_)
             | RightSurface::Sidechat(_)
-            | RightSurface::Browser(_) => {
+            | RightSurface::Browser(_)
+            | RightSurface::Device(_) => {
                 return None;
             }
         };
@@ -3878,7 +3889,10 @@ impl Shell {
                     });
                 }
             }
-            RightSurface::Subagent(_) | RightSurface::Sidechat(_) | RightSurface::Browser(_) => {}
+            RightSurface::Subagent(_)
+            | RightSurface::Sidechat(_)
+            | RightSurface::Browser(_)
+            | RightSurface::Device(_) => {}
             RightSurface::Picker => {}
         }
         self.sync_explorer_selection(cx);
@@ -5234,6 +5248,9 @@ impl Shell {
                     browser.update(cx, |browser, cx| browser.close(cx));
                 }
                 self.browser_subs.remove(&id);
+            }
+            RightSurface::Device(id) => {
+                self.device_panels.remove(&id);
             }
             RightSurface::Diff(id) => {
                 // Dropping the entity tears down its diff watch.
@@ -12662,6 +12679,7 @@ impl Shell {
                     panel.into_any_element()
                 }
                 RightSurface::SideChat(id) => self.render_side_chat(id, cx),
+                RightSurface::Device(id) => self.render_device_surface(id, cx),
                 RightSurface::Subagent(id) if self.subagent_tabs.contains_key(&id) => {
                     let transcript = self
                         .subagent_tabs
@@ -12846,6 +12864,17 @@ impl Shell {
                             }),
                         ),
                     )
+                    .child(match self.device_surface_unavailable(cx) {
+                        Some(reason) => row("surface-card-device", icons::SMARTPHONE, "Device")
+                            .opacity(0.5)
+                            .cursor_default()
+                            .tooltip(crate::settings::widgets::text_tooltip(reason)),
+                        None => row("surface-card-device", icons::SMARTPHONE, "Device").on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.add_device_surface(cx);
+                            }),
+                        ),
+                    })
                     .when(self.sidechat_source_chat(cx).is_some(), |el| {
                         el.child(
                             row(
@@ -13072,6 +13101,7 @@ impl Shell {
                 RightSurface::Sidechat(_) => icons::CHAT_ROUND_LINE,
                 RightSurface::Terminal(_) => icons::TERMINAL,
                 RightSurface::Browser(_) => icons::GLOBE,
+                RightSurface::Device(_) => icons::SMARTPHONE,
                 RightSurface::Picker => icons::PLUS,
             };
             // A live subagent tab swaps its icon for the mini working
@@ -14757,6 +14787,15 @@ impl Render for Shell {
                     }
                     if popover {
                         self.set_sidecar_popover(true, cx);
+                    }
+                }
+                if self.debug_dialog.as_deref() == Some("device")
+                    && self.state.read(cx).selected_chat.is_some()
+                {
+                    self.debug_dialog = None;
+                    self.add_device_surface(cx);
+                    if !self.right_pane_open(cx) {
+                        self.toggle_right_pane(cx);
                     }
                 }
                 // `=background-send`: once the boot draft carries text (see
