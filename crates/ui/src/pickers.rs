@@ -3766,6 +3766,7 @@ impl Pickers {
             .relative()
             .child(self.measure_trigger(kind, cx))
             .id(id.clone())
+            .debug_selector(move || base.to_string())
             .h(px(32.0))
             .max_w(px(248.0))
             // Shrinkable under row pressure — four footer chips share one
@@ -5197,6 +5198,7 @@ impl Pickers {
         let compact = self.model_rail == ModelRail::Harness;
         let mut el = div()
             .id(("model-row", ix))
+            .debug_selector(move || format!("model-row-{ix}"))
             .px(px(8.0))
             .py(px(if compact { 5.0 } else { 6.0 }))
             .rounded(px(popover::MENU_ITEM_RADIUS))

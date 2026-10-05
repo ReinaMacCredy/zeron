@@ -58,6 +58,13 @@ enum PendingTarget {
     File { staged: bool, path: String },
     All { staged: bool },
     Commit,
+    Stash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Confirm {
+    Discard { path: String, revision: String },
+    DropStash { oid: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +126,10 @@ pub struct GitTab {
     diff_task: Option<Task<()>>,
     message: Entity<ComposerInput>,
     commit_menu: bool,
+    confirm: Option<Confirm>,
+    confirm_focus: FocusHandle,
+    stash_menu: bool,
+    stash_note: Option<SharedString>,
     last_commit: Option<CommitSummary>,
     writing: bool,
     write_generation: u64,
@@ -180,6 +191,24 @@ fn agent_banner(policy: GitAgentBusyPolicy) -> &'static str {
             "An agent is running in this worktree. Git actions here can collide with its edits."
         }
     }
+}
+
+fn conflict_note(conflicts: &[String]) -> String {
+    let shown: Vec<&str> = conflicts.iter().take(3).map(String::as_str).collect();
+    let more = conflicts.len().saturating_sub(shown.len());
+    let files = if more > 0 {
+        format!("{} and {more} more", shown.join(", "))
+    } else {
+        shown.join(", ")
+    };
+    let count = if conflicts.len() == 1 {
+        "1 file".to_string()
+    } else {
+        format!("{} files", conflicts.len())
+    };
+    format!(
+        "The pop stopped on conflicts in {count} ({files}). The stash is kept; resolve the conflicts, then delete it."
+    )
 }
 
 fn subject_chars(message: &str) -> usize {
@@ -377,6 +406,10 @@ impl GitTab {
             diff_task: None,
             message,
             commit_menu: false,
+            confirm: None,
+            confirm_focus: cx.focus_handle(),
+            stash_menu: false,
+            stash_note: None,
             last_commit: None,
             writing: false,
             write_generation: 0,
@@ -453,6 +486,9 @@ impl GitTab {
         self.expanded = None;
         self.diff_task = None;
         self.commit_menu = false;
+        self.confirm = None;
+        self.stash_menu = false;
+        self.stash_note = None;
         self.last_commit = None;
         self.cancel_writing();
         self.written = None;
@@ -518,6 +554,10 @@ impl GitTab {
                         }
                         if moved {
                             tab.history.update(cx, |history, cx| history.refresh(cx));
+                        }
+                        if tab.confirm_is_stale() {
+                            tab.confirm = None;
+                            cx.notify();
                         }
                         if let (Some(expanded), Some(tree)) = (&tab.expanded, &tab.tree) {
                             if !in_section(tree, expanded.staged, &expanded.path) {
@@ -647,6 +687,9 @@ impl GitTab {
         self.expanded = None;
         self.diff_task = None;
         self.commit_menu = false;
+        self.confirm = None;
+        self.stash_menu = false;
+        self.stash_note = None;
         cx.notify();
         self.action_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
@@ -662,9 +705,12 @@ impl GitTab {
                         if let Some(pending) = tab.pending.as_mut() {
                             pending.replied = true;
                         }
+                        let reply: WorkingTreeActionReply =
+                            serde_json::from_value(value).unwrap_or_default();
+                        if !reply.conflicts.is_empty() {
+                            tab.stash_note = Some(conflict_note(&reply.conflicts).into());
+                        }
                         if committing {
-                            let reply: WorkingTreeActionReply =
-                                serde_json::from_value(value).unwrap_or_default();
                             tab.last_commit = reply.commit;
                             tab.message.update(cx, |input, cx| input.set_text("", cx));
                             tab.written = None;
@@ -708,6 +754,62 @@ impl GitTab {
         }
         let message = self.message.read(cx).text().to_string();
         self.run_action(kind.action(message), PendingTarget::Commit, cx);
+    }
+
+    fn confirm_is_stale(&self) -> bool {
+        let Some(tree) = &self.tree else {
+            return false;
+        };
+        match &self.confirm {
+            Some(Confirm::Discard { revision, .. }) => *revision != tree.revision,
+            Some(Confirm::DropStash { oid }) => !tree.stashes.iter().any(|stash| stash.oid == *oid),
+            None => false,
+        }
+    }
+
+    fn open_confirm(&mut self, confirm: Confirm, window: &mut Window, cx: &mut Context<Self>) {
+        self.confirm = Some(confirm);
+        window.focus(&self.confirm_focus, cx);
+        cx.notify();
+    }
+
+    fn cancel_confirm(&mut self, cx: &mut Context<Self>) {
+        if self.confirm.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn confirm_discard(&mut self, cx: &mut Context<Self>) {
+        let stale = self.confirm_is_stale();
+        let Some(Confirm::Discard { path, .. }) = self.confirm.take() else {
+            return;
+        };
+        cx.notify();
+        if stale {
+            return;
+        }
+        self.run_action(
+            WorkingTreeAction::Discard {
+                paths: vec![path.clone()],
+            },
+            PendingTarget::File {
+                staged: false,
+                path,
+            },
+            cx,
+        );
+    }
+
+    fn confirm_drop_stash(&mut self, cx: &mut Context<Self>) {
+        let Some(Confirm::DropStash { oid }) = self.confirm.take() else {
+            return;
+        };
+        cx.notify();
+        self.run_action(
+            WorkingTreeAction::StashDrop { oid },
+            PendingTarget::Stash,
+            cx,
+        );
     }
 
     fn reset_model_override(&mut self, cx: &mut Context<Self>) {
@@ -978,16 +1080,13 @@ impl GitTab {
         });
         let mut rows: Vec<AnyElement> = Vec::with_capacity(files.len());
         for (index, file) in files.iter().enumerate() {
-            rows.push(self.render_file_row(
-                id,
-                index,
-                file,
-                staged,
-                writes,
-                section_pending,
-                theme,
-                cx,
-            ));
+            let confirming = !staged
+                && matches!(&self.confirm, Some(Confirm::Discard { path, .. }) if *path == file.path);
+            rows.push(if confirming {
+                self.render_discard_confirm(file, theme, cx)
+            } else {
+                self.render_file_row(id, index, file, staged, writes, section_pending, theme, cx)
+            });
             if let Some(open) = self
                 .expanded
                 .as_ref()
@@ -1120,6 +1219,66 @@ impl GitTab {
                     }
                 })
         });
+        let discard = writes.filter(|_| !staged).map(|policy| {
+            let path = file.path.clone();
+            let enabled = file.worktree != GitFileState::Unmerged
+                && !path.ends_with('/')
+                && self.allows(
+                    &WorkingTreeAction::Discard {
+                        paths: vec![path.clone()],
+                    },
+                    policy,
+                );
+            let selector = format!("{section}-discard-{index}");
+            div()
+                .id(SharedString::from(selector.clone()))
+                .debug_selector(move || selector.clone())
+                .role(gpui::Role::Button)
+                .aria_label(SharedString::from(format!(
+                    "Discard changes to {}",
+                    file.path
+                )))
+                .tooltip(text_tooltip("Discard changes"))
+                .size(px(20.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(5.0))
+                .child(
+                    icon(icons::LUCIDE_ROTATE_CCW)
+                        .size(px(12.0))
+                        .text_color(theme.text_muted),
+                )
+                .map(|el| {
+                    if enabled {
+                        el.opacity(0.0)
+                            .group_hover(group.clone(), |style| style.opacity(1.0))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(theme.danger.opacity(0.12)))
+                            .on_click(cx.listener(move |tab, _, window, cx| {
+                                cx.stop_propagation();
+                                let Some(revision) =
+                                    tab.tree.as_ref().map(|tree| tree.revision.clone())
+                                else {
+                                    return;
+                                };
+                                tab.open_confirm(
+                                    Confirm::Discard {
+                                        path: path.clone(),
+                                        revision,
+                                    },
+                                    window,
+                                    cx,
+                                );
+                            }))
+                    } else {
+                        el.opacity(0.0)
+                            .group_hover(group.clone(), |style| style.opacity(0.3))
+                            .on_click(|_, _, cx| cx.stop_propagation())
+                    }
+                })
+        });
         let path = file.path.clone();
         div()
             .id(SharedString::from(selector.clone()))
@@ -1185,7 +1344,74 @@ impl GitTab {
                         None => el,
                     }),
             )
+            .children(discard)
             .children(toggle)
+            .into_any_element()
+    }
+
+    fn render_discard_confirm(
+        &self,
+        file: &WorkingTreeFile,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let untracked = file.worktree == GitFileState::Untracked;
+        let (lead, tail) = if untracked {
+            ("Delete ", "? It is untracked, so this cannot be undone.")
+        } else if file.index != GitFileState::Unchanged {
+            (
+                "Discard the unstaged changes to ",
+                "? Staged changes stay. This cannot be undone.",
+            )
+        } else {
+            ("Discard changes to ", "? This cannot be undone.")
+        };
+        let name = file.path.clone();
+        let text = format!("{lead}{name}{tail}");
+        div()
+            .id("git-discard-confirm")
+            .debug_selector(|| "git-discard-confirm".into())
+            .track_focus(&self.confirm_focus)
+            .on_key_down(cx.listener(|tab, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" {
+                    cx.stop_propagation();
+                    tab.cancel_confirm(cx);
+                }
+            }))
+            .mx(px(12.0))
+            .my(px(2.0))
+            .px(px(10.0))
+            .py(px(8.0))
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(theme.danger.opacity(0.3))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .text_size(px(12.0))
+            .text_color(theme.text)
+            .child(div().flex_1().min_w_0().child(
+                gpui::StyledText::new(SharedString::from(text)).with_highlights([(
+                    lead.len()..lead.len() + name.len(),
+                    gpui::HighlightStyle {
+                        font_weight: Some(gpui::FontWeight::SEMIBOLD),
+                        ..Default::default()
+                    },
+                )]),
+            ))
+            .child(
+                small_button(
+                    "git-discard-yes",
+                    if untracked { "Delete" } else { "Discard" },
+                    true,
+                    theme,
+                )
+                .on_click(cx.listener(|tab, _, _, cx| tab.confirm_discard(cx))),
+            )
+            .child(
+                small_button("git-discard-no", "Cancel", false, theme)
+                    .on_click(cx.listener(|tab, _, _, cx| tab.cancel_confirm(cx))),
+            )
             .into_any_element()
     }
 
@@ -1238,6 +1464,18 @@ impl GitTab {
                             .text_size(px(12.0))
                             .text_color(theme.warning)
                             .child("Partial snapshot: only the first files are listed."),
+                    )
+                })
+                .when_some(self.stash_note.clone(), |el, note| {
+                    el.child(
+                        div()
+                            .id("git-stash-note")
+                            .debug_selector(|| "git-stash-note".into())
+                            .mx(px(12.0))
+                            .mt(px(8.0))
+                            .text_size(px(12.0))
+                            .text_color(theme.warning)
+                            .child(note),
                     )
                 })
                 .children(
@@ -1312,6 +1550,11 @@ impl GitTab {
                             .text_size(px(12.0))
                             .text_color(theme.text_muted)
                             .child(SharedString::from(detail.join(" · "))),
+                    )
+                    .children(
+                        writes.zip(tree).map(|(policy, tree)| {
+                            self.render_stash_button(tree, policy, theme, cx)
+                        }),
                     ),
             )
             .when(tree.is_some_and(|tree| tree.agent_active), |el| {
@@ -1340,6 +1583,271 @@ impl GitTab {
             )
             .child(self.render_commit_box(staged.len(), writes, theme, cx))
             .into_any_element()
+    }
+
+    fn render_stash_button(
+        &self,
+        tree: &WorkingTree,
+        policy: GitAgentBusyPolicy,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let menu = self
+            .stash_menu
+            .then(|| self.render_stash_menu(tree, policy, theme, cx));
+        div()
+            .id("git-stash-button")
+            .debug_selector(|| "git-stash-button".into())
+            .role(gpui::Role::Button)
+            .aria_label("Stash")
+            .ml_auto()
+            .relative()
+            .flex_none()
+            .h(px(24.0))
+            .px(px(8.0))
+            .rounded(px(6.0))
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .text_size(px(12.0))
+            .text_color(theme.text_muted)
+            .cursor_pointer()
+            .hover(|style| style.text_color(theme.text).bg(theme.ink(0.06)))
+            .when(self.stash_menu, |el| el.bg(theme.ink(0.06)))
+            .child("Stash")
+            .child(
+                icon(icons::LUCIDE_CHEVRON_DOWN)
+                    .size(px(12.0))
+                    .text_color(theme.text_muted),
+            )
+            .on_click(cx.listener(|tab, _, _, cx| {
+                tab.stash_menu = !tab.stash_menu;
+                if matches!(tab.confirm, Some(Confirm::DropStash { .. })) {
+                    tab.confirm = None;
+                }
+                cx.notify();
+            }))
+            .children(menu)
+            .into_any_element()
+    }
+
+    fn render_stash_menu(
+        &self,
+        tree: &WorkingTree,
+        policy: GitAgentBusyPolicy,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let popup = theme.for_popup();
+        let files = tree.files.len();
+        let push = WorkingTreeAction::StashPush { message: None };
+        let push_enabled = files > 0 && self.allows(&push, policy);
+        let push_label = if files == 1 {
+            "Stash all (1 file)".to_string()
+        } else {
+            format!("Stash all ({files} files)")
+        };
+        let now = chrono::Utc::now();
+        let mut rows: Vec<AnyElement> = Vec::with_capacity(tree.stashes.len());
+        for (index, stash) in tree.stashes.iter().enumerate() {
+            let name = format!("stash@{{{index}}}");
+            let confirming =
+                matches!(&self.confirm, Some(Confirm::DropStash { oid }) if *oid == stash.oid);
+            if confirming {
+                rows.push(
+                    div()
+                        .id("git-stash-drop-confirm")
+                        .debug_selector(|| "git-stash-drop-confirm".into())
+                        .track_focus(&self.confirm_focus)
+                        .on_key_down(cx.listener(|tab, event: &KeyDownEvent, _, cx| {
+                            if event.keystroke.key == "escape" {
+                                cx.stop_propagation();
+                                tab.cancel_confirm(cx);
+                            }
+                        }))
+                        .my(px(2.0))
+                        .px(px(8.0))
+                        .py(px(6.0))
+                        .rounded(px(8.0))
+                        .border_1()
+                        .border_color(popup.danger.opacity(0.3))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .text_size(px(12.0))
+                        .child(div().flex_1().min_w_0().child(SharedString::from(format!(
+                            "Delete {name}? This cannot be undone."
+                        ))))
+                        .child(
+                            small_button("git-stash-drop-yes", "Delete", true, &popup)
+                                .on_click(cx.listener(|tab, _, _, cx| tab.confirm_drop_stash(cx))),
+                        )
+                        .child(
+                            small_button("git-stash-drop-no", "Cancel", false, &popup)
+                                .on_click(cx.listener(|tab, _, _, cx| tab.cancel_confirm(cx))),
+                        )
+                        .into_any_element(),
+                );
+                continue;
+            }
+            let pop = WorkingTreeAction::StashPop {
+                oid: stash.oid.clone(),
+            };
+            let drop = WorkingTreeAction::StashDrop {
+                oid: stash.oid.clone(),
+            };
+            let pop_enabled = self.allows(&pop, policy);
+            let drop_enabled = self.allows(&drop, policy);
+            let when = stash
+                .created_at
+                .map(|at| super::relative_time(now, at))
+                .unwrap_or_default();
+            let row_button = |selector: String, label: &'static str, enabled: bool| {
+                div()
+                    .id(SharedString::from(selector.clone()))
+                    .debug_selector(move || selector.clone())
+                    .role(gpui::Role::Button)
+                    .aria_label(label)
+                    .flex_none()
+                    .h(px(22.0))
+                    .px(px(8.0))
+                    .rounded(px(6.0))
+                    .border_1()
+                    .border_color(popup.hairline(0.12))
+                    .flex()
+                    .items_center()
+                    .text_size(px(12.0))
+                    .child(label)
+                    .map(|el| {
+                        if enabled {
+                            el.cursor_pointer().hover(|style| style.bg(popup.ink(0.06)))
+                        } else {
+                            el.opacity(0.45)
+                        }
+                    })
+            };
+            let oid = stash.oid.clone();
+            rows.push(
+                div()
+                    .id(SharedString::from(format!("git-stash-row-{index}")))
+                    .py(px(4.0))
+                    .px(px(4.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .text_size(px(12.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_color(popup.text)
+                                    .child(SharedString::from(format!(
+                                        "{name} · {}",
+                                        stash.message
+                                    ))),
+                            )
+                            .when(!when.is_empty(), |el| {
+                                el.child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .text_color(popup.text_muted)
+                                        .child(SharedString::from(when)),
+                                )
+                            }),
+                    )
+                    .child(
+                        row_button(format!("git-stash-pop-{index}"), "Pop", pop_enabled).when(
+                            pop_enabled,
+                            |el| {
+                                el.on_click(cx.listener(move |tab, _, _, cx| {
+                                    tab.run_action(pop.clone(), PendingTarget::Stash, cx);
+                                }))
+                            },
+                        ),
+                    )
+                    .child(
+                        row_button(format!("git-stash-drop-{index}"), "Delete", drop_enabled).when(
+                            drop_enabled,
+                            |el| {
+                                el.on_click(cx.listener(move |tab, _, window, cx| {
+                                    tab.open_confirm(
+                                        Confirm::DropStash { oid: oid.clone() },
+                                        window,
+                                        cx,
+                                    );
+                                }))
+                            },
+                        ),
+                    )
+                    .into_any_element(),
+            );
+        }
+        popover::anchored_menu_below_end(
+            "git-stash-menu",
+            popover::popover_card(&popup)
+                .id("git-stash-card")
+                .debug_selector(|| "git-stash-card".into())
+                .w(px(300.0))
+                .p(px(8.0))
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .on_click(|_, _, cx| cx.stop_propagation())
+                .child(
+                    div()
+                        .id("git-stash-push")
+                        .debug_selector(|| "git-stash-push".into())
+                        .role(gpui::Role::Button)
+                        .aria_label(SharedString::from(push_label.clone()))
+                        .h(px(30.0))
+                        .rounded(px(7.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(12.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .bg(popup.accent_strong)
+                        .text_color(popup.on_accent)
+                        .child(SharedString::from(push_label))
+                        .map(|el| {
+                            if push_enabled {
+                                el.cursor_pointer()
+                                    .hover(|style| style.opacity(0.9))
+                                    .on_click(cx.listener(move |tab, _, _, cx| {
+                                        tab.run_action(push.clone(), PendingTarget::Stash, cx);
+                                    }))
+                            } else {
+                                el.opacity(0.45)
+                            }
+                        }),
+                )
+                .child(popover::menu_heading(&popup, "Stashed"))
+                .when(rows.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .px(px(8.0))
+                            .pb(px(4.0))
+                            .text_size(px(12.0))
+                            .text_color(popup.text_muted)
+                            .child("No stashes"),
+                    )
+                })
+                .children(rows)
+                .on_mouse_down_out(cx.listener(|tab, _, _, cx| {
+                    tab.stash_menu = false;
+                    if matches!(tab.confirm, Some(Confirm::DropStash { .. })) {
+                        tab.confirm = None;
+                    }
+                    cx.notify();
+                }))
+                .into_any_element(),
+            None,
+        )
     }
 
     fn render_commit_box(
@@ -1773,6 +2281,40 @@ impl GitTab {
             )
             .into_any_element()
     }
+}
+
+fn small_button(
+    selector: &'static str,
+    label: &'static str,
+    danger: bool,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(selector)
+        .debug_selector(move || selector.into())
+        .role(gpui::Role::Button)
+        .aria_label(label)
+        .flex_none()
+        .h(px(24.0))
+        .px(px(9.0))
+        .rounded(px(6.0))
+        .flex()
+        .items_center()
+        .text_size(px(12.0))
+        .cursor_pointer()
+        .map(|el| {
+            if danger {
+                el.bg(theme.danger_strong)
+                    .text_color(gpui::white())
+                    .hover(|style| style.opacity(0.9))
+            } else {
+                el.border_1()
+                    .border_color(theme.hairline(0.12))
+                    .text_color(theme.text)
+                    .hover(|style| style.bg(theme.ink(0.06)))
+            }
+        })
+        .child(label)
 }
 
 fn render_diff(open: &Expanded, theme: &Theme) -> AnyElement {
@@ -2394,6 +2936,7 @@ mod tests {
         calls: Calls,
         tree: Mutex<Option<serde_json::Value>>,
         action_error: Mutex<Option<String>>,
+        action_reply: Mutex<Option<serde_json::Value>>,
         write_error: Mutex<Option<String>>,
         hold_writes: std::sync::atomic::AtomicBool,
         release_write: tokio::sync::Notify,
@@ -2486,7 +3029,11 @@ mod tests {
                             "branch": "feature/7", "subject": "Fix the panel",
                         }})
                     } else {
-                        serde_json::json!({})
+                        self.action_reply
+                            .lock()
+                            .unwrap()
+                            .clone()
+                            .unwrap_or_else(|| serde_json::json!({}))
                     };
                     *self.tree.lock().unwrap() = Some(next);
                     RpcReply::value(&reply)
@@ -2512,6 +3059,26 @@ mod tests {
                         "model": params.get("model").cloned().unwrap_or_else(|| "claude-haiku-4-5".into()),
                     }))
                 }
+                methods::LIST_HARNESSES => RpcReply::value(&serde_json::json!([
+                    {"id": "claude-code", "name": "Claude Code", "installed": true,
+                     "canInstall": false, "enabled": true, "supportsSteering": false,
+                     "steeringMode": "step-boundary", "reasoningLevels": []},
+                    {"id": "codex", "name": "Codex", "installed": true,
+                     "canInstall": false, "enabled": true, "supportsSteering": false,
+                     "steeringMode": "step-boundary", "reasoningLevels": []},
+                ])),
+                methods::LIST_MODELS => RpcReply::value(&if params["harness"] == "claude-code" {
+                    serde_json::json!({"models": [
+                        {"id": "claude-opus-5-5", "label": "Opus 5.5"},
+                        {"id": "claude-fable-5-1", "label": "Fable 5.1"},
+                        {"id": "claude-fable-5", "label": "Fable 5"},
+                        {"id": "claude-opus-4-8", "label": "Opus 4.8"},
+                        {"id": "claude-haiku-4-5", "label": "Haiku 4.5"},
+                        {"id": "claude-sonnet-5", "label": "Sonnet 5"},
+                    ]})
+                } else {
+                    serde_json::json!({"models": [{"id": "gpt-5-mini", "label": "GPT-5 mini"}]})
+                }),
                 methods::LIST_CHANGE_REQUESTS => RpcReply::value(&listing()),
                 methods::LIST_CHANGE_REQUEST_STATS => {
                     RpcReply::value(&serde_json::json!({"stats": []}))
@@ -3513,5 +4080,309 @@ mod tests {
         click(cx, "git-write-settings");
         cx.run_until_parked();
         assert_eq!(opened.get(), 1);
+    }
+
+    #[gpui::test]
+    fn clicking_a_model_row_in_the_chip_menu_sets_the_override_and_leaves_the_box_alone(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        let (page, cx, calls, _dir) = open_lab(cx, lab_state(), git_prefs(), lab);
+        cx.update(|_, cx| crate::composer::init(cx, Default::default()));
+        settle(cx, |cx| cx.debug_bounds("picker-model").is_some());
+        let tab = git_tab(&page, cx);
+        settle(cx, |cx| tab.read_with(cx, |tab, _| tab.tree.is_some()));
+        set_message(&tab, cx, "Draft");
+
+        click(cx, "picker-model");
+        settle(cx, |cx| cx.debug_bounds("model-row-5").is_some());
+        let row = cx.debug_bounds("model-row-5").unwrap();
+        let commit_box = cx.debug_bounds("git-commit-message").unwrap();
+        assert!(
+            commit_box.contains(&row.center()),
+            "the last row sits over the commit box, as in the app"
+        );
+        click(cx, "model-row-5");
+        cx.run_until_parked();
+        tab.read_with(cx, |tab, cx| {
+            assert!(
+                !tab.model_picker.read(cx).is_open(),
+                "the pick closes the menu"
+            );
+            assert_eq!(
+                tab.model_override,
+                Some(CommitModelChoice {
+                    harness: zeron_proto::HarnessId::ClaudeCode,
+                    model: "claude-sonnet-5".into(),
+                })
+            );
+        });
+        assert!(cx.debug_bounds("git-write-model-override").is_some());
+        assert_eq!(message(&tab, cx), "Draft");
+
+        std::thread::sleep(Duration::from_millis(500));
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("model-row-5").is_none(),
+            "the menu unmounted"
+        );
+        click(cx, "git-write-ai");
+        settle(cx, |_| writes(&calls).len() == 1);
+        assert_eq!(writes(&calls)[0]["model"], "claude-sonnet-5");
+    }
+
+    fn stashed_tree(agent_active: bool) -> serde_json::Value {
+        let mut tree = tree();
+        tree["agentActive"] = agent_active.into();
+        tree["stashes"] = serde_json::json!([
+            {"oid": "1111111111111111111111111111111111111111", "message": "On feature/7: parked panel",
+             "createdAt": "2026-10-01T00:00:00Z"},
+            {"oid": "2222222222222222222222222222222222222222", "message": "WIP on feature/7: aaa Tip"},
+        ]);
+        tree
+    }
+
+    fn actions(calls: &Calls) -> Vec<serde_json::Value> {
+        calls_of(calls, methods::RUN_WORKING_TREE_ACTION)
+    }
+
+    #[gpui::test]
+    fn discard_waits_for_the_inline_confirm_and_cancel_or_escape_send_nothing(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        let (page, cx, calls, _dir) = open_lab(cx, lab_state(), git_prefs(), lab);
+        settle(cx, |cx| cx.debug_bounds("git-changes-discard-1").is_some());
+        let tab = git_tab(&page, cx);
+        assert!(
+            cx.debug_bounds("git-staged-discard-0").is_none(),
+            "staged rows have no discard"
+        );
+
+        click(cx, "git-changes-discard-1");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("git-discard-confirm").is_some());
+        assert!(
+            calls_of(&calls, methods::GET_WORKING_TREE_FILE_DIFF).is_empty(),
+            "the discard button does not expand the row"
+        );
+        click(cx, "git-discard-no");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("git-discard-confirm").is_none());
+
+        click(cx, "git-changes-discard-1");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("git-discard-confirm").is_some());
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("git-discard-confirm").is_none());
+        assert!(
+            actions(&calls).is_empty(),
+            "nothing runs before the confirm"
+        );
+
+        click(cx, "git-changes-discard-1");
+        cx.run_until_parked();
+        click(cx, "git-discard-yes");
+        settle_action(cx, &tab, &calls, 1);
+        assert_eq!(
+            actions(&calls)[0],
+            serde_json::json!({
+                "spaceId": "space-1", "expectedRevision": "r1", "busyPolicy": "safeOnly",
+                "action": {"kind": "discard", "paths": ["notes/new file.txt"]},
+            })
+        );
+        assert!(cx.debug_bounds("git-discard-confirm").is_none());
+    }
+
+    #[gpui::test]
+    fn a_discard_confirm_closes_when_the_file_changes_and_a_late_change_is_refused(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        let (page, cx, calls, _dir) = open_lab(cx, lab_state(), git_prefs(), lab.clone());
+        settle(cx, |cx| cx.debug_bounds("git-changes-discard-0").is_some());
+        let tab = git_tab(&page, cx);
+
+        click(cx, "git-changes-discard-0");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("git-discard-confirm").is_some());
+        let mut changed = tree();
+        changed["revision"] = "r-edited".into();
+        *lab.tree.lock().unwrap() = Some(changed);
+        tab.update(cx, |tab, cx| tab.load(cx));
+        settle(cx, |cx| tab.read_with(cx, |tab, _| !tab.loading));
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("git-discard-confirm").is_none(),
+            "a confirm never outlives the revision it was asked for"
+        );
+        assert!(actions(&calls).is_empty());
+
+        *lab.action_error.lock().unwrap() = Some(
+            "The working tree changed since it was shown. Check the refreshed list and try again."
+                .into(),
+        );
+        click(cx, "git-changes-discard-0");
+        cx.run_until_parked();
+        click(cx, "git-discard-yes");
+        settle(cx, |cx| cx.debug_bounds("git-error-0").is_some());
+        assert_eq!(actions(&calls).len(), 1);
+        assert_eq!(actions(&calls)[0]["expectedRevision"], "r-edited");
+        assert_eq!(
+            actions(&calls)[0]["action"],
+            serde_json::json!({"kind": "discard", "paths": ["src/a b.rs"]})
+        );
+        tab.read_with(cx, |tab, _| {
+            assert!(
+                tab.action_error
+                    .as_ref()
+                    .is_some_and(|error| error.contains("changed since it was shown"))
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn the_stash_menu_pushes_pops_and_deletes_only_after_a_confirm(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        *lab.tree.lock().unwrap() = Some(stashed_tree(false));
+        let (page, cx, calls, _dir) = open_lab(cx, lab_state(), git_prefs(), lab.clone());
+        settle(cx, |cx| cx.debug_bounds("git-stash-button").is_some());
+        let tab = git_tab(&page, cx);
+        settle(cx, |cx| tab.read_with(cx, |tab, _| tab.tree.is_some()));
+
+        click(cx, "git-stash-button");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("git-stash-push").is_some());
+        assert!(cx.debug_bounds("git-stash-pop-1").is_some());
+        click(cx, "git-stash-push");
+        settle_action(cx, &tab, &calls, 1);
+        assert_eq!(
+            actions(&calls)[0],
+            serde_json::json!({
+                "spaceId": "space-1", "expectedRevision": "r1", "busyPolicy": "safeOnly",
+                "action": {"kind": "stashPush"},
+            })
+        );
+        assert!(
+            cx.debug_bounds("git-stash-push").is_none(),
+            "the menu closed"
+        );
+
+        click(cx, "git-stash-button");
+        cx.run_until_parked();
+        click(cx, "git-stash-drop-1");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("git-stash-drop-confirm").is_some());
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("git-stash-drop-confirm").is_none());
+        assert!(
+            cx.debug_bounds("git-stash-drop-1").is_some(),
+            "the menu stays open"
+        );
+        click(cx, "git-stash-drop-1");
+        cx.run_until_parked();
+        click(cx, "git-stash-drop-no");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("git-stash-drop-confirm").is_none());
+        assert_eq!(actions(&calls).len(), 1, "Delete runs nothing on its own");
+
+        click(cx, "git-stash-drop-1");
+        cx.run_until_parked();
+        click(cx, "git-stash-drop-yes");
+        settle_action(cx, &tab, &calls, 2);
+        assert_eq!(
+            actions(&calls)[1]["action"],
+            serde_json::json!({"kind": "stashDrop", "oid": "2222222222222222222222222222222222222222"})
+        );
+        assert_eq!(actions(&calls)[1]["expectedRevision"], "r2");
+
+        *lab.action_reply.lock().unwrap() =
+            Some(serde_json::json!({"conflicts": ["src/a b.rs", "notes/new file.txt"]}));
+        click(cx, "git-stash-button");
+        cx.run_until_parked();
+        click(cx, "git-stash-pop-0");
+        settle_action(cx, &tab, &calls, 3);
+        assert_eq!(
+            actions(&calls)[2]["action"],
+            serde_json::json!({"kind": "stashPop", "oid": "1111111111111111111111111111111111111111"})
+        );
+        assert!(cx.debug_bounds("git-stash-note").is_some());
+        tab.read_with(cx, |tab, _| {
+            assert_eq!(
+                tab.stash_note.as_deref(),
+                Some(
+                    "The pop stopped on conflicts in 2 files (src/a b.rs, notes/new file.txt). The stash is kept; resolve the conflicts, then delete it."
+                )
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn discard_and_stash_follow_the_busy_policy_while_an_agent_runs(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        *lab.tree.lock().unwrap() = Some(stashed_tree(true));
+        let (page, cx, calls, _dir) = open_lab(cx, lab_state(), git_prefs(), lab);
+        settle(cx, |cx| cx.debug_bounds("git-agent-active").is_some());
+        let tab = git_tab(&page, cx);
+        for policy in [
+            crate::settings::GitAgentBusyPolicy::SafeOnly,
+            crate::settings::GitAgentBusyPolicy::BlockAll,
+        ] {
+            cx.update(|_, cx| {
+                crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
+                    settings.git_agent_busy_policy = policy;
+                });
+            });
+            cx.run_until_parked();
+            click(cx, "git-changes-discard-0");
+            cx.run_until_parked();
+            assert!(
+                cx.debug_bounds("git-discard-confirm").is_none(),
+                "{policy:?}"
+            );
+            click(cx, "git-stash-button");
+            cx.run_until_parked();
+            for selector in ["git-stash-push", "git-stash-pop-0", "git-stash-drop-0"] {
+                click(cx, selector);
+                cx.run_until_parked();
+            }
+            assert!(cx.debug_bounds("git-stash-drop-confirm").is_none());
+            tab.update(cx, |tab, cx| {
+                tab.stash_menu = false;
+                cx.notify();
+            });
+            cx.run_until_parked();
+        }
+        assert!(actions(&calls).is_empty());
+
+        cx.update(|_, cx| {
+            crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
+                settings.git_agent_busy_policy = crate::settings::GitAgentBusyPolicy::AllowAll;
+            });
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("git-agent-active").is_some(),
+            "the banner stays"
+        );
+        click(cx, "git-changes-discard-0");
+        cx.run_until_parked();
+        click(cx, "git-discard-yes");
+        settle_action(cx, &tab, &calls, 1);
+        assert_eq!(actions(&calls)[0]["busyPolicy"], "allowAll");
+        assert_eq!(actions(&calls)[0]["action"]["kind"], "discard");
     }
 }
