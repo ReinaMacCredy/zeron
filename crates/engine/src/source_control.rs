@@ -235,6 +235,15 @@ impl ChangeRequestResolver {
                 }),
             }
         }
+        listing.repositories = repositories
+            .iter()
+            .map(RepositoryIdentity::name_with_owner)
+            .collect();
+        listing.repositories.sort();
+        listing.repositories.dedup();
+        if let Some(wanted) = &request.filters.repository {
+            repositories.retain(|identity| identity.name_with_owner().eq_ignore_ascii_case(wanted));
+        }
 
         let mut hosts: Vec<(String, PathBuf)> = Vec::new();
         for identity in &repositories {
@@ -7399,6 +7408,7 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
                 vec!["size:S".into()],
             ],
             excluded_labels: vec!["wontfix".into()],
+            repository: Some("acme/zeron".into()),
         };
         assert_eq!(
             filter_qualifiers(&filters, "alice"),
@@ -7496,5 +7506,80 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
                 .map(String::as_str)
                 != Some("pr"))
         );
+    }
+
+    #[tokio::test]
+    async fn a_project_filter_searches_only_that_repository_and_lists_every_project() {
+        let runner = ScriptedRunner::new(|request| {
+            if request.program == "git" {
+                let root = request.cwd.to_string_lossy().into_owned();
+                return match request.args.first().map(String::as_str) {
+                    Some("rev-parse") => command_success(format!("{root}\n")),
+                    _ if root == "/other" => {
+                        command_success("origin\thttps://github.com/Acme/Other.git (fetch)\n")
+                    }
+                    _ => command_success("origin\thttps://github.com/acme/zeron.git (fetch)\n"),
+                };
+            }
+            if request.args.get(1).map(String::as_str) != Some("graphql") {
+                return command_success("alice\n");
+            }
+            let query = arg_after(request, "-f")
+                .and_then(|value| value.strip_prefix("q="))
+                .expect("search terms");
+            assert!(
+                query.ends_with("sort:updated-desc repo:Acme/Other"),
+                "{query}"
+            );
+            assert!(!query.contains("acme/zeron"), "{query}");
+            let mut node = search_node(7, "bob", None);
+            node["repository"] = serde_json::json!({"nameWithOwner": "Acme/Other"});
+            command_success(
+                serde_json::to_vec(&serde_json::json!({
+                    "data": {"search": {"pageInfo": {"hasNextPage": false}, "nodes": [node]}}
+                }))
+                .unwrap(),
+            )
+        });
+        let roots = [PathBuf::from("/repo"), PathBuf::from("/other")];
+        let request = |repository: &str| ListChangeRequestsRequest {
+            filters: ChangeRequestListFilters {
+                repository: Some(repository.into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let resolver = list_resolver(runner.clone());
+        let listing = resolver
+            .list_change_requests(&roots, &request("acme/other"))
+            .await;
+        assert!(listing.errors.is_empty(), "{:?}", listing.errors);
+        assert_eq!(listing.repositories, ["Acme/Other", "acme/zeron"]);
+        assert_eq!(
+            listing
+                .items
+                .iter()
+                .map(|item| (item.repository.as_str(), item.number))
+                .collect::<Vec<_>>(),
+            [("Acme/Other", 7)]
+        );
+        let searched = |runner: &ScriptedRunner| {
+            runner
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|request| request.args.get(1).map(String::as_str) == Some("graphql"))
+                .count()
+        };
+        assert!(searched(&runner) > 0);
+
+        let before = searched(&runner);
+        let unknown = resolver
+            .list_change_requests(&roots, &request("acme/elsewhere"))
+            .await;
+        assert!(unknown.items.is_empty() && unknown.errors.is_empty());
+        assert_eq!(unknown.repositories, ["Acme/Other", "acme/zeron"]);
+        assert_eq!(searched(&runner), before);
     }
 }

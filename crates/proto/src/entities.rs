@@ -1116,6 +1116,8 @@ pub struct ChangeRequestListFilters {
     pub labels: Vec<Vec<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub excluded_labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1616,6 +1618,8 @@ pub struct ChangeRequestListing {
     pub items: Vec<ChangeRequestListItem>,
     pub errors: Vec<ChangeRequestListError>,
     pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repositories: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
