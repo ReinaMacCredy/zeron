@@ -3527,6 +3527,8 @@ impl SavedViewportCache {
     }
 }
 
+pub type HiddenFence = Arc<dyn Fn(&str, &str) -> bool>;
+
 pub struct Transcript {
     state: Entity<AppState>,
     list: ListState,
@@ -3650,6 +3652,7 @@ pub struct Transcript {
     /// Compact mode as last applied to this instance's row split. Render
     /// polls the setting each frame; a flip rebuilds every row.
     compact_mode: bool,
+    hidden_fence: Option<HiddenFence>,
     /// Compact work-group entry ids that were live this session — the
     /// "Worked for" subtitle fades in only for those, not historical rows.
     compact_live_entries: HashSet<SharedString>,
@@ -4163,6 +4166,7 @@ impl Transcript {
             preview_inset: 0.0,
             code_fences_generation: crate::settings::code_fences_generation(cx),
             compact_mode: crate::settings::transcript_compact_mode(cx),
+            hidden_fence: None,
             compact_live_entries: HashSet::new(),
             compact_last_elapsed: HashMap::new(),
             compact_worked_fade_at: HashMap::new(),
@@ -4242,6 +4246,27 @@ impl Transcript {
         }
         this.sync(cx);
         this
+    }
+
+    pub fn hide_code_fences(&mut self, filter: HiddenFence, cx: &mut Context<Self>) {
+        self.hidden_fence = Some(filter);
+        self.last_source = None;
+        self.sync(cx);
+        cx.notify();
+    }
+
+    fn fence_hidden(&self, row: &Row) -> bool {
+        let Some(filter) = &self.hidden_fence else {
+            return false;
+        };
+        let RowKind::Markdown { tree, block_ix } = &row.kind else {
+            return false;
+        };
+        matches!(
+            tree.blocks.get(*block_ix).map(|top| &top.block),
+            Some(Block::CodeBlock { language: Some(language), code })
+                if filter(language, code)
+        )
     }
 
     // ---- rail plumbing (rendering lives in crate::rail) ----
@@ -5659,6 +5684,7 @@ impl Transcript {
                     .is_some_and(|e| e.status == Some(MessageStatus::Streaming)),
             )
         };
+        new_rows.retain(|row| !self.fence_hidden(row));
         let workless: Vec<SharedString> = self
             .settle_close
             .iter()

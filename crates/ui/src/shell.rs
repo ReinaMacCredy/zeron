@@ -11164,6 +11164,10 @@ impl Shell {
                 cx.stop_propagation();
                 return;
             }
+            if event.keystroke.key == "escape" && self.escape_pr_chat_confirm(cx) {
+                cx.stop_propagation();
+                return;
+            }
             if event.keystroke.key == "escape" && self.pr_chat_owns_focus(window, cx) {
                 return;
             }
@@ -14780,9 +14784,12 @@ impl Render for Shell {
                         .update(cx, |c, cx| c.open_model_menu(window, cx));
                 }
                 let sessions_menu = self.debug_dialog.as_deref() == Some("pr-chat-sessions");
+                let promote = self.debug_dialog.as_deref() == Some("pr-chat-promote");
                 if let Some((open_first, minimized)) = match self.debug_dialog.as_deref() {
                     Some("pr-chat") => Some((false, false)),
-                    Some("pr-chat-open" | "pr-chat-sessions") => Some((true, false)),
+                    Some("pr-chat-open" | "pr-chat-sessions" | "pr-chat-promote") => {
+                        Some((true, false))
+                    }
                     Some("pr-chat-minimized") => Some((true, true)),
                     _ => None,
                 } && matches!(self.route, Route::PullRequests)
@@ -14796,6 +14803,9 @@ impl Render for Shell {
                     }
                     if sessions_menu {
                         self.show_pr_chat_sessions(cx);
+                    }
+                    if promote {
+                        self.promote_pr_chat(cx);
                     }
                 }
                 // `=user-menu` opens the bottom-of-sidebar account menu (its

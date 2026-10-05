@@ -2,7 +2,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::*;
 use crate::pull_requests::{ContextChip, PrChatContext, Suggestion};
-use crate::settings::{PrChatHistory, PrChatPosted, PrChatSession, PrChatStyle};
+use crate::settings::{PrChatCardRef, PrChatHistory, PrChatPosted, PrChatSession, PrChatStyle};
 
 pub(super) const PR_CHAT_WIDTH: f32 = 400.0;
 pub(super) const PR_CHAT_HEIGHT: f32 = 560.0;
@@ -49,6 +49,7 @@ struct ParkedPrChat {
 enum Landing {
     Delete,
     Index(String),
+    Promote,
 }
 
 type CardKey = (String, usize);
@@ -135,6 +136,7 @@ impl Shell {
             composer.set_pr_chat(placeholder, cx);
             composer.set_pr_context(None);
         });
+        hide_card_fences(&tab, context.clone(), cx);
         let sent = cx.subscribe(&tab.composer, |shell, _, event: &ComposerEvent, cx| {
             if matches!(
                 event,
@@ -175,9 +177,14 @@ impl Shell {
             return Vec::new();
         };
         let now = chrono::Local::now();
-        let mut sessions = settings::pr_chat_sessions(&panel.context.index_key(), cx);
-        sessions.sort_by_key(|session| std::cmp::Reverse(session.created_at));
         let state = self.state.read(cx);
+        let mut sessions = crate::pull_requests::live_chat_sessions(
+            &panel.context.index_key(),
+            &state.chats,
+            Some(&panel.chat_id),
+            cx,
+        );
+        sessions.sort_by_key(|session| std::cmp::Reverse(session.created_at));
         let mut rows: Vec<SessionRow> = sessions
             .iter()
             .filter_map(|session| {
@@ -278,6 +285,62 @@ impl Shell {
         self.start_pr_chat(context, cx);
         self.sync_pr_chat_button(cx);
         cx.notify();
+    }
+
+    fn pr_chat_promotable(&self, cx: &App) -> bool {
+        self.pr_chat_tab()
+            .is_some_and(|tab| !tab.state.read(cx).side_chat_unsaved())
+    }
+
+    pub(super) fn promote_pr_chat(&mut self, cx: &mut Context<Self>) {
+        if !self.pr_chat_promotable(cx) {
+            return;
+        }
+        let Some(panel) = self.pr_chat.take() else {
+            return;
+        };
+        let Some(side) = panel.side else {
+            return;
+        };
+        let chat_id = panel.chat_id.clone();
+        let (sending, prompt) = self
+            .side_chats
+            .get(&side)
+            .map(|tab| {
+                (
+                    tab.composer.read(cx).is_sending(),
+                    crate::pull_requests::first_chat_prompt(&tab.state.read(cx).transcript),
+                )
+            })
+            .unwrap_or_default();
+        let title = panel.context.promoted_title(prompt.as_deref());
+        if sending {
+            self.park_pr_chat(chat_id.clone(), side, Landing::Promote, cx);
+        } else {
+            self.side_chats.remove(&side);
+        }
+        self.pr_chat_trash.deleted.remove(&chat_id);
+        settings::update(SavePolicy::Immediate, cx, |settings| {
+            settings.unindex_pr_chat(&chat_id)
+        });
+        self.sync_hidden_chats(cx);
+        self.sync_pr_chat_button(cx);
+        if let Some(engine) = self.state.read(cx).engine().cloned() {
+            let params =
+                serde_json::json!({ "op": "renameChat", "chatId": chat_id, "title": title });
+            cx.spawn(async move |this, cx| {
+                if let Err(error) = engine.client().call(methods::MUTATE, params).await {
+                    this.update(cx, |shell, cx| {
+                        shell.sidebar_notice = Some(format!("{error}").into());
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            })
+            .detach();
+        }
+        self.close_pull_requests(cx);
+        self.open_chat(chat_id, cx);
     }
 
     pub(super) fn minimize_pr_chat(&mut self, cx: &mut Context<Self>) {
@@ -446,9 +509,11 @@ impl Shell {
             }
         };
         let placeholder = panel.context.placeholder();
+        let context = panel.context.clone();
         let tab = self.new_side_chat_tab(chat, true, cx);
         tab.composer
             .update(cx, |composer, cx| composer.set_pr_chat(placeholder, cx));
+        hide_card_fences(&tab, context, cx);
         let saved = cx.observe(&tab.state, |this, _, cx| this.index_saved_pr_chat(cx));
         self.side_chat_seq += 1;
         let id = self.side_chat_seq;
@@ -484,6 +549,7 @@ impl Shell {
                     chat_id,
                     created_at: Utc::now(),
                     posted: Vec::new(),
+                    dismissed: Vec::new(),
                 },
             )
         });
@@ -570,6 +636,7 @@ impl Shell {
         if saved {
             match parked.landing {
                 Landing::Delete => self.delete_pr_chat(parked.chat_id, cx),
+                Landing::Promote => {}
                 Landing::Index(scope) => {
                     settings::update(SavePolicy::Debounced, cx, |settings| {
                         settings.index_pr_chat(
@@ -578,6 +645,7 @@ impl Shell {
                                 chat_id: parked.chat_id,
                                 created_at: Utc::now(),
                                 posted: Vec::new(),
+                                dismissed: Vec::new(),
                             },
                         )
                     });
@@ -672,6 +740,7 @@ impl Shell {
             self.pr_chat_trash
                 .parked
                 .iter()
+                .filter(|parked| !matches!(parked.landing, Landing::Promote))
                 .map(|parked| parked.chat_id.clone()),
         );
         hidden.extend(self.pr_chat_trash.deleted.iter().cloned());
@@ -732,9 +801,18 @@ impl Shell {
     }
 
     fn dismiss_pr_chat_card(&mut self, key: CardKey, cx: &mut Context<Self>) {
-        if let Some(panel) = self.pr_chat.as_mut() {
-            panel.cards.entry(key).or_default().dismissed = true;
-        }
+        let Some(panel) = self.pr_chat.as_mut() else {
+            return;
+        };
+        let chat_id = panel.chat_id.clone();
+        let card = PrChatCardRef {
+            entry_id: key.0.clone(),
+            index: key.1,
+        };
+        panel.cards.entry(key).or_default().dismissed = true;
+        settings::update(SavePolicy::Debounced, cx, |settings| {
+            settings.record_pr_chat_dismiss(&chat_id, card)
+        });
         cx.notify();
     }
 
@@ -768,6 +846,17 @@ impl Shell {
             panel.confirm = None;
         }
         cx.notify();
+    }
+
+    pub(super) fn escape_pr_chat_confirm(&mut self, cx: &mut Context<Self>) -> bool {
+        let open = self
+            .pr_chat
+            .as_ref()
+            .is_some_and(|panel| panel.open && panel.confirm.is_some());
+        if open {
+            self.cancel_pr_chat_confirm(cx);
+        }
+        open
     }
 
     fn run_pr_chat_card(
@@ -886,6 +975,7 @@ impl Shell {
             (settings.pr_chat_style, settings.pr_chat_history)
         };
         let sessions = (history == PrChatHistory::KeepPerPr).then(|| self.pr_chat_session_rows(cx));
+        let promotable = self.pr_chat_promotable(cx);
         let menu_open = panel.sessions_menu;
         let earlier = panel.earlier.clone();
         let prompts = panel.context.continue_prompts();
@@ -959,6 +1049,30 @@ impl Shell {
                     .child(icon(icons::LUCIDE_CHEVRON_DOWN).size(px(12.0)))
             }))
             .child(div().flex_1())
+            .child(
+                div()
+                    .id("pr-chat-promote")
+                    .debug_selector(|| "pr-chat-promote".into())
+                    .role(gpui::Role::Button)
+                    .aria_label("Open as thread")
+                    .size(px(26.0))
+                    .rounded(px(6.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .map(|el| match promotable {
+                        true => el
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.ink(0.06)))
+                            .on_click(cx.listener(|this, _, _, cx| this.promote_pr_chat(cx))),
+                        false => el.opacity(0.4),
+                    })
+                    .child(
+                        icon(icons::LUCIDE_EXTERNAL_LINK)
+                            .size(px(14.0))
+                            .text_color(theme.text_muted),
+                    ),
+            )
             .child(
                 div()
                     .id("pr-chat-minimize")
@@ -1234,6 +1348,7 @@ impl Shell {
         let panel = self.pr_chat.as_ref()?;
         let list = matches!(panel.context, PrChatContext::List(_));
         let posted = settings::pr_chat_posted(&panel.chat_id, cx);
+        let dismissed = settings::pr_chat_dismissed(&panel.chat_id, cx);
         let last = settings::current(cx).pull_requests_merge_method;
         let now = chrono::Local::now();
         let cards: Vec<AnyElement> = suggestions
@@ -1242,7 +1357,11 @@ impl Shell {
                 let ix = suggestion.index;
                 let key: CardKey = (entry.clone(), ix);
                 let state = panel.cards.get(&key);
-                if state.is_some_and(|state| state.dismissed) {
+                if state.is_some_and(|state| state.dismissed)
+                    || dismissed
+                        .iter()
+                        .any(|card| card.entry_id == entry && card.index == ix)
+                {
                     return None;
                 }
                 let done = state.and_then(|state| state.posted.clone()).or_else(|| {
@@ -1545,6 +1664,15 @@ impl Shell {
             ))
             .into_any_element()
     }
+}
+
+fn hide_card_fences(tab: &SideChatTab, context: PrChatContext, cx: &mut Context<Shell>) {
+    tab.transcript.update(cx, |transcript, cx| {
+        transcript.hide_code_fences(
+            std::sync::Arc::new(move |language, code| context.is_card_fence(language, code)),
+            cx,
+        )
+    });
 }
 
 fn card_button(
@@ -2199,6 +2327,7 @@ mod tests {
                             chat_id: (*id).into(),
                             created_at: Utc::now() - chrono::Duration::days(*days),
                             posted: Vec::new(),
+                            dismissed: Vec::new(),
                         },
                     );
                 }
@@ -2706,6 +2835,330 @@ mod tests {
         assert!(cx.debug_bounds("pr-chat-card-post-0").is_none());
         assert!(cx.debug_bounds("pr-chat-card-post-2").is_none());
         assert_eq!(recorder.writes().len(), 2);
+    }
+
+    fn send_review(
+        runtime: &tokio::runtime::Runtime,
+        shell: &Entity<Shell>,
+        cx: &mut VisualTestContext,
+        wire: &mut Wire,
+    ) -> (String, Entity<Composer>) {
+        let (chat_id, composer, side_state) = open_pr_chat(runtime, shell, cx, wire);
+        let config: zeron_proto::ChatConfig = serde_json::from_value(serde_json::json!({
+            "harness": "mock", "sandbox": "workspace-write",
+        }))
+        .unwrap();
+        side_state.update(cx, |state, _| state.apply_chat_config(&chat_id, config));
+        composer.update(cx, |composer, cx| {
+            composer.send_prompt("Review this".into(), cx)
+        });
+        let frames = wire.serve(runtime, cx, |method, params| {
+            (method == methods::MUTATE && params["op"] == "createChat")
+                .then(|| serde_json::json!({}))
+        });
+        assert_eq!(calls(&frames, methods::MUTATE).len(), 1, "{frames:?}");
+        (chat_id, composer)
+    }
+
+    fn renames(frames: &[ClientFrame]) -> Vec<(String, String)> {
+        calls(frames, methods::MUTATE)
+            .into_iter()
+            .filter(|frame| frame.params["op"] == "renameChat")
+            .map(|frame| {
+                (
+                    frame.params["chatId"].as_str().unwrap().to_owned(),
+                    frame.params["title"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect()
+    }
+
+    #[gpui::test]
+    fn promote_opens_the_chat_as_a_sidebar_thread_that_fresh_close_never_deletes(
+        cx: &mut TestAppContext,
+    ) {
+        let (runtime, shell, cx, mut wire, _dir) = setup(cx);
+        let _guard = runtime.enter();
+        cx.update(|_, cx| {
+            settings::update(SavePolicy::Debounced, cx, |settings| {
+                settings.pr_chat_history = PrChatHistory::Fresh;
+            })
+        });
+        let (chat_id, _) = send_review(&runtime, &shell, cx, &mut wire);
+        wire.serve(&runtime, cx, |method, _| {
+            (method == methods::QUEUE_COMMAND).then(|| serde_json::json!({}))
+        });
+        shell.update(cx, |shell, cx| {
+            assert!(settings::current(cx).pr_chat_indexed(&chat_id));
+            shell.state.update(cx, |state, _| {
+                state
+                    .chats
+                    .push(row(&chat_id, false, serde_json::json!({})))
+            });
+            assert!(shell.state.read(cx).is_hidden_chat(&chat_id));
+        });
+
+        click(cx, "pr-chat-promote");
+        let frames = wire.serve(&runtime, cx, |_, _| Some(serde_json::json!({})));
+        assert_eq!(
+            renames(&frames),
+            [(chat_id.clone(), "PR #7: Fix the thing".to_string())]
+        );
+        shell.read_with(cx, |shell, cx| {
+            assert!(shell.pr_chat.is_none());
+            assert!(matches!(shell.route, Route::Chat));
+            assert!(!settings::current(cx).pr_chat_indexed(&chat_id));
+            let state = shell.state.read(cx);
+            assert_eq!(state.selected_chat.as_deref(), Some(chat_id.as_str()));
+            assert!(!state.is_hidden_chat(&chat_id));
+            assert!(
+                state
+                    .sidebar_chats(Utc::now(), None)
+                    .iter()
+                    .any(|(_, chat)| chat.id == chat_id),
+                "the promoted chat is a sidebar thread"
+            );
+        });
+
+        let (next, _) = send_review(&runtime, &shell, cx, &mut wire);
+        let mut frames = wire.serve(&runtime, cx, |method, _| {
+            (method == methods::QUEUE_COMMAND).then(|| serde_json::json!({}))
+        });
+        assert_ne!(next, chat_id);
+        shell.update(cx, |shell, cx| shell.close_pr_chat(cx));
+        frames.extend(wire.serve(&runtime, cx, |_, _| Some(serde_json::json!({}))));
+        let deletes: Vec<_> = calls(&frames, methods::MUTATE)
+            .into_iter()
+            .filter(|frame| frame.params["op"] == "deleteChat")
+            .map(|frame| frame.params["chatId"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(deletes, [next], "Fresh close deletes only the new chat");
+        shell.read_with(cx, |shell, cx| {
+            assert!(!shell.state.read(cx).is_hidden_chat(&chat_id))
+        });
+    }
+
+    #[gpui::test]
+    fn promoting_while_the_send_is_in_flight_does_not_reindex_the_chat(cx: &mut TestAppContext) {
+        let (runtime, shell, cx, mut wire, _dir) = setup(cx);
+        let _guard = runtime.enter();
+        let (chat_id, composer) = send_review(&runtime, &shell, cx, &mut wire);
+        let frames = wire.serve(&runtime, cx, |_, _| None);
+        let run = calls(&frames, methods::QUEUE_COMMAND);
+        assert_eq!(run.len(), 1, "{frames:?}");
+        let run_id = run[0].id.clone();
+        assert!(composer.read_with(cx, |composer, _| composer.is_sending()));
+        shell.read_with(cx, |_, cx| {
+            assert!(settings::current(cx).pr_chat_indexed(&chat_id))
+        });
+
+        click(cx, "pr-chat-promote");
+        shell.read_with(cx, |shell, cx| {
+            assert!(shell.pr_chat.is_none());
+            assert_eq!(shell.pr_chat_trash.parked.len(), 1, "the send stays alive");
+            assert!(!settings::current(cx).pr_chat_indexed(&chat_id));
+            assert!(!shell.state.read(cx).is_hidden_chat(&chat_id));
+            assert!(matches!(shell.route, Route::Chat));
+        });
+
+        let reply = ServerFrame {
+            id: run_id,
+            ok: Some(serde_json::json!({})),
+            ..Default::default()
+        };
+        wire.replies
+            .try_send(serde_json::to_string(&reply).unwrap())
+            .unwrap();
+        let frames = wire.serve(&runtime, cx, |_, _| Some(serde_json::json!({})));
+        assert!(
+            calls(&frames, methods::MUTATE)
+                .iter()
+                .all(|frame| frame.params["op"] != "deleteChat"),
+            "{frames:?}"
+        );
+        shell.update(cx, |shell, cx| {
+            assert!(shell.pr_chat_trash.parked.is_empty(), "settled");
+            assert!(!settings::current(cx).pr_chat_indexed(&chat_id));
+            assert!(settings::current(cx).pr_chat_sessions.is_empty());
+            shell.state.update(cx, |state, _| {
+                state
+                    .chats
+                    .push(row(&chat_id, false, serde_json::json!({})))
+            });
+            assert!(
+                shell
+                    .state
+                    .read(cx)
+                    .visible_chats()
+                    .any(|chat| chat.id == chat_id)
+            );
+        });
+    }
+
+    fn open_cards(
+        cx: &mut TestAppContext,
+    ) -> (
+        tokio::runtime::Runtime,
+        Entity<Shell>,
+        &mut VisualTestContext,
+        std::sync::Arc<Recorder>,
+        tempfile::TempDir,
+    ) {
+        let recorder = std::sync::Arc::new(Recorder::default());
+        let service = recorder.clone();
+        let (runtime, shell, cx, dir) = boot(cx, move |runtime| {
+            let _guard = runtime.enter();
+            zeron_rpc::memory_client(service)
+        });
+        {
+            let _guard = runtime.enter();
+            shell.update(cx, |shell, cx| {
+                shell.state.update(cx, |state, _| {
+                    state.chats.push(row("s7", false, serde_json::json!({})))
+                })
+            });
+            index(cx, "github.com/acme/zeron#7", &[("s7", 1)]);
+            shell.update(cx, |shell, cx| shell.open_pull_requests(cx));
+            let page = shell.read_with(cx, |shell, _| shell.pull_requests_page.clone().unwrap());
+            page.update(cx, |page, cx| page.open_linked(item(), None, cx));
+            Wire::pump(&runtime, cx);
+        }
+        (runtime, shell, cx, recorder, dir)
+    }
+
+    fn inject_cards(
+        runtime: &tokio::runtime::Runtime,
+        shell: &Entity<Shell>,
+        cx: &mut VisualTestContext,
+    ) {
+        let fence = |json: &str| format!("```zeron-github-action\n{json}\n```\n");
+        let reply = [
+            "Two notes before merge.\n\n".to_string(),
+            fence(r#"{"action":"review","event":"comment","body":"Pi returns matches."}"#),
+            fence(r#"{"action":"reply","body":"No thread id"}"#),
+            fence(r#"{"action":"merge","method":"squash"}"#),
+        ]
+        .concat();
+        shell.update(cx, |shell, cx| {
+            shell.toggle_pr_chat(cx);
+            let tab = shell.pr_chat_tab().expect("resumed session");
+            tab.state
+                .update(cx, |state, _| state.apply_transcript(reply_entry(&reply)));
+        });
+        Wire::pump(runtime, cx);
+    }
+
+    #[gpui::test]
+    fn card_fences_leave_the_mini_transcript_and_other_fences_stay(cx: &mut TestAppContext) {
+        let (runtime, shell, cx, _recorder, _dir) = open_cards(cx);
+        let _guard = runtime.enter();
+        inject_cards(&runtime, &shell, cx);
+        assert!(cx.debug_bounds("pr-chat-card-0").is_some());
+        let ids: Vec<String> = shell.read_with(cx, |shell, cx| {
+            shell
+                .pr_chat_tab()
+                .unwrap()
+                .transcript
+                .read(cx)
+                .rows()
+                .iter()
+                .map(|row| row.id.to_string())
+                .filter(|id| id.starts_with("a1#"))
+                .collect()
+        });
+        assert_eq!(
+            ids,
+            ["a1#a1-t.0", "a1#a1-t.2"],
+            "the reply text and the malformed fence"
+        );
+    }
+
+    #[gpui::test]
+    fn a_dismissed_card_stays_dismissed_after_reopening(cx: &mut TestAppContext) {
+        let (runtime, shell, cx, recorder, _dir) = open_cards(cx);
+        let _guard = runtime.enter();
+        inject_cards(&runtime, &shell, cx);
+        click(cx, "pr-chat-card-dismiss-2");
+        assert!(cx.debug_bounds("pr-chat-card-2").is_none());
+        shell.update(cx, |shell, cx| shell.discard_pr_chat(cx));
+        inject_cards(&runtime, &shell, cx);
+        assert!(cx.debug_bounds("pr-chat-card-0").is_some(), "reopened");
+        assert!(
+            cx.debug_bounds("pr-chat-card-2").is_none(),
+            "still dismissed"
+        );
+        assert!(recorder.writes().is_empty());
+    }
+
+    #[gpui::test]
+    fn escape_closes_the_merge_confirm_and_keeps_the_panel_open(cx: &mut TestAppContext) {
+        let (runtime, shell, cx, recorder, _dir) = open_cards(cx);
+        let _guard = runtime.enter();
+        inject_cards(&runtime, &shell, cx);
+        click(cx, "pr-chat-card-post-2");
+        assert!(cx.debug_bounds("pr-chat-confirm").is_some());
+        cx.simulate_keystrokes("escape");
+        Wire::pump(&runtime, cx);
+        assert!(cx.debug_bounds("pr-chat-confirm").is_none());
+        shell.read_with(cx, |shell, _| {
+            assert!(shell.pr_chat_open(), "only the confirm closed");
+            assert!(shell.pr_chat.as_ref().unwrap().confirm.is_none());
+            assert!(matches!(shell.route, Route::PullRequests));
+        });
+        assert!(recorder.writes().is_empty());
+    }
+
+    #[gpui::test]
+    fn sessions_without_a_chat_row_draw_no_bubble_or_menu_row_and_stay_indexed(
+        cx: &mut TestAppContext,
+    ) {
+        let (runtime, shell, cx, mut wire, _dir) = setup(cx);
+        let _guard = runtime.enter();
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.chats.push(row("kept", false, serde_json::json!({})))
+            })
+        });
+        index(cx, "github.com/acme/zeron#7", &[("kept", 2), ("gone", 1)]);
+        index(cx, "github.com/acme/zeron#8", &[("gone8", 1)]);
+        shell.update(cx, |shell, cx| shell.sync_hidden_chats(cx));
+        shell.update(cx, |shell, cx| shell.open_pull_requests(cx));
+        wire.serve(&runtime, cx, |method, _| {
+            (method == methods::LIST_CHANGE_REQUESTS).then(|| {
+                serde_json::json!({
+                    "viewers": {}, "items": [item_n(7), item_n(8)],
+                    "errors": [], "truncated": false,
+                })
+            })
+        });
+        assert!(cx.debug_bounds("pr-chat-badge-7").is_some());
+        assert!(cx.debug_bounds("pr-chat-badge-8").is_none(), "only a ghost");
+
+        let page = shell.read_with(cx, |shell, _| shell.pull_requests_page.clone().unwrap());
+        page.update(cx, |page, cx| page.open_linked(item(), None, cx));
+        wire.serve(&runtime, cx, |method, _| {
+            (method == methods::GET_CHANGE_REQUEST).then(detail)
+        });
+        shell.update(cx, |shell, cx| shell.toggle_pr_chat(cx));
+        wire.serve(&runtime, cx, |_, _| None);
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(shell.pr_chat.as_ref().unwrap().chat_id, "kept");
+            let rows = shell.pr_chat_session_rows(cx);
+            let ids: Vec<&str> = rows.iter().map(|row| row.chat_id.as_str()).collect();
+            assert_eq!(ids, ["kept"]);
+            assert_eq!(
+                crate::pull_requests::live_chat_sessions(
+                    "github.com/acme/zeron#7",
+                    &shell.state.read(cx).chats,
+                    None,
+                    cx
+                )
+                .len(),
+                1
+            );
+            let settings = settings::current(cx);
+            assert!(settings.pr_chat_indexed("gone") && settings.pr_chat_indexed("gone8"));
+        });
     }
 
     #[test]
