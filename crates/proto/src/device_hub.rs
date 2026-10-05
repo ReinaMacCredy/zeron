@@ -303,6 +303,90 @@ impl AvccDemuxer {
     }
 }
 
+const SEMU_MAGIC: [u8; 4] = *b"SEMU";
+
+pub fn semu_payload(message: &[u8]) -> (Option<bool>, &[u8]) {
+    if message.len() > 16 && message[..4] == SEMU_MAGIC {
+        let key = Some(message[5] & 1 == 1);
+        match message[4] {
+            1 => return (key, &message[16..]),
+            2 if message.len() > 24 => return (key, &message[24..]),
+            _ => {}
+        }
+    }
+    (None, message)
+}
+
+pub fn annexb_nals(data: &[u8]) -> Vec<&[u8]> {
+    let mut starts = Vec::new();
+    let mut i = 0;
+    while i + 3 <= data.len() {
+        if data[i..i + 3] == [0, 0, 1] {
+            let code = if i > 0 && data[i - 1] == 0 { i - 1 } else { i };
+            starts.push((code, i + 3));
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    starts
+        .iter()
+        .enumerate()
+        .map(|(n, &(_, start))| {
+            let end = starts.get(n + 1).map_or(data.len(), |&(code, _)| code);
+            let mut nal = &data[start..end];
+            while let [rest @ .., 0] = nal {
+                nal = rest;
+            }
+            nal
+        })
+        .filter(|nal| !nal.is_empty())
+        .collect()
+}
+
+pub fn avcc_record(sps: &[u8], pps: &[u8]) -> Option<Vec<u8>> {
+    let sps_len = u16::try_from(sps.len()).ok().filter(|_| sps.len() >= 4)?;
+    let pps_len = u16::try_from(pps.len()).ok().filter(|_| !pps.is_empty())?;
+    let mut record = vec![1, sps[1], sps[2], sps[3], 0xFF, 0xE1];
+    record.extend(sps_len.to_be_bytes());
+    record.extend(sps);
+    record.push(1);
+    record.extend(pps_len.to_be_bytes());
+    record.extend(pps);
+    Some(record)
+}
+
+pub fn annexb_to_avcc(access_unit: &[u8], key: Option<bool>) -> Vec<AvccEnvelope> {
+    let nals = annexb_nals(access_unit);
+    let of_type = |kind: u8| nals.iter().find(|nal| nal[0] & 0x1F == kind);
+    let mut envelopes = Vec::new();
+    if let (Some(sps), Some(pps)) = (of_type(7), of_type(8))
+        && let Some(record) = avcc_record(sps, pps)
+    {
+        envelopes.push(AvccEnvelope {
+            tag: AVCC_DESCRIPTION,
+            payload: record,
+        });
+    }
+    let mut sample = Vec::with_capacity(access_unit.len());
+    for nal in nals.iter().filter(|nal| !matches!(nal[0] & 0x1F, 7..=9)) {
+        sample.extend((nal.len() as u32).to_be_bytes());
+        sample.extend(*nal);
+    }
+    if !sample.is_empty() {
+        let idr = of_type(5).is_some();
+        envelopes.push(AvccEnvelope {
+            tag: if key == Some(true) || idr {
+                AVCC_KEYFRAME
+            } else {
+                AVCC_DELTA
+            },
+            payload: sample,
+        });
+    }
+    envelopes
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TouchPhase {
@@ -317,6 +401,7 @@ pub enum DeviceButton {
     Home,
     AppSwitcher,
     Lock,
+    Back,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -326,13 +411,15 @@ pub enum KeyPhase {
     Up,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DeviceInput {
     Touch { phase: TouchPhase, x: f32, y: f32 },
     Button { button: DeviceButton },
     Key { phase: KeyPhase, usage: u16 },
     Orientation { orientation: DeviceOrientation },
+    Keycode { keycode: u16 },
+    Text { text: String },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -567,6 +654,8 @@ pub struct DeviceSettingsSnapshot {
     pub liquid_glass: Option<LiquidGlass>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_filter: Option<ColorFilter>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -823,9 +912,23 @@ mod tests {
                 },
                 json!({"orientation": {"orientation": "landscape_right"}}),
             ),
+            (
+                DeviceInput::Button {
+                    button: DeviceButton::Back,
+                },
+                json!({"button": {"button": "back"}}),
+            ),
+            (
+                DeviceInput::Keycode { keycode: 66 },
+                json!({"keycode": {"keycode": 66}}),
+            ),
+            (
+                DeviceInput::Text { text: "é".into() },
+                json!({"text": {"text": "é"}}),
+            ),
         ];
         for (input, wire) in cases {
-            assert_eq!(serde_json::to_value(input).unwrap(), wire);
+            assert_eq!(serde_json::to_value(&input).unwrap(), wire);
             assert_eq!(serde_json::from_value::<DeviceInput>(wire).unwrap(), input);
         }
         let status = DeviceStreamStatus {
@@ -966,6 +1069,189 @@ mod tests {
         let mut demuxer = AvccDemuxer::default();
         assert_eq!(demuxer.push(&stream[..stream.len() - 1]).unwrap().len(), 4);
         assert!(demuxer.push(&[]).unwrap().is_empty());
+    }
+
+    const ANDROID_CAPTURE: &[u8] = include_bytes!("../tests/fixtures/device-android-576x1280.semu");
+
+    enum Message<'a> {
+        Binary(&'a [u8]),
+        Text(&'a str),
+    }
+
+    fn android_capture() -> Vec<Message<'static>> {
+        let mut messages = Vec::new();
+        let mut rest = ANDROID_CAPTURE;
+        while let [kind, a, b, c, d, tail @ ..] = rest {
+            let length = u32::from_be_bytes([*a, *b, *c, *d]) as usize;
+            let (payload, next) = tail.split_at(length);
+            messages.push(match kind {
+                0 => Message::Binary(payload),
+                _ => Message::Text(std::str::from_utf8(payload).unwrap()),
+            });
+            rest = next;
+        }
+        messages
+    }
+
+    fn binaries() -> Vec<&'static [u8]> {
+        android_capture()
+            .into_iter()
+            .filter_map(|message| match message {
+                Message::Binary(bytes) => Some(bytes),
+                Message::Text(_) => None,
+            })
+            .collect()
+    }
+
+    fn nal_types(sample: &[u8]) -> Vec<u8> {
+        let mut types = Vec::new();
+        let mut rest = sample;
+        while let [a, b, c, d, tail @ ..] = rest {
+            let length = u32::from_be_bytes([*a, *b, *c, *d]) as usize;
+            types.push(tail[0] & 0x1F);
+            rest = &tail[length..];
+        }
+        assert!(
+            rest.is_empty(),
+            "the length prefixes cover the sample exactly"
+        );
+        types
+    }
+
+    #[test]
+    fn semu_v1_and_v2_headers_strip_to_the_annexb_payload() {
+        let captured = binaries();
+        assert_eq!(captured.len(), 6);
+        for (n, message) in captured.iter().enumerate() {
+            assert_eq!(
+                &message[..5],
+                b"SEMU\x01",
+                "the hub-mounted serve-emu writes v1"
+            );
+            let key = n == 0 || n == 4;
+            let (flag, payload) = semu_payload(message);
+            assert_eq!(flag, Some(key), "message {n}");
+            assert_eq!(payload, &message[16..]);
+            assert_eq!(&payload[..4], [0, 0, 0, 1]);
+
+            let mut v2 = message[..16].to_vec();
+            v2[4] = 2;
+            v2.extend(1_791_216_912_063_000u64.to_be_bytes());
+            v2.extend(payload);
+            assert_eq!(semu_payload(&v2), (Some(key), payload), "message {n} as v2");
+        }
+        let payload = &captured[1][16..];
+        assert_eq!(semu_payload(payload), (None, payload), "raw Annex-B");
+        let mut unknown = captured[1].to_vec();
+        unknown[4] = 3;
+        assert_eq!(semu_payload(&unknown).0, None);
+        let short = &captured[1][..16];
+        assert_eq!(semu_payload(short), (None, short));
+    }
+
+    #[test]
+    fn annexb_access_units_become_avcc_envelopes_with_a_description_from_sps_pps() {
+        let mut tags = Vec::new();
+        let mut descriptions = Vec::new();
+        for (n, message) in android_capture().into_iter().enumerate() {
+            let bytes = match message {
+                Message::Text(text) => {
+                    assert!(text.contains(r#""type":"video-session""#), "{text}");
+                    continue;
+                }
+                Message::Binary(bytes) => bytes,
+            };
+            let (key, payload) = semu_payload(bytes);
+            let nals = annexb_nals(payload);
+            for envelope in annexb_to_avcc(payload, key) {
+                tags.push(envelope.tag);
+                match envelope.tag {
+                    AVCC_DESCRIPTION => {
+                        let sps = nals.iter().find(|nal| nal[0] & 0x1F == 7).unwrap();
+                        let pps = nals.iter().find(|nal| nal[0] & 0x1F == 8).unwrap();
+                        assert_eq!(envelope.payload[..6], [1, 0x42, 0xC0, 0x20, 0xFF, 0xE1]);
+                        assert_eq!(Some(envelope.payload.clone()), avcc_record(sps, pps));
+                        descriptions.push(envelope.payload);
+                    }
+                    AVCC_KEYFRAME => {
+                        let types = nal_types(&envelope.payload);
+                        assert_eq!(types[0], 6, "SEI stays, parameter sets go");
+                        assert!(types[1..].iter().all(|kind| *kind == 5), "{types:?}");
+                    }
+                    _ => {
+                        let types = nal_types(&envelope.payload);
+                        assert!(
+                            types.iter().all(|kind| *kind == 1),
+                            "message {n}: {types:?}"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            tags,
+            [
+                AVCC_DESCRIPTION,
+                AVCC_KEYFRAME,
+                AVCC_DELTA,
+                AVCC_DELTA,
+                AVCC_DELTA,
+                AVCC_DESCRIPTION,
+                AVCC_KEYFRAME,
+                AVCC_DELTA
+            ]
+        );
+        assert_ne!(
+            descriptions[0], descriptions[1],
+            "the encoder restart after rotation brings a new SPS"
+        );
+    }
+
+    #[test]
+    fn annexb_splits_three_and_four_byte_start_codes_and_drops_access_unit_delimiters() {
+        let au = [
+            &[0, 0, 0, 1, 0x09, 0xF0][..],
+            &[0, 0, 1, 0x67, 0x42, 0xC0, 0x1F, 0xAA, 0, 0],
+            &[0, 0, 0, 1, 0x68, 0xCE],
+            &[0, 0, 1, 0x65, 0x88, 0x84],
+        ]
+        .concat();
+        assert_eq!(
+            annexb_nals(&au),
+            [
+                &[0x09, 0xF0][..],
+                &[0x67, 0x42, 0xC0, 0x1F, 0xAA],
+                &[0x68, 0xCE],
+                &[0x65, 0x88, 0x84]
+            ]
+        );
+        let envelopes = annexb_to_avcc(&au, None);
+        assert_eq!(
+            envelopes,
+            [
+                AvccEnvelope {
+                    tag: AVCC_DESCRIPTION,
+                    payload: vec![
+                        1, 0x42, 0xC0, 0x1F, 0xFF, 0xE1, 0, 5, 0x67, 0x42, 0xC0, 0x1F, 0xAA, 1, 0,
+                        2, 0x68, 0xCE
+                    ],
+                },
+                AvccEnvelope {
+                    tag: AVCC_KEYFRAME,
+                    payload: vec![0, 0, 0, 3, 0x65, 0x88, 0x84],
+                },
+            ],
+            "an IDR slice makes a keyframe even without a SEMU flag"
+        );
+        assert_eq!(
+            annexb_to_avcc(&[0, 0, 1, 0x41, 0x9A], Some(false)),
+            [AvccEnvelope {
+                tag: AVCC_DELTA,
+                payload: vec![0, 0, 0, 2, 0x41, 0x9A],
+            }]
+        );
+        assert!(annexb_to_avcc(&[1, 2, 3], None).is_empty());
+        assert_eq!(avcc_record(&[0x67, 0x42], &[0x68]), None);
     }
 
     #[test]
