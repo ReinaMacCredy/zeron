@@ -279,6 +279,13 @@ pub mod methods {
     /// remove only its untracked, non-ignored paths.
     pub const DISCARD_WORKING_TREE: &str = "DiscardWorkingTree";
     pub const GET_CHECKOUT_FILE_DIFF_TEXT: &str = "GetCheckoutFileDiffText";
+    // Source control for one space checkout, addressed by `WorkspaceTarget`.
+    pub const GET_WORKING_TREE: &str = "GetWorkingTree";
+    pub const GET_WORKING_TREE_FILE_DIFF: &str = "GetWorkingTreeFileDiff";
+    pub const RUN_WORKING_TREE_ACTION: &str = "RunWorkingTreeAction";
+    pub const SYNC_BRANCH: &str = "SyncBranch";
+    pub const GENERATE_COMMIT_MESSAGE: &str = "GenerateCommitMessage";
+    pub const CREATE_CHANGE_REQUEST: &str = "CreateChangeRequest";
     // Agent accounts (ControlRpc, relay-forwardable — CLI logins are per-device).
     pub const LIST_AGENT_ACCOUNTS: &str = "ListAgentAccounts";
     pub const ACTIVATE_AGENT_ACCOUNT: &str = "ActivateAgentAccount";

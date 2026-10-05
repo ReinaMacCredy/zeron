@@ -1549,9 +1549,11 @@ where
 fn forward_deadline(method: &str) -> std::time::Duration {
     use std::time::Duration;
     match method {
-        methods::CLONE_REPO | methods::FETCH_ALL | methods::APPLY_UPDATE => {
-            Duration::from_secs(15 * 60)
-        }
+        methods::CLONE_REPO
+        | methods::FETCH_ALL
+        | methods::APPLY_UPDATE
+        | methods::SYNC_BRANCH
+        | methods::CREATE_CHANGE_REQUEST => Duration::from_secs(15 * 60),
         methods::INSTALL_HARNESS => Duration::from_secs(15 * 60),
         // A full fleet of enabled providers is checked two at a time; each
         // provider may need both a CLI probe and a network request.
@@ -1564,7 +1566,9 @@ fn forward_deadline(method: &str) -> std::time::Duration {
         // reports the harness's outcome rather than a transport timeout.
         methods::COMPACT_CHAT => Duration::from_secs(660),
         // Allow the adapter discovery budget plus relay and shutdown overhead.
-        methods::LIST_MODELS | methods::LIST_COMMANDS => Duration::from_secs(100),
+        methods::LIST_MODELS | methods::LIST_COMMANDS | methods::GENERATE_COMMIT_MESSAGE => {
+            Duration::from_secs(100)
+        }
         _ => Duration::from_secs(30),
     }
 }
@@ -1742,6 +1746,12 @@ fn forwardable(method: &str) -> bool {
             | methods::GET_CHECKOUT_DIFF
             | methods::DISCARD_WORKING_TREE
             | methods::GET_CHECKOUT_FILE_DIFF_TEXT
+            | methods::GET_WORKING_TREE
+            | methods::GET_WORKING_TREE_FILE_DIFF
+            | methods::RUN_WORKING_TREE_ACTION
+            | methods::SYNC_BRANCH
+            | methods::GENERATE_COMMIT_MESSAGE
+            | methods::CREATE_CHANGE_REQUEST
             // Terminals live on the chat's host device.
             | methods::OPEN_TERMINAL
             | methods::SUBSCRIBE_TERMINAL
@@ -4857,6 +4867,17 @@ mod tests {
             assert!(forwardable(method), "{method}");
         }
         assert!(forwardable(methods::DISCARD_WORKING_TREE));
+        for method in [
+            methods::GET_WORKING_TREE,
+            methods::GET_WORKING_TREE_FILE_DIFF,
+            methods::RUN_WORKING_TREE_ACTION,
+            methods::SYNC_BRANCH,
+            methods::GENERATE_COMMIT_MESSAGE,
+            methods::CREATE_CHANGE_REQUEST,
+        ] {
+            assert!(forwardable(method), "{method}");
+            assert!(!is_stream_method(method), "{method}");
+        }
         assert!(forwardable(methods::LIST_WORKSPACE_DIRECTORY));
         assert!(forwardable(methods::SEARCH_WORKSPACE_FILES));
         assert!(forwardable(methods::READ_WORKSPACE_FILE));
@@ -4911,7 +4932,11 @@ mod tests {
     /// long leash, and nothing awaits forever (the "Sending…" wedge).
     #[test]
     fn forward_deadlines_are_tiered_and_bounded() {
-        for method in [methods::LIST_MODELS, methods::LIST_COMMANDS] {
+        for method in [
+            methods::LIST_MODELS,
+            methods::LIST_COMMANDS,
+            methods::GENERATE_COMMIT_MESSAGE,
+        ] {
             assert_eq!(
                 forward_deadline(method),
                 std::time::Duration::from_secs(100)
@@ -4922,10 +4947,20 @@ mod tests {
             forward_deadline(methods::CREATE_WORKTREE),
             Duration::from_secs(120)
         );
-        assert_eq!(
-            forward_deadline(methods::CLONE_REPO),
-            Duration::from_secs(15 * 60)
-        );
+        for method in [
+            methods::CLONE_REPO,
+            methods::FETCH_ALL,
+            methods::SYNC_BRANCH,
+            methods::CREATE_CHANGE_REQUEST,
+        ] {
+            assert_eq!(forward_deadline(method), Duration::from_secs(15 * 60));
+        }
+        for method in [
+            methods::GET_WORKING_TREE,
+            methods::GET_WORKING_TREE_FILE_DIFF,
+        ] {
+            assert_eq!(forward_deadline(method), Duration::from_secs(30));
+        }
         assert_eq!(
             forward_deadline(methods::APPLY_HARNESS_UPDATE),
             Duration::from_secs(20 * 60)
