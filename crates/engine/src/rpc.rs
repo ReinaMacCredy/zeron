@@ -5616,8 +5616,8 @@ mod tests {
             )
             .await
             .err()
-            .expect("AllowAll passes the policy; discard itself is not built yet");
-        assert!(error.to_string().contains("not available yet"), "{error}");
+            .expect("AllowAll passes the policy; a.txt has nothing unstaged to discard");
+        assert!(error.to_string().contains("no unstaged changes"), "{error}");
         assert_eq!(
             git(&repo, &["status", "--porcelain"]).replace('"', ""),
             "M  a.txt\n?? new file.txt\n"
@@ -5732,6 +5732,200 @@ mod tests {
         );
         assert_eq!(reply["commit"]["subject"], "Everything");
         assert_eq!(git(&repo, &["status", "--porcelain"]), "");
+    }
+
+    #[tokio::test]
+    async fn discard_and_stash_run_by_revision_and_oid_behind_the_busy_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap()
+        };
+        let repo = root.join("repo");
+        let data = root.join("data");
+        for path in [&repo, &data] {
+            std::fs::create_dir(path).unwrap();
+        }
+        git(&repo, &["init", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "first"]);
+        std::fs::write(repo.join("a.txt"), "edited\n").unwrap();
+        std::fs::write(repo.join("new file.txt"), "n\n").unwrap();
+
+        let core = crate::EngineCore::assemble(
+            &data,
+            std::sync::Arc::new(HarnessRegistry::new()),
+            HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        let rpc = core.rpc_service();
+        rpc.handle(
+            methods::MUTATE,
+            serde_json::json!({
+                "op": "createSpace", "spaceId": "space-repo", "deviceId": core.device_id,
+                "path": repo, "gitDetected": true,
+            }),
+        )
+        .await
+        .unwrap();
+        async fn read(rpc: &EngineRpc) -> zeron_proto::WorkingTree {
+            serde_json::from_value(through_the_wire(
+                rpc.handle(
+                    methods::GET_WORKING_TREE,
+                    serde_json::json!({ "spaceId": "space-repo" }),
+                )
+                .await
+                .unwrap(),
+            ))
+            .unwrap()
+        }
+        let action = |revision: &str, policy: &str, action: serde_json::Value| {
+            serde_json::json!({
+                "spaceId": "space-repo", "expectedRevision": revision,
+                "busyPolicy": policy, "action": action,
+            })
+        };
+        let discard = serde_json::json!({"kind": "discard", "paths": ["a.txt", "new file.txt"]});
+
+        let shown = read(&rpc).await.revision;
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(repo.join("a.txt"), "EDITED\n").unwrap();
+        let error = rpc
+            .handle(
+                methods::RUN_WORKING_TREE_ACTION,
+                action(&shown, "safeOnly", discard.clone()),
+            )
+            .await
+            .err()
+            .expect("a file rewritten after the confirm is refused, even with equal line counts");
+        assert!(error.to_string().contains("changed since"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+            "EDITED\n"
+        );
+        assert!(repo.join("new file.txt").exists());
+
+        let reply = through_the_wire(
+            rpc.handle(
+                methods::RUN_WORKING_TREE_ACTION,
+                action(&read(&rpc).await.revision, "safeOnly", discard),
+            )
+            .await
+            .unwrap(),
+        );
+        assert_eq!(reply, serde_json::json!({}));
+        assert_eq!(git(&repo, &["status", "--porcelain"]), "");
+
+        std::fs::write(repo.join("a.txt"), "parked\n").unwrap();
+        rpc.handle(
+            methods::RUN_WORKING_TREE_ACTION,
+            action(
+                &read(&rpc).await.revision,
+                "safeOnly",
+                serde_json::json!({"kind": "stashPush", "message": "Park the edit"}),
+            ),
+        )
+        .await
+        .unwrap();
+        let tree = read(&rpc).await;
+        assert!(tree.files.is_empty());
+        assert_eq!(tree.stashes.len(), 1);
+        assert!(
+            tree.stashes[0].message.contains("Park the edit"),
+            "{:?}",
+            tree.stashes
+        );
+        let oid = tree.stashes[0].oid.clone();
+
+        rpc.handle(
+            methods::MUTATE,
+            serde_json::json!({
+                "op": "createChat", "chatId": "chat-busy", "deviceId": core.device_id,
+                "spaceId": "space-repo", "cwd": repo,
+            }),
+        )
+        .await
+        .unwrap();
+        core.sessions
+            .set_status_for_test("chat-busy", zeron_proto::SessionStatus::Working);
+        std::fs::write(repo.join("b.txt"), "b\n").unwrap();
+        let tree = read(&rpc).await;
+        assert!(tree.agent_active);
+        for (policy, kind, expected) in [
+            (
+                "safeOnly",
+                serde_json::json!({"kind": "stashPop", "oid": oid}),
+                "Only stage",
+            ),
+            (
+                "safeOnly",
+                serde_json::json!({"kind": "stashDrop", "oid": oid}),
+                "Only stage",
+            ),
+            (
+                "safeOnly",
+                serde_json::json!({"kind": "stashPush"}),
+                "Only stage",
+            ),
+            (
+                "safeOnly",
+                serde_json::json!({"kind": "discard", "paths": ["b.txt"]}),
+                "Only stage",
+            ),
+            (
+                "blockAll",
+                serde_json::json!({"kind": "stashDrop", "oid": oid}),
+                "read-only",
+            ),
+        ] {
+            let error = rpc
+                .handle(
+                    methods::RUN_WORKING_TREE_ACTION,
+                    action(&tree.revision, policy, kind.clone()),
+                )
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{policy} {kind} must be refused"));
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+        assert_eq!(read(&rpc).await.stashes.len(), 1);
+        assert!(repo.join("b.txt").exists());
+
+        let reply = through_the_wire(
+            rpc.handle(
+                methods::RUN_WORKING_TREE_ACTION,
+                action(
+                    &tree.revision,
+                    "allowAll",
+                    serde_json::json!({"kind": "stashPop", "oid": oid}),
+                ),
+            )
+            .await
+            .expect("AllowAll pops while an agent runs"),
+        );
+        assert_eq!(reply, serde_json::json!({}));
+        assert_eq!(
+            std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+            "parked\n"
+        );
+        assert!(read(&rpc).await.stashes.is_empty());
     }
 
     /// Every forwardable unary method gets a bounded reply deadline —
