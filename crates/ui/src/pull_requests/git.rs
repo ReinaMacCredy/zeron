@@ -675,7 +675,9 @@ impl GitTab {
         self.detail = None;
         self.detail_task = None;
         self.cancel_writing();
-        self.written = None;
+        if self.written.take().is_some() {
+            self.message.update(cx, |input, cx| input.set_text("", cx));
+        }
         self.write_error = None;
         self.reset_model_override(cx);
         let target = self.space.as_ref().map(|space| GitHistoryTarget::Pinned {
@@ -925,7 +927,11 @@ impl GitTab {
                             tab.last_commit = reply.commit;
                             tab.card_dismissed = false;
                             tab.pr_sheet = None;
-                            tab.message.update(cx, |input, cx| input.set_text("", cx));
+                            if let WorkingTreeAction::Commit { message, .. } = &op
+                                && tab.message.read(cx).text() == message.as_str()
+                            {
+                                tab.message.update(cx, |input, cx| input.set_text("", cx));
+                            }
                             tab.written = None;
                             tab.write_error = None;
                             tab.reset_model_override(cx);
@@ -8089,5 +8095,55 @@ mod tests {
                 })
             );
         });
+    }
+
+    #[gpui::test]
+    fn retargeting_drops_an_ai_written_message_but_keeps_typed_text(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (page, cx, calls, _dir) = open_page(cx, lab_state(), git_prefs());
+        cx.update(|_, cx| crate::composer::init(cx, Default::default()));
+        settle(cx, |cx| cx.debug_bounds("git-write-ai").is_some());
+        let tab = git_tab(&page, cx);
+        settle(cx, |cx| tab.read_with(cx, |tab, _| tab.tree.is_some()));
+        click(cx, "git-write-ai");
+        settle(cx, |cx| tab.read_with(cx, |tab, _| tab.written.is_some()));
+        assert_eq!(writes(&calls).len(), 1);
+        assert_eq!(message(&tab, cx), WRITTEN);
+        tab.update(cx, |tab, cx| {
+            tab.set_checkout(Some("/lab/worktrees/idle".into()), cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            message(&tab, cx),
+            "",
+            "the other checkout's message is gone"
+        );
+
+        set_message(&tab, cx, "My own words");
+        tab.update(cx, |tab, cx| tab.set_checkout(None, cx));
+        cx.run_until_parked();
+        assert_eq!(message(&tab, cx), "My own words");
+    }
+
+    #[gpui::test]
+    fn text_typed_while_a_commit_runs_survives_its_reply(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        let (page, cx, calls, _dir) = open_lab(cx, lab_state(), git_prefs(), lab.clone());
+        settle(cx, |cx| cx.debug_bounds("git-commit-button").is_some());
+        let tab = git_tab(&page, cx);
+        settle(cx, |cx| tab.read_with(cx, |tab, _| tab.tree.is_some()));
+        set_message(&tab, cx, "First");
+        lab.hold_actions
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        click(cx, "git-commit-button");
+        settle(cx, |_| actions(&calls).len() == 1);
+        set_message(&tab, cx, "Second");
+        lab.release_action.notify_one();
+        settle_action(cx, &tab, &calls, 1);
+        tab.read_with(cx, |tab, _| assert!(tab.last_commit.is_some()));
+        assert_eq!(message(&tab, cx), "Second");
     }
 }
