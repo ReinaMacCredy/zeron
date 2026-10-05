@@ -6590,6 +6590,7 @@ pub struct Composer {
     side_chat: bool,
     pr_chat: bool,
     pr_context: Option<String>,
+    idle_placeholder: SharedString,
     _picker_focus: Subscription,
     _input_events: Subscription,
     _dictation_events: Subscription,
@@ -6880,6 +6881,7 @@ impl Composer {
             side_chat: false,
             pr_chat: false,
             pr_context: None,
+            idle_placeholder: "Do anything…".into(),
             _picker_focus: picker_focus,
             _input_events: input_events,
             _dictation_events: dictation_events,
@@ -7174,9 +7176,14 @@ impl Composer {
         cx.notify();
     }
 
-    pub(crate) fn set_pr_chat(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn set_pr_chat(&mut self, placeholder: &'static str, cx: &mut Context<Self>) {
         self.side_chat = true;
         self.pr_chat = true;
+        self.idle_placeholder = placeholder.into();
+        if self.wizard.is_none() {
+            self.input
+                .update(cx, |input, cx| input.set_placeholder(placeholder, cx));
+        }
         cx.notify();
     }
 
@@ -7197,6 +7204,11 @@ impl Composer {
     #[cfg(test)]
     pub(crate) fn failure(&self) -> Option<&SharedString> {
         self.failure.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn placeholder(&self, cx: &App) -> SharedString {
+        self.input.read(cx).placeholder.clone()
     }
 
     /// Show a dismissable failure chip for the current draft's session.
@@ -9700,9 +9712,10 @@ impl Composer {
                         self.wizard = None;
                         self.advance_task = None;
                         let draft = crate::draft_store::entry(&self.current_key, cx).prompt;
+                        let placeholder = self.idle_placeholder.clone();
                         self.input.update(cx, |input, cx| {
                             input.set_text(draft, cx);
-                            input.set_placeholder("Do anything…", cx);
+                            input.set_placeholder(placeholder, cx);
                         });
                     }
                 }
@@ -11188,10 +11201,11 @@ impl Composer {
         self.advance_task = None;
         self.answered_requests.insert(wizard.request_id.clone());
         let draft = crate::draft_store::entry(&self.current_key, cx).prompt;
+        let placeholder = self.idle_placeholder.clone();
         self.input.update(cx, |input, cx| {
             input.set_text(draft, cx);
             // The panel borrowed the composer input; hand back its identity.
-            input.set_placeholder("Do anything…", cx);
+            input.set_placeholder(placeholder, cx);
             input.set_key_context(MESSAGE_COMPOSER_CONTEXT, cx);
         });
         let Some(engine) = self.state.read(cx).engine().cloned() else {
