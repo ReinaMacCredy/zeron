@@ -32,7 +32,7 @@ pub(super) const MERGE_METHODS: [(ChangeRequestMergeMethod, &str, &str); 3] = [
     ),
 ];
 
-fn method_label(method: ChangeRequestMergeMethod) -> &'static str {
+pub(super) fn method_label(method: ChangeRequestMergeMethod) -> &'static str {
     MERGE_METHODS
         .iter()
         .find(|(known, _, _)| *known == method)

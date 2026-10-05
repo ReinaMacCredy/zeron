@@ -12,8 +12,10 @@ mod review;
 mod tabs;
 
 pub use chat::{
-    CONTEXT_HEADER as CHAT_CONTEXT_HEADER, ContextCall, ContextChip, PrChatContext, PrChatScope,
-    chat_shortcut, extract_badge as extract_chat_context_badge,
+    ACTION_NOTE as CHAT_ACTION_NOTE, CONTEXT_HEADER as CHAT_CONTEXT_HEADER, ContextCall,
+    ContextChip, GithubWrite, PrChatContext, PrChatScope, Suggestion, chat_shortcut,
+    extract_badge as extract_chat_context_badge, failure_text as chat_write_failure,
+    latest_reply as latest_chat_reply,
 };
 pub use filters::PullRequestListPrefs;
 

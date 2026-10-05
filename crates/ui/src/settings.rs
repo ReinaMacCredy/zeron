@@ -721,6 +721,20 @@ pub fn transcript_compact_mode(cx: &App) -> bool {
         .unwrap_or_default()
 }
 
+pub fn pr_chat_posted(chat_id: &str, cx: &App) -> Vec<PrChatPosted> {
+    cx.try_global::<SettingsStore>()
+        .and_then(|store| {
+            store
+                .current
+                .pr_chat_sessions
+                .values()
+                .flatten()
+                .find(|session| session.chat_id == chat_id)
+                .map(|session| session.posted.clone())
+        })
+        .unwrap_or_default()
+}
+
 pub fn pr_chat_sessions(scope: &str, cx: &App) -> Vec<PrChatSession> {
     cx.try_global::<SettingsStore>()
         .filter(|store| store.current.pr_chat_history == PrChatHistory::KeepPerPr)
@@ -1079,6 +1093,17 @@ pub enum PrChatHistory {
 pub struct PrChatSession {
     pub chat_id: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub posted: Vec<PrChatPosted>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrChatPosted {
+    pub entry_id: String,
+    pub index: usize,
+    pub label: String,
+    pub at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2141,24 +2166,38 @@ impl UiSettings {
             .retain(|_, sessions| !sessions.is_empty());
     }
 
+    pub fn record_pr_chat_post(&mut self, chat_id: &str, posted: PrChatPosted) {
+        if let Some(session) = self
+            .pr_chat_sessions
+            .values_mut()
+            .flatten()
+            .find(|session| session.chat_id == chat_id)
+            && !session
+                .posted
+                .iter()
+                .any(|p| p.entry_id == posted.entry_id && p.index == posted.index)
+        {
+            session.posted.push(posted);
+        }
+    }
+
     pub fn stale_pr_chats(
         &self,
         chats: &[zeron_proto::Chat],
+        vanished: &std::collections::HashSet<String>,
         live: &[&str],
-        now: chrono::DateTime<chrono::Utc>,
     ) -> Vec<String> {
-        // A just-indexed chat can precede the chats frame that carries its row.
-        let grace = chrono::Duration::minutes(5);
+        // A missing row is not proof of deletion: another profile or device may own it.
         self.pr_chat_sessions
             .values()
             .flatten()
             .filter(|session| !live.contains(&session.chat_id.as_str()))
-            .filter(
-                |session| match chats.iter().find(|chat| chat.id == session.chat_id) {
-                    Some(chat) => chat.archived,
-                    None => now - session.created_at > grace,
-                },
-            )
+            .filter(|session| {
+                vanished.contains(&session.chat_id)
+                    || chats
+                        .iter()
+                        .any(|chat| chat.id == session.chat_id && chat.archived)
+            })
             .map(|session| session.chat_id.clone())
             .collect()
     }
@@ -2510,6 +2549,7 @@ mod tests {
         let session = |id: &str| PrChatSession {
             chat_id: id.into(),
             created_at: chrono::Utc::now(),
+            posted: Vec::new(),
         };
         let base = UiSettings::default();
         let mut edited = base.clone();
@@ -2526,6 +2566,19 @@ mod tests {
         pruned.unindex_pr_chat("two");
         assert!(!pruned.pr_chat_indexed("two"));
         assert!(!pruned.pr_chat_sessions.contains_key("list"));
+
+        let posted = |index: usize| PrChatPosted {
+            entry_id: "m2".into(),
+            index,
+            label: "Posted comment".into(),
+            at: chrono::Utc::now(),
+        };
+        pruned.record_pr_chat_post("one", posted(0));
+        pruned.record_pr_chat_post("one", posted(0));
+        pruned.record_pr_chat_post("one", posted(1));
+        pruned.record_pr_chat_post("missing", posted(0));
+        let sessions = &pruned.pr_chat_sessions["github.com/acme/zeron#7"];
+        assert_eq!(sessions[0].posted.len(), 2);
     }
 
     #[test]
@@ -3441,6 +3494,12 @@ mod tests {
                 vec![PrChatSession {
                     chat_id: "pr-chat-1".into(),
                     created_at: chrono::DateTime::from_timestamp(1_790_000_000, 0).unwrap(),
+                    posted: vec![PrChatPosted {
+                        entry_id: "m2".into(),
+                        index: 0,
+                        label: "Posted comment".into(),
+                        at: chrono::DateTime::from_timestamp(1_790_000_100, 0).unwrap(),
+                    }],
                 }],
             )]),
             git_agent_busy_policy: GitAgentBusyPolicy::BlockAll,
@@ -3455,6 +3514,7 @@ mod tests {
         assert!(json.contains(r#""gitAgentBusyPolicy": "block-all""#));
         assert!(json.contains(r#""github.com/acme/zeron#7": ["#));
         assert!(json.contains(r#""chatId": "pr-chat-1""#));
+        assert!(json.contains(r#""entryId": "m2""#));
         assert!(json.contains(r#""diffWrap": true"#));
         assert_eq!(UiSettings::load(dir.path()), settings);
         assert!(json.contains(r#""codeFencesFitContent": true"#));
