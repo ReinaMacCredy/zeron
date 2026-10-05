@@ -14,9 +14,9 @@ use gpui::{
 };
 use zeron_proto::device_hub::{
     DeviceButton, DeviceFrame, DeviceInput, DeviceOrientation, DeviceScreenConfig,
-    DeviceStreamStatus, StreamLinkStatus, TouchPhase,
+    DeviceStreamStatus, DeviceVideoCodec, StreamLinkStatus, TouchPhase,
 };
-use zeron_rpc::methods;
+use zeron_rpc::{RpcSubscription, methods};
 
 use super::geometry::{self, KeyPress};
 use super::loading::{self, LoadingStage, LoadingView};
@@ -64,11 +64,46 @@ impl AxBox {
     }
 }
 
+#[derive(Clone)]
+enum Picture {
+    Image(Arc<RenderImage>),
+    #[cfg(target_os = "macos")]
+    Surface(super::h264::Surface),
+}
+
 struct DecodedFrame {
-    image: Arc<RenderImage>,
+    picture: Picture,
     width: u32,
     height: u32,
     rotation: DeviceOrientation,
+    codec: DeviceVideoCodec,
+}
+
+impl DecodedFrame {
+    fn into_image(self) -> Option<Arc<RenderImage>> {
+        match self.picture {
+            Picture::Image(image) => Some(image),
+            #[cfg(target_os = "macos")]
+            Picture::Surface(_) => None,
+        }
+    }
+}
+
+fn codec_label(codec: DeviceVideoCodec) -> &'static str {
+    match codec {
+        DeviceVideoCodec::Mjpeg => "mjpeg",
+        DeviceVideoCodec::H264 => "h264",
+    }
+}
+
+fn codec_choice(knob: Option<&str>) -> (DeviceVideoCodec, bool) {
+    let h264 = cfg!(target_os = "macos");
+    match knob {
+        Some("mjpeg") => (DeviceVideoCodec::Mjpeg, true),
+        Some("h264") if h264 => (DeviceVideoCodec::H264, true),
+        _ if h264 => (DeviceVideoCodec::H264, false),
+        _ => (DeviceVideoCodec::Mjpeg, false),
+    }
 }
 
 #[derive(Default)]
@@ -80,7 +115,7 @@ struct FpsCounter {
 }
 
 impl FpsCounter {
-    fn tick(&mut self, device_id: &str) {
+    fn tick(&mut self, device_id: &str, codec: DeviceVideoCodec) {
         let now = Instant::now();
         let start = *self.window_start.get_or_insert(now);
         self.frames += 1;
@@ -98,6 +133,7 @@ impl FpsCounter {
             tracing::info!(
                 device = device_id,
                 fps = self.shown,
+                codec = codec_label(codec),
                 "device panel decoded fps"
             );
         }
@@ -155,55 +191,172 @@ async fn send_inputs(
     }
 }
 
-fn decode(item: serde_json::Value, rotation: DeviceOrientation) -> Option<DecodedFrame> {
-    let frame: DeviceFrame = serde_json::from_value(item).ok()?;
-    let jpeg = base64::engine::general_purpose::STANDARD
-        .decode(frame.jpeg)
-        .ok()?;
+fn decode_jpeg(
+    jpeg: &[u8],
+    rotation: DeviceOrientation,
+    codec: DeviceVideoCodec,
+) -> Option<DecodedFrame> {
     let mut pixels =
-        geometry::rotate_for_display(image::load_from_memory(&jpeg).ok()?.to_rgba8(), rotation);
+        geometry::rotate_for_display(image::load_from_memory(jpeg).ok()?.to_rgba8(), rotation);
     for pixel in pixels.pixels_mut() {
         pixel.0.swap(0, 2);
     }
     let (width, height) = pixels.dimensions();
     (width > 0 && height > 0).then(|| DecodedFrame {
-        image: Arc::new(RenderImage::new([image::Frame::new(pixels)])),
+        picture: Picture::Image(Arc::new(RenderImage::new([image::Frame::new(pixels)]))),
         width,
         height,
         rotation,
+        codec,
     })
+}
+
+fn jpeg_of(frame: &DeviceFrame) -> Option<Vec<u8>> {
+    (!frame.jpeg.is_empty())
+        .then(|| {
+            base64::engine::general_purpose::STANDARD
+                .decode(&frame.jpeg)
+                .ok()
+        })
+        .flatten()
+}
+
+struct FrameSink {
+    slot: Arc<Mutex<Option<DecodedFrame>>>,
+    nudge: mpsc::UnboundedSender<()>,
+    rotation: Arc<Mutex<DeviceOrientation>>,
+}
+
+impl FrameSink {
+    fn rotation(&self) -> DeviceOrientation {
+        *self.rotation.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn publish(&self, frame: DecodedFrame) -> bool {
+        *self.slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(frame);
+        self.nudge.unbounded_send(()).is_ok()
+    }
+}
+
+async fn drain_mjpeg(frames: &mut RpcSubscription, sink: &FrameSink) {
+    while let Some(mut item) = frames.recv().await {
+        while let Some(Some(newer)) = futures::FutureExt::now_or_never(frames.recv()) {
+            item = newer;
+        }
+        let Some(frame) = serde_json::from_value::<DeviceFrame>(item)
+            .ok()
+            .and_then(|frame| jpeg_of(&frame))
+            .and_then(|jpeg| decode_jpeg(&jpeg, sink.rotation(), DeviceVideoCodec::Mjpeg))
+        else {
+            continue;
+        };
+        if !sink.publish(frame) {
+            return;
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn drain_h264(
+    frames: &mut RpcSubscription,
+    sink: &FrameSink,
+) -> Option<super::h264::FallbackReason> {
+    use super::h264::Pipeline;
+    use zeron_proto::device_hub::{AVCC_DELTA, AVCC_KEYFRAME, AvccDemuxer};
+
+    let mut pipeline = Pipeline::default();
+    let mut demuxer = AvccDemuxer::default();
+    let mut replay = true;
+    while let Some(item) = frames.recv().await {
+        let mut items = vec![item];
+        while let Some(Some(more)) = futures::FutureExt::now_or_never(frames.recv()) {
+            items.push(more);
+        }
+        let mut envelopes = Vec::new();
+        let mut pending = 0;
+        let mut jpeg = None;
+        for item in items {
+            let Ok(frame) = serde_json::from_value::<DeviceFrame>(item) else {
+                continue;
+            };
+            if let Some(bytes) = jpeg_of(&frame) {
+                jpeg = Some(bytes);
+                continue;
+            }
+            let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&frame.avcc) else {
+                continue;
+            };
+            let batch = demuxer.push(&bytes)?;
+            if !std::mem::take(&mut replay) {
+                pending += batch
+                    .iter()
+                    .filter(|envelope| matches!(envelope.tag, AVCC_KEYFRAME | AVCC_DELTA))
+                    .count();
+            }
+            envelopes.extend(batch);
+        }
+        if let Some(reason) = pipeline.pending(pending) {
+            return Some(reason);
+        }
+        let rotation = sink.rotation();
+        let batch = pipeline.feed(envelopes, rotation);
+        if batch.fallback.is_some() {
+            return batch.fallback;
+        }
+        let frame = match (batch.picture, batch.seed.or(jpeg)) {
+            (Some(surface), _) => Some(DecodedFrame {
+                width: surface.width(),
+                height: surface.height(),
+                picture: Picture::Surface(surface),
+                rotation,
+                codec: DeviceVideoCodec::H264,
+            }),
+            (None, Some(jpeg)) => decode_jpeg(&jpeg, rotation, DeviceVideoCodec::H264),
+            (None, None) => None,
+        };
+        if let Some(frame) = frame
+            && !sink.publish(frame)
+        {
+            return None;
+        }
+    }
+    None
 }
 
 async fn drain_frames(
     executor: gpui::BackgroundExecutor,
     engine: EngineHandle,
     device_id: String,
-    slot: Arc<Mutex<Option<DecodedFrame>>>,
-    nudge: mpsc::UnboundedSender<()>,
-    rotation: Arc<Mutex<DeviceOrientation>>,
+    sink: FrameSink,
+    (mut codec, forced): (DeviceVideoCodec, bool),
 ) {
     loop {
-        let params = serde_json::json!({ "deviceId": device_id });
+        let params = serde_json::json!({ "deviceId": device_id, "codec": codec });
         if let Ok(mut frames) = engine
             .client()
             .subscribe_scoped(methods::WATCH_HUB_DEVICE_FRAMES, params)
             .await
         {
-            while let Some(mut item) = frames.recv().await {
-                while let Some(Some(newer)) = futures::FutureExt::now_or_never(frames.recv()) {
-                    item = newer;
+            match codec {
+                #[cfg(target_os = "macos")]
+                DeviceVideoCodec::H264 => {
+                    if let Some(reason) = drain_h264(&mut frames, &sink).await {
+                        tracing::warn!(
+                            device = %device_id,
+                            reason = reason.describe(),
+                            forced,
+                            "device panel H.264 fallback"
+                        );
+                        if !forced {
+                            codec = DeviceVideoCodec::Mjpeg;
+                            continue;
+                        }
+                    }
                 }
-                let rotation = *rotation.lock().unwrap_or_else(PoisonError::into_inner);
-                let Some(frame) = decode(item, rotation) else {
-                    continue;
-                };
-                *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(frame);
-                if nudge.unbounded_send(()).is_err() {
-                    return;
-                }
+                _ => drain_mjpeg(&mut frames, &sink).await,
             }
         }
-        if nudge.is_closed() {
+        if sink.nudge.is_closed() {
             return;
         }
         executor.timer(RESUBSCRIBE_DELAY).await;
@@ -232,6 +385,7 @@ pub struct DeviceStreamView {
     focus_watch: Option<Subscription>,
     inputs: mpsc::UnboundedSender<DeviceInput>,
     fps: Option<FpsCounter>,
+    codec: (DeviceVideoCodec, bool),
     debug_tap: Option<(f32, f32)>,
     rail_inset: f32,
     ax_boxes: Vec<AxBox>,
@@ -270,7 +424,7 @@ impl DeviceStreamView {
                 })
                 .detach();
             }
-            let current = view.image.take().map(|frame| frame.image);
+            let current = view.image.take().and_then(DecodedFrame::into_image);
             for image in current.into_iter().chain(view.retired.drain(..)) {
                 gpui::ImageSource::Render(image).evict(None, cx);
             }
@@ -310,6 +464,7 @@ impl DeviceStreamView {
             inputs,
             fps: (std::env::var("ZERON_DEVICE_FPS").as_deref() == Ok("1"))
                 .then(FpsCounter::default),
+            codec: codec_choice(std::env::var("ZERON_DEVICE_CODEC").ok().as_deref()),
             debug_tap: debug_tap_from_env(),
             rail_inset: geometry::RAIL_WIDTH,
             ax_boxes: Vec::new(),
@@ -337,9 +492,12 @@ impl DeviceStreamView {
             cx.background_executor().clone(),
             self.engine.clone(),
             self.device_id.clone(),
-            self.slot.clone(),
-            self.nudge.clone(),
-            self.rotation.clone(),
+            FrameSink {
+                slot: self.slot.clone(),
+                nudge: self.nudge.clone(),
+                rotation: self.rotation.clone(),
+            },
+            self.codec,
         ));
         self.await_frame(cx);
     }
@@ -465,13 +623,14 @@ impl DeviceStreamView {
             return;
         };
         self.awaiting_frame = false;
+        let codec = frame.codec;
         if let Some(old) = self.image.replace(frame)
             && std::mem::take(&mut self.painted)
         {
-            self.retired.push(old.image);
+            self.retired.extend(old.into_image());
         }
         if let Some(fps) = &mut self.fps {
-            fps.tick(&self.device_id);
+            fps.tick(&self.device_id, codec);
         }
         if let Some(frame) = self.frame_box.get()
             && let Some((x, y)) = self.debug_tap.take()
@@ -573,10 +732,16 @@ impl Render for DeviceStreamView {
         }
         self.painted = self.image.is_some();
         let theme = Theme::of(cx).clone();
-        let image = self.image.as_ref().map(|frame| frame.image.clone());
+        let picture = self.image.as_ref().map(|frame| frame.picture.clone());
         let aspect = self.aspect();
         let frame_box = self.frame_box.clone();
-        let fps = self.fps.as_ref().map(|fps| fps.shown);
+        let fps = self.fps.as_ref().map(|fps| {
+            let codec = self
+                .image
+                .as_ref()
+                .map_or(self.codec.0, |frame| frame.codec);
+            format!("{:.0} fps · {}", fps.shown, codec_label(codec))
+        });
         let rail_inset = self.rail_inset;
         let corners = gpui::Corners::all(px(self.corner_radius));
         let rotation = self.image.as_ref().map_or_else(
@@ -620,9 +785,13 @@ impl Render for DeviceStreamView {
                     move |bounds, _, window, _| {
                         let frame = geometry::centered_frame(bounds, aspect, rail_inset);
                         frame_box.set(Some(frame));
-                        match image {
-                            Some(image) => {
+                        match picture {
+                            Some(Picture::Image(image)) => {
                                 let _ = window.paint_image(frame, corners, image, 0, false);
+                            }
+                            #[cfg(target_os = "macos")]
+                            Some(Picture::Surface(surface)) => {
+                                window.paint_surface(frame, surface.to_gpui())
                             }
                             None => window.paint_quad(
                                 gpui::fill(frame, crate::theme::ink(0.04)).corner_radii(corners),
@@ -736,7 +905,7 @@ impl Render for DeviceStreamView {
                         .right(px(8.0 + rail_inset))
                         .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.text_muted)
-                        .child(SharedString::from(format!("{fps:.0} fps"))),
+                        .child(SharedString::from(fps)),
                 )
             })
             .on_mouse_down(
@@ -781,6 +950,11 @@ mod tests {
             .encode_image(&image)
             .unwrap();
         base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    fn decode(item: Value, rotation: DeviceOrientation) -> Option<DecodedFrame> {
+        let frame: DeviceFrame = serde_json::from_value(item).ok()?;
+        decode_jpeg(&jpeg_of(&frame)?, rotation, DeviceVideoCodec::Mjpeg)
     }
 
     fn fake_engine(runtime: &tokio::runtime::Runtime) -> (EngineHandle, Inputs) {
@@ -1408,6 +1582,152 @@ mod tests {
                 ..raw
             };
             assert_eq!(oriented.displayed(rotation), oriented, "{rotation:?}");
+        }
+    }
+
+    #[test]
+    fn the_codec_knob_forces_either_path_and_defaults_to_h264_on_macos() {
+        let default = if cfg!(target_os = "macos") {
+            DeviceVideoCodec::H264
+        } else {
+            DeviceVideoCodec::Mjpeg
+        };
+        assert_eq!(codec_choice(None), (default, false));
+        assert_eq!(codec_choice(Some("other")), (default, false));
+        assert_eq!(codec_choice(Some("mjpeg")), (DeviceVideoCodec::Mjpeg, true));
+        assert_eq!(
+            codec_choice(Some("h264")),
+            (default, cfg!(target_os = "macos"))
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    mod h264 {
+        use super::*;
+        use zeron_proto::device_hub::{AvccDemuxer, AvccEnvelope};
+
+        const FIXTURE: &[u8] = include_bytes!("../../tests/fixtures/device-ios-588x1280.avcc");
+
+        fn item(envelopes: &[AvccEnvelope]) -> Value {
+            let mut bytes = Vec::new();
+            for envelope in envelopes {
+                envelope.encode_into(&mut bytes);
+            }
+            json!({ "seq": 1, "avcc": base64::engine::general_purpose::STANDARD.encode(bytes) })
+        }
+
+        fn video_engine(
+            runtime: &tokio::runtime::Runtime,
+            h264: Vec<Value>,
+        ) -> (EngineHandle, Inputs) {
+            let (out, mut frames) = tokio::sync::mpsc::channel::<String>(64);
+            let (replies, inbound) = tokio::sync::mpsc::channel::<String>(64);
+            let watches: Inputs = Arc::default();
+            let seen = watches.clone();
+            runtime.spawn(async move {
+                while let Some(frame) = frames.recv().await {
+                    let frame: Value = serde_json::from_str(&frame).unwrap();
+                    if frame["method"] != methods::WATCH_HUB_DEVICE_FRAMES {
+                        continue;
+                    }
+                    seen.lock().unwrap().push(frame["params"].clone());
+                    let items = if frame["params"]["codec"] == "h264" {
+                        h264.clone()
+                    } else {
+                        vec![json!({ "seq": 1, "jpeg": jpeg() })]
+                    };
+                    for item in items {
+                        let reply = json!({ "id": frame["id"], "item": item });
+                        if replies.send(reply.to_string()).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+            });
+            let client = zeron_rpc::RpcClient::new(out, inbound);
+            (EngineHandle::from_test_client(client), watches)
+        }
+
+        fn shown(
+            view: &Entity<DeviceStreamView>,
+            cx: &mut VisualTestContext,
+        ) -> Option<(DeviceVideoCodec, u32, u32, bool)> {
+            view.read_with(cx, |view, _| {
+                view.image.as_ref().map(|frame| {
+                    let surface = matches!(frame.picture, Picture::Surface(_));
+                    (frame.codec, frame.width, frame.height, surface)
+                })
+            })
+        }
+
+        fn codecs(watches: &Inputs) -> Vec<Value> {
+            watches
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|params| params["codec"].clone())
+                .collect()
+        }
+
+        #[gpui::test]
+        fn an_h264_stream_paints_a_decoded_surface(cx: &mut TestAppContext) {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let _guard = runtime.enter();
+            setup(cx);
+            let envelopes = AvccDemuxer::default().push(FIXTURE).unwrap();
+            let mut items = vec![item(&envelopes[..2])];
+            items.extend(
+                envelopes[2..]
+                    .iter()
+                    .map(|envelope| item(std::slice::from_ref(envelope))),
+            );
+            let (engine, watches) = video_engine(&runtime, items);
+            let (view, cx) =
+                cx.add_window_view(|_, cx| DeviceStreamView::new(engine, "SIM".into(), cx));
+            wait(cx, |cx| shown(&view, cx).is_some());
+            assert_eq!(
+                shown(&view, cx),
+                Some((DeviceVideoCodec::H264, 588, 1280, true))
+            );
+            assert_eq!(codecs(&watches), [json!("h264")]);
+            let frame = view.read_with(cx, |view, _| view.frame_box().unwrap());
+            assert!((frame.size.width / frame.size.height - 588.0 / 1280.0).abs() < 0.01);
+        }
+
+        #[gpui::test]
+        fn video_without_a_description_falls_back_to_mjpeg(cx: &mut TestAppContext) {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let _guard = runtime.enter();
+            setup(cx);
+            let envelopes = AvccDemuxer::default().push(FIXTURE).unwrap();
+            let (engine, watches) = video_engine(&runtime, vec![item(&envelopes[1..2])]);
+            let (view, cx) =
+                cx.add_window_view(|_, cx| DeviceStreamView::new(engine, "SIM".into(), cx));
+            wait(cx, |cx| shown(&view, cx).is_some());
+            assert_eq!(
+                shown(&view, cx),
+                Some((DeviceVideoCodec::Mjpeg, 18, 39, false))
+            );
+            assert_eq!(codecs(&watches), [json!("h264"), json!("mjpeg")]);
+        }
+
+        #[gpui::test]
+        fn more_than_eight_queued_frames_fall_back_to_mjpeg(cx: &mut TestAppContext) {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let _guard = runtime.enter();
+            setup(cx);
+            let envelopes = AvccDemuxer::default().push(FIXTURE).unwrap();
+            let backlog: Vec<AvccEnvelope> =
+                envelopes[2..].iter().cycle().take(9).cloned().collect();
+            let (engine, watches) =
+                video_engine(&runtime, vec![item(&envelopes[..2]), item(&backlog)]);
+            let (view, cx) =
+                cx.add_window_view(|_, cx| DeviceStreamView::new(engine, "SIM".into(), cx));
+            wait(cx, |_| codecs(&watches).len() == 2);
+            wait(cx, |cx| {
+                shown(&view, cx).is_some_and(|shown| shown.0 == DeviceVideoCodec::Mjpeg)
+            });
+            assert_eq!(codecs(&watches), [json!("h264"), json!("mjpeg")]);
         }
     }
 }
