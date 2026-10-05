@@ -151,11 +151,19 @@ pub enum StreamLinkStatus {
     },
 }
 
+impl StreamLinkStatus {
+    pub fn is_idle(&self) -> bool {
+        *self == StreamLinkStatus::Idle
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceStreamStatus {
     #[serde(default)]
     pub video: StreamLinkStatus,
+    #[serde(default, skip_serializing_if = "StreamLinkStatus::is_idle")]
+    pub avcc: StreamLinkStatus,
     #[serde(default)]
     pub input: StreamLinkStatus,
     #[serde(default)]
@@ -229,6 +237,70 @@ pub struct DeviceFrame {
     pub height: Option<u32>,
     #[serde(default)]
     pub jpeg: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub avcc: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DeviceVideoCodec {
+    #[default]
+    Mjpeg,
+    H264,
+}
+
+pub const AVCC_DESCRIPTION: u8 = 1;
+pub const AVCC_KEYFRAME: u8 = 2;
+pub const AVCC_DELTA: u8 = 3;
+pub const AVCC_SEED: u8 = 4;
+pub const AVCC_MAX_ENVELOPE: usize = 16 << 20;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AvccEnvelope {
+    pub tag: u8,
+    pub payload: Vec<u8>,
+}
+
+impl AvccEnvelope {
+    pub fn encode_into(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&(self.payload.len() as u32 + 1).to_be_bytes());
+        out.push(self.tag);
+        out.extend_from_slice(&self.payload);
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct AvccDemuxer {
+    buffer: Vec<u8>,
+}
+
+impl AvccDemuxer {
+    pub fn push(&mut self, bytes: &[u8]) -> Option<Vec<AvccEnvelope>> {
+        self.buffer.extend_from_slice(bytes);
+        let mut envelopes = Vec::new();
+        let mut offset = 0;
+        while let Some(head) = self.buffer.get(offset..offset + 4) {
+            let length = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
+            if length > AVCC_MAX_ENVELOPE {
+                self.buffer.clear();
+                return None;
+            }
+            let Some(body) = self.buffer.get(offset + 4..offset + 4 + length) else {
+                break;
+            };
+            if let Some((&tag, payload)) = body.split_first()
+                && (AVCC_DESCRIPTION..=AVCC_SEED).contains(&tag)
+            {
+                envelopes.push(AvccEnvelope {
+                    tag,
+                    payload: payload.to_vec(),
+                });
+            }
+            offset += 4 + length;
+        }
+        self.buffer.drain(..offset);
+        Some(envelopes)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -305,6 +377,8 @@ pub struct OpenHubDeviceParams {
 pub struct WatchHubDeviceFramesParams {
     #[serde(default)]
     pub device_id: String,
+    #[serde(default)]
+    pub codec: DeviceVideoCodec,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -760,6 +834,7 @@ mod tests {
                 detail: "closed".into(),
             },
             subscribers: 2,
+            ..Default::default()
         };
         let wire =
             json!({"video": "live", "input": {"failed": {"detail": "closed"}}, "subscribers": 2});
@@ -767,6 +842,17 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<DeviceStreamStatus>(wire).unwrap(),
             status
+        );
+        let both = DeviceStreamStatus {
+            video: StreamLinkStatus::Idle,
+            avcc: StreamLinkStatus::Live,
+            ..status
+        };
+        let wire = json!({"video": "idle", "avcc": "live", "input": {"failed": {"detail": "closed"}}, "subscribers": 2});
+        assert_eq!(serde_json::to_value(&both).unwrap(), wire);
+        assert_eq!(
+            serde_json::from_value::<DeviceStreamStatus>(wire).unwrap(),
+            both
         );
         let close: CloseHubDeviceParams =
             serde_json::from_value(json!({"chatId": "c", "deviceId": "d", "shutdown": true}))
@@ -811,5 +897,88 @@ mod tests {
         assert_eq!(serde_json::from_value::<DeviceHubHost>(wire).unwrap(), host);
         let bare: DeviceHubHost = serde_json::from_value(json!({"id": "local"})).unwrap();
         assert!(bare.tools.is_none());
+    }
+
+    #[test]
+    fn video_codec_and_avcc_items_default_to_the_mjpeg_wire() {
+        let old: WatchHubDeviceFramesParams =
+            serde_json::from_value(json!({"deviceId": "SIM"})).unwrap();
+        assert_eq!(old.codec, DeviceVideoCodec::Mjpeg);
+        let h264: WatchHubDeviceFramesParams =
+            serde_json::from_value(json!({"deviceId": "SIM", "codec": "h264"})).unwrap();
+        assert_eq!(h264.codec, DeviceVideoCodec::H264);
+        let jpeg = DeviceFrame {
+            seq: 1,
+            jpeg: "AA==".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_value(&jpeg).unwrap(),
+            json!({"seq": 1, "jpeg": "AA=="})
+        );
+        let avcc: DeviceFrame =
+            serde_json::from_value(json!({"seq": 2, "avcc": "AAAAAgEB"})).unwrap();
+        assert_eq!(avcc.avcc, "AAAAAgEB");
+        assert!(avcc.jpeg.is_empty());
+    }
+
+    fn envelope(tag: u8, payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        AvccEnvelope {
+            tag,
+            payload: payload.to_vec(),
+        }
+        .encode_into(&mut out);
+        out
+    }
+
+    #[test]
+    fn avcc_demuxer_yields_whole_envelopes_at_every_chunk_split_and_skips_unknown_tags() {
+        let stream = [
+            envelope(AVCC_SEED, b"jpeg"),
+            envelope(AVCC_DESCRIPTION, &[1, 0x64, 0, 0x20, 0xff]),
+            envelope(9, b"unknown"),
+            vec![0, 0, 0, 0],
+            envelope(AVCC_KEYFRAME, &[0, 0, 0, 1, 0x65]),
+            envelope(AVCC_DELTA, &[]),
+            envelope(AVCC_DELTA, &[0, 0, 0, 2, 0x41, 7]),
+        ]
+        .concat();
+        let expected = vec![
+            (AVCC_SEED, b"jpeg".to_vec()),
+            (AVCC_DESCRIPTION, vec![1, 0x64, 0, 0x20, 0xff]),
+            (AVCC_KEYFRAME, vec![0, 0, 0, 1, 0x65]),
+            (AVCC_DELTA, vec![]),
+            (AVCC_DELTA, vec![0, 0, 0, 2, 0x41, 7]),
+        ];
+        for first in 0..=stream.len() {
+            for second in first..=stream.len() {
+                let mut demuxer = AvccDemuxer::default();
+                let got: Vec<(u8, Vec<u8>)> =
+                    [&stream[..first], &stream[first..second], &stream[second..]]
+                        .into_iter()
+                        .flat_map(|chunk| demuxer.push(chunk).unwrap())
+                        .map(|envelope| (envelope.tag, envelope.payload))
+                        .collect();
+                assert_eq!(got, expected, "split at {first} and {second}");
+            }
+        }
+        let mut demuxer = AvccDemuxer::default();
+        assert_eq!(demuxer.push(&stream[..stream.len() - 1]).unwrap().len(), 4);
+        assert!(demuxer.push(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn avcc_demuxer_refuses_an_oversized_envelope() {
+        let mut demuxer = AvccDemuxer::default();
+        let length = (AVCC_MAX_ENVELOPE as u32 + 1).to_be_bytes();
+        assert!(demuxer.push(&length).is_none());
+        assert_eq!(
+            demuxer.push(&envelope(AVCC_DELTA, b"x")).unwrap(),
+            vec![AvccEnvelope {
+                tag: AVCC_DELTA,
+                payload: b"x".to_vec()
+            }]
+        );
     }
 }

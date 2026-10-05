@@ -142,6 +142,14 @@ impl HubClient<'_> {
         )
     }
 
+    pub(crate) fn avcc_url(&self, udid: &str) -> String {
+        format!(
+            "{}/vendor/serve-sim/helper/{}/stream.avcc",
+            self.origin,
+            path_segment(udid)
+        )
+    }
+
     pub(crate) fn input_url(&self, udid: &str) -> String {
         format!(
             "{}/vendor/serve-sim/helper/ws?device={}",

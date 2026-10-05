@@ -1,5 +1,6 @@
 pub mod float;
 pub mod geometry;
+pub mod h264;
 pub mod loading;
 pub mod presentation;
 mod rail;
@@ -1083,6 +1084,7 @@ pub(crate) mod tests {
             "SIM".into(),
             DeviceStreamStatus {
                 video: StreamLinkStatus::Live,
+                avcc: StreamLinkStatus::Live,
                 input,
                 subscribers: 1,
             },

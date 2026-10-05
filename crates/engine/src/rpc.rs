@@ -4595,6 +4595,26 @@ impl RpcService for EngineRpc {
             methods::WATCH_HUB_DEVICE_FRAMES => {
                 use base64::Engine as _;
                 let p: zeron_proto::device_hub::WatchHubDeviceFramesParams = parse_params(params)?;
+                if p.codec == zeron_proto::device_hub::DeviceVideoCodec::H264 {
+                    let subscription = self
+                        .device_hub()?
+                        .watch_avcc(&p.device_id)
+                        .map_err(RpcError::Failed)?;
+                    let mut seq = 0;
+                    return Ok(RpcReply::Stream(
+                        crate::device_hub::avcc_batches(subscription)
+                            .filter_map(move |bytes| {
+                                seq += 1;
+                                let frame = zeron_proto::device_hub::DeviceFrame {
+                                    seq,
+                                    avcc: base64::engine::general_purpose::STANDARD.encode(bytes),
+                                    ..Default::default()
+                                };
+                                futures::future::ready(serde_json::to_value(frame).ok())
+                            })
+                            .boxed(),
+                    ));
+                }
                 let subscription = self
                     .device_hub()?
                     .watch_frames(&p.device_id)
@@ -4614,6 +4634,7 @@ impl RpcService for EngineRpc {
                                     height: None,
                                     jpeg: base64::engine::general_purpose::STANDARD
                                         .encode(&frame.jpeg),
+                                    ..Default::default()
                                 })
                                 .ok()?;
                             return Some((value, subscription));
