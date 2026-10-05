@@ -29,6 +29,7 @@ pub mod composer;
 mod composer_dock;
 mod composer_markdown;
 mod context_usage;
+pub mod device_panel;
 mod dictation;
 pub mod draft_store;
 pub mod edge_fade;
