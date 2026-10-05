@@ -312,6 +312,8 @@ icon_assets![
     (LUCIDE_ARROW_UP_RIGHT, "lucide-arrow-up-right"),
     (LUCIDE_LINK, "lucide-link"),
     (LUCIDE_ROTATE_CCW, "lucide-rotate-ccw"),
+    (LUCIDE_CHEVRON_LEFT, "lucide-chevron-left"),
+    (LUCIDE_SQUARE, "lucide-square"),
     (LUCIDE_POWER, "lucide-power"),
     (LUCIDE_TYPE, "lucide-type"),
     (LUCIDE_SLIDERS_HORIZONTAL, "lucide-sliders-horizontal"),

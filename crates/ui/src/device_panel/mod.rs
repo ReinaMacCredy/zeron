@@ -73,6 +73,26 @@ pub(crate) fn feed_view(
     });
 }
 
+pub fn picker_groups(hub: &DeviceHubState) -> Vec<(DevicePlatform, &'static str, Vec<HubDevice>)> {
+    [
+        (DevicePlatform::Ios, "iOS Simulators"),
+        (DevicePlatform::Android, "Android Emulators"),
+    ]
+    .into_iter()
+    .map(|(platform, title)| {
+        let mut devices: Vec<HubDevice> = hub
+            .devices
+            .iter()
+            .filter(|device| device.platform == platform)
+            .cloned()
+            .collect();
+        devices.sort_by(|a, b| b.booted.cmp(&a.booted).then_with(|| a.name.cmp(&b.name)));
+        (platform, title, devices)
+    })
+    .filter(|(_, _, devices)| !devices.is_empty())
+    .collect()
+}
+
 pub fn booting_banner(hub: &DeviceHubState, chat_id: &str) -> Option<String> {
     let names: Vec<&str> = hub
         .booting
@@ -170,6 +190,7 @@ pub struct DevicePanel {
     close_task: Option<Task<()>>,
     more: crate::popover::Popup<()>,
     text_size: crate::popover::Popup<()>,
+    rotate: crate::popover::Popup<()>,
     _state: Subscription,
 }
 
@@ -204,6 +225,7 @@ impl DevicePanel {
             close_task: None,
             more: Default::default(),
             text_size: Default::default(),
+            rotate: Default::default(),
             _state: observer,
         };
         panel.sync(cx);
@@ -282,6 +304,7 @@ impl DevicePanel {
         self.view = None;
         self.controls = None;
         self.text_size = Default::default();
+        self.rotate = Default::default();
     }
 
     pub fn controls(&self) -> Option<&Entity<DeviceControls>> {
@@ -359,20 +382,28 @@ impl DevicePanel {
             .target
             .as_ref()
             .and_then(|(host, device)| hub.session(&self.chat_id, host, device))
-            .map(|session| session.device_id.clone());
+            .map(|session| (session.device_id.clone(), session.platform));
         match live {
-            Some(device_id) => {
+            Some((device_id, platform)) => {
                 self.seen_live = true;
                 if self.view.is_none()
                     && self.visible
                     && let Some(engine) = self.state.read(cx).engine().cloned()
                 {
                     let id = device_id.clone();
-                    let view = cx.new(|cx| DeviceStreamView::new(engine.clone(), id.clone(), cx));
+                    let view = cx
+                        .new(|cx| DeviceStreamView::new(engine.clone(), id.clone(), platform, cx));
                     let host = self.target.as_ref().map(|(host, _)| host.clone());
                     let weak = view.downgrade();
                     let controls = cx.new(|cx| {
-                        DeviceControls::new(engine, host.unwrap_or_default(), id, weak, cx)
+                        DeviceControls::new(
+                            engine,
+                            host.unwrap_or_default(),
+                            id,
+                            platform,
+                            weak,
+                            cx,
+                        )
                     });
                     let observer = cx.observe(&controls, |_, _, cx| cx.notify());
                     self.controls = Some((controls, observer));
@@ -660,13 +691,11 @@ impl DevicePanel {
     fn render_picker(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let hub = self.hub(cx).cloned().unwrap_or_default();
         let ready = hub.host_status == DeviceHostStatus::Ready;
-        let mut devices: Vec<HubDevice> = hub
-            .devices
-            .iter()
-            .filter(|device| device.platform == DevicePlatform::Ios)
-            .cloned()
-            .collect();
-        devices.sort_by(|a, b| b.booted.cmp(&a.booted).then_with(|| a.name.cmp(&b.name)));
+        let groups = if ready {
+            picker_groups(&hub)
+        } else {
+            Vec::new()
+        };
         let empty = if hub.host_status == DeviceHostStatus::Failed {
             hub.host_status_detail
                 .clone()
@@ -686,96 +715,108 @@ impl DevicePanel {
                 .any(|platform| {
                     platform.platform == DevicePlatform::Android && !platform.available
                 });
-        let rows: Vec<_> = devices
-            .into_iter()
-            .filter(|_| ready)
-            .map(|device| {
-                let opening = self.opening.as_deref() == Some(device.id.as_str());
-                let status = if device.booted { "Running" } else { "Stopped" };
-                let action = if device.booted { "Open" } else { "Start" };
-                let detail = format!("{} · {status}", device_description(&hub, &device));
-                let row_id = SharedString::from(format!("device-row-{}", device.id));
-                let label = SharedString::from(format!("{action} {}", device.name));
-                let clicked = device.clone();
-                div()
-                    .id(row_id)
-                    .role(gpui::Role::Button)
-                    .aria_label(label)
-                    .w_full()
-                    .px(px(12.0))
-                    .py(px(8.0))
-                    .rounded(px(10.0))
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(crate::theme::ink(0.02))
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(crate::theme::ink(0.05)))
-                    .child(
-                        icons::icon(icons::SMARTPHONE)
-                            .size(px(15.0))
-                            .flex_none()
-                            .text_color(theme.text_muted),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .text_size(crate::typography::ui_rems(13.0))
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(theme.text)
-                                    .truncate()
-                                    .child(SharedString::from(device.name.clone())),
-                            )
-                            .child(
-                                div()
-                                    .text_size(crate::typography::ui_rems(11.0))
-                                    .text_color(theme.text_muted)
-                                    .truncate()
-                                    .child(SharedString::from(detail)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .text_color(theme.text)
-                            .child(if opening { "Opening..." } else { action }),
-                    )
-                    .on_click(cx.listener(move |panel, _, _, cx| {
-                        panel.open_device(clicked.clone(), cx);
-                    }))
-            })
-            .collect();
+        let row = |device: HubDevice, cx: &mut Context<Self>| {
+            let opening = self.opening.as_deref() == Some(device.id.as_str());
+            let status = if device.booted { "Running" } else { "Stopped" };
+            let action = if device.booted { "Open" } else { "Start" };
+            let detail = format!("{} · {status}", device_description(&hub, &device));
+            let row_id = SharedString::from(format!("device-row-{}", device.id));
+            let selector = row_id.clone();
+            let label = SharedString::from(format!("{action} {}", device.name));
+            let clicked = device.clone();
+            div()
+                .id(row_id)
+                .debug_selector(move || selector.to_string())
+                .role(gpui::Role::Button)
+                .aria_label(label)
+                .w_full()
+                .px(px(12.0))
+                .py(px(8.0))
+                .rounded(px(10.0))
+                .border_1()
+                .border_color(theme.border)
+                .bg(crate::theme::ink(0.02))
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .cursor_pointer()
+                .hover(|s| s.bg(crate::theme::ink(0.05)))
+                .child(
+                    icons::icon(icons::SMARTPHONE)
+                        .size(px(15.0))
+                        .flex_none()
+                        .text_color(theme.text_muted),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .text_size(crate::typography::ui_rems(13.0))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .truncate()
+                                .child(SharedString::from(device.name.clone())),
+                        )
+                        .child(
+                            div()
+                                .text_size(crate::typography::ui_rems(11.0))
+                                .text_color(theme.text_muted)
+                                .truncate()
+                                .child(SharedString::from(detail)),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.text)
+                        .child(if opening { "Opening..." } else { action }),
+                )
+                .on_click(cx.listener(move |panel, _, _, cx| {
+                    panel.open_device(clicked.clone(), cx);
+                }))
+        };
         let small = |text: String| {
             div()
                 .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_muted)
                 .child(SharedString::from(text))
         };
+        let empty_list = groups.is_empty();
+        let mut sections = Vec::new();
+        for (platform, title, devices) in groups {
+            let id = match platform {
+                DevicePlatform::Ios => "device-group-ios",
+                DevicePlatform::Android => "device-group-android",
+            };
+            sections.push(
+                div()
+                    .id(id)
+                    .debug_selector(move || id.into())
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text_muted)
+                    .child(title)
+                    .into_any_element(),
+            );
+            sections.extend(
+                devices
+                    .into_iter()
+                    .map(|device| row(device, cx).into_any_element()),
+            );
+        }
         div()
             .size_full()
             .flex()
             .flex_col()
             .gap(px(8.0))
             .p(px(16.0))
-            .when(!rows.is_empty(), |el| {
-                el.child(
-                    div()
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.text_muted)
-                        .child("iOS Simulators"),
-                )
-            })
-            .when(rows.is_empty(), |el| el.child(small(empty)))
-            .children(rows)
+            .when(empty_list, |el| el.child(small(empty)))
+            .children(sections)
             .when(android_hint, |el| {
                 el.child(small(
                     "No Android virtual devices found. Create one in Android Studio's Device \
@@ -1170,6 +1211,208 @@ pub(crate) mod tests {
         click(cx, "device-close-panel");
         wait(cx, |_| *closed.lock().unwrap());
         assert!(calls_of(&calls, methods::CLOSE_HUB_DEVICE).is_empty());
+    }
+
+    fn android(mut state: DeviceHubState) -> DeviceHubState {
+        state.devices[0].platform = DevicePlatform::Android;
+        state.devices[0].name = "Medium_Phone_API_36.1".into();
+        for session in &mut state.sessions {
+            session.platform = DevicePlatform::Android;
+        }
+        state
+    }
+
+    fn android_panel<'a>(
+        cx: &'a mut TestAppContext,
+        runtime: &tokio::runtime::Runtime,
+        reply: Reply,
+    ) -> (Entity<DevicePanel>, Calls, &'a mut VisualTestContext) {
+        let (state, calls) = app_state_with(
+            cx,
+            runtime,
+            android(streaming(StreamLinkStatus::Live)),
+            reply,
+        );
+        let (panel, cx) = cx.add_window_view(|_, cx| {
+            let mut panel = DevicePanel::new(state, "chat".into(), cx);
+            panel.target = Some(("local".into(), "SIM".into()));
+            panel.revision = None;
+            panel.sync(cx);
+            panel
+        });
+        wait(cx, |cx| cx.debug_bounds("device-more").is_some());
+        (panel, calls, cx)
+    }
+
+    #[test]
+    fn the_picker_groups_simulators_then_emulators_with_running_devices_first() {
+        let mut state = hub(true);
+        let device = |id: &str, name: &str, platform, booted| HubDevice {
+            host_id: "local".into(),
+            id: id.into(),
+            name: name.into(),
+            platform,
+            booted,
+            ..Default::default()
+        };
+        state.devices.extend([
+            device("Pixel_9", "Pixel_9", DevicePlatform::Android, false),
+            device(
+                "emulator-5554",
+                "Medium_Phone",
+                DevicePlatform::Android,
+                true,
+            ),
+            device("PAD", "iPad", DevicePlatform::Ios, true),
+        ]);
+        let shape = |state: &DeviceHubState| {
+            picker_groups(state)
+                .into_iter()
+                .map(|(_, title, devices)| {
+                    (
+                        title,
+                        devices
+                            .into_iter()
+                            .map(|device| device.id)
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            shape(&state),
+            [
+                ("iOS Simulators", vec!["PAD".to_string(), "SIM".to_string()]),
+                (
+                    "Android Emulators",
+                    vec!["emulator-5554".to_string(), "Pixel_9".to_string()]
+                ),
+            ]
+        );
+        state.devices.truncate(1);
+        assert_eq!(shape(&state), [("iOS Simulators", vec!["SIM".to_string()])]);
+    }
+
+    #[gpui::test]
+    fn an_avd_row_under_android_emulators_starts_it_with_the_android_platform(
+        cx: &mut TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let mut state = hub(true);
+        state.devices.push(HubDevice {
+            host_id: "local".into(),
+            id: "Medium_Phone_API_36.1".into(),
+            name: "Medium_Phone_API_36.1".into(),
+            platform: DevicePlatform::Android,
+            version: "Android".into(),
+            ..Default::default()
+        });
+        let (state, calls) = app_state(cx, &runtime, state);
+        let (_panel, cx) = cx.add_window_view(|_, cx| DevicePanel::new(state, "chat".into(), cx));
+        wait(cx, |cx| cx.debug_bounds("device-group-android").is_some());
+        let ios = cx.debug_bounds("device-group-ios").unwrap();
+        let android = cx.debug_bounds("device-group-android").unwrap();
+        assert!(ios.top() < android.top());
+        click(cx, "device-row-Medium_Phone_API_36.1");
+        wait(cx, |_| {
+            !calls_of(&calls, methods::OPEN_HUB_DEVICE).is_empty()
+        });
+        assert_eq!(
+            calls_of(&calls, methods::OPEN_HUB_DEVICE),
+            vec![serde_json::json!({
+                "chatId": "chat", "hostId": "local",
+                "deviceId": "Medium_Phone_API_36.1", "platform": "android"
+            })]
+        );
+    }
+
+    #[gpui::test]
+    fn the_android_rail_has_back_recents_and_a_rotate_menu_of_device_actions(
+        cx: &mut TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (_panel, calls, cx) = android_panel(cx, &runtime, Arc::new(|_| serde_json::json!({})));
+        click(cx, "device-back");
+        click(cx, "device-recents");
+        wait(cx, |_| {
+            calls_of(&calls, methods::SEND_HUB_DEVICE_INPUT).len() == 2
+        });
+        let inputs: Vec<_> = calls_of(&calls, methods::SEND_HUB_DEVICE_INPUT)
+            .into_iter()
+            .map(|params| params["input"].clone())
+            .collect();
+        assert_eq!(
+            inputs,
+            vec![
+                serde_json::json!({"button": {"button": "back"}}),
+                serde_json::json!({"button": {"button": "app_switcher"}}),
+            ]
+        );
+        wait(cx, |_| {
+            !calls_of(&calls, methods::GET_HUB_DEVICE_DETAIL).is_empty()
+        });
+        click(cx, "device-rotate");
+        click(cx, "device-rotate-landscape");
+        wait(cx, |_| {
+            !calls_of(&calls, methods::RUN_HUB_DEVICE_ACTION).is_empty()
+        });
+        assert_eq!(
+            calls_of(&calls, methods::RUN_HUB_DEVICE_ACTION)[0]["action"],
+            serde_json::json!({"setOrientation": {"value": "landscape_left"}})
+        );
+        assert!(
+            calls_of(&calls, methods::SEND_HUB_DEVICE_INPUT).len() == 2,
+            "rotation is an adb action, never an input"
+        );
+    }
+
+    #[gpui::test]
+    fn the_android_tools_drawer_shows_the_emulator_section_and_drops_ios_only_tools(
+        cx: &mut TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let detail = serde_json::json!({
+            "hostId": "local", "deviceId": "SIM", "readAt": "now",
+            "settings": {"appearance": "light", "textSize": "default", "networkEnabled": true},
+            "foregroundApp": {"id": "com.android.settings"}
+        });
+        let (_panel, calls, cx) = android_panel(
+            cx,
+            &runtime,
+            Arc::new(move |method| match method {
+                methods::GET_HUB_DEVICE_DETAIL | methods::RUN_HUB_DEVICE_ACTION => detail.clone(),
+                _ => serde_json::json!({}),
+            }),
+        );
+        cx.simulate_resize(gpui::size(gpui::px(900.0), gpui::px(1400.0)));
+        click(cx, "device-tools-toggle");
+        wait(cx, |cx| cx.debug_bounds("device-tool-network").is_some());
+        for absent in [
+            "device-tool-push",
+            "device-tool-event-log",
+            "device-tool-ax-overlay",
+            "device-tool-location-clear",
+            "device-tool-permission-Reset",
+            "device-tool-glass-Clear",
+        ] {
+            assert!(cx.debug_bounds(absent).is_none(), "{absent}");
+        }
+        assert!(cx.debug_bounds("device-tool-orientation-3").is_some());
+        click(cx, "device-tool-network");
+        wait(cx, |_| {
+            !calls_of(&calls, methods::RUN_HUB_DEVICE_ACTION).is_empty()
+        });
+        assert_eq!(
+            calls_of(&calls, methods::RUN_HUB_DEVICE_ACTION)[0]["action"],
+            serde_json::json!({"setToggle": {"setting": "networkEnabled", "enabled": false}})
+        );
+        assert!(
+            calls_of(&calls, methods::WATCH_HUB_DEVICE_APP_STATE).is_empty(),
+            "the foreground app comes from the detail read on Android"
+        );
     }
 
     #[gpui::test]

@@ -1,7 +1,10 @@
 use gpui::{Bounds, Keystroke, Pixels, Point, point, px, size};
-use zeron_proto::device_hub::{DeviceInput, DeviceOrientation, DeviceScreenConfig, KeyPhase};
+use zeron_proto::device_hub::{
+    DeviceButton, DeviceInput, DeviceOrientation, DeviceScreenConfig, KeyPhase,
+};
 
 pub const IOS_PLACEHOLDER_ASPECT: f32 = 9.0 / 19.5;
+pub const ANDROID_PLACEHOLDER_ASPECT: f32 = 9.0 / 20.0;
 pub const RAIL_WIDTH: f32 = 56.0;
 
 const SHIFT: u16 = 0xE1;
@@ -34,6 +37,46 @@ const PUNCTUATION: [(char, char, u16); 11] = [
     ('/', '?', 0x38),
 ];
 const SHIFTED_DIGITS: [char; 10] = ['!', '@', '#', '$', '%', '^', '&', '*', '(', ')'];
+
+const ANDROID_KEYCODES: [(&str, u16); 12] = [
+    ("up", 19),
+    ("down", 20),
+    ("left", 21),
+    ("right", 22),
+    ("tab", 61),
+    ("enter", 66),
+    ("backspace", 67),
+    ("delete", 112),
+    ("home", 122),
+    ("end", 123),
+    ("pageup", 92),
+    ("pagedown", 93),
+];
+
+pub fn android_input(keystroke: &Keystroke) -> Option<DeviceInput> {
+    if keystroke.key == "escape" {
+        return Some(DeviceInput::Button {
+            button: DeviceButton::Back,
+        });
+    }
+    if let Some((_, keycode)) = ANDROID_KEYCODES
+        .iter()
+        .find(|(name, _)| *name == keystroke.key)
+    {
+        return Some(DeviceInput::Keycode { keycode: *keycode });
+    }
+    if keystroke.modifiers.control || keystroke.modifiers.platform {
+        return None;
+    }
+    let text = keystroke.key_char.as_deref().unwrap_or(&keystroke.key);
+    let mut chars = text.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) if !c.is_control() => Some(DeviceInput::Text {
+            text: c.to_string(),
+        }),
+        _ => None,
+    }
+}
 
 // macOS reports shift + digit or punctuation as the shifted character with shift cleared.
 pub fn hid_usage(key: &str) -> Option<(u16, bool)> {
@@ -345,6 +388,46 @@ mod tests {
                 key(KeyPhase::Down, 0x04),
             ]
         );
+    }
+
+    #[test]
+    fn android_keys_become_keycodes_back_or_typed_text() {
+        let input = |text: &str| android_input(&Keystroke::parse(text).unwrap());
+        let keycode = |keycode| Some(DeviceInput::Keycode { keycode });
+        let typed = |text: &str| Some(DeviceInput::Text { text: text.into() });
+        assert_eq!(
+            input("escape"),
+            Some(DeviceInput::Button {
+                button: DeviceButton::Back
+            })
+        );
+        for (key, code) in ANDROID_KEYCODES {
+            assert_eq!(input(key), keycode(code), "{key}");
+        }
+        assert_eq!(input("a"), typed("a"));
+        assert_eq!(input("7"), typed("7"));
+        assert_eq!(input("/"), typed("/"));
+        assert_eq!(
+            android_input(&Keystroke {
+                key: "a".into(),
+                key_char: Some("A".into()),
+                modifiers: gpui::Modifiers::shift(),
+                ..Default::default()
+            }),
+            typed("A"),
+            "the typed character wins, so no shift juggling"
+        );
+        assert_eq!(
+            android_input(&Keystroke {
+                key: "space".into(),
+                key_char: Some(" ".into()),
+                ..Default::default()
+            }),
+            typed(" ")
+        );
+        assert_eq!(input("ctrl-a"), None);
+        assert_eq!(input("cmd-v"), None);
+        assert_eq!(input("f1"), None);
     }
 
     #[test]

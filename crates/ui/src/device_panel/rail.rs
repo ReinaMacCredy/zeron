@@ -1,5 +1,7 @@
 use gpui::{AnyElement, Context, Entity, MouseButton, SharedString, Stateful, div, prelude::*, px};
-use zeron_proto::device_hub::{DeviceAction, DeviceAppearance, DeviceButton};
+use zeron_proto::device_hub::{
+    DeviceAction, DeviceAppearance, DeviceButton, DeviceOrientation, DevicePlatform,
+};
 
 use super::geometry::RAIL_WIDTH;
 use super::stream_view::DeviceStreamView;
@@ -54,7 +56,47 @@ impl DevicePanel {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let input_live = view.read(cx).input_live();
+        let android = view.read(cx).platform() == DevicePlatform::Android;
         let (home, rotate) = (view.clone(), view.clone());
+        let press = |id: &'static str, glyph, label, button: DeviceButton| {
+            let view = view.clone();
+            rail_button(id, glyph, label, input_live, theme).when(input_live, |el| {
+                el.on_click(move |_, _, cx| view.update(cx, |view, _| view.press_button(button)))
+            })
+        };
+        let turn = if android {
+            vec![
+                press(
+                    "device-back",
+                    icons::LUCIDE_CHEVRON_LEFT,
+                    "Back",
+                    DeviceButton::Back,
+                )
+                .into_any_element(),
+                press(
+                    "device-recents",
+                    icons::LUCIDE_SQUARE,
+                    "Recents",
+                    DeviceButton::AppSwitcher,
+                )
+                .into_any_element(),
+                self.render_rotate_menu(theme, cx),
+            ]
+        } else {
+            vec![
+                rail_button(
+                    "device-rotate",
+                    icons::LUCIDE_ROTATE_CCW,
+                    "Rotate device",
+                    input_live,
+                    theme,
+                )
+                .when(input_live, |button| {
+                    button.on_click(move |_, _, cx| rotate.update(cx, |view, _| view.rotate()))
+                })
+                .into_any_element(),
+            ]
+        };
         div()
             .absolute()
             .top_0()
@@ -90,20 +132,7 @@ impl DevicePanel {
                             },
                         ),
                     )
-                    .child(
-                        rail_button(
-                            "device-rotate",
-                            icons::LUCIDE_ROTATE_CCW,
-                            "Rotate device",
-                            input_live,
-                            theme,
-                        )
-                        .when(input_live, |button| {
-                            button.on_click(move |_, _, cx| {
-                                rotate.update(cx, |view, _| view.rotate())
-                            })
-                        }),
-                    )
+                    .children(turn)
                     .child(divider(theme))
                     .children(self.render_settings_buttons(theme, cx))
                     .child(self.render_more(theme, cx)),
@@ -276,6 +305,91 @@ impl DevicePanel {
                 self.text_size.closing_since(),
             ))
             .into_any_element()
+    }
+
+    fn render_rotate_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let controls = self.controls().cloned();
+        let enabled = controls
+            .as_ref()
+            .is_some_and(|controls| !controls.read(cx).disabled());
+        let trigger = rail_button(
+            "device-rotate",
+            icons::LUCIDE_ROTATE_CCW,
+            "Rotate device",
+            enabled,
+            theme,
+        )
+        .relative();
+        let Some(controls) = controls.filter(|_| enabled) else {
+            return trigger.into_any_element();
+        };
+        let trigger = trigger
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|panel, _, _, _| panel.rotate.note_trigger_press()),
+            )
+            .on_click(cx.listener(|panel, _, _, cx| {
+                if panel.rotate.take_press_was_open() {
+                    panel.close_rotate(cx);
+                } else {
+                    panel.rotate.open(());
+                    cx.notify();
+                }
+            }));
+        if self.rotate.get().is_none() {
+            return trigger.into_any_element();
+        }
+        let popup = theme.for_popup();
+        let rows = [
+            (
+                "device-rotate-portrait",
+                "Portrait",
+                DeviceOrientation::Portrait,
+            ),
+            (
+                "device-rotate-landscape",
+                "Landscape",
+                DeviceOrientation::LandscapeLeft,
+            ),
+        ]
+        .map(|(id, label, value)| {
+            let controls = controls.clone();
+            popover::menu_row(&popup, false, id)
+                .id(id)
+                .debug_selector(move || id.into())
+                .role(gpui::Role::MenuItem)
+                .aria_label(label)
+                .child(label)
+                .on_click(cx.listener(move |panel, _, _, cx| {
+                    panel.close_rotate(cx);
+                    controls.update(cx, |controls, cx| {
+                        controls.act(DeviceAction::SetOrientation { value }, cx)
+                    });
+                }))
+        });
+        let menu = popover::popover_card(&popup)
+            .bg(popup.surface_dialog)
+            .min_w(px(160.0))
+            .flex()
+            .flex_col()
+            .gap(px(popover::MENU_GAP))
+            .on_mouse_down_out(cx.listener(|panel, _, _, cx| panel.close_rotate(cx)))
+            .children(rows)
+            .into_any_element();
+        trigger
+            .child(popover::anchored_menu_below_end(
+                "device-rotate-menu",
+                menu,
+                self.rotate.closing_since(),
+            ))
+            .into_any_element()
+    }
+
+    fn close_rotate(&mut self, cx: &mut Context<Self>) {
+        if self.rotate.begin_close() {
+            popover::reap_popup(cx, |panel: &mut Self| &mut panel.rotate);
+        }
+        cx.notify();
     }
 
     fn close_text_size(&mut self, cx: &mut Context<Self>) {

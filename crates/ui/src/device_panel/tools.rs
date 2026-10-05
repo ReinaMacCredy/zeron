@@ -7,9 +7,9 @@ use gpui::{
 };
 use zeron_proto::device_hub::{
     ColorFilter, DeviceAction, DeviceAppState, DeviceAppearance, DeviceAxNode, DeviceAxTree,
-    DeviceDetail, DeviceEventLogBatch, DeviceEventLogEntry, DevicePermission,
-    DeviceSettingsSnapshot, DeviceTextSize, DeviceToggle, ForegroundApp, LiquidGlass,
-    PermissionDecision,
+    DeviceDetail, DeviceEventLogBatch, DeviceEventLogEntry, DeviceOrientation, DevicePermission,
+    DevicePlatform, DeviceSettingsSnapshot, DeviceTextSize, DeviceToggle, ForegroundApp,
+    LiquidGlass, PermissionDecision,
 };
 use zeron_rpc::methods;
 
@@ -54,6 +54,24 @@ const PERMISSIONS: [(DevicePermission, &str); 11] = [
     (DevicePermission::Motion, "Motion"),
     (DevicePermission::MediaLibrary, "Media library"),
     (DevicePermission::FaceId, "Face ID"),
+];
+
+const ANDROID_PERMISSIONS: [(DevicePermission, &str); 8] = [
+    (DevicePermission::Camera, "Camera"),
+    (DevicePermission::Microphone, "Microphone"),
+    (DevicePermission::Photos, "Photos"),
+    (DevicePermission::Contacts, "Contacts"),
+    (DevicePermission::Calendar, "Calendar"),
+    (DevicePermission::Location, "Location"),
+    (DevicePermission::Notifications, "Notifications"),
+    (DevicePermission::Motion, "Physical activity"),
+];
+
+const ORIENTATIONS: [(DeviceOrientation, &str); 4] = [
+    (DeviceOrientation::Portrait, "Portrait"),
+    (DeviceOrientation::LandscapeLeft, "Landscape left"),
+    (DeviceOrientation::PortraitUpsideDown, "Upside down"),
+    (DeviceOrientation::LandscapeRight, "Landscape right"),
 ];
 
 pub const LOCATION_PRESETS: [(&str, f64, f64); 5] = [
@@ -145,6 +163,7 @@ pub struct DeviceControls {
     engine: EngineHandle,
     host_id: String,
     device_id: String,
+    platform: DevicePlatform,
     view: WeakEntity<DeviceStreamView>,
     detail: Option<DeviceDetail>,
     error: Option<SharedString>,
@@ -169,14 +188,21 @@ impl DeviceControls {
         engine: EngineHandle,
         host_id: String,
         device_id: String,
+        platform: DevicePlatform,
         view: WeakEntity<DeviceStreamView>,
         cx: &mut Context<Self>,
     ) -> Self {
         let inputs: Vec<(Field, Entity<ComposerInput>)> = FIELDS
             .iter()
             .map(|(field, placeholder)| {
+                let placeholder = match field {
+                    Field::Bundle if platform == DevicePlatform::Android => {
+                        "Package name to launch"
+                    }
+                    _ => *placeholder,
+                };
                 let input = cx.new(|cx| {
-                    ComposerInput::new(*placeholder, cx)
+                    ComposerInput::new(placeholder, cx)
                         .with_text_metrics(12.0, 16.0)
                         .with_single_line()
                         .with_accessibility_role(gpui::Role::TextInput)
@@ -199,6 +225,7 @@ impl DeviceControls {
             engine,
             host_id,
             device_id,
+            platform,
             view,
             detail: None,
             error: None,
@@ -331,7 +358,9 @@ impl DeviceControls {
             return;
         }
         self.drawer = open;
-        if open {
+        if open && self.platform == DevicePlatform::Android {
+            self.read(cx);
+        } else if open {
             self.read(cx);
             self.app_feed = self.feed(methods::WATCH_HUB_DEVICE_APP_STATE, cx, |controls, item| {
                 if let Ok(state) = serde_json::from_value::<DeviceAppState>(item) {
@@ -847,6 +876,118 @@ impl DeviceControls {
             .children(toggles)
     }
 
+    fn render_emulator(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
+        let enabled = !self.disabled();
+        let settings = self.settings().cloned().unwrap_or_default();
+        let choice = |title: &'static str, chips: gpui::Div| {
+            div()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .child(caption(theme, title))
+                .child(chips)
+        };
+        let appearance = [
+            (DeviceAppearance::Light, "Light"),
+            (DeviceAppearance::Dark, "Dark"),
+        ]
+        .into_iter()
+        .fold(chips(), |el, (value, label)| {
+            el.child(
+                chip(
+                    format!("device-tool-appearance-{label}"),
+                    label,
+                    settings.appearance == Some(value),
+                    enabled,
+                    theme,
+                )
+                .when(enabled, |el| {
+                    el.on_click(cx.listener(move |this, _, _, cx| {
+                        this.act(DeviceAction::SetAppearance { value }, cx)
+                    }))
+                }),
+            )
+        });
+        let text_size =
+            TEXT_SIZES
+                .into_iter()
+                .enumerate()
+                .fold(chips(), |el, (i, (value, label))| {
+                    el.child(
+                        chip(
+                            format!("device-tool-text-size-{i}"),
+                            label,
+                            settings.text_size == Some(value),
+                            enabled,
+                            theme,
+                        )
+                        .when(enabled, |el| {
+                            el.on_click(cx.listener(move |this, _, _, cx| {
+                                this.act(DeviceAction::SetTextSize { value }, cx)
+                            }))
+                        }),
+                    )
+                });
+        let orientation =
+            ORIENTATIONS
+                .into_iter()
+                .enumerate()
+                .fold(chips(), |el, (i, (value, label))| {
+                    el.child(
+                        chip(
+                            format!("device-tool-orientation-{i}"),
+                            label,
+                            false,
+                            enabled,
+                            theme,
+                        )
+                        .when(enabled, |el| {
+                            el.on_click(cx.listener(move |this, _, _, cx| {
+                                this.act(DeviceAction::SetOrientation { value }, cx)
+                            }))
+                        }),
+                    )
+                });
+        let toggles = [
+            (
+                DeviceToggle::ReduceMotion,
+                "Reduce Motion",
+                "device-tool-reduce-motion",
+                settings.reduce_motion,
+            ),
+            (
+                DeviceToggle::NetworkEnabled,
+                "Network",
+                "device-tool-network",
+                settings.network_enabled,
+            ),
+        ]
+        .map(|(setting, label, id, value)| {
+            let live = enabled && value.is_some();
+            labelled(
+                theme,
+                label,
+                switch(id, label, value, enabled, theme).when(live, |el| {
+                    el.on_click(cx.listener(move |this, _, _, cx| {
+                        this.act(
+                            DeviceAction::SetToggle {
+                                setting,
+                                enabled: value != Some(true),
+                            },
+                            cx,
+                        )
+                    }))
+                }),
+            )
+        });
+        section(theme, "Emulator")
+            .child(choice("Appearance", appearance))
+            .child(choice("Text size", text_size))
+            .child(choice("Rotate to...", orientation))
+            .children(toggles)
+    }
+
     fn render_location(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
         let enabled = !self.disabled();
         let presets =
@@ -884,49 +1025,58 @@ impl DeviceControls {
                                 el.on_click(cx.listener(|this, _, _, cx| this.set_location(cx)))
                             }),
                     )
-                    .child(
-                        button("device-tool-location-clear", "Clear", enabled, theme).when(
-                            enabled,
-                            |el| {
-                                el.on_click(cx.listener(|this, _, _, cx| {
-                                    for field in [Field::Latitude, Field::Longitude] {
-                                        this.input(field)
-                                            .update(cx, |input, cx| input.set_text("", cx));
-                                    }
-                                    this.act(DeviceAction::ClearLocation, cx)
-                                }))
-                            },
-                        ),
-                    ),
+                    .when(self.platform == DevicePlatform::Ios, |el| {
+                        el.child(
+                            button("device-tool-location-clear", "Clear", enabled, theme).when(
+                                enabled,
+                                |el| {
+                                    el.on_click(cx.listener(|this, _, _, cx| {
+                                        for field in [Field::Latitude, Field::Longitude] {
+                                            this.input(field)
+                                                .update(cx, |input, cx| input.set_text("", cx));
+                                        }
+                                        this.act(DeviceAction::ClearLocation, cx)
+                                    }))
+                                },
+                            ),
+                        )
+                    }),
             )
     }
 
     fn render_permissions(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
         let enabled = !self.disabled() && self.permission_app(cx).is_some();
-        let kinds = PERMISSIONS
-            .into_iter()
-            .enumerate()
-            .fold(chips(), |el, (i, (value, label))| {
-                el.child(
-                    chip(
-                        format!("device-tool-permission-{i}"),
-                        label,
-                        self.permission == value,
-                        true,
-                        theme,
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.permission = value;
-                        cx.notify();
-                    })),
+        let android = self.platform == DevicePlatform::Android;
+        let kinds = if android {
+            &ANDROID_PERMISSIONS[..]
+        } else {
+            &PERMISSIONS[..]
+        }
+        .iter()
+        .copied()
+        .enumerate()
+        .fold(chips(), |el, (i, (value, label))| {
+            el.child(
+                chip(
+                    format!("device-tool-permission-{i}"),
+                    label,
+                    self.permission == value,
+                    true,
+                    theme,
                 )
-            });
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.permission = value;
+                    cx.notify();
+                })),
+            )
+        });
         let decisions = [
             (PermissionDecision::Grant, "Grant"),
             (PermissionDecision::Revoke, "Revoke"),
             (PermissionDecision::Reset, "Reset"),
         ]
         .into_iter()
+        .filter(|(decision, _)| !(android && *decision == PermissionDecision::Reset))
         .fold(row(), |el, (decision, label)| {
             el.child(
                 button(
@@ -1101,9 +1251,10 @@ impl Render for DeviceControls {
                         .py(px(10.0)),
                 )
             })
-            .child(self.render_app(&theme, cx))
-            .child(self.render_simulator(&theme, cx))
-            .child(
+            .child(self.render_app(&theme, cx));
+        let ios = self.platform == DevicePlatform::Ios;
+        let body = if ios {
+            body.child(self.render_simulator(&theme, cx)).child(
                 section(&theme, "Accessibility").child(labelled(
                     &theme,
                     "Overlay element frames",
@@ -1119,10 +1270,15 @@ impl Render for DeviceControls {
                     ),
                 )),
             )
-            .child(self.render_location(&theme, cx))
-            .child(self.render_permissions(&theme, cx))
-            .child(self.render_push(&theme, cx))
-            .child(self.render_events(&theme, cx));
+        } else {
+            body.child(self.render_emulator(&theme, cx))
+        }
+        .child(self.render_location(&theme, cx))
+        .child(self.render_permissions(&theme, cx))
+        .when(ios, |el| {
+            el.child(self.render_push(&theme, cx))
+                .child(self.render_events(&theme, cx))
+        });
         div()
             .id("device-tools")
             .debug_selector(|| "device-tools".into())

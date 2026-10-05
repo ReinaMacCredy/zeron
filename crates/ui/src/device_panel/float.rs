@@ -288,9 +288,9 @@ impl DeviceFloat {
             && self.visible
             && let Some(engine) = self.state.read(cx).engine().cloned()
         {
-            let id = device_id.clone();
+            let (id, platform) = (device_id.clone(), self.platform);
             self.view = Some(cx.new(|cx| {
-                DeviceStreamView::new(engine, id, cx)
+                DeviceStreamView::new(engine, id, platform, cx)
                     .without_rail()
                     .with_corner_radius(CORNER_RADIUS)
             }));
