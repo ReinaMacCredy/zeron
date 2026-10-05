@@ -259,6 +259,59 @@ pub fn tool_list() -> Value {
             }
         },
         {
+            "name": "device_list",
+            "description": "List iOS Simulators and Android Emulators on this environment's device hosts, which platforms each host can run, and which devices are already open in this thread's Device panel. Call this before device_open when you do not know a device id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "hostId": { "type": "string", "description": "Limit to one device host. Defaults to all hosts." }
+                },
+                "additionalProperties": false
+            },
+            "annotations": { "title": "List devices", "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false }
+        },
+        {
+            "name": "device_open",
+            "description": "Open a simulator or emulator for this thread: boots it if needed, starts its live stream, and shows it in the user's Device panel so they can watch. Returns the agent-device CLI invocation pinned to the device; drive the device with that CLI afterwards.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "deviceId": { "type": "string", "description": "Simulator udid or emulator serial from device_list. Omit to use the booted device for the platform, or the most recently used one." },
+                    "platform": { "type": "string", "enum": ["ios", "android"], "description": "Required when deviceId is omitted and both platforms are available." },
+                    "hostId": { "type": "string", "description": "Device host from device_list. Defaults to local." }
+                },
+                "additionalProperties": false
+            },
+            "annotations": { "title": "Open device", "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true }
+        },
+        {
+            "name": "device_screenshot",
+            "description": "Capture the current screen of an open device as a PNG image. Use it to see what the user sees; for taps and text use the agent-device CLI.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "deviceId": { "type": "string", "description": "Device from device_list. Omit to use the device most recently opened in this thread." },
+                    "hostId": { "type": "string" }
+                },
+                "additionalProperties": false
+            },
+            "annotations": { "title": "Screenshot device", "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true }
+        },
+        {
+            "name": "device_close",
+            "description": "Remove a device from this thread's Device panel. Pass shutdown=true to also power the simulator or emulator off.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "deviceId": { "type": "string", "description": "Device to close. Omit to close every device in this thread." },
+                    "hostId": { "type": "string" },
+                    "shutdown": { "type": "boolean", "description": "Also power the simulator or emulator off. Defaults to false." }
+                },
+                "additionalProperties": false
+            },
+            "annotations": { "title": "Close device", "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": true }
+        },
+        {
             "name": "list_projects",
             "description": "List the projects on this device: id, name, folder path, and whether it is a git repository. Pass one as create_thread's `project`.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
@@ -434,6 +487,7 @@ impl ThreadTools {
             "respond_to_input" => self.respond_to_input(args).await,
             "ask_user" => self.ask_user(args).await,
             "terminal" => self.terminal(args).await,
+            "device_list" | "device_open" | "device_close" => self.device_tool(name, args).await,
             "list_projects" => self.list_projects().await,
             "list_harnesses" => self.list_harnesses().await,
             "list_models" => self.list_models(args).await,
@@ -1222,6 +1276,48 @@ impl ThreadTools {
         }
     }
 
+    async fn device_tool(&self, name: &str, args: &Value) -> Result<Value, String> {
+        let method = match name {
+            "device_list" => methods::DEVICE_TOOL_LIST,
+            "device_open" => methods::DEVICE_TOOL_OPEN,
+            "device_close" => methods::DEVICE_TOOL_CLOSE,
+            _ => methods::DEVICE_TOOL_SCREENSHOT,
+        };
+        let mut params = json!({ "chatId": self.chat_id });
+        for key in ["hostId", "deviceId", "platform", "shutdown"] {
+            if let Some(value) = args.get(key).filter(|value| !value.is_null()) {
+                params[key] = value.clone();
+            }
+        }
+        self.client
+            .call(method, params)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    // Only the image block carries the PNG: harnesses record the text block in the chat doc.
+    pub async fn device_screenshot(&self, args: &Value) -> Value {
+        match self.device_tool("device_screenshot", args).await {
+            Ok(mut result) => {
+                let data = result["screenshot"]
+                    .as_object_mut()
+                    .and_then(|screenshot| screenshot.remove("data"))
+                    .unwrap_or_default();
+                json!({
+                    "content": [
+                        { "type": "text", "text": result.to_string() },
+                        { "type": "image", "data": data, "mimeType": "image/png" },
+                    ],
+                    "structuredContent": result,
+                    "isError": false,
+                })
+            }
+            Err(message) => {
+                json!({ "content": [{ "type": "text", "text": message }], "isError": true })
+            }
+        }
+    }
+
     async fn terminal_id(&self, args: &Value) -> Result<String, String> {
         if let Some(id) = args["terminalId"].as_str().filter(|id| !id.is_empty()) {
             return Ok(id.to_string());
@@ -1747,6 +1843,9 @@ async fn respond(request: &Value, tools: &ThreadTools) -> Option<Value> {
                 let result = tools.computer_action(secret, name, args, &id).await;
                 return Some(ok(id, result));
             }
+            if name == "device_screenshot" {
+                return Some(ok(id, tools.device_screenshot(&args).await));
+            }
             let (text, is_error) = match tools.call(name, &args).await {
                 Ok(value) => (
                     serde_json::to_string_pretty(&value).unwrap_or_default(),
@@ -1781,7 +1880,7 @@ mod tests {
 
     use super::*;
 
-    const THREAD_TOOLS: [&str; 18] = [
+    const THREAD_TOOLS: [&str; 22] = [
         "list_threads",
         "read_thread",
         "create_thread",
@@ -1793,6 +1892,10 @@ mod tests {
         "respond_to_input",
         "ask_user",
         "terminal",
+        "device_list",
+        "device_open",
+        "device_screenshot",
+        "device_close",
         "list_projects",
         "list_harnesses",
         "list_models",
@@ -2041,6 +2144,30 @@ mod tests {
                         Vec::new()
                     };
                     Ok(RpcReply::Value(json!({ "answers": answers })))
+                }
+                methods::DEVICE_TOOL_LIST
+                | methods::DEVICE_TOOL_OPEN
+                | methods::DEVICE_TOOL_SCREENSHOT
+                | methods::DEVICE_TOOL_CLOSE => {
+                    self.calls
+                        .lock()
+                        .unwrap()
+                        .push((method.to_string(), params.clone()));
+                    let device = json!({ "hostId": "local", "id": "SIM-1", "name": "iPhone 17" });
+                    match method {
+                        methods::DEVICE_TOOL_OPEN if params.get("platform").is_none() => {
+                            Err(RpcError::Failed(
+                                "Both iOS and Android devices are available; pass platform or deviceId."
+                                    .into(),
+                            ))
+                        }
+                        methods::DEVICE_TOOL_SCREENSHOT => Ok(RpcReply::Value(json!({
+                            "device": device,
+                            "screenshot": { "mimeType": "image/png", "data": "iVBORw0KGgo", "width": 1206, "height": 2622 },
+                        }))),
+                        methods::DEVICE_TOOL_CLOSE => Ok(RpcReply::Value(json!({}))),
+                        _ => Ok(RpcReply::Value(json!({ "device": device }))),
+                    }
                 }
                 methods::GET_COMPUTER_CATALOG
                 | methods::COMPUTER_ACTION
@@ -2921,6 +3048,64 @@ mod tests {
                 .call("terminal", &json!({ "action": "close" }))
                 .await
                 .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn device_tools_are_chat_scoped_and_the_screenshot_is_an_image_block() {
+        let rig = rig(fixture());
+        let mut pipe = Pipe::open(rig.tools);
+        let tools = pipe.list().await;
+        let open = tools
+            .iter()
+            .find(|tool| tool["name"] == "device_open")
+            .unwrap();
+        assert_eq!(open["annotations"]["openWorldHint"], true);
+        assert_eq!(
+            open["inputSchema"]["properties"]["platform"]["enum"],
+            json!(["ios", "android"])
+        );
+
+        let shot = pipe
+            .call(json!(1), "device_screenshot", json!({ "chatId": "other" }))
+            .await;
+        let result = &shot["result"];
+        assert_eq!(result["isError"], false);
+        assert_eq!(result["content"][1]["type"], "image");
+        assert_eq!(result["content"][1]["mimeType"], "image/png");
+        assert_eq!(result["content"][1]["data"], "iVBORw0KGgo");
+        let text: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            text,
+            json!({
+                "device": { "hostId": "local", "id": "SIM-1", "name": "iPhone 17" },
+                "screenshot": { "mimeType": "image/png", "width": 1206, "height": 2622 },
+            })
+        );
+        assert_eq!(result["structuredContent"], text);
+
+        let both = pipe.call(json!(2), "device_open", json!({})).await;
+        assert_eq!(both["result"]["isError"], true);
+        assert_eq!(
+            both["result"]["content"][0]["text"],
+            "Both iOS and Android devices are available; pass platform or deviceId."
+        );
+        let closed = pipe
+            .call(
+                json!(3),
+                "device_close",
+                json!({ "deviceId": "SIM-1", "shutdown": true, "hostId": null }),
+            )
+            .await;
+        assert_eq!(closed["result"]["isError"], false);
+        assert_eq!(
+            logged(&rig.calls, methods::DEVICE_TOOL_SCREENSHOT),
+            vec![json!({ "chatId": "a" })]
+        );
+        assert_eq!(
+            logged(&rig.calls, methods::DEVICE_TOOL_CLOSE),
+            vec![json!({ "chatId": "a", "deviceId": "SIM-1", "shutdown": true })]
         );
     }
 
