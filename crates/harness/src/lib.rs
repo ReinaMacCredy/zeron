@@ -342,11 +342,10 @@ pub fn compose_child_path(cmd: &mut process::Command, exe: &std::path::Path) {
     );
 }
 
+// A lock, not a OnceLock: a second engine in the same process must be able to replace it.
 static CHILD_PATH_PREFIX: std::sync::RwLock<Option<std::path::PathBuf>> =
     std::sync::RwLock::new(None);
 
-/// A directory every harness child sees first on its PATH (the engine's
-/// device tool shims). A later engine in the same process replaces it.
 pub fn set_child_path_prefix(dir: Option<std::path::PathBuf>) {
     *CHILD_PATH_PREFIX
         .write()
