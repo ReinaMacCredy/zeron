@@ -2844,8 +2844,8 @@ impl GitTab {
             .unwrap_or_else(|| "no remote".into());
         let ahead = tree.map(|tree| tree.ahead).unwrap_or(0);
         let destination = match tree.and_then(|tree| tree.upstream.clone()) {
-            Some(upstream) => format!("{upstream} ({} to push)", commit_count(ahead)),
-            None => format!("{remote}/{branch}, a new branch ({})", commit_count(ahead)),
+            Some(upstream) => format!("{upstream} ({})", commit_count(ahead)),
+            None => format!("{remote}/{branch} (new branch, {})", commit_count(ahead)),
         };
         let base = tree
             .and_then(|tree| tree.default_branch.clone())
@@ -2870,7 +2870,7 @@ impl GitTab {
                         .text_color(theme.text_muted)
                         .child(name),
                 )
-                .child(div().flex_1().min_w_0().truncate().child(value))
+                .child(div().flex_1().min_w_0().child(value))
         };
         let draft = sheet.draft;
         div()
