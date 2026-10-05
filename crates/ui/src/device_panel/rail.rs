@@ -1,8 +1,9 @@
-use gpui::{AnyElement, Context, Entity, MouseButton, Stateful, div, prelude::*, px};
-use zeron_proto::device_hub::DeviceButton;
+use gpui::{AnyElement, Context, Entity, MouseButton, SharedString, Stateful, div, prelude::*, px};
+use zeron_proto::device_hub::{DeviceAction, DeviceAppearance, DeviceButton};
 
 use super::geometry::RAIL_WIDTH;
 use super::stream_view::DeviceStreamView;
+use super::tools::TEXT_SIZES;
 use super::{DevicePanel, DevicePanelEvent};
 use crate::icons::{self, icon};
 use crate::popover;
@@ -104,9 +105,184 @@ impl DevicePanel {
                         }),
                     )
                     .child(divider(theme))
+                    .children(self.render_settings_buttons(theme, cx))
                     .child(self.render_more(theme, cx)),
             )
             .into_any_element()
+    }
+
+    fn render_settings_buttons(&self, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let Some(controls) = self.controls().cloned() else {
+            return Vec::new();
+        };
+        let (settings, ready, tools_open) = {
+            let controls = controls.read(cx);
+            (
+                controls.settings().cloned(),
+                !controls.disabled(),
+                controls.drawer_open(),
+            )
+        };
+        let appearance = settings.as_ref().and_then(|settings| settings.appearance);
+        let next = match appearance {
+            Some(DeviceAppearance::Dark) => DeviceAppearance::Light,
+            _ => DeviceAppearance::Dark,
+        };
+        let (glyph, label) = match next {
+            DeviceAppearance::Light => (icons::SUN, "Switch device to light mode"),
+            DeviceAppearance::Dark => (icons::MOON, "Switch device to dark mode"),
+        };
+        let can_flip = ready && appearance.is_some();
+        let flip = controls.clone();
+        let tools = controls.clone();
+        let shooting = self.screenshot_task.is_some();
+        let streaming = self
+            .view
+            .as_ref()
+            .is_some_and(|view| view.read(cx).has_frame());
+        let can_shoot = streaming && !shooting;
+        vec![
+            rail_button("device-appearance", glyph, label, can_flip, theme)
+                .when(can_flip, |button| {
+                    button.on_click(move |_, _, cx| {
+                        flip.update(cx, |controls, cx| {
+                            controls.act(DeviceAction::SetAppearance { value: next }, cx)
+                        })
+                    })
+                })
+                .into_any_element(),
+            self.render_text_size(
+                &controls,
+                ready && settings.as_ref().is_some_and(|s| s.text_size.is_some()),
+                theme,
+                cx,
+            ),
+            rail_button(
+                "device-tools-toggle",
+                icons::LUCIDE_SLIDERS_HORIZONTAL,
+                "Device tools",
+                true,
+                theme,
+            )
+            .aria_toggled(if tools_open {
+                gpui::Toggled::True
+            } else {
+                gpui::Toggled::False
+            })
+            .when(tools_open, |button| button.bg(crate::theme::ink(0.08)))
+            .on_click(move |_, _, cx| {
+                tools.update(cx, |controls, cx| controls.set_drawer(!tools_open, cx))
+            })
+            .into_any_element(),
+            rail_button(
+                "device-screenshot",
+                icons::LUCIDE_CAMERA,
+                if shooting {
+                    "Capturing screenshot"
+                } else {
+                    "Save screenshot"
+                },
+                can_shoot,
+                theme,
+            )
+            .when(can_shoot, |button| {
+                button.on_click(cx.listener(|panel, _, _, cx| panel.save_screenshot(cx)))
+            })
+            .into_any_element(),
+        ]
+    }
+
+    fn render_text_size(
+        &self,
+        controls: &Entity<super::tools::DeviceControls>,
+        enabled: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let trigger = rail_button(
+            "device-text-size",
+            icons::LUCIDE_TYPE,
+            "Device text size",
+            enabled,
+            theme,
+        )
+        .relative();
+        if !enabled {
+            return trigger.into_any_element();
+        }
+        let trigger = trigger
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|panel, _, _, _| panel.text_size.note_trigger_press()),
+            )
+            .on_click(cx.listener(|panel, _, _, cx| {
+                if panel.text_size.take_press_was_open() {
+                    panel.close_text_size(cx);
+                } else {
+                    panel.text_size.open(());
+                    cx.notify();
+                }
+            }));
+        if self.text_size.get().is_none() {
+            return trigger.into_any_element();
+        }
+        let popup = theme.for_popup();
+        let current = controls
+            .read(cx)
+            .settings()
+            .and_then(|settings| settings.text_size);
+        let rows = TEXT_SIZES
+            .into_iter()
+            .enumerate()
+            .map(|(i, (value, label))| {
+                let id = SharedString::from(format!("device-text-size-{i}"));
+                let selector = id.clone();
+                let selected = current == Some(value);
+                let controls = controls.clone();
+                popover::menu_row(&popup, selected, id.clone())
+                    .id(id)
+                    .debug_selector(move || selector.to_string())
+                    .role(gpui::Role::MenuItemRadio)
+                    .aria_label(label)
+                    .aria_toggled(if selected {
+                        gpui::Toggled::True
+                    } else {
+                        gpui::Toggled::False
+                    })
+                    .child(div().flex_1().child(label))
+                    .when(selected, |row| {
+                        row.child(icon(icons::CHECK).size(px(14.0)).text_color(popup.text))
+                    })
+                    .on_click(cx.listener(move |panel, _, _, cx| {
+                        panel.close_text_size(cx);
+                        controls.update(cx, |controls, cx| {
+                            controls.act(DeviceAction::SetTextSize { value }, cx)
+                        });
+                    }))
+            });
+        let menu = popover::popover_card(&popup)
+            .bg(popup.surface_dialog)
+            .min_w(px(160.0))
+            .flex()
+            .flex_col()
+            .gap(px(popover::MENU_GAP))
+            .on_mouse_down_out(cx.listener(|panel, _, _, cx| panel.close_text_size(cx)))
+            .children(rows)
+            .into_any_element();
+        trigger
+            .child(popover::anchored_menu_below_end(
+                "device-text-size-menu",
+                menu,
+                self.text_size.closing_since(),
+            ))
+            .into_any_element()
+    }
+
+    fn close_text_size(&mut self, cx: &mut Context<Self>) {
+        if self.text_size.begin_close() {
+            popover::reap_popup(cx, |panel: &mut Self| &mut panel.text_size);
+        }
+        cx.notify();
     }
 
     fn render_more(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {

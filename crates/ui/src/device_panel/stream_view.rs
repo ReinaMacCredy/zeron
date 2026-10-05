@@ -38,6 +38,14 @@ pub(crate) fn bind_keys(cx: &mut App) {
     )]);
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AxBox {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
 struct DecodedFrame {
     image: Arc<RenderImage>,
     width: u32,
@@ -208,6 +216,7 @@ pub struct DeviceStreamView {
     fps: Option<FpsCounter>,
     debug_tap: Option<(f32, f32)>,
     rail_inset: f32,
+    ax_boxes: Vec<AxBox>,
     pub(super) corner_radius: f32,
     drain: Task<()>,
     timer: Task<()>,
@@ -285,6 +294,7 @@ impl DeviceStreamView {
                 .then(FpsCounter::default),
             debug_tap: debug_tap_from_env(),
             rail_inset: geometry::RAIL_WIDTH,
+            ax_boxes: Vec::new(),
             corner_radius: 0.0,
             drain: Task::ready(()),
             timer: Task::ready(()),
@@ -368,6 +378,18 @@ impl DeviceStreamView {
             self.await_frame(cx);
         }
         cx.notify();
+    }
+
+    pub fn set_ax_boxes(&mut self, boxes: Vec<AxBox>, cx: &mut Context<Self>) {
+        if self.ax_boxes != boxes {
+            self.ax_boxes = boxes;
+            cx.notify();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ax_boxes(&self) -> &[AxBox] {
+        &self.ax_boxes
     }
 
     pub fn input_live(&self) -> bool {
@@ -539,6 +561,8 @@ impl Render for DeviceStreamView {
         let fps = self.fps.as_ref().map(|fps| fps.shown);
         let rail_inset = self.rail_inset;
         let corners = gpui::Corners::all(px(self.corner_radius));
+        let ax_boxes = self.ax_boxes.clone();
+        let ax_color = theme.accent;
         let dragging = self.pressed.is_some().then(|| cx.entity().downgrade());
         let connecting = self.awaiting_frame && self.video_error.is_none();
         let input_down = (!self.awaiting_frame && self.video_error.is_none() && !self.input_live())
@@ -577,6 +601,25 @@ impl Render for DeviceStreamView {
                             None => window.paint_quad(
                                 gpui::fill(frame, crate::theme::ink(0.04)).corner_radii(corners),
                             ),
+                        }
+                        for ax in &ax_boxes {
+                            let at = |x: f32, y: f32| {
+                                gpui::point(
+                                    frame.origin.x + frame.size.width * x,
+                                    frame.origin.y + frame.size.height * y,
+                                )
+                            };
+                            window.paint_quad(gpui::quad(
+                                Bounds::from_corners(
+                                    at(ax.x, ax.y),
+                                    at(ax.x + ax.width, ax.y + ax.height),
+                                ),
+                                px(2.0),
+                                ax_color.opacity(0.1),
+                                px(1.0),
+                                ax_color.opacity(0.8),
+                                gpui::BorderStyle::Solid,
+                            ));
                         }
                         if let Some(view) = dragging {
                             window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
