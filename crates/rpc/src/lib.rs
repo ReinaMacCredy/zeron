@@ -258,6 +258,12 @@ pub mod methods {
     pub const SHUTDOWN_HUB_DEVICE: &str = "ShutdownHubDevice";
     pub const WATCH_HUB_DEVICE_FRAMES: &str = "WatchHubDeviceFrames";
     pub const SEND_HUB_DEVICE_INPUT: &str = "SendHubDeviceInput";
+    pub const GET_HUB_DEVICE_DETAIL: &str = "GetHubDeviceDetail";
+    pub const RUN_HUB_DEVICE_ACTION: &str = "RunHubDeviceAction";
+    pub const HUB_DEVICE_SCREENSHOT: &str = "HubDeviceScreenshot";
+    pub const GET_HUB_DEVICE_AX_TREE: &str = "GetHubDeviceAxTree";
+    pub const WATCH_HUB_DEVICE_APP_STATE: &str = "WatchHubDeviceAppState";
+    pub const WATCH_HUB_DEVICE_EVENTS: &str = "WatchHubDeviceEvents";
     pub const DEVICE_TOOL_LIST: &str = "DeviceToolList";
     pub const DEVICE_TOOL_OPEN: &str = "DeviceToolOpen";
     pub const DEVICE_TOOL_SCREENSHOT: &str = "DeviceToolScreenshot";

@@ -51,6 +51,30 @@ async fn list_hub_devices_is_refused_while_disabled_and_installs_nothing() {
             methods::WATCH_HUB_DEVICE_FRAMES,
             serde_json::json!({"deviceId": "SIM"}),
         ),
+        (
+            methods::GET_HUB_DEVICE_DETAIL,
+            serde_json::json!({"deviceId": "SIM"}),
+        ),
+        (
+            methods::RUN_HUB_DEVICE_ACTION,
+            serde_json::json!({"deviceId": "SIM", "action": {"setAppearance": {"value": "dark"}}}),
+        ),
+        (
+            methods::HUB_DEVICE_SCREENSHOT,
+            serde_json::json!({"deviceId": "SIM"}),
+        ),
+        (
+            methods::GET_HUB_DEVICE_AX_TREE,
+            serde_json::json!({"deviceId": "SIM"}),
+        ),
+        (
+            methods::WATCH_HUB_DEVICE_APP_STATE,
+            serde_json::json!({"deviceId": "SIM"}),
+        ),
+        (
+            methods::WATCH_HUB_DEVICE_EVENTS,
+            serde_json::json!({"deviceId": "SIM"}),
+        ),
     ] {
         match rpc.handle(method, params).await {
             Err(RpcError::Failed(message)) => assert_eq!(message, DEVICE_SUPPORT_OFF, "{method}"),

@@ -5,13 +5,17 @@ pub mod presentation;
 mod rail;
 pub mod setup;
 pub mod stream_view;
+pub mod tools;
+
+use std::cell::Cell;
+use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, Focusable, SharedString, Subscription, Task,
     Window, div, prelude::*, px,
 };
 use zeron_proto::device_hub::{
-    DeviceHostStatus, DeviceHubState, DevicePlatform, DeviceSession, HubDevice,
+    DeviceHostStatus, DeviceHubState, DevicePlatform, DeviceSession, HubDevice, HubDeviceScreenshot,
 };
 use zeron_rpc::methods;
 
@@ -22,6 +26,9 @@ use crate::theme::Theme;
 use loading::{LoadingStage, LoadingView};
 use setup::SetupPending;
 use stream_view::DeviceStreamView;
+use tools::DeviceControls;
+
+const TOAST_FOR: std::time::Duration = std::time::Duration::from_secs(4);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PanelPhase {
@@ -151,12 +158,17 @@ pub struct DevicePanel {
     listed: bool,
     error: Option<SharedString>,
     view: Option<Entity<DeviceStreamView>>,
+    controls: Option<(Entity<DeviceControls>, Subscription)>,
+    panel_width: Rc<Cell<f32>>,
+    screenshot_task: Option<Task<()>>,
+    toast: Option<(u64, SharedString)>,
     revision: Option<u64>,
     configure_task: Option<Task<()>>,
     list_task: Option<Task<()>>,
     open_task: Option<Task<()>>,
     close_task: Option<Task<()>>,
     more: crate::popover::Popup<()>,
+    text_size: crate::popover::Popup<()>,
     _state: Subscription,
 }
 
@@ -180,12 +192,17 @@ impl DevicePanel {
             listed: false,
             error: None,
             view: None,
+            controls: None,
+            panel_width: Rc::default(),
+            screenshot_task: None,
+            toast: None,
             revision: None,
             configure_task: None,
             list_task: None,
             open_task: None,
             close_task: None,
             more: Default::default(),
+            text_size: Default::default(),
             _state: observer,
         };
         panel.sync(cx);
@@ -241,7 +258,7 @@ impl DevicePanel {
         }
         self.target = target;
         self.seen_live = false;
-        self.view = None;
+        self.drop_view();
         self.revision = None;
         self.sync(cx);
     }
@@ -255,9 +272,19 @@ impl DevicePanel {
             self.revision = None;
             self.sync(cx);
         } else {
-            self.view = None;
+            self.drop_view();
             cx.notify();
         }
+    }
+
+    fn drop_view(&mut self) {
+        self.view = None;
+        self.controls = None;
+        self.text_size = Default::default();
+    }
+
+    pub fn controls(&self) -> Option<&Entity<DeviceControls>> {
+        self.controls.as_ref().map(|(controls, _)| controls)
     }
 
     pub fn rename_input(&self) -> Option<Entity<ComposerInput>> {
@@ -340,14 +367,22 @@ impl DevicePanel {
                     && let Some(engine) = self.state.read(cx).engine().cloned()
                 {
                     let id = device_id.clone();
-                    self.view = Some(cx.new(|cx| DeviceStreamView::new(engine, id, cx)));
+                    let view = cx.new(|cx| DeviceStreamView::new(engine.clone(), id.clone(), cx));
+                    let host = self.target.as_ref().map(|(host, _)| host.clone());
+                    let weak = view.downgrade();
+                    let controls = cx.new(|cx| {
+                        DeviceControls::new(engine, host.unwrap_or_default(), id, weak, cx)
+                    });
+                    let observer = cx.observe(&controls, |_, _, cx| cx.notify());
+                    self.controls = Some((controls, observer));
+                    self.view = Some(view);
                 }
                 if let (Some(view), Some((host, _))) = (&self.view, &self.target) {
                     feed_view(view, &hub, host, &device_id, cx);
                 }
             }
             None => {
-                self.view = None;
+                self.drop_view();
                 if self.opening.is_none() && std::mem::take(&mut self.seen_live) {
                     self.target = None;
                     self.custom_title = None;
@@ -438,7 +473,7 @@ impl DevicePanel {
                 Ok(_) => {
                     panel.target = None;
                     panel.custom_title = None;
-                    panel.view = None;
+                    panel.drop_view();
                     panel.revision = None;
                     panel.sync(cx);
                 }
@@ -446,6 +481,146 @@ impl DevicePanel {
             }
         });
         self.powering_off = self.close_task.is_some();
+    }
+
+    fn save_screenshot(&mut self, cx: &mut Context<Self>) {
+        let Some((host_id, device_id)) = self.target.clone() else {
+            return;
+        };
+        if self.screenshot_task.is_some() {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let params = serde_json::json!({ "hostId": host_id, "deviceId": device_id });
+        self.error = None;
+        self.screenshot_task = Some(cx.spawn(async move |this, cx| {
+            let saved = engine
+                .client()
+                .call(methods::HUB_DEVICE_SCREENSHOT, params)
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|reply| {
+                    serde_json::from_value::<HubDeviceScreenshot>(reply).map_err(|e| e.to_string())
+                });
+            this.update(cx, |panel, cx| {
+                panel.screenshot_task = None;
+                match saved {
+                    Ok(shot) => panel.show_toast(format!("Saved screenshot to {}", shot.path), cx),
+                    Err(error) => panel.error = Some(error.into()),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn show_toast(&mut self, text: String, cx: &mut Context<Self>) {
+        let id = self.toast.as_ref().map_or(0, |(id, _)| id + 1);
+        self.toast = Some((id, text.into()));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(TOAST_FOR).await;
+            this.update(cx, |panel, cx| {
+                if panel.toast.as_ref().is_some_and(|(shown, _)| *shown == id) {
+                    panel.toast = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn render_stream(
+        &self,
+        view: Entity<DeviceStreamView>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let docked = self.panel_width.get() >= tools::DOCK_MIN_WIDTH;
+        let drawer = self
+            .controls()
+            .filter(|controls| controls.read(cx).drawer_open())
+            .cloned();
+        let width = self.panel_width.clone();
+        let panel = cx.entity().downgrade();
+        let measure = gpui::canvas(
+            move |bounds, _, cx| {
+                let now = f32::from(bounds.size.width);
+                let was = width.replace(now);
+                if (was >= tools::DOCK_MIN_WIDTH) != (now >= tools::DOCK_MIN_WIDTH) {
+                    panel.update(cx, |_, cx| cx.notify()).ok();
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0();
+        let toast = self.toast.as_ref().map(|(_, text)| {
+            div()
+                .absolute()
+                .left_0()
+                .right(px(geometry::RAIL_WIDTH))
+                .top(px(8.0))
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .id("device-toast")
+                        .debug_selector(|| "device-toast".into())
+                        .role(gpui::Role::Status)
+                        .max_w_full()
+                        .rounded(px(6.0))
+                        .bg(theme.bg.opacity(0.92))
+                        .border_1()
+                        .border_color(theme.border)
+                        .px(px(8.0))
+                        .py(px(4.0))
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.text)
+                        .child(text.clone()),
+                )
+        });
+        let screen = div()
+            .id("device-screen-area")
+            .debug_selector(|| "device-screen-area".into())
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .relative()
+            .child(view.clone())
+            .child(self.render_rail(&view, theme, cx))
+            .children(toast)
+            .when_some(drawer.clone().filter(|_| !docked), |el, drawer| {
+                el.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .right_0()
+                        .w_full()
+                        .max_w(px(tools::DRAWER_WIDTH))
+                        .child(drawer),
+                )
+            });
+        div()
+            .size_full()
+            .relative()
+            .flex()
+            .child(measure)
+            .child(screen)
+            .when_some(drawer.filter(|_| docked), |el, drawer| {
+                el.child(
+                    div()
+                        .flex_none()
+                        .w(px(tools::DRAWER_WIDTH))
+                        .h_full()
+                        .child(drawer),
+                )
+            })
+            .into_any_element()
     }
 
     fn render_message(
@@ -713,12 +888,7 @@ impl Render for DevicePanel {
                 cx,
             ),
             PanelPhase::Stream => match self.view.clone() {
-                Some(view) => div()
-                    .size_full()
-                    .relative()
-                    .child(view.clone())
-                    .child(self.render_rail(&view, &theme, cx))
-                    .into_any_element(),
+                Some(view) => self.render_stream(view, &theme, cx),
                 None => self.render_message(&theme, "Opening device...".into(), true, cx),
             },
             PanelPhase::Picker => self.render_picker(&theme, cx),
@@ -787,8 +957,17 @@ pub(crate) mod tests {
         calls_of(calls, methods::WATCH_HUB_DEVICE_FRAMES).len() - calls_of(calls, CANCEL).len()
     }
 
+    pub(crate) type Reply = Arc<dyn Fn(&str) -> serde_json::Value + Send + Sync>;
+
     pub(crate) fn fake_engine(
         runtime: &tokio::runtime::Runtime,
+    ) -> (crate::state::EngineHandle, Calls) {
+        fake_engine_with(runtime, Arc::new(|_| serde_json::json!({})))
+    }
+
+    pub(crate) fn fake_engine_with(
+        runtime: &tokio::runtime::Runtime,
+        reply: Reply,
     ) -> (crate::state::EngineHandle, Calls) {
         let (out, mut frames) = tokio::sync::mpsc::channel::<String>(64);
         let (replies, inbound) = tokio::sync::mpsc::channel::<String>(64);
@@ -805,7 +984,13 @@ pub(crate) mod tests {
                 seen.lock()
                     .unwrap()
                     .push((method.clone(), frame["params"].clone()));
-                if method == methods::WATCH_HUB_DEVICE_FRAMES || method == CANCEL {
+                if matches!(
+                    method.as_str(),
+                    methods::WATCH_HUB_DEVICE_FRAMES
+                        | methods::WATCH_HUB_DEVICE_APP_STATE
+                        | methods::WATCH_HUB_DEVICE_EVENTS
+                        | CANCEL
+                ) {
                     continue;
                 }
                 let delay = if method == methods::CONFIGURE_DEVICE_HUB
@@ -816,9 +1001,10 @@ pub(crate) mod tests {
                     Duration::ZERO
                 };
                 let replies = replies.clone();
+                let ok = reply(&method);
                 tokio::spawn(async move {
                     tokio::time::sleep(delay).await;
-                    let reply = serde_json::json!({ "id": frame["id"], "ok": {} });
+                    let reply = serde_json::json!({ "id": frame["id"], "ok": ok });
                     let _ = replies.send(reply.to_string()).await;
                 });
             }
@@ -833,12 +1019,21 @@ pub(crate) mod tests {
         runtime: &tokio::runtime::Runtime,
         hub: DeviceHubState,
     ) -> (Entity<AppState>, Calls) {
+        app_state_with(cx, runtime, hub, Arc::new(|_| serde_json::json!({})))
+    }
+
+    pub(crate) fn app_state_with(
+        cx: &mut TestAppContext,
+        runtime: &tokio::runtime::Runtime,
+        hub: DeviceHubState,
+        reply: Reply,
+    ) -> (Entity<AppState>, Calls) {
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
         });
         cx.executor().allow_parking();
-        let (engine, calls) = fake_engine(runtime);
+        let (engine, calls) = fake_engine_with(runtime, reply);
         let state = cx.new(|_| {
             let mut state = AppState::new();
             state.set_test_engine(engine);
@@ -876,7 +1071,7 @@ pub(crate) mod tests {
         calls_of(calls, methods::LIST_HUB_DEVICES).len()
     }
 
-    fn streaming(input: StreamLinkStatus) -> DeviceHubState {
+    pub(crate) fn streaming(input: StreamLinkStatus) -> DeviceHubState {
         let mut state = hub(true);
         state.sessions.push(DeviceSession {
             chat_id: "chat".into(),

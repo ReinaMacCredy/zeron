@@ -38,6 +38,32 @@ pub(crate) fn bind_keys(cx: &mut App) {
     )]);
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AxBox {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub oriented: bool,
+}
+
+impl AxBox {
+    pub fn displayed(self, rotation: DeviceOrientation) -> AxBox {
+        if self.oriented {
+            return self;
+        }
+        let (x0, y0) = geometry::display_point(rotation, self.x, self.y);
+        let (x1, y1) = geometry::display_point(rotation, self.x + self.width, self.y + self.height);
+        AxBox {
+            x: x0.min(x1),
+            y: y0.min(y1),
+            width: (x1 - x0).abs(),
+            height: (y1 - y0).abs(),
+            oriented: true,
+        }
+    }
+}
+
 struct DecodedFrame {
     image: Arc<RenderImage>,
     width: u32,
@@ -208,6 +234,7 @@ pub struct DeviceStreamView {
     fps: Option<FpsCounter>,
     debug_tap: Option<(f32, f32)>,
     rail_inset: f32,
+    ax_boxes: Vec<AxBox>,
     pub(super) corner_radius: f32,
     drain: Task<()>,
     timer: Task<()>,
@@ -285,6 +312,7 @@ impl DeviceStreamView {
                 .then(FpsCounter::default),
             debug_tap: debug_tap_from_env(),
             rail_inset: geometry::RAIL_WIDTH,
+            ax_boxes: Vec::new(),
             corner_radius: 0.0,
             drain: Task::ready(()),
             timer: Task::ready(()),
@@ -368,6 +396,18 @@ impl DeviceStreamView {
             self.await_frame(cx);
         }
         cx.notify();
+    }
+
+    pub fn set_ax_boxes(&mut self, boxes: Vec<AxBox>, cx: &mut Context<Self>) {
+        if self.ax_boxes != boxes {
+            self.ax_boxes = boxes;
+            cx.notify();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ax_boxes(&self) -> &[AxBox] {
+        &self.ax_boxes
     }
 
     pub fn input_live(&self) -> bool {
@@ -539,6 +579,16 @@ impl Render for DeviceStreamView {
         let fps = self.fps.as_ref().map(|fps| fps.shown);
         let rail_inset = self.rail_inset;
         let corners = gpui::Corners::all(px(self.corner_radius));
+        let rotation = self.image.as_ref().map_or_else(
+            || geometry::display_rotation(self.screen.as_ref()),
+            |shown| shown.rotation,
+        );
+        let ax_boxes: Vec<AxBox> = self
+            .ax_boxes
+            .iter()
+            .map(|ax| ax.displayed(rotation))
+            .collect();
+        let ax_color = theme.accent;
         let dragging = self.pressed.is_some().then(|| cx.entity().downgrade());
         let connecting = self.awaiting_frame && self.video_error.is_none();
         let input_down = (!self.awaiting_frame && self.video_error.is_none() && !self.input_live())
@@ -577,6 +627,25 @@ impl Render for DeviceStreamView {
                             None => window.paint_quad(
                                 gpui::fill(frame, crate::theme::ink(0.04)).corner_radii(corners),
                             ),
+                        }
+                        for ax in &ax_boxes {
+                            let at = |x: f32, y: f32| {
+                                gpui::point(
+                                    frame.origin.x + frame.size.width * x,
+                                    frame.origin.y + frame.size.height * y,
+                                )
+                            };
+                            window.paint_quad(gpui::quad(
+                                Bounds::from_corners(
+                                    at(ax.x, ax.y),
+                                    at(ax.x + ax.width, ax.y + ax.height),
+                                ),
+                                px(2.0),
+                                ax_color.opacity(0.1),
+                                px(1.0),
+                                ax_color.opacity(0.8),
+                                gpui::BorderStyle::Solid,
+                            ));
                         }
                         if let Some(view) = dragging {
                             window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
@@ -1311,5 +1380,34 @@ mod tests {
         assert_eq!((width, height), (39, 18));
         let frame = view.read_with(cx, |view, _| view.frame_box().unwrap());
         assert!(frame.size.width > frame.size.height);
+    }
+
+    #[test]
+    fn ax_boxes_turn_with_the_displayed_frame() {
+        let raw = AxBox {
+            x: 0.1,
+            y: 0.2,
+            width: 0.3,
+            height: 0.4,
+            oriented: false,
+        };
+        for (rotation, shown) in [
+            (DeviceOrientation::Portrait, [0.1, 0.2, 0.3, 0.4]),
+            (DeviceOrientation::LandscapeLeft, [0.4, 0.1, 0.4, 0.3]),
+            (DeviceOrientation::LandscapeRight, [0.2, 0.6, 0.4, 0.3]),
+            (DeviceOrientation::PortraitUpsideDown, [0.6, 0.4, 0.3, 0.4]),
+        ] {
+            let got = raw.displayed(rotation);
+            let got = [got.x, got.y, got.width, got.height];
+            assert!(
+                got.iter().zip(shown).all(|(a, b)| (a - b).abs() < 1e-5),
+                "{rotation:?}: {got:?}"
+            );
+            let oriented = AxBox {
+                oriented: true,
+                ..raw
+            };
+            assert_eq!(oriented.displayed(rotation), oriented, "{rotation:?}");
+        }
     }
 }

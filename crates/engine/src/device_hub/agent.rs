@@ -461,7 +461,7 @@ fn fit_screenshot(png: Vec<u8>) -> Result<(Vec<u8>, u32, u32), String> {
     Ok((out.into_inner(), scaled.width(), scaled.height()))
 }
 
-async fn capture_simulator(udid: &str) -> Result<Vec<u8>, String> {
+pub(super) async fn capture_simulator(udid: &str) -> Result<Vec<u8>, String> {
     let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
     let file = dir.path().join("screen.png");
     let run = tokio::process::Command::new("xcrun")
