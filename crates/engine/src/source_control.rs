@@ -41,6 +41,7 @@ use zeron_proto::{
     ChangeRequestReviewEvent, ReplyToChangeRequestThreadRequest,
     SetChangeRequestThreadResolvedRequest, SubmitChangeRequestReviewRequest,
 };
+use zeron_proto::{CreateChangeRequestRequest, CreatedChangeRequest};
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(10);
 const GITHUB_TIMEOUT: Duration = Duration::from_secs(20);
@@ -1333,6 +1334,72 @@ impl ChangeRequestResolver {
         subject_in_scope(&scope, Some(thread))
             .map(|_| ())
             .ok_or(ActionError::Host(ChangeRequestError::UnsupportedRepository))
+    }
+
+    pub async fn create_change_request(
+        &self,
+        root: &Path,
+        request: &CreateChangeRequestRequest,
+    ) -> Result<CreatedChangeRequest, ActionError> {
+        let title = request.title.trim();
+        if title.is_empty() {
+            return Err(ActionError::Refused(
+                "Give the pull request a title.".into(),
+            ));
+        }
+        if title.chars().count() > 256 || request.body.len() > 64 * 1024 {
+            return Err(ActionError::Refused(
+                "The pull request title or description is too long.".into(),
+            ));
+        }
+        let ref_name = |name: &str| {
+            !name.is_empty()
+                && !name.starts_with('-')
+                && !name.chars().any(|c| c.is_whitespace() || c.is_control())
+        };
+        let base = request.base.as_deref().filter(|base| !base.is_empty());
+        if !ref_name(&request.head) || base.is_some_and(|base| !ref_name(base)) {
+            return Err(ActionError::Refused("That is not a branch name.".into()));
+        }
+        let identity = self
+            .space_identity(&[root.to_path_buf()], &request.host, &request.repository)
+            .await?;
+        let repo = format!("{}/{}", identity.remote.host, identity.name_with_owner());
+        let mut args: Vec<String> = vec![
+            "pr".into(),
+            "create".into(),
+            "--repo".into(),
+            repo,
+            format!("--head={}", request.head),
+        ];
+        if let Some(base) = base {
+            args.push(format!("--base={base}"));
+        }
+        args.extend([format!("--title={title}"), "--body-file".into(), "-".into()]);
+        if request.draft {
+            args.push("--draft".into());
+        }
+        let stdout = self
+            .github
+            .run_gh_action(root, args, Some(request.body.clone().into_bytes()))
+            .await?;
+        let url = String::from_utf8_lossy(&stdout)
+            .lines()
+            .map(str::trim)
+            .rfind(|line| line.starts_with("https://"))
+            .map(str::to_owned)
+            .ok_or(ActionError::Host(ChangeRequestError::Decode))?;
+        let number = url
+            .trim_end_matches('/')
+            .rsplit_once("/pull/")
+            .and_then(|(_, number)| number.parse().ok())
+            .ok_or(ActionError::Host(ChangeRequestError::Decode))?;
+        Ok(CreatedChangeRequest {
+            host: identity.remote.host.clone(),
+            repository: identity.name_with_owner(),
+            number,
+            url,
+        })
     }
 
     async fn space_identity(
@@ -7595,5 +7662,231 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
         assert!(unknown.items.is_empty() && unknown.errors.is_empty());
         assert_eq!(unknown.repositories, ["Acme/Other", "acme/zeron"]);
         assert_eq!(searched(&runner), before);
+    }
+
+    fn create_request(title: &str, base: Option<&str>, draft: bool) -> CreateChangeRequestRequest {
+        CreateChangeRequestRequest {
+            target: zeron_proto::WorkspaceTarget {
+                chat_id: None,
+                space_id: Some("space-1".into()),
+                checkout_path: None,
+            },
+            host: "github.com".into(),
+            repository: "acme/zeron".into(),
+            head: "feature/x".into(),
+            base: base.map(str::to_owned),
+            title: title.into(),
+            body: "--body $(touch /tmp/zeron-pwned)\nSecond line.".into(),
+            draft,
+        }
+    }
+
+    fn requests_of(runner: &ScriptedRunner) -> Vec<ProcessRequest> {
+        runner.requests.lock().unwrap().clone()
+    }
+
+    #[tokio::test]
+    async fn creating_a_pull_request_runs_gh_pr_create_with_exact_arguments_and_the_body_on_stdin()
+    {
+        let runner = ScriptedRunner::new(|request| {
+            if let Some(output) = git_repo_script(request) {
+                return output;
+            }
+            command_success("Creating draft pull request\nhttps://github.com/acme/zeron/pull/42\n")
+        });
+        let resolver = list_resolver(runner.clone());
+        let created = resolver
+            .create_change_request(
+                Path::new("/repo"),
+                &create_request("  -t Fix the panel  ", Some("main"), true),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            created,
+            CreatedChangeRequest {
+                host: "github.com".into(),
+                repository: "acme/zeron".into(),
+                number: 42,
+                url: "https://github.com/acme/zeron/pull/42".into(),
+            }
+        );
+        let gh: Vec<ProcessRequest> = requests_of(&runner)
+            .into_iter()
+            .filter(|request| request.program == "gh")
+            .collect();
+        assert_eq!(gh.len(), 1);
+        assert_eq!(
+            gh[0].args,
+            [
+                "pr",
+                "create",
+                "--repo",
+                "github.com/acme/zeron",
+                "--head=feature/x",
+                "--base=main",
+                "--title=-t Fix the panel",
+                "--body-file",
+                "-",
+                "--draft",
+            ]
+        );
+        assert_eq!(
+            gh[0].stdin.as_deref(),
+            Some("--body $(touch /tmp/zeron-pwned)\nSecond line.".as_bytes())
+        );
+        assert_eq!(gh[0].env, [("GH_PROMPT_DISABLED".into(), "1".into())]);
+        assert_eq!(gh[0].cwd, Path::new("/repo"));
+        let json = serde_json::to_value(&created).unwrap();
+        assert_eq!(json["number"], 42);
+        assert_eq!(json["url"], "https://github.com/acme/zeron/pull/42");
+
+        let runner = ScriptedRunner::new(|request| {
+            if let Some(output) = git_repo_script(request) {
+                return output;
+            }
+            command_success("https://github.com/acme/zeron/pull/43\n")
+        });
+        list_resolver(runner.clone())
+            .create_change_request(Path::new("/repo"), &create_request("Ready", None, false))
+            .await
+            .unwrap();
+        let gh: Vec<ProcessRequest> = requests_of(&runner)
+            .into_iter()
+            .filter(|request| request.program == "gh")
+            .collect();
+        assert_eq!(
+            gh[0].args,
+            [
+                "pr",
+                "create",
+                "--repo",
+                "github.com/acme/zeron",
+                "--head=feature/x",
+                "--title=Ready",
+                "--body-file",
+                "-",
+            ],
+            "no base means the repository default; no draft flag when draft is off"
+        );
+        assert!(
+            gh.iter()
+                .flat_map(|request| &request.args)
+                .all(|arg| !arg.contains("force"))
+        );
+    }
+
+    #[tokio::test]
+    async fn creating_a_pull_request_refuses_bad_input_and_foreign_repositories_before_gh() {
+        let runner = ScriptedRunner::new(|request| {
+            if let Some(output) = git_repo_script(request) {
+                return output;
+            }
+            panic!("gh must not run: {:?}", request.args);
+        });
+        let resolver = list_resolver(runner.clone());
+        let mut cases = vec![
+            (create_request("   ", None, true), "title"),
+            (create_request(&"x".repeat(300), None, true), "too long"),
+        ];
+        let mut dash = create_request("T", None, true);
+        dash.head = "--force".into();
+        cases.push((dash, "branch name"));
+        let mut spaced = create_request("T", Some("main branch"), true);
+        spaced.head = "feature/x".into();
+        cases.push((spaced, "branch name"));
+        for (request, expected) in cases {
+            match resolver
+                .create_change_request(Path::new("/repo"), &request)
+                .await
+            {
+                Err(ActionError::Refused(message)) => {
+                    assert!(message.contains(expected), "{message}")
+                }
+                other => panic!("{expected}: {other:?}"),
+            }
+        }
+        let mut foreign = create_request("T", None, true);
+        foreign.repository = "someone/else".into();
+        assert_eq!(
+            resolver
+                .create_change_request(Path::new("/repo"), &foreign)
+                .await,
+            Err(ActionError::Host(ChangeRequestError::UnsupportedRepository))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_create_reads_as_the_hosts_words() {
+        let runner = ScriptedRunner::new(|request| {
+            if let Some(output) = git_repo_script(request) {
+                return output;
+            }
+            command_failure(
+                "a pull request for branch \"feature/x\" into branch \"main\" already exists:\nhttps://github.com/acme/zeron/pull/7\n",
+            )
+        });
+        match list_resolver(runner)
+            .create_change_request(Path::new("/repo"), &create_request("T", None, true))
+            .await
+        {
+            Err(ActionError::Refused(message)) => {
+                assert!(message.contains("already exists"), "{message}")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_real_checkout_creates_through_a_fake_gh_executable() {
+        let temp = tempfile::tempdir().expect("fixture tempdir");
+        let checkout = temp.path().join("checkout");
+        std::fs::create_dir_all(&checkout).unwrap();
+        run_git(&checkout, &["init", "-q", "-b", "feature/x"]);
+        run_git(
+            &checkout,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/acme/zeron.git",
+            ],
+        );
+        let log = temp.path().join("argv.txt");
+        let body = temp.path().join("body.txt");
+        let fake_gh = temp.path().join("gh");
+        std::fs::write(
+            &fake_gh,
+            format!(
+                "#!/bin/sh\nif [ \"$GH_PROMPT_DISABLED\" != \"1\" ]; then exit 2; fi\nprintf '%s\\n' \"$@\" > '{}'\ncat > '{}'\necho https://github.com/acme/zeron/pull/77\n",
+                log.display(),
+                body.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&fake_gh).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&fake_gh, permissions).unwrap();
+        let runner: Arc<dyn ProcessRunner> = Arc::new(ExecutableGhRunner {
+            executable: fake_gh,
+        });
+        let resolver = ChangeRequestResolver {
+            inspector: GitCheckoutInspector::new(runner.clone()),
+            github: GitHubCli::with_runner(runner),
+        };
+        let created = resolver
+            .create_change_request(&checkout, &create_request("Fix the panel", None, true))
+            .await
+            .unwrap();
+        assert_eq!(created.number, 77);
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap(),
+            "pr\ncreate\n--repo\ngithub.com/acme/zeron\n--head=feature/x\n--title=Fix the panel\n--body-file\n-\n--draft\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&body).unwrap(),
+            "--body $(touch /tmp/zeron-pwned)\nSecond line."
+        );
     }
 }

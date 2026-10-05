@@ -18,6 +18,7 @@ pub mod capabilities {
     pub const PULL_REQUESTS_PAGE_V1: &str = "pull-requests-page-v1";
     pub const DEVICE_HUB_V1: &str = "device-hub-v1";
     pub const SOURCE_CONTROL_V1: &str = "source-control-v1";
+    pub const SOURCE_CONTROL_SYNC_V1: &str = "source-control-sync-v1";
 
     pub const CURRENT: &[&str] = &[
         COMPOSER_REFERENCES_V1,
@@ -30,6 +31,7 @@ pub mod capabilities {
         PULL_REQUESTS_PAGE_V1,
         DEVICE_HUB_V1,
         SOURCE_CONTROL_V1,
+        SOURCE_CONTROL_SYNC_V1,
     ];
 
     pub fn current() -> Vec<String> {
@@ -112,7 +114,8 @@ mod tests {
                     "harness-updates-v1",
                     "pull-requests-page-v1",
                     "device-hub-v1",
-                    "source-control-v1"
+                    "source-control-v1",
+                    "source-control-sync-v1"
                 ],
             })
         );

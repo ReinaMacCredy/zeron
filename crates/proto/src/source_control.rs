@@ -20,6 +20,14 @@ impl GitAgentBusyPolicy {
             Self::AllowAll => true,
         }
     }
+
+    pub fn allows_sync(self, direction: SyncDirection) -> bool {
+        match self {
+            Self::SafeOnly => matches!(direction, SyncDirection::Push { .. }),
+            Self::BlockAll => false,
+            Self::AllowAll => true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,6 +52,10 @@ pub struct WorkingTree {
     pub ahead: u32,
     #[serde(default)]
     pub behind: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push_remote: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_branch: Option<String>,
     pub revision: String,
     #[serde(default)]
     pub truncated: bool,
@@ -236,6 +248,8 @@ pub struct SyncBranchReply {
     pub ahead: u32,
     #[serde(default)]
     pub behind: u32,
+    #[serde(default)]
+    pub commits: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -401,6 +415,8 @@ mod tests {
             upstream: Some("origin/main".into()),
             ahead: 2,
             behind: 1,
+            push_remote: Some("origin".into()),
+            default_branch: Some("main".into()),
             revision: "rev-1".into(),
             truncated: false,
             agent_active: true,
@@ -442,6 +458,8 @@ mod tests {
         let json = round_trip(&tree);
         assert_eq!(json["headSha"], "abc123");
         assert_eq!(json["agentActive"], true);
+        assert_eq!(json["pushRemote"], "origin");
+        assert_eq!(json["defaultBranch"], "main");
         assert_eq!(json["files"][0]["oldPath"], "src/old.rs");
         assert_eq!(json["files"][1]["worktree"], "untracked");
         assert!(json["files"][1].get("staged").is_none());
@@ -450,6 +468,7 @@ mod tests {
             serde_json::from_value(json!({"checkoutId": "c", "root": "/r", "revision": "r"}))
                 .unwrap();
         assert_eq!(minimal.branch, None);
+        assert_eq!((minimal.push_remote, minimal.default_branch), (None, None));
         assert_eq!((minimal.ahead, minimal.behind), (0, 0));
         assert!(minimal.files.is_empty() && minimal.stashes.is_empty());
         assert!(!minimal.agent_active);
@@ -618,8 +637,19 @@ mod tests {
             upstream: Some("origin/feature".into()),
             ahead: 0,
             behind: 0,
+            commits: 2,
         });
         assert_eq!(json["upstream"], "origin/feature");
+        assert_eq!(json["commits"], 2);
+        let push = SyncDirection::Push {
+            set_upstream: false,
+        };
+        assert!(GitAgentBusyPolicy::SafeOnly.allows_sync(push));
+        assert!(!GitAgentBusyPolicy::SafeOnly.allows_sync(SyncDirection::Pull));
+        assert!(!GitAgentBusyPolicy::BlockAll.allows_sync(push));
+        assert!(!GitAgentBusyPolicy::BlockAll.allows_sync(SyncDirection::Pull));
+        assert!(GitAgentBusyPolicy::AllowAll.allows_sync(push));
+        assert!(GitAgentBusyPolicy::AllowAll.allows_sync(SyncDirection::Pull));
     }
 
     #[test]

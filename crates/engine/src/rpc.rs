@@ -3861,6 +3861,76 @@ impl RpcService for EngineRpc {
                 })
                 .await
             }
+            methods::SYNC_BRANCH => {
+                Box::pin(async move {
+                    let request: zeron_proto::SyncBranchRequest = parse_params(params)?;
+                    let workspace = self.source_control_checkout(&request.target).await?;
+                    if self.agent_active_on_checkout(&workspace.checkout_id).await
+                        && !request.busy_policy.allows_sync(request.direction)
+                    {
+                        return Err(RpcError::Failed(
+                            match request.busy_policy {
+                                zeron_proto::GitAgentBusyPolicy::BlockAll => {
+                                    "An agent is running in this checkout, and Git is read-only while it runs (Settings > Source Control)."
+                                }
+                                _ => {
+                                    "An agent is running in this checkout. Pull waits until it stops, so it cannot rewrite files under the agent (Settings > Source Control)."
+                                }
+                            }
+                            .into(),
+                        ));
+                    }
+                    let _guard = crate::working_tree::lock_checkout(&workspace.checkout_id).await;
+                    let read = |root: std::path::PathBuf, checkout_id: String| async move {
+                        tokio::time::timeout(
+                            crate::working_tree::READ_TIMEOUT,
+                            crate::working_tree::read(&root, &checkout_id),
+                        )
+                        .await
+                        .map_err(|_| RpcError::Failed("working tree read timed out".into()))?
+                        .map_err(|error| RpcError::Failed(error.to_string()))
+                    };
+                    let tree = read(workspace.root.clone(), workspace.checkout_id.clone()).await?;
+                    if tree.head_sha.as_deref() != Some(request.expected_head_sha.as_str()) {
+                        return Err(RpcError::Failed(
+                            "The branch moved since it was shown. Check the refreshed state and try again."
+                                .into(),
+                        ));
+                    }
+                    let result = crate::working_tree::sync(
+                        &workspace.root,
+                        &tree,
+                        request.direction,
+                        crate::working_tree::SYNC_TIMEOUT,
+                    )
+                    .await
+                    .map_err(|error| RpcError::Failed(error.to_string()));
+                    self.diff_sync.sync_all();
+                    let commits = result?;
+                    let after = read(workspace.root.clone(), workspace.checkout_id.clone()).await?;
+                    RpcReply::value(&zeron_proto::SyncBranchReply {
+                        head_sha: after.head_sha.unwrap_or_default(),
+                        upstream: after.upstream,
+                        ahead: after.ahead,
+                        behind: after.behind,
+                        commits,
+                    })
+                })
+                .await
+            }
+            methods::CREATE_CHANGE_REQUEST => {
+                Box::pin(async move {
+                    let request: zeron_proto::CreateChangeRequestRequest = parse_params(params)?;
+                    let workspace = self.source_control_checkout(&request.target).await?;
+                    let created = crate::source_control::ChangeRequestResolver::new()
+                        .create_change_request(&workspace.root, &request)
+                        .await
+                        .map_err(action_failure)?;
+                    crate::source_control::invalidate_responses();
+                    RpcReply::value(&created)
+                })
+                .await
+            }
             methods::GENERATE_COMMIT_MESSAGE => {
                 Box::pin(async move {
                     let request: zeron_proto::GenerateCommitMessageRequest = parse_params(params)?;
@@ -5928,6 +5998,226 @@ mod tests {
         assert!(read(&rpc).await.stashes.is_empty());
     }
 
+    #[tokio::test]
+    async fn sync_branch_checks_the_head_and_the_busy_policy_and_replies_through_the_wire() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        let remote = root.join("remote.git");
+        let repo = root.join("repo");
+        let data = root.join("data");
+        for path in [&repo, &data] {
+            std::fs::create_dir(path).unwrap();
+        }
+        git(
+            &root,
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                remote.to_str().unwrap(),
+            ],
+        );
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(
+            &repo,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "first"]);
+        git(&repo, &["push", "-q", "-u", "origin", "main"]);
+        git(&repo, &["checkout", "-q", "-b", "feature/x"]);
+        std::fs::write(repo.join("b.txt"), "b\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "second"]);
+        let head = git(&repo, &["rev-parse", "HEAD"]);
+
+        let core = crate::EngineCore::assemble(
+            &data,
+            std::sync::Arc::new(HarnessRegistry::new()),
+            HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        let rpc = core.rpc_service();
+        rpc.handle(
+            methods::MUTATE,
+            serde_json::json!({
+                "op": "createSpace", "spaceId": "space-repo", "deviceId": core.device_id,
+                "path": repo, "gitDetected": true,
+            }),
+        )
+        .await
+        .unwrap();
+        let sync = |head: &str, policy: &str, direction: serde_json::Value| {
+            serde_json::json!({
+                "spaceId": "space-repo", "expectedHeadSha": head,
+                "busyPolicy": policy, "direction": direction,
+            })
+        };
+        let push = serde_json::json!({"kind": "push", "setUpstream": true});
+        let pull = serde_json::json!({"kind": "pull"});
+
+        for (params, expected) in [
+            (sync("0000", "safeOnly", push.clone()), "moved since"),
+            (
+                serde_json::json!({
+                    "chatId": "chat-1", "expectedHeadSha": head, "direction": push,
+                }),
+                "spaceId",
+            ),
+        ] {
+            let error = rpc
+                .handle(methods::SYNC_BRANCH, params.clone())
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{params} must be refused"));
+            assert!(error.to_string().contains(expected), "{params}: {error}");
+        }
+        assert_eq!(
+            git(&remote, &["for-each-ref", "--format=%(refname)"]),
+            "refs/heads/main"
+        );
+
+        let reply = through_the_wire(
+            rpc.handle(methods::SYNC_BRANCH, sync(&head, "safeOnly", push.clone()))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(
+            reply,
+            serde_json::json!({
+                "headSha": head, "upstream": "origin/feature/x",
+                "ahead": 0, "behind": 0, "commits": 1,
+            })
+        );
+        assert_eq!(git(&remote, &["rev-parse", "refs/heads/feature/x"]), head);
+
+        rpc.handle(
+            methods::MUTATE,
+            serde_json::json!({
+                "op": "createChat", "chatId": "chat-busy", "deviceId": core.device_id,
+                "spaceId": "space-repo", "cwd": repo,
+            }),
+        )
+        .await
+        .unwrap();
+        core.sessions
+            .set_status_for_test("chat-busy", zeron_proto::SessionStatus::Working);
+        std::fs::write(repo.join("c.txt"), "c\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "third"]);
+        let head = git(&repo, &["rev-parse", "HEAD"]);
+        for (policy, direction, expected) in [
+            ("safeOnly", pull.clone(), "Pull waits"),
+            ("blockAll", push.clone(), "read-only"),
+            ("blockAll", pull.clone(), "read-only"),
+        ] {
+            let error = rpc
+                .handle(methods::SYNC_BRANCH, sync(&head, policy, direction.clone()))
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{policy} {direction} must be refused"));
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+        assert_ne!(git(&remote, &["rev-parse", "refs/heads/feature/x"]), head);
+        let reply = through_the_wire(
+            rpc.handle(methods::SYNC_BRANCH, sync(&head, "safeOnly", push))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(
+            reply["commits"], 1,
+            "SafeOnly still pushes under the banner"
+        );
+        assert_eq!(git(&remote, &["rev-parse", "refs/heads/feature/x"]), head);
+        let reply = through_the_wire(
+            rpc.handle(methods::SYNC_BRANCH, sync(&head, "allowAll", pull))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(reply["commits"], 0);
+        assert_eq!(reply["headSha"], head);
+        core.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn create_change_request_refuses_before_gh_when_the_request_cannot_be_right() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let repo = root.join("repo");
+        let data = root.join("data");
+        for path in [&repo, &data] {
+            std::fs::create_dir(path).unwrap();
+        }
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["init", "-q", "-b", "feature/x"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let core = crate::EngineCore::assemble(
+            &data,
+            std::sync::Arc::new(HarnessRegistry::new()),
+            HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        let rpc = core.rpc_service();
+        rpc.handle(
+            methods::MUTATE,
+            serde_json::json!({
+                "op": "createSpace", "spaceId": "space-repo", "deviceId": core.device_id,
+                "path": repo, "gitDetected": true,
+            }),
+        )
+        .await
+        .unwrap();
+        let request = |title: &str| {
+            serde_json::json!({
+                "spaceId": "space-repo", "host": "github.com", "repository": "acme/zeron",
+                "head": "feature/x", "title": title, "body": "", "draft": true,
+            })
+        };
+        let mut chat = request("T");
+        chat.as_object_mut().unwrap().remove("spaceId");
+        chat["chatId"] = "chat-1".into();
+        for (params, expected) in [
+            (request("  "), "title"),
+            (chat, "spaceId"),
+            (request("No GitHub remote here"), "unsupportedRepository"),
+        ] {
+            let error = rpc
+                .handle(methods::CREATE_CHANGE_REQUEST, params.clone())
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{params} must be refused"));
+            assert!(error.to_string().contains(expected), "{params}: {error}");
+        }
+        core.shutdown().await;
+    }
+
     /// Every forwardable unary method gets a bounded reply deadline —
     /// interactive calls fail fast, network-bound git/update calls get the
     /// long leash, and nothing awaits forever (the "Sending…" wedge).
@@ -5959,6 +6249,13 @@ mod tests {
         assert!(
             crate::working_tree::COMMIT_TIMEOUT + crate::working_tree::READ_TIMEOUT
                 <= crate::working_tree::WRITE_TIMEOUT
+        );
+        assert!(
+            crate::working_tree::WRITE_TIMEOUT
+                + crate::working_tree::READ_TIMEOUT * 2
+                + crate::working_tree::SYNC_TIMEOUT
+                < forward_deadline(methods::SYNC_BRANCH),
+            "a forwarded push waits out a held lock and still reports the engine's own outcome"
         );
         assert!(
             crate::commit_messages::ATTEMPT_TIMEOUT < crate::commit_messages::GENERATE_TIMEOUT

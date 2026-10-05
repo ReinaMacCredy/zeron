@@ -5,8 +5,8 @@ use std::sync::{Arc, LazyLock, Weak};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 use zeron_proto::{
-    CommitSummary, GitFileState, LineDelta, StashEntry, WorkingTree, WorkingTreeAction,
-    WorkingTreeActionReply, WorkingTreeFile, WorkingTreeFileDiff,
+    CommitSummary, GitFileState, LineDelta, StashEntry, SyncDirection, WorkingTree,
+    WorkingTreeAction, WorkingTreeActionReply, WorkingTreeFile, WorkingTreeFileDiff,
 };
 
 use crate::EngineError;
@@ -424,6 +424,27 @@ pub(crate) async fn read(root: &Path, checkout_id: &str) -> Result<WorkingTree, 
     for (index, delta) in counts {
         status.files[index].unstaged = delta;
     }
+    let config = match status.branch.as_deref() {
+        Some(branch) => branch_config(root, branch).await,
+        None => BranchConfig::default(),
+    };
+    let push_remote = config.push_remote(status.upstream.is_some());
+    let mut ahead = status.ahead;
+    if let (None, Some(remote), Some(_)) = (&status.upstream, &push_remote, &status.head_sha) {
+        let not_on_remote = format!("--remotes={remote}");
+        ahead = git(
+            root,
+            &["rev-list", "--count", "HEAD", "--not", &not_on_remote],
+        )
+        .await
+        .ok()
+        .and_then(|out| String::from_utf8_lossy(&out.stdout).trim().parse().ok())
+        .unwrap_or(0);
+    }
+    let default_branch = match &push_remote {
+        Some(remote) => default_branch(root, remote).await,
+        None => None,
+    };
     Ok(WorkingTree {
         checkout_id: checkout_id.to_owned(),
         root: root.to_string_lossy().into_owned(),
@@ -431,8 +452,10 @@ pub(crate) async fn read(root: &Path, checkout_id: &str) -> Result<WorkingTree, 
         branch: status.branch,
         head_sha: status.head_sha,
         upstream: status.upstream,
-        ahead: status.ahead,
+        ahead,
         behind: status.behind,
+        push_remote,
+        default_branch,
         truncated,
         agent_active: false,
         files: status.files,
@@ -440,6 +463,89 @@ pub(crate) async fn read(root: &Path, checkout_id: &str) -> Result<WorkingTree, 
             .map(|out| parse_stashes(&out.stdout))
             .unwrap_or_default(),
     })
+}
+
+#[derive(Debug, Default, PartialEq)]
+struct BranchConfig {
+    remotes: Vec<String>,
+    push_default: Option<String>,
+    remote: Option<String>,
+    merge: Option<String>,
+}
+
+impl BranchConfig {
+    fn parse(bytes: &[u8], branch: &str) -> Self {
+        let mut config = Self::default();
+        let branch_key = |key: &str, field: &str| {
+            key.strip_prefix("branch.")
+                .and_then(|rest| rest.strip_suffix(field))
+                .is_some_and(|name| name == branch)
+        };
+        for entry in bytes.split(|byte| *byte == 0) {
+            let entry = String::from_utf8_lossy(entry);
+            let Some((key, value)) = entry.split_once('\n') else {
+                continue;
+            };
+            let value = value.to_owned();
+            if let Some(name) = key
+                .strip_prefix("remote.")
+                .and_then(|rest| rest.strip_suffix(".url"))
+            {
+                if !config.remotes.iter().any(|known| known == name) {
+                    config.remotes.push(name.to_owned());
+                }
+            } else if key == "remote.pushdefault" {
+                config.push_default = Some(value);
+            } else if branch_key(key, ".remote") {
+                config.remote = Some(value);
+            } else if branch_key(key, ".merge") {
+                config.merge = Some(value);
+            }
+        }
+        config
+    }
+
+    fn known(&self, remote: &str) -> bool {
+        self.remotes.iter().any(|known| known == remote)
+    }
+
+    fn push_remote(&self, tracking: bool) -> Option<String> {
+        if tracking {
+            return self.remote.clone().filter(|remote| self.known(remote));
+        }
+        self.push_default
+            .clone()
+            .filter(|remote| self.known(remote))
+            .or_else(|| self.known("origin").then(|| "origin".to_owned()))
+            .or_else(|| (self.remotes.len() == 1).then(|| self.remotes[0].clone()))
+    }
+}
+
+async fn branch_config(root: &Path, branch: &str) -> BranchConfig {
+    git_with(
+        root,
+        &[
+            "config",
+            "-z",
+            "--get-regexp",
+            r"^(remote\..*\.url|remote\.pushdefault|branch\..*\.(remote|merge))$",
+        ],
+        OUTPUT_MAX_BYTES,
+        true,
+    )
+    .await
+    .map(|out| BranchConfig::parse(&out.stdout, branch))
+    .unwrap_or_default()
+}
+
+async fn default_branch(root: &Path, remote: &str) -> Option<String> {
+    let head = format!("refs/remotes/{remote}/HEAD");
+    let out = git(root, &["symbolic-ref", "-q", &head]).await.ok()?;
+    let target = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    target
+        .strip_prefix(&format!("refs/remotes/{remote}/"))
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
 }
 
 pub(crate) const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(150);
@@ -847,6 +953,138 @@ async fn commit(
         }),
         conflicts: Vec::new(),
     })
+}
+
+pub(crate) const SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+pub(crate) fn push_args(remote: &str, branch: &str, dest: &str, set_upstream: bool) -> Vec<String> {
+    let mut args = vec!["push".to_owned()];
+    if set_upstream {
+        args.push("--set-upstream".into());
+    }
+    args.extend([
+        "--".to_owned(),
+        remote.to_owned(),
+        format!("refs/heads/{branch}:{dest}"),
+    ]);
+    args
+}
+
+pub(crate) const PULL_ARGS: [&str; 4] = ["pull", "--ff-only", "--no-rebase", "--no-autostash"];
+
+fn sync_error(error: EngineError) -> EngineError {
+    let EngineError::Other(message) = error else {
+        return error;
+    };
+    let text: String = message
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("hint:"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let lower = text.to_ascii_lowercase();
+    let lead = if lower.contains("[rejected]") || lower.contains("non-fast-forward") {
+        Some("The remote has commits this branch does not have. Pull first, then push again.")
+    } else if lower.contains("not possible to fast-forward") {
+        Some(
+            "This branch and its upstream have diverged, and Pull only fast-forwards. Merge or rebase in a terminal.",
+        )
+    } else if lower.contains("terminal prompts disabled")
+        || lower.contains("could not read username")
+        || lower.contains("authentication failed")
+        || lower.contains("permission denied (publickey")
+        || lower.contains("host key verification failed")
+    {
+        Some(
+            "Git could not sign in to the remote without a prompt. Set up a credential helper or an SSH key in a terminal, then try again.",
+        )
+    } else {
+        None
+    };
+    EngineError::Other(match lead {
+        Some(lead) => format!("{lead}\n{text}"),
+        None => text,
+    })
+}
+
+async fn timed_git(
+    root: &Path,
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> Result<(), EngineError> {
+    tokio::time::timeout(timeout, git(root, args))
+        .await
+        .map_err(|_| {
+            EngineError::Other(format!(
+                "Git did not finish within {} min. The remote may be slow or waiting for a sign-in; try again from a terminal.",
+                timeout.as_secs() / 60
+            ))
+        })?
+        .map(drop)
+        .map_err(sync_error)
+}
+
+pub(crate) async fn sync(
+    root: &Path,
+    tree: &WorkingTree,
+    direction: SyncDirection,
+    timeout: std::time::Duration,
+) -> Result<u32, EngineError> {
+    let Some(branch) = tree.branch.as_deref() else {
+        return Err(refused(
+            "HEAD is detached. Check out a branch to push or pull.",
+        ));
+    };
+    let Some(head) = tree.head_sha.as_deref() else {
+        return Err(refused("This branch has no commits yet."));
+    };
+    let config = branch_config(root, branch).await;
+    match direction {
+        SyncDirection::Push { set_upstream } => {
+            let (remote, dest, track) = if tree.upstream.is_some() {
+                let remote = config.push_remote(true).ok_or_else(|| {
+                    refused("This branch tracks something other than a remote branch. Push it from a terminal.")
+                })?;
+                let dest = config
+                    .merge
+                    .clone()
+                    .filter(|merge| merge.starts_with("refs/heads/"))
+                    .ok_or_else(|| {
+                        refused("This branch tracks something other than a remote branch. Push it from a terminal.")
+                    })?;
+                (remote, dest, false)
+            } else {
+                if !set_upstream {
+                    return Err(refused(
+                        "This branch is not on a remote yet. Push it with tracking turned on.",
+                    ));
+                }
+                let remote = config.push_remote(false).ok_or_else(|| {
+                    refused(
+                        "There is no remote to push to. Add one named origin, or set remote.pushDefault.",
+                    )
+                })?;
+                (remote, format!("refs/heads/{branch}"), true)
+            };
+            let args = push_args(&remote, branch, &dest, track);
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            timed_git(root, &args, timeout).await?;
+            Ok(tree.ahead)
+        }
+        SyncDirection::Pull => {
+            if tree.upstream.is_none() {
+                return Err(refused(
+                    "This branch has no upstream to pull from. Push it first.",
+                ));
+            }
+            timed_git(root, &PULL_ARGS, timeout).await?;
+            let range = format!("{head}..HEAD");
+            let count = git(root, &["rev-list", "--count", &range]).await?;
+            Ok(String::from_utf8_lossy(&count.stdout)
+                .trim()
+                .parse()
+                .unwrap_or(0))
+        }
+    }
 }
 
 pub(crate) async fn file_diff(
@@ -1951,5 +2189,263 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("merge conflicts"), "{error}");
+    }
+
+    fn rev(cwd: &Path, name: &str) -> String {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(["rev-parse", "--verify", "-q", name])
+            .output()
+            .unwrap();
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    fn commit_file(cwd: &Path, name: &str, text: &str) {
+        std::fs::write(cwd.join(name), text).unwrap();
+        run(cwd, &["add", "--", name]);
+        run(cwd, &["commit", "-q", "-m", name]);
+    }
+
+    fn lab() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let remote = dir.path().join("remote.git");
+        let repo = dir.path().join("repo");
+        run(
+            dir.path(),
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                remote.to_str().unwrap(),
+            ],
+        );
+        run(
+            dir.path(),
+            &["init", "-q", "-b", "main", repo.to_str().unwrap()],
+        );
+        run(
+            &repo,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        commit_file(&repo, "a.txt", "a\n");
+        run(&repo, &["push", "-q", "-u", "origin", "main"]);
+        (dir, remote, repo)
+    }
+
+    const PUSH: SyncDirection = SyncDirection::Push {
+        set_upstream: false,
+    };
+    const PUSH_TRACKING: SyncDirection = SyncDirection::Push { set_upstream: true };
+
+    #[test]
+    fn push_args_name_one_branch_ref_and_never_force() {
+        let tracked = push_args("origin", "feature/x", "refs/heads/feature/x", false);
+        assert_eq!(
+            tracked,
+            [
+                "push",
+                "--",
+                "origin",
+                "refs/heads/feature/x:refs/heads/feature/x"
+            ]
+        );
+        let new = push_args("origin", "-odd", "refs/heads/-odd", true);
+        assert_eq!(
+            new,
+            [
+                "push",
+                "--set-upstream",
+                "--",
+                "origin",
+                "refs/heads/-odd:refs/heads/-odd"
+            ]
+        );
+        for args in [tracked, new] {
+            assert!(args.iter().all(|arg| {
+                !matches!(
+                    arg.as_str(),
+                    "--force" | "-f" | "--no-verify" | "--mirror" | "--delete" | "--prune"
+                ) && !arg.starts_with("--force")
+                    && !arg.starts_with('+')
+            }));
+        }
+        assert_eq!(
+            PULL_ARGS,
+            ["pull", "--ff-only", "--no-rebase", "--no-autostash"]
+        );
+    }
+
+    #[test]
+    fn the_push_remote_follows_tracking_then_push_default_then_origin_then_a_sole_remote() {
+        let config = |text: &str, branch: &str| {
+            BranchConfig::parse(text.replace('|', "\0").as_bytes(), branch)
+        };
+        let tracked = config(
+            "remote.origin.url\n/r|remote.fork.url\n/f|branch.feature/x.remote\nfork|branch.feature/x.merge\nrefs/heads/x|branch.other.remote\norigin|",
+            "feature/x",
+        );
+        assert_eq!(tracked.push_remote(true).as_deref(), Some("fork"));
+        assert_eq!(tracked.merge.as_deref(), Some("refs/heads/x"));
+        assert_eq!(tracked.push_remote(false).as_deref(), Some("origin"));
+        let local = config("remote.origin.url\n/r|branch.b.remote\n.|", "b");
+        assert_eq!(
+            local.push_remote(true),
+            None,
+            "a local upstream is not a remote"
+        );
+        let pinned = config(
+            "remote.origin.url\n/r|remote.mine.url\n/m|remote.pushdefault\nmine|",
+            "b",
+        );
+        assert_eq!(pinned.push_remote(false).as_deref(), Some("mine"));
+        let sole = config("remote.upstream.url\n/u|", "b");
+        assert_eq!(sole.push_remote(false).as_deref(), Some("upstream"));
+        let many = config("remote.a.url\n/a|remote.b.url\n/b|", "b");
+        assert_eq!(many.push_remote(false), None, "never a guess among remotes");
+    }
+
+    #[tokio::test]
+    async fn push_sends_a_new_branch_with_tracking_then_follow_up_commits() {
+        let (_dir, remote, repo) = lab();
+        run(&repo, &["checkout", "-q", "-b", "feature/x"]);
+        commit_file(&repo, "b.txt", "b\n");
+        commit_file(&repo, "c.txt", "c\n");
+        let tree = read(&repo, "c").await.unwrap();
+        assert_eq!(tree.upstream, None);
+        assert_eq!(tree.push_remote.as_deref(), Some("origin"));
+        assert_eq!(tree.ahead, 2, "commits not on origin yet");
+        assert_eq!(tree.default_branch, None);
+
+        let error = sync(&repo, &tree, PUSH, SYNC_TIMEOUT).await.unwrap_err();
+        assert!(error.to_string().contains("not on a remote yet"), "{error}");
+        assert_eq!(rev(&remote, "refs/heads/feature/x"), "");
+
+        assert_eq!(
+            sync(&repo, &tree, PUSH_TRACKING, SYNC_TIMEOUT)
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(rev(&remote, "refs/heads/feature/x"), rev(&repo, "HEAD"));
+        let tree = read(&repo, "c").await.unwrap();
+        assert_eq!(tree.upstream.as_deref(), Some("origin/feature/x"));
+        assert_eq!((tree.ahead, tree.behind), (0, 0));
+
+        commit_file(&repo, "d.txt", "d\n");
+        let tree = read(&repo, "c").await.unwrap();
+        assert_eq!(tree.ahead, 1);
+        assert_eq!(sync(&repo, &tree, PUSH, SYNC_TIMEOUT).await.unwrap(), 1);
+        assert_eq!(rev(&remote, "refs/heads/feature/x"), rev(&repo, "HEAD"));
+        assert_eq!(rev(&remote, "refs/heads/main"), rev(&repo, "main"));
+
+        run(
+            &repo,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
+        assert_eq!(
+            read(&repo, "c").await.unwrap().default_branch.as_deref(),
+            Some("main")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rejected_push_and_a_diverged_pull_leave_both_sides_alone() {
+        let (dir, remote, repo) = lab();
+        let other = dir.path().join("other");
+        run(
+            dir.path(),
+            &[
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                other.to_str().unwrap(),
+            ],
+        );
+        commit_file(&other, "theirs.txt", "theirs\n");
+        run(&other, &["push", "-q", "origin", "main"]);
+        let theirs = rev(&other, "HEAD");
+        commit_file(&repo, "mine.txt", "mine\n");
+        let mine = rev(&repo, "HEAD");
+        run(&repo, &["fetch", "-q", "origin"]);
+        let tree = read(&repo, "c").await.unwrap();
+        assert_eq!((tree.ahead, tree.behind), (1, 1));
+
+        let error = sync(&repo, &tree, PUSH, SYNC_TIMEOUT).await.unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("Pull first"), "{text}");
+        assert!(
+            text.contains("[rejected]"),
+            "git's own line is kept: {text}"
+        );
+        assert!(!text.contains("hint:"), "{text}");
+        assert_eq!(rev(&remote, "refs/heads/main"), theirs);
+
+        let error = sync(&repo, &tree, SyncDirection::Pull, SYNC_TIMEOUT)
+            .await
+            .unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("diverged"), "{text}");
+        assert!(text.contains("Not possible to fast-forward"), "{text}");
+        assert_eq!(rev(&repo, "HEAD"), mine);
+        assert_eq!(rev(&remote, "refs/heads/main"), theirs);
+    }
+
+    #[tokio::test]
+    async fn pull_fast_forwards_and_refuses_without_an_upstream_or_a_branch() {
+        let (dir, remote, repo) = lab();
+        let other = dir.path().join("other");
+        run(
+            dir.path(),
+            &[
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                other.to_str().unwrap(),
+            ],
+        );
+        commit_file(&other, "one.txt", "1\n");
+        commit_file(&other, "two.txt", "2\n");
+        run(&other, &["push", "-q", "origin", "main"]);
+        std::fs::write(repo.join("local note.txt"), "keep\n").unwrap();
+        let tree = read(&repo, "c").await.unwrap();
+        assert_eq!(
+            sync(&repo, &tree, SyncDirection::Pull, SYNC_TIMEOUT)
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(rev(&repo, "HEAD"), rev(&other, "HEAD"));
+        assert!(repo.join("local note.txt").exists());
+        let tree = read(&repo, "c").await.unwrap();
+        assert_eq!(
+            sync(&repo, &tree, SyncDirection::Pull, SYNC_TIMEOUT)
+                .await
+                .unwrap(),
+            0
+        );
+
+        run(&repo, &["checkout", "-q", "-b", "local-only"]);
+        let tree = read(&repo, "c").await.unwrap();
+        let error = sync(&repo, &tree, SyncDirection::Pull, SYNC_TIMEOUT)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("no upstream"), "{error}");
+
+        let head = rev(&repo, "HEAD");
+        run(&repo, &["checkout", "-q", "--detach", &head]);
+        let tree = read(&repo, "c").await.unwrap();
+        for direction in [PUSH_TRACKING, SyncDirection::Pull] {
+            let error = sync(&repo, &tree, direction, SYNC_TIMEOUT)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("detached"), "{error}");
+        }
     }
 }
