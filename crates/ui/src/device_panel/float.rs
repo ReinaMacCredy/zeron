@@ -237,7 +237,7 @@ impl DeviceFloat {
             view: None,
             visible: false,
             container: None,
-            stored: settings::current(cx).device_float_frame,
+            stored: None,
             gesture: None,
             handle_hovered: false,
             revision: None,
@@ -264,6 +264,7 @@ impl DeviceFloat {
         } else {
             self.view = None;
             self.gesture = None;
+            self.stored = None;
             cx.notify();
         }
     }
@@ -311,11 +312,13 @@ impl DeviceFloat {
     }
 
     fn frame(&self, cx: &App) -> Option<DeviceFloatFrame> {
-        Some(resolve_frame(self.stored, self.source(cx), self.container?))
+        let stored = self.stored.or_else(|| settings::device_float_frame(cx));
+        Some(resolve_frame(stored, self.source(cx), self.container?))
     }
 
     fn begin(&mut self, edge: Option<ResizeEdge>, pointer: Point<Pixels>, cx: &mut Context<Self>) {
         if let Some(start) = self.frame(cx) {
+            self.stored = settings::device_float_frame(cx);
             self.gesture = Some(Gesture {
                 pointer,
                 start,
@@ -338,7 +341,14 @@ impl DeviceFloat {
             f32::from(position.y - gesture.pointer.y),
         );
         let next = match gesture.edge {
-            None => moved(gesture.start, delta, container),
+            None => {
+                let next = moved(gesture.start, delta, container);
+                DeviceFloatFrame {
+                    x: next.x,
+                    y: next.y,
+                    ..self.stored.unwrap_or(next)
+                }
+            }
             Some(edge) => resized(gesture.start, edge, delta, self.source(cx), container),
         };
         if self.stored != Some(next) {
@@ -351,7 +361,7 @@ impl DeviceFloat {
         if self.gesture.take().is_none() {
             return;
         }
-        if let Some(frame) = self.stored {
+        if let Some(frame) = self.stored.take() {
             settings::update(SavePolicy::Debounced, cx, |settings| {
                 settings.device_float_frame = Some(frame)
             });
@@ -737,6 +747,38 @@ mod tests {
         cx.simulate_click(close, Modifiers::default());
         cx.run_until_parked();
         assert!(closed.get(), "Close floating preview emits Close");
+
+        cx.simulate_resize(size(px(300.0), px(800.0)));
+        wait(cx, |cx| {
+            cx.debug_bounds("device-float")
+                .is_some_and(|card| card.size.width == px(276.0))
+        });
+        drag(cx, "device-float-grip", point(px(0.0), px(40.0)));
+        let saved = cx.update(|_, cx| settings::current(cx).device_float_frame.unwrap());
+        assert_eq!(
+            (saved.y, saved.width, saved.height),
+            (152.0, 300.0, 600.0),
+            "a move in a narrow window keeps the stored size"
+        );
+
+        let elsewhere = DeviceFloatFrame {
+            x: 20.0,
+            y: 30.0,
+            width: 260.0,
+            height: 520.0,
+        };
+        cx.simulate_resize(size(px(1000.0), px(800.0)));
+        cx.update(|_, cx| {
+            settings::update(SavePolicy::Debounced, cx, |settings| {
+                settings.device_float_frame = Some(elsewhere)
+            })
+        });
+        wait(cx, |cx| frame(cx).is_some_and(|frame| frame.width == 260.0));
+        assert_eq!(
+            frame(cx),
+            Some(elsewhere),
+            "the float follows a frame saved by another float"
+        );
     }
 
     const CONTAINER: Size<f32> = Size {

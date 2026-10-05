@@ -483,6 +483,11 @@ pub fn current(cx: &App) -> UiSettings {
         .unwrap_or_default()
 }
 
+pub fn device_float_frame(cx: &App) -> Option<crate::device_panel::float::DeviceFloatFrame> {
+    cx.try_global::<SettingsStore>()
+        .and_then(|store| store.current.device_float_frame)
+}
+
 /// Read the picker preference without cloning the full settings for each model row.
 pub fn compact_model_picker(cx: &App) -> bool {
     cx.try_global::<SettingsStore>()

@@ -49,6 +49,12 @@ impl Shell {
         self.device_panels.get(&id)?.0.read(cx).target().cloned()
     }
 
+    fn idle_device_picker(&self, id: u64, cx: &App) -> bool {
+        self.device_panels
+            .get(&id)
+            .is_some_and(|(panel, _)| panel.read(cx).is_idle_picker())
+    }
+
     fn new_device_panel(
         &mut self,
         chat_id: String,
@@ -147,7 +153,7 @@ impl Shell {
         let placeholder = ids
             .iter()
             .copied()
-            .find(|id| self.device_tab_target(*id, cx).is_none());
+            .find(|id| self.idle_device_picker(*id, cx));
         let id = match (existing, placeholder) {
             (Some(_), _) if automatic => return None,
             (Some(existing), placeholder) => {
@@ -256,6 +262,24 @@ impl Shell {
         }
     }
 
+    pub(super) fn prune_device_shell(&mut self, cx: &App) {
+        let state = self.state.read(cx);
+        if !state.chats_synced {
+            return;
+        }
+        let live = state
+            .chats
+            .iter()
+            .map(|chat| chat.id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        self.device_shell
+            .floats
+            .retain(|chat_id, _| live.contains(chat_id.as_str()));
+        self.device_shell
+            .dismissed
+            .retain(|chat_id, _| live.contains(chat_id.as_str()));
+    }
+
     pub(super) fn rename_device_tab(
         &mut self,
         surface: RightSurface,
@@ -283,9 +307,10 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let RightSurface::Device(_) = surface else {
+        let RightSurface::Device(id) = surface else {
             return None;
         };
+        self.device_tab_target(id, cx)?;
         Some(
             popover::menu_row(theme, false, "device-tab-menu-rename")
                 .id("device-tab-menu-rename")
@@ -868,6 +893,25 @@ mod tests {
                 .is_empty(),
             "hiding never ends a device session"
         );
+
+        set_pane(window, cx, true, Some(pad));
+        settle(cx, |_| open_frame_streams(&calls) == 2);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.right_pane_expanded = true;
+                cx.notify();
+            })
+            .unwrap();
+        settle(cx, |_| open_frame_streams(&calls) == 1);
+        assert!(
+            window
+                .update(cx, |shell, _, cx| !shell.device_shell.floats["chat"]
+                    .0
+                    .read(cx)
+                    .is_visible())
+                .unwrap(),
+            "pane takeover leaves no chat column for the float"
+        );
     }
 
     #[gpui::test]
@@ -948,6 +992,98 @@ mod tests {
             None,
             "powering the device off elsewhere closes its float"
         );
+        window
+            .update(cx, |shell, _, cx| {
+                assert_eq!(
+                    shell.device_tab_target(id, cx),
+                    None,
+                    "and returns its tab to the picker"
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn a_picker_with_an_open_in_flight_is_neither_retargeted_nor_dropped(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (window, _dir) = device_shell(cx);
+        window
+            .update(cx, |shell, window, cx| {
+                let picker = shell.add_device_surface(window, cx).unwrap();
+                let device = shell.state.read(cx).device_hub.as_ref().unwrap().devices[0].clone();
+                shell.device_panels[&picker]
+                    .0
+                    .update(cx, |panel, cx| panel.open_device(device, cx));
+                let pad = shell
+                    .open_device_tab("chat", target("PAD"), false, window, cx)
+                    .unwrap();
+                assert_ne!(pad, picker, "the opening picker keeps its device");
+                assert_eq!(shell.device_tab_target(picker, cx), None);
+                assert_eq!(
+                    shell.open_device_tab("chat", target("PAD"), false, window, cx),
+                    Some(pad)
+                );
+                assert_eq!(
+                    device_tabs(shell),
+                    vec![picker, pad],
+                    "focusing a shown device leaves the opening picker alone"
+                );
+                assert!(
+                    shell
+                        .device_rename_menu_row(RightSurface::Device(picker), &Theme::default(), cx)
+                        .is_none(),
+                    "a picker tab has no Rename row"
+                );
+                assert!(
+                    shell
+                        .device_rename_menu_row(RightSurface::Device(pad), &Theme::default(), cx)
+                        .is_some()
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn floats_and_dismissals_of_deleted_chats_are_pruned(cx: &mut gpui::TestAppContext) {
+        let (window, _dir) = device_shell(cx);
+        window
+            .update(cx, |shell, _, cx| {
+                for chat in ["chat", "gone"] {
+                    shell.open_device_float(chat.into(), target("SIM"), cx);
+                    shell
+                        .device_shell
+                        .dismissed
+                        .entry(chat.into())
+                        .or_default()
+                        .insert(target("PAD"));
+                }
+                shell.state.update(cx, |state, cx| {
+                    state.chats = vec![
+                        serde_json::from_value(serde_json::json!({
+                            "id": "chat",
+                            "deviceId": "this-mac",
+                            "archived": false,
+                            "createdAt": "2026-09-28T00:00:00Z"
+                        }))
+                        .unwrap(),
+                    ];
+                    state.chats_synced = true;
+                    cx.notify();
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, _| {
+                let mut floats: Vec<_> = shell.device_shell.floats.keys().cloned().collect();
+                floats.sort();
+                assert_eq!(floats, ["chat"]);
+                let mut dismissed: Vec<_> = shell.device_shell.dismissed.keys().cloned().collect();
+                dismissed.sort();
+                assert_eq!(dismissed, ["chat"]);
+            })
+            .unwrap();
     }
 
     #[gpui::test]
@@ -1035,6 +1171,29 @@ mod tests {
         assert!(shell.update(cx, |shell, cx| shell.capture_escape_surface(cx)));
         cx.run_until_parked();
         assert_eq!(title(cx), "My phone");
+        assert!(cx.debug_bounds("device-tab-rename").is_none());
+
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.chat_menu.open(ChatMenuState {
+                    chat_id: String::new(),
+                    tab: Some(("chat".into(), RightSurface::Device(id))),
+                    position: Point::default(),
+                    page: ChatMenuPage::Root,
+                });
+                shell.close_chat_menu(cx);
+                shell.rename_device_tab(RightSurface::Device(id), window, cx);
+            })
+        });
+        assert!(shell.read_with(cx, |shell, _| shell.chat_menu.get().is_some()));
+        cx.simulate_input("Discarded");
+        assert!(shell.update(cx, |shell, cx| shell.capture_escape_surface(cx)));
+        cx.run_until_parked();
+        assert_eq!(
+            title(cx),
+            "My phone",
+            "Escape reverts while the context menu is still closing"
+        );
         assert!(cx.debug_bounds("device-tab-rename").is_none());
     }
 

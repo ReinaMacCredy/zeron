@@ -3050,6 +3050,7 @@ impl Shell {
 
     fn on_state_changed(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) {
         self.prune_file_explorers(cx);
+        self.prune_device_shell(cx);
         self.prune_pr_chat_index(cx);
         self.refresh_harness_update_watch(cx);
         if state.read(cx).engine().is_none() {
@@ -11076,6 +11077,9 @@ impl Shell {
             self.acknowledge_appshot_welcome(cx);
             return true;
         }
+        if self.cancel_device_rename(cx) {
+            return true;
+        }
         if self.sync_flow.has_visible_overlay()
             || self.delete_confirm.is_some()
             || self.delete_space_confirm.is_some()
@@ -11091,9 +11095,6 @@ impl Shell {
         }
         if self.chat_rename.is_some() {
             self.finish_rename_chat(false, cx);
-            return true;
-        }
-        if self.cancel_device_rename(cx) {
             return true;
         }
         if self.rename_space_dialog.is_some() {
@@ -14570,7 +14571,8 @@ impl Render for Shell {
         }
         let chat_visible = matches!(gate, GatePhase::Ready)
             && !restart_required
-            && matches!(self.route, Route::Chat);
+            && matches!(self.route, Route::Chat)
+            && !(self.right_pane_expanded && self.right_pane_open(cx));
         self.sync_device_visibility(chat_visible, browser_active, selected_surface, cx);
 
         // Fullscreen hides the macOS traffic lights — reflow the control

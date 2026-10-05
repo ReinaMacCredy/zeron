@@ -131,6 +131,7 @@ pub enum DevicePanelEvent {
 
 struct TabRename {
     input: Entity<ComposerInput>,
+    initial: String,
     _subscriptions: [Subscription; 2],
 }
 
@@ -141,6 +142,7 @@ pub struct DevicePanel {
     custom_title: Option<String>,
     rename: Option<TabRename>,
     visible: bool,
+    seen_live: bool,
     opening: Option<String>,
     pending: Option<SetupPending>,
     setup_step: usize,
@@ -169,6 +171,7 @@ impl DevicePanel {
             custom_title: None,
             rename: None,
             visible: true,
+            seen_live: false,
             opening: None,
             pending: None,
             setup_step: 0,
@@ -222,8 +225,17 @@ impl DevicePanel {
         self.target.as_ref()
     }
 
+    pub fn is_idle_picker(&self) -> bool {
+        self.target.is_none() && self.opening.is_none()
+    }
+
     pub fn bind(&mut self, host_id: String, device_id: String, cx: &mut Context<Self>) {
-        self.target = Some((host_id, device_id));
+        let target = Some((host_id, device_id));
+        if self.target != target {
+            self.custom_title = None;
+        }
+        self.target = target;
+        self.seen_live = false;
         self.view = None;
         self.revision = None;
         self.sync(cx);
@@ -248,7 +260,7 @@ impl DevicePanel {
     }
 
     pub fn begin_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.rename.is_some() {
+        if self.rename.is_some() || self.target.is_none() {
             return;
         }
         let title = self.title(cx).to_string();
@@ -259,7 +271,7 @@ impl DevicePanel {
                 .with_accessibility_role(gpui::Role::TextInput)
         });
         input.update(cx, |input, cx| {
-            input.set_text(title, cx);
+            input.set_text(title.clone(), cx);
             input.select_all_text(cx);
         });
         let submit = cx.subscribe(&input, |panel, _, event, cx| {
@@ -274,6 +286,7 @@ impl DevicePanel {
         });
         self.rename = Some(TabRename {
             input,
+            initial: title,
             _subscriptions: [submit, blur],
         });
         cx.notify();
@@ -285,7 +298,9 @@ impl DevicePanel {
         };
         if commit {
             let text = rename.input.read(cx).text().trim().to_string();
-            self.custom_title = (!text.is_empty()).then_some(text);
+            if text != rename.initial {
+                self.custom_title = (!text.is_empty()).then_some(text);
+            }
         }
         cx.notify();
         true
@@ -314,6 +329,7 @@ impl DevicePanel {
             .map(|session| session.device_id.clone());
         match live {
             Some(device_id) => {
+                self.seen_live = true;
                 if self.view.is_none()
                     && self.visible
                     && let Some(engine) = self.state.read(cx).engine().cloned()
@@ -325,7 +341,13 @@ impl DevicePanel {
                     feed_view(view, &hub, host, &device_id, cx);
                 }
             }
-            None => self.view = None,
+            None => {
+                self.view = None;
+                if self.opening.is_none() && std::mem::take(&mut self.seen_live) {
+                    self.target = None;
+                    self.custom_title = None;
+                }
+            }
         }
         cx.notify();
     }
@@ -365,7 +387,7 @@ impl DevicePanel {
         );
     }
 
-    fn open_device(&mut self, device: HubDevice, cx: &mut Context<Self>) {
+    pub(crate) fn open_device(&mut self, device: HubDevice, cx: &mut Context<Self>) {
         if self.opening.is_some() {
             return;
         }
@@ -410,6 +432,7 @@ impl DevicePanel {
             match reply {
                 Ok(_) => {
                     panel.target = None;
+                    panel.custom_title = None;
                     panel.view = None;
                     panel.revision = None;
                     panel.sync(cx);
@@ -992,6 +1015,11 @@ pub(crate) mod tests {
             panel.update(cx, |panel, cx| panel.finish_rename(commit, cx));
             panel.read_with(cx, |panel, cx| panel.title(cx).to_string())
         };
+        assert_eq!(rename(cx, "iPhone 17", true), "iPhone 17");
+        assert!(
+            panel.read_with(cx, |panel, _| panel.custom_title.is_none()),
+            "an unedited rename does not pin the device name"
+        );
         assert_eq!(rename(cx, "  My phone ", true), "My phone");
         assert_eq!(rename(cx, "Discarded", false), "My phone", "Escape reverts");
         assert_eq!(rename(cx, "   ", true), "iPhone 17");
@@ -1015,6 +1043,7 @@ pub(crate) mod tests {
             "the stream gives way to the powering-off message"
         );
         assert!(panel.read_with(cx, |panel, _| panel.target.is_some()));
+        panel.update(cx, |panel, _| panel.custom_title = Some("My phone".into()));
         panel.update(cx, |panel, cx| panel.power_off(cx));
         wait(cx, |cx| {
             panel.read_with(cx, |panel, _| panel.target.is_none())
@@ -1034,6 +1063,7 @@ pub(crate) mod tests {
             )
         });
         assert_eq!(phase, PanelPhase::Picker);
+        assert!(panel.read_with(cx, |panel, _| panel.custom_title.is_none()));
         assert!(panel.read_with(cx, |panel, _| panel.stream_view().is_none()));
         assert!(
             state.read_with(cx, |state, _| state.device_hub.is_some()),
@@ -1042,6 +1072,48 @@ pub(crate) mod tests {
         assert!(
             cx.debug_bounds("device-more").is_none(),
             "the rail left with the stream"
+        );
+    }
+
+    #[gpui::test]
+    fn a_tab_whose_session_ends_returns_to_the_picker_and_a_new_target_drops_the_custom_title(
+        cx: &mut TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (state, panel, _calls, cx) = streaming_panel(cx, &runtime, StreamLinkStatus::Live);
+        panel.update(cx, |panel, cx| {
+            panel.custom_title = Some("My phone".into());
+            panel.bind("local".into(), "PAD".into(), cx);
+            assert_eq!(panel.custom_title, None, "a new device drops the old name");
+            assert_eq!(
+                panel.target,
+                Some(("local".into(), "PAD".into())),
+                "a session the hub has not published yet keeps the bind"
+            );
+            panel.bind("local".into(), "SIM".into(), cx);
+            panel.custom_title = Some("My phone".into());
+            panel.bind("local".into(), "SIM".into(), cx);
+            assert_eq!(panel.custom_title.as_deref(), Some("My phone"));
+        });
+        state.update(cx, |state, cx| {
+            let mut ended = hub(true);
+            ended.revision = 1;
+            state.device_hub = Some(ended);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, cx| {
+            assert_eq!(panel.target, None, "the session ended elsewhere");
+            assert_eq!(panel.custom_title, None);
+            assert_eq!(panel.title(cx).as_ref(), "Device");
+        });
+        cx.update(|window, cx| {
+            panel.update(cx, |panel, cx| panel.begin_rename(window, cx));
+        });
+        assert!(
+            panel.read_with(cx, |panel, _| panel.rename_input().is_none()),
+            "a picker tab cannot be renamed"
         );
     }
 
