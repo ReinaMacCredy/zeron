@@ -606,7 +606,7 @@ pub struct RunHubDeviceActionParams {
 #[serde(rename_all = "camelCase")]
 pub struct HubDeviceScreenshot {
     #[serde(default)]
-    pub png: String,
+    pub path: String,
     #[serde(default)]
     pub width: u32,
     #[serde(default)]

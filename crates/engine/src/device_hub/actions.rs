@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 
-use base64::Engine as _;
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use zeron_proto::device_hub::{
@@ -25,7 +24,14 @@ const INVALID_LOCATION: &str =
     "Latitude must be between -90 and 90 and longitude between -180 and 180.";
 const INVALID_APP_ID: &str = "That is not a valid bundle ID.";
 const INVALID_URL: &str = "That is not a valid URL.";
+const REFUSED_URL_SCHEME: &str =
+    "file, data, javascript and about URLs cannot be opened on the device.";
 const INVALID_PUSH: &str = "A push notification needs alert text or a JSON object payload.";
+const PUSH_TOO_LARGE: &str = "A push notification payload must be at most 4096 bytes.";
+const PUSH_LIMIT: usize = 4096;
+const EVENT_SUMMARY_LIMIT: usize = 1000;
+const EVENT_FIELD_LIMIT: usize = 64;
+const SCREENSHOT_NAME_TRIES: usize = 100;
 pub(crate) const ACTION_TIMEOUT: Duration = Duration::from_secs(20);
 const FOREGROUND_READ: Duration = Duration::from_secs(1);
 
@@ -85,8 +91,9 @@ impl Helpers {
     fn from_entry(entry: &Path, node: Option<PathBuf>) -> Self {
         let Some(dist) = entry
             .ancestors()
-            .map(|dir| dir.join("vendor/serve-sim/dist"))
-            .find(|dist| dist.is_dir())
+            .find(|dir| dir.file_name() == Some("expo-device-hub".as_ref()))
+            .map(|package| package.join("vendor/serve-sim/dist"))
+            .filter(|dist| dist.is_dir())
         else {
             return Self::default();
         };
@@ -115,7 +122,19 @@ pub(crate) fn push_payload(payload: &serde_json::Value) -> Result<String, String
         serde_json::Value::Object(_) => payload.clone(),
         _ => return Err(INVALID_PUSH.into()),
     };
-    Ok(payload.to_string())
+    let payload = payload.to_string();
+    if payload.len() > PUSH_LIMIT {
+        return Err(PUSH_TOO_LARGE.into());
+    }
+    Ok(payload)
+}
+
+fn open_url(url: &str) -> Result<String, String> {
+    let parsed = reqwest::Url::parse(url).map_err(|_| INVALID_URL.to_string())?;
+    if matches!(parsed.scheme(), "file" | "data" | "javascript" | "about") {
+        return Err(REFUSED_URL_SCHEME.into());
+    }
+    Ok(parsed.into())
 }
 
 fn ios_text_size(size: DeviceTextSize) -> &'static str {
@@ -211,9 +230,6 @@ fn validate(action: &DeviceAction) -> Result<(), String> {
             }
             push_payload(payload).map(|_| ())
         }
-        DeviceAction::OpenUrl { url } => reqwest::Url::parse(url)
-            .map(|_| ())
-            .map_err(|_| INVALID_URL.into()),
         _ => Ok(()),
     }
 }
@@ -223,7 +239,7 @@ pub(crate) fn action_argv(
     udid: &str,
     action: &DeviceAction,
     helpers: &Helpers,
-    push_file: &Path,
+    push_file: Option<&Path>,
 ) -> Result<Vec<String>, String> {
     if platform != DevicePlatform::Ios || !hub_client::valid_device_id(udid) {
         return Err(DEVICE_ACTION_UNAVAILABLE.into());
@@ -314,10 +330,11 @@ pub(crate) fn action_argv(
                 .collect()
             }
         },
-        DeviceAction::OpenUrl { url } => simctl("openurl", &[url]),
+        DeviceAction::OpenUrl { url } => simctl("openurl", &[&open_url(url)?]),
         DeviceAction::LaunchApp { app_id } => simctl("launch", &[app_id]),
         DeviceAction::TerminateApp { app_id } => simctl("terminate", &[app_id]),
         DeviceAction::SendPush { app_id, .. } => {
+            let push_file = push_file.ok_or(DEVICE_ACTION_UNAVAILABLE)?;
             simctl("push", &[app_id, &push_file.to_string_lossy()])
         }
     })
@@ -386,7 +403,8 @@ pub(crate) fn app_state(value: &serde_json::Value) -> Option<DeviceAppState> {
 
 fn event_entry(value: &serde_json::Value) -> Option<DeviceEventLogEntry> {
     let id = value["id"].as_u64()?;
-    let text = |key: &str| value[key].as_str().unwrap_or_default().to_string();
+    let cut = |text: &str, limit: usize| text.chars().take(limit).collect::<String>();
+    let text = |key: &str| cut(value[key].as_str().unwrap_or_default(), EVENT_FIELD_LIMIT);
     let summary = value["summary"]
         .as_str()
         .or_else(|| value["msg"].as_str())
@@ -395,7 +413,7 @@ fn event_entry(value: &serde_json::Value) -> Option<DeviceEventLogEntry> {
         id: id.to_string(),
         timestamp: text("timestamp"),
         kind: text("kind"),
-        summary: summary.to_string(),
+        summary: cut(summary, EVENT_SUMMARY_LIMIT),
     })
 }
 
@@ -410,6 +428,49 @@ pub(crate) fn event_batch(value: &serde_json::Value) -> Option<DeviceEventLogBat
         reset: false,
         events: vec![event_entry(&value["event"])?],
     })
+}
+
+pub(crate) fn screenshot_file_name(device_name: &str, millis: i64, attempt: usize) -> String {
+    let base: String = device_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    match attempt {
+        0 => format!("{base}-{millis}.png"),
+        n => format!("{base}-{millis}-{n}.png"),
+    }
+}
+
+pub(crate) fn save_screenshot(
+    dir: &Path,
+    device_name: &str,
+    millis: i64,
+    png: &[u8],
+) -> Result<PathBuf, String> {
+    use std::io::Write;
+    let failed = |e: std::io::Error| format!("Could not save the screenshot: {e}");
+    for attempt in 0..SCREENSHOT_NAME_TRIES {
+        let path = dir.join(screenshot_file_name(device_name, millis, attempt));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                file.write_all(png).map_err(failed)?;
+                return Ok(path);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(failed(e)),
+        }
+    }
+    Err("Could not save the screenshot: too many files with that name.".into())
 }
 
 fn private_dir() -> std::io::Result<tempfile::TempDir> {
@@ -548,8 +609,11 @@ impl DeviceHub {
     }
 
     async fn foreground_once(&self, host_id: &str, device_id: &str) -> Option<ForegroundApp> {
-        let mut feed = self.app_state_feed(Some(host_id), device_id).await.ok()?;
-        tokio::time::timeout(FOREGROUND_READ, feed.next())
+        let first = async {
+            let mut feed = self.app_state_feed(Some(host_id), device_id).await.ok()?;
+            feed.next().await
+        };
+        tokio::time::timeout(FOREGROUND_READ, first)
             .await
             .ok()
             .flatten()?
@@ -562,17 +626,22 @@ impl DeviceHub {
     ) -> Result<DeviceDetail, String> {
         let device = self.action_target(params.host_id.as_deref(), &params.device_id)?;
         let (runner, helpers) = self.action_env();
-        let dir = private_dir().map_err(|e| e.to_string())?;
-        let push_file = dir.path().join("payload.json");
+        let dir = match &params.action {
+            DeviceAction::SendPush { .. } => Some(private_dir().map_err(|e| e.to_string())?),
+            _ => None,
+        };
+        let push_file = dir.as_ref().map(|dir| dir.path().join("payload.json"));
         let argv = action_argv(
             device.platform,
             &device.id,
             &params.action,
             &helpers,
-            &push_file,
+            push_file.as_deref(),
         )?;
-        if let DeviceAction::SendPush { payload, .. } = &params.action {
-            write_private(&push_file, &push_payload(payload)?).map_err(|e| e.to_string())?;
+        if let (DeviceAction::SendPush { payload, .. }, Some(push_file)) =
+            (&params.action, &push_file)
+        {
+            write_private(push_file, &push_payload(payload)?).map_err(|e| e.to_string())?;
         }
         let lock = self.device_lock(&device.id);
         let _serial = lock.lock().await;
@@ -599,8 +668,17 @@ impl DeviceHub {
         }
         let png = super::agent::capture_simulator(&device.id).await?;
         let (width, height) = super::agent::png_dimensions(&png);
+        let downloads = crate::repos::session_home_dir()
+            .map_err(|e| format!("Could not save the screenshot: {e}"))?
+            .join("Downloads");
+        let path = save_screenshot(
+            &downloads,
+            &device.name,
+            chrono::Utc::now().timestamp_millis(),
+            &png,
+        )?;
         Ok(HubDeviceScreenshot {
-            png: base64::engine::general_purpose::STANDARD.encode(&png),
+            path: path.to_string_lossy().into_owned(),
             width,
             height,
         })
@@ -690,7 +768,7 @@ mod tests {
             UDID,
             &action,
             &helpers(),
-            Path::new("/tmp/x/payload.json"),
+            Some(Path::new("/tmp/x/payload.json")),
         )
     }
 
@@ -963,15 +1041,48 @@ mod tests {
             push_payload(&json!({"aps": {"badge": 3}})).unwrap(),
             r#"{"aps":{"badge":3}}"#
         );
+        let wrapper = r#"{"aps":{"alert":""}}"#.len();
+        assert!(push_payload(&json!("a".repeat(PUSH_LIMIT - wrapper))).is_ok());
+        assert_eq!(
+            argv(DeviceAction::SendPush {
+                app_id: "a.b".into(),
+                payload: json!("a".repeat(PUSH_LIMIT - wrapper + 1))
+            }),
+            Err(PUSH_TOO_LARGE.into())
+        );
         assert!(
             action_argv(
                 DevicePlatform::Ios,
                 "../SIM",
                 &DeviceAction::ClearLocation,
                 &helpers(),
-                Path::new("/tmp/p.json")
+                Some(Path::new("/tmp/p.json"))
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn open_url_passes_the_parsed_url_and_refuses_local_schemes() {
+        for url in [
+            "file:///etc/passwd",
+            "FILE:///etc/passwd",
+            "data:text/html,<b>x</b>",
+            "javascript:alert(1)",
+            "JavaScript:alert(1)",
+            "about:blank",
+        ] {
+            assert_eq!(
+                argv(DeviceAction::OpenUrl { url: url.into() }),
+                Err(REFUSED_URL_SCHEME.into()),
+                "{url:?}"
+            );
+        }
+        assert_eq!(
+            argv(DeviceAction::OpenUrl {
+                url: "HTTPS://Example.com".into()
+            }),
+            Ok(words("xcrun simctl openurl <udid> https://example.com/"))
         );
     }
 
@@ -998,7 +1109,7 @@ mod tests {
                 UDID,
                 &action,
                 &bare,
-                Path::new("/tmp/p.json"),
+                Some(Path::new("/tmp/p.json")),
             )
         };
         assert_eq!(
@@ -1045,7 +1156,7 @@ mod tests {
                     "emulator-5554",
                     &action,
                     &helpers(),
-                    Path::new("/tmp/p.json")
+                    Some(Path::new("/tmp/p.json"))
                 ),
                 unavailable
             );
@@ -1143,6 +1254,54 @@ mod tests {
             ))
         );
         assert!(Helpers::from_entry(&entry, None).serve_sim.is_none());
+
+        let outside = tempfile::tempdir().unwrap();
+        let decoy = outside.path().join("vendor/serve-sim/dist");
+        std::fs::create_dir_all(decoy.join("simax")).unwrap();
+        std::fs::write(decoy.join("simax/serve-sim-ax-settings"), "").unwrap();
+        let entry = outside
+            .path()
+            .join("node_modules/expo-device-hub/dist/server/cli.mjs");
+        std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        std::fs::write(&entry, "").unwrap();
+        assert!(
+            Helpers::from_entry(&entry, Some("/bin/node".into()))
+                .ax_settings
+                .is_none(),
+            "a vendor dir above the package is never used"
+        );
+    }
+
+    #[test]
+    fn screenshots_are_saved_under_a_fresh_name_and_never_through_a_symlink() {
+        assert_eq!(
+            screenshot_file_name("iPhone 17 Pro", 1_759_651_200_123, 0),
+            "iPhone-17-Pro-1759651200123.png"
+        );
+        assert_eq!(screenshot_file_name("../é/x", 5, 2), "-----x-5-2.png");
+        let dir = tempfile::tempdir().unwrap();
+        let png = [0x89, b'P', b'N', b'G', 1, 2, 3];
+        let first = save_screenshot(dir.path(), "iPhone 17", 42, &png).unwrap();
+        assert_eq!(first, dir.path().join("iPhone-17-42.png"));
+        assert_eq!(std::fs::read(&first).unwrap(), png);
+        let second = save_screenshot(dir.path(), "iPhone 17", 42, b"two").unwrap();
+        assert_eq!(second, dir.path().join("iPhone-17-42-1.png"));
+        assert_eq!(std::fs::read(&first).unwrap(), png, "never overwritten");
+
+        let sentinel = dir.path().join("sentinel");
+        std::fs::write(&sentinel, "keep").unwrap();
+        std::os::unix::fs::symlink(&sentinel, dir.path().join("Pad-7.png")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("missing"), dir.path().join("Pad-7-1.png"))
+            .unwrap();
+        let saved = save_screenshot(dir.path(), "Pad", 7, b"shot").unwrap();
+        assert_eq!(saved, dir.path().join("Pad-7-2.png"));
+        assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "keep");
+        assert!(!dir.path().join("missing").exists());
+        assert!(
+            save_screenshot(&dir.path().join("absent"), "Pad", 7, b"shot")
+                .unwrap_err()
+                .starts_with("Could not save the screenshot")
+        );
     }
 
     #[test]
@@ -1185,6 +1344,15 @@ mod tests {
         assert!(!live.reset);
         assert_eq!(live.events[0].kind, "key");
         assert_eq!(event_batch(&json!({"event": {}})), None);
+        let long = event_batch(&json!({"event": {
+            "id": 10, "timestamp": "t".repeat(500), "kind": "k".repeat(500), "summary": "s".repeat(50_000)
+        }}))
+        .unwrap();
+        let entry = &long.events[0];
+        assert_eq!(
+            (entry.timestamp.len(), entry.kind.len(), entry.summary.len()),
+            (EVENT_FIELD_LIMIT, EVENT_FIELD_LIMIT, EVENT_SUMMARY_LIMIT)
+        );
     }
 }
 
@@ -1198,7 +1366,7 @@ mod hub_tests {
         DeviceAction, DeviceAppearance, HubDevice, HubDeviceTargetParams, RunHubDeviceActionParams,
     };
 
-    use super::super::tests::{HEALTHY, enabled_hub, fake_hub};
+    use super::super::tests::{HEALTHY, HUGE_AX, STALLED_APP_STATE, enabled_hub, fake_hub};
     use super::*;
     use zeron_rpc::{RpcReply, RpcService, methods};
 
@@ -1297,6 +1465,44 @@ mod hub_tests {
         assert!(
             starts.iter().all(|start| *start < first_end),
             "different devices run side by side: {both:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stuck_app_state_feed_never_holds_the_device_lock() {
+        let (_dir, hub, _) = enabled_hub(STALLED_APP_STATE).await;
+        hub.use_actions_for_test(
+            recording_runner(Arc::default(), "light"),
+            Helpers::default(),
+        );
+        let detail = tokio::time::timeout(
+            Duration::from_secs(3),
+            hub.device_detail(HubDeviceTargetParams {
+                host_id: None,
+                device_id: "SIM-1".into(),
+            }),
+        )
+        .await
+        .expect("the foreground read is capped, connect included")
+        .unwrap();
+        assert_eq!(detail.foreground_app, None);
+        assert_eq!(detail.settings.appearance, Some(DeviceAppearance::Light));
+        tokio::time::timeout(Duration::from_secs(3), hub.run_action(dark("SIM-1")))
+            .await
+            .expect("the device lock was released")
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_oversized_ax_body_is_refused() {
+        let (_dir, hub, _) = enabled_hub(HUGE_AX).await;
+        assert_eq!(
+            hub.device_ax_tree(HubDeviceTargetParams {
+                host_id: None,
+                device_id: "SIM-1".into(),
+            })
+            .await,
+            Err(hub_client::AX_TOO_LARGE.into())
         );
     }
 

@@ -46,6 +46,19 @@ pub struct AxBox {
     pub height: f32,
 }
 
+impl AxBox {
+    pub fn displayed(self, rotation: DeviceOrientation) -> AxBox {
+        let (x0, y0) = geometry::display_point(rotation, self.x, self.y);
+        let (x1, y1) = geometry::display_point(rotation, self.x + self.width, self.y + self.height);
+        AxBox {
+            x: x0.min(x1),
+            y: y0.min(y1),
+            width: (x1 - x0).abs(),
+            height: (y1 - y0).abs(),
+        }
+    }
+}
+
 struct DecodedFrame {
     image: Arc<RenderImage>,
     width: u32,
@@ -561,7 +574,15 @@ impl Render for DeviceStreamView {
         let fps = self.fps.as_ref().map(|fps| fps.shown);
         let rail_inset = self.rail_inset;
         let corners = gpui::Corners::all(px(self.corner_radius));
-        let ax_boxes = self.ax_boxes.clone();
+        let rotation = self.image.as_ref().map_or_else(
+            || geometry::display_rotation(self.screen.as_ref()),
+            |shown| shown.rotation,
+        );
+        let ax_boxes: Vec<AxBox> = self
+            .ax_boxes
+            .iter()
+            .map(|ax| ax.displayed(rotation))
+            .collect();
         let ax_color = theme.accent;
         let dragging = self.pressed.is_some().then(|| cx.entity().downgrade());
         let connecting = self.awaiting_frame && self.video_error.is_none();
@@ -1354,5 +1375,28 @@ mod tests {
         assert_eq!((width, height), (39, 18));
         let frame = view.read_with(cx, |view, _| view.frame_box().unwrap());
         assert!(frame.size.width > frame.size.height);
+    }
+
+    #[test]
+    fn ax_boxes_turn_with_the_displayed_frame() {
+        let raw = AxBox {
+            x: 0.1,
+            y: 0.2,
+            width: 0.3,
+            height: 0.4,
+        };
+        for (rotation, shown) in [
+            (DeviceOrientation::Portrait, [0.1, 0.2, 0.3, 0.4]),
+            (DeviceOrientation::LandscapeLeft, [0.4, 0.1, 0.4, 0.3]),
+            (DeviceOrientation::LandscapeRight, [0.2, 0.6, 0.4, 0.3]),
+            (DeviceOrientation::PortraitUpsideDown, [0.6, 0.4, 0.3, 0.4]),
+        ] {
+            let got = raw.displayed(rotation);
+            let got = [got.x, got.y, got.width, got.height];
+            assert!(
+                got.iter().zip(shown).all(|(a, b)| (a - b).abs() < 1e-5),
+                "{rotation:?}: {got:?}"
+            );
+        }
     }
 }

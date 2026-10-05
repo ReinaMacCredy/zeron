@@ -154,7 +154,7 @@ impl HubClient<'_> {
         let unreadable = |e: reqwest::Error| {
             format!("Reading the accessibility tree failed: {}", e.without_url())
         };
-        let payload: serde_json::Value = self
+        let body = self
             .http
             .get(format!(
                 "{}/vendor/serve-sim/helper/{}/ax",
@@ -166,9 +166,13 @@ impl HubClient<'_> {
             .await
             .and_then(|r| r.error_for_status())
             .map_err(unreadable)?
-            .json()
-            .await
-            .map_err(unreadable)?;
+            .bytes_stream();
+        let body = read_capped(body, AX_BODY_LIMIT).await.map_err(unreadable)?;
+        let payload: serde_json::Value = match body {
+            Some(body) => serde_json::from_slice(&body)
+                .map_err(|e| format!("Reading the accessibility tree failed: {e}"))?,
+            None => return Err(AX_TOO_LARGE.into()),
+        };
         match payload {
             serde_json::Value::Array(roots) => {
                 let mut budget = AX_NODE_LIMIT;
@@ -232,7 +236,26 @@ pub(crate) type SseStream = futures::stream::BoxStream<'static, serde_json::Valu
 
 const AX_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const AX_NODE_LIMIT: usize = 500;
+pub(crate) const AX_BODY_LIMIT: usize = 4 << 20;
+pub(crate) const AX_TOO_LARGE: &str = "The accessibility tree is too large to show.";
 pub(crate) const EVENT_LOG_LIMIT: usize = 100;
+const SSE_LINE_LIMIT: usize = 1 << 20;
+const SSE_EVENT_LIMIT: usize = 1 << 20;
+
+async fn read_capped<B: AsRef<[u8]>, E>(
+    chunks: impl futures::Stream<Item = Result<B, E>>,
+    limit: usize,
+) -> Result<Option<Vec<u8>>, E> {
+    let mut chunks = std::pin::pin!(chunks);
+    let mut body = Vec::new();
+    while let Some(chunk) = chunks.next().await {
+        body.extend_from_slice(chunk?.as_ref());
+        if body.len() > limit {
+            return Ok(None);
+        }
+    }
+    Ok(Some(body))
+}
 
 pub(crate) fn ax_nodes(items: &[serde_json::Value], budget: &mut usize) -> Vec<DeviceAxNode> {
     let mut nodes = Vec::new();
@@ -267,6 +290,8 @@ pub(crate) fn ax_nodes(items: &[serde_json::Value], budget: &mut usize) -> Vec<D
 pub(crate) struct SseParser {
     line: Vec<u8>,
     data: Vec<String>,
+    data_len: usize,
+    dropping: bool,
 }
 
 impl SseParser {
@@ -274,7 +299,12 @@ impl SseParser {
         let mut events = Vec::new();
         for &byte in chunk {
             if byte != b'\n' {
-                self.line.push(byte);
+                if self.line.len() < SSE_LINE_LIMIT {
+                    self.line.push(byte);
+                } else {
+                    self.dropping = true;
+                    self.data.clear();
+                }
                 continue;
             }
             let line = String::from_utf8_lossy(&self.line)
@@ -282,13 +312,23 @@ impl SseParser {
                 .to_string();
             self.line.clear();
             if line.is_empty() {
-                if !self.data.is_empty() {
+                if !self.data.is_empty() && !self.dropping {
                     events.push(self.data.join("\n"));
-                    self.data.clear();
                 }
+                self.data.clear();
+                self.data_len = 0;
+                self.dropping = false;
+            } else if self.dropping {
+                continue;
             } else if let Some(data) = line.strip_prefix("data:") {
-                self.data
-                    .push(data.strip_prefix(' ').unwrap_or(data).to_string());
+                let data = data.strip_prefix(' ').unwrap_or(data);
+                self.data_len += data.len() + 1;
+                if self.data_len > SSE_EVENT_LIMIT {
+                    self.dropping = true;
+                    self.data.clear();
+                } else {
+                    self.data.push(data.to_string());
+                }
             }
         }
         events
@@ -296,7 +336,9 @@ impl SseParser {
 }
 
 pub(crate) fn valid_device_id(id: &str) -> bool {
-    !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    !id.is_empty()
+        && !id.starts_with('-')
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
 fn path_segment(id: &str) -> String {
@@ -322,6 +364,9 @@ mod tests {
             "a_b",
             "a?device=b",
             "a b",
+            "-",
+            "-x",
+            "--set",
         ] {
             assert!(!valid_device_id(id), "{id:?}");
         }
@@ -343,6 +388,32 @@ mod tests {
                 "{\"a\":\n1}".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn sse_drops_overlong_lines_and_oversized_events_and_recovers() {
+        let mut parser = SseParser::default();
+        let long_line = format!("data: {}\n\n", "x".repeat(SSE_LINE_LIMIT + 10));
+        assert!(parser.push(long_line.as_bytes()).is_empty());
+        assert!(parser.line.is_empty());
+        let line = format!("data: {}\n", "y".repeat(SSE_LINE_LIMIT / 2));
+        assert!(parser.push(line.repeat(3).as_bytes()).is_empty());
+        assert!(parser.data.is_empty(), "an oversized event is not buffered");
+        assert_eq!(parser.push(b"\ndata: {\"ok\":1}\n\n"), vec!["{\"ok\":1}"]);
+    }
+
+    #[tokio::test]
+    async fn bodies_past_the_cap_are_refused_before_parsing() {
+        let chunks = |n: usize| {
+            futures::stream::iter(
+                (0..n).map(|_| Ok::<_, std::convert::Infallible>(vec![b'a'; 1024])),
+            )
+        };
+        assert_eq!(
+            read_capped(chunks(4), 4096).await,
+            Ok(Some(vec![b'a'; 4096]))
+        );
+        assert_eq!(read_capped(chunks(5), 4096).await, Ok(None));
     }
 
     #[test]

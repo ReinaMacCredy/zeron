@@ -196,6 +196,15 @@ pub fn raw_point(rotation: DeviceOrientation, x: f32, y: f32) -> (f32, f32) {
     }
 }
 
+pub fn display_point(rotation: DeviceOrientation, x: f32, y: f32) -> (f32, f32) {
+    match rotation {
+        DeviceOrientation::LandscapeLeft => (1.0 - y, x),
+        DeviceOrientation::LandscapeRight => (y, 1.0 - x),
+        DeviceOrientation::PortraitUpsideDown => (1.0 - x, 1.0 - y),
+        DeviceOrientation::Portrait => (x, y),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,5 +424,26 @@ mod tests {
         assert_eq!(raw(None), (0.25, 0.75));
         let already_landscape = screen(DeviceOrientation::LandscapeLeft, 1280, 588);
         assert_eq!(raw(Some(&already_landscape)), (0.25, 0.75));
+    }
+
+    #[test]
+    fn display_point_inverts_raw_point_in_every_orientation() {
+        for (rotation, shown) in [
+            (DeviceOrientation::Portrait, (0.1, 0.2)),
+            (DeviceOrientation::LandscapeLeft, (0.8, 0.1)),
+            (DeviceOrientation::LandscapeRight, (0.2, 0.9)),
+            (DeviceOrientation::PortraitUpsideDown, (0.9, 0.8)),
+        ] {
+            let (x, y) = display_point(rotation, 0.1, 0.2);
+            assert!(
+                close(x, shown.0) && close(y, shown.1),
+                "{rotation:?}: ({x}, {y})"
+            );
+            let (rx, ry) = raw_point(rotation, x, y);
+            assert!(
+                close(rx, 0.1) && close(ry, 0.2),
+                "{rotation:?}: ({rx}, {ry})"
+            );
+        }
     }
 }

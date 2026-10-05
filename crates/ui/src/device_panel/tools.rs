@@ -1,8 +1,6 @@
 use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use base64::Engine as _;
 use gpui::{
     Context, Entity, SharedString, Stateful, Subscription, Task, WeakEntity, Window, div,
     prelude::*, px,
@@ -10,8 +8,8 @@ use gpui::{
 use zeron_proto::device_hub::{
     ColorFilter, DeviceAction, DeviceAppState, DeviceAppearance, DeviceAxNode, DeviceAxTree,
     DeviceDetail, DeviceEventLogBatch, DeviceEventLogEntry, DevicePermission,
-    DeviceSettingsSnapshot, DeviceTextSize, DeviceToggle, ForegroundApp, HubDeviceScreenshot,
-    LiquidGlass, PermissionDecision,
+    DeviceSettingsSnapshot, DeviceTextSize, DeviceToggle, ForegroundApp, LiquidGlass,
+    PermissionDecision,
 };
 use zeron_rpc::methods;
 
@@ -74,38 +72,6 @@ const TOGGLES: [(DeviceToggle, &str); 5] = [
     (DeviceToggle::VoiceOver, "VoiceOver"),
 ];
 
-pub fn screenshot_file_name(device_name: &str, millis: i64) -> String {
-    let base: String = device_name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    format!("{base}-{millis}.png")
-}
-
-pub fn downloads_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Downloads"))
-}
-
-pub fn save_screenshot(
-    dir: &Path,
-    device_name: &str,
-    millis: i64,
-    shot: &HubDeviceScreenshot,
-) -> Result<PathBuf, String> {
-    let png = base64::engine::general_purpose::STANDARD
-        .decode(&shot.png)
-        .map_err(|e| format!("The screenshot could not be read: {e}"))?;
-    let path = dir.join(screenshot_file_name(device_name, millis));
-    std::fs::write(&path, png).map_err(|e| format!("Could not save the screenshot: {e}"))?;
-    Ok(path)
-}
-
 pub fn ax_boxes(tree: &DeviceAxTree) -> Vec<AxBox> {
     let Some(root) = tree.nodes.first() else {
         return Vec::new();
@@ -117,12 +83,20 @@ pub fn ax_boxes(tree: &DeviceAxTree) -> Vec<AxBox> {
             let frame = node.frame;
             let covers =
                 (frame.width - screen.0).abs() < 0.5 && (frame.height - screen.1).abs() < 0.5;
-            if !covers && frame.width > 0.0 && frame.height > 0.0 {
+            let (left, top) = (
+                (frame.x / screen.0).clamp(0.0, 1.0),
+                (frame.y / screen.1).clamp(0.0, 1.0),
+            );
+            let (right, bottom) = (
+                ((frame.x + frame.width) / screen.0).clamp(0.0, 1.0),
+                ((frame.y + frame.height) / screen.1).clamp(0.0, 1.0),
+            );
+            if !covers && right > left && bottom > top {
                 boxes.push(AxBox {
-                    x: (frame.x / screen.0) as f32,
-                    y: (frame.y / screen.1) as f32,
-                    width: (frame.width / screen.0) as f32,
-                    height: (frame.height / screen.1) as f32,
+                    x: left as f32,
+                    y: top as f32,
+                    width: (right - left) as f32,
+                    height: (bottom - top) as f32,
                 });
             }
             visit(&node.children, screen, boxes);
@@ -282,7 +256,12 @@ impl DeviceControls {
         }
     }
 
-    fn apply(&mut self, revision: u64, reply: Result<serde_json::Value, String>) {
+    fn apply(
+        &mut self,
+        revision: u64,
+        keep_foreground: bool,
+        reply: Result<serde_json::Value, String>,
+    ) {
         if revision != self.revision {
             return;
         }
@@ -292,7 +271,7 @@ impl DeviceControls {
         }) {
             Ok(mut detail) => {
                 let DeviceDetail { foreground_app, .. } = &mut detail;
-                if foreground_app.is_none() {
+                if keep_foreground && foreground_app.is_none() {
                     *foreground_app = self.detail.take().and_then(|old| old.foreground_app);
                 }
                 self.detail = Some(detail);
@@ -302,7 +281,13 @@ impl DeviceControls {
         }
     }
 
-    fn send(&mut self, method: &'static str, params: serde_json::Value, cx: &mut Context<Self>) {
+    fn send(
+        &mut self,
+        method: &'static str,
+        params: serde_json::Value,
+        keep_foreground: bool,
+        cx: &mut Context<Self>,
+    ) {
         self.revision += 1;
         let revision = self.revision;
         let engine = self.engine.clone();
@@ -313,7 +298,7 @@ impl DeviceControls {
                 .await
                 .map_err(|error| error.to_string());
             this.update(cx, |controls, cx| {
-                controls.apply(revision, reply);
+                controls.apply(revision, keep_foreground, reply);
                 cx.notify();
             })
             .ok();
@@ -324,7 +309,7 @@ impl DeviceControls {
         if self.pending {
             return;
         }
-        self.send(methods::GET_HUB_DEVICE_DETAIL, self.target(), cx);
+        self.send(methods::GET_HUB_DEVICE_DETAIL, self.target(), false, cx);
     }
 
     pub fn act(&mut self, action: DeviceAction, cx: &mut Context<Self>) {
@@ -333,9 +318,10 @@ impl DeviceControls {
         }
         self.pending = true;
         self.error = None;
+        let keep_foreground = !matches!(action, DeviceAction::TerminateApp { .. });
         let mut params = self.target();
         params["action"] = serde_json::to_value(action).unwrap_or_default();
-        self.send(methods::RUN_HUB_DEVICE_ACTION, params, cx);
+        self.send(methods::RUN_HUB_DEVICE_ACTION, params, keep_foreground, cx);
         cx.notify();
     }
 
@@ -466,6 +452,9 @@ impl DeviceControls {
             Field::AppId => return self.decide(PermissionDecision::Grant, cx),
             _ => return,
         };
+        if self.disabled() {
+            return;
+        }
         self.act(action, cx);
         if matches!(field, Field::Url | Field::Bundle | Field::Push) {
             self.input(field)
@@ -795,11 +784,13 @@ impl DeviceControls {
                 }),
             )
         });
+        let filter_known = settings.color_filter.is_some();
         let filters =
             COLOR_FILTERS
                 .into_iter()
                 .enumerate()
                 .fold(chips(), |el, (i, (value, label))| {
+                    let enabled = enabled && filter_known;
                     el.child(
                         chip(
                             format!("device-tool-filter-{i}"),
@@ -1467,28 +1458,103 @@ mod tests {
         });
     }
 
-    #[test]
-    fn screenshots_are_named_after_the_device_and_saved_as_png() {
+    #[gpui::test]
+    fn submitting_while_an_action_is_pending_keeps_the_typed_text(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (panel, calls, cx) = panel_with(cx, &runtime, (1000.0, 2400.0));
+        let controls = controls(&panel, cx);
+        controls.update(cx, |controls, _| controls.pending = true);
+        for field in [Field::Url, Field::Bundle, Field::Push] {
+            let input = controls.read_with(cx, |controls, _| controls.input(field).clone());
+            input.update(cx, |input, cx| input.set_text("com.example.app", cx));
+            controls.update(cx, |controls, cx| controls.submit(field, cx));
+            assert_eq!(
+                input.read_with(cx, |input, _| input.text().to_string()),
+                "com.example.app"
+            );
+        }
+        controls.update(cx, |controls, _| controls.pending = false);
+        act_and_wait(cx, &calls, "device-appearance");
         assert_eq!(
-            screenshot_file_name("iPhone 17 Pro", 1_759_651_200_123),
-            "iPhone-17-Pro-1759651200123.png"
+            actions(&calls),
+            vec![json!({"setAppearance": {"value": "dark"}})]
         );
-        assert_eq!(screenshot_file_name("../é/x", 5), "-----x-5.png");
-        let dir = tempfile::tempdir().unwrap();
-        let png = [0x89, b'P', b'N', b'G', 1, 2, 3];
-        let shot = HubDeviceScreenshot {
-            png: base64::engine::general_purpose::STANDARD.encode(png),
-            width: 1206,
-            height: 2622,
+    }
+
+    #[gpui::test]
+    fn only_action_replies_keep_the_last_foreground_app(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (panel, _calls, cx) = panel_with(cx, &runtime, (1000.0, 2400.0));
+        let controls = controls(&panel, cx);
+        let without_app = || {
+            let mut reply = detail("light", false);
+            reply["foregroundApp"] = serde_json::Value::Null;
+            Ok(reply)
         };
-        let path = save_screenshot(dir.path(), "iPhone 17", 42, &shot).unwrap();
-        assert_eq!(path, dir.path().join("iPhone-17-42.png"));
-        assert_eq!(std::fs::read(&path).unwrap(), png);
-        let bad = HubDeviceScreenshot {
-            png: "%%%".into(),
-            ..Default::default()
+        let shown = |cx: &mut VisualTestContext| {
+            controls.read_with(cx, |controls, _| {
+                controls.foreground_app().map(|app| app.id)
+            })
         };
-        assert!(save_screenshot(dir.path(), "x", 1, &bad).is_err());
+        assert_eq!(shown(cx).as_deref(), Some("com.apple.Maps"));
+        controls.update(cx, |controls, _| {
+            controls.apply(controls.revision, true, without_app())
+        });
+        assert_eq!(shown(cx).as_deref(), Some("com.apple.Maps"), "action reply");
+        controls.update(cx, |controls, _| {
+            controls.apply(controls.revision, false, without_app())
+        });
+        assert_eq!(shown(cx), None, "detail read or terminate reply");
+    }
+
+    #[gpui::test]
+    fn color_filter_chips_wait_for_a_known_filter(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (panel, calls, cx) = panel_with(cx, &runtime, (1000.0, 2400.0));
+        click(cx, "device-tools-toggle");
+        wait(cx, |cx| cx.debug_bounds("device-tools").is_some());
+        let controls = controls(&panel, cx);
+        wait(cx, |cx| {
+            controls.read_with(cx, |controls, _| !controls.disabled())
+        });
+        controls.update(cx, |controls, cx| {
+            if let Some(detail) = controls.detail.as_mut() {
+                detail.settings.color_filter = None;
+            }
+            controls.revision += 1;
+            cx.notify();
+        });
+        redraw(cx);
+        click(cx, "device-tool-filter-1");
+        act_and_wait(cx, &calls, "device-tool-glass-Tinted");
+        assert_eq!(
+            actions(&calls),
+            vec![json!({"setLiquidGlass": {"value": "tinted"}})]
+        );
+    }
+
+    #[gpui::test]
+    fn the_text_size_menu_closes_when_the_controls_are_rebuilt(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (panel, _calls, cx) = panel_with(cx, &runtime, (600.0, 900.0));
+        click(cx, "device-text-size");
+        wait(cx, |cx| cx.debug_bounds("device-text-size-0").is_some());
+        panel.update(cx, |panel, cx| panel.set_visible(false, cx));
+        panel.update(cx, |panel, cx| panel.set_visible(true, cx));
+        redraw(cx);
+        wait(cx, |cx| {
+            panel.read_with(cx, |panel, cx| {
+                panel
+                    .controls()
+                    .is_some_and(|controls| !controls.read(cx).disabled())
+            })
+        });
+        redraw(cx);
+        assert!(cx.debug_bounds("device-text-size-0").is_none());
     }
 
     #[test]
@@ -1518,17 +1584,28 @@ mod tests {
                         vec![node(20.0, 40.0, 100.0, 40.0, vec![])],
                     ),
                     node(10.0, 10.0, 0.0, 10.0, vec![]),
+                    node(150.0, -40.0, 100.0, 80.0, vec![]),
+                    node(-80.0, 500.0, 40.0, 40.0, vec![]),
                 ],
             )],
         };
         assert_eq!(
             ax_boxes(&tree),
-            vec![AxBox {
-                x: 0.1,
-                y: 0.1,
-                width: 0.5,
-                height: 0.1
-            }]
+            vec![
+                AxBox {
+                    x: 0.1,
+                    y: 0.1,
+                    width: 0.5,
+                    height: 0.1
+                },
+                AxBox {
+                    x: 0.75,
+                    y: 0.0,
+                    width: 0.25,
+                    height: 0.1
+                }
+            ],
+            "a box past the edge is clipped, one fully outside is skipped"
         );
         assert!(ax_boxes(&DeviceAxTree::default()).is_empty());
 

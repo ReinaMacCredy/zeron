@@ -962,6 +962,8 @@ mod tests {
         shutdown_flips: bool,
         frame: &'static str,
         attach_delay: Duration,
+        stall_app_state: bool,
+        huge_ax: bool,
     }
 
     pub(super) const HEALTHY: Fake = Fake {
@@ -972,6 +974,18 @@ mod tests {
         shutdown_flips: true,
         frame: "frame",
         attach_delay: Duration::ZERO,
+        stall_app_state: false,
+        huge_ax: false,
+    };
+
+    pub(super) const STALLED_APP_STATE: Fake = Fake {
+        stall_app_state: true,
+        ..HEALTHY
+    };
+
+    pub(super) const HUGE_AX: Fake = Fake {
+        huge_ax: true,
+        ..HEALTHY
     };
 
     pub(super) async fn fake_hub() -> (String, Requests) {
@@ -1007,7 +1021,12 @@ mod tests {
                         }
                         return;
                     }
-                    let sse = if line.starts_with("GET /vendor/serve-sim/appstate?device=SIM-1 ") {
+                    let app_state =
+                        line.starts_with("GET /vendor/serve-sim/appstate?device=SIM-1 ");
+                    if app_state && fake.stall_app_state {
+                        std::future::pending::<()>().await;
+                    }
+                    let sse = if app_state {
                         Some(
                             ": \n\ndata: {\"bundleId\":\"com.apple.Maps\",\"pid\":7,\"isReactNative\":false}\n\n",
                         )
@@ -1028,8 +1047,14 @@ mod tests {
                     let (status, body) = if line
                         .starts_with("GET /vendor/serve-sim/helper/SIM-1/ax ")
                     {
+                        let pad = if fake.huge_ax {
+                            "x".repeat(super::hub_client::AX_BODY_LIMIT + 1)
+                        } else {
+                            String::new()
+                        };
                         let body = serde_json::json!([{
                             "frame": {"x": 0, "y": 0, "width": 402, "height": 874},
+                            "AXValue": pad,
                             "AXLabel": "SpringBoard", "type": "Application",
                             "children": [{"frame": {"x": 20, "y": 60, "width": 64, "height": 64},
                                 "AXLabel": "Maps", "AXUniqueId": "Maps", "type": "Icon"}]

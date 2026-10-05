@@ -15,7 +15,7 @@ use gpui::{
     Window, div, prelude::*, px,
 };
 use zeron_proto::device_hub::{
-    DeviceHostStatus, DeviceHubState, DevicePlatform, DeviceSession, HubDevice,
+    DeviceHostStatus, DeviceHubState, DevicePlatform, DeviceSession, HubDevice, HubDeviceScreenshot,
 };
 use zeron_rpc::methods;
 
@@ -280,6 +280,7 @@ impl DevicePanel {
     fn drop_view(&mut self) {
         self.view = None;
         self.controls = None;
+        self.text_size = Default::default();
     }
 
     pub fn controls(&self) -> Option<&Entity<DeviceControls>> {
@@ -492,36 +493,21 @@ impl DevicePanel {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        let name = self
-            .device(cx)
-            .map_or_else(|| device_id.clone(), |device| device.name.clone());
         let params = serde_json::json!({ "hostId": host_id, "deviceId": device_id });
         self.error = None;
         self.screenshot_task = Some(cx.spawn(async move |this, cx| {
-            let reply = engine
+            let saved = engine
                 .client()
                 .call(methods::HUB_DEVICE_SCREENSHOT, params)
                 .await
-                .map_err(|error| error.to_string());
-            let saved = cx
-                .background_spawn(async move {
-                    let shot = serde_json::from_value(reply?).map_err(|e| e.to_string())?;
-                    let dir = tools::downloads_dir()
-                        .ok_or_else(|| "The Downloads folder could not be found.".to_string())?;
-                    tools::save_screenshot(
-                        &dir,
-                        &name,
-                        chrono::Utc::now().timestamp_millis(),
-                        &shot,
-                    )
-                })
-                .await;
+                .map_err(|error| error.to_string())
+                .and_then(|reply| {
+                    serde_json::from_value::<HubDeviceScreenshot>(reply).map_err(|e| e.to_string())
+                });
             this.update(cx, |panel, cx| {
                 panel.screenshot_task = None;
                 match saved {
-                    Ok(path) => {
-                        panel.show_toast(format!("Saved screenshot to {}", path.display()), cx)
-                    }
+                    Ok(shot) => panel.show_toast(format!("Saved screenshot to {}", shot.path), cx),
                     Err(error) => panel.error = Some(error.into()),
                 }
                 cx.notify();
