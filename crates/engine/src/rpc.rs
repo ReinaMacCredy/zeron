@@ -1636,6 +1636,14 @@ where
     Ok(registry.descriptors())
 }
 
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 fn forward_deadline(method: &str) -> std::time::Duration {
     use std::time::Duration;
     match method {
@@ -3329,7 +3337,7 @@ impl RpcService for EngineRpc {
                     _ => None,
                 };
                 // A task of its own: under the dispatcher's frame a debug build overflows the 2 MB worker stack.
-                tokio::spawn(async move {
+                let mut task = AbortOnDrop(tokio::spawn(async move {
                     let identity = repos
                         .checkout_identity(std::path::Path::new(&p.cwd))
                         .await
@@ -3382,9 +3390,10 @@ impl RpcService for EngineRpc {
                         checksum: snapshot.checksum,
                         updated_at: chrono::Utc::now(),
                     })
-                })
-                .await
-                .map_err(|e| RpcError::Failed(format!("checkout diff task failed: {e}")))?
+                }));
+                (&mut task.0)
+                    .await
+                    .map_err(|e| RpcError::Failed(format!("checkout diff task failed: {e}")))?
             }
             methods::DISCARD_WORKING_TREE => {
                 // This destructive branch performs several nested filesystem
@@ -6110,6 +6119,22 @@ mod tests {
             let error = diff(params).await.err().expect(expected);
             assert!(error.to_string().contains(expected), "{error}");
         }
+    }
+
+    #[tokio::test]
+    async fn dropping_a_spawned_rpc_capture_cancels_its_task() {
+        let (alive, gone) = tokio::sync::oneshot::channel::<()>();
+        let task = AbortOnDrop(tokio::spawn(async move {
+            let _alive = alive;
+            std::future::pending::<()>().await;
+        }));
+        drop(task);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), gone)
+                .await
+                .expect("the task outlived its caller")
+                .is_err()
+        );
     }
 
     #[tokio::test]
