@@ -73,7 +73,9 @@ pub struct DevicePanel {
     error: Option<SharedString>,
     view: Option<Entity<DeviceStreamView>>,
     revision: Option<u64>,
-    task: Option<Task<()>>,
+    configure_task: Option<Task<()>>,
+    list_task: Option<Task<()>>,
+    open_task: Option<Task<()>>,
     _state: Subscription,
 }
 
@@ -90,7 +92,9 @@ impl DevicePanel {
             error: None,
             view: None,
             revision: None,
-            task: None,
+            configure_task: None,
+            list_task: None,
+            open_task: None,
             _state: observer,
         };
         panel.sync(cx);
@@ -154,11 +158,9 @@ impl DevicePanel {
         params: serde_json::Value,
         cx: &mut Context<Self>,
         done: impl FnOnce(&mut Self, Result<serde_json::Value, String>, &mut Context<Self>) + 'static,
-    ) {
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        self.task = Some(cx.spawn(async move |this, cx| {
+    ) -> Option<Task<()>> {
+        let engine = self.state.read(cx).engine().cloned()?;
+        Some(cx.spawn(async move |this, cx| {
             let reply = engine
                 .client()
                 .call(method, params)
@@ -169,14 +171,14 @@ impl DevicePanel {
                 cx.notify();
             })
             .ok();
-        }));
+        }))
     }
 
     fn enable(&mut self, cx: &mut Context<Self>) {
         self.enabling = true;
         self.error = None;
         let params = serde_json::json!({ "enabled": true, "onboardingCompleted": true });
-        self.call(
+        self.configure_task = self.call(
             methods::CONFIGURE_DEVICE_HUB,
             params,
             cx,
@@ -190,7 +192,7 @@ impl DevicePanel {
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        self.call(
+        self.list_task = self.call(
             methods::LIST_HUB_DEVICES,
             serde_json::json!({}),
             cx,
@@ -214,7 +216,7 @@ impl DevicePanel {
             "deviceId": device.id,
             "platform": device.platform,
         });
-        self.call(methods::OPEN_HUB_DEVICE, params, cx, |panel, reply, cx| {
+        self.open_task = self.call(methods::OPEN_HUB_DEVICE, params, cx, |panel, reply, cx| {
             panel.opening = None;
             match reply.and_then(|value| {
                 serde_json::from_value::<DeviceSession>(value).map_err(|e| e.to_string())
@@ -397,7 +399,31 @@ impl Render for DevicePanel {
                 cx.listener(|panel, _, _, cx| panel.enable(cx)),
             ),
             PanelPhase::Loading(text) => self.render_message(&theme, text, true, cx),
-            PanelPhase::Failed(text) => self.render_message(&theme, text, false, cx),
+            PanelPhase::Failed(text) => div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .child(self.render_message(&theme, text, false, cx)),
+                )
+                .child(
+                    div()
+                        .id("device-retry")
+                        .debug_selector(|| "device-retry".into())
+                        .flex_none()
+                        .self_center()
+                        .mb(px(16.0))
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.text_muted)
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(theme.text))
+                        .child("Retry")
+                        .on_click(cx.listener(|panel, _, _, cx| panel.refresh(cx))),
+                )
+                .into_any_element(),
             PanelPhase::Stream => match &self.view {
                 Some(view) => view.clone().into_any_element(),
                 None => self.render_message(&theme, "Opening device...".into(), true, cx),
@@ -436,7 +462,113 @@ impl Render for DevicePanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::{Modifiers, TestAppContext, VisualTestContext};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
     use zeron_proto::device_hub::{DeviceBooting, DeviceHubSettings};
+
+    type Calls = Arc<Mutex<Vec<String>>>;
+
+    fn fake_engine(runtime: &tokio::runtime::Runtime) -> (crate::state::EngineHandle, Calls) {
+        let (out, mut frames) = tokio::sync::mpsc::channel::<String>(64);
+        let (replies, inbound) = tokio::sync::mpsc::channel::<String>(64);
+        let calls: Calls = Arc::default();
+        let seen = calls.clone();
+        runtime.spawn(async move {
+            while let Some(frame) = frames.recv().await {
+                let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+                let method = frame["method"].as_str().unwrap_or_default().to_string();
+                seen.lock().unwrap().push(method.clone());
+                let delay = if method == methods::CONFIGURE_DEVICE_HUB {
+                    Duration::from_millis(200)
+                } else {
+                    Duration::ZERO
+                };
+                let replies = replies.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(delay).await;
+                    let reply = serde_json::json!({ "id": frame["id"], "ok": {} });
+                    let _ = replies.send(reply.to_string()).await;
+                });
+            }
+            std::future::pending::<()>().await;
+        });
+        let client = zeron_rpc::RpcClient::new(out, inbound);
+        (crate::state::EngineHandle::from_test_client(client), calls)
+    }
+
+    fn app_state(
+        cx: &mut TestAppContext,
+        runtime: &tokio::runtime::Runtime,
+        hub: DeviceHubState,
+    ) -> (Entity<AppState>, Calls) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+        });
+        cx.executor().allow_parking();
+        let (engine, calls) = fake_engine(runtime);
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.set_test_engine(engine);
+            state.device_hub = Some(hub);
+            state
+        });
+        (state, calls)
+    }
+
+    fn wait(cx: &mut VisualTestContext, mut done: impl FnMut(&mut VisualTestContext) -> bool) {
+        for _ in 0..400 {
+            cx.run_until_parked();
+            if done(cx) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("condition never held");
+    }
+
+    fn lists(calls: &Calls) -> usize {
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|method| *method == methods::LIST_HUB_DEVICES)
+            .count()
+    }
+
+    #[gpui::test]
+    fn a_list_started_while_enabling_does_not_drop_the_enable_reply(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (state, calls) = app_state(cx, &runtime, hub(false));
+        let (panel, cx) =
+            cx.add_window_view(|_, cx| DevicePanel::new(state.clone(), "chat".into(), cx));
+        panel.update(cx, |panel, cx| panel.enable(cx));
+        state.update(cx, |state, cx| {
+            let mut enabled = hub(true);
+            enabled.revision = 1;
+            state.device_hub = Some(enabled);
+            cx.notify();
+        });
+        wait(cx, |_| lists(&calls) == 1);
+        wait(cx, |cx| panel.read_with(cx, |panel, _| !panel.enabling));
+    }
+
+    #[gpui::test]
+    fn retry_in_the_failed_phase_lists_again(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let mut failed = hub(true);
+        failed.host_status = DeviceHostStatus::Failed;
+        failed.host_status_detail = Some("npm missing".into());
+        let (state, calls) = app_state(cx, &runtime, failed);
+        let (_panel, cx) = cx.add_window_view(|_, cx| DevicePanel::new(state, "chat".into(), cx));
+        wait(cx, |_| lists(&calls) == 1);
+        let retry = cx.debug_bounds("device-retry").expect("Retry is shown");
+        cx.simulate_click(retry.center(), Modifiers::default());
+        wait(cx, |_| lists(&calls) == 2);
+    }
 
     fn hub(enabled: bool) -> DeviceHubState {
         DeviceHubState {

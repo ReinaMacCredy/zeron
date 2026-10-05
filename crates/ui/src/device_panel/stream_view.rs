@@ -161,6 +161,7 @@ async fn drain_frames(
 pub struct DeviceStreamView {
     device_id: String,
     image: Option<DecodedFrame>,
+    painted: bool,
     retired: Vec<Arc<RenderImage>>,
     slot: Arc<Mutex<Option<DecodedFrame>>>,
     screen: Option<DeviceScreenConfig>,
@@ -209,6 +210,7 @@ impl DeviceStreamView {
         Self {
             device_id,
             image: None,
+            painted: false,
             retired: Vec::new(),
             slot,
             screen: None,
@@ -242,7 +244,9 @@ impl DeviceStreamView {
         else {
             return;
         };
-        if let Some(old) = self.image.replace(frame) {
+        if let Some(old) = self.image.replace(frame)
+            && std::mem::take(&mut self.painted)
+        {
             self.retired.push(old.image);
         }
         if let Some(fps) = &mut self.fps {
@@ -304,6 +308,7 @@ impl Render for DeviceStreamView {
         for old in self.retired.drain(..) {
             let _ = window.drop_image(old);
         }
+        self.painted = self.image.is_some();
         let theme = Theme::of(cx).clone();
         let image = self.image.as_ref().map(|frame| frame.image.clone());
         let aspect = self.aspect();
@@ -489,6 +494,38 @@ mod tests {
                 touch(TouchPhase::Move, 0.6),
             ]
         );
+    }
+
+    #[gpui::test]
+    fn frames_that_were_never_painted_are_released_instead_of_retired(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+        });
+        let (engine, _) = fake_engine(&runtime);
+        let view = cx.new(|cx| DeviceStreamView::new(engine, "SIM".into(), cx));
+        view.update(cx, |view, cx| {
+            for seq in 0..20 {
+                let item = json!({ "seq": seq, "jpeg": jpeg() });
+                *view.slot.lock().unwrap() = decode(item);
+                view.take_frame(cx);
+            }
+            assert!(view.has_frame());
+            assert!(view.retired.is_empty(), "{} retired", view.retired.len());
+            view.painted = true;
+            for seq in 20..40 {
+                let item = json!({ "seq": seq, "jpeg": jpeg() });
+                *view.slot.lock().unwrap() = decode(item);
+                view.take_frame(cx);
+            }
+            assert_eq!(
+                view.retired.len(),
+                1,
+                "only the painted image waits for the atlas"
+            );
+        });
     }
 
     #[gpui::test]

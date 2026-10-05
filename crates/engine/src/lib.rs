@@ -517,6 +517,8 @@ impl EngineCore {
     /// kill live PTYs, stamp our workspace `lastSeenAt`, and flush every open doc
     /// snapshot.
     pub async fn shutdown(&self) {
+        // App quit allows 200 ms and the hub owns its process group: SIGTERM it before the drains.
+        self.device_hub.signal_stop();
         self.previews.shutdown().await;
         self.harness_updates.shutdown().await;
         // A run interruption transitions its chat to Idle, and Idle normally

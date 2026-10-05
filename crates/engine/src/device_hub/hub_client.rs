@@ -52,10 +52,10 @@ impl HubClient<'_> {
             .send()
             .await
             .and_then(|r| r.error_for_status())
-            .map_err(|e| format!("{operation} failed: {e}"))?
+            .map_err(|e| format!("{operation} failed: {}", e.without_url()))?
             .json()
             .await
-            .map_err(|e| format!("{operation} failed: {e}"))?;
+            .map_err(|e| format!("{operation} failed: {}", e.without_url()))?;
         if result.ok {
             Ok(result)
         } else {
@@ -74,10 +74,10 @@ impl HubClient<'_> {
             .send()
             .await
             .and_then(|r| r.error_for_status())
-            .map_err(|e| format!("Listing devices failed: {e}"))?
+            .map_err(|e| format!("Listing devices failed: {}", e.without_url()))?
             .json()
             .await
-            .map_err(|e| format!("Listing devices failed: {e}"))?;
+            .map_err(|e| format!("Listing devices failed: {}", e.without_url()))?;
         let devices = list
             .simulators
             .into_iter()
@@ -137,8 +137,36 @@ impl HubClient<'_> {
     }
 }
 
+pub(crate) fn valid_device_id(id: &str) -> bool {
+    !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
 fn path_segment(id: &str) -> String {
     id.chars()
-        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_ids_are_alphanumerics_and_dashes_only() {
+        assert!(valid_device_id("9C1D2E3F-0000-4ABC-8DEF-0123456789AB"));
+        for id in [
+            "",
+            ".",
+            "..",
+            "../x",
+            "a/b",
+            "a.b",
+            "a_b",
+            "a?device=b",
+            "a b",
+        ] {
+            assert!(!valid_device_id(id), "{id:?}");
+        }
+        assert_eq!(path_segment("../a.b_c/-1"), "abc-1");
+    }
 }

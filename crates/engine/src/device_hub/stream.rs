@@ -18,6 +18,7 @@ pub(crate) struct Frame {
 pub(crate) type FrameSlot = watch::Sender<Option<Arc<Frame>>>;
 
 struct Entry {
+    generation: u64,
     frames: FrameSlot,
     subscribers: usize,
     reader: tokio::task::JoinHandle<()>,
@@ -31,8 +32,14 @@ impl Drop for Entry {
 }
 
 #[derive(Default)]
+struct Entries {
+    next_generation: u64,
+    by_device: HashMap<String, Entry>,
+}
+
+#[derive(Default)]
 pub(crate) struct DeviceStreams {
-    entries: Mutex<HashMap<String, Entry>>,
+    entries: Mutex<Entries>,
 }
 
 pub(crate) struct FrameSubscription {
@@ -43,18 +50,20 @@ pub(crate) struct FrameSubscription {
 struct Release {
     streams: Arc<DeviceStreams>,
     device_id: String,
+    generation: u64,
 }
 
 impl Drop for Release {
     fn drop(&mut self) {
         let removed = {
             let mut entries = self.streams.lock();
-            match entries.get_mut(&self.device_id) {
+            match entries.by_device.get_mut(&self.device_id) {
+                Some(entry) if entry.generation != self.generation => None,
                 Some(entry) if entry.subscribers > 1 => {
                     entry.subscribers -= 1;
                     None
                 }
-                Some(_) => entries.remove(&self.device_id),
+                Some(_) => entries.by_device.remove(&self.device_id),
                 None => None,
             }
         };
@@ -63,7 +72,7 @@ impl Drop for Release {
 }
 
 impl DeviceStreams {
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Entry>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Entries> {
         self.entries.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -73,10 +82,16 @@ impl DeviceStreams {
         start: impl FnOnce(FrameSlot) -> tokio::task::JoinHandle<()>,
     ) -> FrameSubscription {
         let mut entries = self.lock();
-        let entry = entries.entry(device_id.to_string()).or_insert_with(|| {
+        let Entries {
+            next_generation,
+            by_device,
+        } = &mut *entries;
+        let entry = by_device.entry(device_id.to_string()).or_insert_with(|| {
             let (frames, _) = watch::channel(None);
             let reader = start(frames.clone());
+            *next_generation += 1;
             Entry {
+                generation: *next_generation,
                 frames,
                 subscribers: 0,
                 reader,
@@ -91,18 +106,20 @@ impl DeviceStreams {
             _release: Release {
                 streams: self.clone(),
                 device_id: device_id.to_string(),
+                generation: entry.generation,
             },
         }
     }
 
     pub(crate) fn has_input(&self, device_id: &str) -> bool {
         self.lock()
+            .by_device
             .get(device_id)
             .is_some_and(|entry| entry.input.is_some())
     }
 
     pub(crate) fn set_input(&self, device_id: &str, input: InputSocket) {
-        if let Some(entry) = self.lock().get_mut(device_id)
+        if let Some(entry) = self.lock().by_device.get_mut(device_id)
             && entry.input.is_none()
         {
             entry.input = Some(input);
@@ -116,6 +133,7 @@ impl DeviceStreams {
     ) -> Result<(), String> {
         match self
             .lock()
+            .by_device
             .get(device_id)
             .and_then(|entry| entry.input.as_ref())
         {
@@ -125,13 +143,14 @@ impl DeviceStreams {
     }
 
     pub(crate) fn clear(&self) {
-        let entries = std::mem::take(&mut *self.lock());
+        let entries = std::mem::take(&mut self.lock().by_device);
         drop(entries);
     }
 
     #[cfg(test)]
     pub(crate) fn subscribers(&self, device_id: &str) -> usize {
         self.lock()
+            .by_device
             .get(device_id)
             .map_or(0, |entry| entry.subscribers)
     }
@@ -268,6 +287,19 @@ mod tests {
         eventually(|| hub.open.load(Ordering::SeqCst) == 0).await;
         tokio::time::sleep(Duration::from_millis(1200)).await;
         assert_eq!(hub.accepted.load(Ordering::SeqCst), 1, "no reconnect");
+    }
+
+    #[tokio::test]
+    async fn a_release_from_before_a_clear_leaves_the_replacement_entry_alone() {
+        let streams = Arc::new(DeviceStreams::default());
+        let idle = |_: FrameSlot| tokio::spawn(std::future::pending::<()>());
+        let stale = streams.subscribe("UDID", idle);
+        streams.clear();
+        let current = streams.subscribe("UDID", idle);
+        drop(stale);
+        assert_eq!(streams.subscribers("UDID"), 1);
+        drop(current);
+        assert_eq!(streams.subscribers("UDID"), 0);
     }
 
     #[tokio::test]

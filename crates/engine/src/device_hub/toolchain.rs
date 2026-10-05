@@ -3,8 +3,12 @@ use std::path::{Path, PathBuf};
 const HUB_PIN: &str = "expo-device-hub@0.12.0";
 const HUB_BIN: &str = "expo-device-hub";
 
+pub(crate) fn installed_hub() -> Option<PathBuf> {
+    zeron_harness::installed_npm_tool(HUB_PIN, HUB_BIN)
+}
+
 pub(crate) fn hub_installed() -> bool {
-    zeron_harness::installed_npm_tool(HUB_PIN, HUB_BIN).is_some()
+    installed_hub().is_some()
 }
 
 pub(crate) async fn ensure_hub() -> Result<PathBuf, String> {
