@@ -195,8 +195,35 @@ pub fn chat_shortcut(cx: &App) -> String {
     crate::settings::badge_combo(keymap.get(crate::settings::ShortcutId::ToggleTerminal))
 }
 
-pub(super) fn row_badge(_key: &PullRequestKey) -> Option<AnyElement> {
-    None
+pub(super) fn row_badge(
+    key: &PullRequestKey,
+    theme: &crate::theme::Theme,
+    cx: &App,
+) -> Option<AnyElement> {
+    use gpui::prelude::*;
+    use gpui::{SharedString, div, px};
+    let count = crate::settings::pr_chat_sessions(&session_key(key), cx).len();
+    let number = key.number;
+    (count > 0).then(|| {
+        div()
+            .debug_selector(move || format!("pr-chat-badge-{number}"))
+            .flex()
+            .items_center()
+            .gap(px(3.0))
+            .text_size(px(11.0))
+            .text_color(theme.accent)
+            .child(
+                crate::icons::icon(crate::icons::ASTRA_CHAT_BUBBLE)
+                    .size(px(12.0))
+                    .text_color(theme.accent),
+            )
+            .child(SharedString::from(count.to_string()))
+            .into_any_element()
+    })
+}
+
+fn session_key(key: &PullRequestKey) -> String {
+    format!("{}/{}#{}", key.host, key.repository, key.number)
 }
 
 const PATCH_LIMIT: usize = 32 * 1024;
@@ -246,11 +273,22 @@ pub struct ContextCall {
 }
 
 impl PrChatContext {
+    pub fn continue_prompts(&self) -> [&'static str; 2] {
+        match self {
+            PrChatContext::PullRequest(_) => [
+                "What changed since we last talked?",
+                "Draft a reply to the latest comment",
+            ],
+            PrChatContext::List(_) => [
+                "What is new since then?",
+                "Which pull requests still fail checks?",
+            ],
+        }
+    }
+
     pub fn index_key(&self) -> String {
         match self {
-            PrChatContext::PullRequest(pr) => {
-                format!("{}/{}#{}", pr.key.host, pr.key.repository, pr.key.number)
-            }
+            PrChatContext::PullRequest(pr) => session_key(&pr.key),
             PrChatContext::List(list) => match &list.repository {
                 Some(repository) => format!("list:{}", repository.to_ascii_lowercase()),
                 None => "list".into(),

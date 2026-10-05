@@ -3030,6 +3030,7 @@ impl Shell {
 
     fn on_state_changed(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) {
         self.prune_file_explorers(cx);
+        self.prune_pr_chat_index(cx);
         self.refresh_harness_update_watch(cx);
         if state.read(cx).engine().is_none() {
             self.side_chats.clear();
@@ -14775,9 +14776,10 @@ impl Render for Shell {
                     self.composer
                         .update(cx, |c, cx| c.open_model_menu(window, cx));
                 }
+                let sessions_menu = self.debug_dialog.as_deref() == Some("pr-chat-sessions");
                 if let Some((open_first, minimized)) = match self.debug_dialog.as_deref() {
                     Some("pr-chat") => Some((false, false)),
-                    Some("pr-chat-open") => Some((true, false)),
+                    Some("pr-chat-open" | "pr-chat-sessions") => Some((true, false)),
                     Some("pr-chat-minimized") => Some((true, true)),
                     _ => None,
                 } && matches!(self.route, Route::PullRequests)
@@ -14788,6 +14790,9 @@ impl Render for Shell {
                     self.toggle_pr_chat(cx);
                     if minimized {
                         self.minimize_pr_chat(cx);
+                    }
+                    if sessions_menu {
+                        self.show_pr_chat_sessions(cx);
                     }
                 }
                 // `=user-menu` opens the bottom-of-sidebar account menu (its
