@@ -508,29 +508,16 @@ impl Repos {
     pub async fn refs(&self, repo_path: &Path) -> Result<Vec<RepoRef>, EngineError> {
         let names = self.branches(repo_path).await?;
         let current = self.current_branch(repo_path).await.ok();
-        // `git worktree list --porcelain`: stanzas of `worktree <path>` /
-        // `HEAD <sha>` / `branch refs/heads/<name>`. The first stanza is the
-        // main checkout — excluded (it's `current`, not a linked worktree).
-        let mut worktrees: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
-        if let Ok(out) = self
+        let worktrees: std::collections::HashMap<String, String> = self
             .git(&["worktree", "list", "--porcelain"], Some(repo_path))
             .await
-        {
-            let mut stanza = 0usize;
-            let mut path: Option<String> = None;
-            for line in out.lines().map(str::trim) {
-                if let Some(p) = line.strip_prefix("worktree ") {
-                    stanza += 1;
-                    // The first stanza is the main checkout, not a linked tree.
-                    path = (stanza > 1).then(|| p.to_string());
-                } else if let Some(branch) = line.strip_prefix("branch refs/heads/")
-                    && let Some(path) = path.take()
-                {
-                    worktrees.insert(branch.to_string(), path);
-                }
-            }
-        }
+            .map(|out| {
+                linked_worktrees(&out)
+                    .into_iter()
+                    .filter_map(|(path, branch)| Some((branch?, path)))
+                    .collect()
+            })
+            .unwrap_or_default();
         Ok(names
             .into_iter()
             .map(|name| RepoRef {
@@ -1025,10 +1012,9 @@ impl Repos {
             .git(&["worktree", "list", "--porcelain"], Some(&repo_path))
             .await
             .map(|out| {
-                out.lines()
-                    .filter_map(|line| line.trim().strip_prefix("worktree "))
-                    .skip(1)
-                    .map(PathBuf::from)
+                linked_worktrees(&out)
+                    .into_iter()
+                    .map(|(path, _)| PathBuf::from(path))
                     .collect()
             })
             .unwrap_or_default();
@@ -2181,6 +2167,21 @@ fn absolutize(path: &Path) -> PathBuf {
             .map(|cwd| cwd.join(path))
             .unwrap_or_else(|_| path.to_path_buf())
     }
+}
+
+fn linked_worktrees(listing: &str) -> Vec<(String, Option<String>)> {
+    let mut entries: Vec<(String, Option<String>)> = Vec::new();
+    for line in listing.lines().map(str::trim) {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            entries.push((path.to_owned(), None));
+        } else if let Some(branch) = line.strip_prefix("branch refs/heads/")
+            && let Some((_, slot @ None)) = entries.last_mut()
+        {
+            *slot = Some(branch.to_owned());
+        }
+    }
+    // The first stanza is the main checkout, not a linked worktree.
+    entries.into_iter().skip(1).collect()
 }
 
 pub(crate) fn hex(bytes: &[u8]) -> String {
