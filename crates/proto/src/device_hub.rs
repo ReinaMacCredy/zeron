@@ -356,10 +356,335 @@ pub struct ShutdownHubDeviceParams {
     pub platform: DevicePlatform,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DeviceAppearance {
+    Light,
+    Dark,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DeviceTextSize {
+    Small,
+    Default,
+    Large,
+    ExtraLarge,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DeviceToggle {
+    ReduceMotion,
+    IncreaseContrast,
+    ReduceTransparency,
+    ShowBorders,
+    VoiceOver,
+    NetworkEnabled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LiquidGlass {
+    Clear,
+    Tinted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ColorFilter {
+    None,
+    Grayscale,
+    RedGreen,
+    GreenRed,
+    BlueYellow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DevicePermission {
+    Camera,
+    Microphone,
+    Photos,
+    Contacts,
+    Calendar,
+    Reminders,
+    Location,
+    Notifications,
+    Motion,
+    MediaLibrary,
+    #[serde(rename = "faceid")]
+    FaceId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PermissionDecision {
+    Grant,
+    Revoke,
+    Reset,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum DeviceAction {
+    SetAppearance {
+        value: DeviceAppearance,
+    },
+    SetTextSize {
+        value: DeviceTextSize,
+    },
+    SetToggle {
+        setting: DeviceToggle,
+        enabled: bool,
+    },
+    SetLiquidGlass {
+        value: LiquidGlass,
+    },
+    SetColorFilter {
+        value: ColorFilter,
+    },
+    SetOrientation {
+        value: DeviceOrientation,
+    },
+    SetLocation {
+        lat: f64,
+        lon: f64,
+    },
+    ClearLocation,
+    SetPermission {
+        app_id: String,
+        permission: DevicePermission,
+        decision: PermissionDecision,
+    },
+    OpenUrl {
+        url: String,
+    },
+    LaunchApp {
+        app_id: String,
+    },
+    TerminateApp {
+        app_id: String,
+    },
+    SendPush {
+        app_id: String,
+        payload: serde_json::Value,
+    },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceSettingsSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub appearance: Option<DeviceAppearance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_size: Option<DeviceTextSize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reduce_motion: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub increase_contrast: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reduce_transparency: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_borders: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_over: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liquid_glass: Option<LiquidGlass>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_filter: Option<ColorFilter>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForegroundApp {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceDetail {
+    #[serde(default)]
+    pub host_id: String,
+    #[serde(default)]
+    pub device_id: String,
+    #[serde(default)]
+    pub settings: DeviceSettingsSnapshot,
+    #[serde(default)]
+    pub foreground_app: Option<ForegroundApp>,
+    #[serde(default)]
+    pub read_at: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AxRect {
+    #[serde(default)]
+    pub x: f64,
+    #[serde(default)]
+    pub y: f64,
+    #[serde(default)]
+    pub width: f64,
+    #[serde(default)]
+    pub height: f64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceAxNode {
+    #[serde(default)]
+    pub frame: AxRect,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<DeviceAxNode>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceAxTree {
+    #[serde(default)]
+    pub nodes: Vec<DeviceAxNode>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceAppState {
+    #[serde(default)]
+    pub foreground_app: Option<ForegroundApp>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceEventLogEntry {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub timestamp: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceEventLogBatch {
+    #[serde(default)]
+    pub reset: bool,
+    #[serde(default)]
+    pub events: Vec<DeviceEventLogEntry>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubDeviceTargetParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<String>,
+    #[serde(default)]
+    pub device_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunHubDeviceActionParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<String>,
+    #[serde(default)]
+    pub device_id: String,
+    pub action: DeviceAction,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubDeviceScreenshot {
+    #[serde(default)]
+    pub png: String,
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn device_actions_have_stable_wire_shapes() {
+        let cases = [
+            (
+                DeviceAction::SetAppearance {
+                    value: DeviceAppearance::Dark,
+                },
+                json!({"setAppearance": {"value": "dark"}}),
+            ),
+            (
+                DeviceAction::SetTextSize {
+                    value: DeviceTextSize::ExtraLarge,
+                },
+                json!({"setTextSize": {"value": "extra-large"}}),
+            ),
+            (
+                DeviceAction::SetToggle {
+                    setting: DeviceToggle::VoiceOver,
+                    enabled: true,
+                },
+                json!({"setToggle": {"setting": "voiceOver", "enabled": true}}),
+            ),
+            (
+                DeviceAction::SetColorFilter {
+                    value: ColorFilter::BlueYellow,
+                },
+                json!({"setColorFilter": {"value": "blue-yellow"}}),
+            ),
+            (
+                DeviceAction::SetLocation {
+                    lat: 35.6762,
+                    lon: 139.6503,
+                },
+                json!({"setLocation": {"lat": 35.6762, "lon": 139.6503}}),
+            ),
+            (DeviceAction::ClearLocation, json!("clearLocation")),
+            (
+                DeviceAction::SetPermission {
+                    app_id: "com.apple.Maps".into(),
+                    permission: DevicePermission::FaceId,
+                    decision: PermissionDecision::Grant,
+                },
+                json!({"setPermission": {"appId": "com.apple.Maps", "permission": "faceid", "decision": "grant"}}),
+            ),
+            (
+                DeviceAction::SendPush {
+                    app_id: "a.b".into(),
+                    payload: json!("hi"),
+                },
+                json!({"sendPush": {"appId": "a.b", "payload": "hi"}}),
+            ),
+        ];
+        for (action, wire) in cases {
+            assert_eq!(serde_json::to_value(&action).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_value::<DeviceAction>(wire).unwrap(),
+                action
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(DevicePermission::MediaLibrary).unwrap(),
+            json!("media-library")
+        );
+        let detail: DeviceDetail = serde_json::from_value(json!({"deviceId": "SIM"})).unwrap();
+        assert_eq!(detail.settings, DeviceSettingsSnapshot::default());
+        assert!(detail.foreground_app.is_none());
+    }
 
     #[test]
     fn touch_input_is_externally_tagged() {
