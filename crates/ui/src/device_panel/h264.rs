@@ -83,6 +83,7 @@ pub enum DecodeEvent {
 #[derive(Debug, Default)]
 pub struct Health {
     errors: u32,
+    backlogs: u32,
 }
 
 impl Health {
@@ -98,8 +99,13 @@ impl Health {
                 self.errors = 0;
                 None
             }
-            DecodeEvent::Pending(frames) => {
-                (frames > MAX_PENDING_FRAMES).then_some(FallbackReason::Backlog)
+            DecodeEvent::Pending(frames) if frames > MAX_PENDING_FRAMES => {
+                self.backlogs += 1;
+                (self.backlogs >= 2).then_some(FallbackReason::Backlog)
+            }
+            DecodeEvent::Pending(_) => {
+                self.backlogs = 0;
+                None
             }
         }
     }
@@ -654,9 +660,21 @@ mod tests {
                 None,
             ),
             (&[DecodeEvent::Pending(MAX_PENDING_FRAMES)], None),
+            (&[DecodeEvent::Pending(MAX_PENDING_FRAMES + 1)], None),
             (
-                &[DecodeEvent::Pending(MAX_PENDING_FRAMES + 1)],
+                &[
+                    DecodeEvent::Pending(MAX_PENDING_FRAMES + 1),
+                    DecodeEvent::Pending(MAX_PENDING_FRAMES + 1),
+                ],
                 Some(FallbackReason::Backlog),
+            ),
+            (
+                &[
+                    DecodeEvent::Pending(MAX_PENDING_FRAMES + 1),
+                    DecodeEvent::Pending(0),
+                    DecodeEvent::Pending(MAX_PENDING_FRAMES + 1),
+                ],
+                None,
             ),
             (&[DecodeEvent::Decoded, DecodeEvent::Pending(0)], None),
         ];
@@ -707,7 +725,15 @@ mod tests {
                 .collect::<Vec<_>>(),
             [1, 2, 3, 3, 3, 3]
         );
+        let started = std::time::Instant::now();
+        drop(Decoder::new(&envelopes[0].payload).unwrap());
+        let first_session = started.elapsed();
+        let started = std::time::Instant::now();
         let decoder = Decoder::new(&envelopes[0].payload).unwrap();
+        eprintln!(
+            "decoder session create: first {first_session:?}, again {:?}",
+            started.elapsed()
+        );
         let mut timings = Vec::new();
         let mut last = None;
         for envelope in &envelopes[1..] {

@@ -1639,6 +1639,10 @@ mod tests {
                         vec![json!({ "seq": 1, "jpeg": jpeg() })]
                     };
                     for item in items {
+                        if item == "pause" {
+                            tokio::time::sleep(Duration::from_millis(300)).await;
+                            continue;
+                        }
                         let reply = json!({ "id": frame["id"], "item": item });
                         if replies.send(reply.to_string()).await.is_err() {
                             return;
@@ -1713,16 +1717,41 @@ mod tests {
             assert_eq!(codecs(&watches), [json!("h264"), json!("mjpeg")]);
         }
 
+        fn backlog_engine(
+            runtime: &tokio::runtime::Runtime,
+            bursts: usize,
+        ) -> (EngineHandle, Inputs) {
+            let envelopes = AvccDemuxer::default().push(FIXTURE).unwrap();
+            let burst: Vec<AvccEnvelope> = envelopes[2..].iter().cycle().take(9).cloned().collect();
+            let mut items = vec![item(&envelopes[..2])];
+            for _ in 0..bursts {
+                items.extend([json!("pause"), item(&burst)]);
+            }
+            items.extend([json!("pause"), item(&envelopes[2..3])]);
+            video_engine(runtime, items)
+        }
+
         #[gpui::test]
-        fn more_than_eight_queued_frames_fall_back_to_mjpeg(cx: &mut TestAppContext) {
+        fn one_burst_of_queued_frames_keeps_h264(cx: &mut TestAppContext) {
             let runtime = tokio::runtime::Runtime::new().unwrap();
             let _guard = runtime.enter();
             setup(cx);
-            let envelopes = AvccDemuxer::default().push(FIXTURE).unwrap();
-            let backlog: Vec<AvccEnvelope> =
-                envelopes[2..].iter().cycle().take(9).cloned().collect();
-            let (engine, watches) =
-                video_engine(&runtime, vec![item(&envelopes[..2]), item(&backlog)]);
+            let (engine, watches) = backlog_engine(&runtime, 1);
+            let (view, cx) =
+                cx.add_window_view(|_, cx| DeviceStreamView::new(engine, "SIM".into(), cx));
+            wait(cx, |cx| shown(&view, cx).is_some());
+            std::thread::sleep(Duration::from_millis(1200));
+            cx.run_until_parked();
+            assert_eq!(codecs(&watches), [json!("h264")]);
+            assert_eq!(shown(&view, cx).unwrap().0, DeviceVideoCodec::H264);
+        }
+
+        #[gpui::test]
+        fn two_passes_over_eight_queued_frames_fall_back_to_mjpeg(cx: &mut TestAppContext) {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let _guard = runtime.enter();
+            setup(cx);
+            let (engine, watches) = backlog_engine(&runtime, 2);
             let (view, cx) =
                 cx.add_window_view(|_, cx| DeviceStreamView::new(engine, "SIM".into(), cx));
             wait(cx, |_| codecs(&watches).len() == 2);
