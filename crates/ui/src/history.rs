@@ -1134,6 +1134,29 @@ fn estimated_ref_overflow_width(hidden: usize) -> f32 {
     format!("+{hidden}").chars().count() as f32 * 5.7
 }
 
+fn estimated_pr_badge_width(label: &str) -> f32 {
+    22.0 + label.chars().count() as f32 * 5.7
+}
+
+fn ref_branch_name(reference: &GitHistoryRef) -> Option<&str> {
+    match reference.kind {
+        GitHistoryRefKind::Branch => Some(reference.label.as_str()),
+        GitHistoryRefKind::Remote => reference.label.split_once('/').map(|(_, branch)| branch),
+        GitHistoryRefKind::Tag => None,
+    }
+}
+
+fn ref_badge_for(
+    refs: &[GitHistoryRef],
+    badges: &HashMap<String, SharedString>,
+) -> Option<(String, SharedString)> {
+    refs.iter().filter_map(ref_branch_name).find_map(|name| {
+        badges
+            .get(name)
+            .map(|label| (name.to_string(), label.clone()))
+    })
+}
+
 fn ref_area_width(commit_column_width: f32) -> f32 {
     let inner = (commit_column_width - 8.0).max(0.0);
     (inner * HISTORY_REF_AREA_RATIO)
@@ -1300,8 +1323,22 @@ fn decode_history_avatar(encoded: &str) -> Option<Arc<Image>> {
     Some(Arc::new(Image::from_bytes(format, bytes)))
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum GitHistoryTarget {
+    #[default]
+    SelectedChat,
+    Pinned {
+        cwd: String,
+        device: Option<String>,
+    },
+    Nothing,
+}
+
 pub struct GitHistory {
     state: Entity<AppState>,
+    target: GitHistoryTarget,
+    selected_sha: Option<String>,
+    ref_badges: HashMap<String, SharedString>,
     started: bool,
     target_key: Option<String>,
     commits: Vec<GitHistoryCommit>,
@@ -1364,6 +1401,7 @@ pub enum GitHistoryEvent {
     FetchSucceeded,
     /// A commit row was clicked — the host opens it as its own diff tab.
     OpenCommit(GitHistoryCommit),
+    OpenRefBadge(String),
 }
 
 impl EventEmitter<GitHistoryEvent> for GitHistory {}
@@ -1951,6 +1989,9 @@ impl GitHistory {
         });
         Self {
             state,
+            target: GitHistoryTarget::SelectedChat,
+            selected_sha: None,
+            ref_badges: HashMap::new(),
             started: false,
             target_key: None,
             commits: Vec::new(),
@@ -2006,7 +2047,50 @@ impl GitHistory {
         }
     }
 
+    pub fn set_target(&mut self, target: GitHistoryTarget, cx: &mut Context<Self>) {
+        if self.target == target {
+            return;
+        }
+        self.target = target;
+        self.selected_sha = None;
+        if self.started {
+            self.ensure_loaded(cx);
+        }
+        cx.notify();
+    }
+
+    pub fn set_selected_sha(&mut self, sha: Option<String>, cx: &mut Context<Self>) {
+        if self.selected_sha != sha {
+            self.selected_sha = sha;
+            cx.notify();
+        }
+    }
+
+    #[cfg(test)]
+    pub fn selected_sha(&self) -> Option<&str> {
+        self.selected_sha.as_deref()
+    }
+
+    pub fn set_ref_badges(
+        &mut self,
+        badges: HashMap<String, SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.ref_badges != badges {
+            self.ref_badges = badges;
+            cx.notify();
+        }
+    }
+
     fn context(&self, cx: &App) -> Option<(String, String, Option<String>)> {
+        match &self.target {
+            GitHistoryTarget::SelectedChat => {}
+            GitHistoryTarget::Pinned { cwd, device } => {
+                let key = format!("{}|{cwd}", device.as_deref().unwrap_or("local"));
+                return Some((key, cwd.clone(), device.clone()));
+            }
+            GitHistoryTarget::Nothing => return None,
+        }
         let state = self.state.read(cx);
         let chat = state.selected_chat_row()?;
         let cwd = chat.cwd.clone()?;
@@ -3741,9 +3825,15 @@ impl GitHistory {
         refs: Vec<GitHistoryRef>,
         row_index: usize,
         available_width: f32,
+        badge: Option<(String, SharedString)>,
+        history: gpui::WeakEntity<GitHistory>,
         theme: &Theme,
     ) -> AnyElement {
-        let visible_count = visible_ref_count(&refs, available_width);
+        let badge_width = badge
+            .as_ref()
+            .map(|(_, label)| estimated_pr_badge_width(label) + HISTORY_REF_GAP)
+            .unwrap_or_default();
+        let visible_count = visible_ref_count(&refs, (available_width - badge_width).max(0.0));
         let hidden_refs: Vec<_> = refs.iter().skip(visible_count).cloned().collect();
         let hidden_count = hidden_refs.len();
         let hidden_descriptions: Vec<_> = hidden_refs.iter().map(ref_description).collect();
@@ -3758,6 +3848,11 @@ impl GitHistory {
             .children(refs.into_iter().take(visible_count).enumerate().map(
                 |(ref_index, reference)| Self::render_ref(reference, row_index, ref_index, theme),
             ))
+            .when_some(badge, |element, (branch, label)| {
+                element.child(Self::render_pr_badge(
+                    branch, label, row_index, history, theme,
+                ))
+            })
             .when(hidden_count > 0, |element| {
                 element.child(
                     div()
@@ -3775,6 +3870,52 @@ impl GitHistory {
                         .tooltip_show_delay(Duration::from_millis(350)),
                 )
             })
+            .into_any_element()
+    }
+
+    fn render_pr_badge(
+        branch: String,
+        label: SharedString,
+        row_index: usize,
+        history: gpui::WeakEntity<GitHistory>,
+        theme: &Theme,
+    ) -> AnyElement {
+        let color = if theme.appearance == crate::theme::Appearance::Dark {
+            crate::theme::oklch(0.811, 0.111, 293.571)
+        } else {
+            crate::theme::oklch(0.541, 0.281, 293.009)
+        };
+        let selector = format!("history-pr-badge-{row_index}");
+        div()
+            .id(SharedString::from(selector.clone()))
+            .debug_selector(move || selector.clone())
+            .role(gpui::Role::Button)
+            .aria_label(SharedString::from(format!("Open pull request {label}")))
+            .h(px(16.0))
+            .px(px(5.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(3.0))
+            .rounded(px(4.0))
+            .bg(color.opacity(0.14))
+            .text_size(px(10.0))
+            .text_color(color)
+            .cursor_pointer()
+            .hover(|style| style.bg(color.opacity(0.24)))
+            .on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                let branch = branch.clone();
+                history
+                    .update(cx, |_, cx| cx.emit(GitHistoryEvent::OpenRefBadge(branch)))
+                    .ok();
+            })
+            .child(
+                crate::icons::icon(crate::icons::LUCIDE_GIT_PULL_REQUEST)
+                    .size(px(10.0))
+                    .text_color(color),
+            )
+            .child(label)
             .into_any_element()
     }
 
@@ -4014,6 +4155,9 @@ impl GitHistory {
             commit.subject
         };
         let commit_refs = commit.refs;
+        let badge = ref_badge_for(&commit_refs, &self.ref_badges);
+        let history = cx.entity().downgrade();
+        let selected = self.selected_sha.as_deref() == Some(sha.as_str());
         let commit_theme = theme.clone();
         let columns = configured_columns(cx);
         let column_widths = configured_column_widths(cx);
@@ -4078,6 +4222,7 @@ impl GitHistory {
             .text_size(px(11.0))
             .cursor_pointer()
             .when_some(focused_row_wash, |element, wash| element.bg(wash))
+            .when(selected, |element| element.bg(crate::theme::ink(0.07)))
             .hover(|style| style.bg(crate::theme::ink(0.025)))
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 this.set_row_hover((*hovered).then_some(row_hover_path), cx);
@@ -4112,6 +4257,8 @@ impl GitHistory {
                                 commit_refs.clone(),
                                 index,
                                 refs_width,
+                                badge.clone(),
+                                history.clone(),
                                 &commit_theme,
                             ))
                         })

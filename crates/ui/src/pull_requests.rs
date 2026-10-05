@@ -413,6 +413,7 @@ pub struct PullRequestsPage {
     toast_seq: u64,
     tab_menu: crate::popover::Popup<(PullRequestKey, gpui::Point<gpui::Pixels>)>,
     git_view: Option<Entity<git::GitTab>>,
+    git_events: Vec<Subscription>,
 }
 
 impl EventEmitter<PullRequestsEvent> for PullRequestsPage {}
@@ -480,6 +481,7 @@ impl PullRequestsPage {
             toast_seq: 0,
             tab_menu: Default::default(),
             git_view: None,
+            git_events: Vec::new(),
         };
         if let Some(listing) = paging::snapshot_dir(cx).and_then(|dir| paging::load_list(&dir)) {
             page.listing = Loadable::Ready(listing);
@@ -718,7 +720,14 @@ impl PullRequestsPage {
                     .child("Back"),
             )
             .child(self.render_page_tabs(theme, cx))
-            .child(self.render_project_control(theme, cx))
+            .map(|el| {
+                if self.prefs.tab == PageTab::Git {
+                    el.child(self.render_git_project_control(theme, cx))
+                        .children(self.render_git_checkout_control(theme, cx))
+                } else {
+                    el.child(self.render_project_control(theme, cx))
+                }
+            })
             .when(condensed, |el| {
                 let compact = |id: &'static str, label: &'static str| {
                     div()
@@ -1937,8 +1946,11 @@ impl Render for PullRequestsPage {
         let on_list = self.prefs.tab == PageTab::PullRequests;
         let panel_width =
             (on_list && self.active.is_some()).then(|| self.panel_width(viewport, cx));
+        let git_view = (!on_list).then(|| self.sync_git_tab(cx));
         let topbar = self.render_topbar(&theme, window, cx);
-        let body: AnyElement = if on_list {
+        let body: AnyElement = if let Some(git_view) = git_view {
+            div().flex_1().min_h_0().child(git_view).into_any_element()
+        } else {
             let list_width = viewport - panel_width.map_or(0.0, |width| width + 1.0);
             let container = list_width.min(CONTAINER_MAX_WIDTH);
             let row_width = (container - 2.0 * CONTAINER_PAD_X).max(0.0);
@@ -1958,12 +1970,6 @@ impl Render for PullRequestsPage {
             .flex_1()
             .min_h_0()
             .into_any_element()
-        } else {
-            let git_view = self
-                .git_view
-                .get_or_insert_with(|| cx.new(|_| git::GitTab))
-                .clone();
-            div().flex_1().min_h_0().child(git_view).into_any_element()
         };
         let list = div()
             .flex_1()
@@ -2506,7 +2512,7 @@ mod tests {
         page.update(cx, |_, cx| cx.notify());
         cx.run_until_parked();
         assert_eq!(ROWS_RENDERED.with(|rows| rows.get()), 0);
-        assert!(cx.debug_bounds("pull-requests-project").is_some());
+        assert!(cx.debug_bounds("pull-requests-git-project").is_some());
         assert!(cx.debug_bounds("pull-requests-chat").is_some());
 
         let list = cx

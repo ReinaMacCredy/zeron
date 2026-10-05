@@ -2308,6 +2308,7 @@ impl Changes {
                         // Bubble to the host — the surface strip opens the tab.
                         cx.emit(ChangesEvent::OpenCommit(commit.clone()));
                     }
+                    GitHistoryEvent::OpenRefBadge(_) => {}
                     GitHistoryEvent::FetchSucceeded => {
                         // Remote refs affect branch choices and every scoped diff
                         // based on a ref. Force fresh reads after the engine has

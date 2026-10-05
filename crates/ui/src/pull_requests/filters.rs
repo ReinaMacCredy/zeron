@@ -448,6 +448,8 @@ pub(super) enum MenuKind {
     State,
     Involvement,
     Project,
+    GitProject,
+    GitCheckout,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -637,7 +639,7 @@ fn section_of(kind: MenuKind) -> Option<FilterSection> {
         MenuKind::State => Some(FilterSection::State),
         MenuKind::Involvement => Some(FilterSection::Involvement),
         MenuKind::Project => Some(FilterSection::Project),
-        MenuKind::Sort | MenuKind::Filters => None,
+        MenuKind::Sort | MenuKind::Filters | MenuKind::GitProject | MenuKind::GitCheckout => None,
     }
 }
 
@@ -698,6 +700,9 @@ impl PullRequestsPage {
     ) {
         let before = self.prefs.clone();
         apply(&mut self.prefs);
+        if self.prefs.repository != before.repository {
+            self.follow_repository_into_git();
+        }
         if self.prefs == before {
             return;
         }
@@ -711,7 +716,7 @@ impl PullRequestsPage {
         cx.notify();
     }
 
-    fn choose(
+    pub(super) fn choose(
         &mut self,
         refetch: bool,
         cx: &mut Context<Self>,
@@ -791,6 +796,8 @@ impl PullRequestsPage {
                 .min_w(px(180.0))
                 .into_any_element()
             }
+            (MenuKind::GitProject, _) => self.render_git_project_menu(theme, cx),
+            (MenuKind::GitCheckout, _) => self.render_git_checkout_menu(theme, cx),
             (_, Some(section)) => div()
                 .min_w(px(160.0))
                 .child(self.render_filter_section(section, theme, cx))

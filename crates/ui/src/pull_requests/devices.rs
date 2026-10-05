@@ -105,6 +105,7 @@ pub(crate) fn merge_listings(
                 merged.errors.extend(listing.errors);
                 merged.truncated |= listing.truncated;
                 merged.repositories.extend(listing.repositories);
+                merged.projects.extend(listing.projects);
             }
             Err(error) => {
                 if !device.local {
@@ -216,7 +217,11 @@ mod tests {
                 }],
                 "errors": [],
                 "truncated": number == 2,
-                "repositories": ["acme/zeron"]
+                "repositories": ["acme/zeron"],
+                "projects": [{
+                    "repository": "acme/zeron", "host": "github.com",
+                    "spaceId": format!("space-{login}"), "path": "/repo"
+                }]
             }))
             .unwrap()
         };
@@ -237,6 +242,12 @@ mod tests {
         assert_eq!(viewer_key(&merged.items[0]), "studio github.com");
         assert!(merged.truncated);
         assert_eq!(merged.repositories, ["acme/zeron"]);
+        let spaces: Vec<_> = merged
+            .projects
+            .iter()
+            .map(|p| p.space_id.as_str())
+            .collect();
+        assert_eq!(spaces, ["space-alice", "space-bob"]);
         assert_eq!(merged.errors.len(), 1);
         assert_eq!(merged.errors[0].path, "Gone");
         assert_eq!(

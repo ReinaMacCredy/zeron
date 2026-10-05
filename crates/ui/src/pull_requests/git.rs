@@ -1,23 +1,419 @@
-use gpui::{Context, Window, div, prelude::*, px};
+use std::collections::HashMap;
+use std::time::Duration;
 
+use gpui::{
+    AnyElement, App, Context, Entity, EventEmitter, SharedString, Subscription, Task, Window, div,
+    prelude::*, px,
+};
+use zeron_proto::{
+    ChangeRequestListItem, ChangeRequestState, GetWorkingTreeRequest, GitFileState, SessionStatus,
+    WorkingTree, WorkingTreeFile, WorkspaceTarget,
+};
+use zeron_rpc::{RpcError, methods};
+
+use super::{PageTab, PullRequestsPage, filters, routed, top_chip};
+use crate::history::{GitHistory, GitHistoryEvent, GitHistoryTarget};
 use crate::icons::{self, icon};
+use crate::popover;
+use crate::state::AppState;
 use crate::theme::Theme;
 
-pub struct GitTab;
+const POLL_INTERVAL: Duration = Duration::from_secs(4);
+const WATCH_RETRY: Duration = Duration::from_secs(2);
+const PANEL_WIDTH: f32 = 360.0;
+const SUBJECT_LIMIT: usize = 72;
 
-impl Render for GitTab {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct GitSpace {
+    pub space_id: String,
+    pub path: String,
+    pub device: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct CheckoutOption {
+    pub path: Option<String>,
+    pub label: SharedString,
+    pub detail: SharedString,
+    pub live: bool,
+}
+
+pub enum GitTabEvent {
+    OpenPullRequest(String),
+}
+
+pub struct GitTab {
+    state: Entity<AppState>,
+    history: Entity<GitHistory>,
+    space: Option<GitSpace>,
+    checkout_path: Option<String>,
+    tree: Option<WorkingTree>,
+    error: Option<SharedString>,
+    loading: bool,
+    generation: u64,
+    load_task: Option<Task<()>>,
+    watch_task: Option<Task<()>>,
+    _poll_task: Task<()>,
+    visible: bool,
+    window_active: bool,
+    activation: Option<Subscription>,
+    _history_events: Subscription,
+}
+
+impl EventEmitter<GitTabEvent> for GitTab {}
+
+fn target_params(space: &GitSpace, checkout_path: Option<&str>) -> serde_json::Value {
+    let request = GetWorkingTreeRequest {
+        target: WorkspaceTarget {
+            chat_id: None,
+            space_id: Some(space.space_id.clone()),
+            checkout_path: checkout_path.map(str::to_owned),
+        },
+    };
+    routed(
+        serde_json::to_value(request).unwrap_or_default(),
+        space.device.as_deref(),
+    )
+}
+
+fn same_path(left: &str, right: &str) -> bool {
+    left.trim_end_matches('/') == right.trim_end_matches('/')
+}
+
+fn status_letter(state: GitFileState) -> &'static str {
+    match state {
+        GitFileState::Added => "A",
+        GitFileState::Modified => "M",
+        GitFileState::Deleted => "D",
+        GitFileState::Renamed => "R",
+        GitFileState::Copied => "C",
+        GitFileState::Unmerged => "!",
+        GitFileState::Untracked => "U",
+        GitFileState::TypeChanged => "T",
+        GitFileState::Unchanged => " ",
+    }
+}
+
+pub(super) fn staged_files(tree: &WorkingTree) -> Vec<&WorkingTreeFile> {
+    tree.files
+        .iter()
+        .filter(|file| {
+            !matches!(
+                file.index,
+                GitFileState::Unchanged | GitFileState::Untracked | GitFileState::Unmerged
+            )
+        })
+        .collect()
+}
+
+pub(super) fn changed_files(tree: &WorkingTree) -> Vec<&WorkingTreeFile> {
+    tree.files
+        .iter()
+        .filter(|file| file.worktree != GitFileState::Unchanged)
+        .collect()
+}
+
+pub(super) fn checkout_options(state: &AppState, space: &GitSpace) -> Vec<CheckoutOption> {
+    let space_device = state
+        .spaces
+        .iter()
+        .find(|candidate| candidate.id == space.space_id)
+        .map(|candidate| candidate.device_id.clone());
+    let mut options = vec![CheckoutOption {
+        path: None,
+        label: "Main checkout".into(),
+        detail: space.path.clone().into(),
+        live: false,
+    }];
+    let mut worktrees: Vec<(String, Option<String>, Option<String>, bool)> = Vec::new();
+    for chat in &state.chats {
+        if chat.archived
+            || chat.space_id.as_deref() != Some(space.space_id.as_str())
+            || Some(&chat.device_id) != space_device.as_ref()
+        {
+            continue;
+        }
+        let Some(cwd) = chat.cwd.as_deref() else {
+            continue;
+        };
+        if same_path(cwd, &space.path) {
+            continue;
+        }
+        let live = state.session_for(&chat.id).is_some_and(|session| {
+            matches!(
+                session.status,
+                SessionStatus::Working | SessionStatus::AwaitingInput
+            )
+        });
+        match worktrees.iter_mut().find(|known| same_path(&known.0, cwd)) {
+            Some(known) => {
+                known.3 |= live;
+                if known.2.is_none() {
+                    known.2 = chat.title.clone();
+                }
+            }
+            None => worktrees.push((
+                cwd.to_owned(),
+                chat.branch.clone(),
+                chat.title.clone(),
+                live,
+            )),
+        }
+    }
+    worktrees.sort_by(|a, b| b.3.cmp(&a.3).then_with(|| a.0.cmp(&b.0)));
+    options.extend(worktrees.into_iter().map(|(path, branch, title, live)| {
+        let label = branch.unwrap_or_else(|| {
+            std::path::Path::new(&path)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.clone())
+        });
+        let thread = title
+            .map(|title| format!("Thread \"{title}\""))
+            .unwrap_or_else(|| "Agent thread".into());
+        let detail = if live {
+            format!("{thread} · running")
+        } else {
+            thread
+        };
+        CheckoutOption {
+            path: Some(path),
+            label: label.into(),
+            detail: detail.into(),
+            live,
+        }
+    }));
+    options
+}
+
+impl GitTab {
+    pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        let history = cx.new(|cx| {
+            let mut history = GitHistory::new(state.clone(), cx);
+            history.set_target(GitHistoryTarget::Nothing, cx);
+            history
+        });
+        let history_events =
+            cx.subscribe(&history, |tab: &mut Self, history, event, cx| match event {
+                GitHistoryEvent::OpenCommit(commit) => {
+                    let sha = commit.sha.clone();
+                    history.update(cx, |history, cx| history.set_selected_sha(Some(sha), cx));
+                }
+                GitHistoryEvent::OpenRefBadge(branch) => {
+                    cx.emit(GitTabEvent::OpenPullRequest(branch.clone()));
+                }
+                GitHistoryEvent::FetchSucceeded => tab.load(cx),
+            });
+        let poll_task = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(POLL_INTERVAL).await;
+                let Ok(()) = this.update(cx, |tab, cx| {
+                    if tab.visible && tab.window_active && !tab.loading {
+                        tab.load(cx);
+                    }
+                    if tab.watch_task.is_none() {
+                        tab.watch(cx);
+                    }
+                }) else {
+                    break;
+                };
+            }
+        });
+        Self {
+            state,
+            history,
+            space: None,
+            checkout_path: None,
+            tree: None,
+            error: None,
+            loading: false,
+            generation: 0,
+            load_task: None,
+            watch_task: None,
+            _poll_task: poll_task,
+            visible: true,
+            window_active: true,
+            activation: None,
+            _history_events: history_events,
+        }
+    }
+
+    pub(super) fn tree(&self) -> Option<&WorkingTree> {
+        self.tree.as_ref()
+    }
+
+    pub(super) fn space(&self) -> Option<&GitSpace> {
+        self.space.as_ref()
+    }
+
+    pub(super) fn checkout_path(&self) -> Option<&str> {
+        self.checkout_path.as_deref()
+    }
+
+    pub(super) fn set_space(&mut self, space: Option<GitSpace>, cx: &mut Context<Self>) {
+        if self.space == space {
+            return;
+        }
+        self.space = space;
+        self.checkout_path = None;
+        self.retarget(cx);
+    }
+
+    pub(super) fn set_checkout(&mut self, path: Option<String>, cx: &mut Context<Self>) {
+        if self.checkout_path == path {
+            return;
+        }
+        self.checkout_path = path;
+        self.retarget(cx);
+    }
+
+    pub(super) fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        let resumed = visible && !self.visible;
+        self.visible = visible;
+        if resumed && !self.loading {
+            self.load(cx);
+        }
+    }
+
+    pub(super) fn set_ref_badges(
+        &mut self,
+        badges: HashMap<String, SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        self.history
+            .update(cx, |history, cx| history.set_ref_badges(badges, cx));
+    }
+
+    fn retarget(&mut self, cx: &mut Context<Self>) {
+        self.generation = self.generation.wrapping_add(1);
+        self.tree = None;
+        self.error = None;
+        self.loading = false;
+        self.load_task = None;
+        self.watch_task = None;
+        let target = self.space.as_ref().map(|space| GitHistoryTarget::Pinned {
+            cwd: self
+                .checkout_path
+                .clone()
+                .unwrap_or_else(|| space.path.clone()),
+            device: space.device.clone(),
+        });
+        self.history.update(cx, |history, cx| {
+            history.set_target(target.unwrap_or(GitHistoryTarget::Nothing), cx)
+        });
+        self.load(cx);
+        self.watch(cx);
+        cx.notify();
+    }
+
+    fn load(&mut self, cx: &mut Context<Self>) {
+        let Some(space) = self.space.clone() else {
+            return;
+        };
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let params = target_params(&space, self.checkout_path.as_deref());
+        let generation = self.generation;
+        self.loading = true;
+        self.load_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::GET_WORKING_TREE, params)
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|value| {
+                    serde_json::from_value::<WorkingTree>(value).map_err(|error| error.to_string())
+                });
+            this.update(cx, |tab, cx| {
+                if tab.generation != generation {
+                    return;
+                }
+                tab.loading = false;
+                match result {
+                    Ok(tree) => {
+                        let moved = tab
+                            .tree
+                            .as_ref()
+                            .is_some_and(|previous| previous.head_sha != tree.head_sha);
+                        tab.error = None;
+                        if tab.tree.as_ref() != Some(&tree) {
+                            tab.tree = Some(tree);
+                            cx.notify();
+                        }
+                        if moved {
+                            tab.history.update(cx, |history, cx| history.refresh(cx));
+                        }
+                    }
+                    Err(error) => {
+                        tab.error = Some(error.into());
+                        cx.notify();
+                    }
+                }
+            })
+            .ok();
+        }));
+    }
+
+    fn watch(&mut self, cx: &mut Context<Self>) {
+        let Some(space) = self.space.clone() else {
+            return;
+        };
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let params = target_params(&space, self.checkout_path.as_deref());
+        self.watch_task = Some(cx.spawn(async move |this, cx| {
+            let mut seen: Option<String> = None;
+            loop {
+                match engine
+                    .client()
+                    .subscribe_checked(methods::WATCH_WORKSPACE_GIT_STATUS, params.clone())
+                    .await
+                {
+                    Ok(mut receiver) => {
+                        while let Some(value) = receiver.recv().await {
+                            let revision = serde_json::from_value::<
+                                zeron_proto::WorkspaceGitStatusFrame,
+                            >(value)
+                            .ok()
+                            .and_then(|frame| frame.status)
+                            .map(|status| status.revision);
+                            if revision.is_none() || revision == seen {
+                                continue;
+                            }
+                            let first = seen.is_none();
+                            seen = revision;
+                            if first {
+                                continue;
+                            }
+                            if this.update(cx, |tab, cx| tab.load(cx)).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                    Err(error)
+                        if matches!(error, RpcError::UnknownMethod(_))
+                            || error.to_string().starts_with("unknown method:") =>
+                    {
+                        return;
+                    }
+                    Err(_) => {}
+                }
+                cx.background_executor().timer(WATCH_RETRY).await;
+            }
+        }));
+    }
+
+    fn render_empty(&self, theme: &Theme) -> AnyElement {
         div()
-            .id("pull-requests-git")
-            .role(gpui::Role::Group)
-            .aria_label("Git")
+            .id("pull-requests-git-empty")
             .size_full()
             .flex()
             .flex_col()
             .items_center()
             .justify_center()
-            .gap(px(12.0))
+            .gap(px(10.0))
             .px(px(16.0))
             .child(
                 div()
@@ -36,9 +432,1281 @@ impl Render for GitTab {
             )
             .child(
                 div()
-                    .text_size(px(14.0))
-                    .text_color(theme.text_muted)
-                    .child("The commit graph and working tree of a project appear here."),
+                    .text_size(px(15.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child("Pick a project"),
             )
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(theme.text_muted)
+                    .child(
+                        "Choose a project in the top bar to see its commit graph and working tree.",
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_section(
+        &self,
+        id: &'static str,
+        title: &str,
+        files: &[&WorkingTreeFile],
+        staged: bool,
+        empty: &'static str,
+        theme: &Theme,
+    ) -> AnyElement {
+        div()
+            .id(id)
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(30.0))
+                    .px(px(12.0))
+                    .flex()
+                    .items_center()
+                    .text_size(px(12.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(format!("{title} ({})", files.len()))),
+            )
+            .when(files.is_empty(), |el| {
+                el.child(
+                    div()
+                        .h(px(26.0))
+                        .px(px(12.0))
+                        .flex()
+                        .items_center()
+                        .text_size(px(12.0))
+                        .text_color(theme.text_muted.opacity(0.6))
+                        .child(empty),
+                )
+            })
+            .children(
+                files
+                    .iter()
+                    .enumerate()
+                    .map(|(index, file)| render_file_row(id, index, file, staged, theme)),
+            )
+            .into_any_element()
+    }
+
+    fn render_panel(&self, theme: &Theme, cx: &App) -> AnyElement {
+        let tree = self.tree.as_ref();
+        let checkout = self.space.as_ref().and_then(|space| {
+            checkout_options(self.state.read(cx), space)
+                .into_iter()
+                .find(|option| option.path.as_deref() == self.checkout_path.as_deref())
+        });
+        let mut detail = Vec::new();
+        if let Some(branch) = tree.and_then(|tree| tree.branch.clone()) {
+            detail.push(branch);
+        } else if tree.is_some() {
+            detail.push("detached HEAD".into());
+        }
+        if let Some(option) = &checkout {
+            detail.push(if option.path.is_none() {
+                "main checkout".into()
+            } else {
+                "agent worktree".into()
+            });
+        }
+        let staged = tree.map(staged_files).unwrap_or_default();
+        let changes = tree.map(changed_files).unwrap_or_default();
+        let body: AnyElement = match (tree, &self.error) {
+            (None, Some(error)) => div()
+                .p(px(12.0))
+                .text_size(px(12.0))
+                .text_color(theme.danger)
+                .child(error.clone())
+                .into_any_element(),
+            (None, None) => div()
+                .p(px(12.0))
+                .text_size(px(12.0))
+                .text_color(theme.text_muted)
+                .child("Reading the working tree…")
+                .into_any_element(),
+            (Some(tree), _) => div()
+                .flex()
+                .flex_col()
+                .pb(px(8.0))
+                .when(tree.truncated, |el| {
+                    el.child(
+                        div()
+                            .mx(px(12.0))
+                            .mt(px(8.0))
+                            .text_size(px(12.0))
+                            .text_color(theme.warning)
+                            .child("Partial snapshot: only the first files are listed."),
+                    )
+                })
+                .when_some(self.error.clone(), |el, error| {
+                    el.child(
+                        div()
+                            .mx(px(12.0))
+                            .mt(px(8.0))
+                            .text_size(px(12.0))
+                            .text_color(theme.danger)
+                            .child(error),
+                    )
+                })
+                .child(self.render_section(
+                    "git-staged",
+                    "Staged",
+                    &staged,
+                    true,
+                    "No staged files",
+                    theme,
+                ))
+                .child(self.render_section(
+                    "git-changes",
+                    "Changes",
+                    &changes,
+                    false,
+                    "No changes",
+                    theme,
+                ))
+                .into_any_element(),
+        };
+        div()
+            .id("pull-requests-git-panel")
+            .w(px(PANEL_WIDTH))
+            .flex_none()
+            .h_full()
+            .border_l_1()
+            .border_color(theme.hairline(0.07))
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(40.0))
+                    .px(px(12.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .border_b_1()
+                    .border_color(theme.hairline(0.07))
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child("Working tree"),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(12.0))
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(detail.join(" · "))),
+                    ),
+            )
+            .when(tree.is_some_and(|tree| tree.agent_active), |el| {
+                el.child(
+                    div()
+                        .id("git-agent-active")
+                        .mx(px(12.0))
+                        .mt(px(8.0))
+                        .px(px(8.0))
+                        .py(px(6.0))
+                        .rounded(px(6.0))
+                        .bg(theme.warning.opacity(0.1))
+                        .text_size(px(12.0))
+                        .text_color(theme.warning)
+                        .child("An agent is running in this worktree."),
+                )
+            })
+            .child(
+                div()
+                    .id("git-working-tree-files")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(body),
+            )
+            .child(render_commit_box(staged.len(), theme))
+            .into_any_element()
+    }
+}
+
+fn render_file_row(
+    section: &'static str,
+    index: usize,
+    file: &WorkingTreeFile,
+    staged: bool,
+    theme: &Theme,
+) -> AnyElement {
+    let state = if staged { file.index } else { file.worktree };
+    let delta = if staged { file.staged } else { file.unstaged };
+    let color = match state {
+        GitFileState::Added | GitFileState::Untracked => theme.success,
+        GitFileState::Deleted | GitFileState::Unmerged => theme.danger,
+        GitFileState::Renamed | GitFileState::Copied => theme.accent,
+        _ => theme.warning,
+    };
+    let (dir, name) = match file.path.rsplit_once('/') {
+        Some((dir, name)) => (format!("{dir}/"), name.to_owned()),
+        None => (String::new(), file.path.clone()),
+    };
+    let selector = format!("{section}-row-{index}");
+    div()
+        .id(SharedString::from(selector.clone()))
+        .debug_selector(move || selector.clone())
+        .h(px(26.0))
+        .px(px(12.0))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .text_size(px(12.0))
+        .hover(|style| style.bg(theme.ink(0.04)))
+        .child(
+            div()
+                .w(px(12.0))
+                .flex_none()
+                .font_family(theme.font_mono.clone())
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(color)
+                .child(status_letter(state)),
+        )
+        .child(div().flex_1().min_w_0().truncate().child(
+            gpui::StyledText::new(SharedString::from(format!("{dir}{name}"))).with_highlights([(
+                0..dir.len(),
+                gpui::HighlightStyle {
+                    color: Some(theme.text_muted),
+                    ..Default::default()
+                },
+            )]),
+        ))
+        .child(
+            div()
+                .flex_none()
+                .flex()
+                .gap(px(4.0))
+                .font_family(theme.font_mono.clone())
+                .text_size(px(11.0))
+                .map(|el| match delta {
+                    Some(delta) if delta.binary => el.text_color(theme.text_muted).child("binary"),
+                    Some(delta) => el
+                        .child(
+                            div()
+                                .text_color(theme.success)
+                                .child(SharedString::from(format!("+{}", delta.additions))),
+                        )
+                        .child(
+                            div()
+                                .text_color(theme.danger)
+                                .child(SharedString::from(format!("-{}", delta.deletions))),
+                        ),
+                    None => el,
+                }),
+        )
+        .into_any_element()
+}
+
+fn render_commit_box(staged: usize, theme: &Theme) -> AnyElement {
+    let label = match staged {
+        1 => "Commit 1 file".to_string(),
+        count => format!("Commit {count} files"),
+    };
+    div()
+        .id("git-commit-box")
+        .flex_none()
+        .p(px(12.0))
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .border_t_1()
+        .border_color(theme.hairline(0.07))
+        .opacity(0.55)
+        .child(
+            div()
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(theme.hairline(0.09))
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .h(px(64.0))
+                        .px(px(10.0))
+                        .py(px(8.0))
+                        .text_size(px(13.0))
+                        .text_color(theme.text_muted.opacity(0.7))
+                        .child("Commit message (⌘↵ to commit)"),
+                )
+                .child(
+                    div()
+                        .h(px(30.0))
+                        .px(px(8.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .text_size(px(12.0))
+                        .text_color(theme.text_muted)
+                        .child("✦ Write with AI")
+                        .child(div().flex_1())
+                        .child(SharedString::from(format!("0/{SUBJECT_LIMIT}"))),
+                ),
+        )
+        .child(
+            div()
+                .id("git-commit-button")
+                .debug_selector(|| "git-commit-button".into())
+                .role(gpui::Role::Button)
+                .aria_label("Commit (available in a later version)")
+                .h(px(30.0))
+                .rounded(px(8.0))
+                .bg(theme.ink(0.08))
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap(px(6.0))
+                .text_size(px(13.0))
+                .text_color(theme.text_muted)
+                .child(
+                    icon(icons::LUCIDE_CHECK)
+                        .size(px(14.0))
+                        .text_color(theme.text_muted),
+                )
+                .child(SharedString::from(label)),
+        )
+        .into_any_element()
+}
+
+impl Render for GitTab {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.activation.is_none() {
+            self.window_active = window.is_window_active();
+            self.activation = Some(cx.observe_window_activation(window, |tab, window, cx| {
+                let resumed = window.is_window_active() && !tab.window_active;
+                tab.window_active = window.is_window_active();
+                if resumed && tab.visible && !tab.loading {
+                    tab.load(cx);
+                }
+            }));
+        }
+        let theme = Theme::of(cx).clone();
+        if self.space.is_none() {
+            return div()
+                .id("pull-requests-git")
+                .role(gpui::Role::Group)
+                .aria_label("Git")
+                .size_full()
+                .child(self.render_empty(&theme));
+        }
+        div()
+            .id("pull-requests-git")
+            .role(gpui::Role::Group)
+            .aria_label("Git")
+            .size_full()
+            .flex()
+            .flex_row()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .child(self.history.clone()),
+            )
+            .child(self.render_panel(&theme, cx))
+    }
+}
+
+pub(super) fn pr_badges(
+    items: &[ChangeRequestListItem],
+    repository: &str,
+) -> HashMap<String, (SharedString, usize)> {
+    let mut badges = HashMap::new();
+    for (index, item) in items.iter().enumerate() {
+        if item.state != ChangeRequestState::Open
+            || !item.repository.eq_ignore_ascii_case(repository)
+            || item.head_ref == item.base_ref
+        {
+            continue;
+        }
+        badges
+            .entry(item.head_ref.clone())
+            .or_insert_with(|| (SharedString::from(format!("#{}", item.number)), index));
+    }
+    badges
+}
+
+impl PullRequestsPage {
+    pub(super) fn git_tab(&mut self, cx: &mut Context<Self>) -> Entity<GitTab> {
+        if let Some(view) = &self.git_view {
+            return view.clone();
+        }
+        let state = self.state.clone();
+        let view = cx.new(|cx| GitTab::new(state, cx));
+        self.git_events = vec![
+            cx.subscribe(&view, |page: &mut Self, _, event, cx| match event {
+                GitTabEvent::OpenPullRequest(branch) => page.open_branch_pull_request(branch, cx),
+            }),
+            cx.observe(&view, |_, _, cx| cx.notify()),
+        ];
+        self.git_view = Some(view.clone());
+        view
+    }
+
+    fn git_project_repository(&self, space_id: &str) -> Option<String> {
+        self.listing.ready().and_then(|listing| {
+            listing
+                .projects
+                .iter()
+                .find(|project| project.space_id == space_id)
+                .map(|project| project.repository.clone())
+        })
+    }
+
+    pub(super) fn git_space(&self, cx: &App) -> Option<GitSpace> {
+        let state = self.state.read(cx);
+        let usable = |id: &str| {
+            state
+                .spaces
+                .iter()
+                .find(|space| space.id == id && space.git_detected)
+        };
+        let space = self
+            .prefs
+            .git_space_id
+            .as_deref()
+            .and_then(usable)
+            .or_else(|| {
+                let wanted = self.prefs.repository.as_deref()?;
+                let listing = self.listing.ready()?;
+                listing
+                    .projects
+                    .iter()
+                    .filter(|project| project.repository.eq_ignore_ascii_case(wanted))
+                    .find_map(|project| usable(&project.space_id))
+            })?;
+        Some(GitSpace {
+            space_id: space.id.clone(),
+            path: space.path.clone(),
+            device: (state.local_device_id.as_deref() != Some(space.device_id.as_str()))
+                .then(|| space.device_id.clone()),
+        })
+    }
+
+    pub(super) fn follow_repository_into_git(&mut self) {
+        let Some(wanted) = self.prefs.repository.clone() else {
+            return;
+        };
+        let Some(listing) = self.listing.ready() else {
+            return;
+        };
+        let current = self.prefs.git_space_id.as_deref().and_then(|id| {
+            listing
+                .projects
+                .iter()
+                .find(|project| project.space_id == id)
+        });
+        if current.is_some_and(|project| project.repository.eq_ignore_ascii_case(&wanted)) {
+            return;
+        }
+        if let Some(project) = listing
+            .projects
+            .iter()
+            .find(|project| project.repository.eq_ignore_ascii_case(&wanted))
+        {
+            self.prefs.git_space_id = Some(project.space_id.clone());
+        }
+    }
+
+    pub(super) fn sync_git_tab(&mut self, cx: &mut Context<Self>) -> Entity<GitTab> {
+        let view = self.git_tab(cx);
+        let space = self.git_space(cx);
+        let badges = match (&space, self.listing.ready()) {
+            (Some(space), Some(listing)) => self
+                .git_project_repository(&space.space_id)
+                .map(|repository| {
+                    pr_badges(&listing.items, &repository)
+                        .into_iter()
+                        .map(|(branch, (label, _))| (branch, label))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            _ => HashMap::new(),
+        };
+        let visible = self.visible;
+        view.update(cx, |tab, cx| {
+            tab.set_space(space, cx);
+            tab.set_visible(visible, cx);
+            tab.set_ref_badges(badges, cx);
+        });
+        view
+    }
+
+    pub(super) fn open_branch_pull_request(&mut self, branch: &str, cx: &mut Context<Self>) {
+        let Some(space) = self.git_space(cx) else {
+            return;
+        };
+        let Some(repository) = self.git_project_repository(&space.space_id) else {
+            return;
+        };
+        let Some(listing) = self.listing.ready() else {
+            return;
+        };
+        let Some(item) = pr_badges(&listing.items, &repository)
+            .remove(branch)
+            .and_then(|(_, index)| listing.items.get(index).cloned())
+        else {
+            return;
+        };
+        self.set_tab(PageTab::PullRequests, cx);
+        self.open_pull_request(&item, cx);
+    }
+
+    fn git_project_options(&self, cx: &App) -> Vec<(String, SharedString, SharedString)> {
+        let state = self.state.read(cx);
+        let mut options: Vec<_> = state
+            .spaces
+            .iter()
+            .filter(|space| space.git_detected)
+            .map(|space| {
+                let subtitle = self
+                    .git_project_repository(&space.id)
+                    .unwrap_or_else(|| space.path.clone());
+                (
+                    space.id.clone(),
+                    SharedString::from(space.display_name().to_string()),
+                    SharedString::from(subtitle),
+                )
+            })
+            .collect();
+        options.sort_by_key(|(_, name, _)| name.to_lowercase());
+        options
+    }
+
+    pub(super) fn render_git_project_control(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let space = self.git_space(cx);
+        let label: SharedString = space
+            .as_ref()
+            .and_then(|space| {
+                self.state
+                    .read(cx)
+                    .spaces
+                    .iter()
+                    .find(|candidate| candidate.id == space.space_id)
+                    .map(|candidate| SharedString::from(candidate.display_name().to_string()))
+            })
+            .unwrap_or_else(|| "Pick a project".into());
+        self.menu_trigger(
+            filters::MenuKind::GitProject,
+            top_chip("pull-requests-git-project", "Project", theme)
+                .debug_selector(|| "pull-requests-git-project".into())
+                .max_w(px(240.0))
+                .child(
+                    icon(icons::LUCIDE_FOLDER)
+                        .size(px(14.0))
+                        .flex_none()
+                        .text_color(if space.is_some() {
+                            theme.text
+                        } else {
+                            theme.text_muted
+                        }),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(label),
+                )
+                .child(
+                    icon(icons::LUCIDE_CHEVRON_DOWN)
+                        .size(px(12.0))
+                        .flex_none()
+                        .text_color(theme.text_muted.opacity(0.7)),
+                ),
+            theme,
+            cx,
+        )
+        .into_any_element()
+    }
+
+    pub(super) fn render_git_project_menu(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let current = self.git_space(cx).map(|space| space.space_id);
+        let options = self.git_project_options(cx);
+        let body = div()
+            .min_w(px(240.0))
+            .flex()
+            .flex_col()
+            .gap(px(popover::MENU_GAP));
+        if options.is_empty() {
+            return body
+                .child(
+                    div()
+                        .px(px(8.0))
+                        .py(px(6.0))
+                        .text_color(theme.text_muted)
+                        .child("No Git projects yet"),
+                )
+                .into_any_element();
+        }
+        body.children(
+            options
+                .into_iter()
+                .enumerate()
+                .map(|(index, (space_id, name, subtitle))| {
+                    let selected = current.as_deref() == Some(space_id.as_str());
+                    let selector = format!("pull-requests-git-project-{index}");
+                    let repository = self.git_project_repository(&space_id);
+                    menu_option(selector, name, subtitle, selected, false, theme).on_click(
+                        cx.listener(move |page, _, _, cx| {
+                            let space_id = space_id.clone();
+                            let repository = repository.clone();
+                            let refetch = repository.is_some()
+                                && repository.as_deref() != page.prefs.repository.as_deref();
+                            page.choose(refetch, cx, |prefs| {
+                                prefs.git_space_id = Some(space_id);
+                                if repository.is_some() {
+                                    prefs.repository = repository;
+                                }
+                            });
+                        }),
+                    )
+                }),
+        )
+        .into_any_element()
+    }
+
+    pub(super) fn render_git_checkout_control(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let view = self.git_view.as_ref()?.read(cx);
+        let space = view.space()?;
+        let option = checkout_options(self.state.read(cx), space)
+            .into_iter()
+            .find(|option| option.path.as_deref() == view.checkout_path())?;
+        let tree = view.tree();
+        let label: SharedString = tree
+            .and_then(|tree| tree.branch.clone())
+            .map(SharedString::from)
+            .unwrap_or_else(|| option.label.clone());
+        let ahead = tree.map(|tree| (tree.ahead, tree.behind));
+        let agent = option.path.is_some();
+        Some(
+            self.menu_trigger(
+                filters::MenuKind::GitCheckout,
+                top_chip("pull-requests-git-checkout", "Checkout", theme)
+                    .debug_selector(|| "pull-requests-git-checkout".into())
+                    .max_w(px(280.0))
+                    .child(
+                        icon(icons::LUCIDE_GIT_BRANCH)
+                            .size(px(14.0))
+                            .flex_none()
+                            .text_color(theme.text_muted),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .child(label),
+                    )
+                    .when(agent, |el| {
+                        el.child(
+                            div()
+                                .px(px(5.0))
+                                .rounded(px(4.0))
+                                .bg(theme.ink(0.08))
+                                .text_size(px(11.0))
+                                .text_color(theme.text_muted)
+                                .child("agent"),
+                        )
+                    })
+                    .when_some(ahead.filter(|(a, b)| *a + *b > 0), |el, (a, b)| {
+                        let mut parts = Vec::new();
+                        if a > 0 {
+                            parts.push(format!("↑{a}"));
+                        }
+                        if b > 0 {
+                            parts.push(format!("↓{b}"));
+                        }
+                        el.child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(parts.join(" "))),
+                        )
+                    })
+                    .child(
+                        icon(icons::LUCIDE_CHEVRON_DOWN)
+                            .size(px(12.0))
+                            .flex_none()
+                            .text_color(theme.text_muted.opacity(0.7)),
+                    ),
+                theme,
+                cx,
+            )
+            .into_any_element(),
+        )
+    }
+
+    pub(super) fn render_git_checkout_menu(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(view) = self.git_view.clone() else {
+            return div().into_any_element();
+        };
+        let (options, current) = {
+            let tab = view.read(cx);
+            let Some(space) = tab.space() else {
+                return div().into_any_element();
+            };
+            (
+                checkout_options(self.state.read(cx), space),
+                tab.checkout_path().map(str::to_owned),
+            )
+        };
+        let group = |label: &'static str| {
+            div()
+                .px(px(8.0))
+                .pt(px(6.0))
+                .pb(px(2.0))
+                .text_size(px(11.0))
+                .text_color(theme.text_muted)
+                .child(label)
+        };
+        let worktrees = options.len().saturating_sub(1);
+        let rows: Vec<AnyElement> = options
+            .into_iter()
+            .enumerate()
+            .map(|(index, option)| {
+                let selected = option.path == current;
+                let selector = format!("pull-requests-git-checkout-{index}");
+                let path = option.path.clone();
+                let view = view.clone();
+                menu_option(
+                    selector,
+                    option.label,
+                    option.detail,
+                    selected,
+                    option.live,
+                    theme,
+                )
+                .on_click(cx.listener(move |page, _, _, cx| {
+                    let path = path.clone();
+                    view.update(cx, |tab, cx| tab.set_checkout(path, cx));
+                    page.close_menu(cx);
+                }))
+                .into_any_element()
+            })
+            .collect();
+        let mut rows = rows.into_iter();
+        div()
+            .min_w(px(280.0))
+            .max_w(px(420.0))
+            .flex()
+            .flex_col()
+            .gap(px(popover::MENU_GAP))
+            .child(group("Main checkout"))
+            .children(rows.next())
+            .child(group("Agent worktrees"))
+            .when(worktrees == 0, |el| {
+                el.child(
+                    div()
+                        .px(px(8.0))
+                        .py(px(6.0))
+                        .text_color(theme.text_muted)
+                        .child("No agent worktrees in this project"),
+                )
+            })
+            .children(rows)
+            .into_any_element()
+    }
+}
+
+fn menu_option(
+    selector: String,
+    label: SharedString,
+    detail: SharedString,
+    selected: bool,
+    live: bool,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    let id = SharedString::from(selector.clone());
+    popover::menu_row(theme, false, id.clone())
+        .id(id)
+        .debug_selector(move || selector.clone())
+        .role(gpui::Role::MenuItemRadio)
+        .aria_label(label.clone())
+        .when(live, |el| {
+            el.child(
+                div()
+                    .size(px(6.0))
+                    .flex_none()
+                    .rounded_full()
+                    .bg(theme.success),
+            )
+        })
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(div().truncate().child(label))
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(px(11.0))
+                        .text_color(theme.text_muted)
+                        .child(detail),
+                ),
+        )
+        .child(
+            div()
+                .ml_auto()
+                .size(px(14.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(selected, |el| {
+                    el.child(div().size(px(6.0)).rounded_full().bg(theme.text))
+                }),
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use zeron_proto::{ChangeRequestListing, Chat, Session, Space};
+    use zeron_rpc::{RpcReply, RpcService};
+
+    use super::*;
+    use crate::popover::Loadable;
+
+    type Calls = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
+
+    struct GitLab {
+        calls: Calls,
+    }
+
+    fn listing() -> ChangeRequestListing {
+        let item = |number: u64, head: &str, state: &str, repository: &str| {
+            serde_json::json!({
+                "provider": "github", "host": "github.com", "repository": repository,
+                "number": number, "title": format!("PR {number}"), "url": "u",
+                "headRef": head, "baseRef": "main", "state": state, "isDraft": false,
+                "mergeability": "unknown", "additions": 0, "deletions": 0,
+                "createdAt": "2026-10-01T00:00:00Z", "updatedAt": "2026-10-01T00:00:00Z",
+                "viewerReviewRequested": false, "labels": []
+            })
+        };
+        serde_json::from_value(serde_json::json!({
+            "viewers": {"github.com": "alice"},
+            "items": [
+                item(7, "feature/7", "open", "acme/zeron"),
+                item(8, "feature/8", "merged", "acme/zeron"),
+                item(9, "main", "open", "acme/zeron"),
+                item(10, "feature/7", "open", "acme/other"),
+            ],
+            "errors": [],
+            "truncated": false,
+            "repositories": ["acme/zeron"],
+            "projects": [{
+                "repository": "acme/zeron", "host": "github.com",
+                "spaceId": "space-1", "path": "/lab/repo"
+            }]
+        }))
+        .unwrap()
+    }
+
+    fn tree() -> serde_json::Value {
+        serde_json::json!({
+            "checkoutId": "checkout-1", "root": "/lab/repo", "branch": "feature/7",
+            "headSha": "aaa", "upstream": "origin/feature/7", "ahead": 2, "behind": 0,
+            "revision": "r1",
+            "files": [
+                {"path": "src/a b.rs", "index": "modified", "worktree": "modified",
+                 "staged": {"additions": 3, "deletions": 1}, "unstaged": {"additions": 1, "deletions": 0}},
+                {"path": "notes/new file.txt", "index": "untracked", "worktree": "untracked",
+                 "unstaged": {"additions": 4, "deletions": 0}}
+            ]
+        })
+    }
+
+    #[async_trait::async_trait]
+    impl RpcService for GitLab {
+        async fn handle(
+            &self,
+            method: &str,
+            params: serde_json::Value,
+        ) -> Result<RpcReply, RpcError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((method.to_string(), params.clone()));
+            match method {
+                methods::LIST_GIT_HISTORY => RpcReply::value(&serde_json::json!({
+                    "commits": [{
+                        "sha": "aaa", "parentShas": [], "subject": "Tip of feature",
+                        "authorName": "Alice", "authorEmail": "a@example.com",
+                        "authoredAt": "2026-10-01T00:00:00Z",
+                        "refs": [{"kind": "remote", "label": "origin/feature/7"}]
+                    }],
+                    "headSha": "aaa", "nextCursor": null, "totalCount": 1, "headCommitCount": 1
+                })),
+                methods::GET_WORKING_TREE => RpcReply::value(&tree()),
+                methods::LIST_CHANGE_REQUESTS => RpcReply::value(&listing()),
+                methods::LIST_CHANGE_REQUEST_STATS => {
+                    RpcReply::value(&serde_json::json!({"stats": []}))
+                }
+                _ => Err(RpcError::UnknownMethod(method.to_string())),
+            }
+        }
+    }
+
+    fn space(id: &str, path: &str) -> Space {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "deviceId": "dev-local", "path": path, "gitDetected": true,
+            "createdAt": "2026-10-01T00:00:00Z"
+        }))
+        .unwrap()
+    }
+
+    fn chat(id: &str, cwd: &str, branch: Option<&str>, title: &str) -> Chat {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "deviceId": "dev-local", "title": title, "archived": false,
+            "cwd": cwd, "branch": branch, "spaceId": "space-1",
+            "createdAt": "2026-10-01T00:00:00Z"
+        }))
+        .unwrap()
+    }
+
+    fn lab_state() -> AppState {
+        let mut state = AppState::new();
+        state.local_device_id = Some("dev-local".into());
+        state.spaces = vec![
+            space("space-1", "/lab/repo"),
+            space("space-2", "/lab/plain"),
+        ];
+        state.chats = vec![
+            chat("c-main", "/lab/repo", Some("main"), "On main"),
+            chat(
+                "c-wt",
+                "/lab/worktrees/feat",
+                Some("feat/wt"),
+                "Worktree thread",
+            ),
+            chat(
+                "c-wt-2",
+                "/lab/worktrees/feat/",
+                None,
+                "Second on same worktree",
+            ),
+            chat("c-idle", "/lab/worktrees/idle", None, "Idle thread"),
+        ];
+        state.sessions = vec![
+            serde_json::from_value::<Session>(serde_json::json!({
+                "chatId": "c-wt-2", "deviceId": "dev-local", "status": "working",
+                "updatedAt": "2026-10-01T00:00:00Z"
+            }))
+            .unwrap(),
+        ];
+        state
+    }
+
+    #[test]
+    fn checkout_options_list_the_main_checkout_then_agent_worktrees_once() {
+        let state = lab_state();
+        let options = checkout_options(
+            &state,
+            &GitSpace {
+                space_id: "space-1".into(),
+                path: "/lab/repo".into(),
+                device: None,
+            },
+        );
+        let rows: Vec<_> = options
+            .iter()
+            .map(|option| {
+                (
+                    option.path.as_deref(),
+                    option.label.to_string(),
+                    option.detail.to_string(),
+                    option.live,
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (None, "Main checkout".into(), "/lab/repo".into(), false),
+                (
+                    Some("/lab/worktrees/feat"),
+                    "feat/wt".into(),
+                    "Thread \"Worktree thread\" · running".into(),
+                    true
+                ),
+                (
+                    Some("/lab/worktrees/idle"),
+                    "idle".into(),
+                    "Thread \"Idle thread\"".into(),
+                    false
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn badges_cover_open_pull_requests_of_the_project_by_head_branch() {
+        let listing = listing();
+        let badges = pr_badges(&listing.items, "ACME/zeron");
+        assert_eq!(badges.len(), 1);
+        assert_eq!(badges["feature/7"].0.as_ref(), "#7");
+    }
+
+    #[test]
+    fn sections_split_staged_and_changed_files() {
+        let tree: WorkingTree = serde_json::from_value(tree()).unwrap();
+        let staged: Vec<_> = staged_files(&tree).iter().map(|f| f.path.clone()).collect();
+        let changed: Vec<_> = changed_files(&tree)
+            .iter()
+            .map(|f| f.path.clone())
+            .collect();
+        assert_eq!(staged, ["src/a b.rs"]);
+        assert_eq!(changed, ["src/a b.rs", "notes/new file.txt"]);
+    }
+
+    fn settle(
+        cx: &mut gpui::VisualTestContext,
+        mut done: impl FnMut(&mut gpui::VisualTestContext) -> bool,
+    ) {
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if done(cx) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("condition never settled");
+    }
+
+    fn open_page(
+        cx: &mut gpui::TestAppContext,
+        state: AppState,
+        prefs: filters::PullRequestListPrefs,
+    ) -> (
+        Entity<PullRequestsPage>,
+        &mut gpui::VisualTestContext,
+        Calls,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let calls: Calls = Arc::default();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            let mut settings = crate::settings::UiSettings::default();
+            settings.pull_requests_list = prefs;
+            crate::settings::init(settings, dir.path(), cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+        });
+        cx.executor().allow_parking();
+        let engine = crate::state::EngineHandle::from_test_client(zeron_rpc::memory_client(
+            Arc::new(GitLab {
+                calls: calls.clone(),
+            }),
+        ));
+        let state = cx.new(|_| state);
+        state.update(cx, |state, _| state.set_test_engine(engine));
+        let (page, cx) = cx.add_window_view(|_, cx| PullRequestsPage::new(state, cx));
+        (page, cx, calls, dir)
+    }
+
+    #[gpui::test]
+    fn the_git_tab_pins_history_and_reads_the_working_tree_of_the_picked_project(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let prefs = filters::PullRequestListPrefs {
+            tab: PageTab::Git,
+            ..Default::default()
+        };
+        let mut state = lab_state();
+        state.selected_chat = Some("c-wt".into());
+        let (page, cx, calls, _dir) = open_page(cx, state, prefs);
+        settle(cx, |cx| {
+            cx.debug_bounds("pull-requests-git-project").is_some()
+        });
+        page.update(cx, |page, cx| {
+            assert!(page.git_space(cx).is_none(), "no project is guessed");
+        });
+        assert!(
+            !calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(method, _)| method == methods::GET_WORKING_TREE
+                    || method == methods::LIST_GIT_HISTORY),
+            "nothing is read before a project is picked, not even the selected chat's history"
+        );
+
+        let chip = cx.debug_bounds("pull-requests-git-project").unwrap();
+        cx.simulate_click(chip.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("pull-requests-git-project-0").is_some());
+        let repo = cx
+            .debug_bounds("pull-requests-git-project-1")
+            .expect("the picker lists Git spaces by name: plain, repo");
+        cx.simulate_click(repo.center(), gpui::Modifiers::default());
+        settle(cx, |cx| cx.debug_bounds("git-staged-row-0").is_some());
+        page.update(cx, |page, cx| {
+            assert_eq!(page.prefs.git_space_id.as_deref(), Some("space-1"));
+            assert_eq!(
+                crate::settings::current(cx)
+                    .pull_requests_list
+                    .git_space_id
+                    .as_deref(),
+                Some("space-1")
+            );
+        });
+        assert!(cx.debug_bounds("git-changes-row-1").is_some());
+        assert!(cx.debug_bounds("git-commit-button").is_some());
+        let calls_now = calls.lock().unwrap().clone();
+        let tree_call = calls_now
+            .iter()
+            .find(|(method, _)| method == methods::GET_WORKING_TREE)
+            .expect("working tree read");
+        assert_eq!(tree_call.1, serde_json::json!({"spaceId": "space-1"}));
+        let history_call = calls_now
+            .iter()
+            .find(|(method, _)| method == methods::LIST_GIT_HISTORY)
+            .expect("history read");
+        assert_eq!(history_call.1["cwd"], "/lab/repo");
+    }
+
+    #[gpui::test]
+    fn the_checkout_picker_retargets_the_graph_and_the_working_tree(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let prefs = filters::PullRequestListPrefs {
+            tab: PageTab::Git,
+            git_space_id: Some("space-1".into()),
+            ..Default::default()
+        };
+        let (_page, cx, calls, _dir) = open_page(cx, lab_state(), prefs);
+        settle(cx, |cx| cx.debug_bounds("git-staged-row-0").is_some());
+        let chip = cx
+            .debug_bounds("pull-requests-git-checkout")
+            .expect("checkout chip in the top bar");
+        cx.simulate_click(chip.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("pull-requests-git-checkout-0").is_some());
+        assert!(cx.debug_bounds("pull-requests-git-checkout-3").is_none());
+        let worktree = cx
+            .debug_bounds("pull-requests-git-checkout-1")
+            .expect("the agent worktree is listed");
+        calls.lock().unwrap().clear();
+        cx.simulate_click(worktree.center(), gpui::Modifiers::default());
+        settle(cx, |_| {
+            let calls = calls.lock().unwrap();
+            [methods::LIST_GIT_HISTORY, methods::GET_WORKING_TREE]
+                .iter()
+                .all(|wanted| calls.iter().any(|(method, _)| method == wanted))
+        });
+        let calls_now = calls.lock().unwrap().clone();
+        let tree_call = calls_now
+            .iter()
+            .find(|(method, _)| method == methods::GET_WORKING_TREE)
+            .unwrap();
+        assert_eq!(
+            tree_call.1,
+            serde_json::json!({"spaceId": "space-1", "checkoutPath": "/lab/worktrees/feat"})
+        );
+        let history_call = calls_now
+            .iter()
+            .find(|(method, _)| method == methods::LIST_GIT_HISTORY)
+            .unwrap();
+        assert_eq!(history_call.1["cwd"], "/lab/worktrees/feat");
+    }
+
+    #[gpui::test]
+    fn a_pull_request_badge_on_a_ref_opens_that_pull_request(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let prefs = filters::PullRequestListPrefs {
+            tab: PageTab::Git,
+            git_space_id: Some("space-1".into()),
+            ..Default::default()
+        };
+        let (page, cx, _calls, _dir) = open_page(cx, lab_state(), prefs);
+        page.update(cx, |page, cx| {
+            page.listing = Loadable::Ready(listing());
+            cx.notify();
+        });
+        settle(cx, |cx| cx.debug_bounds("history-pr-badge-0").is_some());
+        let badge = cx.debug_bounds("history-pr-badge-0").unwrap();
+        cx.simulate_click(badge.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        page.update(cx, |page, _| {
+            assert_eq!(page.prefs.tab, PageTab::PullRequests);
+            let active = page.active.clone().expect("a pull request is open");
+            assert_eq!(
+                (active.repository.as_str(), active.number),
+                ("acme/zeron", 7)
+            );
+        });
+        let git = page.read_with(cx, |page, _| page.git_view.clone().unwrap());
+        git.read_with(cx, |tab, cx| {
+            assert_eq!(
+                tab.history.read(cx).selected_sha(),
+                None,
+                "the row click did not fire"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn picking_a_repository_on_the_pull_requests_tab_moves_the_git_project(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (page, cx, _calls, _dir) =
+            open_page(cx, lab_state(), filters::PullRequestListPrefs::default());
+        page.update(cx, |page, cx| {
+            page.listing = Loadable::Ready(listing());
+            page.update_prefs(false, cx, |prefs| {
+                prefs.repository = Some("acme/zeron".into())
+            });
+            assert_eq!(page.prefs.git_space_id.as_deref(), Some("space-1"));
+            page.update_prefs(false, cx, |prefs| prefs.repository = None);
+            assert_eq!(
+                page.prefs.git_space_id.as_deref(),
+                Some("space-1"),
+                "All projects keeps the Git project"
+            );
+        });
     }
 }
