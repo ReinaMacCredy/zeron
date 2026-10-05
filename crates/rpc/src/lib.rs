@@ -254,6 +254,8 @@ pub mod methods {
     pub const CONFIGURE_DEVICE_HUB: &str = "ConfigureDeviceHub";
     pub const LIST_HUB_DEVICES: &str = "ListHubDevices";
     pub const OPEN_HUB_DEVICE: &str = "OpenHubDevice";
+    pub const CLOSE_HUB_DEVICE: &str = "CloseHubDevice";
+    pub const SHUTDOWN_HUB_DEVICE: &str = "ShutdownHubDevice";
     pub const WATCH_HUB_DEVICE_FRAMES: &str = "WatchHubDeviceFrames";
     pub const SEND_HUB_DEVICE_INPUT: &str = "SendHubDeviceInput";
     /// Checkout-diff stream for the target device's chats (DataRpc,

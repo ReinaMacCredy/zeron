@@ -120,6 +120,30 @@ pub struct DeviceScreenConfig {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub enum StreamLinkStatus {
+    #[default]
+    Idle,
+    Connecting,
+    Live,
+    Failed {
+        #[serde(default)]
+        detail: String,
+    },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceStreamStatus {
+    #[serde(default)]
+    pub video: StreamLinkStatus,
+    #[serde(default)]
+    pub input: StreamLinkStatus,
+    #[serde(default)]
+    pub subscribers: u32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DeviceHubSettings {
     #[serde(default)]
     pub enabled: bool,
@@ -148,6 +172,8 @@ pub struct DeviceHubState {
     pub sessions: Vec<DeviceSession>,
     #[serde(default)]
     pub booting: Vec<DeviceBooting>,
+    #[serde(default)]
+    pub streams: BTreeMap<String, DeviceStreamStatus>,
     #[serde(default)]
     pub screens: BTreeMap<String, DeviceScreenConfig>,
 }
@@ -189,10 +215,28 @@ pub enum TouchPhase {
     End,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceButton {
+    Home,
+    AppSwitcher,
+    Lock,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KeyPhase {
+    Down,
+    Up,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DeviceInput {
     Touch { phase: TouchPhase, x: f32, y: f32 },
+    Button { button: DeviceButton },
+    Key { phase: KeyPhase, usage: u16 },
+    Orientation { orientation: DeviceOrientation },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -247,6 +291,30 @@ pub struct SendHubDeviceInputParams {
     pub input: DeviceInput,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloseHubDeviceParams {
+    #[serde(default)]
+    pub chat_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+    #[serde(default)]
+    pub shutdown: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShutdownHubDeviceParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<String>,
+    #[serde(default)]
+    pub device_id: String,
+    #[serde(default)]
+    pub platform: DevicePlatform,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,6 +359,58 @@ mod tests {
         .unwrap();
         assert_eq!(device.platform, DevicePlatform::Ios);
         assert_eq!(device.host_id, "");
+    }
+
+    #[test]
+    fn hardware_inputs_and_stream_status_have_stable_wire_shapes() {
+        let cases = [
+            (
+                DeviceInput::Button {
+                    button: DeviceButton::AppSwitcher,
+                },
+                json!({"button": {"button": "app_switcher"}}),
+            ),
+            (
+                DeviceInput::Key {
+                    phase: KeyPhase::Down,
+                    usage: 0x04,
+                },
+                json!({"key": {"phase": "down", "usage": 4}}),
+            ),
+            (
+                DeviceInput::Orientation {
+                    orientation: DeviceOrientation::LandscapeRight,
+                },
+                json!({"orientation": {"orientation": "landscape_right"}}),
+            ),
+        ];
+        for (input, wire) in cases {
+            assert_eq!(serde_json::to_value(input).unwrap(), wire);
+            assert_eq!(serde_json::from_value::<DeviceInput>(wire).unwrap(), input);
+        }
+        let status = DeviceStreamStatus {
+            video: StreamLinkStatus::Live,
+            input: StreamLinkStatus::Failed {
+                detail: "closed".into(),
+            },
+            subscribers: 2,
+        };
+        let wire =
+            json!({"video": "live", "input": {"failed": {"detail": "closed"}}, "subscribers": 2});
+        assert_eq!(serde_json::to_value(&status).unwrap(), wire);
+        assert_eq!(
+            serde_json::from_value::<DeviceStreamStatus>(wire).unwrap(),
+            status
+        );
+        let close: CloseHubDeviceParams =
+            serde_json::from_value(json!({"chatId": "c", "deviceId": "d", "shutdown": true}))
+                .unwrap();
+        assert!(close.shutdown && close.host_id.is_none());
+        assert!(
+            !serde_json::from_value::<CloseHubDeviceParams>(json!({"chatId": "c"}))
+                .unwrap()
+                .shutdown
+        );
     }
 
     #[test]
