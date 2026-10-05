@@ -3298,22 +3298,26 @@ impl RpcService for EngineRpc {
             // turn-start tree snapshot against the current tree; anything else
             // is the plain working-tree capture.
             methods::GET_CHECKOUT_DIFF => {
-                // Keep the scoped-diff future off the dispatcher's stack. The
-                // per-commit path adds another nested git-capture future.
-                Box::pin(async move {
-                    #[derive(Deserialize)]
-                    #[serde(rename_all = "camelCase")]
-                    struct P {
-                        cwd: String,
-                        #[serde(default)]
-                        mode: String,
-                        base_ref: Option<String>,
-                        chat_id: Option<String>,
-                        commit_sha: Option<String>,
-                    }
-                    let p: P = parse_params(params)?;
-                    let identity = self
-                        .repos
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    cwd: String,
+                    #[serde(default)]
+                    mode: String,
+                    base_ref: Option<String>,
+                    chat_id: Option<String>,
+                    commit_sha: Option<String>,
+                }
+                let p: P = parse_params(params)?;
+                let repos = self.repos.clone();
+                let device_id = self.doc_host.device_id().to_string();
+                let turn = match (p.mode.as_str(), p.chat_id.as_deref()) {
+                    ("turn", Some(chat_id)) => self.diff_sync.turn_snapshot(chat_id),
+                    _ => None,
+                };
+                // A task of its own: under the dispatcher's frame a debug build overflows the 2 MB worker stack.
+                tokio::spawn(async move {
+                    let identity = repos
                         .checkout_identity(std::path::Path::new(&p.cwd))
                         .await
                         .map_err(|e| RpcError::Failed(e.to_string()))?;
@@ -3327,8 +3331,7 @@ impl RpcService for EngineRpc {
                             let base = crate::diff_sync::merge_base(root, base_ref)
                                 .await
                                 .map_err(|e| RpcError::Failed(e.to_string()))?;
-                            crate::diff_sync::capture_diff_against(&self.repos, root, Some(&base))
-                                .await
+                            crate::diff_sync::capture_diff_against(&repos, root, Some(&base)).await
                         }
                         // One commit's own changes (History → per-commit tab):
                         // parent (or the empty tree) vs the commit itself.
@@ -3337,27 +3340,23 @@ impl RpcService for EngineRpc {
                                 .commit_sha
                                 .as_deref()
                                 .ok_or_else(|| RpcError::Failed("commitSha required".into()))?;
-                            crate::diff_sync::capture_commit_diff(&self.repos, root, sha).await
+                            crate::diff_sync::capture_commit_diff(&repos, root, sha).await
                         }
                         "turn" => {
-                            let chat_id = p
-                                .chat_id
-                                .as_deref()
-                                .ok_or_else(|| RpcError::Failed("chatId required".into()))?;
-                            let snapshot = self
-                                .diff_sync
-                                .turn_snapshot(chat_id)
+                            if p.chat_id.is_none() {
+                                return Err(RpcError::Failed("chatId required".into()));
+                            }
+                            let snapshot = turn
                                 .filter(|s| s.root == identity.root)
                                 .ok_or_else(|| RpcError::Failed("no turn recorded".into()))?;
-                            crate::diff_sync::capture_turn_diff(&self.repos, root, &snapshot.tree)
-                                .await
+                            crate::diff_sync::capture_turn_diff(&repos, root, &snapshot.tree).await
                         }
-                        _ => crate::diff_sync::capture_diff(&self.repos, root).await,
+                        _ => crate::diff_sync::capture_diff(&repos, root).await,
                     }
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                     RpcReply::value(&zeron_proto::CheckoutDiff {
                         checkout_id: identity.id,
-                        device_id: self.doc_host.device_id().to_string(),
+                        device_id,
                         cwd: identity.root.to_string_lossy().to_string(),
                         patch: snapshot.patch,
                         files: snapshot.files,
@@ -3369,6 +3368,7 @@ impl RpcService for EngineRpc {
                     })
                 })
                 .await
+                .map_err(|e| RpcError::Failed(format!("checkout diff task failed: {e}")))?
             }
             methods::DISCARD_WORKING_TREE => {
                 // This destructive branch performs several nested filesystem
@@ -5996,6 +5996,90 @@ mod tests {
             "parked\n"
         );
         assert!(read(&rpc).await.stashes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn checkout_diffs_run_on_their_own_task_for_every_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        git(&["init", "-b", "main"]);
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "first"]);
+        std::fs::write(root.join("b.txt"), "b\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "second"]);
+        let second = git(&["rev-parse", "HEAD"]);
+        std::fs::write(root.join("a.txt"), "edited\n").unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble(
+            data.path(),
+            std::sync::Arc::new(HarnessRegistry::new()),
+            HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        let rpc = core.rpc_service();
+        let diff = |params: serde_json::Value| {
+            let rpc = rpc.clone();
+            async move { rpc.handle(methods::GET_CHECKOUT_DIFF, params).await }
+        };
+        let paths = |reply: serde_json::Value| -> Vec<String> {
+            reply["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|file| file["path"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let commit = through_the_wire(
+            diff(serde_json::json!({"cwd": root, "mode": "commit", "commitSha": second}))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(paths(commit.clone()), ["b.txt"]);
+        assert_eq!(commit["deviceId"], core.device_id.to_string());
+        let working = through_the_wire(diff(serde_json::json!({"cwd": root})).await.unwrap());
+        assert_eq!(paths(working), ["a.txt"]);
+        for (params, expected) in [
+            (
+                serde_json::json!({"cwd": root, "mode": "commit"}),
+                "commitSha required",
+            ),
+            (
+                serde_json::json!({"cwd": root, "mode": "branch"}),
+                "baseRef required",
+            ),
+            (
+                serde_json::json!({"cwd": root, "mode": "turn"}),
+                "chatId required",
+            ),
+            (
+                serde_json::json!({"cwd": root, "mode": "turn", "chatId": "none"}),
+                "no turn recorded",
+            ),
+        ] {
+            let error = diff(params).await.err().expect(expected);
+            assert!(error.to_string().contains(expected), "{error}");
+        }
     }
 
     #[tokio::test]
