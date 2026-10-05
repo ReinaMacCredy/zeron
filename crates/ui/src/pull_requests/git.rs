@@ -1475,6 +1475,7 @@ impl GitTab {
                 .flex()
                 .flex_row()
                 .flex_wrap()
+                .content_start()
                 .items_end()
                 .when(!current_text.is_empty(), |el| {
                     el.child(SharedString::from(current_text))
