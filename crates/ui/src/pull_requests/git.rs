@@ -622,6 +622,23 @@ impl GitTab {
         }
     }
 
+    pub(super) fn drop_missing_checkout(&mut self, cx: &mut Context<Self>) {
+        let (Some(space), Some(path)) = (&self.space, &self.checkout_path) else {
+            return;
+        };
+        let listed = checkout_options(self.state.read(cx), space)
+            .iter()
+            .any(|option| {
+                option
+                    .path
+                    .as_deref()
+                    .is_some_and(|known| same_path(known, path))
+            });
+        if !listed {
+            self.set_checkout(None, cx);
+        }
+    }
+
     pub(super) fn set_ref_badges(
         &mut self,
         badges: HashMap<String, SharedString>,
@@ -4620,6 +4637,7 @@ impl PullRequestsPage {
         let visible = self.visible;
         view.update(cx, |tab, cx| {
             tab.set_space(space, cx);
+            tab.drop_missing_checkout(cx);
             tab.set_visible(visible, cx);
             tab.set_ref_badges(badges, cx);
             tab.set_pull_requests(target, heads, cx);
@@ -7839,5 +7857,37 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(tree_reads(&calls), before + 2, "one reread, not three");
+    }
+
+    #[gpui::test]
+    fn archiving_the_picked_worktrees_thread_falls_back_to_the_main_checkout(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (page, cx, calls, _dir) = open_page(cx, lab_state(), git_prefs());
+        settle(cx, |cx| cx.debug_bounds("git-staged-row-0").is_some());
+        let tab = git_tab(&page, cx);
+        tab.update(cx, |tab, cx| {
+            tab.set_checkout(Some("/lab/worktrees/idle".into()), cx)
+        });
+        settle(cx, |cx| tab.read_with(cx, |tab, _| tab.tree.is_some()));
+        let state = page.read_with(cx, |page, _| page.state.clone());
+        state.update(cx, |state, _| {
+            for chat in &mut state.chats {
+                if chat.id == "c-idle" {
+                    chat.archived = true;
+                }
+            }
+        });
+        page.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        tab.read_with(cx, |tab, _| assert_eq!(tab.checkout_path(), None));
+        assert!(cx.debug_bounds("pull-requests-git-checkout").is_some());
+        settle(cx, |_| {
+            calls_of(&calls, methods::GET_WORKING_TREE)
+                .last()
+                .is_some_and(|params| params.get("checkoutPath").is_none())
+        });
     }
 }
