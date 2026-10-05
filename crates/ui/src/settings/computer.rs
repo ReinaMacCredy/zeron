@@ -23,7 +23,7 @@ use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::icons;
 use crate::popover;
 use crate::settings::permission_guide::{
-    self, PermissionGuide, PermissionGuideHost, PermissionPane, choice_chip, outline_button, row,
+    self, PermissionGuide, PermissionGuideHost, PermissionPane, choice_button, outline_button, row,
 };
 use crate::settings::{SavePolicy, widgets};
 use crate::state::AppState;
@@ -1332,20 +1332,9 @@ impl Render for ComputerPage {
             || !settings.agent_cursor_fill_color.is_empty()
             || !settings.agent_cursor_rim_color.is_empty();
         let chip = |id: &'static str, label: &'static str, selected: bool| {
-            choice_chip(&theme, selected)
-                .id(id)
+            choice_button(&theme, id, label, selected)
                 .debug_selector(move || id.to_string())
-                .role(gpui::Role::Button)
-                .aria_label(label)
-                .aria_toggled(if selected {
-                    gpui::Toggled::True
-                } else {
-                    gpui::Toggled::False
-                })
-                .tab_index(0)
-                .focus_visible(move |style| style.border_2().border_color(accent))
                 .when(!editable, |el| el.opacity(0.5))
-                .child(label)
         };
         let reset = |id: &'static str, label: &'static str| {
             widgets::ghost_action(&theme)

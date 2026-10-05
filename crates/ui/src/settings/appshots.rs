@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use super::*;
 use crate::appshots::{AppshotPlatform, CapabilityState, ChordModifier};
 use crate::settings::permission_guide::{
-    self, PermissionGuide, PermissionGuideHost, PermissionPane, choice_chip, outline_button, row,
+    self, PermissionGuide, PermissionGuideHost, PermissionPane, choice_button, outline_button, row,
     section_label,
 };
 use crate::settings::widgets;
@@ -492,23 +492,17 @@ impl ShortcutsPage {
             .enumerate()
             .map(|(ix, destination)| {
                 let selected = self.appshot_destination == destination;
-                choice_chip(&theme, selected)
-                    .id(("appshot-destination", ix))
-                    .role(gpui::Role::Button)
-                    .aria_label(destination.label())
-                    .aria_toggled(if selected {
-                        gpui::Toggled::True
-                    } else {
-                        gpui::Toggled::False
-                    })
-                    .tab_index(0)
-                    .focus_visible(move |style| style.border_2().border_color(accent))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.appshot_destination = destination;
-                        this.commit_appshots(cx);
-                        cx.notify();
-                    }))
-                    .child(destination.label())
+                choice_button(
+                    &theme,
+                    ("appshot-destination", ix),
+                    destination.label(),
+                    selected,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.appshot_destination = destination;
+                    this.commit_appshots(cx);
+                    cx.notify();
+                }))
             })
             .collect::<Vec<_>>();
         let destination_description = match self.appshot_destination {

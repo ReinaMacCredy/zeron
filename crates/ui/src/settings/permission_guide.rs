@@ -246,6 +246,28 @@ pub fn choice_chip(theme: &Theme, selected: bool) -> gpui::Div {
         .cursor_pointer()
 }
 
+pub fn choice_button(
+    theme: &Theme,
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<gpui::SharedString>,
+    selected: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let label = label.into();
+    let accent = theme.accent;
+    choice_chip(theme, selected)
+        .id(id)
+        .role(gpui::Role::Button)
+        .aria_label(label.clone())
+        .aria_toggled(if selected {
+            gpui::Toggled::True
+        } else {
+            gpui::Toggled::False
+        })
+        .tab_index(0)
+        .focus_visible(move |style| style.border_2().border_color(accent))
+        .child(label)
+}
+
 pub fn section_label(theme: &Theme, title: &'static str) -> gpui::Div {
     div()
         .mt(px(24.0))
