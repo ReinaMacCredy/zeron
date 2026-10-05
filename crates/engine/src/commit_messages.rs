@@ -29,50 +29,56 @@ pub(crate) struct StagedChange {
 }
 
 pub(crate) async fn read_staged(root: &Path) -> Result<StagedChange, EngineError> {
-    let tree = working_tree::read(root, "").await?;
-    let stat = working_tree::git_with(
-        root,
-        &["diff", "--cached", "--stat", "--no-ext-diff", "--no-color"],
-        STAT_LIMIT,
-        false,
-    )
-    .await?;
+    let (staged, stat, patch, head, log) = tokio::join!(
+        working_tree::git_with(
+            root,
+            &["diff", "--cached", "--name-only", "-z", "--diff-filter=u"],
+            1024,
+            false,
+        ),
+        working_tree::git_with(
+            root,
+            &["diff", "--cached", "--stat", "--no-ext-diff", "--no-color"],
+            STAT_LIMIT,
+            false,
+        ),
+        working_tree::git_with(
+            root,
+            &[
+                "diff",
+                "--cached",
+                "-M",
+                "--no-ext-diff",
+                "--no-color",
+                "--no-textconv",
+            ],
+            PATCH_LIMIT,
+            false,
+        ),
+        working_tree::verify_rev(root, "HEAD"),
+        working_tree::git_with(
+            root,
+            &["log", SUBJECT_COUNT, "--format=%s", "--no-color"],
+            SUBJECT_LIMIT,
+            false,
+        ),
+    );
+    let staged = staged?;
+    let stat = stat?;
     let stat = String::from_utf8_lossy(&stat.stdout).trim_end().to_owned();
-    let staged =
-        tree.files.iter().any(working_tree::is_staged) || (tree.truncated && !stat.is_empty());
-    if !staged {
+    if staged.stdout.is_empty() {
         return Err(EngineError::Other(
             "Nothing is staged. Stage files first, then write the message.".into(),
         ));
     }
-    let patch = working_tree::git_with(
-        root,
-        &[
-            "diff",
-            "--cached",
-            "-M",
-            "--no-ext-diff",
-            "--no-color",
-            "--no-textconv",
-        ],
-        PATCH_LIMIT,
-        false,
-    )
-    .await?;
+    let patch = patch?;
     let (patch, patch_cut) = if patch.truncated {
         (cut_on_hunk(&patch.stdout), true)
     } else {
         (String::from_utf8_lossy(&patch.stdout).into_owned(), false)
     };
-    let subjects = if tree.head_sha.is_some() {
-        let log = working_tree::git_with(
-            root,
-            &["log", SUBJECT_COUNT, "--format=%s", "--no-color"],
-            SUBJECT_LIMIT,
-            false,
-        )
-        .await?;
-        String::from_utf8_lossy(&log.stdout)
+    let subjects = if head?.is_some() {
+        String::from_utf8_lossy(&log?.stdout)
             .lines()
             .map(str::to_owned)
             .collect()
