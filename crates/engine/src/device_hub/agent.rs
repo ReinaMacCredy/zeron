@@ -11,7 +11,7 @@ use zeron_proto::device_hub::{
 };
 
 use super::hub_process::{self, HubProcess};
-use super::{DeviceHub, IOS_ONLY, UNKNOWN_DEVICE, hub_client, toolchain};
+use super::{DeviceHub, UNKNOWN_DEVICE, hub_client, toolchain};
 
 pub const AGENT_ACCESS_OFF: &str = "Agent device access is turned off for this environment.";
 pub const TOOL_SUPPORT_OFF: &str = "Device support is off. Ask the user to enable it in the Device panel before installing or starting device tools.";
@@ -229,7 +229,7 @@ fn write_host_config(path: &Path, base_url: &str, token: &str) -> std::io::Resul
     Ok(())
 }
 
-fn sh_quote(value: &str) -> String {
+pub(super) fn sh_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
@@ -461,7 +461,38 @@ fn fit_screenshot(png: Vec<u8>) -> Result<(Vec<u8>, u32, u32), String> {
     Ok((out.into_inner(), scaled.width(), scaled.height()))
 }
 
-pub(super) async fn capture_simulator(udid: &str) -> Result<Vec<u8>, String> {
+pub(super) async fn capture_device(device: &HubDevice) -> Result<Vec<u8>, String> {
+    match device.platform {
+        DevicePlatform::Ios => capture_simulator(&device.id).await,
+        DevicePlatform::Android => {
+            let root = tokio::task::spawn_blocking(super::platform::android_root)
+                .await
+                .ok()
+                .flatten()
+                .ok_or(super::actions::ANDROID_SDK_MISSING)?;
+            capture_emulator(&super::platform::adb(&root), &device.id).await
+        }
+    }
+}
+
+async fn capture_emulator(adb: &Path, serial: &str) -> Result<Vec<u8>, String> {
+    let run = tokio::process::Command::new(adb)
+        .args(["-s", serial, "exec-out", "screencap", "-p"])
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    let output = tokio::time::timeout(SCREENSHOT_TIMEOUT, run)
+        .await
+        .map_err(|_| "The emulator screenshot timed out.".to_string())?
+        .map_err(|e| format!("Could not run adb: {e}"))?;
+    if !output.status.success() || !output.stdout.starts_with(b"\x89PNG") {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(format!("The emulator screenshot failed: {detail}"));
+    }
+    Ok(output.stdout)
+}
+
+async fn capture_simulator(udid: &str) -> Result<Vec<u8>, String> {
     let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
     let file = dir.path().join("screen.png");
     let run = tokio::process::Command::new("xcrun")
@@ -740,10 +771,7 @@ impl DeviceHub {
                 .cloned()
                 .ok_or_else(|| UNKNOWN_DEVICE.to_string())?,
         };
-        if device.platform != DevicePlatform::Ios {
-            return Err(IOS_ONLY.into());
-        }
-        let png = capture_simulator(&device.id).await?;
+        let png = capture_device(&device).await?;
         let (png, width, height) = tokio::task::spawn_blocking(move || fit_screenshot(png))
             .await
             .map_err(|e| e.to_string())??;
@@ -1359,6 +1387,67 @@ if (args[0] === "daemon" && args[1] === "stop") {
         assert_eq!(png_dimensions(&scaled), (721, 1568));
         let small = encode(600, 1200);
         assert_eq!(fit_screenshot(small.clone()), Ok((small, 600, 1200)));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn device_open_needs_a_platform_once_simulators_and_emulators_are_both_listed() {
+        let (_dir, hub, _) = enabled_hub(HEALTHY).await;
+        hub.use_platforms_for_test(
+            [DevicePlatform::Ios, DevicePlatform::Android]
+                .map(
+                    |platform| zeron_proto::device_hub::DevicePlatformAvailability {
+                        platform,
+                        available: true,
+                        reason: None,
+                    },
+                )
+                .to_vec(),
+        );
+        hub.use_actions_for_test(
+            Arc::new(|_| {
+                Box::pin(async {
+                    super::super::actions::CommandOutput {
+                        code: 0,
+                        stdout: "Pixel_9_API_36\n".into(),
+                        stderr: String::new(),
+                    }
+                })
+            }),
+            super::super::actions::Helpers {
+                android_sdk: Some("/sdk".into()),
+                ..Default::default()
+            },
+        );
+        hub.state
+            .send_modify(|state| state.settings.agent_access_enabled = true);
+        let listed = hub
+            .tool_list(DeviceToolParams {
+                chat_id: "chat-1".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            listed["devices"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|device| (
+                    device["id"].as_str().unwrap(),
+                    device["platform"].as_str().unwrap()
+                ))
+                .collect::<Vec<_>>(),
+            [("SIM-1", "ios"), ("Pixel_9_API_36", "android")]
+        );
+        let opened = hub
+            .tool_open(DeviceToolParams {
+                chat_id: "chat-1".into(),
+                ..Default::default()
+            })
+            .await;
+        assert_eq!(opened, Err(BOTH_PLATFORMS.into()));
+        assert!(hub.snapshot().sessions.is_empty());
+        hub.shutdown().await;
     }
 
     #[tokio::test(flavor = "multi_thread")]

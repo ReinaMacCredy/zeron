@@ -1,15 +1,17 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use futures::StreamExt;
+use futures::{SinkExt, StreamExt};
 use tokio::sync::{broadcast, watch};
+use tokio_tungstenite::tungstenite::{self, Message};
 use zeron_proto::device_hub::{
     AVCC_DELTA, AVCC_DESCRIPTION, AVCC_KEYFRAME, AVCC_SEED, AvccDemuxer, AvccEnvelope,
-    DeviceStreamStatus, DeviceVideoCodec, StreamLinkStatus,
+    DeviceStreamStatus, DeviceVideoCodec, StreamLinkStatus, annexb_to_avcc, semu_payload,
 };
 
-use super::input::InputSocket;
+use super::input::{InputSocket, RESET_VIDEO};
 use super::mjpeg::MjpegParser;
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
@@ -40,6 +42,7 @@ struct AvccCache {
 pub(crate) struct AvccFeed {
     cache: Mutex<AvccCache>,
     sender: broadcast::Sender<Arc<AvccEnvelope>>,
+    keyframe_wanted: tokio::sync::Notify,
 }
 
 impl AvccFeed {
@@ -51,6 +54,7 @@ impl AvccFeed {
                 ..Default::default()
             }),
             sender: broadcast::channel(AVCC_QUEUE).0,
+            keyframe_wanted: tokio::sync::Notify::new(),
         })
     }
 
@@ -362,6 +366,9 @@ impl DeviceStreams {
             }
         });
         feed.subscribers += 1;
+        if feed.subscribers > 1 {
+            feed.sink.keyframe_wanted.notify_one();
+        }
         let feed = feed.sink.clone();
         let generation = entry.generation;
         self.publish(&entries);
@@ -640,6 +647,84 @@ pub(crate) fn spawn_avcc_reader(
             Some(produced)
         },
     )
+}
+
+fn video_session(text: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(text)
+        .is_ok_and(|value| value["type"] == "video-session")
+}
+
+pub(crate) fn spawn_semu_reader(
+    url: String,
+    feed: Arc<AvccFeed>,
+    mut controls: tokio::sync::mpsc::UnboundedReceiver<Message>,
+    live: Arc<AtomicBool>,
+    on_status: impl Fn(StreamLinkStatus) + Send + 'static,
+    on_first_frame: impl Fn() + Send + 'static,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let reset = || Message::Text(RESET_VIDEO.into());
+        loop {
+            on_status(StreamLinkStatus::Connecting);
+            let detail = match tokio_tungstenite::connect_async(url.as_str()).await {
+                Err(tungstenite::Error::Http(response)) => {
+                    format!("HTTP {}", response.status().as_u16())
+                }
+                Err(_) => "could not connect".to_string(),
+                Ok((socket, _)) => {
+                    let (mut sink, mut stream) = socket.split();
+                    feed.connected();
+                    while controls.try_recv().is_ok() {}
+                    let mut first = true;
+                    let detail = if sink.send(reset()).await.is_err() {
+                        "the video stream ended"
+                    } else {
+                        live.store(true, Ordering::SeqCst);
+                        loop {
+                            let outgoing = tokio::select! {
+                                control = controls.recv() => match control {
+                                    Some(control) => control,
+                                    None => return,
+                                },
+                                _ = feed.keyframe_wanted.notified() => reset(),
+                                incoming = stream.next() => match incoming {
+                                    Some(Ok(Message::Binary(bytes))) => {
+                                        let (key, payload) = semu_payload(&bytes);
+                                        let envelopes = annexb_to_avcc(payload, key);
+                                        let produced = !envelopes.is_empty();
+                                        for envelope in envelopes {
+                                            feed.push(envelope);
+                                        }
+                                        if produced && first {
+                                            first = false;
+                                            on_status(StreamLinkStatus::Live);
+                                            on_first_frame();
+                                        }
+                                        continue;
+                                    }
+                                    Some(Ok(Message::Text(text))) if video_session(&text) => {
+                                        feed.connected();
+                                        reset()
+                                    }
+                                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
+                                        break "the video stream ended";
+                                    }
+                                    Some(Ok(_)) => continue,
+                                },
+                            };
+                            if sink.send(outgoing).await.is_err() {
+                                break "the video stream ended";
+                            }
+                        }
+                    };
+                    live.store(false, Ordering::SeqCst);
+                    detail.to_string()
+                }
+            };
+            on_status(StreamLinkStatus::Failed { detail });
+            tokio::time::sleep(RECONNECT_DELAY).await;
+        }
+    })
 }
 
 fn spawn_link<P>(

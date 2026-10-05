@@ -60,10 +60,48 @@ fn ios_reason(
     }
 }
 
-pub(crate) fn android() -> DevicePlatformAvailability {
+fn detect_android_sdk() -> AndroidSdk {
     let env = |key: &str| std::env::var(key).ok();
-    let reason = android_reason(&android_sdk(&env, &|path| std::fs::canonicalize(path).ok()));
-    availability(DevicePlatform::Android, reason)
+    android_sdk(&env, &|path| std::fs::canonicalize(path).ok())
+}
+
+pub(crate) fn android() -> DevicePlatformAvailability {
+    availability(
+        DevicePlatform::Android,
+        android_reason(&detect_android_sdk()),
+    )
+}
+
+pub(crate) fn android_root() -> Option<PathBuf> {
+    let sdk = detect_android_sdk();
+    android_reason(&sdk).is_none().then_some(sdk.root).flatten()
+}
+
+pub(crate) fn adb(root: &Path) -> PathBuf {
+    root.join("platform-tools").join(exe("adb"))
+}
+
+pub(crate) fn emulator(root: &Path) -> PathBuf {
+    root.join("emulator").join(exe("emulator"))
+}
+
+pub(crate) fn android_env(
+    root: &Path,
+    path: Option<&std::ffi::OsStr>,
+) -> Vec<(&'static str, std::ffi::OsString)> {
+    let inherited: Vec<PathBuf> = path
+        .map(|path| std::env::split_paths(path).collect())
+        .unwrap_or_default();
+    let dirs = [root.join("platform-tools"), root.join("emulator")]
+        .into_iter()
+        .chain(inherited);
+    let path =
+        std::env::join_paths(dirs).unwrap_or_else(|_| path.unwrap_or_default().to_os_string());
+    vec![
+        ("ANDROID_HOME", root.as_os_str().to_os_string()),
+        ("ANDROID_SDK_ROOT", root.as_os_str().to_os_string()),
+        ("PATH", path),
+    ]
 }
 
 pub(crate) fn detect() -> Vec<DevicePlatformAvailability> {
@@ -295,5 +333,28 @@ mod tests {
                 && emulator_missing.contains("path-sdk"),
             "{emulator_missing}"
         );
+    }
+
+    #[test]
+    fn the_hub_env_points_at_the_sdk_and_prefixes_its_tools_on_path() {
+        let root = Path::new("/sdk root");
+        let env = android_env(root, Some("/usr/bin:/bin".as_ref()));
+        let value = |key: &str| {
+            env.iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| value.to_string_lossy().into_owned())
+        };
+        assert_eq!(value("ANDROID_HOME").as_deref(), Some("/sdk root"));
+        assert_eq!(value("ANDROID_SDK_ROOT").as_deref(), Some("/sdk root"));
+        assert_eq!(
+            value("PATH").as_deref(),
+            Some("/sdk root/platform-tools:/sdk root/emulator:/usr/bin:/bin")
+        );
+        assert_eq!(
+            android_env(root, None)[2].1,
+            "/sdk root/platform-tools:/sdk root/emulator"
+        );
+        assert_eq!(adb(root), Path::new("/sdk root/platform-tools/adb"));
+        assert_eq!(emulator(root), Path::new("/sdk root/emulator/emulator"));
     }
 }

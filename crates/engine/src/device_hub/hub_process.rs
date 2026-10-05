@@ -287,6 +287,7 @@ pub(crate) async fn spawn(
     entry: &Path,
     state_dir: &Path,
     ready_timeout: Duration,
+    env: Vec<(&'static str, std::ffi::OsString)>,
 ) -> Result<HubProcess, String> {
     reap_stale(state_dir, entry);
     std::fs::create_dir_all(state_dir).map_err(|e| e.to_string())?;
@@ -297,7 +298,8 @@ pub(crate) async fn spawn(
         .args(["--port", &port.to_string(), "--host", "127.0.0.1"])
         .args(["--hide-sidebar", "--hide-boot-device"])
         .env("FORCE_COLOR", "0")
-        .env("NO_COLOR", "1");
+        .env("NO_COLOR", "1")
+        .envs(env);
     scrub_env(
         &mut command,
         "EXPO_DEVICE_HUB_",
@@ -438,6 +440,7 @@ http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
             &script,
             &state_dir,
             Duration::from_secs(20),
+            Vec::new(),
         )
         .await
         .expect("hub becomes ready");
@@ -463,6 +466,7 @@ http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
             &script,
             &state_dir,
             Duration::from_millis(800),
+            Vec::new(),
         )
         .await;
         assert!(late.err().unwrap().contains("did not answer"));
@@ -496,6 +500,7 @@ http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
                     &script,
                     &state_dir,
                     Duration::from_secs(60),
+                    Vec::new(),
                 )
                 .await;
             })
@@ -537,6 +542,7 @@ http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
             &script,
             &dir.path().join("device"),
             Duration::from_secs(20),
+            Vec::new(),
         )
         .await
         .expect("hub becomes ready");
@@ -712,6 +718,7 @@ http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
             &script,
             &dir.path().join("device"),
             Duration::from_secs(20),
+            Vec::new(),
         )
         .await
         .expect("hub becomes ready");

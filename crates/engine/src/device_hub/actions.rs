@@ -7,7 +7,7 @@ use futures::StreamExt;
 use futures::future::BoxFuture;
 use zeron_proto::device_hub::{
     ColorFilter, DeviceAction, DeviceAppState, DeviceAppearance, DeviceAxTree, DeviceDetail,
-    DeviceEventLogBatch, DeviceEventLogEntry, DevicePermission, DevicePlatform,
+    DeviceEventLogBatch, DeviceEventLogEntry, DeviceOrientation, DevicePermission, DevicePlatform,
     DeviceSettingsSnapshot, DeviceTextSize, DeviceToggle, ForegroundApp, HubDevice,
     HubDeviceScreenshot, HubDeviceTargetParams, LOCAL_DEVICE_HOST_ID, LiquidGlass,
     PermissionDecision, RunHubDeviceActionParams,
@@ -29,6 +29,7 @@ const REFUSED_URL_SCHEME: &str =
 const INVALID_PUSH: &str = "A push notification needs alert text or a JSON object payload.";
 const PUSH_TOO_LARGE: &str = "A push notification payload must be at most 4096 bytes.";
 const PUSH_LIMIT: usize = 4096;
+pub(crate) const ANDROID_SDK_MISSING: &str = "The Android SDK is not available on this machine.";
 const EVENT_SUMMARY_LIMIT: usize = 1000;
 const EVENT_FIELD_LIMIT: usize = 64;
 const SCREENSHOT_NAME_TRIES: usize = 100;
@@ -77,15 +78,28 @@ async fn run_command(argv: Vec<String>) -> CommandOutput {
 pub(crate) struct Helpers {
     pub ax_settings: Option<String>,
     pub serve_sim: Option<(String, String)>,
+    pub android_sdk: Option<PathBuf>,
 }
 
 impl Helpers {
     fn installed() -> Self {
+        let android_sdk = super::platform::android_root();
         let Some(entry) = toolchain::installed_hub() else {
-            return Self::default();
+            return Self {
+                android_sdk,
+                ..Self::default()
+            };
         };
         let node = toolchain::launch(&entry).ok().map(|(node, _)| node);
-        Self::from_entry(&entry, node)
+        Self {
+            android_sdk,
+            ..Self::from_entry(&entry, node)
+        }
+    }
+
+    pub(crate) fn adb(&self) -> Option<String> {
+        let root = self.android_sdk.as_deref()?;
+        Some(super::platform::adb(root).to_string_lossy().into_owned())
     }
 
     fn from_entry(entry: &Path, node: Option<PathBuf>) -> Self {
@@ -102,6 +116,7 @@ impl Helpers {
         Self {
             ax_settings: file(dist.join("simax/serve-sim-ax-settings")),
             serve_sim: node.zip(file(dist.join("serve-sim.js"))),
+            android_sdk: None,
         }
     }
 }
@@ -340,6 +355,227 @@ pub(crate) fn action_argv(
     })
 }
 
+fn android_text_size(size: DeviceTextSize) -> &'static str {
+    match size {
+        DeviceTextSize::Small => "0.85",
+        DeviceTextSize::Default => "1.0",
+        DeviceTextSize::Large => "1.15",
+        DeviceTextSize::ExtraLarge => "1.3",
+    }
+}
+
+fn android_permissions(permission: DevicePermission) -> Option<&'static [&'static str]> {
+    Some(match permission {
+        DevicePermission::Camera => &["android.permission.CAMERA"],
+        DevicePermission::Microphone => &["android.permission.RECORD_AUDIO"],
+        DevicePermission::Photos => &[
+            "android.permission.READ_MEDIA_IMAGES",
+            "android.permission.READ_EXTERNAL_STORAGE",
+        ],
+        DevicePermission::Contacts => &[
+            "android.permission.READ_CONTACTS",
+            "android.permission.WRITE_CONTACTS",
+        ],
+        DevicePermission::Calendar => &[
+            "android.permission.READ_CALENDAR",
+            "android.permission.WRITE_CALENDAR",
+        ],
+        DevicePermission::Location => &[
+            "android.permission.ACCESS_FINE_LOCATION",
+            "android.permission.ACCESS_COARSE_LOCATION",
+        ],
+        DevicePermission::Notifications => &["android.permission.POST_NOTIFICATIONS"],
+        DevicePermission::Motion => &["android.permission.ACTIVITY_RECOGNITION"],
+        DevicePermission::Reminders | DevicePermission::MediaLibrary | DevicePermission::FaceId => {
+            return None;
+        }
+    })
+}
+
+fn android_orientation(orientation: DeviceOrientation) -> (&'static str, &'static str) {
+    match orientation {
+        DeviceOrientation::Portrait => ("0:9.81:0", "0"),
+        DeviceOrientation::LandscapeLeft => ("9.81:0:0", "1"),
+        DeviceOrientation::PortraitUpsideDown => ("0:-9.81:0", "2"),
+        DeviceOrientation::LandscapeRight => ("-9.81:0:0", "3"),
+    }
+}
+
+pub(crate) fn android_action_argvs(
+    adb: &str,
+    serial: &str,
+    action: &DeviceAction,
+) -> Result<Vec<Vec<String>>, String> {
+    if !hub_client::valid_device_id(serial) {
+        return Err(DEVICE_ACTION_UNAVAILABLE.into());
+    }
+    validate(action)?;
+    let adb_argv = |rest: &[&str]| -> Vec<String> {
+        [adb, "-s", serial]
+            .iter()
+            .chain(rest)
+            .map(|arg| arg.to_string())
+            .collect()
+    };
+    let shell = |rest: &[&str]| adb_argv(&[&["shell"][..], rest].concat());
+    let unavailable = || Err(DEVICE_ACTION_UNAVAILABLE.to_string());
+    Ok(match action {
+        DeviceAction::SetAppearance { value } => vec![shell(&[
+            "cmd",
+            "uimode",
+            "night",
+            match value {
+                DeviceAppearance::Dark => "yes",
+                DeviceAppearance::Light => "no",
+            },
+        ])],
+        DeviceAction::SetTextSize { value } => vec![shell(&[
+            "settings",
+            "put",
+            "system",
+            "font_scale",
+            android_text_size(*value),
+        ])],
+        DeviceAction::SetToggle {
+            setting: DeviceToggle::NetworkEnabled,
+            enabled,
+        } => {
+            let state = if *enabled { "enable" } else { "disable" };
+            vec![
+                shell(&["svc", "wifi", state]),
+                shell(&["svc", "data", state]),
+            ]
+        }
+        DeviceAction::SetToggle {
+            setting: DeviceToggle::ReduceMotion,
+            enabled,
+        } => [
+            "animator_duration_scale",
+            "transition_animation_scale",
+            "window_animation_scale",
+        ]
+        .iter()
+        .map(|key| {
+            shell(&[
+                "settings",
+                "put",
+                "global",
+                key,
+                if *enabled { "0" } else { "1" },
+            ])
+        })
+        .collect(),
+        DeviceAction::SetOrientation { value } => {
+            let (gravity, rotation) = android_orientation(*value);
+            // Locking the user rotation leaves the encoded display unrotated on emulators; tilting the accelerometer does not.
+            if serial.starts_with("emulator-") {
+                vec![
+                    shell(&["settings", "put", "system", "accelerometer_rotation", "1"]),
+                    shell(&["cmd", "window", "user-rotation", "free"]),
+                    adb_argv(&["emu", "sensor", "set", "acceleration", gravity]),
+                ]
+            } else {
+                vec![shell(&["cmd", "window", "user-rotation", "lock", rotation])]
+            }
+        }
+        DeviceAction::SetLocation { lat, lon } => vec![adb_argv(&[
+            "emu",
+            "geo",
+            "fix",
+            &lon.to_string(),
+            &lat.to_string(),
+        ])],
+        DeviceAction::ClearLocation => Vec::new(),
+        DeviceAction::SetPermission {
+            app_id,
+            permission,
+            decision: choice,
+        } => {
+            let verb = match choice {
+                PermissionDecision::Grant => "grant",
+                PermissionDecision::Revoke | PermissionDecision::Reset => "revoke",
+            };
+            let Some(names) = android_permissions(*permission) else {
+                return unavailable();
+            };
+            names
+                .iter()
+                .map(|name| shell(&["pm", verb, app_id, name]))
+                .collect()
+        }
+        DeviceAction::OpenUrl { url } => {
+            // adb joins its arguments into one command line for the device shell.
+            let url = super::agent::sh_quote(&open_url(url)?);
+            vec![shell(&[
+                "am",
+                "start",
+                "-a",
+                "android.intent.action.VIEW",
+                "-d",
+                &url,
+            ])]
+        }
+        DeviceAction::LaunchApp { app_id } => vec![shell(&[
+            "monkey",
+            "-p",
+            app_id,
+            "-c",
+            "android.intent.category.LAUNCHER",
+            "1",
+        ])],
+        DeviceAction::TerminateApp { app_id } => vec![shell(&["am", "force-stop", app_id])],
+        DeviceAction::SetToggle { .. }
+        | DeviceAction::SetLiquidGlass { .. }
+        | DeviceAction::SetColorFilter { .. }
+        | DeviceAction::SendPush { .. } => return unavailable(),
+    })
+}
+
+pub(crate) fn android_settings_from(
+    night: Option<&str>,
+    font_scale: Option<&str>,
+    animator: Option<&str>,
+    wifi: Option<&str>,
+) -> DeviceSettingsSnapshot {
+    let number = |value: Option<&str>| value.and_then(|value| value.trim().parse::<f64>().ok());
+    DeviceSettingsSnapshot {
+        appearance: night.and_then(|night| {
+            if night.contains("yes") {
+                Some(DeviceAppearance::Dark)
+            } else if night.contains("no") {
+                Some(DeviceAppearance::Light)
+            } else {
+                None
+            }
+        }),
+        text_size: number(font_scale).map(|scale| {
+            if scale <= 0.9 {
+                DeviceTextSize::Small
+            } else if scale >= 1.25 {
+                DeviceTextSize::ExtraLarge
+            } else if scale >= 1.1 {
+                DeviceTextSize::Large
+            } else {
+                DeviceTextSize::Default
+            }
+        }),
+        reduce_motion: number(animator).map(|scale| scale == 0.0),
+        network_enabled: match wifi.map(str::trim) {
+            Some("1") => Some(true),
+            Some("0") => Some(false),
+            _ => None,
+        },
+        ..Default::default()
+    }
+}
+
+pub(crate) fn android_foreground(dumpsys: &str) -> Option<ForegroundApp> {
+    let focus =
+        regex::Regex::new(r"m(?:CurrentFocus|FocusedApp)=\w+\{[^ ]+ u\d+ ([^/ ]+)/").ok()?;
+    let id = focus.captures(dumpsys)?.get(1)?.as_str().to_string();
+    Some(ForegroundApp { id, pid: None })
+}
+
 pub(crate) fn settings_from(
     appearance: Option<&str>,
     content_size: Option<&str>,
@@ -383,6 +619,7 @@ pub(crate) fn settings_from(
             Some("blue-yellow") => Some(ColorFilter::BlueYellow),
             _ => None,
         },
+        network_enabled: None,
     }
 }
 
@@ -492,6 +729,46 @@ fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
     options.open(path)?.write_all(text.as_bytes())
 }
 
+async fn read_android_detail(
+    device: &HubDevice,
+    runner: &Runner,
+    adb: Option<String>,
+) -> DeviceDetail {
+    let shell = |args: &[&str]| {
+        let run = adb.as_deref().map(|adb| {
+            let argv = [adb, "-s", &device.id, "shell"]
+                .iter()
+                .chain(args)
+                .map(|arg| arg.to_string())
+                .collect();
+            runner(argv)
+        });
+        async move {
+            let output = run?.await;
+            (output.code == 0).then_some(output.stdout)
+        }
+    };
+    let (night, font_scale, animator, wifi, window) = tokio::join!(
+        shell(&["cmd", "uimode", "night"]),
+        shell(&["settings", "get", "system", "font_scale"]),
+        shell(&["settings", "get", "global", "animator_duration_scale"]),
+        shell(&["settings", "get", "global", "wifi_on"]),
+        shell(&["dumpsys", "window"]),
+    );
+    DeviceDetail {
+        host_id: device.host_id.clone(),
+        device_id: device.id.clone(),
+        settings: android_settings_from(
+            night.as_deref(),
+            font_scale.as_deref(),
+            animator.as_deref(),
+            wifi.as_deref(),
+        ),
+        foreground_app: window.as_deref().and_then(android_foreground),
+        read_at: chrono::Utc::now().to_rfc3339(),
+    }
+}
+
 impl DeviceHub {
     fn action_env(&self) -> (Runner, Helpers) {
         #[cfg(test)]
@@ -512,6 +789,24 @@ impl DeviceHub {
             .test_actions
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some((runner, helpers));
+    }
+
+    pub(super) async fn list_avds(&self) -> String {
+        let (runner, helpers) = self.action_env();
+        let Some(root) = helpers.android_sdk else {
+            return String::new();
+        };
+        let emulator = super::platform::emulator(&root);
+        let output = runner(vec![
+            emulator.to_string_lossy().into_owned(),
+            "-list-avds".into(),
+        ])
+        .await;
+        if output.code != 0 {
+            tracing::warn!(stderr = %output.stderr.trim(), "listing Android virtual devices failed");
+            return String::new();
+        }
+        output.stdout
     }
 
     fn device_lock(&self, device_id: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -546,9 +841,6 @@ impl DeviceHub {
         params: HubDeviceTargetParams,
     ) -> Result<DeviceDetail, String> {
         let device = self.action_target(params.host_id.as_deref(), &params.device_id)?;
-        if device.platform != DevicePlatform::Ios {
-            return Err(IOS_ONLY.into());
-        }
         let lock = self.device_lock(&device.id);
         let _serial = lock.lock().await;
         Ok(self.read_detail(&device, true).await)
@@ -556,6 +848,9 @@ impl DeviceHub {
 
     async fn read_detail(&self, device: &HubDevice, foreground: bool) -> DeviceDetail {
         let (runner, helpers) = self.action_env();
+        if device.platform == DevicePlatform::Android {
+            return read_android_detail(device, &runner, helpers.adb()).await;
+        }
         let read = |argv: Vec<String>| {
             let run = runner(argv);
             async move {
@@ -631,29 +926,41 @@ impl DeviceHub {
             _ => None,
         };
         let push_file = dir.as_ref().map(|dir| dir.path().join("payload.json"));
-        let argv = action_argv(
-            device.platform,
-            &device.id,
-            &params.action,
-            &helpers,
-            push_file.as_deref(),
-        )?;
+        let argvs = match device.platform {
+            DevicePlatform::Ios => vec![action_argv(
+                device.platform,
+                &device.id,
+                &params.action,
+                &helpers,
+                push_file.as_deref(),
+            )?],
+            DevicePlatform::Android => android_action_argvs(
+                &helpers.adb().ok_or(ANDROID_SDK_MISSING)?,
+                &device.id,
+                &params.action,
+            )?,
+        };
         if let (DeviceAction::SendPush { payload, .. }, Some(push_file)) =
             (&params.action, &push_file)
         {
             write_private(push_file, &push_payload(payload)?).map_err(|e| e.to_string())?;
         }
+        // Apps rarely declare every permission of a group; t3code ignores the refusals too.
+        let tolerant = device.platform == DevicePlatform::Android
+            && matches!(params.action, DeviceAction::SetPermission { .. });
         let lock = self.device_lock(&device.id);
         let _serial = lock.lock().await;
-        let output = runner(argv).await;
-        if output.code != 0 {
-            let detail = output.stderr.trim();
-            let detail = if detail.is_empty() {
-                format!("exit code {}", output.code)
-            } else {
-                detail.chars().take(400).collect()
-            };
-            return Err(format!("The device action failed: {detail}"));
+        for argv in argvs {
+            let output = runner(argv).await;
+            if output.code != 0 && !tolerant {
+                let detail = output.stderr.trim();
+                let detail = if detail.is_empty() {
+                    format!("exit code {}", output.code)
+                } else {
+                    detail.chars().take(400).collect()
+                };
+                return Err(format!("The device action failed: {detail}"));
+            }
         }
         Ok(self.read_detail(&device, false).await)
     }
@@ -663,10 +970,7 @@ impl DeviceHub {
         params: HubDeviceTargetParams,
     ) -> Result<HubDeviceScreenshot, String> {
         let device = self.action_target(params.host_id.as_deref(), &params.device_id)?;
-        if device.platform != DevicePlatform::Ios {
-            return Err(IOS_ONLY.into());
-        }
-        let png = super::agent::capture_simulator(&device.id).await?;
+        let png = super::agent::capture_device(&device).await?;
         let (width, height) = super::agent::png_dimensions(&png);
         let downloads = crate::repos::session_home_dir()
             .map_err(|e| format!("Could not save the screenshot: {e}"))?
@@ -759,6 +1063,7 @@ mod tests {
         Helpers {
             ax_settings: Some("/hub/simax/serve-sim-ax-settings".into()),
             serve_sim: Some(("/bin/node".into(), "/hub/serve-sim.js".into())),
+            android_sdk: None,
         }
     }
 
@@ -1164,6 +1469,290 @@ mod tests {
     }
 
     #[test]
+    fn every_android_action_maps_to_its_adb_argv_sequence() {
+        let adb = "/sdk/platform-tools/adb";
+        let run = |serial: &str, action: DeviceAction| android_action_argvs(adb, serial, &action);
+        let lines = |serial: &str, lines: &[&str]| -> Vec<Vec<String>> {
+            lines
+                .iter()
+                .map(|line| {
+                    format!("{adb} -s {serial} {line}")
+                        .split(' ')
+                        .map(str::to_string)
+                        .collect()
+                })
+                .collect()
+        };
+        let emu = "emulator-5554";
+        let toggle = |setting, enabled| DeviceAction::SetToggle { setting, enabled };
+        let cases: Vec<(DeviceAction, Vec<&str>)> = vec![
+            (
+                DeviceAction::SetAppearance {
+                    value: DeviceAppearance::Dark,
+                },
+                vec!["shell cmd uimode night yes"],
+            ),
+            (
+                DeviceAction::SetAppearance {
+                    value: DeviceAppearance::Light,
+                },
+                vec!["shell cmd uimode night no"],
+            ),
+            (
+                DeviceAction::SetTextSize {
+                    value: DeviceTextSize::Small,
+                },
+                vec!["shell settings put system font_scale 0.85"],
+            ),
+            (
+                DeviceAction::SetTextSize {
+                    value: DeviceTextSize::ExtraLarge,
+                },
+                vec!["shell settings put system font_scale 1.3"],
+            ),
+            (
+                toggle(DeviceToggle::NetworkEnabled, false),
+                vec!["shell svc wifi disable", "shell svc data disable"],
+            ),
+            (
+                toggle(DeviceToggle::NetworkEnabled, true),
+                vec!["shell svc wifi enable", "shell svc data enable"],
+            ),
+            (
+                toggle(DeviceToggle::ReduceMotion, true),
+                vec![
+                    "shell settings put global animator_duration_scale 0",
+                    "shell settings put global transition_animation_scale 0",
+                    "shell settings put global window_animation_scale 0",
+                ],
+            ),
+            (
+                DeviceAction::SetOrientation {
+                    value: DeviceOrientation::LandscapeLeft,
+                },
+                vec![
+                    "shell settings put system accelerometer_rotation 1",
+                    "shell cmd window user-rotation free",
+                    "emu sensor set acceleration 9.81:0:0",
+                ],
+            ),
+            (
+                DeviceAction::SetOrientation {
+                    value: DeviceOrientation::Portrait,
+                },
+                vec![
+                    "shell settings put system accelerometer_rotation 1",
+                    "shell cmd window user-rotation free",
+                    "emu sensor set acceleration 0:9.81:0",
+                ],
+            ),
+            (
+                DeviceAction::SetLocation {
+                    lat: 35.6762,
+                    lon: 139.6503,
+                },
+                vec!["emu geo fix 139.6503 35.6762"],
+            ),
+            (DeviceAction::ClearLocation, vec![]),
+            (
+                DeviceAction::SetPermission {
+                    app_id: "com.example.app".into(),
+                    permission: DevicePermission::Location,
+                    decision: PermissionDecision::Revoke,
+                },
+                vec![
+                    "shell pm revoke com.example.app android.permission.ACCESS_FINE_LOCATION",
+                    "shell pm revoke com.example.app android.permission.ACCESS_COARSE_LOCATION",
+                ],
+            ),
+            (
+                DeviceAction::SetPermission {
+                    app_id: "com.example.app".into(),
+                    permission: DevicePermission::Camera,
+                    decision: PermissionDecision::Grant,
+                },
+                vec!["shell pm grant com.example.app android.permission.CAMERA"],
+            ),
+            (
+                DeviceAction::LaunchApp {
+                    app_id: "com.android.settings".into(),
+                },
+                vec!["shell monkey -p com.android.settings -c android.intent.category.LAUNCHER 1"],
+            ),
+            (
+                DeviceAction::TerminateApp {
+                    app_id: "com.android.settings".into(),
+                },
+                vec!["shell am force-stop com.android.settings"],
+            ),
+            (
+                DeviceAction::OpenUrl {
+                    url: "https://example.com/a?b=c".into(),
+                },
+                vec!["shell am start -a android.intent.action.VIEW -d 'https://example.com/a?b=c'"],
+            ),
+        ];
+        for (action, expected) in cases {
+            assert_eq!(
+                run(emu, action.clone()),
+                Ok(lines(emu, &expected)),
+                "{action:?}"
+            );
+        }
+        assert_eq!(
+            run(
+                "R5CT1234",
+                DeviceAction::SetOrientation {
+                    value: DeviceOrientation::LandscapeRight
+                }
+            ),
+            Ok(lines(
+                "R5CT1234",
+                &["shell cmd window user-rotation lock 3"]
+            )),
+            "a physical device locks the window rotation"
+        );
+    }
+
+    #[test]
+    fn android_urls_reach_the_device_shell_as_one_quoted_word() {
+        let url = |url: &str| {
+            android_action_argvs(
+                "adb",
+                "emulator-5554",
+                &DeviceAction::OpenUrl { url: url.into() },
+            )
+            .map(|argvs| argvs[0].last().cloned().unwrap())
+        };
+        assert_eq!(
+            url("https://example.com/a?b=c&d=$(reboot);x"),
+            Ok("'https://example.com/a?b=c&d=$(reboot);x'".into())
+        );
+        assert_eq!(
+            url("myapp://x?q=it's"),
+            Ok(r#"'myapp://x?q=it'"'"'s'"#.into())
+        );
+        assert_eq!(url("file:///sdcard/x"), Err(REFUSED_URL_SCHEME.into()));
+        assert_eq!(url("not a url"), Err(INVALID_URL.into()));
+    }
+
+    #[test]
+    fn android_rejects_ios_only_actions_bad_ids_and_bad_serials() {
+        let unavailable = Err(DEVICE_ACTION_UNAVAILABLE.to_string());
+        let run = |serial: &str, action: DeviceAction| android_action_argvs("adb", serial, &action);
+        for action in [
+            DeviceAction::SetLiquidGlass {
+                value: LiquidGlass::Clear,
+            },
+            DeviceAction::SetColorFilter {
+                value: ColorFilter::Grayscale,
+            },
+            DeviceAction::SendPush {
+                app_id: "a.b".into(),
+                payload: json!("hi"),
+            },
+            DeviceAction::SetToggle {
+                setting: DeviceToggle::VoiceOver,
+                enabled: true,
+            },
+            DeviceAction::SetToggle {
+                setting: DeviceToggle::IncreaseContrast,
+                enabled: true,
+            },
+            DeviceAction::SetPermission {
+                app_id: "a.b".into(),
+                permission: DevicePermission::Reminders,
+                decision: PermissionDecision::Grant,
+            },
+        ] {
+            assert_eq!(
+                run("emulator-5554", action.clone()),
+                unavailable,
+                "{action:?}"
+            );
+        }
+        assert_eq!(
+            run("../x", DeviceAction::ClearLocation),
+            unavailable,
+            "a serial that is not a device id"
+        );
+        assert_eq!(
+            run(
+                "emulator-5554",
+                DeviceAction::LaunchApp {
+                    app_id: "com.app;reboot".into()
+                }
+            ),
+            Err(INVALID_APP_ID.into())
+        );
+        assert_eq!(
+            run(
+                "emulator-5554",
+                DeviceAction::SetLocation {
+                    lat: 91.0,
+                    lon: 0.0
+                }
+            ),
+            Err(INVALID_LOCATION.into())
+        );
+    }
+
+    #[test]
+    fn android_detail_parses_real_adb_output() {
+        let settings = android_settings_from(
+            Some("Night mode: no\n"),
+            Some("1.0\n"),
+            Some("null\n"),
+            Some("1\n"),
+        );
+        assert_eq!(
+            settings,
+            DeviceSettingsSnapshot {
+                appearance: Some(DeviceAppearance::Light),
+                text_size: Some(DeviceTextSize::Default),
+                network_enabled: Some(true),
+                ..Default::default()
+            },
+            "an unset animator scale is unknown"
+        );
+        let dark =
+            android_settings_from(Some("Night mode: yes"), Some("1.3"), Some("0.0"), Some("0"));
+        assert_eq!(
+            (
+                dark.appearance,
+                dark.text_size,
+                dark.reduce_motion,
+                dark.network_enabled
+            ),
+            (
+                Some(DeviceAppearance::Dark),
+                Some(DeviceTextSize::ExtraLarge),
+                Some(true),
+                Some(false)
+            )
+        );
+        for (scale, size) in [
+            ("0.85", DeviceTextSize::Small),
+            ("1.15", DeviceTextSize::Large),
+            ("1.0", DeviceTextSize::Default),
+        ] {
+            assert_eq!(
+                android_settings_from(None, Some(scale), None, None).text_size,
+                Some(size)
+            );
+        }
+        let dumpsys = "  mCurrentFocus=Window{c17dad0 u0 Application Not Responding: com.android.systemui}\n  mFocusedApp=ActivityRecord{154543861 u0 com.google.android.apps.nexuslauncher/.NexusLauncherActivity t6}\n";
+        assert_eq!(
+            android_foreground(dumpsys),
+            Some(ForegroundApp {
+                id: "com.google.android.apps.nexuslauncher".into(),
+                pid: None
+            })
+        );
+        assert_eq!(android_foreground("mCurrentFocus=null"), None);
+    }
+
+    #[test]
     fn detail_parses_real_simctl_and_helper_output() {
         let settings = settings_from(
             Some("light"),
@@ -1185,6 +1774,7 @@ mod tests {
                 voice_over: Some(false),
                 liquid_glass: Some(LiquidGlass::Clear),
                 color_filter: Some(ColorFilter::None),
+                network_enabled: None,
             }
         );
         let dark = settings_from(
@@ -1427,6 +2017,7 @@ mod hub_tests {
             Helpers {
                 ax_settings: Some("/hub/ax".into()),
                 serve_sim: None,
+                android_sdk: None,
             },
         );
         let (a, b) = tokio::join!(hub.run_action(dark("SIM-1")), hub.run_action(dark("SIM-1")));

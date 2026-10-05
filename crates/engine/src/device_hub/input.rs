@@ -48,8 +48,13 @@ struct Orientation {
     orientation: DeviceOrientation,
 }
 
-pub(crate) fn encode(input: &DeviceInput) -> Vec<u8> {
-    match *input {
+pub(crate) fn encode(input: &DeviceInput) -> Option<Vec<u8>> {
+    Some(match *input {
+        DeviceInput::Button {
+            button: DeviceButton::Back,
+        }
+        | DeviceInput::Keycode { .. }
+        | DeviceInput::Text { .. } => return None,
         DeviceInput::Touch { phase, x, y } => message(
             TOUCH,
             &Touch {
@@ -69,7 +74,53 @@ pub(crate) fn encode(input: &DeviceInput) -> Vec<u8> {
         DeviceInput::Orientation { orientation } => {
             message(ORIENTATION, &Orientation { orientation })
         }
-    }
+    })
+}
+
+pub(crate) const RESET_VIDEO: &str = r#"{"type":"reset-video","ack":false}"#;
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+enum Control<'a> {
+    Touch {
+        action: &'static str,
+        x: f32,
+        y: f32,
+    },
+    Home,
+    Back,
+    Recents,
+    Power,
+    Key {
+        keycode: u16,
+    },
+    Text {
+        text: &'a str,
+    },
+}
+
+pub(crate) fn encode_semu(input: &DeviceInput) -> Option<String> {
+    let control = match input {
+        DeviceInput::Touch { phase, x, y } => Control::Touch {
+            action: match phase {
+                TouchPhase::Begin => "down",
+                TouchPhase::Move => "move",
+                TouchPhase::End => "up",
+            },
+            x: x.clamp(0.0, 1.0),
+            y: y.clamp(0.0, 1.0),
+        },
+        DeviceInput::Button { button } => match button {
+            DeviceButton::Home => Control::Home,
+            DeviceButton::Back => Control::Back,
+            DeviceButton::AppSwitcher => Control::Recents,
+            DeviceButton::Lock => Control::Power,
+        },
+        DeviceInput::Keycode { keycode } => Control::Key { keycode: *keycode },
+        DeviceInput::Text { text } if !text.is_empty() => Control::Text { text },
+        _ => return None,
+    };
+    serde_json::to_string(&control).ok()
 }
 
 pub(crate) fn hardware_keyboard_off() -> Vec<u8> {
@@ -83,10 +134,13 @@ pub(crate) fn screen_config(bytes: &[u8]) -> Option<DeviceScreenConfig> {
         .flatten()
 }
 
+pub(crate) const UNSUPPORTED_INPUT: &str = "This device does not accept that input.";
+
 pub(crate) struct InputSocket {
-    tx: mpsc::UnboundedSender<Vec<u8>>,
+    tx: mpsc::UnboundedSender<Message>,
     live: Arc<AtomicBool>,
-    task: tokio::task::JoinHandle<()>,
+    encode: fn(&DeviceInput) -> Option<Message>,
+    task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl InputSocket {
@@ -95,7 +149,7 @@ impl InputSocket {
         on_screen: impl Fn(DeviceScreenConfig) + Send + Sync + 'static,
         on_status: impl Fn(StreamLinkStatus) + Send + Sync + 'static,
     ) -> Self {
-        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
         let live = Arc::new(AtomicBool::new(false));
         let flag = live.clone();
         let task = tokio::spawn(async move {
@@ -120,8 +174,8 @@ impl InputSocket {
                             let detail = loop {
                                 tokio::select! {
                                     outgoing = rx.recv() => match outgoing {
-                                        Some(bytes) => {
-                                            if sink.send(Message::Binary(bytes)).await.is_err() {
+                                        Some(message) => {
+                                            if sink.send(message).await.is_err() {
                                                 break "socket closed";
                                             }
                                         }
@@ -151,22 +205,39 @@ impl InputSocket {
                 tokio::time::sleep(RECONNECT_DELAY).await;
             }
         });
-        Self { tx, live, task }
+        Self {
+            tx,
+            live,
+            encode: |input| encode(input).map(Message::Binary),
+            task: Some(task),
+        }
+    }
+
+    pub(crate) fn semu(tx: mpsc::UnboundedSender<Message>, live: Arc<AtomicBool>) -> Self {
+        Self {
+            tx,
+            live,
+            encode: |input| encode_semu(input).map(Message::Text),
+            task: None,
+        }
     }
 
     pub(crate) fn send(&self, input: &DeviceInput) -> Result<(), String> {
+        let message = (self.encode)(input).ok_or(UNSUPPORTED_INPUT)?;
         if !self.live.load(Ordering::SeqCst) {
             return Err("Input disconnected, reconnecting...".into());
         }
         self.tx
-            .send(encode(input))
+            .send(message)
             .map_err(|_| "Input disconnected".to_string())
     }
 }
 
 impl Drop for InputSocket {
     fn drop(&mut self) {
-        self.task.abort();
+        if let Some(task) = &self.task {
+            task.abort();
+        }
     }
 }
 
@@ -180,7 +251,8 @@ mod tests {
             phase: TouchPhase::Begin,
             x: 0.25,
             y: 0.5,
-        });
+        })
+        .unwrap();
         let mut expected = vec![0x03];
         expected.extend_from_slice(br#"{"type":"begin","x":0.25,"y":0.5}"#);
         assert_eq!(bytes, expected);
@@ -204,21 +276,101 @@ mod tests {
             encode(&DeviceInput::Button {
                 button: DeviceButton::Home
             }),
-            tagged(0x04, br#"{"button":"home"}"#)
+            Some(tagged(0x04, br#"{"button":"home"}"#))
         );
         assert_eq!(
             encode(&DeviceInput::Key {
                 phase: KeyPhase::Up,
                 usage: 0xE1
             }),
-            tagged(0x06, br#"{"type":"up","usage":225}"#)
+            Some(tagged(0x06, br#"{"type":"up","usage":225}"#))
         );
         assert_eq!(
             encode(&DeviceInput::Orientation {
                 orientation: DeviceOrientation::PortraitUpsideDown
             }),
-            tagged(0x07, br#"{"orientation":"portrait_upside_down"}"#)
+            Some(tagged(0x07, br#"{"orientation":"portrait_upside_down"}"#))
         );
+        for android_only in [
+            DeviceInput::Button {
+                button: DeviceButton::Back,
+            },
+            DeviceInput::Keycode { keycode: 66 },
+            DeviceInput::Text { text: "a".into() },
+        ] {
+            assert_eq!(encode(&android_only), None, "{android_only:?}");
+        }
+    }
+
+    #[test]
+    fn android_control_messages_are_serve_emu_json() {
+        let touch = |phase, x, y| DeviceInput::Touch { phase, x, y };
+        let button = |button| DeviceInput::Button { button };
+        let cases = [
+            (
+                touch(TouchPhase::Begin, 0.25, 0.5),
+                r#"{"type":"touch","action":"down","x":0.25,"y":0.5}"#,
+            ),
+            (
+                touch(TouchPhase::Move, 0.1, 1.5),
+                r#"{"type":"touch","action":"move","x":0.1,"y":1.0}"#,
+            ),
+            (
+                touch(TouchPhase::End, -0.2, 0.75),
+                r#"{"type":"touch","action":"up","x":0.0,"y":0.75}"#,
+            ),
+            (button(DeviceButton::Home), r#"{"type":"home"}"#),
+            (button(DeviceButton::Back), r#"{"type":"back"}"#),
+            (button(DeviceButton::AppSwitcher), r#"{"type":"recents"}"#),
+            (button(DeviceButton::Lock), r#"{"type":"power"}"#),
+            (
+                DeviceInput::Keycode { keycode: 66 },
+                r#"{"type":"key","keycode":66}"#,
+            ),
+            (
+                DeviceInput::Text {
+                    text: "é\"".into()
+                },
+                r#"{"type":"text","text":"é\""}"#,
+            ),
+        ];
+        for (input, wire) in cases {
+            assert_eq!(encode_semu(&input).as_deref(), Some(wire), "{input:?}");
+        }
+        for ios_only in [
+            DeviceInput::Key {
+                phase: KeyPhase::Down,
+                usage: 4,
+            },
+            DeviceInput::Orientation {
+                orientation: DeviceOrientation::LandscapeLeft,
+            },
+            DeviceInput::Text {
+                text: String::new(),
+            },
+        ] {
+            assert_eq!(encode_semu(&ios_only), None, "{ios_only:?}");
+        }
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(RESET_VIDEO).unwrap(),
+            serde_json::json!({"type": "reset-video", "ack": false})
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let live = Arc::new(AtomicBool::new(true));
+        let socket = InputSocket::semu(tx, live.clone());
+        socket.send(&button(DeviceButton::Back)).unwrap();
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            Message::Text(r#"{"type":"back"}"#.into())
+        );
+        assert_eq!(
+            socket.send(&DeviceInput::Orientation {
+                orientation: DeviceOrientation::Portrait
+            }),
+            Err(UNSUPPORTED_INPUT.into())
+        );
+        live.store(false, Ordering::SeqCst);
+        assert!(socket.send(&button(DeviceButton::Home)).is_err());
     }
 
     #[tokio::test]

@@ -15,6 +15,8 @@ struct DeviceList {
     #[serde(default)]
     simulators: Vec<HubDevice>,
     #[serde(default)]
+    emulators: Vec<HubDevice>,
+    #[serde(default)]
     errors: Vec<ListError>,
 }
 
@@ -82,10 +84,16 @@ impl HubClient<'_> {
             .json()
             .await
             .map_err(|e| format!("Listing devices failed: {}", e.without_url()))?;
-        let devices = list
+        let ios = list
             .simulators
             .into_iter()
-            .filter(|device| device.platform == DevicePlatform::Ios)
+            .filter(|device| device.platform == DevicePlatform::Ios);
+        let android = list
+            .emulators
+            .into_iter()
+            .filter(|device| device.platform == DevicePlatform::Android);
+        let devices = ios
+            .chain(android)
             .map(|device| HubDevice {
                 host_id: LOCAL_DEVICE_HOST_ID.into(),
                 ..device
@@ -132,6 +140,24 @@ impl HubClient<'_> {
         )
         .await
         .map(|_| ())
+    }
+
+    pub(crate) async fn shutdown_emulator(&self, serial: &str) -> Result<(), String> {
+        self.post(
+            "/api/devices/shutdown",
+            serde_json::json!({ "platform": DevicePlatform::Android, "id": serial }),
+            "Shutting the device down",
+        )
+        .await
+        .map(|_| ())
+    }
+
+    pub(crate) fn semu_url(&self, serial: &str) -> String {
+        format!(
+            "{}/vendor/serve-emu/ws?device={}&frame-meta=1",
+            self.origin.replacen("http://", "ws://", 1),
+            serial.chars().filter(|c| id_char(*c)).collect::<String>()
+        )
     }
 
     pub(crate) fn mjpeg_url(&self, udid: &str) -> String {
@@ -343,10 +369,12 @@ impl SseParser {
     }
 }
 
+fn id_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':')
+}
+
 pub(crate) fn valid_device_id(id: &str) -> bool {
-    !id.is_empty()
-        && !id.starts_with('-')
-        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    id.starts_with(|c: char| c.is_ascii_alphanumeric()) && id.chars().all(id_char)
 }
 
 fn path_segment(id: &str) -> String {
@@ -360,17 +388,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn device_ids_are_alphanumerics_and_dashes_only() {
-        assert!(valid_device_id("9C1D2E3F-0000-4ABC-8DEF-0123456789AB"));
+    fn device_ids_are_udids_serials_or_avd_names_and_never_paths_or_flags() {
+        for id in [
+            "9C1D2E3F-0000-4ABC-8DEF-0123456789AB",
+            "emulator-5554",
+            "Medium_Phone_API_36.1",
+            "192.168.1.20:5555",
+        ] {
+            assert!(valid_device_id(id), "{id:?}");
+        }
         for id in [
             "",
             ".",
             "..",
             "../x",
+            ".hidden",
+            "_x",
             "a/b",
-            "a.b",
-            "a_b",
             "a?device=b",
+            "a&b",
             "a b",
             "-",
             "-x",
@@ -379,6 +415,18 @@ mod tests {
             assert!(!valid_device_id(id), "{id:?}");
         }
         assert_eq!(path_segment("../a.b_c/-1"), "abc-1");
+        let client = HubClient {
+            http: &reqwest::Client::new(),
+            origin: "http://127.0.0.1:4000",
+        };
+        assert_eq!(
+            client.semu_url("emulator-5554"),
+            "ws://127.0.0.1:4000/vendor/serve-emu/ws?device=emulator-5554&frame-meta=1"
+        );
+        assert_eq!(
+            client.semu_url("a&b=c/../d"),
+            "ws://127.0.0.1:4000/vendor/serve-emu/ws?device=abc..d&frame-meta=1"
+        );
     }
 
     #[test]
