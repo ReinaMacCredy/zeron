@@ -20,7 +20,10 @@ const local = (server, request) => {
   return [`127.0.0.1:${address.port}`, `localhost:${address.port}`, `[::1]:${address.port}`].includes(host);
 };
 http.Server.prototype.emit = function (event, request, target) {
-  if (["request", "checkContinue", "checkExpectation"].includes(event) && !local(this, request)) {
+  if (
+    ["request", "checkContinue", "checkExpectation"].includes(event) &&
+    (!local(this, request) || request.headers.origin !== undefined)
+  ) {
     target.writeHead(403, { Connection: "close" }).end();
     return true;
   }
@@ -948,6 +951,15 @@ server.listen(port, "127.0.0.1");
                 "{host}"
             );
         }
+        let cross_origin_post = format!(
+            "POST /api/devices/boot HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://evil.example\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\n{{}}"
+        );
+        assert!(
+            first_reply(port, &cross_origin_post)
+                .await
+                .starts_with("HTTP/1.1 403"),
+            "a browser form post carries an Origin"
+        );
         let upgrade = |host: &str, extra: &str| {
             format!(
                 "GET /ws HTTP/1.1\r\nHost: {host}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n{extra}\r\n"
