@@ -1,6 +1,7 @@
 pub mod geometry;
+pub mod loading;
 mod rail;
-mod setup;
+pub mod setup;
 pub mod stream_view;
 
 use gpui::{
@@ -15,15 +16,39 @@ use zeron_rpc::methods;
 use crate::icons;
 use crate::state::AppState;
 use crate::theme::Theme;
+use loading::{LoadingStage, LoadingView};
+use setup::SetupPending;
 use stream_view::DeviceStreamView;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PanelPhase {
     Setup,
-    Loading(String),
-    Failed(String),
+    Loading {
+        name: String,
+        description: String,
+        message: String,
+    },
     Stream,
     Picker,
+}
+
+pub fn device_description(hub: &DeviceHubState, device: &HubDevice) -> String {
+    let label = hub
+        .hosts
+        .iter()
+        .find(|host| host.id == device.host_id)
+        .map_or("Device host", |host| host.label.as_str());
+    format!("{label} · {}", device.version)
+}
+
+pub fn booting_banner(hub: &DeviceHubState, chat_id: &str) -> Option<String> {
+    let names: Vec<&str> = hub
+        .booting
+        .iter()
+        .filter(|entry| entry.chat_id == chat_id)
+        .map(|entry| entry.device.name.as_str())
+        .collect();
+    (!names.is_empty()).then(|| format!("Starting {}... This can take a minute.", names.join(", ")))
 }
 
 pub fn panel_phase(
@@ -32,10 +57,15 @@ pub fn panel_phase(
     target: Option<&(String, String)>,
     opening: Option<&str>,
 ) -> PanelPhase {
-    let Some(hub) = hub else {
-        return PanelPhase::Loading("Finding devices...".into());
+    let loading = |name: &str, description: String, message: &str| PanelPhase::Loading {
+        name: name.into(),
+        description,
+        message: message.into(),
     };
-    if !hub.settings.enabled {
+    let Some(hub) = hub else {
+        return loading("Devices", String::new(), "Finding devices...");
+    };
+    if !hub.settings.onboarding_completed || hub.host_status == DeviceHostStatus::Disabled {
         return PanelPhase::Setup;
     }
     if let Some((host_id, device_id)) = target
@@ -44,23 +74,28 @@ pub fn panel_phase(
         return PanelPhase::Stream;
     }
     if let Some(opening) = opening {
-        let booting = hub
-            .booting
-            .iter()
-            .find(|entry| entry.device.id == opening && entry.chat_id == chat_id);
-        return PanelPhase::Loading(match booting {
-            Some(entry) => format!("Starting {}... This can take a minute.", entry.device.name),
-            None => "Opening device...".into(),
-        });
+        return match hub.devices.iter().find(|device| device.id == opening) {
+            Some(device) => loading(
+                &device.name,
+                device_description(hub, device),
+                if device.booted {
+                    "Opening device..."
+                } else {
+                    "Starting device..."
+                },
+            ),
+            None => loading("Devices", String::new(), "Opening device..."),
+        };
     }
     match hub.host_status {
-        DeviceHostStatus::Installing => PanelPhase::Loading("Installing device support...".into()),
-        DeviceHostStatus::Starting => PanelPhase::Loading("Starting device hub...".into()),
-        DeviceHostStatus::Failed => PanelPhase::Failed(
+        DeviceHostStatus::Installing => loading(
+            "Devices",
+            String::new(),
             hub.host_status_detail
-                .clone()
-                .unwrap_or_else(|| "The device hub failed to start.".into()),
+                .as_deref()
+                .unwrap_or("Installing device support..."),
         ),
+        DeviceHostStatus::Starting => loading("Devices", String::new(), "Finding devices..."),
         _ => PanelPhase::Picker,
     }
 }
@@ -74,7 +109,8 @@ pub struct DevicePanel {
     chat_id: String,
     target: Option<(String, String)>,
     opening: Option<String>,
-    enabling: bool,
+    pending: Option<SetupPending>,
+    setup_step: usize,
     powering_off: bool,
     listed: bool,
     error: Option<SharedString>,
@@ -98,7 +134,8 @@ impl DevicePanel {
             chat_id,
             target: None,
             opening: None,
-            enabling: false,
+            pending: None,
+            setup_step: 0,
             powering_off: false,
             listed: false,
             error: None,
@@ -159,9 +196,17 @@ impl DevicePanel {
                 if let Some(view) = &self.view {
                     let screen = hub.screens.get(&device_id).cloned();
                     let link = hub.streams.get(&device_id).cloned();
+                    let label = self
+                        .target
+                        .as_ref()
+                        .and_then(|(host, device)| hub.device(host, device))
+                        .map(|device| (device.name.clone(), device_description(&hub, device)));
                     view.update(cx, |view, cx| {
                         view.set_screen(screen, cx);
                         view.set_link(link, cx);
+                        if let Some((name, description)) = label {
+                            view.set_label(name, description, cx);
+                        }
                     });
                 }
             }
@@ -190,23 +235,6 @@ impl DevicePanel {
             })
             .ok();
         }))
-    }
-
-    fn enable(&mut self, cx: &mut Context<Self>) {
-        self.enabling = true;
-        self.error = None;
-        let params = serde_json::json!({ "enabled": true, "onboardingCompleted": true });
-        self.configure_task = self.call(
-            methods::CONFIGURE_DEVICE_HUB,
-            params,
-            cx,
-            |panel, reply, _| {
-                panel.enabling = false;
-                if let Err(error) = reply {
-                    panel.error = Some(error.into());
-                }
-            },
-        );
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -313,6 +341,7 @@ impl DevicePanel {
 
     fn render_picker(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let hub = self.hub(cx).cloned().unwrap_or_default();
+        let ready = hub.host_status == DeviceHostStatus::Ready;
         let mut devices: Vec<HubDevice> = hub
             .devices
             .iter()
@@ -320,104 +349,127 @@ impl DevicePanel {
             .cloned()
             .collect();
         devices.sort_by(|a, b| b.booted.cmp(&a.booted).then_with(|| a.name.cmp(&b.name)));
-        let ios_reason = hub
-            .hosts
-            .iter()
-            .flat_map(|host| host.platforms.iter())
-            .find(|platform| platform.platform == DevicePlatform::Ios && !platform.available)
-            .and_then(|platform| platform.reason.clone());
-        let empty = match &ios_reason {
-            Some(reason) => reason.clone(),
-            None => "Xcode is installed, but no iOS Simulator is available. Install a runtime in \
-                     Xcode Settings → Components."
-                .into(),
+        let empty = if hub.host_status == DeviceHostStatus::Failed {
+            hub.host_status_detail
+                .clone()
+                .unwrap_or_else(|| "The device hub failed to start.".into())
+        } else {
+            "No simulators or emulators were found on this environment.".into()
         };
-        let rows = devices.into_iter().map(|device| {
-            let opening = self.opening.as_deref() == Some(device.id.as_str());
-            let status = if device.booted { "Running" } else { "Stopped" };
-            let action = if device.booted { "Open" } else { "Start" };
-            let detail = format!("{} · {status}", device.version);
-            let row_id = SharedString::from(format!("device-row-{}", device.id));
-            let clicked = device.clone();
+        let android_hint = ready
+            && !hub
+                .devices
+                .iter()
+                .any(|device| device.platform == DevicePlatform::Android)
+            && !hub
+                .hosts
+                .iter()
+                .flat_map(|host| host.platforms.iter())
+                .any(|platform| {
+                    platform.platform == DevicePlatform::Android && !platform.available
+                });
+        let rows: Vec<_> = devices
+            .into_iter()
+            .filter(|_| ready)
+            .map(|device| {
+                let opening = self.opening.as_deref() == Some(device.id.as_str());
+                let status = if device.booted { "Running" } else { "Stopped" };
+                let action = if device.booted { "Open" } else { "Start" };
+                let detail = format!("{} · {status}", device_description(&hub, &device));
+                let row_id = SharedString::from(format!("device-row-{}", device.id));
+                let label = SharedString::from(format!("{action} {}", device.name));
+                let clicked = device.clone();
+                div()
+                    .id(row_id)
+                    .role(gpui::Role::Button)
+                    .aria_label(label)
+                    .w_full()
+                    .px(px(12.0))
+                    .py(px(8.0))
+                    .rounded(px(10.0))
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(crate::theme::ink(0.02))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(crate::theme::ink(0.05)))
+                    .child(
+                        icons::icon(icons::SMARTPHONE)
+                            .size(px(15.0))
+                            .flex_none()
+                            .text_color(theme.text_muted),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_size(crate::typography::ui_rems(13.0))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .truncate()
+                                    .child(SharedString::from(device.name.clone())),
+                            )
+                            .child(
+                                div()
+                                    .text_size(crate::typography::ui_rems(11.0))
+                                    .text_color(theme.text_muted)
+                                    .truncate()
+                                    .child(SharedString::from(detail)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .text_color(theme.text)
+                            .child(if opening { "Opening..." } else { action }),
+                    )
+                    .on_click(cx.listener(move |panel, _, _, cx| {
+                        panel.open_device(clicked.clone(), cx);
+                    }))
+            })
+            .collect();
+        let small = |text: String| {
             div()
-                .id(row_id)
-                .w_full()
-                .px(px(12.0))
-                .py(px(8.0))
-                .rounded(px(10.0))
-                .border_1()
-                .border_color(theme.border)
-                .bg(crate::theme::ink(0.02))
-                .flex()
-                .items_center()
-                .gap(px(10.0))
-                .cursor_pointer()
-                .hover(|s| s.bg(crate::theme::ink(0.05)))
-                .child(
-                    icons::icon(icons::SMARTPHONE)
-                        .size(px(15.0))
-                        .flex_none()
-                        .text_color(theme.text_muted),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .text_size(crate::typography::ui_rems(13.0))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(theme.text)
-                                .truncate()
-                                .child(SharedString::from(device.name.clone())),
-                        )
-                        .child(
-                            div()
-                                .text_size(crate::typography::ui_rems(11.0))
-                                .text_color(theme.text_muted)
-                                .truncate()
-                                .child(SharedString::from(detail)),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(theme.text)
-                        .child(if opening { "Opening..." } else { action }),
-                )
-                .on_click(cx.listener(move |panel, _, _, cx| {
-                    panel.open_device(clicked.clone(), cx);
-                }))
-        });
-        let rows: Vec<_> = rows.collect();
+                .text_size(crate::typography::ui_rems(12.0))
+                .text_color(theme.text_muted)
+                .child(SharedString::from(text))
+        };
         div()
             .size_full()
             .flex()
             .flex_col()
             .gap(px(8.0))
             .p(px(16.0))
-            .child(
-                div()
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text_muted)
-                    .child("iOS Simulators"),
-            )
-            .when(rows.is_empty(), |el| {
+            .when(!rows.is_empty(), |el| {
                 el.child(
                     div()
-                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(theme.text_muted)
-                        .child(SharedString::from(empty)),
+                        .child("iOS Simulators"),
                 )
             })
+            .when(rows.is_empty(), |el| el.child(small(empty)))
             .children(rows)
+            .when(android_hint, |el| {
+                el.child(small(
+                    "No Android virtual devices found. Create one in Android Studio's Device \
+                     Manager, then refresh."
+                        .into(),
+                ))
+            })
             .child(
                 div()
                     .id("device-refresh")
+                    .role(gpui::Role::Button)
+                    .aria_label("Refresh devices")
                     .mt(px(4.0))
                     .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.text_muted)
@@ -428,52 +480,96 @@ impl DevicePanel {
             )
             .into_any_element()
     }
+
+    fn render_banners(
+        &self,
+        hub: &DeviceHubState,
+        theme: &Theme,
+        stream: bool,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let banner = |id: &'static str| {
+            div()
+                .id(id)
+                .role(gpui::Role::Status)
+                .flex_none()
+                .border_b_1()
+                .border_color(theme.border)
+                .px(px(12.0))
+                .py(px(8.0))
+                .text_size(crate::typography::ui_rems(12.0))
+                .text_color(theme.text_muted)
+        };
+        let mut banners = Vec::new();
+        if hub.host_status == DeviceHostStatus::Ready
+            && !stream
+            && let Some(detail) = hub.host_status_detail.clone()
+        {
+            banners.push(
+                banner("device-host-detail")
+                    .child(SharedString::from(detail))
+                    .into_any_element(),
+            );
+        }
+        if let Some((label, detail, failed)) = setup::host_update(hub) {
+            banners.push(
+                div()
+                    .flex_none()
+                    .px(px(12.0))
+                    .pt(px(8.0))
+                    .child(self.render_host_update(theme, label, detail, failed, cx))
+                    .into_any_element(),
+            );
+        }
+        if let Some(text) = booting_banner(hub, &self.chat_id) {
+            banners.push(
+                banner("device-booting")
+                    .child(SharedString::from(text))
+                    .into_any_element(),
+            );
+        }
+        banners
+    }
 }
 
 impl Render for DevicePanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
+        let hub = self.hub(cx).cloned();
         let phase = panel_phase(
-            self.hub(cx),
+            hub.as_ref(),
             &self.chat_id,
             self.target.as_ref(),
             self.opening.as_deref(),
         );
+        let banners = match &hub {
+            Some(hub) if phase != PanelPhase::Setup => {
+                self.render_banners(hub, &theme, phase == PanelPhase::Stream, cx)
+            }
+            _ => Vec::new(),
+        };
         let body = match phase {
             _ if self.powering_off => {
                 self.render_message(&theme, "Powering off device...".into(), true, cx)
             }
-            PanelPhase::Setup => setup::render_gate(
+            PanelPhase::Setup => self.render_setup(&hub.unwrap_or_default(), &theme, cx),
+            PanelPhase::Loading {
+                name,
+                description,
+                message,
+            } => loading::render(
+                LoadingView {
+                    name: name.into(),
+                    description: description.into(),
+                    message: message.into(),
+                    stage: LoadingStage::Opening,
+                    error: false,
+                },
                 &theme,
-                self.enabling,
-                cx.listener(|panel, _, _, cx| panel.enable(cx)),
+                cx.entity_id(),
+                None,
+                cx,
             ),
-            PanelPhase::Loading(text) => self.render_message(&theme, text, true, cx),
-            PanelPhase::Failed(text) => div()
-                .size_full()
-                .flex()
-                .flex_col()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_h_0()
-                        .child(self.render_message(&theme, text, false, cx)),
-                )
-                .child(
-                    div()
-                        .id("device-retry")
-                        .debug_selector(|| "device-retry".into())
-                        .flex_none()
-                        .self_center()
-                        .mb(px(16.0))
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(theme.text_muted)
-                        .cursor_pointer()
-                        .hover(|s| s.text_color(theme.text))
-                        .child("Retry")
-                        .on_click(cx.listener(|panel, _, _, cx| panel.refresh(cx))),
-                )
-                .into_any_element(),
             PanelPhase::Stream => match self.view.clone() {
                 Some(view) => div()
                     .size_full()
@@ -489,25 +585,42 @@ impl Render for DevicePanel {
             .size_full()
             .flex()
             .flex_col()
+            .children(banners)
             .when_some(self.error.clone(), |el, error| {
                 el.child(
                     div()
                         .id("device-panel-error")
+                        .role(gpui::Role::Alert)
                         .flex_none()
-                        .mx(px(12.0))
-                        .mt(px(10.0))
-                        .px(px(10.0))
-                        .py(px(6.0))
-                        .rounded(px(8.0))
+                        .flex()
+                        .items_start()
+                        .gap(px(8.0))
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .px(px(12.0))
+                        .py(px(8.0))
                         .bg(theme.danger_muted)
                         .text_size(crate::typography::ui_rems(12.0))
                         .text_color(theme.danger)
-                        .cursor_pointer()
-                        .child(error)
-                        .on_click(cx.listener(|panel, _, _, cx| {
-                            panel.error = None;
-                            cx.notify();
-                        })),
+                        .child(div().flex_1().min_w_0().child(error))
+                        .child(
+                            div()
+                                .id("device-error-dismiss")
+                                .debug_selector(|| "device-error-dismiss".into())
+                                .role(gpui::Role::Button)
+                                .aria_label("Dismiss device error")
+                                .flex_none()
+                                .cursor_pointer()
+                                .child(
+                                    icons::icon(icons::CLOSE)
+                                        .size(px(12.0))
+                                        .text_color(theme.danger),
+                                )
+                                .on_click(cx.listener(|panel, _, _, cx| {
+                                    panel.error = None;
+                                    cx.notify();
+                                })),
+                        ),
                 )
             })
             .child(div().flex_1().min_h_0().child(body))
@@ -515,7 +628,7 @@ impl Render for DevicePanel {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use gpui::{Modifiers, TestAppContext, VisualTestContext};
     use std::sync::{Arc, Mutex};
@@ -524,7 +637,7 @@ mod tests {
         DeviceBooting, DeviceHubSettings, DeviceStreamStatus, StreamLinkStatus,
     };
 
-    type Calls = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
+    pub(crate) type Calls = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
 
     fn fake_engine(runtime: &tokio::runtime::Runtime) -> (crate::state::EngineHandle, Calls) {
         let (out, mut frames) = tokio::sync::mpsc::channel::<String>(64);
@@ -558,7 +671,7 @@ mod tests {
         (crate::state::EngineHandle::from_test_client(client), calls)
     }
 
-    fn app_state(
+    pub(crate) fn app_state(
         cx: &mut TestAppContext,
         runtime: &tokio::runtime::Runtime,
         hub: DeviceHubState,
@@ -578,7 +691,10 @@ mod tests {
         (state, calls)
     }
 
-    fn wait(cx: &mut VisualTestContext, mut done: impl FnMut(&mut VisualTestContext) -> bool) {
+    pub(crate) fn wait(
+        cx: &mut VisualTestContext,
+        mut done: impl FnMut(&mut VisualTestContext) -> bool,
+    ) {
         for _ in 0..400 {
             cx.run_until_parked();
             if done(cx) {
@@ -589,7 +705,7 @@ mod tests {
         panic!("condition never held");
     }
 
-    fn calls_of(calls: &Calls, method: &str) -> Vec<serde_json::Value> {
+    pub(crate) fn calls_of(calls: &Calls, method: &str) -> Vec<serde_json::Value> {
         calls
             .lock()
             .unwrap()
@@ -645,7 +761,7 @@ mod tests {
         (state, panel, calls, cx)
     }
 
-    fn click(cx: &mut VisualTestContext, selector: &'static str) {
+    pub(crate) fn click(cx: &mut VisualTestContext, selector: &'static str) {
         wait(cx, |cx| cx.debug_bounds(selector).is_some());
         let bounds = cx.debug_bounds(selector).unwrap();
         cx.simulate_click(bounds.center(), Modifiers::default());
@@ -658,6 +774,7 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();
         let (state, panel, calls, cx) = streaming_panel(cx, &runtime, StreamLinkStatus::Connecting);
+        assert!(cx.debug_bounds("Step 2 of 2: connect video").is_some());
         click(cx, "device-home");
         click(cx, "device-rotate");
         cx.run_until_parked();
@@ -754,7 +871,13 @@ mod tests {
         let (state, calls) = app_state(cx, &runtime, hub(false));
         let (panel, cx) =
             cx.add_window_view(|_, cx| DevicePanel::new(state.clone(), "chat".into(), cx));
-        panel.update(cx, |panel, cx| panel.enable(cx));
+        panel.update(cx, |panel, cx| {
+            panel.configure(
+                SetupPending::Hub,
+                serde_json::json!({ "enabled": true }),
+                cx,
+            )
+        });
         state.update(cx, |state, cx| {
             let mut enabled = hub(true);
             enabled.revision = 1;
@@ -762,7 +885,9 @@ mod tests {
             cx.notify();
         });
         wait(cx, |_| lists(&calls) == 1);
-        wait(cx, |cx| panel.read_with(cx, |panel, _| !panel.enabling));
+        wait(cx, |cx| {
+            panel.read_with(cx, |panel, _| panel.pending.is_none())
+        });
     }
 
     #[gpui::test]
@@ -780,13 +905,24 @@ mod tests {
         wait(cx, |_| lists(&calls) == 2);
     }
 
-    fn hub(enabled: bool) -> DeviceHubState {
+    pub(crate) fn hub(enabled: bool) -> DeviceHubState {
         DeviceHubState {
             settings: DeviceHubSettings {
                 enabled,
+                onboarding_completed: enabled,
                 ..Default::default()
             },
-            host_status: DeviceHostStatus::Ready,
+            host_status: if enabled {
+                DeviceHostStatus::Ready
+            } else {
+                DeviceHostStatus::Disabled
+            },
+            hosts: vec![zeron_proto::device_hub::DeviceHubHost {
+                id: "local".into(),
+                kind: "local".into(),
+                label: "This machine".into(),
+                ..Default::default()
+            }],
             devices: vec![HubDevice {
                 host_id: "local".into(),
                 id: "SIM".into(),
@@ -809,8 +945,14 @@ mod tests {
         );
         assert!(matches!(
             panel_phase(None, "c", None, None),
-            PanelPhase::Loading(_)
+            PanelPhase::Loading { .. }
         ));
+        let mut fresh = hub(true);
+        fresh.settings.onboarding_completed = false;
+        assert_eq!(
+            panel_phase(Some(&fresh), "c", None, None),
+            PanelPhase::Setup
+        );
     }
 
     #[test]
@@ -825,14 +967,24 @@ mod tests {
             device: state.devices[0].clone(),
             chat_id: "c".into(),
         });
+        state.devices[0].version = "iOS 27.0".into();
+        let starting = PanelPhase::Loading {
+            name: "iPhone 17".into(),
+            description: "This machine · iOS 27.0".into(),
+            message: "Starting device...".into(),
+        };
+        assert_eq!(panel_phase(Some(&state), "c", None, Some("SIM")), starting);
         assert_eq!(
+            booting_banner(&state, "c").as_deref(),
+            Some("Starting iPhone 17... This can take a minute.")
+        );
+        assert_eq!(booting_banner(&state, "other"), None);
+        state.devices[0].booted = true;
+        assert!(matches!(
             panel_phase(Some(&state), "c", None, Some("SIM")),
-            PanelPhase::Loading("Starting iPhone 17... This can take a minute.".into())
-        );
-        assert_eq!(
-            panel_phase(Some(&state), "other", None, Some("SIM")),
-            PanelPhase::Loading("Opening device...".into())
-        );
+            PanelPhase::Loading { message, .. } if message == "Opening device..."
+        ));
+        state.devices[0].booted = false;
         state.sessions.push(DeviceSession {
             chat_id: "c".into(),
             host_id: "local".into(),
@@ -851,7 +1003,112 @@ mod tests {
         state.host_status_detail = Some("npm missing".into());
         assert_eq!(
             panel_phase(Some(&state), "other", None, None),
-            PanelPhase::Failed("npm missing".into())
+            PanelPhase::Picker
         );
+        assert_eq!(
+            panel_phase(Some(&state), "c", Some(&target), None),
+            PanelPhase::Stream,
+            "a hub failure keeps an open device on its stream"
+        );
+        state.host_status = DeviceHostStatus::Starting;
+        assert!(matches!(
+            panel_phase(Some(&state), "other", None, None),
+            PanelPhase::Loading { message, .. } if message == "Finding devices..."
+        ));
+    }
+
+    #[gpui::test]
+    fn the_wizard_continues_only_once_the_hub_is_ready_and_done_completes_onboarding(
+        cx: &mut TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let mut starting = hub(true);
+        starting.settings.onboarding_completed = false;
+        starting.host_status = DeviceHostStatus::Starting;
+        let (state, calls) = app_state(cx, &runtime, starting);
+        let (panel, cx) =
+            cx.add_window_view(|_, cx| DevicePanel::new(state.clone(), "chat".into(), cx));
+        click(cx, "device-setup-continue");
+        cx.run_until_parked();
+        assert_eq!(panel.read_with(cx, |panel, _| panel.setup_step), 0);
+        assert!(cx.debug_bounds("device-hub-enable").is_some());
+
+        state.update(cx, |state, cx| {
+            let mut ready = hub(true);
+            ready.settings.onboarding_completed = false;
+            ready.revision = 1;
+            state.device_hub = Some(ready);
+            cx.notify();
+        });
+        click(cx, "device-setup-continue");
+        wait(cx, |cx| {
+            panel.read_with(cx, |panel, _| panel.setup_step == 1)
+        });
+        assert!(cx.debug_bounds("device-setup-check").is_some());
+        click(cx, "device-setup-continue");
+        wait(cx, |cx| {
+            panel.read_with(cx, |panel, _| panel.setup_step == 2)
+        });
+        click(cx, "device-agent-access");
+        wait(cx, |_| {
+            !calls_of(&calls, methods::CONFIGURE_DEVICE_HUB).is_empty()
+        });
+        wait(cx, |cx| {
+            panel.read_with(cx, |panel, _| panel.pending.is_none())
+        });
+        click(cx, "device-setup-done");
+        wait(cx, |_| {
+            calls_of(&calls, methods::CONFIGURE_DEVICE_HUB).len() == 2
+        });
+        assert_eq!(
+            calls_of(&calls, methods::CONFIGURE_DEVICE_HUB),
+            vec![
+                serde_json::json!({ "agentAccessEnabled": true }),
+                serde_json::json!({ "onboardingCompleted": true }),
+            ]
+        );
+    }
+
+    #[gpui::test]
+    fn the_wizard_switch_enables_the_hub_and_cancel_closes_the_tab(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (state, calls) = app_state(cx, &runtime, hub(false));
+        let (panel, cx) = cx.add_window_view(|_, cx| DevicePanel::new(state, "chat".into(), cx));
+        click(cx, "device-hub-enable");
+        wait(cx, |_| {
+            !calls_of(&calls, methods::CONFIGURE_DEVICE_HUB).is_empty()
+        });
+        assert_eq!(
+            calls_of(&calls, methods::CONFIGURE_DEVICE_HUB),
+            vec![serde_json::json!({ "enabled": true })]
+        );
+        let closed = Arc::new(Mutex::new(false));
+        let seen = closed.clone();
+        let _subscription = cx.update(|_, cx| {
+            cx.subscribe(&panel, move |_, event: &DevicePanelEvent, _| {
+                let DevicePanelEvent::Close = event;
+                *seen.lock().unwrap() = true;
+            })
+        });
+        click(cx, "device-setup-cancel");
+        wait(cx, |_| *closed.lock().unwrap());
+    }
+
+    #[gpui::test]
+    fn opening_a_device_shows_the_first_step_of_the_loading_view(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (state, _calls) = app_state(cx, &runtime, hub(true));
+        let (panel, cx) = cx.add_window_view(|_, cx| DevicePanel::new(state, "chat".into(), cx));
+        panel.update(cx, |panel, cx| {
+            panel.opening = Some("SIM".into());
+            cx.notify();
+        });
+        wait(cx, |cx| {
+            cx.debug_bounds("Step 1 of 2: open device").is_some()
+        });
+        assert!(cx.debug_bounds("Step 2 of 2: connect video").is_none());
     }
 }
