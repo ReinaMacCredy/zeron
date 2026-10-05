@@ -281,6 +281,22 @@ fn launch_for_entry_with_node(
     Ok((node, vec![entry.display().to_string()]))
 }
 
+pub fn installed_npm_tool(pin: &'static str, bin_name: &str) -> Option<PathBuf> {
+    installed_entry(&NpmPin::parse(pin), bin_name)
+}
+
+pub async fn ensure_npm_tool(
+    pin: &'static str,
+    bin_name: &str,
+    display_name: &str,
+) -> Result<PathBuf, HarnessError> {
+    ensure_installed(NpmPin::parse(pin), bin_name, display_name).await
+}
+
+pub fn npm_tool_launch(entry: &Path) -> Result<(PathBuf, Vec<String>), HarnessError> {
+    launch_for_entry(entry)
+}
+
 /// npm encodes fatal fs errors as `256 - errno` (npm/cli#4838 — often with no
 /// stderr at all); name the ones users actually hit.
 fn describe_npm_exit(status: Option<std::process::ExitStatus>) -> String {

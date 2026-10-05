@@ -1,0 +1,79 @@
+use std::sync::Arc;
+use std::time::Duration;
+
+use futures::StreamExt;
+use zeron_engine::device_hub::DEVICE_SUPPORT_OFF;
+use zeron_engine::{EngineCore, HarnessRegistry};
+use zeron_proto::HarnessId;
+use zeron_proto::device_hub::{DeviceHostStatus, DeviceHubState};
+use zeron_rpc::{RpcError, RpcReply, RpcService, methods};
+
+#[tokio::test(flavor = "multi_thread")]
+async fn list_hub_devices_is_refused_while_disabled_and_installs_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let adapters = dir.path().join("adapters");
+    // SAFETY: the only test in this binary; set before the engine reads it.
+    unsafe { std::env::set_var("ZERON_ADAPTERS_DIR", &adapters) };
+    let data = dir.path().join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let core = EngineCore::assemble(
+        &data,
+        Arc::new(HarnessRegistry::new()),
+        HarnessId::Mock,
+        None,
+    )
+    .unwrap();
+    let rpc = core.rpc_service();
+
+    let Ok(RpcReply::Stream(mut watch)) = rpc
+        .handle(methods::WATCH_DEVICE_HUB, serde_json::json!({}))
+        .await
+    else {
+        panic!("WatchDeviceHub streams");
+    };
+    let first: DeviceHubState = serde_json::from_value(
+        tokio::time::timeout(Duration::from_secs(5), watch.next())
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(first.host_status, DeviceHostStatus::Disabled);
+    assert!(!first.settings.enabled);
+
+    for (method, params) in [
+        (methods::LIST_HUB_DEVICES, serde_json::json!({})),
+        (
+            methods::OPEN_HUB_DEVICE,
+            serde_json::json!({"chatId": "c", "deviceId": "SIM", "platform": "ios"}),
+        ),
+        (
+            methods::WATCH_HUB_DEVICE_FRAMES,
+            serde_json::json!({"deviceId": "SIM"}),
+        ),
+    ] {
+        match rpc.handle(method, params).await {
+            Err(RpcError::Failed(message)) => assert_eq!(message, DEVICE_SUPPORT_OFF, "{method}"),
+            Err(other) => panic!("{method}: {other}"),
+            Ok(_) => panic!("{method} must be refused while disabled"),
+        }
+    }
+    let input = rpc
+        .handle(
+            methods::SEND_HUB_DEVICE_INPUT,
+            serde_json::json!({"deviceId": "SIM", "input": {"touch": {"phase": "begin", "x": 0.5, "y": 0.5}}}),
+        )
+        .await;
+    assert!(input.is_err());
+
+    assert!(!adapters.exists(), "no install was attempted");
+    assert!(!data.join("device").exists(), "no hub was started");
+    assert!(!data.join("device-hub-settings.json").exists());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), watch.next())
+            .await
+            .is_err(),
+        "refusals publish nothing"
+    );
+    core.shutdown().await;
+}
