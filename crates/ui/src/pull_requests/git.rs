@@ -184,9 +184,7 @@ pub struct GitTab {
     checkout_path: Option<String>,
     tree: Option<WorkingTree>,
     error: Option<SharedString>,
-    loading: bool,
     reload_wanted: bool,
-    generation: u64,
     load_task: Option<Task<()>>,
     watch_task: Option<Task<()>>,
     _poll_task: Task<()>,
@@ -205,8 +203,6 @@ pub struct GitTab {
     stash_menu: bool,
     stash_note: Option<SharedString>,
     last_commit: Option<CommitSummary>,
-    writing: bool,
-    write_generation: u64,
     write_task: Option<Task<()>>,
     write_focus: FocusHandle,
     written: Option<GeneratedCommitMessage>,
@@ -521,7 +517,7 @@ impl GitTab {
             loop {
                 cx.background_executor().timer(POLL_INTERVAL).await;
                 let Ok(()) = this.update(cx, |tab, cx| {
-                    if tab.visible && tab.window_active && !tab.loading {
+                    if tab.visible && tab.window_active && !tab.loading() {
                         tab.load(cx);
                     }
                     if tab.visible && tab.watch_task.is_none() {
@@ -565,9 +561,7 @@ impl GitTab {
             checkout_path: None,
             tree: None,
             error: None,
-            loading: false,
             reload_wanted: false,
-            generation: 0,
             load_task: None,
             watch_task: None,
             _poll_task: poll_task,
@@ -586,8 +580,6 @@ impl GitTab {
             stash_menu: false,
             stash_note: None,
             last_commit: None,
-            writing: false,
-            write_generation: 0,
             write_task: None,
             write_focus: cx.focus_handle(),
             written: None,
@@ -649,7 +641,7 @@ impl GitTab {
             self.watch_task = None;
         }
         if resumed {
-            if !self.loading {
+            if !self.loading() {
                 self.load(cx);
             }
             if self.watch_task.is_none() {
@@ -685,10 +677,8 @@ impl GitTab {
     }
 
     fn retarget(&mut self, cx: &mut Context<Self>) {
-        self.generation = self.generation.wrapping_add(1);
         self.tree = None;
         self.error = None;
-        self.loading = false;
         self.reload_wanted = false;
         self.load_task = None;
         self.watch_task = None;
@@ -733,8 +723,16 @@ impl GitTab {
         cx.notify();
     }
 
+    fn loading(&self) -> bool {
+        self.load_task.is_some()
+    }
+
+    fn writing(&self) -> bool {
+        self.write_task.is_some()
+    }
+
     fn load_if_idle(&mut self, cx: &mut Context<Self>) {
-        if self.loading {
+        if self.loading() {
             self.reload_wanted = true;
         } else {
             self.load(cx);
@@ -749,8 +747,6 @@ impl GitTab {
             return;
         };
         let params = target_params(&space, self.checkout_path.as_deref());
-        let generation = self.generation;
-        self.loading = true;
         self.reload_wanted = false;
         self.load_task = Some(cx.spawn(async move |this, cx| {
             let result = decode::<WorkingTree>(
@@ -760,10 +756,7 @@ impl GitTab {
                     .await,
             );
             this.update(cx, |tab, cx| {
-                if tab.generation != generation {
-                    return;
-                }
-                tab.loading = false;
+                tab.load_task = None;
                 if tab.pending.as_ref().is_some_and(|pending| pending.replied) {
                     tab.pending = None;
                     cx.notify();
@@ -918,7 +911,6 @@ impl GitTab {
             action,
         };
         let params = space.route(request);
-        let generation = self.generation;
         let committing = target == PendingTarget::Commit;
         let stashing = target == PendingTarget::Stash;
         let detailed = target == PendingTarget::Detail;
@@ -943,9 +935,6 @@ impl GitTab {
                 .call(methods::RUN_WORKING_TREE_ACTION, params)
                 .await;
             this.update(cx, |tab, cx| {
-                if tab.generation != generation {
-                    return;
-                }
                 match result {
                     Ok(value) => {
                         if let Some(pending) = tab.pending.as_mut() {
@@ -1000,7 +989,7 @@ impl GitTab {
             CommitKind::All => !tree.files.is_empty(),
         };
         ready
-            && !self.writing
+            && !self.writing()
             && !self.message.read(cx).text().trim().is_empty()
             && self.allows(&kind.action(String::new()), policy, cx)
     }
@@ -1047,7 +1036,7 @@ impl GitTab {
             self.cancel_confirm(cx);
             return true;
         }
-        if self.writing {
+        if self.writing() {
             self.stop_writing(window, cx);
             return true;
         }
@@ -1150,7 +1139,6 @@ impl GitTab {
             .unwrap_or_else(|| space.path.clone());
         let params =
             space.route(serde_json::json!({"cwd": cwd, "mode": "commit", "commitSha": sha}));
-        let generation = self.generation;
         self.detail_task = Some(cx.spawn(async move |this, cx| {
             let result = decode::<CheckoutDiff>(
                 engine
@@ -1159,9 +1147,6 @@ impl GitTab {
                     .await,
             );
             this.update(cx, |tab, cx| {
-                if tab.generation != generation {
-                    return;
-                }
                 let Some(detail) = tab
                     .detail
                     .as_mut()
@@ -1623,7 +1608,6 @@ impl GitTab {
             SyncKind::Pull => (SyncDirection::Pull, None),
         };
         let params = space.route(self.sync_request(&space, head, direction, cx));
-        let generation = self.generation;
         self.syncing = Some(kind);
         self.sync_outcome = None;
         cx.notify();
@@ -1631,9 +1615,6 @@ impl GitTab {
             let result =
                 decode::<SyncBranchReply>(engine.client().call(methods::SYNC_BRANCH, params).await);
             this.update(cx, |tab, cx| {
-                if tab.generation != generation {
-                    return;
-                }
                 tab.syncing = None;
                 tab.sync_outcome = Some(match result {
                     Ok(reply) => SyncOutcome {
@@ -1759,15 +1740,11 @@ impl GitTab {
             body: String::new(),
             draft,
         });
-        let generation = self.generation;
         cx.notify();
         self.pr_task = Some(cx.spawn(async move |this, cx| {
             let pushed = engine.client().call(methods::SYNC_BRANCH, push).await;
             let pushed = this
                 .update(cx, |tab, cx| {
-                    if tab.generation != generation {
-                        return false;
-                    }
                     let Some(sheet) = tab.pr_sheet.as_mut() else {
                         return false;
                     };
@@ -1797,9 +1774,6 @@ impl GitTab {
                     .await,
             );
             this.update(cx, |tab, cx| {
-                if tab.generation != generation {
-                    return;
-                }
                 match created {
                     Ok(created) => {
                         tab.pr_sheet = None;
@@ -1855,7 +1829,7 @@ impl GitTab {
     }
 
     fn write_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.writing {
+        if self.writing() {
             self.stop_writing(window, cx);
             return;
         }
@@ -1881,9 +1855,6 @@ impl GitTab {
             model: choice.map(|choice| choice.model),
         };
         let params = space.route(request);
-        self.write_generation = self.write_generation.wrapping_add(1);
-        let generation = self.write_generation;
-        self.writing = true;
         self.write_error = None;
         self.commit_menu = false;
         window.focus(&self.write_focus, cx);
@@ -1896,10 +1867,7 @@ impl GitTab {
                     .await,
             );
             this.update_in(cx, |tab, window, cx| {
-                if tab.write_generation != generation {
-                    return;
-                }
-                tab.writing = false;
+                tab.write_task = None;
                 match result {
                     Ok(generated) => {
                         tab.message.update(cx, |input, cx| {
@@ -1917,12 +1885,11 @@ impl GitTab {
     }
 
     fn cancel_writing(&mut self) {
-        self.write_generation = self.write_generation.wrapping_add(1);
-        self.writing = false;
+        self.write_task = None;
     }
 
     fn stop_writing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.writing {
+        if !self.writing() {
             return;
         }
         self.cancel_writing();
@@ -1967,7 +1934,6 @@ impl GitTab {
             staged,
         };
         let params = space.route(request);
-        let generation = self.generation;
         self.diff_task = Some(cx.spawn(async move |this, cx| {
             let result = decode::<WorkingTreeFileDiff>(
                 engine
@@ -1976,9 +1942,6 @@ impl GitTab {
                     .await,
             );
             this.update(cx, |tab, cx| {
-                if tab.generation != generation {
-                    return;
-                }
                 let Some(open) = tab
                     .expanded
                     .as_mut()
@@ -2871,7 +2834,7 @@ impl GitTab {
             format!("Commit {staged} files")
         };
         let main_enabled = enabled(CommitKind::Staged);
-        let writing = self.writing;
+        let writing = self.writing();
         let write_enabled = writing || self.can_write(cx);
         let write_label = if writing {
             "Writing… Esc to stop"
@@ -3108,7 +3071,7 @@ impl GitTab {
                         }
                     }))
                     .on_click(cx.listener(|tab, _, window, cx| {
-                        if !tab.writing {
+                        if !tab.writing() {
                             window.focus(&tab.message.focus_handle(cx), cx);
                         }
                     }))
@@ -4381,7 +4344,7 @@ impl Render for GitTab {
             self.activation = Some(cx.observe_window_activation(window, |tab, window, cx| {
                 let resumed = window.is_window_active() && !tab.window_active;
                 tab.window_active = window.is_window_active();
-                if resumed && tab.visible && !tab.loading {
+                if resumed && tab.visible && !tab.loading() {
                     tab.load(cx);
                 }
             }));
@@ -5801,7 +5764,7 @@ mod tests {
     ) {
         settle(cx, |cx| {
             calls_of(calls, methods::RUN_WORKING_TREE_ACTION).len() == actions
-                && tab.read_with(cx, |tab, _| tab.pending.is_none() && !tab.loading)
+                && tab.read_with(cx, |tab, _| tab.pending.is_none() && !tab.loading())
         });
     }
 
@@ -6241,7 +6204,7 @@ mod tests {
             })]
         );
         tab.read_with(cx, |tab, _| {
-            assert!(!tab.writing);
+            assert!(!tab.writing());
             let written = tab.written.as_ref().expect("the reply is kept");
             assert_eq!(written.model, "claude-haiku-4-5");
         });
@@ -6268,7 +6231,7 @@ mod tests {
         assert!(cx.debug_bounds("git-write-model-override").is_some());
         click(cx, "git-write-ai");
         settle(cx, |_| writes(&calls).len() == 2);
-        settle(cx, |cx| tab.read_with(cx, |tab, _| !tab.writing));
+        settle(cx, |cx| tab.read_with(cx, |tab, _| !tab.writing()));
         assert_eq!(
             writes(&calls)[1],
             serde_json::json!({
@@ -6323,7 +6286,7 @@ mod tests {
         click(cx, "git-write-ai");
         settle(cx, |_| writes(&calls).len() == 1);
         cx.run_until_parked();
-        assert!(tab.read_with(cx, |tab, _| tab.writing));
+        assert!(tab.read_with(cx, |tab, _| tab.writing()));
         assert!(cx.debug_bounds("git-write-preview").is_some());
         cx.simulate_keystrokes("cmd-enter");
         cx.run_until_parked();
@@ -6334,7 +6297,7 @@ mod tests {
 
         press_escape(&tab, cx);
         cx.run_until_parked();
-        assert!(!tab.read_with(cx, |tab, _| tab.writing));
+        assert!(!tab.read_with(cx, |tab, _| tab.writing()));
         assert!(cx.debug_bounds("git-write-preview").is_none());
 
         lab.release_write.notify_one();
@@ -6349,7 +6312,7 @@ mod tests {
         }
         assert_eq!(message(&tab, cx), "My own words");
         tab.read_with(cx, |tab, _| {
-            assert!(tab.written.is_none() && tab.write_error.is_none() && !tab.writing);
+            assert!(tab.written.is_none() && tab.write_error.is_none() && !tab.writing());
         });
         assert!(calls_of(&calls, methods::RUN_WORKING_TREE_ACTION).is_empty());
     }
@@ -6558,7 +6521,7 @@ mod tests {
         changed["revision"] = "r-edited".into();
         *lab.tree.lock().unwrap() = Some(changed);
         tab.update(cx, |tab, cx| tab.load(cx));
-        settle(cx, |cx| tab.read_with(cx, |tab, _| !tab.loading));
+        settle(cx, |cx| tab.read_with(cx, |tab, _| !tab.loading()));
         cx.run_until_parked();
         assert!(
             cx.debug_bounds("git-discard-confirm").is_none(),
@@ -7975,7 +7938,7 @@ mod tests {
         let (page, cx, calls, _dir) = open_lab(cx, lab_state(), git_prefs(), lab.clone());
         settle(cx, |cx| cx.debug_bounds("git-staged-row-0").is_some());
         let tab = git_tab(&page, cx);
-        settle(cx, |cx| tab.read_with(cx, |tab, _| !tab.loading));
+        settle(cx, |cx| tab.read_with(cx, |tab, _| !tab.loading()));
         frames.send(watch_frame("w0")).unwrap();
         cx.run_until_parked();
         lab.hold_trees
@@ -7999,7 +7962,7 @@ mod tests {
             .store(false, std::sync::atomic::Ordering::SeqCst);
         lab.release_tree.notify_one();
         settle(cx, |cx| {
-            tree_reads(&calls) == before + 2 && tab.read_with(cx, |tab, _| !tab.loading)
+            tree_reads(&calls) == before + 2 && tab.read_with(cx, |tab, _| !tab.loading())
         });
         for _ in 0..10 {
             cx.run_until_parked();
@@ -8265,7 +8228,7 @@ mod tests {
 
         *lab.tree.lock().unwrap() = Some(clean_tree());
         tab.update(cx, |tab, cx| tab.load(cx));
-        settle(cx, |cx| tab.read_with(cx, |tab, _| !tab.loading));
+        settle(cx, |cx| tab.read_with(cx, |tab, _| !tab.loading()));
         *lab.action_error.lock().unwrap() = Some("Git refused the checkout.".into());
         show_commit(cx, &tab, history_commit(PICKED, &["feature/x"], 1));
         click(cx, "git-commit-checkout");
