@@ -319,7 +319,11 @@ pub(crate) fn score_match(item: &ChangeRequestListItem, query: &str) -> u32 {
     }
 }
 
-pub(crate) fn sort_items(items: &mut Vec<&ChangeRequestListItem>, sort: ListSort, search: &str) {
+pub(crate) fn sort_items<T: std::ops::Deref<Target = ChangeRequestListItem>>(
+    items: &mut [T],
+    sort: ListSort,
+    search: &str,
+) {
     use std::cmp::{Ordering, Reverse};
     if !search.trim().is_empty() {
         items.sort_by_cached_key(|item| {
