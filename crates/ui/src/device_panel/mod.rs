@@ -1,4 +1,5 @@
 pub mod float;
+pub mod fold;
 pub mod geometry;
 pub mod h264;
 pub mod loading;
@@ -24,6 +25,7 @@ use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::icons;
 use crate::state::AppState;
 use crate::theme::Theme;
+use fold::FoldControls;
 use loading::{LoadingStage, LoadingView};
 use setup::SetupPending;
 use stream_view::DeviceStreamView;
@@ -180,6 +182,7 @@ pub struct DevicePanel {
     error: Option<SharedString>,
     view: Option<Entity<DeviceStreamView>>,
     controls: Option<(Entity<DeviceControls>, Subscription)>,
+    fold: Option<(Entity<FoldControls>, Subscription)>,
     panel_width: Rc<Cell<f32>>,
     screenshot_task: Option<Task<()>>,
     toast: Option<(u64, SharedString)>,
@@ -215,6 +218,7 @@ impl DevicePanel {
             error: None,
             view: None,
             controls: None,
+            fold: None,
             panel_width: Rc::default(),
             screenshot_task: None,
             toast: None,
@@ -303,12 +307,17 @@ impl DevicePanel {
     fn drop_view(&mut self) {
         self.view = None;
         self.controls = None;
+        self.fold = None;
         self.text_size = Default::default();
         self.rotate = Default::default();
     }
 
     pub fn controls(&self) -> Option<&Entity<DeviceControls>> {
         self.controls.as_ref().map(|(controls, _)| controls)
+    }
+
+    pub fn fold(&self) -> Option<&Entity<FoldControls>> {
+        self.fold.as_ref().map(|(fold, _)| fold)
     }
 
     pub fn rename_input(&self) -> Option<Entity<ComposerInput>> {
@@ -396,6 +405,18 @@ impl DevicePanel {
                         .new(|cx| DeviceStreamView::new(engine.clone(), id.clone(), platform, cx));
                     let host = self.target.as_ref().map(|(host, _)| host.clone());
                     let weak = view.downgrade();
+                    let fold = cx.new(|cx| {
+                        FoldControls::new(
+                            engine.clone(),
+                            host.clone().unwrap_or_default(),
+                            id.clone(),
+                            platform,
+                            &view,
+                            cx,
+                        )
+                    });
+                    let observer = cx.observe(&fold, |_, _, cx| cx.notify());
+                    self.fold = Some((fold, observer));
                     let controls = cx.new(|cx| {
                         DeviceControls::new(
                             engine,
@@ -1039,6 +1060,7 @@ pub(crate) mod tests {
                 }
                 let delay = if method == methods::CONFIGURE_DEVICE_HUB
                     || method == methods::CLOSE_HUB_DEVICE
+                    || method == methods::SET_HUB_DEVICE_HINGE
                 {
                     Duration::from_millis(200)
                 } else {
@@ -1048,7 +1070,10 @@ pub(crate) mod tests {
                 let ok = reply(&method);
                 tokio::spawn(async move {
                     tokio::time::sleep(delay).await;
-                    let reply = serde_json::json!({ "id": frame["id"], "ok": ok });
+                    let reply = match ok.get("err") {
+                        Some(err) => serde_json::json!({ "id": frame["id"], "err": err }),
+                        None => serde_json::json!({ "id": frame["id"], "ok": ok }),
+                    };
                     let _ = replies.send(reply.to_string()).await;
                 });
             }
@@ -1244,6 +1269,158 @@ pub(crate) mod tests {
         });
         wait(cx, |cx| cx.debug_bounds("device-more").is_some());
         (panel, calls, cx)
+    }
+
+    fn duo(hinged: bool) -> DeviceHubState {
+        let mut state = streaming(StreamLinkStatus::Live);
+        state.revision = 1;
+        state.screens.insert(
+            "SIM".into(),
+            zeron_proto::device_hub::DeviceScreenConfig {
+                width: 1398,
+                height: 2034,
+                screen_id: Some(1),
+                supports_hinge_angle: Some(hinged),
+                hinge_angle: Some(0),
+                hinge_pose: Some(zeron_proto::device_hub::HingePose::Closed),
+                ..Default::default()
+            },
+        );
+        state
+    }
+
+    #[gpui::test]
+    fn duo_poses_go_out_one_at_a_time_and_a_refused_pose_shows_its_error(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let hinges = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = hinges.clone();
+        let (state, calls) = app_state_with(
+            cx,
+            &runtime,
+            duo(true),
+            Arc::new(move |method| {
+                if method != methods::SET_HUB_DEVICE_HINGE {
+                    return serde_json::json!({});
+                }
+                match counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                    2 => serde_json::json!({"err": "Simulator could not change the device pose."}),
+                    _ => serde_json::json!({}),
+                }
+            }),
+        );
+        let panel_state = state.clone();
+        let (panel, cx) = cx.add_window_view(|_, cx| {
+            let mut panel = DevicePanel::new(panel_state, "chat".into(), cx);
+            panel.target = Some(("local".into(), "SIM".into()));
+            panel.revision = None;
+            panel.sync(cx);
+            panel
+        });
+        cx.simulate_resize(gpui::size(gpui::px(700.0), gpui::px(1200.0)));
+        wait(cx, |cx| cx.debug_bounds("device-pose-tent").is_some());
+        assert!(cx.debug_bounds("device-fold-shape").is_some());
+        assert!(cx.debug_bounds("device-stance").is_some());
+        let poses = || -> Vec<serde_json::Value> {
+            calls_of(&calls, methods::SET_HUB_DEVICE_HINGE)
+                .into_iter()
+                .map(|params| {
+                    assert_eq!(params["deviceId"], "SIM");
+                    params["pose"].clone()
+                })
+                .collect()
+        };
+        click(cx, "device-pose-book");
+        click(cx, "device-pose-laptop");
+        click(cx, "device-pose-tent");
+        wait(cx, |_| poses().len() == 2);
+        std::thread::sleep(Duration::from_millis(300));
+        cx.run_until_parked();
+        assert_eq!(
+            poses(),
+            [serde_json::json!("book"), serde_json::json!("tent")],
+            "laptop was replaced while book was in flight"
+        );
+        wait(cx, |cx| {
+            !panel.read_with(cx, |panel, cx| {
+                panel.fold().unwrap().read(cx).hinge_pending()
+            })
+        });
+        assert!(cx.debug_bounds("device-fold-error").is_none());
+        click(cx, "device-pose-open");
+        wait(cx, |cx| cx.debug_bounds("device-fold-error").is_some());
+        assert_eq!(
+            panel.read_with(cx, |panel, cx| panel
+                .fold()
+                .unwrap()
+                .read(cx)
+                .error()
+                .cloned()),
+            Some("Simulator could not change the device pose.".into())
+        );
+
+        state.update(cx, |state, cx| {
+            let mut iphone = duo(false);
+            iphone.revision = 2;
+            state.device_hub = Some(iphone);
+            cx.notify();
+        });
+        wait(cx, |cx| cx.debug_bounds("device-fold-shape").is_none());
+        assert!(cx.debug_bounds("device-fold-error").is_none());
+    }
+
+    #[gpui::test]
+    fn android_fold_buttons_show_for_a_foldable_and_send_the_posture(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (_panel, calls, cx) = android_panel(
+            cx,
+            &runtime,
+            Arc::new(|method| match method {
+                methods::HUB_DEVICE_FOLD => {
+                    serde_json::json!({"supported": true, "posture": "opened"})
+                }
+                _ => serde_json::json!({}),
+            }),
+        );
+        cx.simulate_resize(gpui::size(gpui::px(700.0), gpui::px(1200.0)));
+        wait(cx, |cx| cx.debug_bounds("device-fold").is_some());
+        assert!(cx.debug_bounds("device-unfold").is_some());
+        assert!(cx.debug_bounds("device-pose-closed").is_none());
+        assert_eq!(
+            calls_of(&calls, methods::HUB_DEVICE_FOLD),
+            [serde_json::json!({"hostId": "local", "deviceId": "SIM", "posture": null})]
+        );
+        click(cx, "device-fold");
+        wait(cx, |_| {
+            calls_of(&calls, methods::HUB_DEVICE_FOLD).len() == 2
+        });
+        assert_eq!(
+            calls_of(&calls, methods::HUB_DEVICE_FOLD)[1],
+            serde_json::json!({"hostId": "local", "deviceId": "SIM", "posture": "closed"})
+        );
+    }
+
+    #[gpui::test]
+    fn an_android_device_without_a_hinge_shows_no_fold_buttons(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (_panel, calls, cx) = android_panel(
+            cx,
+            &runtime,
+            Arc::new(|method| match method {
+                methods::HUB_DEVICE_FOLD => {
+                    serde_json::json!({"supported": false, "posture": null})
+                }
+                _ => serde_json::json!({}),
+            }),
+        );
+        wait(cx, |_| {
+            !calls_of(&calls, methods::HUB_DEVICE_FOLD).is_empty()
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("device-android-fold").is_none());
     }
 
     #[test]

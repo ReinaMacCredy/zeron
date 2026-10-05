@@ -41,7 +41,8 @@ Contributors 2022).
 ## T3 Code
 
 `crates/ui/assets/icons/pr-branch-mark.svg` reproduces the empty-state drawing
-from [T3 Code](https://github.com/pingdotgg/t3code), MIT licensed,
+and `crates/ui/assets/icons/duo-*.svg` reproduce the device pose glyphs
+(`DeviceDuoGlyph.tsx`) from [T3 Code](https://github.com/pingdotgg/t3code), MIT licensed,
 Copyright (c) 2026 T3 Tools Inc.
 
 ## Bundled theme palette adaptations

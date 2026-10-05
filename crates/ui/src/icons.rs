@@ -331,6 +331,11 @@ icon_assets![
     (LUCIDE_PANEL_RIGHT, "lucide-panel-right"),
     (APPLE, "apple"),
     (ANDROID, "android"),
+    (DUO_CLOSED, "duo-closed"),
+    (DUO_BOOK, "duo-book"),
+    (DUO_OPEN, "duo-open"),
+    (DUO_LAPTOP, "duo-laptop"),
+    (DUO_TENT, "duo-tent"),
 ];
 
 /// Serves both the compact control-icon set and the complete file-identity

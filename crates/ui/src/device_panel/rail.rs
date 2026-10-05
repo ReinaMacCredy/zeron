@@ -1,8 +1,9 @@
 use gpui::{AnyElement, Context, Entity, MouseButton, SharedString, Stateful, div, prelude::*, px};
 use zeron_proto::device_hub::{
-    DeviceAction, DeviceAppearance, DeviceButton, DeviceOrientation, DevicePlatform,
+    DeviceAction, DeviceAppearance, DeviceButton, DeviceOrientation, DevicePlatform, FoldPosture,
 };
 
+use super::fold;
 use super::geometry::RAIL_WIDTH;
 use super::stream_view::DeviceStreamView;
 use super::tools::TEXT_SIZES;
@@ -18,6 +19,17 @@ fn rail_button(
     enabled: bool,
     theme: &Theme,
 ) -> Stateful<gpui::Div> {
+    tipped_button(id, glyph, label, label, enabled, theme)
+}
+
+fn tipped_button(
+    id: &'static str,
+    glyph: &'static str,
+    label: &'static str,
+    tip: &'static str,
+    enabled: bool,
+    theme: &Theme,
+) -> Stateful<gpui::Div> {
     let button = div()
         .id(id)
         .debug_selector(move || id.into())
@@ -28,7 +40,7 @@ fn rail_button(
         .items_center()
         .justify_center()
         .rounded(px(8.0))
-        .tooltip(crate::settings::widgets::text_tooltip(label))
+        .tooltip(crate::settings::widgets::text_tooltip(tip))
         .child(icon(glyph).size(px(16.0)).text_color(theme.text_muted));
     if enabled {
         button
@@ -37,6 +49,34 @@ fn rail_button(
     } else {
         button.opacity(0.4).cursor_default()
     }
+}
+
+fn pressed(button: Stateful<gpui::Div>, on: bool) -> Stateful<gpui::Div> {
+    button
+        .aria_toggled(if on {
+            gpui::Toggled::True
+        } else {
+            gpui::Toggled::False
+        })
+        .when(on, |button| button.bg(crate::theme::ink(0.08)))
+}
+
+fn pill(id: &'static str, label: &'static str, theme: &Theme) -> Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .role(gpui::Role::Group)
+        .aria_label(label)
+        .occlude()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(4.0))
+        .p(px(8.0))
+        .rounded_full()
+        .border_1()
+        .border_color(theme.border.opacity(0.5))
+        .bg(theme.bg.opacity(0.8))
 }
 
 fn divider(theme: &Theme) -> gpui::Div {
@@ -107,6 +147,7 @@ impl DevicePanel {
             .flex_col()
             .items_center()
             .justify_center()
+            .gap(px(8.0))
             .py(px(12.0))
             .pr(px(8.0))
             .child(
@@ -137,7 +178,114 @@ impl DevicePanel {
                     .children(self.render_settings_buttons(theme, cx))
                     .child(self.render_more(theme, cx)),
             )
+            .children(self.render_fold(view, theme, cx))
             .into_any_element()
+    }
+
+    fn render_fold(
+        &self,
+        view: &Entity<DeviceStreamView>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let Some(controls) = self.fold().cloned() else {
+            return Vec::new();
+        };
+        let (live, screen, android) = {
+            let view = view.read(cx);
+            (
+                view.input_live(),
+                view.screen().cloned(),
+                view.platform() == DevicePlatform::Android,
+            )
+        };
+        let (state, pending, error) = {
+            let controls = controls.read(cx);
+            (
+                controls.android().cloned(),
+                controls.android_pending(),
+                controls.error().cloned(),
+            )
+        };
+        let mut groups = Vec::new();
+        if let Some(screen) = screen.filter(|screen| !android && fold::hinged(Some(screen))) {
+            for (id, label, buttons) in [
+                ("device-fold-shape", "Fold shape", &fold::FOLD_SHAPES[..]),
+                ("device-stance", "Device stance", &fold::STANCES[..]),
+            ] {
+                let buttons = buttons.iter().map(|button| {
+                    let (pose, controls) = (button.pose, controls.clone());
+                    pressed(
+                        tipped_button(
+                            button.id,
+                            button.glyph,
+                            button.label,
+                            button.tip,
+                            live,
+                            theme,
+                        ),
+                        fold::duo_selected(&screen, pose),
+                    )
+                    .when(live, |button| {
+                        button.on_click(move |_, _, cx| {
+                            controls.update(cx, |controls, cx| controls.set_pose(pose, cx))
+                        })
+                    })
+                });
+                groups.push(pill(id, label, theme).children(buttons).into_any_element());
+            }
+        }
+        if let Some(state) = state.filter(|_| android) {
+            let enabled = live && !pending;
+            let buttons = [
+                (
+                    FoldPosture::Closed,
+                    "device-fold",
+                    "Fold device",
+                    icons::DUO_CLOSED,
+                ),
+                (
+                    FoldPosture::Opened,
+                    "device-unfold",
+                    "Unfold device",
+                    icons::DUO_OPEN,
+                ),
+            ]
+            .map(|(posture, id, label, glyph)| {
+                let controls = controls.clone();
+                pressed(
+                    rail_button(id, glyph, label, enabled, theme),
+                    state.posture == Some(posture),
+                )
+                .when(enabled, |button| {
+                    button.on_click(move |_, _, cx| {
+                        controls.update(cx, |controls, cx| controls.set_android(posture, cx))
+                    })
+                })
+            });
+            groups.push(
+                pill("device-android-fold", "Android fold controls", theme)
+                    .children(buttons)
+                    .into_any_element(),
+            );
+        }
+        if let Some(error) = error.filter(|_| !groups.is_empty()) {
+            groups.push(
+                div()
+                    .id("device-fold-error")
+                    .debug_selector(|| "device-fold-error".into())
+                    .role(gpui::Role::Alert)
+                    .aria_label(error.clone())
+                    .tooltip(crate::settings::widgets::text_tooltip(error))
+                    .px(px(6.0))
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(theme.danger)
+                    .child("!")
+                    .into_any_element(),
+            );
+        }
+        groups
     }
 
     fn render_settings_buttons(&self, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {

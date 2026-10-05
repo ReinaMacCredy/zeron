@@ -450,6 +450,10 @@ pub struct DeviceStreamView {
     _tasks: [Task<()>; 2],
 }
 
+pub struct StreamChanged;
+
+impl gpui::EventEmitter<StreamChanged> for DeviceStreamView {}
+
 fn debug_tap_from_env() -> Option<(f32, f32)> {
     let value = std::env::var("ZERON_DEVICE_TAP").ok()?;
     let (x, y) = value.split_once(',')?;
@@ -602,11 +606,30 @@ impl DeviceStreamView {
 
     pub fn set_screen(&mut self, screen: Option<DeviceScreenConfig>, cx: &mut Context<Self>) {
         if self.screen != screen {
+            let screen_id = |screen: &Option<DeviceScreenConfig>| {
+                screen.as_ref().and_then(|screen| screen.screen_id)
+            };
+            // A fold hands HID to the other display; a press must not continue there.
+            if screen_id(&self.screen) != screen_id(&screen) {
+                self.release_held(true, cx);
+            }
             *self.rotation.lock().unwrap_or_else(PoisonError::into_inner) =
                 geometry::display_rotation(screen.as_ref());
             self.screen = screen;
             cx.notify();
         }
+    }
+
+    pub fn focus_handle(&self) -> FocusHandle {
+        self.focus.clone()
+    }
+
+    pub fn screen(&self) -> Option<&DeviceScreenConfig> {
+        self.screen.as_ref()
+    }
+
+    pub fn frame_size(&self) -> Option<(u32, u32)> {
+        self.image.as_ref().map(|frame| (frame.width, frame.height))
     }
 
     pub fn set_label(&mut self, name: String, description: String, cx: &mut Context<Self>) {
@@ -641,7 +664,11 @@ impl DeviceStreamView {
             DeviceVideoCodec::H264 => status.avcc == StreamLinkStatus::Live,
         };
         let (was_live, live) = (video(&self.link), video(&link));
+        let input_was_live = self.input_live();
         self.link = link;
+        if input_was_live != self.input_live() {
+            cx.emit(StreamChanged);
+        }
         if was_live && !live && self.video_error.is_none() {
             self.await_frame(cx);
         } else if live && self.image.is_some() {
@@ -733,6 +760,9 @@ impl DeviceStreamView {
         };
         self.awaiting_frame = false;
         let codec = frame.codec;
+        if self.frame_size() != Some((frame.width, frame.height)) {
+            cx.emit(StreamChanged);
+        }
         if let Some(old) = self.image.replace(frame) {
             let painted = std::mem::take(&mut self.painted);
             match old.picture {
@@ -1379,6 +1409,73 @@ mod tests {
         });
         cx.run_until_parked();
         assert_touches(&tap(cx), &[("begin", 0.75, 0.75), ("end", 0.75, 0.75)]);
+    }
+
+    fn duo_screen(
+        screen_id: u32,
+        hinge_pose: zeron_proto::device_hub::HingePose,
+    ) -> DeviceScreenConfig {
+        let inner = screen_id == 3;
+        DeviceScreenConfig {
+            width: if inner { 2006 } else { 1398 },
+            height: if inner { 2852 } else { 2034 },
+            orientation: if inner {
+                DeviceOrientation::LandscapeLeft
+            } else {
+                DeviceOrientation::Portrait
+            },
+            screen_id: Some(screen_id),
+            supports_hinge_angle: Some(true),
+            hinge_pose: Some(hinge_pose),
+            ..Default::default()
+        }
+    }
+
+    #[gpui::test]
+    fn a_fold_onto_the_other_screen_ends_a_held_touch(cx: &mut TestAppContext) {
+        use zeron_proto::device_hub::HingePose;
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        setup(cx);
+        let (engine, inputs) = fake_engine(&runtime);
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            DeviceStreamView::new(engine, "SIM".into(), DevicePlatform::Ios, cx)
+        });
+        view.update(cx, |view, cx| {
+            view.set_screen(Some(duo_screen(1, HingePose::Closed)), cx)
+        });
+        wait(cx, |cx| {
+            view.read_with(cx, |view, _| view.has_frame() && view.frame_box().is_some())
+        });
+        let frame = view.read_with(cx, |view, _| view.frame_box().unwrap());
+        let at = |x, y| geometry::position_at(frame, x, y);
+        let none = Modifiers::default();
+        cx.simulate_mouse_down(at(0.5, 0.5), MouseButton::Left, none);
+        cx.simulate_mouse_move(at(0.6, 0.5), MouseButton::Left, none);
+        wait(cx, |_| inputs.lock().unwrap().len() >= 2);
+        let mut tent = duo_screen(1, HingePose::Tent);
+        tent.hinge_angle = Some(80);
+        view.update(cx, |view, cx| view.set_screen(Some(tent), cx));
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(100));
+        cx.run_until_parked();
+        assert_eq!(
+            inputs.lock().unwrap().len(),
+            2,
+            "a new pose on the same screen keeps the press"
+        );
+        view.update(cx, |view, cx| {
+            view.set_screen(Some(duo_screen(3, HingePose::Open)), cx)
+        });
+        wait(cx, |_| inputs.lock().unwrap().len() >= 3);
+        cx.simulate_mouse_move(at(0.7, 0.5), MouseButton::Left, none);
+        cx.simulate_mouse_up(at(0.7, 0.5), MouseButton::Left, none);
+        std::thread::sleep(Duration::from_millis(100));
+        cx.run_until_parked();
+        assert_touches(
+            &touches(&inputs),
+            &[("begin", 0.5, 0.5), ("move", 0.6, 0.5), ("end", 0.6, 0.5)],
+        );
     }
 
     fn inputs_of(inputs: &Inputs, kind: &str) -> Vec<Value> {
@@ -2219,6 +2316,80 @@ mod tests {
             cx.run_until_parked();
             assert_eq!(codecs(&watches), [json!("h264")]);
             assert_eq!(shown(&view, cx).unwrap().0, DeviceVideoCodec::H264);
+        }
+
+        const DUO_FOLD: &[u8] = include_bytes!("../../tests/fixtures/device-ios-duo-fold.avcc");
+
+        #[gpui::test]
+        fn a_duo_stream_follows_the_fold_onto_the_inner_screen_and_back(cx: &mut TestAppContext) {
+            use zeron_proto::device_hub::HingePose;
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let _guard = runtime.enter();
+            setup(cx);
+            let mut screens: Vec<Vec<AvccEnvelope>> = Vec::new();
+            for envelope in AvccDemuxer::default().push(DUO_FOLD).unwrap() {
+                if envelope.tag == zeron_proto::device_hub::AVCC_DESCRIPTION {
+                    screens.push(Vec::new());
+                }
+                screens.last_mut().unwrap().push(envelope);
+            }
+            let screens: Vec<Value> = screens.iter().map(|screen| item(screen)).collect();
+            assert_eq!(screens.len(), 3, "cover, inner, cover");
+            let pause = || {
+                [
+                    json!("pause"),
+                    json!("pause"),
+                    json!("pause"),
+                    json!("pause"),
+                ]
+            };
+            let mut wire = vec![screens[0].clone()];
+            wire.extend(pause());
+            wire.push(screens[1].clone());
+            wire.extend(pause());
+            wire.push(screens[2].clone());
+            let (engine, watches) = video_engine(&runtime, wire);
+            let (view, cx) = cx.add_window_view(|_, cx| {
+                view_with_screen(engine, duo_screen(1, HingePose::Closed), cx)
+            });
+            wait(cx, |cx| shown(&view, cx).is_some());
+            assert_eq!(
+                shown(&view, cx),
+                Some((DeviceVideoCodec::H264, 1398, 2034, true))
+            );
+            view.update(cx, |view, cx| {
+                view.set_screen(Some(duo_screen(3, HingePose::Open)), cx)
+            });
+            wait(cx, |cx| {
+                shown(&view, cx).is_some_and(|shown| shown.1 == 2852)
+            });
+            assert_eq!(
+                shown(&view, cx),
+                Some((DeviceVideoCodec::H264, 2852, 2006, true)),
+                "the inner display reports landscape_left and turns upright"
+            );
+            view.update(cx, |view, cx| {
+                view.set_screen(Some(duo_screen(1, HingePose::Closed)), cx)
+            });
+            wait(cx, |cx| {
+                shown(&view, cx).is_some_and(|shown| shown.1 == 1398)
+            });
+            assert_eq!(
+                shown(&view, cx),
+                Some((DeviceVideoCodec::H264, 1398, 2034, true))
+            );
+            assert_eq!(codecs(&watches), [json!("h264")]);
+            assert!(view.read_with(cx, |view, _| view.video_error.is_none()));
+        }
+
+        fn view_with_screen(
+            engine: EngineHandle,
+            screen: DeviceScreenConfig,
+            cx: &mut Context<DeviceStreamView>,
+        ) -> DeviceStreamView {
+            let mut view = DeviceStreamView::new(engine, "SIM".into(), DevicePlatform::Ios, cx);
+            view.set_screen(Some(screen), cx);
+            view
         }
 
         const ANDROID_CAPTURE: &[u8] =
