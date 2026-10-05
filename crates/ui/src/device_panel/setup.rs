@@ -568,56 +568,61 @@ impl DevicePanel {
             .p(px(16.0))
             .child(
                 div()
-                    .debug_selector(|| "device-setup-card".into())
+                    .flex_none()
                     .my_auto()
                     .w_full()
-                    .max_w(px(440.0))
-                    .rounded(px(12.0))
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.surface)
-                    .flex()
-                    .flex_col()
                     .child(
                         div()
-                            .p(px(16.0))
+                            .debug_selector(|| "device-setup-card".into())
+                            .mx_auto()
+                            .max_w(px(440.0))
+                            .rounded(px(12.0))
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.surface)
                             .flex()
                             .flex_col()
-                            .gap(px(6.0))
                             .child(
                                 div()
-                                    .text_size(crate::typography::ui_rems(14.0))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(theme.text)
-                                    .child("Set up devices"),
-                            )
-                            .child(muted(
-                                theme,
-                                "Review what runs on this environment before using simulators and emulators.",
-                            ))
-                            .child(
-                                div()
-                                    .id("device-setup-steps")
-                                    .mt(px(8.0))
-                                    .role(gpui::Role::TabList)
-                                    .aria_label("Setup steps")
+                                    .p(px(16.0))
                                     .flex()
+                                    .flex_col()
+                                    .gap(px(6.0))
+                                    .child(
+                                        div()
+                                            .text_size(crate::typography::ui_rems(14.0))
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .text_color(theme.text)
+                                            .child("Set up devices"),
+                                    )
+                                    .child(muted(
+                                        theme,
+                                        "Review what runs on this environment before using simulators and emulators.",
+                                    ))
+                                    .child(
+                                        div()
+                                            .id("device-setup-steps")
+                                            .mt(px(8.0))
+                                            .role(gpui::Role::TabList)
+                                            .aria_label("Setup steps")
+                                            .flex()
+                                            .gap(px(8.0))
+                                            .children(steps),
+                                    ),
+                            )
+                            .child(div().px(px(16.0)).pb(px(16.0)).child(body))
+                            .child(
+                                div()
+                                    .border_t_1()
+                                    .border_color(theme.border)
+                                    .px(px(16.0))
+                                    .py(px(12.0))
+                                    .flex()
+                                    .justify_end()
                                     .gap(px(8.0))
-                                    .children(steps),
+                                    .child(back)
+                                    .child(next),
                             ),
-                    )
-                    .child(div().px(px(16.0)).pb(px(16.0)).child(body))
-                    .child(
-                        div()
-                            .border_t_1()
-                            .border_color(theme.border)
-                            .px(px(16.0))
-                            .py(px(12.0))
-                            .flex()
-                            .justify_end()
-                            .gap(px(8.0))
-                            .child(back)
-                            .child(next),
                     ),
             )
             .into_any_element()

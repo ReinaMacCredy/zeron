@@ -1127,6 +1127,39 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
+    fn the_wizard_footer_stays_inside_the_card_on_every_step(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let mut state = hub(true);
+        state.settings.onboarding_completed = false;
+        let (state, _calls) = app_state(cx, &runtime, state);
+        let (_panel, cx) = cx.add_window_view(|_, cx| DevicePanel::new(state, "chat".into(), cx));
+        cx.simulate_resize(gpui::size(gpui::px(620.0), gpui::px(900.0)));
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        for (back, next) in [
+            ("device-setup-cancel", "device-setup-continue"),
+            ("device-setup-back", "device-setup-continue"),
+            ("device-setup-back", "device-setup-done"),
+        ] {
+            for selector in [back, next] {
+                wait(cx, |cx| cx.debug_bounds(selector).is_some());
+                let card = cx.debug_bounds("device-setup-card").unwrap();
+                let button = cx.debug_bounds(selector).unwrap();
+                assert!(
+                    button.top() >= card.top() && button.bottom() <= card.bottom(),
+                    "{selector} {button:?} is outside the card {card:?}"
+                );
+            }
+            if next == "device-setup-continue" {
+                click(cx, next);
+            }
+        }
+    }
+
+    #[gpui::test]
     fn opening_a_device_shows_the_first_step_of_the_loading_view(cx: &mut TestAppContext) {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();
