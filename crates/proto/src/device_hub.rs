@@ -102,6 +102,15 @@ pub struct DeviceSession {
     pub platform: DevicePlatform,
     #[serde(default)]
     pub opened_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opened_by: Option<DeviceOpener>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DeviceOpener {
+    User,
+    Agent,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,6 +145,73 @@ pub struct DeviceScreenConfig {
     pub supports_physical_orientation: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_hinge_angle: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_id: Option<u32>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "hinge_degrees"
+    )]
+    pub hinge_angle: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hinge_pose: Option<HingePose>,
+}
+
+fn hinge_degrees<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u8>, D::Error> {
+    Ok(
+        Option::<f64>::deserialize(deserializer)?
+            .map(|angle| angle.clamp(0.0, 180.0).round() as u8),
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HingePose {
+    Closed,
+    Book,
+    Open,
+    Laptop,
+    Tent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetHubDeviceHingeParams {
+    #[serde(default)]
+    pub device_id: String,
+    pub pose: HingePose,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FoldPosture {
+    Closed,
+    HalfOpened,
+    Opened,
+    Flipped,
+    Tent,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceFoldState {
+    #[serde(default)]
+    pub supported: bool,
+    #[serde(default)]
+    pub posture: Option<FoldPosture>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubDeviceFoldParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<String>,
+    #[serde(default)]
+    pub device_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub posture: Option<FoldPosture>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -909,6 +985,154 @@ mod tests {
         .unwrap();
         assert_eq!(device.platform, DevicePlatform::Ios);
         assert_eq!(device.host_id, "");
+    }
+
+    #[test]
+    fn iphone_duo_screen_configs_carry_the_screen_and_hinge() {
+        // 0x82 payloads captured from the iPhone Duo simulator (iOS 27.1, hub 0.12.0).
+        let captured = [
+            (
+                r#"{"width":1398,"height":2034,"orientation":"portrait","screenId":1,"supportsPhysicalOrientation":true,"supportsHingeAngle":true,"hingePose":null,"tableModeAvailable":false}"#,
+                (1398, 2034, DeviceOrientation::Portrait, Some(1), None, None),
+            ),
+            (
+                r#"{"width":1398,"height":2034,"orientation":"portrait","screenId":1,"supportsPhysicalOrientation":true,"supportsHingeAngle":true,"hingeAngle":0,"hingePose":"closed","tableModeAvailable":false,"physicalOrientation":"portrait","tableMode":false}"#,
+                (
+                    1398,
+                    2034,
+                    DeviceOrientation::Portrait,
+                    Some(1),
+                    Some(0),
+                    Some(HingePose::Closed),
+                ),
+            ),
+            (
+                r#"{"width":2007,"height":2853,"orientation":"landscape_left","screenId":3,"supportsPhysicalOrientation":true,"supportsHingeAngle":true,"hingeAngle":180,"hingePose":"open","tableModeAvailable":true,"physicalOrientation":"portrait","tableMode":false}"#,
+                (
+                    2007,
+                    2853,
+                    DeviceOrientation::LandscapeLeft,
+                    Some(3),
+                    Some(180),
+                    Some(HingePose::Open),
+                ),
+            ),
+            (
+                r#"{"width":2006,"height":2852,"orientation":"landscape_left","screenId":3,"supportsPhysicalOrientation":true,"supportsHingeAngle":true,"hingeAngle":90,"hingePose":"book","tableModeAvailable":true,"physicalOrientation":"portrait","tableMode":false}"#,
+                (
+                    2006,
+                    2852,
+                    DeviceOrientation::LandscapeLeft,
+                    Some(3),
+                    Some(90),
+                    Some(HingePose::Book),
+                ),
+            ),
+            (
+                r#"{"width":2006,"height":2852,"orientation":"portrait","screenId":3,"supportsPhysicalOrientation":true,"supportsHingeAngle":true,"hingeAngle":90,"hingePose":"laptop","tableModeAvailable":true,"physicalOrientation":"landscape-left","tableMode":false}"#,
+                (
+                    2006,
+                    2852,
+                    DeviceOrientation::Portrait,
+                    Some(3),
+                    Some(90),
+                    Some(HingePose::Laptop),
+                ),
+            ),
+            (
+                r#"{"width":1398,"height":2034,"orientation":"portrait","screenId":1,"supportsPhysicalOrientation":true,"supportsHingeAngle":true,"hingeAngle":80,"hingePose":"tent","tableModeAvailable":true,"physicalOrientation":"facedown","tableMode":true}"#,
+                (
+                    1398,
+                    2034,
+                    DeviceOrientation::Portrait,
+                    Some(1),
+                    Some(80),
+                    Some(HingePose::Tent),
+                ),
+            ),
+            (
+                r#"{"width":2007,"height":2853,"orientation":"landscape_left","screenId":3,"supportsPhysicalOrientation":true,"supportsHingeAngle":true,"hingeAngle":45,"hingePose":null,"tableModeAvailable":true,"physicalOrientation":"portrait","tableMode":false}"#,
+                (
+                    2007,
+                    2853,
+                    DeviceOrientation::LandscapeLeft,
+                    Some(3),
+                    Some(45),
+                    None,
+                ),
+            ),
+        ];
+        for (wire, expected) in captured {
+            let screen: DeviceScreenConfig = serde_json::from_str(wire).unwrap();
+            assert_eq!(
+                (
+                    screen.width,
+                    screen.height,
+                    screen.orientation,
+                    screen.screen_id,
+                    screen.hinge_angle,
+                    screen.hinge_pose
+                ),
+                expected,
+                "{wire}"
+            );
+            assert_eq!(screen.supports_hinge_angle, Some(true));
+        }
+        let fractional: DeviceScreenConfig =
+            serde_json::from_value(json!({"width": 1, "height": 2, "hingeAngle": 92.6})).unwrap();
+        assert_eq!(fractional.hinge_angle, Some(93));
+        let iphone: DeviceScreenConfig = serde_json::from_value(json!({
+            "width": 588, "height": 1280, "orientation": "portrait", "screenId": 1,
+            "supportsPhysicalOrientation": false, "supportsHingeAngle": false
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&iphone).unwrap(),
+            json!({
+                "width": 588, "height": 1280, "orientation": "portrait", "screenId": 1,
+                "supportsPhysicalOrientation": false, "supportsHingeAngle": false
+            })
+        );
+    }
+
+    #[test]
+    fn hinge_fold_and_opener_wire_shapes() {
+        assert_eq!(
+            serde_json::to_value(SetHubDeviceHingeParams {
+                device_id: "DUO".into(),
+                pose: HingePose::Laptop,
+            })
+            .unwrap(),
+            json!({"deviceId": "DUO", "pose": "laptop"})
+        );
+        assert_eq!(
+            serde_json::to_value(HubDeviceFoldParams {
+                device_id: "emulator-5554".into(),
+                posture: Some(FoldPosture::Closed),
+                ..Default::default()
+            })
+            .unwrap(),
+            json!({"deviceId": "emulator-5554", "posture": "closed"})
+        );
+        let fold: DeviceFoldState = serde_json::from_value(
+            json!({"supported": true, "posture": "half_opened", "hingeAngle": 92.5}),
+        )
+        .unwrap();
+        assert_eq!(fold.posture, Some(FoldPosture::HalfOpened));
+        let unsupported: DeviceFoldState = serde_json::from_value(
+            json!({"supported": false, "posture": null, "hingeAngle": null}),
+        )
+        .unwrap();
+        assert_eq!(unsupported, DeviceFoldState::default());
+        let session: DeviceSession =
+            serde_json::from_value(json!({"chatId": "c", "openedBy": "agent"})).unwrap();
+        assert_eq!(session.opened_by, Some(DeviceOpener::Agent));
+        assert!(
+            serde_json::to_value(DeviceSession::default())
+                .unwrap()
+                .get("openedBy")
+                .is_none()
+        );
     }
 
     #[test]
