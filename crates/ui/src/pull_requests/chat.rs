@@ -9,7 +9,7 @@ use zeron_proto::{
 };
 
 use super::handoff::bounded;
-use super::{ListEntry, PullRequestKey, PullRequestsPage, filters, group_thousands};
+use super::{ListEntry, PullRequestKey, PullRequestsPage, change_size, filters, group_thousands};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrChatScope {
@@ -39,7 +39,18 @@ impl PullRequestsPage {
                         .find(|item| PullRequestKey::of(item) == *key)
                         .cloned()
                 });
-            if let Some(item) = item {
+            if let Some(mut item) = item {
+                if change_size(&item) == 0
+                    && let Some(listed) = listing.and_then(|listing| {
+                        listing
+                            .items
+                            .iter()
+                            .find(|listed| PullRequestKey::of(listed) == *key)
+                    })
+                {
+                    item.additions = listed.additions;
+                    item.deletions = listed.deletions;
+                }
                 let detail = state.and_then(|state| state.detail.ready().cloned());
                 let comments = state
                     .and_then(|state| state.activity.activity.ready())
