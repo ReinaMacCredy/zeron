@@ -3861,6 +3861,26 @@ impl RpcService for EngineRpc {
                 })
                 .await
             }
+            methods::GENERATE_COMMIT_MESSAGE => {
+                Box::pin(async move {
+                    let request: zeron_proto::GenerateCommitMessageRequest = parse_params(params)?;
+                    let workspace = self.source_control_checkout(&request.target).await?;
+                    let generated = tokio::time::timeout(
+                        crate::commit_messages::GENERATE_TIMEOUT,
+                        crate::commit_messages::generate(&self.registry, &workspace.root, &request),
+                    )
+                    .await
+                    .map_err(|_| {
+                        RpcError::Failed(
+                            "Writing the commit message took too long. Try again, or pick a faster model."
+                                .into(),
+                        )
+                    })?
+                    .map_err(|error| RpcError::Failed(error.to_string()))?;
+                    RpcReply::value(&generated)
+                })
+                .await
+            }
             methods::LIST_WORKSPACE_DIRECTORY => {
                 let request: zeron_proto::ListWorkspaceDirectoryRequest = parse_params(params)?;
                 let page = tokio::time::timeout(
@@ -5325,6 +5345,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generate_commit_message_reads_the_staged_change_and_replies_through_the_wire() {
+        use crate::commit_messages::tests::{Scripted, git};
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let repo = root.join("repo");
+        let data = root.join("data");
+        for path in [&repo, &data] {
+            std::fs::create_dir(path).unwrap();
+        }
+        git(&repo, &["init", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "first"]);
+        std::fs::write(repo.join("a.txt"), "a\nb\n").unwrap();
+
+        let registry = std::sync::Arc::new(HarnessRegistry::new());
+        let scripted = std::sync::Arc::new(Scripted::new(
+            HarnessId::ClaudeCode,
+            &["claude-sonnet", "claude-haiku-4-5"],
+            "A: add b\n\nWhy it matters.",
+        ));
+        registry.register(scripted.clone());
+        let core = crate::EngineCore::assemble(&data, registry, HarnessId::Mock, None).unwrap();
+        let rpc = core.rpc_service();
+        rpc.handle(
+            methods::MUTATE,
+            serde_json::json!({
+                "op": "createSpace", "spaceId": "space-repo", "deviceId": core.device_id,
+                "path": repo, "gitDetected": true,
+            }),
+        )
+        .await
+        .unwrap();
+        let params = serde_json::json!({
+            "spaceId": "space-repo",
+            "instruction": "Write a short commit message for this staged diff.",
+        });
+
+        let error = rpc
+            .handle(methods::GENERATE_COMMIT_MESSAGE, params.clone())
+            .await
+            .err()
+            .expect("nothing staged is refused");
+        assert!(error.to_string().contains("Nothing is staged"), "{error}");
+        let error = rpc
+            .handle(
+                methods::GENERATE_COMMIT_MESSAGE,
+                serde_json::json!({ "chatId": "chat-1" }),
+            )
+            .await
+            .err()
+            .expect("a chat target is refused");
+        assert!(error.to_string().contains("spaceId"), "{error}");
+        assert!(scripted.calls.lock().unwrap().is_empty());
+
+        git(&repo, &["add", "a.txt"]);
+        let reply = through_the_wire(
+            rpc.handle(methods::GENERATE_COMMIT_MESSAGE, params)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(
+            reply,
+            serde_json::json!({
+                "message": "A: add b\n\nWhy it matters.",
+                "harness": serde_json::to_value(HarnessId::ClaudeCode).unwrap(),
+                "model": "claude-haiku-4-5",
+            })
+        );
+        assert_eq!(git(&repo, &["log", "--format=%s"]), "first\n");
+        assert_eq!(git(&repo, &["diff", "--cached", "--name-only"]), "a.txt\n");
+        core.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn working_tree_actions_check_the_revision_the_target_and_the_busy_policy() {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
@@ -5670,6 +5765,12 @@ mod tests {
         assert!(
             crate::working_tree::COMMIT_TIMEOUT + crate::working_tree::READ_TIMEOUT
                 <= crate::working_tree::WRITE_TIMEOUT
+        );
+        assert!(
+            crate::commit_messages::ATTEMPT_TIMEOUT < crate::commit_messages::GENERATE_TIMEOUT
+                && crate::commit_messages::GENERATE_TIMEOUT
+                    < forward_deadline(methods::GENERATE_COMMIT_MESSAGE),
+            "a forwarded generation reports the engine's own outcome"
         );
         for method in [
             methods::CLONE_REPO,

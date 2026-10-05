@@ -571,13 +571,14 @@ impl Harness for ClaudeHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        self.run_with_mode(request, controls, false).await
+        self.run_with_mode(request, controls, None).await
     }
 
-    async fn run_title(
+    async fn run_one_shot(
         &self,
         mut request: RunRequest,
         controls: RunControls,
+        instructions: &'static str,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         request.resume = None;
         request.worktree = None;
@@ -585,7 +586,8 @@ impl Harness for ClaudeHarness {
         request.mcp = None;
         request.model_options.clear();
         request.auto_approve = false;
-        self.run_with_mode(request, controls, true).await
+        self.run_with_mode(request, controls, Some(instructions))
+            .await
     }
 }
 
@@ -594,14 +596,15 @@ impl ClaudeHarness {
         &self,
         request: RunRequest,
         controls: RunControls,
-        title_only: bool,
+        one_shot: Option<&'static str>,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let title_only = one_shot.is_some();
         let exe = self.resolve_executable()?;
         let mut cmd = self.build_command(&exe, &request);
-        if title_only {
+        if let Some(instructions) = one_shot {
             cmd.args([
                 "--system-prompt",
-                crate::TITLE_INSTRUCTIONS,
+                instructions,
                 "--tools",
                 "",
                 "--strict-mcp-config",

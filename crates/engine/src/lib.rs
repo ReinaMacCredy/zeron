@@ -21,6 +21,7 @@ mod background_output;
 pub mod change_requests;
 pub mod chat2_host;
 mod chat_persistence;
+mod commit_messages;
 pub mod computer;
 pub mod device_hub;
 pub mod diff_sync;

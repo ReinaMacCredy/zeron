@@ -27,7 +27,7 @@ pub(crate) async fn git(root: &Path, args: &[&str]) -> Result<GitOutput, EngineE
     git_with(root, args, OUTPUT_MAX_BYTES, false).await
 }
 
-async fn git_with(
+pub(crate) async fn git_with(
     root: &Path,
     args: &[&str],
     max_bytes: usize,
