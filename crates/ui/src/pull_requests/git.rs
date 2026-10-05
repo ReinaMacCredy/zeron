@@ -2,14 +2,16 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, Context, Entity, EntityInputHandler, EventEmitter, Focusable, KeyDownEvent,
-    SharedString, Subscription, Task, Window, div, prelude::*, px,
+    Animation, AnimationExt, AnyElement, App, Context, Entity, EntityInputHandler, EventEmitter,
+    FocusHandle, Focusable, KeyDownEvent, SharedString, Subscription, Task, Window, div,
+    percentage, prelude::*, px,
 };
 use zeron_proto::{
-    ChangeRequestListItem, ChangeRequestState, CommitSummary, GetWorkingTreeFileDiffRequest,
-    GetWorkingTreeRequest, GitAgentBusyPolicy, GitFileState, RunWorkingTreeActionRequest,
-    SessionStatus, WorkingTree, WorkingTreeAction, WorkingTreeActionReply, WorkingTreeFile,
-    WorkingTreeFileDiff, WorkspaceTarget,
+    ChangeRequestListItem, ChangeRequestState, CommitSummary, GenerateCommitMessageRequest,
+    GeneratedCommitMessage, GetWorkingTreeFileDiffRequest, GetWorkingTreeRequest,
+    GitAgentBusyPolicy, GitFileState, RunWorkingTreeActionRequest, SessionStatus, WorkingTree,
+    WorkingTreeAction, WorkingTreeActionReply, WorkingTreeFile, WorkingTreeFileDiff,
+    WorkspaceTarget,
 };
 use zeron_rpc::{RpcError, methods};
 
@@ -18,7 +20,9 @@ use crate::changes::{self, FileDiff};
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::history::{GitHistory, GitHistoryEvent, GitHistoryTarget};
 use crate::icons::{self, icon};
+use crate::pickers::{CommitModelPicked, Pickers};
 use crate::popover;
+use crate::settings::CommitModelChoice;
 use crate::settings::widgets::text_tooltip;
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -46,6 +50,7 @@ pub(super) struct CheckoutOption {
 
 pub enum GitTabEvent {
     OpenPullRequest(String),
+    OpenSourceControlSettings,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +120,17 @@ pub struct GitTab {
     message: Entity<ComposerInput>,
     commit_menu: bool,
     last_commit: Option<CommitSummary>,
+    writing: bool,
+    write_generation: u64,
+    write_task: Option<Task<()>>,
+    write_focus: FocusHandle,
+    written: Option<GeneratedCommitMessage>,
+    write_error: Option<SharedString>,
+    model_override: Option<CommitModelChoice>,
+    shown_default: Option<CommitModelChoice>,
+    model_picker: Entity<Pickers>,
+    _model_picks: Subscription,
+    _settings_changes: Subscription,
     _message_edits: Subscription,
     _history_events: Subscription,
 }
@@ -319,6 +335,26 @@ impl GitTab {
                 cx.notify();
             }
         });
+        let shown_default = crate::settings::current(cx).commit_message_model;
+        let model_picker = cx
+            .new(|cx| Pickers::new_for_commit_messages(state.clone(), shown_default.as_ref(), cx));
+        let model_picks = cx.subscribe(
+            &model_picker,
+            |tab: &mut Self, _, event: &CommitModelPicked, cx| {
+                let default = crate::settings::current(cx).commit_message_model;
+                tab.model_override = (default.as_ref() != Some(&event.0)).then(|| event.0.clone());
+                cx.notify();
+            },
+        );
+        let settings_changes = cx.observe_global::<crate::settings::SettingsStore>(|tab, cx| {
+            let default = crate::settings::current(cx).commit_message_model;
+            if default != tab.shown_default {
+                tab.shown_default = default;
+                if tab.model_override.is_none() {
+                    tab.reset_model_override(cx);
+                }
+            }
+        });
         Self {
             state,
             history,
@@ -342,6 +378,17 @@ impl GitTab {
             message,
             commit_menu: false,
             last_commit: None,
+            writing: false,
+            write_generation: 0,
+            write_task: None,
+            write_focus: cx.focus_handle(),
+            written: None,
+            write_error: None,
+            model_override: None,
+            shown_default,
+            model_picker,
+            _model_picks: model_picks,
+            _settings_changes: settings_changes,
             _message_edits: message_edits,
             _history_events: history_events,
         }
@@ -407,6 +454,10 @@ impl GitTab {
         self.diff_task = None;
         self.commit_menu = false;
         self.last_commit = None;
+        self.cancel_writing();
+        self.written = None;
+        self.write_error = None;
+        self.reset_model_override(cx);
         let target = self.space.as_ref().map(|space| GitHistoryTarget::Pinned {
             cwd: self
                 .checkout_path
@@ -616,6 +667,9 @@ impl GitTab {
                                 serde_json::from_value(value).unwrap_or_default();
                             tab.last_commit = reply.commit;
                             tab.message.update(cx, |input, cx| input.set_text("", cx));
+                            tab.written = None;
+                            tab.write_error = None;
+                            tab.reset_model_override(cx);
                         }
                     }
                     Err(error) => {
@@ -640,6 +694,7 @@ impl GitTab {
             CommitKind::All => !tree.files.is_empty(),
         };
         ready
+            && !self.writing
             && !self.message.read(cx).text().trim().is_empty()
             && self.allows(&kind.action(String::new()), policy)
             && self.source_control(cx)
@@ -653,6 +708,107 @@ impl GitTab {
         }
         let message = self.message.read(cx).text().to_string();
         self.run_action(kind.action(message), PendingTarget::Commit, cx);
+    }
+
+    fn reset_model_override(&mut self, cx: &mut Context<Self>) {
+        self.model_override = None;
+        let default = self.shown_default.clone();
+        self.model_picker.update(cx, |picker, cx| {
+            picker.set_commit_model(default.as_ref(), cx)
+        });
+        cx.notify();
+    }
+
+    fn can_write(&self, cx: &App) -> bool {
+        self.tree
+            .as_ref()
+            .is_some_and(|tree| !staged_files(tree).is_empty())
+            && !self
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.target == PendingTarget::Commit)
+            && self.source_control(cx)
+    }
+
+    fn write_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.writing {
+            self.stop_writing(window, cx);
+            return;
+        }
+        if !self.can_write(cx) {
+            return;
+        }
+        let Some(space) = self.space.clone() else {
+            return;
+        };
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let settings = crate::settings::current(cx);
+        let choice = self
+            .model_override
+            .clone()
+            .or(settings.commit_message_model.clone());
+        let request = GenerateCommitMessageRequest {
+            target: workspace_target(&space, self.checkout_path.as_deref()),
+            instruction: Some(settings.effective_commit_instruction().to_owned()),
+            harness: choice.as_ref().map(|choice| choice.harness),
+            model: choice.map(|choice| choice.model),
+        };
+        let params = routed(
+            serde_json::to_value(request).unwrap_or_default(),
+            space.device.as_deref(),
+        );
+        self.write_generation = self.write_generation.wrapping_add(1);
+        let generation = self.write_generation;
+        self.writing = true;
+        self.write_error = None;
+        self.commit_menu = false;
+        window.focus(&self.write_focus, cx);
+        cx.notify();
+        self.write_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::GENERATE_COMMIT_MESSAGE, params)
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|value| {
+                    serde_json::from_value::<GeneratedCommitMessage>(value)
+                        .map_err(|error| error.to_string())
+                });
+            this.update_in(cx, |tab, window, cx| {
+                if tab.write_generation != generation {
+                    return;
+                }
+                tab.writing = false;
+                match result {
+                    Ok(generated) => {
+                        tab.message.update(cx, |input, cx| {
+                            input.set_text(generated.message.clone(), cx)
+                        });
+                        tab.written = Some(generated);
+                    }
+                    Err(error) => tab.write_error = Some(error.into()),
+                }
+                window.focus(&tab.message.focus_handle(cx), cx);
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn cancel_writing(&mut self) {
+        self.write_generation = self.write_generation.wrapping_add(1);
+        self.writing = false;
+    }
+
+    fn stop_writing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.writing {
+            return;
+        }
+        self.cancel_writing();
+        window.focus(&self.message.focus_handle(cx), cx);
+        cx.notify();
     }
 
     fn toggle_diff(&mut self, staged: bool, path: String, cx: &mut Context<Self>) {
@@ -1208,6 +1364,145 @@ impl GitTab {
             format!("Commit {staged} files")
         };
         let main_enabled = enabled(CommitKind::Staged);
+        let writing = self.writing;
+        let write_enabled = writing || self.can_write(cx);
+        let write_label = if writing {
+            "Writing… Esc to stop"
+        } else if self.written.is_some() {
+            "Rewrite"
+        } else {
+            "Write with AI"
+        };
+        let write_icon: AnyElement = if writing {
+            icon(icons::LUCIDE_REFRESH_CW)
+                .size(px(12.0))
+                .text_color(theme.text_muted)
+                .with_animation(
+                    "git-write-spin",
+                    Animation::new(Duration::from_millis(900)).repeat(),
+                    |svg, delta| {
+                        svg.with_transformation(gpui::Transformation::rotate(percentage(delta)))
+                    },
+                )
+                .into_any_element()
+        } else {
+            div().child("✦").into_any_element()
+        };
+        let write_button = div()
+            .id("git-write-ai")
+            .debug_selector(|| "git-write-ai".into())
+            .role(gpui::Role::Button)
+            .aria_label(write_label)
+            .flex_none()
+            .h(px(24.0))
+            .px(px(8.0))
+            .rounded(px(7.0))
+            .border_1()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .text_size(px(12.0))
+            .map(|el| {
+                if writing {
+                    el.border_color(theme.hairline(0.12))
+                        .text_color(theme.text_muted)
+                } else {
+                    el.border_color(theme.accent.opacity(0.25))
+                        .bg(theme.accent.opacity(0.08))
+                        .text_color(theme.accent)
+                }
+            })
+            .child(write_icon)
+            .child(write_label)
+            .map(|el| {
+                if write_enabled {
+                    el.cursor_pointer()
+                        .hover(|style| style.bg(theme.accent.opacity(0.15)))
+                        .on_click(cx.listener(|tab, _, window, cx| tab.write_message(window, cx)))
+                } else {
+                    el.opacity(0.45).tooltip(text_tooltip("Stage files first"))
+                }
+            });
+        let model_chip = div()
+            .id("git-write-model")
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .child(self.model_picker.clone())
+            .when(self.model_override.is_some(), |el| {
+                el.child(
+                    div()
+                        .id("git-write-model-override")
+                        .debug_selector(|| "git-write-model-override".into())
+                        .flex_none()
+                        .text_size(px(12.0))
+                        .text_color(theme.text_muted)
+                        .child("· this commit"),
+                )
+            });
+        let settings_button = div()
+            .id("git-write-settings")
+            .debug_selector(|| "git-write-settings".into())
+            .role(gpui::Role::Button)
+            .aria_label("Instruction and default model…")
+            .flex_none()
+            .size(px(24.0))
+            .rounded(px(7.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .hover(|style| style.bg(theme.ink(0.06)))
+            .tooltip(text_tooltip("Instruction and default model…"))
+            .child(
+                icon(icons::SETTINGS)
+                    .size(px(14.0))
+                    .text_color(theme.text_muted),
+            )
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(GitTabEvent::OpenSourceControlSettings)));
+        let current_text = self.message.read(cx).text().to_string();
+        let message_body: AnyElement = if writing {
+            div()
+                .id("git-write-preview")
+                .debug_selector(|| "git-write-preview".into())
+                .min_h(px(64.0))
+                .max_h(px(160.0))
+                .px(px(10.0))
+                .pt(px(8.0))
+                .text_size(px(13.0))
+                .text_color(theme.text_muted)
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .content_start()
+                .items_end()
+                .when(!current_text.is_empty(), |el| {
+                    el.child(SharedString::from(current_text))
+                })
+                .child(
+                    div()
+                        .ml(px(1.0))
+                        .w(px(7.0))
+                        .h(px(14.0))
+                        .bg(theme.accent)
+                        .with_animation(
+                            "git-write-caret",
+                            Animation::new(Duration::from_millis(900)).repeat(),
+                            |caret, delta| caret.opacity(if delta < 0.5 { 1.0 } else { 0.0 }),
+                        ),
+                )
+                .into_any_element()
+        } else {
+            div()
+                .min_h(px(64.0))
+                .max_h(px(160.0))
+                .px(px(10.0))
+                .pt(px(8.0))
+                .text_size(px(13.0))
+                .child(self.message.clone())
+                .into_any_element()
+        };
         let menu = self.commit_menu.then(|| {
             let popup = theme.for_popup();
             let row = |selector: &'static str,
@@ -1296,13 +1591,19 @@ impl GitTab {
                     .bg(theme.ink(0.02))
                     .flex()
                     .flex_col()
+                    .when(writing, |el| el.track_focus(&self.write_focus))
                     .capture_action(cx.listener(|tab, _: &crate::composer::Submit, window, cx| {
                         cx.stop_propagation();
                         tab.message.update(cx, |input, cx| {
                             input.replace_text_in_range(None, "\n", window, cx)
                         });
                     }))
-                    .on_key_down(cx.listener(|tab, event: &KeyDownEvent, _, cx| {
+                    .on_key_down(cx.listener(|tab, event: &KeyDownEvent, window, cx| {
+                        if event.keystroke.key == "escape" && tab.writing {
+                            cx.stop_propagation();
+                            tab.stop_writing(window, cx);
+                            return;
+                        }
                         let modifiers = &event.keystroke.modifiers;
                         if event.keystroke.key == "enter"
                             && (modifiers.platform || modifiers.control)
@@ -1312,27 +1613,23 @@ impl GitTab {
                         }
                     }))
                     .on_click(cx.listener(|tab, _, window, cx| {
-                        window.focus(&tab.message.focus_handle(cx), cx);
+                        if !tab.writing {
+                            window.focus(&tab.message.focus_handle(cx), cx);
+                        }
                     }))
-                    .child(
-                        div()
-                            .min_h(px(64.0))
-                            .max_h(px(160.0))
-                            .px(px(10.0))
-                            .pt(px(8.0))
-                            .text_size(px(13.0))
-                            .child(self.message.clone()),
-                    )
+                    .child(message_body)
                     .child(
                         div()
                             .h(px(30.0))
-                            .px(px(8.0))
+                            .px(px(6.0))
                             .flex()
                             .items_center()
                             .gap(px(6.0))
                             .text_size(px(12.0))
                             .text_color(theme.text_muted)
-                            .child("✦ Write with AI")
+                            .child(write_button)
+                            .child(model_chip)
+                            .child(settings_button)
                             .child(div().flex_1())
                             .child(
                                 div()
@@ -1351,6 +1648,33 @@ impl GitTab {
                             ),
                     ),
             )
+            .when_some(self.written.as_ref().filter(|_| !writing), |el, written| {
+                el.child(
+                    div()
+                        .id("git-write-note")
+                        .debug_selector(|| "git-write-note".into())
+                        .text_size(px(11.0))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(format!(
+                            "Written by {} · {} from your instruction and the staged diff. Edit it before you commit.",
+                            crate::composer::harness_display_name(written.harness),
+                            written.model
+                        ))),
+                )
+            })
+            .when_some(self.write_error.clone(), |el, error| {
+                el.child(
+                    div()
+                        .id("git-write-error")
+                        .debug_selector(|| "git-write-error".into())
+                        .text_size(px(11.0))
+                        .text_color(theme.danger)
+                        .child(SharedString::from(format!(
+                            "Could not write a message: {}. Pick another model or write it yourself.",
+                            error.trim_end_matches('.')
+                        ))),
+                )
+            })
             .when_some(self.last_commit.as_ref(), |el, commit| {
                 let short: String = commit.sha.chars().take(7).collect();
                 let text = match &commit.branch {
@@ -1605,6 +1929,11 @@ impl PullRequestsPage {
         self.git_events = vec![
             cx.subscribe(&view, |page: &mut Self, _, event, cx| match event {
                 GitTabEvent::OpenPullRequest(branch) => page.open_branch_pull_request(branch, cx),
+                GitTabEvent::OpenSourceControlSettings => {
+                    cx.emit(super::PullRequestsEvent::OpenSettings(
+                        crate::shell::SettingsSection::SourceControl,
+                    ))
+                }
             }),
             cx.observe(&view, |_, _, cx| cx.notify()),
         ];
@@ -2065,7 +2394,14 @@ mod tests {
         calls: Calls,
         tree: Mutex<Option<serde_json::Value>>,
         action_error: Mutex<Option<String>>,
+        write_error: Mutex<Option<String>>,
+        hold_writes: std::sync::atomic::AtomicBool,
+        release_write: tokio::sync::Notify,
+        writes_answered: std::sync::atomic::AtomicUsize,
     }
+
+    const WRITTEN: &str =
+        "Panel: keep the scroll position\n\nThe list reset its offset on every poll.";
 
     const PATCH: &str = "diff --git a/src/a b.rs b/src/a b.rs\n--- a/src/a b.rs\n+++ b/src/a b.rs\n@@ -1,2 +1,3 @@\n one\n-two\n+TWO\n+three\n";
 
@@ -2159,6 +2495,23 @@ mod tests {
                     "checkoutId": "checkout-1", "path": params["path"],
                     "staged": params["staged"], "patch": PATCH,
                 })),
+                methods::GENERATE_COMMIT_MESSAGE => {
+                    if self.hold_writes.load(std::sync::atomic::Ordering::SeqCst) {
+                        self.release_write.notified().await;
+                    }
+                    self.writes_answered
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if let Some(error) = self.write_error.lock().unwrap().clone() {
+                        return Err(RpcError::Failed(error));
+                    }
+                    RpcReply::value(&serde_json::json!({
+                        "message": WRITTEN,
+                        "harness": params.get("harness").cloned().unwrap_or_else(|| {
+                            serde_json::to_value(zeron_proto::HarnessId::ClaudeCode).unwrap()
+                        }),
+                        "model": params.get("model").cloned().unwrap_or_else(|| "claude-haiku-4-5".into()),
+                    }))
+                }
                 methods::LIST_CHANGE_REQUESTS => RpcReply::value(&listing()),
                 methods::LIST_CHANGE_REQUEST_STATS => {
                     RpcReply::value(&serde_json::json!({"stats": []}))
@@ -2948,5 +3301,217 @@ mod tests {
                     .is_some_and(|error| error.contains("does not know who you are"))
             );
         });
+    }
+
+    fn pick_model(
+        tab: &Entity<GitTab>,
+        cx: &mut gpui::VisualTestContext,
+        choice: &CommitModelChoice,
+    ) {
+        let picker = tab.read_with(cx, |tab, _| tab.model_picker.clone());
+        picker.update(cx, |_, cx| cx.emit(CommitModelPicked(choice.clone())));
+        cx.run_until_parked();
+    }
+
+    fn writes(calls: &Calls) -> Vec<serde_json::Value> {
+        calls_of(calls, methods::GENERATE_COMMIT_MESSAGE)
+    }
+
+    #[gpui::test]
+    fn write_with_ai_fills_the_box_and_the_chip_override_lasts_one_commit(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        let (page, cx, calls, _dir) = open_lab(cx, lab_state(), git_prefs(), lab);
+        cx.update(|_, cx| crate::composer::init(cx, Default::default()));
+        settle(cx, |cx| cx.debug_bounds("git-write-ai").is_some());
+        let tab = git_tab(&page, cx);
+        settle(cx, |cx| tab.read_with(cx, |tab, _| tab.tree.is_some()));
+
+        click(cx, "git-write-ai");
+        settle(cx, |cx| message(&tab, cx) == WRITTEN);
+        assert_eq!(
+            writes(&calls),
+            [serde_json::json!({
+                "spaceId": "space-1",
+                "instruction": crate::settings::DEFAULT_COMMIT_INSTRUCTION,
+            })]
+        );
+        tab.read_with(cx, |tab, _| {
+            assert!(!tab.writing);
+            let written = tab.written.as_ref().expect("the reply is kept");
+            assert_eq!(written.model, "claude-haiku-4-5");
+        });
+        assert!(cx.debug_bounds("git-write-note").is_some());
+        assert!(
+            calls_of(&calls, methods::RUN_WORKING_TREE_ACTION).is_empty(),
+            "writing a message never commits"
+        );
+
+        cx.update(|_, cx| {
+            crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
+                settings.commit_message_instruction = "  Use Conventional Commits.  ".into();
+                settings.commit_message_model = Some(CommitModelChoice {
+                    harness: zeron_proto::HarnessId::Codex,
+                    model: "gpt-5-mini".into(),
+                });
+            });
+        });
+        let opus = CommitModelChoice {
+            harness: zeron_proto::HarnessId::ClaudeCode,
+            model: "claude-opus".into(),
+        };
+        pick_model(&tab, cx, &opus);
+        assert!(cx.debug_bounds("git-write-model-override").is_some());
+        click(cx, "git-write-ai");
+        settle(cx, |_| writes(&calls).len() == 2);
+        settle(cx, |cx| tab.read_with(cx, |tab, _| !tab.writing));
+        assert_eq!(
+            writes(&calls)[1],
+            serde_json::json!({
+                "spaceId": "space-1", "instruction": "Use Conventional Commits.",
+                "harness": serde_json::to_value(zeron_proto::HarnessId::ClaudeCode).unwrap(),
+                "model": "claude-opus",
+            })
+        );
+
+        click(cx, "git-commit-message");
+        cx.simulate_keystrokes("cmd-enter");
+        settle_action(cx, &tab, &calls, 1);
+        assert_eq!(
+            calls_of(&calls, methods::RUN_WORKING_TREE_ACTION)[0]["action"]["message"],
+            WRITTEN
+        );
+        tab.read_with(cx, |tab, _| {
+            assert!(
+                tab.model_override.is_none(),
+                "the override ends with the commit"
+            );
+            assert!(tab.written.is_none());
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("git-write-model-override").is_none());
+        click(cx, "git-write-ai");
+        settle(cx, |_| writes(&calls).len() == 3);
+        assert_eq!(
+            writes(&calls)[2]["harness"],
+            serde_json::to_value(zeron_proto::HarnessId::Codex).unwrap(),
+            "the next commit goes back to the default model"
+        );
+        assert_eq!(writes(&calls)[2]["model"], "gpt-5-mini");
+    }
+
+    #[gpui::test]
+    fn escape_stops_waiting_and_a_late_reply_leaves_the_box_untouched(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        lab.hold_writes
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let (page, cx, calls, _dir) = open_lab(cx, lab_state(), git_prefs(), lab.clone());
+        cx.update(|_, cx| crate::composer::init(cx, Default::default()));
+        settle(cx, |cx| cx.debug_bounds("git-write-ai").is_some());
+        let tab = git_tab(&page, cx);
+        settle(cx, |cx| tab.read_with(cx, |tab, _| tab.tree.is_some()));
+        set_message(&tab, cx, "My own words");
+
+        click(cx, "git-write-ai");
+        settle(cx, |_| writes(&calls).len() == 1);
+        cx.run_until_parked();
+        assert!(tab.read_with(cx, |tab, _| tab.writing));
+        assert!(cx.debug_bounds("git-write-preview").is_some());
+        cx.simulate_keystrokes("cmd-enter");
+        cx.run_until_parked();
+        assert!(
+            calls_of(&calls, methods::RUN_WORKING_TREE_ACTION).is_empty(),
+            "no commit while a message is being written"
+        );
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(!tab.read_with(cx, |tab, _| tab.writing));
+        assert!(cx.debug_bounds("git-write-preview").is_none());
+
+        lab.release_write.notify_one();
+        settle(cx, |_| {
+            lab.writes_answered
+                .load(std::sync::atomic::Ordering::SeqCst)
+                == 1
+        });
+        for _ in 0..20 {
+            cx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(message(&tab, cx), "My own words");
+        tab.read_with(cx, |tab, _| {
+            assert!(tab.written.is_none() && tab.write_error.is_none() && !tab.writing);
+        });
+        assert!(calls_of(&calls, methods::RUN_WORKING_TREE_ACTION).is_empty());
+    }
+
+    #[gpui::test]
+    fn a_failed_write_keeps_the_message_and_says_why(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        *lab.write_error.lock().unwrap() = Some("Claude usage limit reached.".into());
+        let (page, cx, calls, _dir) = open_lab(cx, lab_state(), git_prefs(), lab);
+        settle(cx, |cx| cx.debug_bounds("git-write-ai").is_some());
+        let tab = git_tab(&page, cx);
+        settle(cx, |cx| tab.read_with(cx, |tab, _| tab.tree.is_some()));
+        set_message(&tab, cx, "Draft");
+        click(cx, "git-write-ai");
+        settle(cx, |cx| cx.debug_bounds("git-write-error").is_some());
+        assert_eq!(message(&tab, cx), "Draft");
+        assert!(calls_of(&calls, methods::RUN_WORKING_TREE_ACTION).is_empty());
+        tab.read_with(cx, |tab, _| {
+            assert!(
+                tab.write_error
+                    .as_ref()
+                    .is_some_and(|error| error.contains("usage limit"))
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn nothing_staged_disables_writing_and_the_gear_opens_source_control_settings(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        let mut unstaged = tree();
+        unstaged["files"][0]["index"] = "unchanged".into();
+        *lab.tree.lock().unwrap() = Some(unstaged);
+        let (page, cx, calls, _dir) = open_lab(cx, lab_state(), git_prefs(), lab);
+        settle(cx, |cx| cx.debug_bounds("git-write-ai").is_some());
+        let tab = git_tab(&page, cx);
+        settle(cx, |cx| tab.read_with(cx, |tab, _| tab.tree.is_some()));
+        click(cx, "git-write-ai");
+        cx.run_until_parked();
+        assert!(writes(&calls).is_empty());
+
+        let opened = std::rc::Rc::new(std::cell::Cell::new(0));
+        cx.update(|_, cx| {
+            let opened = opened.clone();
+            cx.subscribe(&page, move |_, event, _| {
+                if matches!(
+                    event,
+                    super::super::PullRequestsEvent::OpenSettings(
+                        crate::shell::SettingsSection::SourceControl
+                    )
+                ) {
+                    opened.set(opened.get() + 1);
+                }
+            })
+            .detach();
+        });
+        click(cx, "git-write-settings");
+        cx.run_until_parked();
+        assert_eq!(opened.get(), 1);
     }
 }

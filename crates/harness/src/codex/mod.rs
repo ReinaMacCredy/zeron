@@ -659,7 +659,7 @@ impl Harness for CodexHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        self.run_with_mode(request, controls, false).await
+        self.run_with_mode(request, controls, None).await
     }
 
     async fn compact(
@@ -670,10 +670,11 @@ impl Harness for CodexHarness {
         self.compact_thread(request, controls).await
     }
 
-    async fn run_title(
+    async fn run_one_shot(
         &self,
         mut request: RunRequest,
         controls: RunControls,
+        instructions: &'static str,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         request.resume = None;
         request.worktree = None;
@@ -681,7 +682,8 @@ impl Harness for CodexHarness {
         request.mcp = None;
         request.model_options.clear();
         request.auto_approve = false;
-        self.run_with_mode(request, controls, true).await
+        self.run_with_mode(request, controls, Some(instructions))
+            .await
     }
 }
 
@@ -690,7 +692,7 @@ impl CodexHarness {
         &self,
         mut request: RunRequest,
         controls: RunControls,
-        title_only: bool,
+        one_shot: Option<&'static str>,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let native = command_request(&request.prompt, "")?;
         if native
@@ -713,7 +715,7 @@ impl CodexHarness {
         // workspace-write bug where a linked worktree on a slash-named branch
         // derived a malformed mount that killed every command; re-probed
         // clean on 0.154.0, so Ask/Auto run workspace-write.
-        request.sandbox = if title_only {
+        request.sandbox = if one_shot.is_some() {
             zeron_proto::SandboxLevel::ReadOnly
         } else {
             request.permission_mode.sandbox()
@@ -726,7 +728,7 @@ impl CodexHarness {
         } = self.spawn_app_server(&request.cwd).await?;
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         tokio::spawn(run_session(Session {
-            title_only,
+            one_shot,
             child,
             client,
             incoming,
@@ -846,7 +848,7 @@ struct AppServer {
 // ---------------------------------------------------------------------------
 
 struct Session {
-    title_only: bool,
+    one_shot: Option<&'static str>,
     child: Child,
     client: RpcClient,
     incoming: mpsc::Receiver<Incoming>,
@@ -930,17 +932,14 @@ async fn send(tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>, ev: AgentEven
 fn thread_params(
     request: &RunRequest,
     tool_server: Option<&ToolServer>,
-    title_only: bool,
+    one_shot: Option<&str>,
     approval_policy: &str,
     service_tier: Option<&str>,
 ) -> serde_json::Map<String, Value> {
     let mut p = serde_json::Map::new();
-    if title_only {
-        p.insert("baseInstructions".into(), crate::TITLE_INSTRUCTIONS.into());
-        p.insert(
-            "developerInstructions".into(),
-            crate::TITLE_INSTRUCTIONS.into(),
-        );
+    if let Some(instructions) = one_shot {
+        p.insert("baseInstructions".into(), instructions.into());
+        p.insert("developerInstructions".into(), instructions.into());
         p.insert("ephemeral".into(), true.into());
         p.insert(
             "config".into(),
@@ -1121,7 +1120,7 @@ async fn start_turn(client: &RpcClient, params: Value) -> Result<String, Harness
 /// steering mailbox, the interrupt token, and consumer liveness.
 async fn run_session(session: Session) {
     let Session {
-        title_only,
+        one_shot,
         mut child,
         client,
         mut incoming,
@@ -1141,6 +1140,7 @@ async fn run_session(session: Session) {
         ..
     } = controls;
     let request_input = Arc::new(request_input);
+    let title_only = one_shot.is_some();
 
     // ---- wire params ------------------------------------------------------
     // Full never surfaces wire approvals (with the sandbox above this is
@@ -1167,7 +1167,7 @@ async fn run_session(session: Session) {
     let start_params = thread_params(
         &request,
         tool_server.as_ref(),
-        title_only,
+        one_shot,
         approval_policy,
         service_tier.as_deref(),
     );
@@ -2460,7 +2460,7 @@ mod tests {
         let on = thread_params(
             &computer_request(true),
             Some(&server),
-            false,
+            None,
             "untrusted",
             None,
         );
@@ -2482,7 +2482,7 @@ mod tests {
         let off = thread_params(
             &computer_request(false),
             Some(&tool_server(None)),
-            false,
+            None,
             "untrusted",
             None,
         );
@@ -2499,14 +2499,20 @@ mod tests {
         assert!(fork.get("developerInstructions").is_none());
         assert_eq!(fork["config"], off["config"]);
 
-        let bare = thread_params(&computer_request(false), None, false, "never", None);
+        let bare = thread_params(&computer_request(false), None, None, "never", None);
         assert!(bare.get("config").is_none() && bare.get("developerInstructions").is_none());
         assert_eq!(
             fork_params(&bare, "th", "t").keys().collect::<Vec<_>>(),
             ["lastTurnId", "threadId"]
         );
 
-        let title = thread_params(&computer_request(true), Some(&server), true, "never", None);
+        let title = thread_params(
+            &computer_request(true),
+            Some(&server),
+            Some(crate::TITLE_INSTRUCTIONS),
+            "never",
+            None,
+        );
         assert_eq!(title["developerInstructions"], crate::TITLE_INSTRUCTIONS);
         for competing in COMPETING_BUNDLED_PLUGINS {
             let key = format!("plugins.{competing}.enabled");
@@ -2518,10 +2524,10 @@ mod tests {
     fn approve_for_me_routes_escalations_to_codex_auto_review() {
         let mut request = computer_request(false);
         request.permission_mode = zeron_proto::PermissionMode::Auto;
-        let auto = thread_params(&request, None, false, "on-request", None);
+        let auto = thread_params(&request, None, None, "on-request", None);
         assert_eq!(auto["approvalsReviewer"], "auto_review");
         request.permission_mode = zeron_proto::PermissionMode::Ask;
-        let ask = thread_params(&request, None, false, "untrusted", None);
+        let ask = thread_params(&request, None, None, "untrusted", None);
         assert_eq!(ask["approvalsReviewer"], "user");
     }
 

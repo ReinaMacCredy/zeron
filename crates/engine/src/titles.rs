@@ -170,8 +170,6 @@ impl TitleGenerator {
         // the same CLI. The fair registry gate prevents late title work from
         // jumping ahead of an accepted writer.
         let execution_lease = Arc::new(self.inner.registry.execution_lease(harness_id).await);
-        // No repository instructions, files, or active coding-session context.
-        let scratch = tempfile::tempdir().ok()?;
         let harness = match self.inner.registry.resolve(harness_id) {
             Ok(harness) => harness,
             Err(err) => {
@@ -198,55 +196,102 @@ impl TitleGenerator {
             zeron_harness::TITLE_INSTRUCTIONS,
             serde_json::to_string(prompt).ok()?
         );
-        for attempt in 0..=RETRY_DELAYS_MS.len() {
-            let request = RunRequest {
-                mcp: None,
-                prompt: title_prompt.clone(),
-                harness: Some(harness_id),
-                model: model.clone(),
-                reasoning: Some(ReasoningLevel::Minimal),
-                model_options: serde_json::Map::new(),
-                cwd: scratch.path().to_string_lossy().into_owned(),
-                sandbox: SandboxLevel::ReadOnly,
-                permission_mode: zeron_proto::PermissionMode::Ask,
-                auto_approve: false,
-                attachments: Vec::new(),
-                resume: None,
-                worktree: None,
-                branch: None,
-                forked_at: None,
-                computer_control: false,
-            };
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(30),
-                collect_text(harness.as_ref(), request, Some(execution_lease.clone())),
-            )
-            .await
-            .unwrap_or_else(|_| Err(EngineError::Other("title generation timed out".into())))
-            {
-                Ok(raw) => {
-                    let candidate = clean_title(&raw);
-                    if !candidate.is_empty() {
-                        return Some(candidate);
-                    }
+        run_one_shot(
+            harness.as_ref(),
+            execution_lease,
+            OneShot {
+                harness: harness_id,
+                model,
+                prompt: title_prompt,
+                instructions: None,
+                attempt_timeout: std::time::Duration::from_secs(30),
+                retry_delays_ms: RETRY_DELAYS_MS,
+            },
+            clean_title,
+        )
+        .await
+        .ok()
+    }
+}
+
+pub(crate) struct OneShot {
+    pub harness: HarnessId,
+    pub model: Option<String>,
+    pub prompt: String,
+    // None takes `run_title`, which each driver pins to TITLE_INSTRUCTIONS.
+    pub instructions: Option<&'static str>,
+    pub attempt_timeout: std::time::Duration,
+    pub retry_delays_ms: &'static [u64],
+}
+
+pub(crate) async fn run_one_shot(
+    harness: &dyn zeron_harness::Harness,
+    execution_lease: Arc<tokio::sync::OwnedRwLockReadGuard<()>>,
+    run: OneShot,
+    clean: fn(&str) -> String,
+) -> Result<String, EngineError> {
+    // No repository instructions, files, or active coding-session context.
+    let scratch = tempfile::tempdir().map_err(|error| EngineError::Other(error.to_string()))?;
+    let mut last_error = EngineError::Other("the model returned no text".into());
+    for attempt in 0..=run.retry_delays_ms.len() {
+        let request = RunRequest {
+            mcp: None,
+            prompt: run.prompt.clone(),
+            harness: Some(run.harness),
+            model: run.model.clone(),
+            reasoning: Some(ReasoningLevel::Minimal),
+            model_options: serde_json::Map::new(),
+            cwd: scratch.path().to_string_lossy().into_owned(),
+            sandbox: SandboxLevel::ReadOnly,
+            permission_mode: zeron_proto::PermissionMode::Ask,
+            auto_approve: false,
+            attachments: Vec::new(),
+            resume: None,
+            worktree: None,
+            branch: None,
+            forked_at: None,
+            computer_control: false,
+        };
+        match tokio::time::timeout(
+            run.attempt_timeout,
+            collect_text(
+                harness,
+                request,
+                Some(execution_lease.clone()),
+                run.instructions,
+            ),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(EngineError::Other(format!(
+                "the model did not answer within {} s",
+                run.attempt_timeout.as_secs()
+            )))
+        }) {
+            Ok(raw) => {
+                let candidate = clean(&raw);
+                if !candidate.is_empty() {
+                    return Ok(candidate);
                 }
-                Err(err) => {
-                    tracing::warn!(attempt = attempt + 1, error = %err,
-                        "automatic chat title generation attempt failed");
-                }
+                last_error = EngineError::Other("the model returned no text".into());
             }
-            if let Some(delay) = RETRY_DELAYS_MS.get(attempt) {
-                tokio::time::sleep(std::time::Duration::from_millis(*delay)).await;
+            Err(err) => {
+                tracing::warn!(attempt = attempt + 1, error = %err,
+                    "one-shot generation attempt failed");
+                last_error = err;
             }
         }
-        None
+        if let Some(delay) = run.retry_delays_ms.get(attempt) {
+            tokio::time::sleep(std::time::Duration::from_millis(*delay)).await;
+        }
     }
+    Err(last_error)
 }
 
 /// The cheapest model a harness offers (zeron's `cheapestModel` heuristic):
 /// prefer a small-tier name (haiku/mini/nano/flash/small/lite), else the last
 /// listed model; `None` when the catalog is empty (harness picks its default).
-fn cheapest_model(models: &[Model]) -> Option<String> {
+pub(crate) fn cheapest_model(models: &[Model]) -> Option<String> {
     if models.is_empty() {
         return None;
     }
@@ -272,10 +317,11 @@ fn clean_title(raw: &str) -> String {
 
 /// Drive one titling run through the harness: no steering, questions resolved
 /// empty immediately (a titling prompt must never block on input).
-async fn collect_text(
+pub(crate) async fn collect_text(
     harness: &dyn zeron_harness::Harness,
     request: RunRequest,
     execution_lease: Option<Arc<tokio::sync::OwnedRwLockReadGuard<()>>>,
+    instructions: Option<&'static str>,
 ) -> Result<String, EngineError> {
     let (steer_tx, steer_rx) = tokio::sync::mpsc::channel::<SteerMessage>(1);
     let interrupt = CancellationToken::new();
@@ -292,7 +338,14 @@ async fn collect_text(
         tool_server: None,
         stop_tasks: None,
     };
-    let mut stream = harness.run_title(request, controls).await?;
+    let mut stream = match instructions {
+        Some(instructions) => {
+            harness
+                .run_one_shot(request, controls, instructions)
+                .await?
+        }
+        None => harness.run_title(request, controls).await?,
+    };
     let mut text = String::new();
     let mut completed = false;
     while let Some(event) = stream.next().await {
@@ -300,11 +353,11 @@ async fn collect_text(
             AgentEvent::TextDelta { text: delta } => text.push_str(&delta),
             AgentEvent::ToolCall { .. } => {
                 return Err(EngineError::Other(
-                    "title generation attempted to use a tool".into(),
+                    "the model attempted to use a tool".into(),
                 ));
             }
             AgentEvent::Error { message } => {
-                return Err(EngineError::Other(format!("titling run error: {message}")));
+                return Err(EngineError::Other(message));
             }
             AgentEvent::Done { status, error, .. } => {
                 if status == DoneStatus::Completed {
@@ -312,7 +365,7 @@ async fn collect_text(
                     break;
                 }
                 return Err(EngineError::Other(format!(
-                    "titling run ended {status:?}: {}",
+                    "the run ended {status:?}: {}",
                     error.unwrap_or_default()
                 )));
             }
@@ -324,7 +377,7 @@ async fn collect_text(
         Ok(text)
     } else {
         Err(EngineError::Other(
-            "title stream ended without completion".into(),
+            "the run ended without completing".into(),
         ))
     }
 }
@@ -391,7 +444,7 @@ mod tests {
             forked_at: None,
             computer_control: false,
         };
-        let result = collect_text(&harness, request, None).await;
+        let result = collect_text(&harness, request, None, None).await;
         assert!(
             result
                 .unwrap_err()
