@@ -6233,6 +6233,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-core-media"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05ec576860167a15dd9fce7fbee7512beb4e31f532159d3482d1f9c6caedf31d"
+dependencies = [
+ "bitflags 2.13.1",
+ "objc2-core-foundation",
+ "objc2-core-video",
+]
+
+[[package]]
 name = "objc2-core-text"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6402,6 +6413,18 @@ dependencies = [
  "objc2 0.6.4",
  "objc2-core-location",
  "objc2-foundation 0.3.2",
+]
+
+[[package]]
+name = "objc2-video-toolbox"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05bf9a3c14831a7d9641b0d81d87dd913ee238a012b2fde27db5a84b56f5df3e"
+dependencies = [
+ "bitflags 2.13.1",
+ "objc2-core-foundation",
+ "objc2-core-media",
+ "objc2-core-video",
 ]
 
 [[package]]
@@ -13128,6 +13151,7 @@ dependencies = [
  "chrono",
  "core-foundation 0.10.1",
  "core-graphics 0.24.0",
+ "core-video",
  "dispatch2",
  "fontdb",
  "foreign-types 0.5.0",
@@ -13143,8 +13167,11 @@ dependencies = [
  "objc",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-core-media",
  "objc2-core-video",
  "objc2-foundation 0.3.2",
+ "objc2-video-toolbox",
  "objc2-web-kit",
  "png 0.18.1",
  "pulldown-cmark",
