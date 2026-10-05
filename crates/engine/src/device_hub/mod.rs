@@ -1,3 +1,4 @@
+mod actions;
 mod agent;
 mod hub_client;
 mod hub_process;
@@ -19,6 +20,7 @@ use zeron_proto::device_hub::{
     DeviceSession, LOCAL_DEVICE_HOST_ID, OpenHubDeviceParams, ShutdownHubDeviceParams,
 };
 
+pub use actions::DEVICE_ACTION_UNAVAILABLE;
 pub use agent::{
     AGENT_ACCESS_OFF, BOTH_PLATFORMS, DEVICE_CALLER_REFUSED, DEVICE_TOOL_INSTRUCTIONS,
     TOOL_SUPPORT_OFF,
@@ -50,8 +52,11 @@ pub struct DeviceHub {
     closed: AtomicBool,
     agent: Mutex<Option<agent::AgentDaemon>>,
     agent_start: tokio::sync::Mutex<()>,
+    action_locks: Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     #[cfg(test)]
     test_spawn: Mutex<Option<TestSpawn>>,
+    #[cfg(test)]
+    test_actions: Mutex<Option<(actions::Runner, actions::Helpers)>>,
     #[cfg(test)]
     test_agent: Mutex<Option<agent::AgentTool>>,
 }
@@ -156,8 +161,11 @@ impl DeviceHub {
             closed: AtomicBool::new(false),
             agent: Mutex::new(None),
             agent_start: tokio::sync::Mutex::new(()),
+            action_locks: Mutex::default(),
             #[cfg(test)]
             test_spawn: Mutex::new(None),
+            #[cfg(test)]
+            test_actions: Mutex::new(None),
             #[cfg(test)]
             test_agent: Mutex::new(None),
             streams: Arc::new(DeviceStreams::with_sink({
@@ -999,7 +1007,35 @@ mod tests {
                         }
                         return;
                     }
-                    let (status, body) = if line.starts_with("GET /api/devices ") {
+                    let sse = if line.starts_with("GET /vendor/serve-sim/appstate?device=SIM-1 ") {
+                        Some(
+                            ": \n\ndata: {\"bundleId\":\"com.apple.Maps\",\"pid\":7,\"isReactNative\":false}\n\n",
+                        )
+                    } else if line.starts_with(
+                        "GET /vendor/serve-sim/api/event-log/events?device=SIM-1&limit=100 ",
+                    ) {
+                        Some(
+                            ": \n\ndata: {\"events\":[{\"id\":1,\"timestamp\":\"t1\",\"kind\":\"touch\",\"summary\":\"Touch begin\"}]}\n\ndata: {\"event\":{\"id\":2,\"timestamp\":\"t2\",\"kind\":\"button\",\"msg\":\"Button home\"}}\n\n",
+                        )
+                    } else {
+                        None
+                    };
+                    if let Some(events) = sse {
+                        let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+                        let _ = socket.write_all(format!("{head}{events}").as_bytes()).await;
+                        std::future::pending::<()>().await;
+                    }
+                    let (status, body) = if line
+                        .starts_with("GET /vendor/serve-sim/helper/SIM-1/ax ")
+                    {
+                        let body = serde_json::json!([{
+                            "frame": {"x": 0, "y": 0, "width": 402, "height": 874},
+                            "AXLabel": "SpringBoard", "type": "Application",
+                            "children": [{"frame": {"x": 20, "y": 60, "width": 64, "height": 64},
+                                "AXLabel": "Maps", "AXUniqueId": "Maps", "type": "Icon"}]
+                        }]);
+                        (200, body)
+                    } else if line.starts_with("GET /api/devices ") {
                         let body = serde_json::json!({
                             "simulators": [{"id": "SIM-1", "name": "iPhone 17", "version": "iOS 27.0",
                                 "platform": "ios", "booted": booted.load(SeqCst), "physical": false}],

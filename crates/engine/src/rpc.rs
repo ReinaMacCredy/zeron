@@ -4630,6 +4630,66 @@ impl RpcService for EngineRpc {
                     .map_err(RpcError::Failed)?;
                 RpcReply::value(&serde_json::json!({}))
             }
+            methods::GET_HUB_DEVICE_DETAIL => {
+                let p: zeron_proto::device_hub::HubDeviceTargetParams = parse_params(params)?;
+                let detail = self
+                    .device_hub()?
+                    .device_detail(p)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&detail)
+            }
+            methods::RUN_HUB_DEVICE_ACTION => {
+                let p: zeron_proto::device_hub::RunHubDeviceActionParams = parse_params(params)?;
+                let detail = self
+                    .device_hub()?
+                    .run_action(p)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&detail)
+            }
+            methods::HUB_DEVICE_SCREENSHOT => {
+                let p: zeron_proto::device_hub::HubDeviceTargetParams = parse_params(params)?;
+                let shot = self
+                    .device_hub()?
+                    .device_screenshot(p)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&shot)
+            }
+            methods::GET_HUB_DEVICE_AX_TREE => {
+                let p: zeron_proto::device_hub::HubDeviceTargetParams = parse_params(params)?;
+                let tree = self
+                    .device_hub()?
+                    .device_ax_tree(p)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&tree)
+            }
+            methods::WATCH_HUB_DEVICE_APP_STATE => {
+                let p: zeron_proto::device_hub::HubDeviceTargetParams = parse_params(params)?;
+                let feed = self
+                    .device_hub()?
+                    .app_state_feed(p.host_id.as_deref(), &p.device_id)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                Ok(RpcReply::Stream(
+                    feed.filter_map(|item| async move { serde_json::to_value(item).ok() })
+                        .boxed(),
+                ))
+            }
+            methods::WATCH_HUB_DEVICE_EVENTS => {
+                let p: zeron_proto::device_hub::HubDeviceTargetParams = parse_params(params)?;
+                let feed = self
+                    .device_hub()?
+                    .event_log_feed(p.host_id.as_deref(), &p.device_id)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                Ok(RpcReply::Stream(
+                    feed.filter_map(|item| async move { serde_json::to_value(item).ok() })
+                        .boxed(),
+                ))
+            }
             methods::DEVICE_TOOL_LIST
             | methods::DEVICE_TOOL_OPEN
             | methods::DEVICE_TOOL_SCREENSHOT
