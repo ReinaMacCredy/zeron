@@ -241,14 +241,33 @@ fn workspace_target(space: &GitSpace, checkout_path: Option<&str>) -> WorkspaceT
     }
 }
 
+impl GitSpace {
+    fn route(&self, request: impl serde::Serialize) -> serde_json::Value {
+        routed(
+            serde_json::to_value(request).unwrap_or_default(),
+            self.device.as_deref(),
+        )
+    }
+}
+
 fn target_params(space: &GitSpace, checkout_path: Option<&str>) -> serde_json::Value {
-    let request = GetWorkingTreeRequest {
+    space.route(GetWorkingTreeRequest {
         target: workspace_target(space, checkout_path),
-    };
-    routed(
-        serde_json::to_value(request).unwrap_or_default(),
-        space.device.as_deref(),
-    )
+    })
+}
+
+fn decode<T: serde::de::DeserializeOwned>(
+    reply: Result<serde_json::Value, RpcError>,
+) -> Result<T, String> {
+    reply
+        .map_err(|error| error.to_string())
+        .and_then(|value| serde_json::from_value(value).map_err(|error| error.to_string()))
+}
+
+fn push_direction(tree: &WorkingTree) -> SyncDirection {
+    SyncDirection::Push {
+        set_upstream: push_sets_upstream(tree),
+    }
 }
 
 fn busy_policy(cx: &App) -> GitAgentBusyPolicy {
@@ -734,14 +753,12 @@ impl GitTab {
         self.loading = true;
         self.reload_wanted = false;
         self.load_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::GET_WORKING_TREE, params)
-                .await
-                .map_err(|error| error.to_string())
-                .and_then(|value| {
-                    serde_json::from_value::<WorkingTree>(value).map_err(|error| error.to_string())
-                });
+            let result = decode::<WorkingTree>(
+                engine
+                    .client()
+                    .call(methods::GET_WORKING_TREE, params)
+                    .await,
+            );
             this.update(cx, |tab, cx| {
                 if tab.generation != generation {
                     return;
@@ -900,10 +917,7 @@ impl GitTab {
             busy_policy: policy,
             action,
         };
-        let params = routed(
-            serde_json::to_value(request).unwrap_or_default(),
-            space.device.as_deref(),
-        );
+        let params = space.route(request);
         let generation = self.generation;
         let committing = target == PendingTarget::Commit;
         let stashing = target == PendingTarget::Stash;
@@ -1134,20 +1148,16 @@ impl GitTab {
             .checkout_path
             .clone()
             .unwrap_or_else(|| space.path.clone());
-        let params = routed(
-            serde_json::json!({"cwd": cwd, "mode": "commit", "commitSha": sha}),
-            space.device.as_deref(),
-        );
+        let params =
+            space.route(serde_json::json!({"cwd": cwd, "mode": "commit", "commitSha": sha}));
         let generation = self.generation;
         self.detail_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::GET_CHECKOUT_DIFF, params)
-                .await
-                .map_err(|error| error.to_string())
-                .and_then(|value| {
-                    serde_json::from_value::<CheckoutDiff>(value).map_err(|error| error.to_string())
-                });
+            let result = decode::<CheckoutDiff>(
+                engine
+                    .client()
+                    .call(methods::GET_CHECKOUT_DIFF, params)
+                    .await,
+            );
             this.update(cx, |tab, cx| {
                 if tab.generation != generation {
                     return;
@@ -1609,38 +1619,17 @@ impl GitTab {
             return;
         };
         let (direction, destination) = match kind {
-            SyncKind::Push => (
-                SyncDirection::Push {
-                    set_upstream: push_sets_upstream(&tree),
-                },
-                publish_destination(&tree),
-            ),
+            SyncKind::Push => (push_direction(&tree), publish_destination(&tree)),
             SyncKind::Pull => (SyncDirection::Pull, None),
         };
-        let request = SyncBranchRequest {
-            target: workspace_target(&space, self.checkout_path.as_deref()),
-            expected_head_sha: head,
-            busy_policy: busy_policy(cx),
-            direction,
-        };
-        let params = routed(
-            serde_json::to_value(request).unwrap_or_default(),
-            space.device.as_deref(),
-        );
+        let params = space.route(self.sync_request(&space, head, direction, cx));
         let generation = self.generation;
         self.syncing = Some(kind);
         self.sync_outcome = None;
         cx.notify();
         self.sync_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::SYNC_BRANCH, params)
-                .await
-                .map_err(|error| error.to_string())
-                .and_then(|value| {
-                    serde_json::from_value::<SyncBranchReply>(value)
-                        .map_err(|error| error.to_string())
-                });
+            let result =
+                decode::<SyncBranchReply>(engine.client().call(methods::SYNC_BRANCH, params).await);
             this.update(cx, |tab, cx| {
                 if tab.generation != generation {
                     return;
@@ -1759,33 +1748,17 @@ impl GitTab {
         let draft = sheet.draft;
         sheet.step = Some(PrStep::Pushing);
         sheet.error = None;
-        let workspace = workspace_target(&space, self.checkout_path.as_deref());
-        let push = routed(
-            serde_json::to_value(SyncBranchRequest {
-                target: workspace.clone(),
-                expected_head_sha: head,
-                busy_policy: busy_policy(cx),
-                direction: SyncDirection::Push {
-                    set_upstream: push_sets_upstream(&tree),
-                },
-            })
-            .unwrap_or_default(),
-            space.device.as_deref(),
-        );
-        let create = routed(
-            serde_json::to_value(CreateChangeRequestRequest {
-                target: workspace,
-                host: target.host,
-                repository: target.repository,
-                head: branch,
-                base: tree.default_branch.clone(),
-                title,
-                body: String::new(),
-                draft,
-            })
-            .unwrap_or_default(),
-            space.device.as_deref(),
-        );
+        let push = space.route(self.sync_request(&space, head, push_direction(&tree), cx));
+        let create = space.route(CreateChangeRequestRequest {
+            target: workspace_target(&space, self.checkout_path.as_deref()),
+            host: target.host,
+            repository: target.repository,
+            head: branch,
+            base: tree.default_branch.clone(),
+            title,
+            body: String::new(),
+            draft,
+        });
         let generation = self.generation;
         cx.notify();
         self.pr_task = Some(cx.spawn(async move |this, cx| {
@@ -1817,15 +1790,12 @@ impl GitTab {
             if !pushed {
                 return;
             }
-            let created = engine
-                .client()
-                .call(methods::CREATE_CHANGE_REQUEST, create)
-                .await
-                .map_err(|error| error.to_string())
-                .and_then(|value| {
-                    serde_json::from_value::<CreatedChangeRequest>(value)
-                        .map_err(|error| error.to_string())
-                });
+            let created = decode::<CreatedChangeRequest>(
+                engine
+                    .client()
+                    .call(methods::CREATE_CHANGE_REQUEST, create)
+                    .await,
+            );
             this.update(cx, |tab, cx| {
                 if tab.generation != generation {
                     return;
@@ -1847,6 +1817,21 @@ impl GitTab {
             })
             .ok();
         }));
+    }
+
+    fn sync_request(
+        &self,
+        space: &GitSpace,
+        head: String,
+        direction: SyncDirection,
+        cx: &App,
+    ) -> SyncBranchRequest {
+        SyncBranchRequest {
+            target: workspace_target(space, self.checkout_path.as_deref()),
+            expected_head_sha: head,
+            busy_policy: busy_policy(cx),
+            direction,
+        }
     }
 
     fn reset_model_override(&mut self, cx: &mut Context<Self>) {
@@ -1895,10 +1880,7 @@ impl GitTab {
             harness: choice.as_ref().map(|choice| choice.harness),
             model: choice.map(|choice| choice.model),
         };
-        let params = routed(
-            serde_json::to_value(request).unwrap_or_default(),
-            space.device.as_deref(),
-        );
+        let params = space.route(request);
         self.write_generation = self.write_generation.wrapping_add(1);
         let generation = self.write_generation;
         self.writing = true;
@@ -1907,15 +1889,12 @@ impl GitTab {
         window.focus(&self.write_focus, cx);
         cx.notify();
         self.write_task = Some(cx.spawn_in(window, async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::GENERATE_COMMIT_MESSAGE, params)
-                .await
-                .map_err(|error| error.to_string())
-                .and_then(|value| {
-                    serde_json::from_value::<GeneratedCommitMessage>(value)
-                        .map_err(|error| error.to_string())
-                });
+            let result = decode::<GeneratedCommitMessage>(
+                engine
+                    .client()
+                    .call(methods::GENERATE_COMMIT_MESSAGE, params)
+                    .await,
+            );
             this.update_in(cx, |tab, window, cx| {
                 if tab.write_generation != generation {
                     return;
@@ -1987,21 +1966,15 @@ impl GitTab {
             path: path.clone(),
             staged,
         };
-        let params = routed(
-            serde_json::to_value(request).unwrap_or_default(),
-            space.device.as_deref(),
-        );
+        let params = space.route(request);
         let generation = self.generation;
         self.diff_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::GET_WORKING_TREE_FILE_DIFF, params)
-                .await
-                .map_err(|error| error.to_string())
-                .and_then(|value| {
-                    serde_json::from_value::<WorkingTreeFileDiff>(value)
-                        .map_err(|error| error.to_string())
-                });
+            let result = decode::<WorkingTreeFileDiff>(
+                engine
+                    .client()
+                    .call(methods::GET_WORKING_TREE_FILE_DIFF, params)
+                    .await,
+            );
             this.update(cx, |tab, cx| {
                 if tab.generation != generation {
                     return;
