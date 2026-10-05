@@ -389,12 +389,11 @@ pub(crate) async fn read(root: &Path, checkout_id: &str) -> Result<WorkingTree, 
         "--no-color",
     ];
     let stash = ["stash", "list", "-z", "--format=%H%x1f%cI%x1f%gs"];
-    let picking = ["rev-parse", "--verify", "--quiet", "CHERRY_PICK_HEAD"];
     let (unstaged, staged, stashes, picking) = tokio::join!(
         git(root, &numstat),
         git(root, &cached),
         git(root, &stash),
-        git_with(root, &picking, 1024, true)
+        verify_rev(root, "CHERRY_PICK_HEAD")
     );
     let mut status = parse_status(&status_output.stdout, status_output.truncated);
     let mut truncated = !status.complete;
@@ -478,10 +477,7 @@ pub(crate) async fn read(root: &Path, checkout_id: &str) -> Result<WorkingTree, 
         default_branch,
         truncated,
         agent_active: false,
-        cherry_pick_head: picking
-            .ok()
-            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
-            .filter(|sha| !sha.is_empty()),
+        cherry_pick_head: picking.ok().flatten(),
         files: status.files,
         stashes: stashes
             .map(|out| parse_stashes(&out.stdout))
@@ -839,11 +835,7 @@ async fn stash_push(
     if tree.head_sha.is_none() {
         return Err(refused("Stash needs a first commit on this branch."));
     }
-    if tree
-        .files
-        .iter()
-        .any(|file| file.index == GitFileState::Unmerged || file.worktree == GitFileState::Unmerged)
-    {
+    if has_conflicts(tree) {
         return Err(refused("Resolve the merge conflicts before stashing."));
     }
     if let Some(file) = tree
@@ -899,11 +891,7 @@ async fn stash_pop(
     tree: &WorkingTree,
     oid: &str,
 ) -> Result<WorkingTreeActionReply, EngineError> {
-    if tree
-        .files
-        .iter()
-        .any(|file| file.index == GitFileState::Unmerged || file.worktree == GitFileState::Unmerged)
-    {
+    if has_conflicts(tree) {
         return Err(refused(
             "Resolve the merge conflicts before popping a stash.",
         ));
@@ -1006,16 +994,21 @@ async fn commit(
     if amend {
         args.push("--amend");
     }
-    tokio::time::timeout(timeout, git(root, &args))
+    let timed_out = format!(
+        "The commit did not finish within {} s. A commit hook or a signing prompt may be waiting for input; commit in a terminal instead.",
+        timeout.as_secs()
+    );
+    git_within(root, &args, timeout, timed_out)
         .await
-        .map_err(|_| {
-            EngineError::Other(format!(
-                "The commit did not finish within {} s. A commit hook or a signing prompt may be waiting for input; commit in a terminal instead.",
-                timeout.as_secs()
-            ))
-        })?
         .map_err(commit_error)?;
     drop(file);
+    new_commit_reply(root, tree).await
+}
+
+async fn new_commit_reply(
+    root: &Path,
+    tree: &WorkingTree,
+) -> Result<WorkingTreeActionReply, EngineError> {
     let log = git(root, &["log", "-1", "--format=%H%x1f%s"]).await?;
     let log = String::from_utf8_lossy(&log.stdout);
     let (sha, subject) = log
@@ -1032,6 +1025,21 @@ async fn commit(
     })
 }
 
+fn has_conflicts(tree: &WorkingTree) -> bool {
+    tree.files
+        .iter()
+        .any(|file| file.index == GitFileState::Unmerged || file.worktree == GitFileState::Unmerged)
+}
+
+fn no_cherry_pick_in_progress(tree: &WorkingTree) -> Result<(), EngineError> {
+    if tree.cherry_pick_head.is_some() {
+        return Err(refused(
+            "A cherry-pick is in progress. Commit the resolved files or abort it first.",
+        ));
+    }
+    Ok(())
+}
+
 fn has_tracked_changes(tree: &WorkingTree) -> bool {
     tree.files.iter().any(|file| {
         !matches!(
@@ -1045,11 +1053,7 @@ fn has_tracked_changes(tree: &WorkingTree) -> bool {
 }
 
 fn ready_to_move(tree: &WorkingTree, doing: &str) -> Result<(), EngineError> {
-    if tree.cherry_pick_head.is_some() {
-        return Err(refused(
-            "A cherry-pick is in progress. Commit the resolved files or abort it first.",
-        ));
-    }
+    no_cherry_pick_in_progress(tree)?;
     if has_tracked_changes(tree) {
         return Err(EngineError::Other(format!(
             "This checkout has uncommitted changes. Commit or stash them before {doing}."
@@ -1058,51 +1062,52 @@ fn ready_to_move(tree: &WorkingTree, doing: &str) -> Result<(), EngineError> {
     Ok(())
 }
 
+async fn git_within(
+    root: &Path,
+    args: &[&str],
+    timeout: std::time::Duration,
+    timed_out: String,
+) -> Result<GitOutput, EngineError> {
+    tokio::time::timeout(timeout, git(root, args))
+        .await
+        .map_err(|_| EngineError::Other(timed_out))?
+}
+
 async fn hooked_git(
     root: &Path,
     args: &[&str],
     timeout: std::time::Duration,
 ) -> Result<GitOutput, EngineError> {
-    tokio::time::timeout(timeout, git(root, args))
-        .await
-        .map_err(|_| {
-            EngineError::Other(format!(
-                "Git did not finish within {} s. A hook or a signing prompt may be waiting for input; run it in a terminal instead.",
-                timeout.as_secs()
-            ))
-        })?
+    let timed_out = format!(
+        "Git did not finish within {} s. A hook or a signing prompt may be waiting for input; run it in a terminal instead.",
+        timeout.as_secs()
+    );
+    git_within(root, args, timeout, timed_out).await
 }
 
-pub(crate) async fn resolve_commit(root: &Path, rev: &str) -> Result<String, EngineError> {
-    if rev.len() < 4 || rev.len() > 64 || !rev.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(EngineError::Other(format!("not a commit id: {rev:?}")));
-    }
-    let spec = format!("{rev}^{{commit}}");
+async fn verify_rev(root: &Path, spec: &str) -> Result<Option<String>, EngineError> {
     let out = git_with(
         root,
-        &["rev-parse", "--verify", "--quiet", &spec],
-        1024,
-        true,
-    )
-    .await?;
-    let sha = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-    if sha.is_empty() {
-        return Err(refused("That commit is not in this repository."));
-    }
-    Ok(sha)
-}
-
-async fn local_branch(root: &Path, name: &str) -> Result<Option<String>, EngineError> {
-    let full = format!("refs/heads/{name}");
-    let out = git_with(
-        root,
-        &["rev-parse", "--verify", "--quiet", &full],
+        &["rev-parse", "--verify", "--quiet", spec],
         1024,
         true,
     )
     .await?;
     let sha = String::from_utf8_lossy(&out.stdout).trim().to_owned();
     Ok((!sha.is_empty()).then_some(sha))
+}
+
+pub(crate) async fn resolve_commit(root: &Path, rev: &str) -> Result<String, EngineError> {
+    if rev.len() < 4 || rev.len() > 64 || !rev.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(EngineError::Other(format!("not a commit id: {rev:?}")));
+    }
+    verify_rev(root, &format!("{rev}^{{commit}}"))
+        .await?
+        .ok_or_else(|| refused("That commit is not in this repository."))
+}
+
+async fn local_branch(root: &Path, name: &str) -> Result<Option<String>, EngineError> {
+    verify_rev(root, &format!("refs/heads/{name}")).await
 }
 
 async fn checked_branch_name(root: &Path, name: &str) -> Result<(), EngineError> {
@@ -1190,11 +1195,7 @@ async fn create_branch(
             .map(drop);
     }
     if start == head {
-        if tree.cherry_pick_head.is_some() {
-            return Err(refused(
-                "A cherry-pick is in progress. Commit the resolved files or abort it first.",
-            ));
-        }
+        no_cherry_pick_in_progress(tree)?;
     } else {
         ready_to_move(tree, "switching to a branch at another commit")?;
     }
@@ -1250,20 +1251,7 @@ async fn cherry_pick(
         )));
     }
     let Err(error) = hooked_git(root, &["cherry-pick", &sha], COMMIT_TIMEOUT).await else {
-        let log = git(root, &["log", "-1", "--format=%H%x1f%s"]).await?;
-        let log = String::from_utf8_lossy(&log.stdout);
-        let (new_sha, subject) = log
-            .trim_end_matches('\n')
-            .split_once('\u{1f}')
-            .ok_or_else(|| refused("could not read the new commit"))?;
-        return Ok(WorkingTreeActionReply {
-            commit: Some(CommitSummary {
-                sha: new_sha.to_owned(),
-                branch: tree.branch.clone(),
-                subject: subject.to_owned(),
-            }),
-            conflicts: Vec::new(),
-        });
+        return new_commit_reply(root, tree).await;
     };
     let conflicts = unmerged_paths(root).await?;
     if !conflicts.is_empty() {
@@ -1272,15 +1260,7 @@ async fn cherry_pick(
             conflicts,
         });
     }
-    let stuck = git_with(
-        root,
-        &["rev-parse", "--verify", "--quiet", "CHERRY_PICK_HEAD"],
-        1024,
-        true,
-    )
-    .await
-    .is_ok_and(|out| !out.stdout.trim_ascii().is_empty());
-    if stuck {
+    if let Ok(Some(_)) = verify_rev(root, "CHERRY_PICK_HEAD").await {
         git(root, &["cherry-pick", "--abort"]).await?;
     }
     if error.to_string().contains("is now empty") {
@@ -1347,14 +1327,12 @@ async fn timed_git(
     args: &[&str],
     timeout: std::time::Duration,
 ) -> Result<(), EngineError> {
-    tokio::time::timeout(timeout, git(root, args))
+    let timed_out = format!(
+        "Git did not finish within {} min. The remote may be slow or waiting for a sign-in; try again from a terminal.",
+        timeout.as_secs() / 60
+    );
+    git_within(root, args, timeout, timed_out)
         .await
-        .map_err(|_| {
-            EngineError::Other(format!(
-                "Git did not finish within {} min. The remote may be slow or waiting for a sign-in; try again from a terminal.",
-                timeout.as_secs() / 60
-            ))
-        })?
         .map(drop)
         .map_err(sync_error)
 }
