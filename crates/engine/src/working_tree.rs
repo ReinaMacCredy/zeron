@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Weak};
 
@@ -128,6 +128,7 @@ struct Status {
     ahead: u32,
     behind: u32,
     files: Vec<WorkingTreeFile>,
+    index_ids: BTreeMap<String, String>,
     complete: bool,
 }
 
@@ -219,6 +220,14 @@ fn parse_status(bytes: &[u8], truncated: bool) -> Status {
             b'!' => continue,
             _ => None,
         };
+        if let (Some(file), b'1' | b'2') = (&parsed, record[0]) {
+            let mut fields = line.split(' ');
+            if let (Some(mode), Some(oid)) = (fields.nth(4), fields.nth(2)) {
+                status
+                    .index_ids
+                    .insert(file.path.clone(), format!("{mode} {oid}"));
+            }
+        }
         match parsed {
             Some(file) if !file.path.is_empty() => status.files.push(file),
             _ => status.complete = false,
@@ -346,8 +355,14 @@ fn stamp(root: &Path, path: &str) -> Option<(u64, u128)> {
 fn revision(status: &Status, stamps: &[Option<(u64, u128)>]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(
-        serde_json::to_vec(&(&status.head_sha, &status.branch, &status.files, stamps))
-            .expect("working tree serialization"),
+        serde_json::to_vec(&(
+            &status.head_sha,
+            &status.branch,
+            &status.files,
+            stamps,
+            &status.index_ids,
+        ))
+        .expect("working tree serialization"),
     );
     crate::repos::hex(&hasher.finalize())
 }
@@ -2357,6 +2372,24 @@ mod tests {
         assert_eq!(
             shown.files, now.files,
             "status and line counts are identical"
+        );
+        assert_ne!(shown.revision, now.revision);
+        assert_eq!(read(root, "c").await.unwrap().revision, now.revision);
+    }
+
+    #[tokio::test]
+    async fn restaging_the_same_line_counts_still_changes_the_revision() {
+        let dir = committed_repo();
+        let root = dir.path();
+        std::fs::write(root.join("tracked.txt"), "two\n").unwrap();
+        run(root, &["add", "tracked.txt"]);
+        let shown = read(root, "c").await.unwrap();
+        std::fs::write(root.join("tracked.txt"), "three\n").unwrap();
+        run(root, &["add", "tracked.txt"]);
+        let now = read(root, "c").await.unwrap();
+        assert_eq!(
+            shown.files, now.files,
+            "status and staged line counts are identical"
         );
         assert_ne!(shown.revision, now.revision);
         assert_eq!(read(root, "c").await.unwrap().revision, now.revision);
