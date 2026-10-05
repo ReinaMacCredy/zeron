@@ -53,19 +53,50 @@ const ANDROID_KEYCODES: [(&str, u16); 12] = [
     ("pagedown", 93),
 ];
 
+const META_SHIFT: u32 = 0x1 | 0x40;
+const META_ALT: u32 = 0x2 | 0x10;
+const META_CTRL: u32 = 0x1000 | 0x2000;
+
+fn android_character(key: &str) -> Option<u16> {
+    let mut chars = key.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c @ 'a'..='z'), None) => Some(29 + (c as u16 - 'a' as u16)),
+        (Some(c @ '0'..='9'), None) => Some(7 + (c as u16 - '0' as u16)),
+        _ => None,
+    }
+}
+
 pub fn android_input(keystroke: &Keystroke) -> Option<DeviceInput> {
     if keystroke.key == "escape" {
         return Some(DeviceInput::Button {
             button: DeviceButton::Back,
         });
     }
-    if let Some((_, keycode)) = ANDROID_KEYCODES
+    let held = &keystroke.modifiers;
+    let keycode = ANDROID_KEYCODES
         .iter()
         .find(|(name, _)| *name == keystroke.key)
-    {
-        return Some(DeviceInput::Keycode { keycode: *keycode });
+        .map(|(_, keycode)| *keycode)
+        .or_else(|| {
+            held.control
+                .then(|| android_character(&keystroke.key))
+                .flatten()
+        });
+    if let Some(keycode) = keycode {
+        let meta_state = [
+            (held.shift, META_SHIFT),
+            (held.alt, META_ALT),
+            (held.control, META_CTRL),
+        ]
+        .into_iter()
+        .filter_map(|(on, bits)| on.then_some(bits))
+        .fold(0, |state, bits| state | bits);
+        return Some(DeviceInput::Keycode {
+            keycode,
+            meta_state,
+        });
     }
-    if keystroke.modifiers.control || keystroke.modifiers.platform {
+    if held.control || held.platform {
         return None;
     }
     let text = keystroke.key_char.as_deref().unwrap_or(&keystroke.key);
@@ -393,7 +424,18 @@ mod tests {
     #[test]
     fn android_keys_become_keycodes_back_or_typed_text() {
         let input = |text: &str| android_input(&Keystroke::parse(text).unwrap());
-        let keycode = |keycode| Some(DeviceInput::Keycode { keycode });
+        let keycode = |keycode| {
+            Some(DeviceInput::Keycode {
+                keycode,
+                meta_state: 0,
+            })
+        };
+        let chord = |keycode, meta_state| {
+            Some(DeviceInput::Keycode {
+                keycode,
+                meta_state,
+            })
+        };
         let typed = |text: &str| Some(DeviceInput::Text { text: text.into() });
         assert_eq!(
             input("escape"),
@@ -425,7 +467,13 @@ mod tests {
             }),
             typed(" ")
         );
-        assert_eq!(input("ctrl-a"), None);
+        assert_eq!(input("shift-tab"), chord(61, 0x41));
+        assert_eq!(input("shift-left"), chord(21, 0x41));
+        assert_eq!(input("alt-backspace"), chord(67, 0x12));
+        assert_eq!(input("ctrl-a"), chord(29, 0x3000));
+        assert_eq!(input("ctrl-shift-z"), chord(54, 0x3041));
+        assert_eq!(input("ctrl-0"), chord(7, 0x3000));
+        assert_eq!(input("ctrl-/"), None);
         assert_eq!(input("cmd-v"), None);
         assert_eq!(input("f1"), None);
     }

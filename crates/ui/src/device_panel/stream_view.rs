@@ -435,6 +435,7 @@ pub struct DeviceStreamView {
     frame_box: Rc<Cell<Option<Bounds<Pixels>>>>,
     pressed: Option<(f32, f32)>,
     held_keys: HashSet<u16>,
+    composing: Option<String>,
     focus: FocusHandle,
     focus_watch: Option<Subscription>,
     inputs: mpsc::UnboundedSender<DeviceInput>,
@@ -528,6 +529,7 @@ impl DeviceStreamView {
             frame_box: Rc::default(),
             pressed: None,
             held_keys: HashSet::new(),
+            composing: None,
             focus: cx.focus_handle(),
             focus_watch: None,
             inputs,
@@ -844,6 +846,91 @@ impl DeviceStreamView {
     }
 }
 
+impl gpui::EntityInputHandler for DeviceStreamView {
+    fn text_for_range(
+        &mut self,
+        _range: std::ops::Range<usize>,
+        _adjusted: &mut Option<std::ops::Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        None
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<gpui::UTF16Selection> {
+        let end = self
+            .composing
+            .as_ref()
+            .map_or(0, |text| text.encode_utf16().count());
+        Some(gpui::UTF16Selection {
+            range: end..end,
+            reversed: false,
+        })
+    }
+
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<std::ops::Range<usize>> {
+        self.composing
+            .as_ref()
+            .map(|text| 0..text.encode_utf16().count())
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+        self.composing = None;
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        _range: Option<std::ops::Range<usize>>,
+        text: &str,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        self.composing = None;
+        if !text.is_empty() {
+            self.send(DeviceInput::Text { text: text.into() });
+        }
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _range: Option<std::ops::Range<usize>>,
+        text: &str,
+        _selected: Option<std::ops::Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        self.composing = (!text.is_empty()).then(|| text.to_string());
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _range: std::ops::Range<usize>,
+        element_bounds: Bounds<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        Some(element_bounds)
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _point: Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        None
+    }
+}
+
 impl Render for DeviceStreamView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         for old in self.retired.drain(..) {
@@ -868,6 +955,8 @@ impl Render for DeviceStreamView {
             format!("{:.0} fps · {}", fps.shown, codec_label(codec))
         });
         let rail_inset = self.rail_inset;
+        let ime =
+            (self.platform == DevicePlatform::Android).then(|| (self.focus.clone(), cx.entity()));
         let corners = gpui::Corners::all(px(self.corner_radius));
         let rotation = self.image.as_ref().map_or_else(
             || geometry::display_rotation(self.screen.as_ref()),
@@ -910,9 +999,16 @@ impl Render for DeviceStreamView {
             .child(
                 gpui::canvas(
                     |_, _, _| (),
-                    move |bounds, _, window, _| {
+                    move |bounds, _, window, cx| {
                         let frame = geometry::centered_frame(bounds, aspect, rail_inset);
                         frame_box.set(Some(frame));
+                        if let Some((focus, view)) = ime {
+                            window.handle_input(
+                                &focus,
+                                gpui::ElementInputHandler::new(frame, view),
+                                cx,
+                            );
+                        }
                         match picture {
                             Some(Picture::Image(image)) => {
                                 let _ = window.paint_image(frame, corners, image, 0, false);
@@ -1560,6 +1656,42 @@ mod tests {
             *host.read_with(cx, |host, _| host.passed.clone()).borrow(),
             vec!["w".to_string()]
         );
+    }
+
+    #[gpui::test]
+    fn committed_ime_text_on_android_goes_out_as_typed_text_and_composition_stays_local(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::EntityInputHandler as _;
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (view, _host, inputs, cx) = key_host_on(cx, &runtime, DevicePlatform::Android);
+        view.update_in(cx, |view, window, cx| {
+            view.replace_and_mark_text_in_range(None, "かn", None, window, cx);
+            assert_eq!(view.marked_text_range(window, cx), Some(0..2));
+        });
+        cx.update(|window, cx| {
+            window.dispatch_keystroke(
+                Keystroke {
+                    key: "a".into(),
+                    key_char: Some("かな".into()),
+                    ..Default::default()
+                },
+                cx,
+            )
+        });
+        wait(cx, |_| !inputs.lock().unwrap().is_empty());
+        cx.run_until_parked();
+        let sent: Vec<Value> = inputs
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|params| params["input"].clone())
+            .collect();
+        assert_eq!(sent, vec![json!({"text": {"text": "かな"}})]);
+        view.update_in(cx, |view, window, cx| {
+            assert_eq!(view.marked_text_range(window, cx), None)
+        });
     }
 
     #[gpui::test]

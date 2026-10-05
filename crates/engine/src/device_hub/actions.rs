@@ -35,6 +35,9 @@ const EVENT_FIELD_LIMIT: usize = 64;
 const SCREENSHOT_NAME_TRIES: usize = 100;
 pub(crate) const ACTION_TIMEOUT: Duration = Duration::from_secs(20);
 const FOREGROUND_READ: Duration = Duration::from_secs(1);
+pub(crate) const PORTRAIT_LOCKED: &str = "The foreground app is locked to portrait.";
+const ROTATION_SETTLE: Duration = Duration::from_secs(2);
+const ROTATION_POLL: Duration = Duration::from_millis(250);
 
 pub(crate) struct CommandOutput {
     pub code: i32,
@@ -399,6 +402,19 @@ fn android_orientation(orientation: DeviceOrientation) -> (&'static str, &'stati
         DeviceOrientation::PortraitUpsideDown => ("0:-9.81:0", "2"),
         DeviceOrientation::LandscapeRight => ("-9.81:0:0", "3"),
     }
+}
+
+fn adb_shell(adb: &str, serial: &str, args: &[&str]) -> Vec<String> {
+    [adb, "-s", serial, "shell"]
+        .iter()
+        .chain(args)
+        .map(|arg| arg.to_string())
+        .collect()
+}
+
+pub(crate) fn display_rotation(dumpsys: &str) -> Option<String> {
+    let rotation = regex::Regex::new(r"\bmRotation=(\d)\b").ok()?;
+    Some(rotation.captures(dumpsys)?.get(1)?.as_str().to_string())
 }
 
 pub(crate) fn android_action_argvs(
@@ -948,8 +964,22 @@ impl DeviceHub {
         // Apps rarely declare every permission of a group; t3code ignores the refusals too.
         let tolerant = device.platform == DevicePlatform::Android
             && matches!(params.action, DeviceAction::SetPermission { .. });
+        let rotation = match (&params.action, helpers.adb()) {
+            (DeviceAction::SetOrientation { value }, Some(adb))
+                if device.platform == DevicePlatform::Android
+                    && device.id.starts_with("emulator-") =>
+            {
+                Some((*value, adb))
+            }
+            _ => None,
+        };
         let lock = self.device_lock(&device.id);
         let _serial = lock.lock().await;
+        if let Some((value, adb)) = &rotation
+            && *value != DeviceOrientation::Portrait
+        {
+            self.save_auto_rotate(&runner, adb, &device.id).await;
+        }
         for argv in argvs {
             let output = runner(argv).await;
             if output.code != 0 && !tolerant {
@@ -962,7 +992,103 @@ impl DeviceHub {
                 return Err(format!("The device action failed: {detail}"));
             }
         }
+        if let Some((value, adb)) = &rotation {
+            self.settle_rotation(&runner, adb, &device.id, *value)
+                .await?;
+        }
         Ok(self.read_detail(&device, false).await)
+    }
+
+    async fn save_auto_rotate(&self, runner: &Runner, adb: &str, serial: &str) {
+        let saved = |hub: &Self| {
+            hub.auto_rotate
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .contains_key(serial)
+        };
+        if saved(self) {
+            return;
+        }
+        let output = runner(adb_shell(
+            adb,
+            serial,
+            &["settings", "get", "system", "accelerometer_rotation"],
+        ))
+        .await;
+        let value = output.stdout.trim();
+        if output.code == 0 && matches!(value, "0" | "1") {
+            self.auto_rotate
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(serial.to_string(), value.to_string());
+        }
+    }
+
+    // Taps were misdirected live while the sensor stayed tilted under a display that did not rotate.
+    async fn settle_rotation(
+        &self,
+        runner: &Runner,
+        adb: &str,
+        serial: &str,
+        value: DeviceOrientation,
+    ) -> Result<(), String> {
+        let landscape_or_flipped = value != DeviceOrientation::Portrait;
+        if landscape_or_flipped {
+            let expected = android_orientation(value).1;
+            let deadline = tokio::time::Instant::now() + ROTATION_SETTLE;
+            loop {
+                let output =
+                    runner(adb_shell(adb, serial, &["dumpsys", "window", "displays"])).await;
+                if output.code == 0 && display_rotation(&output.stdout).as_deref() == Some(expected)
+                {
+                    return Ok(());
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    break;
+                }
+                tokio::time::sleep(ROTATION_POLL).await;
+            }
+            let portrait = android_orientation(DeviceOrientation::Portrait).0;
+            runner(
+                [
+                    adb,
+                    "-s",
+                    serial,
+                    "emu",
+                    "sensor",
+                    "set",
+                    "acceleration",
+                    portrait,
+                ]
+                .map(str::to_string)
+                .to_vec(),
+            )
+            .await;
+        }
+        let previous = self
+            .auto_rotate
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(serial);
+        if let Some(previous) = previous {
+            runner(adb_shell(
+                adb,
+                serial,
+                &[
+                    "settings",
+                    "put",
+                    "system",
+                    "accelerometer_rotation",
+                    &previous,
+                ],
+            ))
+            .await;
+        }
+        if landscape_or_flipped {
+            Err(PORTRAIT_LOCKED.into())
+        } else {
+            Ok(())
+        }
     }
 
     pub async fn device_screenshot(
@@ -1750,6 +1876,9 @@ mod tests {
             })
         );
         assert_eq!(android_foreground("mCurrentFocus=null"), None);
+        let displays = "  overrideConfig={ winConfig={ mDisplayRotation=ROTATION_0 mRotation=ROTATION_0} }\n  DisplayRotation\n    mCurrentAppOrientation=SCREEN_ORIENTATION_UNSPECIFIED\n    mRotation=1 mDeferredRotationPauseCount=0\n    WindowOrientationListener\n      mCurrentRotation=ROTATION_0\n";
+        assert_eq!(display_rotation(displays).as_deref(), Some("1"));
+        assert_eq!(display_rotation("mRotation=ROTATION_90"), None);
     }
 
     #[test]
@@ -2056,6 +2185,136 @@ mod hub_tests {
         assert!(
             starts.iter().all(|start| *start < first_end),
             "different devices run side by side: {both:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_emulator_rotation_the_display_ignores_is_undone_and_auto_rotate_comes_back() {
+        use zeron_proto::device_hub::DeviceOrientation;
+        let (_dir, hub, _) = enabled_hub(HEALTHY).await;
+        hub.publish(|state| {
+            state.devices.push(HubDevice {
+                host_id: "local".into(),
+                id: "emulator-5554".into(),
+                name: "Pixel_9".into(),
+                platform: DevicePlatform::Android,
+                booted: true,
+                ..Default::default()
+            })
+        });
+        let log: Log = Arc::default();
+        let display = Arc::new(Mutex::new("0"));
+        let runner: Runner = {
+            let (log, display) = (log.clone(), display.clone());
+            Arc::new(move |argv: Vec<String>| {
+                let line = argv[3..].join(" ");
+                log.lock().unwrap().push(line.clone());
+                let stdout = match line.as_str() {
+                    "shell dumpsys window displays" => format!(
+                        "    mRotation={} mDeferredRotationPauseCount=0\n  winConfig={{ mDisplayRotation=ROTATION_0 mRotation=ROTATION_0}}\n",
+                        display.lock().unwrap()
+                    ),
+                    "shell settings get system accelerometer_rotation" => "0\n".into(),
+                    _ => String::new(),
+                };
+                Box::pin(async move {
+                    CommandOutput {
+                        code: 0,
+                        stdout,
+                        stderr: String::new(),
+                    }
+                })
+            })
+        };
+        hub.use_actions_for_test(
+            runner,
+            Helpers {
+                android_sdk: Some("/sdk".into()),
+                ..Default::default()
+            },
+        );
+        let rotate = |value| RunHubDeviceActionParams {
+            host_id: None,
+            device_id: "emulator-5554".into(),
+            action: DeviceAction::SetOrientation { value },
+        };
+        let ran = |log: &Log| -> Vec<String> {
+            let reads = [
+                "shell cmd uimode night",
+                "shell settings get system font_scale",
+                "shell settings get global animator_duration_scale",
+                "shell settings get global wifi_on",
+                "shell dumpsys window",
+            ];
+            let mut lines = std::mem::take(&mut *log.lock().unwrap());
+            lines.retain(|line| !reads.contains(&line.as_str()));
+            lines.dedup();
+            lines
+        };
+        let tilt = [
+            "shell settings put system accelerometer_rotation 1",
+            "shell cmd window user-rotation free",
+        ];
+
+        let started = std::time::Instant::now();
+        assert_eq!(
+            hub.run_action(rotate(DeviceOrientation::LandscapeLeft))
+                .await,
+            Err(PORTRAIT_LOCKED.into())
+        );
+        assert!(started.elapsed() >= ROTATION_SETTLE);
+        assert_eq!(
+            ran(&log),
+            [
+                "shell settings get system accelerometer_rotation",
+                tilt[0],
+                tilt[1],
+                "emu sensor set acceleration 9.81:0:0",
+                "shell dumpsys window displays",
+                "emu sensor set acceleration 0:9.81:0",
+                "shell settings put system accelerometer_rotation 0",
+            ]
+        );
+
+        *display.lock().unwrap() = "1";
+        hub.run_action(rotate(DeviceOrientation::LandscapeLeft))
+            .await
+            .expect("the display followed the sensor");
+        assert_eq!(
+            ran(&log),
+            [
+                "shell settings get system accelerometer_rotation",
+                tilt[0],
+                tilt[1],
+                "emu sensor set acceleration 9.81:0:0",
+                "shell dumpsys window displays",
+            ]
+        );
+        *display.lock().unwrap() = "3";
+        hub.run_action(rotate(DeviceOrientation::LandscapeRight))
+            .await
+            .unwrap();
+        assert_eq!(
+            ran(&log),
+            [
+                tilt[0],
+                tilt[1],
+                "emu sensor set acceleration -9.81:0:0",
+                "shell dumpsys window displays",
+            ],
+            "the setting from before the first rotation is the one kept"
+        );
+        hub.run_action(rotate(DeviceOrientation::Portrait))
+            .await
+            .unwrap();
+        assert_eq!(
+            ran(&log),
+            [
+                tilt[0],
+                tilt[1],
+                "emu sensor set acceleration 0:9.81:0",
+                "shell settings put system accelerometer_rotation 0",
+            ]
         );
     }
 

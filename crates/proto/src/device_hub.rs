@@ -414,12 +414,33 @@ pub enum KeyPhase {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DeviceInput {
-    Touch { phase: TouchPhase, x: f32, y: f32 },
-    Button { button: DeviceButton },
-    Key { phase: KeyPhase, usage: u16 },
-    Orientation { orientation: DeviceOrientation },
-    Keycode { keycode: u16 },
-    Text { text: String },
+    Touch {
+        phase: TouchPhase,
+        x: f32,
+        y: f32,
+    },
+    Button {
+        button: DeviceButton,
+    },
+    Key {
+        phase: KeyPhase,
+        usage: u16,
+    },
+    Orientation {
+        orientation: DeviceOrientation,
+    },
+    Keycode {
+        keycode: u16,
+        #[serde(default, rename = "metaState", skip_serializing_if = "is_zero")]
+        meta_state: u32,
+    },
+    Text {
+        text: String,
+    },
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -919,8 +940,18 @@ mod tests {
                 json!({"button": {"button": "back"}}),
             ),
             (
-                DeviceInput::Keycode { keycode: 66 },
+                DeviceInput::Keycode {
+                    keycode: 66,
+                    meta_state: 0,
+                },
                 json!({"keycode": {"keycode": 66}}),
+            ),
+            (
+                DeviceInput::Keycode {
+                    keycode: 61,
+                    meta_state: 0x41,
+                },
+                json!({"keycode": {"keycode": 61, "metaState": 65}}),
             ),
             (
                 DeviceInput::Text { text: "é".into() },

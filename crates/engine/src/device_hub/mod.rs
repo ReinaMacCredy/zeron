@@ -55,6 +55,7 @@ pub struct DeviceHub {
     agent: Mutex<Option<agent::AgentDaemon>>,
     agent_start: tokio::sync::Mutex<()>,
     action_locks: Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    auto_rotate: Mutex<std::collections::HashMap<String, String>>,
     #[cfg(test)]
     test_spawn: Mutex<Option<TestSpawn>>,
     #[cfg(test)]
@@ -191,6 +192,7 @@ impl DeviceHub {
             agent: Mutex::new(None),
             agent_start: tokio::sync::Mutex::new(()),
             action_locks: Mutex::default(),
+            auto_rotate: Mutex::default(),
             #[cfg(test)]
             test_spawn: Mutex::new(None),
             #[cfg(test)]

@@ -93,10 +93,16 @@ enum Control<'a> {
     Power,
     Key {
         keycode: u16,
+        #[serde(rename = "metaState", skip_serializing_if = "is_zero")]
+        meta_state: u32,
     },
     Text {
         text: &'a str,
     },
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 pub(crate) fn encode_semu(input: &DeviceInput) -> Option<String> {
@@ -116,7 +122,13 @@ pub(crate) fn encode_semu(input: &DeviceInput) -> Option<String> {
             DeviceButton::AppSwitcher => Control::Recents,
             DeviceButton::Lock => Control::Power,
         },
-        DeviceInput::Keycode { keycode } => Control::Key { keycode: *keycode },
+        DeviceInput::Keycode {
+            keycode,
+            meta_state,
+        } => Control::Key {
+            keycode: *keycode,
+            meta_state: *meta_state,
+        },
         DeviceInput::Text { text } if !text.is_empty() => Control::Text { text },
         _ => return None,
     };
@@ -295,7 +307,10 @@ mod tests {
             DeviceInput::Button {
                 button: DeviceButton::Back,
             },
-            DeviceInput::Keycode { keycode: 66 },
+            DeviceInput::Keycode {
+                keycode: 66,
+                meta_state: 0,
+            },
             DeviceInput::Text { text: "a".into() },
         ] {
             assert_eq!(encode(&android_only), None, "{android_only:?}");
@@ -324,8 +339,18 @@ mod tests {
             (button(DeviceButton::AppSwitcher), r#"{"type":"recents"}"#),
             (button(DeviceButton::Lock), r#"{"type":"power"}"#),
             (
-                DeviceInput::Keycode { keycode: 66 },
+                DeviceInput::Keycode {
+                    keycode: 66,
+                    meta_state: 0,
+                },
                 r#"{"type":"key","keycode":66}"#,
+            ),
+            (
+                DeviceInput::Keycode {
+                    keycode: 29,
+                    meta_state: 0x3000,
+                },
+                r#"{"type":"key","keycode":29,"metaState":12288}"#,
             ),
             (
                 DeviceInput::Text {
