@@ -5,8 +5,8 @@ use std::sync::{Arc, LazyLock, Weak};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 use zeron_proto::{
-    GitFileState, LineDelta, StashEntry, WorkingTree, WorkingTreeAction, WorkingTreeFile,
-    WorkingTreeFileDiff,
+    CommitSummary, GitFileState, LineDelta, StashEntry, WorkingTree, WorkingTreeAction,
+    WorkingTreeActionReply, WorkingTreeFile, WorkingTreeFileDiff,
 };
 
 use crate::EngineError;
@@ -403,6 +403,8 @@ pub(crate) async fn read(root: &Path, checkout_id: &str) -> Result<WorkingTree, 
 }
 
 pub(crate) const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(150);
+pub(crate) const COMMIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 const PATCH_MAX_BYTES: usize = 1024 * 1024;
 const MAX_PATH_BYTES: usize = 4096;
 
@@ -489,8 +491,8 @@ pub(crate) async fn apply(
     root: &Path,
     tree: &WorkingTree,
     action: &WorkingTreeAction,
-) -> Result<(), EngineError> {
-    match action {
+) -> Result<WorkingTreeActionReply, EngineError> {
+    let done = match action {
         WorkingTreeAction::Stage { paths } => {
             let files = listed(
                 tree,
@@ -515,10 +517,130 @@ pub(crate) async fn apply(
         }
         WorkingTreeAction::StageAll => git(root, &["add", "-A"]).await.map(drop),
         WorkingTreeAction::UnstageAll => run_with_paths(root, &["reset", "-q"], &["."]).await,
+        WorkingTreeAction::Commit {
+            message,
+            amend,
+            all,
+        } => return commit(root, tree, message, *amend, *all, COMMIT_TIMEOUT).await,
         _ => Err(EngineError::Other(
             "this Git action is not available yet".into(),
         )),
+    };
+    done.map(|()| WorkingTreeActionReply::default())
+}
+
+fn refused(message: &str) -> EngineError {
+    EngineError::Other(message.into())
+}
+
+fn commit_error(error: EngineError) -> EngineError {
+    let text = error.to_string().to_lowercase();
+    let has = |needles: &[&str]| needles.iter().any(|needle| text.contains(needle));
+    if has(&[
+        "please tell me who you are",
+        "identity unknown",
+        "empty ident name",
+        "unable to auto-detect email address",
+    ]) {
+        refused(
+            "Git does not know who you are. Set your name and email with `git config --global user.name \"Your Name\"` and `git config --global user.email you@example.com`, then commit again.",
+        )
+    } else if has(&["failed to sign", "couldn't sign", "signing failed"]) {
+        refused(
+            "Git could not sign the commit. Signing here cannot show a passphrase prompt; unlock your signing key in a terminal (or commit there once), then try again.",
+        )
+    } else {
+        error
     }
+}
+
+async fn commit(
+    root: &Path,
+    tree: &WorkingTree,
+    message: &str,
+    amend: bool,
+    all: bool,
+    timeout: std::time::Duration,
+) -> Result<WorkingTreeActionReply, EngineError> {
+    if message.trim().is_empty() {
+        return Err(refused("Write a commit message first."));
+    }
+    if message.len() > MAX_MESSAGE_BYTES {
+        return Err(refused("The commit message is too long."));
+    }
+    if amend {
+        let Some(head) = tree.head_sha.as_deref() else {
+            return Err(refused("There is no commit to amend yet."));
+        };
+        let output = git(
+            root,
+            &[
+                "for-each-ref",
+                "--contains",
+                head,
+                "--format=%(refname)",
+                "refs/remotes/",
+            ],
+        )
+        .await?;
+        let listed = String::from_utf8_lossy(&output.stdout).into_owned();
+        let refs: Vec<&str> = listed.lines().filter(|line| !line.is_empty()).collect();
+        if let Some(remote) = refs
+            .iter()
+            .find(|name| !name.ends_with("/HEAD"))
+            .or(refs.first())
+        {
+            let remote = remote.strip_prefix("refs/remotes/").unwrap_or(remote);
+            return Err(EngineError::Other(format!(
+                "The last commit is already on {remote}. Amending it would rewrite pushed history."
+            )));
+        }
+    } else if all {
+        if tree.files.is_empty() {
+            return Err(refused("There is nothing to commit."));
+        }
+    } else if !tree.files.iter().any(is_staged) {
+        return Err(refused(
+            "Nothing is staged. Stage files first, or use Commit all.",
+        ));
+    }
+    if all {
+        git(root, &["add", "-A"]).await?;
+    }
+    let mut file = tempfile::NamedTempFile::new()?;
+    std::io::Write::write_all(&mut file, message.as_bytes())?;
+    let path = file
+        .path()
+        .to_str()
+        .ok_or_else(|| refused("the temporary directory path is not UTF-8"))?;
+    let mut args = vec!["commit", "--quiet", "--cleanup=whitespace", "--file", path];
+    if amend {
+        args.push("--amend");
+    }
+    tokio::time::timeout(timeout, git(root, &args))
+        .await
+        .map_err(|_| {
+            EngineError::Other(format!(
+                "The commit did not finish within {} s. A commit hook or a signing prompt may be waiting for input; commit in a terminal instead.",
+                timeout.as_secs()
+            ))
+        })?
+        .map_err(commit_error)?;
+    drop(file);
+    let log = git(root, &["log", "-1", "--format=%H%x1f%s"]).await?;
+    let log = String::from_utf8_lossy(&log.stdout);
+    let (sha, subject) = log
+        .trim_end_matches('\n')
+        .split_once('\u{1f}')
+        .ok_or_else(|| refused("could not read the new commit"))?;
+    Ok(WorkingTreeActionReply {
+        commit: Some(CommitSummary {
+            sha: sha.to_owned(),
+            branch: tree.branch.clone(),
+            subject: subject.to_owned(),
+        }),
+        conflicts: Vec::new(),
+    })
 }
 
 pub(crate) async fn file_diff(
@@ -1033,6 +1155,302 @@ mod tests {
             .await
             .is_ok()
         );
+    }
+
+    fn local_identity(root: &Path) {
+        for (key, value) in [
+            ("user.name", "Lab"),
+            ("user.email", "lab@example.com"),
+            ("commit.gpgsign", "false"),
+        ] {
+            run(root, &["config", key, value]);
+        }
+    }
+
+    fn output(root: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .unwrap();
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    fn head(root: &Path) -> String {
+        output(root, &["rev-parse", "HEAD"]).trim().to_owned()
+    }
+
+    fn commit_action(message: &str, amend: bool, all: bool) -> WorkingTreeAction {
+        WorkingTreeAction::Commit {
+            message: message.into(),
+            amend,
+            all,
+        }
+    }
+
+    #[tokio::test]
+    async fn commit_takes_the_staged_files_only_and_reports_the_new_commit() {
+        let dir = committed_repo();
+        let root = dir.path();
+        local_identity(root);
+        std::fs::write(root.join("tracked.txt"), "two\n").unwrap();
+        run(root, &["add", "tracked.txt"]);
+        std::fs::write(root.join("tracked.txt"), "two\nthree\n").unwrap();
+        std::fs::write(root.join("untracked.txt"), "u\n").unwrap();
+        let before = head(root);
+
+        let tree = read(root, "c").await.unwrap();
+        let reply = apply(
+            root,
+            &tree,
+            &commit_action("Subject line\n\nWhy it changed.\n\n\n", false, false),
+        )
+        .await
+        .unwrap();
+        let commit = reply.commit.expect("a commit summary");
+        assert_eq!(commit.sha, head(root));
+        assert_eq!(commit.sha.len(), 40);
+        assert_eq!(commit.subject, "Subject line");
+        assert_eq!(commit.branch.as_deref(), Some("main"));
+        assert!(reply.conflicts.is_empty());
+        assert_eq!(output(root, &["rev-parse", "HEAD^"]).trim(), before);
+        assert_eq!(output(root, &["show", "HEAD:tracked.txt"]), "two\n");
+        assert_eq!(
+            output(root, &["log", "-1", "--format=%B"]),
+            "Subject line\n\nWhy it changed.\n\n"
+        );
+        assert_eq!(porcelain(root), " M tracked.txt\n?? untracked.txt\n");
+    }
+
+    #[tokio::test]
+    async fn a_commit_without_a_message_or_staged_files_is_refused_untouched() {
+        let dir = committed_repo();
+        let root = dir.path();
+        local_identity(root);
+        std::fs::write(root.join("tracked.txt"), "two\n").unwrap();
+        let before = head(root);
+        let tree = read(root, "c").await.unwrap();
+        for message in ["", "  \n\t\n"] {
+            let error = apply(root, &tree, &commit_action(message, false, false))
+                .await
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("Write a commit message"),
+                "{error}"
+            );
+        }
+        let error = apply(root, &tree, &commit_action("x", false, false))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("Nothing is staged"), "{error}");
+        let error = apply(
+            root,
+            &tree,
+            &commit_action(&"x".repeat(MAX_MESSAGE_BYTES + 1), false, true),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("too long"), "{error}");
+        assert_eq!(head(root), before);
+        assert_eq!(porcelain(root), " M tracked.txt\n");
+
+        run(root, &["checkout", "--", "tracked.txt"]);
+        let tree = read(root, "c").await.unwrap();
+        let error = apply(root, &tree, &commit_action("x", false, true))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("nothing to commit"), "{error}");
+        assert_eq!(head(root), before);
+    }
+
+    #[tokio::test]
+    async fn commit_all_stages_every_change_first() {
+        let dir = committed_repo();
+        let root = dir.path();
+        local_identity(root);
+        std::fs::write(root.join("tracked.txt"), "two\n").unwrap();
+        std::fs::remove_file(root.join("old name.txt")).unwrap();
+        std::fs::write(root.join("-new file.txt"), "n\n").unwrap();
+        let tree = read(root, "c").await.unwrap();
+        let reply = apply(root, &tree, &commit_action("Everything", false, true))
+            .await
+            .unwrap();
+        assert_eq!(reply.commit.unwrap().subject, "Everything");
+        assert_eq!(porcelain(root), "");
+        assert_eq!(
+            output(root, &["show", "--name-status", "--format=", "HEAD"]),
+            "A\t-new file.txt\nD\told name.txt\nM\ttracked.txt\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn amend_folds_into_an_unpushed_commit_and_refuses_pushed_or_missing_heads() {
+        let dir = tempfile::tempdir().unwrap();
+        let remote = dir.path().join("remote.git");
+        let repo = dir.path().join("repo");
+        run(
+            dir.path(),
+            &["init", "--bare", "-b", "main", remote.to_str().unwrap()],
+        );
+        run(dir.path(), &["init", "-b", "main", repo.to_str().unwrap()]);
+        local_identity(&repo);
+        run(
+            &repo,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        run(&repo, &["add", "."]);
+        run(&repo, &["commit", "-m", "first"]);
+        run(&repo, &["push", "-u", "origin", "main"]);
+        let pushed = head(&repo);
+
+        let tree = read(&repo, "c").await.unwrap();
+        let error = apply(&repo, &tree, &commit_action("Reworded", true, false))
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("already on origin/main"),
+            "{error}"
+        );
+        assert_eq!(head(&repo), pushed);
+
+        std::fs::write(repo.join("b.txt"), "b\n").unwrap();
+        run(&repo, &["add", "."]);
+        run(&repo, &["commit", "-m", "second"]);
+        std::fs::write(repo.join("forgotten.txt"), "f\n").unwrap();
+        run(&repo, &["add", "forgotten.txt"]);
+        let tree = read(&repo, "c").await.unwrap();
+        let reply = apply(&repo, &tree, &commit_action("Second, amended", true, false))
+            .await
+            .unwrap();
+        assert_eq!(reply.commit.unwrap().subject, "Second, amended");
+        assert_eq!(output(&repo, &["rev-parse", "HEAD^"]).trim(), pushed);
+        assert_eq!(output(&repo, &["rev-list", "--count", "HEAD"]).trim(), "2");
+        assert_eq!(output(&repo, &["show", "HEAD:forgotten.txt"]), "f\n");
+
+        run(&repo, &["push", "origin", "HEAD:refs/heads/backup"]);
+        let amended = head(&repo);
+        let tree = read(&repo, "c").await.unwrap();
+        let error = apply(&repo, &tree, &commit_action("Again", true, false))
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("already on origin/backup"),
+            "any remote-tracking ref counts, not only the upstream: {error}"
+        );
+        assert_eq!(head(&repo), amended);
+
+        let unborn = tempfile::tempdir().unwrap();
+        run(unborn.path(), &["init", "-b", "main", "."]);
+        local_identity(unborn.path());
+        std::fs::write(unborn.path().join("x.txt"), "x\n").unwrap();
+        run(unborn.path(), &["add", "."]);
+        let tree = read(unborn.path(), "c").await.unwrap();
+        let error = apply(unborn.path(), &tree, &commit_action("x", true, false))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("no commit to amend"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn the_first_commit_of_an_unborn_branch_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        run(root, &["init", "-b", "trunk", "."]);
+        local_identity(root);
+        std::fs::write(root.join("first.rs"), "fn main() {}\n").unwrap();
+        run(root, &["add", "first.rs"]);
+        let tree = read(root, "c").await.unwrap();
+        let commit = apply(root, &tree, &commit_action("First", false, false))
+            .await
+            .unwrap()
+            .commit
+            .unwrap();
+        assert_eq!(commit.branch.as_deref(), Some("trunk"));
+        assert_eq!(commit.sha, head(root));
+    }
+
+    #[tokio::test]
+    async fn missing_identity_and_failed_signing_read_as_plain_errors() {
+        let dir = committed_repo();
+        let root = dir.path();
+        local_identity(root);
+        run(root, &["config", "user.name", ""]);
+        run(root, &["config", "user.email", ""]);
+        std::fs::write(root.join("tracked.txt"), "two\n").unwrap();
+        run(root, &["add", "tracked.txt"]);
+        let before = head(root);
+        let tree = read(root, "c").await.unwrap();
+        let error = apply(root, &tree, &commit_action("x", false, false))
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("Git does not know who you are"),
+            "{error}"
+        );
+
+        local_identity(root);
+        run(root, &["config", "commit.gpgsign", "true"]);
+        run(root, &["config", "gpg.program", "false"]);
+        let error = apply(root, &tree, &commit_action("x", false, false))
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("could not sign the commit"),
+            "{error}"
+        );
+        assert_eq!(head(root), before);
+        assert_eq!(porcelain(root), "M  tracked.txt\n");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn commit_hooks_run_and_a_hook_that_hangs_times_out() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = committed_repo();
+        let root = dir.path();
+        local_identity(root);
+        let hooks = tempfile::tempdir().unwrap();
+        run(
+            root,
+            &["config", "core.hooksPath", hooks.path().to_str().unwrap()],
+        );
+        let hook = hooks.path().join("pre-commit");
+        let install = |script: &str| {
+            std::fs::write(&hook, script).unwrap();
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        std::fs::write(root.join("tracked.txt"), "two\n").unwrap();
+        run(root, &["add", "tracked.txt"]);
+        let before = head(root);
+        let tree = read(root, "c").await.unwrap();
+
+        install("#!/bin/sh\necho 'lint found 3 problems' >&2\nexit 1\n");
+        let error = apply(root, &tree, &commit_action("x", false, false))
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("lint found 3 problems"),
+            "{error}"
+        );
+
+        install("#!/bin/sh\nsleep 5\n");
+        let started = std::time::Instant::now();
+        let error = commit(
+            root,
+            &tree,
+            "x",
+            false,
+            false,
+            std::time::Duration::from_millis(300),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("did not finish"), "{error}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(4));
+        assert_eq!(head(root), before);
+        assert!(COMMIT_TIMEOUT < WRITE_TIMEOUT);
     }
 
     #[tokio::test]

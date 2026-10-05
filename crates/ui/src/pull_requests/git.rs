@@ -2,19 +2,20 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, Context, Entity, EventEmitter, SharedString, Subscription, Task, Window, div,
-    prelude::*, px,
+    AnyElement, App, Context, Entity, EntityInputHandler, EventEmitter, Focusable, KeyDownEvent,
+    SharedString, Subscription, Task, Window, div, prelude::*, px,
 };
 use zeron_proto::{
-    ChangeRequestListItem, ChangeRequestState, GetWorkingTreeFileDiffRequest,
+    ChangeRequestListItem, ChangeRequestState, CommitSummary, GetWorkingTreeFileDiffRequest,
     GetWorkingTreeRequest, GitAgentBusyPolicy, GitFileState, RunWorkingTreeActionRequest,
-    SessionStatus, WorkingTree, WorkingTreeAction, WorkingTreeFile, WorkingTreeFileDiff,
-    WorkspaceTarget,
+    SessionStatus, WorkingTree, WorkingTreeAction, WorkingTreeActionReply, WorkingTreeFile,
+    WorkingTreeFileDiff, WorkspaceTarget,
 };
 use zeron_rpc::{RpcError, methods};
 
 use super::{PageTab, PullRequestsPage, filters, routed, top_chip};
 use crate::changes::{self, FileDiff};
+use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::history::{GitHistory, GitHistoryEvent, GitHistoryTarget};
 use crate::icons::{self, icon};
 use crate::popover;
@@ -51,6 +52,24 @@ pub enum GitTabEvent {
 enum PendingTarget {
     File { staged: bool, path: String },
     All { staged: bool },
+    Commit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommitKind {
+    Staged,
+    Amend,
+    All,
+}
+
+impl CommitKind {
+    fn action(self, message: String) -> WorkingTreeAction {
+        WorkingTreeAction::Commit {
+            message,
+            amend: self == Self::Amend,
+            all: self == Self::All,
+        }
+    }
 }
 
 struct Pending {
@@ -93,6 +112,10 @@ pub struct GitTab {
     action_task: Option<Task<()>>,
     expanded: Option<Expanded>,
     diff_task: Option<Task<()>>,
+    message: Entity<ComposerInput>,
+    commit_menu: bool,
+    last_commit: Option<CommitSummary>,
+    _message_edits: Subscription,
     _history_events: Subscription,
 }
 
@@ -132,7 +155,7 @@ fn in_section(tree: &WorkingTree, staged: bool, path: &str) -> bool {
 fn agent_banner(policy: GitAgentBusyPolicy) -> &'static str {
     match policy {
         GitAgentBusyPolicy::SafeOnly => {
-            "An agent is running in this worktree. Stage and unstage still work; other Git actions wait until it stops."
+            "An agent is running in this worktree. Stage, unstage and commit of staged files still work; other Git actions wait until it stops."
         }
         GitAgentBusyPolicy::BlockAll => {
             "An agent is running in this worktree. Git is read-only here until it stops."
@@ -141,6 +164,10 @@ fn agent_banner(policy: GitAgentBusyPolicy) -> &'static str {
             "An agent is running in this worktree. Git actions here can collide with its edits."
         }
     }
+}
+
+fn subject_chars(message: &str) -> usize {
+    message.lines().next().unwrap_or_default().chars().count()
 }
 
 fn same_path(left: &str, right: &str) -> bool {
@@ -286,6 +313,12 @@ impl GitTab {
                 };
             }
         });
+        let message = cx.new(|cx| ComposerInput::new("Commit message (⌘↵ to commit)", cx));
+        let message_edits = cx.subscribe(&message, |_, _, event: &ComposerInputEvent, cx| {
+            if matches!(event, ComposerInputEvent::Edited) {
+                cx.notify();
+            }
+        });
         Self {
             state,
             history,
@@ -306,6 +339,10 @@ impl GitTab {
             action_task: None,
             expanded: None,
             diff_task: None,
+            message,
+            commit_menu: false,
+            last_commit: None,
+            _message_edits: message_edits,
             _history_events: history_events,
         }
     }
@@ -368,6 +405,8 @@ impl GitTab {
         self.action_task = None;
         self.expanded = None;
         self.diff_task = None;
+        self.commit_menu = false;
+        self.last_commit = None;
         let target = self.space.as_ref().map(|space| GitHistoryTarget::Pinned {
             cwd: self
                 .checkout_path
@@ -548,6 +587,7 @@ impl GitTab {
             space.device.as_deref(),
         );
         let generation = self.generation;
+        let committing = target == PendingTarget::Commit;
         self.pending = Some(Pending {
             target,
             replied: false,
@@ -555,6 +595,7 @@ impl GitTab {
         self.action_error = None;
         self.expanded = None;
         self.diff_task = None;
+        self.commit_menu = false;
         cx.notify();
         self.action_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
@@ -566,9 +607,15 @@ impl GitTab {
                     return;
                 }
                 match result {
-                    Ok(_) => {
+                    Ok(value) => {
                         if let Some(pending) = tab.pending.as_mut() {
                             pending.replied = true;
+                        }
+                        if committing {
+                            let reply: WorkingTreeActionReply =
+                                serde_json::from_value(value).unwrap_or_default();
+                            tab.last_commit = reply.commit;
+                            tab.message.update(cx, |input, cx| input.set_text("", cx));
                         }
                     }
                     Err(error) => {
@@ -581,6 +628,31 @@ impl GitTab {
             })
             .ok();
         }));
+    }
+
+    fn can_commit(&self, kind: CommitKind, policy: GitAgentBusyPolicy, cx: &App) -> bool {
+        let Some(tree) = self.tree.as_ref() else {
+            return false;
+        };
+        let ready = match kind {
+            CommitKind::Staged => !staged_files(tree).is_empty(),
+            CommitKind::Amend => tree.head_sha.is_some(),
+            CommitKind::All => !tree.files.is_empty(),
+        };
+        ready
+            && !self.message.read(cx).text().trim().is_empty()
+            && self.allows(&kind.action(String::new()), policy)
+            && self.source_control(cx)
+    }
+
+    fn commit(&mut self, kind: CommitKind, cx: &mut Context<Self>) {
+        self.commit_menu = false;
+        if !self.can_commit(kind, busy_policy(cx), cx) {
+            cx.notify();
+            return;
+        }
+        let message = self.message.read(cx).text().to_string();
+        self.run_action(kind.action(message), PendingTarget::Commit, cx);
     }
 
     fn toggle_diff(&mut self, staged: bool, path: String, cx: &mut Context<Self>) {
@@ -1110,7 +1182,271 @@ impl GitTab {
                     .overflow_y_scroll()
                     .child(body),
             )
-            .child(render_commit_box(staged.len(), theme))
+            .child(self.render_commit_box(staged.len(), writes, theme, cx))
+            .into_any_element()
+    }
+
+    fn render_commit_box(
+        &self,
+        staged: usize,
+        writes: Option<GitAgentBusyPolicy>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let committing = self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.target == PendingTarget::Commit);
+        let enabled =
+            |kind: CommitKind| writes.is_some_and(|policy| self.can_commit(kind, policy, cx));
+        let subject = subject_chars(self.message.read(cx).text());
+        let label = if committing {
+            "Committing…".to_string()
+        } else if staged == 1 {
+            "Commit 1 file".to_string()
+        } else {
+            format!("Commit {staged} files")
+        };
+        let main_enabled = enabled(CommitKind::Staged);
+        let menu = self.commit_menu.then(|| {
+            let popup = theme.for_popup();
+            let row = |selector: &'static str,
+                       kind: CommitKind,
+                       title: &'static str,
+                       detail: &'static str| {
+                let on = enabled(kind);
+                popover::menu_row(&popup, false, selector)
+                    .id(selector)
+                    .debug_selector(move || selector.to_string())
+                    .role(gpui::Role::MenuItem)
+                    .aria_label(title)
+                    .child(
+                        div().flex().flex_col().child(div().child(title)).child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(popup.text_muted)
+                                .child(detail),
+                        ),
+                    )
+                    .map(|el| {
+                        if on {
+                            el.cursor_pointer()
+                                .on_click(cx.listener(move |tab, _, _, cx| tab.commit(kind, cx)))
+                        } else {
+                            el.opacity(0.45)
+                        }
+                    })
+            };
+            popover::anchored_menu_above_end(
+                "git-commit-menu",
+                popover::popover_card(&popup)
+                    .w(px(240.0))
+                    .flex()
+                    .flex_col()
+                    .child(row(
+                        "git-commit-menu-commit",
+                        CommitKind::Staged,
+                        "Commit",
+                        "Commit the staged files",
+                    ))
+                    .child(row(
+                        "git-commit-menu-amend",
+                        CommitKind::Amend,
+                        "Amend",
+                        "Fold into the previous commit (not pushed)",
+                    ))
+                    .child(row(
+                        "git-commit-menu-all",
+                        CommitKind::All,
+                        "Commit all",
+                        "Stage everything, then commit",
+                    ))
+                    .on_mouse_down_out(cx.listener(|tab, _, _, cx| {
+                        tab.commit_menu = false;
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+                None,
+            )
+        });
+        let fill = if main_enabled {
+            theme.accent_strong
+        } else {
+            theme.accent_strong.opacity(0.35)
+        };
+        div()
+            .id("git-commit-box")
+            .flex_none()
+            .p(px(12.0))
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .border_t_1()
+            .border_color(theme.hairline(0.07))
+            .when(committing, |el| el.opacity(0.6))
+            .child(
+                div()
+                    .id("git-commit-message")
+                    .debug_selector(|| "git-commit-message".into())
+                    .role(gpui::Role::TextInput)
+                    .aria_label("Commit message")
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(theme.hairline(0.12))
+                    .bg(theme.ink(0.02))
+                    .flex()
+                    .flex_col()
+                    .capture_action(cx.listener(|tab, _: &crate::composer::Submit, window, cx| {
+                        cx.stop_propagation();
+                        tab.message.update(cx, |input, cx| {
+                            input.replace_text_in_range(None, "\n", window, cx)
+                        });
+                    }))
+                    .on_key_down(cx.listener(|tab, event: &KeyDownEvent, _, cx| {
+                        let modifiers = &event.keystroke.modifiers;
+                        if event.keystroke.key == "enter"
+                            && (modifiers.platform || modifiers.control)
+                        {
+                            cx.stop_propagation();
+                            tab.commit(CommitKind::Staged, cx);
+                        }
+                    }))
+                    .on_click(cx.listener(|tab, _, window, cx| {
+                        window.focus(&tab.message.focus_handle(cx), cx);
+                    }))
+                    .child(
+                        div()
+                            .min_h(px(64.0))
+                            .max_h(px(160.0))
+                            .px(px(10.0))
+                            .pt(px(8.0))
+                            .text_size(px(13.0))
+                            .child(self.message.clone()),
+                    )
+                    .child(
+                        div()
+                            .h(px(30.0))
+                            .px(px(8.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .text_size(px(12.0))
+                            .text_color(theme.text_muted)
+                            .child("✦ Write with AI")
+                            .child(div().flex_1())
+                            .child(
+                                div()
+                                    .id("git-commit-count")
+                                    .debug_selector(|| "git-commit-count".into())
+                                    .font_family(theme.font_mono.clone())
+                                    .text_size(px(11.0))
+                                    .text_color(if subject > SUBJECT_LIMIT {
+                                        theme.warning
+                                    } else {
+                                        theme.text_muted
+                                    })
+                                    .child(SharedString::from(format!(
+                                        "{subject}/{SUBJECT_LIMIT}"
+                                    ))),
+                            ),
+                    ),
+            )
+            .when_some(self.last_commit.as_ref(), |el, commit| {
+                let short: String = commit.sha.chars().take(7).collect();
+                let text = match &commit.branch {
+                    Some(branch) => format!("Committed {short} to {branch}"),
+                    None => format!("Committed {short}"),
+                };
+                el.child(
+                    div()
+                        .id("git-last-commit")
+                        .debug_selector(|| "git-last-commit".into())
+                        .text_size(px(11.0))
+                        .text_color(theme.text_muted)
+                        .truncate()
+                        .child(SharedString::from(text)),
+                )
+            })
+            .child(
+                div()
+                    .h(px(32.0))
+                    .rounded(px(8.0))
+                    .bg(fill)
+                    .flex()
+                    .text_size(px(13.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(if main_enabled {
+                        theme.on_accent
+                    } else {
+                        theme.on_accent.opacity(0.55)
+                    })
+                    .child(
+                        div()
+                            .id("git-commit-button")
+                            .debug_selector(|| "git-commit-button".into())
+                            .role(gpui::Role::Button)
+                            .aria_label(SharedString::from(label.clone()))
+                            .flex_1()
+                            .h_full()
+                            .rounded_l(px(8.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .gap(px(8.0))
+                            .child(
+                                icon(icons::LUCIDE_CHECK)
+                                    .size(px(14.0))
+                                    .text_color(theme.on_accent),
+                            )
+                            .child(SharedString::from(label))
+                            .child(
+                                div()
+                                    .px(px(4.0))
+                                    .rounded(px(4.0))
+                                    .bg(theme.on_accent.opacity(0.12))
+                                    .font_family(theme.font_mono.clone())
+                                    .text_size(px(10.0))
+                                    .child("⌘↵"),
+                            )
+                            .when(main_enabled, |el| {
+                                el.cursor_pointer()
+                                    .hover(|style| style.bg(theme.on_accent.opacity(0.08)))
+                                    .on_click(cx.listener(|tab, _, _, cx| {
+                                        tab.commit(CommitKind::Staged, cx)
+                                    }))
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("git-commit-more")
+                            .debug_selector(|| "git-commit-more".into())
+                            .role(gpui::Role::Button)
+                            .aria_label("More commit options")
+                            .relative()
+                            .w(px(32.0))
+                            .h_full()
+                            .rounded_r(px(8.0))
+                            .border_l_1()
+                            .border_color(theme.on_accent.opacity(0.18))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                icon(icons::LUCIDE_CHEVRON_DOWN)
+                                    .size(px(14.0))
+                                    .text_color(theme.on_accent),
+                            )
+                            .when(writes.is_some() && !committing, |el| {
+                                el.cursor_pointer()
+                                    .hover(|style| style.bg(theme.on_accent.opacity(0.08)))
+                                    .on_click(cx.listener(|tab, _, _, cx| {
+                                        tab.commit_menu = !tab.commit_menu;
+                                        cx.notify();
+                                    }))
+                            })
+                            .children(menu),
+                    ),
+            )
             .into_any_element()
     }
 }
@@ -1198,76 +1534,6 @@ fn render_diff(open: &Expanded, theme: &Theme) -> AnyElement {
         .flex()
         .flex_col()
         .children(body)
-        .into_any_element()
-}
-
-fn render_commit_box(staged: usize, theme: &Theme) -> AnyElement {
-    let label = match staged {
-        1 => "Commit 1 file".to_string(),
-        count => format!("Commit {count} files"),
-    };
-    div()
-        .id("git-commit-box")
-        .flex_none()
-        .p(px(12.0))
-        .flex()
-        .flex_col()
-        .gap(px(8.0))
-        .border_t_1()
-        .border_color(theme.hairline(0.07))
-        .opacity(0.55)
-        .child(
-            div()
-                .rounded(px(8.0))
-                .border_1()
-                .border_color(theme.hairline(0.09))
-                .flex()
-                .flex_col()
-                .child(
-                    div()
-                        .h(px(64.0))
-                        .px(px(10.0))
-                        .py(px(8.0))
-                        .text_size(px(13.0))
-                        .text_color(theme.text_muted.opacity(0.7))
-                        .child("Commit message (⌘↵ to commit)"),
-                )
-                .child(
-                    div()
-                        .h(px(30.0))
-                        .px(px(8.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .text_size(px(12.0))
-                        .text_color(theme.text_muted)
-                        .child("✦ Write with AI")
-                        .child(div().flex_1())
-                        .child(SharedString::from(format!("0/{SUBJECT_LIMIT}"))),
-                ),
-        )
-        .child(
-            div()
-                .id("git-commit-button")
-                .debug_selector(|| "git-commit-button".into())
-                .role(gpui::Role::Button)
-                .aria_label("Commit (available in a later version)")
-                .h(px(30.0))
-                .rounded(px(8.0))
-                .bg(theme.ink(0.08))
-                .flex()
-                .items_center()
-                .justify_center()
-                .gap(px(6.0))
-                .text_size(px(13.0))
-                .text_color(theme.text_muted)
-                .child(
-                    icon(icons::LUCIDE_CHECK)
-                        .size(px(14.0))
-                        .text_color(theme.text_muted),
-                )
-                .child(SharedString::from(label)),
-        )
         .into_any_element()
 }
 
@@ -1875,10 +2141,19 @@ mod tests {
                     if let Some(error) = self.action_error.lock().unwrap().clone() {
                         return Err(RpcError::Failed(error));
                     }
-                    let mut next = tree();
+                    let mut next = self.tree.lock().unwrap().clone().unwrap_or_else(tree);
                     next["revision"] = "r2".into();
+                    let reply = if params["action"]["kind"] == "commit" {
+                        next["headSha"] = "bbb".into();
+                        serde_json::json!({"commit": {
+                            "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                            "branch": "feature/7", "subject": "Fix the panel",
+                        }})
+                    } else {
+                        serde_json::json!({})
+                    };
                     *self.tree.lock().unwrap() = Some(next);
-                    RpcReply::value(&serde_json::json!({}))
+                    RpcReply::value(&reply)
                 }
                 methods::GET_WORKING_TREE_FILE_DIFF => RpcReply::value(&serde_json::json!({
                     "checkoutId": "checkout-1", "path": params["path"],
@@ -2482,6 +2757,195 @@ mod tests {
                 tab.action_error
                     .as_ref()
                     .is_some_and(|error| error.contains("changed since"))
+            );
+        });
+    }
+
+    fn set_message(tab: &Entity<GitTab>, cx: &mut gpui::VisualTestContext, text: &str) {
+        tab.update(cx, |tab, cx| {
+            tab.message.update(cx, |input, cx| input.set_text(text, cx));
+        });
+        cx.run_until_parked();
+    }
+
+    fn message(tab: &Entity<GitTab>, cx: &mut gpui::VisualTestContext) -> String {
+        tab.read_with(cx, |tab, cx| tab.message.read(cx).text().to_string())
+    }
+
+    fn commit_kinds(calls: &Calls) -> Vec<serde_json::Value> {
+        calls_of(calls, methods::RUN_WORKING_TREE_ACTION)
+            .into_iter()
+            .map(|params| params["action"].clone())
+            .collect()
+    }
+
+    #[test]
+    fn the_subject_counter_counts_characters_of_the_first_line() {
+        assert_eq!(subject_chars(""), 0);
+        assert_eq!(subject_chars("Fix the panel\n\nBody text"), 13);
+        assert_eq!(subject_chars("Sửa lỗi"), 7);
+    }
+
+    #[gpui::test]
+    fn enter_breaks_the_line_and_cmd_enter_commits_then_the_box_clears(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        let (page, cx, calls, _dir) = open_lab(cx, lab_state(), git_prefs(), lab);
+        cx.update(|_, cx| crate::composer::init(cx, Default::default()));
+        settle(cx, |cx| cx.debug_bounds("git-commit-button").is_some());
+        let tab = git_tab(&page, cx);
+        settle(cx, |cx| tab.read_with(cx, |tab, _| tab.tree.is_some()));
+
+        click(cx, "git-commit-button");
+        cx.simulate_keystrokes("cmd-enter");
+        cx.run_until_parked();
+        assert!(
+            calls_of(&calls, methods::RUN_WORKING_TREE_ACTION).is_empty(),
+            "an empty message never commits"
+        );
+
+        click(cx, "git-commit-message");
+        cx.simulate_input("Fix the panel");
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input("Why it broke.");
+        cx.run_until_parked();
+        assert_eq!(message(&tab, cx), "Fix the panel\nWhy it broke.");
+        assert!(
+            calls_of(&calls, methods::RUN_WORKING_TREE_ACTION).is_empty(),
+            "plain Enter is a newline, not a commit"
+        );
+
+        let history_reads = calls_of(&calls, methods::LIST_GIT_HISTORY).len();
+        cx.simulate_keystrokes("cmd-enter");
+        settle_action(cx, &tab, &calls, 1);
+        assert_eq!(
+            calls_of(&calls, methods::RUN_WORKING_TREE_ACTION)[0],
+            serde_json::json!({
+                "spaceId": "space-1", "expectedRevision": "r1", "busyPolicy": "safeOnly",
+                "action": {
+                    "kind": "commit", "message": "Fix the panel\nWhy it broke.",
+                    "amend": false, "all": false,
+                },
+            })
+        );
+        settle(cx, |_| {
+            calls_of(&calls, methods::LIST_GIT_HISTORY).len() > history_reads
+        });
+        assert_eq!(message(&tab, cx), "", "the box clears after a commit");
+        tab.read_with(cx, |tab, _| {
+            let commit = tab.last_commit.as_ref().expect("the reply is kept");
+            assert_eq!(commit.subject, "Fix the panel");
+            assert_eq!(commit.branch.as_deref(), Some("feature/7"));
+            assert_eq!(tab.tree().unwrap().head_sha.as_deref(), Some("bbb"));
+        });
+        assert!(cx.debug_bounds("git-last-commit").is_some());
+    }
+
+    #[gpui::test]
+    fn the_split_menu_amends_and_commits_all_when_the_policy_allows(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        let mut busy = tree();
+        busy["agentActive"] = true.into();
+        *lab.tree.lock().unwrap() = Some(busy);
+        let (page, cx, calls, _dir) = open_lab(cx, lab_state(), git_prefs(), lab);
+        settle(cx, |cx| cx.debug_bounds("git-agent-active").is_some());
+        let tab = git_tab(&page, cx);
+
+        set_message(&tab, cx, "Fix the panel");
+        click(cx, "git-commit-more");
+        cx.run_until_parked();
+        click(cx, "git-commit-menu-all");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("git-commit-menu-amend").is_some());
+        click(cx, "git-commit-menu-amend");
+        cx.run_until_parked();
+        assert!(
+            calls_of(&calls, methods::RUN_WORKING_TREE_ACTION).is_empty(),
+            "SafeOnly refuses commit all and amend while an agent runs"
+        );
+        click(cx, "git-commit-menu-commit");
+        settle_action(cx, &tab, &calls, 1);
+        assert_eq!(
+            commit_kinds(&calls),
+            [
+                serde_json::json!({"kind": "commit", "message": "Fix the panel", "amend": false, "all": false})
+            ],
+            "commit of staged files still runs, under the warning banner"
+        );
+        assert!(cx.debug_bounds("git-commit-menu").is_none());
+
+        cx.update(|_, cx| {
+            crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
+                settings.git_agent_busy_policy = crate::settings::GitAgentBusyPolicy::AllowAll;
+            });
+        });
+        set_message(&tab, cx, "Everything");
+        click(cx, "git-commit-more");
+        cx.run_until_parked();
+        click(cx, "git-commit-menu-all");
+        settle_action(cx, &tab, &calls, 2);
+        set_message(&tab, cx, "Reworded");
+        click(cx, "git-commit-more");
+        cx.run_until_parked();
+        click(cx, "git-commit-menu-amend");
+        settle_action(cx, &tab, &calls, 3);
+        let sent = calls_of(&calls, methods::RUN_WORKING_TREE_ACTION);
+        assert_eq!(
+            sent[1]["action"],
+            serde_json::json!({"kind": "commit", "message": "Everything", "amend": false, "all": true})
+        );
+        assert_eq!(sent[1]["busyPolicy"], "allowAll");
+        assert_eq!(
+            sent[2]["action"],
+            serde_json::json!({"kind": "commit", "message": "Reworded", "amend": true, "all": false})
+        );
+
+        cx.update(|_, cx| {
+            crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
+                settings.git_agent_busy_policy = crate::settings::GitAgentBusyPolicy::BlockAll;
+            });
+        });
+        set_message(&tab, cx, "Blocked");
+        click(cx, "git-commit-button");
+        click(cx, "git-commit-message");
+        cx.simulate_keystrokes("cmd-enter");
+        cx.run_until_parked();
+        assert_eq!(
+            calls_of(&calls, methods::RUN_WORKING_TREE_ACTION).len(),
+            3,
+            "BlockAll leaves the commit box inert"
+        );
+    }
+
+    #[gpui::test]
+    fn a_refused_commit_keeps_the_message_and_shows_why(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        *lab.action_error.lock().unwrap() = Some(
+            "Git does not know who you are. Set your name and email with `git config --global user.name \"Your Name\"` and `git config --global user.email you@example.com`, then commit again."
+                .into(),
+        );
+        let (page, cx, calls, _dir) = open_lab(cx, lab_state(), git_prefs(), lab);
+        settle(cx, |cx| cx.debug_bounds("git-commit-button").is_some());
+        let tab = git_tab(&page, cx);
+        settle(cx, |cx| tab.read_with(cx, |tab, _| tab.tree.is_some()));
+        set_message(&tab, cx, "Fix the panel");
+        click(cx, "git-commit-button");
+        settle_action(cx, &tab, &calls, 1);
+        settle(cx, |cx| cx.debug_bounds("git-error-0").is_some());
+        assert_eq!(message(&tab, cx), "Fix the panel");
+        tab.read_with(cx, |tab, _| {
+            assert!(tab.last_commit.is_none());
+            assert!(
+                tab.action_error
+                    .as_ref()
+                    .is_some_and(|error| error.contains("does not know who you are"))
             );
         });
     }
