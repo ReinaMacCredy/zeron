@@ -66,7 +66,7 @@ impl HubClient<'_> {
         }
     }
 
-    pub(crate) async fn list(&self) -> Result<(Vec<HubDevice>, Option<String>), String> {
+    pub(crate) async fn list(&self) -> Result<(Vec<HubDevice>, Vec<String>), String> {
         let list: DeviceList = self
             .http
             .get(format!("{}/api/devices", self.origin))
@@ -87,13 +87,13 @@ impl HubClient<'_> {
                 ..device
             })
             .collect();
-        let errors: Vec<String> = list
+        let errors = list
             .errors
             .into_iter()
             .map(|error| error.message)
             .filter(|message| !message.is_empty())
             .collect();
-        Ok((devices, (!errors.is_empty()).then(|| errors.join("\n"))))
+        Ok((devices, errors))
     }
 
     pub(crate) async fn boot(&self, device: &HubDevice) -> Result<String, String> {

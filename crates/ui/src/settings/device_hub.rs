@@ -1,7 +1,7 @@
 use gpui::{
     AnyElement, Context, Entity, SharedString, Subscription, Task, Window, div, prelude::*, px,
 };
-use zeron_proto::device_hub::{DeviceHostStatus, DeviceHubState, DevicePlatform};
+use zeron_proto::device_hub::{DeviceHubState, DevicePlatform};
 use zeron_rpc::methods;
 
 use super::permission_guide::row;
@@ -21,7 +21,6 @@ pub struct DeviceHubPage {
     scroll: widgets::PageScroll,
     pending: Option<SetupPending>,
     update_error: Option<SharedString>,
-    platforms_revealed: bool,
     task: Option<Task<()>>,
     _state: Subscription,
 }
@@ -34,7 +33,6 @@ impl DeviceHubPage {
             scroll: widgets::PageScroll::default(),
             pending: None,
             update_error: None,
-            platforms_revealed: false,
             task: None,
             _state: observer,
         };
@@ -101,28 +99,27 @@ impl DeviceHubPage {
         }
     }
 
-    fn version_line(&self, hub: &DeviceHubState) -> String {
-        match hub
+    fn version_rows(hub: &DeviceHubState) -> Option<[(&'static str, String); 3]> {
+        let tool = &hub
             .hosts
             .iter()
-            .find(|host| host.kind == "local")
-            .and_then(|host| host.tools.as_ref())
-        {
-            Some(tools) => {
-                let tool = &tools.hub;
-                let installed = if tool.installed.is_empty() {
-                    "None".to_string()
-                } else {
-                    tool.installed.join(", ")
-                };
-                format!(
-                    "Running {} · Required {} · Installed {installed}",
-                    tool.running.as_deref().unwrap_or("Not running"),
-                    tool.required
-                )
-            }
-            None => "Versions have not been checked.".into(),
-        }
+            .find(|host| host.kind == "local")?
+            .tools
+            .as_ref()?
+            .hub;
+        let installed = if tool.installed.is_empty() {
+            "None".to_string()
+        } else {
+            tool.installed.join(", ")
+        };
+        Some([
+            (
+                "Running",
+                tool.running.clone().unwrap_or_else(|| "Not running".into()),
+            ),
+            ("Required", tool.required.clone()),
+            ("Installed", installed),
+        ])
     }
 
     fn needs_update(hub: &DeviceHubState) -> Option<String> {
@@ -155,14 +152,6 @@ impl Render for DeviceHubPage {
         let enabled = hub.settings.enabled;
         let busy = setup::busy(&hub);
         let idle = self.pending.is_none();
-        if !enabled {
-            self.platforms_revealed = false;
-        } else if (hub.host_status == DeviceHostStatus::Ready
-            || setup::local_platforms_unavailable(&hub))
-            && self.pending != Some(SetupPending::Hub)
-        {
-            self.platforms_revealed = true;
-        }
         let owner = cx.entity_id();
 
         let mut hub_controls = div().flex().items_center().gap(px(8.0));
@@ -190,12 +179,32 @@ impl Render for DeviceHubPage {
             .flex()
             .flex_col()
             .gap(px(8.0))
-            .child(
-                div()
-                    .text_size(crate::typography::ui_rems(11.5))
+            .child(match Self::version_rows(&hub) {
+                Some(rows) => div()
+                    .max_w(px(280.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .children(rows.into_iter().map(|(label, value)| {
+                        div()
+                            .flex()
+                            .justify_between()
+                            .gap(px(24.0))
+                            .child(div().text_color(theme.text_muted).child(label))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .font_family(theme.font_mono.clone())
+                                    .text_color(theme.text)
+                                    .child(SharedString::from(value)),
+                            )
+                    })),
+                None => div()
+                    .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.text_muted)
-                    .child(SharedString::from(self.version_line(&hub))),
-            )
+                    .child("Versions have not been checked."),
+            })
             .child(
                 div()
                     .flex()
@@ -257,7 +266,7 @@ impl Render for DeviceHubPage {
                     .into_any_element(),
             ),
         ));
-        if self.platforms_revealed {
+        if enabled {
             let platforms = div()
                 .flex()
                 .flex_wrap()
@@ -430,6 +439,27 @@ mod tests {
         state
     }
 
+    #[test]
+    fn the_version_rows_use_the_t3code_labels() {
+        assert_eq!(
+            DeviceHubPage::version_rows(&DeviceHubState::default()),
+            None
+        );
+        assert_eq!(
+            DeviceHubPage::version_rows(&with_tools(hub(true), &[], 0)),
+            Some([
+                ("Running", "Not running".to_string()),
+                ("Required", "0.12.0".to_string()),
+                ("Installed", "None".to_string()),
+            ])
+        );
+        assert_eq!(
+            DeviceHubPage::version_rows(&with_tools(hub(true), &["0.11.0", "0.12.0"], 0))
+                .map(|rows| rows[2].1.clone()),
+            Some("0.11.0, 0.12.0".to_string())
+        );
+    }
+
     #[gpui::test]
     fn the_page_inspects_on_open_and_enabling_also_completes_onboarding(cx: &mut TestAppContext) {
         let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -453,7 +483,9 @@ mod tests {
             vec![serde_json::json!({ "enabled": true, "onboardingCompleted": true })]
         );
         state.update(cx, |state, cx| {
-            state.device_hub = Some(with_tools(hub(true), &["0.12.0"], 1));
+            let mut enabled = with_tools(hub(true), &["0.12.0"], 1);
+            enabled.host_status = zeron_proto::device_hub::DeviceHostStatus::Idle;
+            state.device_hub = Some(enabled);
             cx.notify();
         });
         wait(cx, |cx| {

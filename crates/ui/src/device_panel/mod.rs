@@ -1097,6 +1097,36 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
+    fn the_wizard_switches_stay_inside_the_card_in_a_narrow_pane(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let mut state = hub(true);
+        state.settings.onboarding_completed = false;
+        let (state, _calls) = app_state(cx, &runtime, state);
+        let (_panel, cx) = cx.add_window_view(|_, cx| DevicePanel::new(state, "chat".into(), cx));
+        cx.simulate_resize(gpui::size(gpui::px(360.0), gpui::px(800.0)));
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        let inside = |cx: &mut VisualTestContext, selector: &'static str| {
+            wait(cx, |cx| cx.debug_bounds(selector).is_some());
+            let card = cx.debug_bounds("device-setup-card").unwrap();
+            let control = cx.debug_bounds(selector).unwrap();
+            assert!(
+                control.left() >= card.left() && control.right() <= card.right(),
+                "{selector} {control:?} is outside the card {card:?}"
+            );
+            assert!(card.right() <= gpui::px(360.0), "{card:?}");
+        };
+        inside(cx, "device-hub-enable");
+        click(cx, "device-setup-continue");
+        wait(cx, |cx| cx.debug_bounds("device-setup-check").is_some());
+        click(cx, "device-setup-continue");
+        inside(cx, "device-agent-access");
+    }
+
+    #[gpui::test]
     fn opening_a_device_shows_the_first_step_of_the_loading_view(cx: &mut TestAppContext) {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();

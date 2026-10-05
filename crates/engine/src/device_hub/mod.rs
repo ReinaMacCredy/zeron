@@ -68,6 +68,14 @@ fn mark_running(state: &mut DeviceHubState, running: bool) {
     }
 }
 
+fn host_diagnostics(errors: Vec<String>, android_available: bool) -> Option<String> {
+    let kept: Vec<String> = errors
+        .into_iter()
+        .filter(|message| android_available || !message.contains("[android-utils]"))
+        .collect();
+    (!kept.is_empty()).then(|| kept.join("\n"))
+}
+
 async fn detect_platforms() -> Vec<DevicePlatformAvailability> {
     tokio::task::spawn_blocking(platform::detect)
         .await
@@ -495,16 +503,21 @@ impl DeviceHub {
     }
 
     async fn refresh(&self, origin: &str) -> Result<(), String> {
-        let (devices, detail) = HubClient {
+        let (devices, errors) = HubClient {
             http: &self.http,
             origin,
         }
         .list()
         .await?;
         self.publish(|state| {
+            let android = state
+                .hosts
+                .iter()
+                .flat_map(|host| &host.platforms)
+                .any(|platform| platform.platform == DevicePlatform::Android && platform.available);
             state.devices = devices;
             state.host_status = DeviceHostStatus::Ready;
-            state.host_status_detail = detail;
+            state.host_status_detail = host_diagnostics(errors, android);
         });
         Ok(())
     }
@@ -1569,6 +1582,30 @@ mod tests {
         hub.signal_stop();
         eventually(|| hub.hub_slot().as_mut().is_some_and(|hub| !hub.alive())).await;
         assert_ne!(unsafe { libc::kill(pid, 0) }, 0);
+    }
+
+    #[test]
+    fn android_list_errors_stay_out_of_host_diagnostics_while_android_is_unavailable() {
+        let errors = || {
+            vec![
+                "[android-utils] Failed to run `avdmanager list avd`:".to_string(),
+                "[apple-utils] Failed to run `xcrun simctl list`:".to_string(),
+            ]
+        };
+        assert_eq!(
+            super::host_diagnostics(errors(), false).as_deref(),
+            Some("[apple-utils] Failed to run `xcrun simctl list`:")
+        );
+        assert_eq!(
+            super::host_diagnostics(errors(), true).as_deref(),
+            Some(
+                "[android-utils] Failed to run `avdmanager list avd`:\n[apple-utils] Failed to run `xcrun simctl list`:"
+            )
+        );
+        assert_eq!(
+            super::host_diagnostics(vec![errors().remove(0)], false),
+            None
+        );
     }
 
     #[tokio::test]

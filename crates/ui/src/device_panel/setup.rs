@@ -257,6 +257,8 @@ pub fn platform_card(
         )
         .child(
             div()
+                .flex_1()
+                .min_w_0()
                 .flex()
                 .when(compact && ready, |el| el.items_center().gap(px(8.0)))
                 .when(!(compact && ready), |el| el.flex_col())
@@ -422,7 +424,7 @@ impl DevicePanel {
                             .items_start()
                             .justify_between()
                             .gap(px(16.0))
-                            .child(muted(theme, DEVICE_HUB_DESCRIPTION).flex_1())
+                            .child(muted(theme, DEVICE_HUB_DESCRIPTION).flex_1().min_w_0())
                             .child(hub_switch),
                     )
                     .children(status.map(|text| status_line(theme, owner, text, spinning, cx))),
@@ -484,7 +486,7 @@ impl DevicePanel {
                             .items_start()
                             .justify_between()
                             .gap(px(16.0))
-                            .child(muted(theme, AGENT_DEVICE_DESCRIPTION).flex_1())
+                            .child(muted(theme, AGENT_DEVICE_DESCRIPTION).flex_1().min_w_0())
                             .child(agent_switch),
                     )
                     .when(pending == Some(SetupPending::Agent), |el| {
@@ -566,6 +568,7 @@ impl DevicePanel {
             .p(px(16.0))
             .child(
                 div()
+                    .debug_selector(|| "device-setup-card".into())
                     .my_auto()
                     .w_full()
                     .max_w(px(440.0))
