@@ -889,6 +889,9 @@ impl GitTab {
         let committing = target == PendingTarget::Commit;
         let stashing = target == PendingTarget::Stash;
         let detailed = target == PendingTarget::Detail;
+        let detail_sha = detailed
+            .then(|| self.detail.as_ref().map(|detail| detail.commit.sha.clone()))
+            .flatten();
         self.pending = Some(Pending {
             target,
             replied: false,
@@ -921,7 +924,7 @@ impl GitTab {
                             tab.stash_note = Some(conflict_note(&reply.conflicts).into());
                         }
                         if detailed {
-                            tab.finish_detail(&op, &reply, cx);
+                            tab.finish_detail(&op, &reply, detail_sha.as_deref(), cx);
                         }
                         if committing {
                             tab.last_commit = reply.commit;
@@ -939,7 +942,9 @@ impl GitTab {
                     }
                     Err(error) => {
                         tab.pending = None;
-                        match tab.detail.as_mut().filter(|_| detailed) {
+                        match tab.detail.as_mut().filter(|detail| {
+                            detailed && detail_sha.as_deref() == Some(detail.commit.sha.as_str())
+                        }) {
                             Some(detail) => detail.outcome = Some((error.to_string().into(), true)),
                             None => tab.action_error = Some(error.to_string().into()),
                         }
@@ -1358,6 +1363,7 @@ impl GitTab {
         &mut self,
         op: &WorkingTreeAction,
         reply: &WorkingTreeActionReply,
+        detail_sha: Option<&str>,
         cx: &mut Context<Self>,
     ) {
         self.history.update(cx, |history, cx| history.refresh(cx));
@@ -1409,7 +1415,11 @@ impl GitTab {
             },
             _ => return,
         };
-        let Some(detail) = self.detail.as_mut() else {
+        let Some(detail) = self
+            .detail
+            .as_mut()
+            .filter(|detail| detail_sha == Some(detail.commit.sha.as_str()))
+        else {
             return;
         };
         detail.branch_form = None;
@@ -8145,5 +8155,43 @@ mod tests {
         settle_action(cx, &tab, &calls, 1);
         tab.read_with(cx, |tab, _| assert!(tab.last_commit.is_some()));
         assert_eq!(message(&tab, cx), "Second");
+    }
+
+    #[gpui::test]
+    fn a_detail_outcome_lands_only_on_the_commit_it_was_for(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        *lab.tree.lock().unwrap() = Some(clean_tree());
+        let (cx, calls, _dir, tab) = open_detail_lab(cx, lab_state(), lab.clone());
+        lab.hold_actions
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        show_commit(cx, &tab, history_commit(PICKED, &["feature/x"], 1));
+        click(cx, "git-commit-checkout");
+        settle(cx, |_| actions(&calls).len() == 1);
+        show_commit(cx, &tab, history_commit(LOOSE, &[], 1));
+        lab.release_action.notify_one();
+        settle_action(cx, &tab, &calls, 1);
+        assert_eq!(text_of(&tab, cx), None, "the outcome was for {PICKED}");
+
+        *lab.tree.lock().unwrap() = Some(clean_tree());
+        tab.update(cx, |tab, cx| tab.load(cx));
+        settle(cx, |cx| tab.read_with(cx, |tab, _| !tab.loading));
+        *lab.action_error.lock().unwrap() = Some("Git refused the checkout.".into());
+        show_commit(cx, &tab, history_commit(PICKED, &["feature/x"], 1));
+        click(cx, "git-commit-checkout");
+        settle(cx, |_| actions(&calls).len() == 2);
+        show_commit(cx, &tab, history_commit(LOOSE, &[], 1));
+        lab.release_action.notify_one();
+        settle_action(cx, &tab, &calls, 2);
+        assert_eq!(text_of(&tab, cx), None);
+        tab.read_with(cx, |tab, _| {
+            assert!(
+                tab.action_error
+                    .as_ref()
+                    .is_some_and(|error| error.contains("refused the checkout"))
+            );
+        });
     }
 }
