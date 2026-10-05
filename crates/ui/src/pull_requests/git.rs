@@ -4763,39 +4763,14 @@ impl PullRequestsPage {
                     .map(|candidate| SharedString::from(candidate.display_name().to_string()))
             })
             .unwrap_or_else(|| "Pick a project".into());
-        self.menu_trigger(
+        self.render_project_chip(
             filters::MenuKind::GitProject,
-            top_chip("pull-requests-git-project", "Project", theme)
-                .debug_selector(|| "pull-requests-git-project".into())
-                .max_w(px(240.0))
-                .child(
-                    icon(icons::LUCIDE_FOLDER)
-                        .size(px(14.0))
-                        .flex_none()
-                        .text_color(if space.is_some() {
-                            theme.text
-                        } else {
-                            theme.text_muted
-                        }),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .child(label),
-                )
-                .child(
-                    icon(icons::LUCIDE_CHEVRON_DOWN)
-                        .size(px(12.0))
-                        .flex_none()
-                        .text_color(theme.text_muted.opacity(0.7)),
-                ),
+            "pull-requests-git-project",
+            label,
+            space.is_some(),
             theme,
             cx,
         )
-        .into_any_element()
     }
 
     pub(super) fn render_git_project_menu(

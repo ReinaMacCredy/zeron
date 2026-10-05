@@ -918,11 +918,34 @@ impl PullRequestsPage {
     }
 
     fn render_project_control(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let picked = self.prefs.repository.is_some();
-        self.menu_trigger(
+        let label = self
+            .prefs
+            .repository
+            .clone()
+            .unwrap_or_else(|| "All projects".into());
+        self.render_project_chip(
             filters::MenuKind::Project,
-            top_chip("pull-requests-project", "Project", theme)
-                .debug_selector(|| "pull-requests-project".into())
+            "pull-requests-project",
+            label.into(),
+            self.prefs.repository.is_some(),
+            theme,
+            cx,
+        )
+    }
+
+    fn render_project_chip(
+        &self,
+        kind: filters::MenuKind,
+        id: &'static str,
+        label: SharedString,
+        picked: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.menu_trigger(
+            kind,
+            top_chip(id, "Project", theme)
+                .debug_selector(move || id.into())
                 .max_w(px(240.0))
                 .child(
                     icon(icons::LUCIDE_FOLDER)
@@ -936,12 +959,7 @@ impl PullRequestsPage {
                         .overflow_hidden()
                         .text_ellipsis()
                         .whitespace_nowrap()
-                        .child(
-                            self.prefs
-                                .repository
-                                .clone()
-                                .unwrap_or_else(|| "All projects".into()),
-                        ),
+                        .child(label),
                 )
                 .child(
                     icon(icons::LUCIDE_CHEVRON_DOWN)
