@@ -22,6 +22,7 @@ pub mod change_requests;
 pub mod chat2_host;
 mod chat_persistence;
 pub mod computer;
+pub mod device_hub;
 pub mod diff_sync;
 pub mod doc_host;
 pub mod harness_updates;
@@ -146,6 +147,7 @@ pub struct EngineCore {
     pub uploads: Uploads,
     pub agent_accounts: AgentAccounts,
     pub computer: Arc<computer::runtime::ComputerRuntime>,
+    pub device_hub: Arc<device_hub::DeviceHub>,
     pub harness_updates: harness_updates::HarnessUpdateCoordinator,
     pub device_id: String,
     /// Local→synced profile import (account-scoped runtimes only).
@@ -328,6 +330,7 @@ impl EngineCore {
         let spaces_sync = SpacesSync::start(repos.clone(), workspace.clone(), &device_id);
         let computer = computer::runtime::ComputerRuntime::start(data_dir);
         computer.attach(&sessions);
+        let device_hub = device_hub::DeviceHub::start(data_dir);
         Ok(Self {
             sessions,
             doc_host,
@@ -344,6 +347,7 @@ impl EngineCore {
             uploads,
             agent_accounts,
             computer,
+            device_hub,
             harness_updates,
             device_id,
             local_import,
@@ -483,6 +487,7 @@ impl EngineCore {
         .with_auth(self.auth())
         .with_previews(self.previews.clone())
         .with_computer(self.computer.clone())
+        .with_device_hub(self.device_hub.clone())
         .with_harness_updates(self.harness_updates.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);
@@ -512,6 +517,8 @@ impl EngineCore {
     /// kill live PTYs, stamp our workspace `lastSeenAt`, and flush every open doc
     /// snapshot.
     pub async fn shutdown(&self) {
+        // App quit allows 200 ms and the hub owns its process group: SIGTERM it before the drains.
+        self.device_hub.signal_stop();
         self.previews.shutdown().await;
         self.harness_updates.shutdown().await;
         // A run interruption transitions its chat to Idle, and Idle normally
@@ -548,6 +555,7 @@ impl EngineCore {
         self.doc_host.shutdown_workers().await;
         self.doc_host.flush_all();
         self.computer.shutdown().await;
+        self.device_hub.shutdown().await;
         self.workspace.shutdown();
         // Break the sessions ⇄ doc-host retain cycle so the replaced graph can
         // actually be freed once the last handle drops.
@@ -609,6 +617,12 @@ fn relay_refused(method: &str) -> bool {
             | methods::COMPUTER_ACTION
             | methods::COMPUTER_EMERGENCY_STOP
             | methods::WATCH_COMPUTER_EVENTS
+            | methods::WATCH_DEVICE_HUB
+            | methods::CONFIGURE_DEVICE_HUB
+            | methods::LIST_HUB_DEVICES
+            | methods::OPEN_HUB_DEVICE
+            | methods::WATCH_HUB_DEVICE_FRAMES
+            | methods::SEND_HUB_DEVICE_INPUT
     )
 }
 
