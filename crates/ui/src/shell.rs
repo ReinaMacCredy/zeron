@@ -2612,7 +2612,20 @@ impl Shell {
         // remembered like any other link to a section.
         let open_route = std::env::var("ZERON_OPEN_ROUTE").ok();
         let route = match open_route.as_deref() {
-            Some("pull-requests") => Route::PullRequests,
+            Some(route @ ("pull-requests" | "pull-requests/git")) => {
+                let tab = if route == "pull-requests/git" {
+                    crate::pull_requests::PageTab::Git
+                } else {
+                    crate::pull_requests::PageTab::PullRequests
+                };
+                if settings.pull_requests_list.tab != tab {
+                    settings.pull_requests_list.tab = tab;
+                    settings::update(settings::SavePolicy::Debounced, cx, |s| {
+                        s.pull_requests_list.tab = tab;
+                    });
+                }
+                Route::PullRequests
+            }
             Some(route) if route == "settings" || route.starts_with("settings/") => {
                 match settings_open_route(route, settings.settings_section) {
                     Some(section) => {
