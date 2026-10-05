@@ -13,7 +13,7 @@ mod tabs;
 
 pub use chat::{
     CONTEXT_HEADER as CHAT_CONTEXT_HEADER, ContextCall, ContextChip, PrChatContext, PrChatScope,
-    extract_badge as extract_chat_context_badge,
+    chat_shortcut, extract_badge as extract_chat_context_badge,
 };
 pub use filters::PullRequestListPrefs;
 
@@ -417,6 +417,7 @@ pub struct PullRequestsPage {
     tab_menu: crate::popover::Popup<(PullRequestKey, gpui::Point<gpui::Pixels>)>,
     git_view: Option<Entity<git::GitTab>>,
     git_events: Vec<Subscription>,
+    chat_open: bool,
 }
 
 impl EventEmitter<PullRequestsEvent> for PullRequestsPage {}
@@ -485,6 +486,7 @@ impl PullRequestsPage {
             tab_menu: Default::default(),
             git_view: None,
             git_events: Vec::new(),
+            chat_open: false,
         };
         if let Some(listing) = paging::snapshot_dir(cx).and_then(|dir| paging::load_list(&dir)) {
             page.listing = Loadable::Ready(listing);
@@ -797,14 +799,7 @@ impl PullRequestsPage {
                         ),
                 )
             })
-            .child(
-                top_chip("pull-requests-chat", "Chat", theme)
-                    .debug_selector(|| "pull-requests-chat".into())
-                    .mr(px(12.0))
-                    .on_click(cx.listener(|_, _, _, cx| cx.emit(PullRequestsEvent::ToggleChat)))
-                    .child(div().text_color(theme.text_muted).child("✦"))
-                    .child("Chat"),
-            )
+            .child(self.render_chat_button(theme, cx))
             .into_any_element()
     }
 

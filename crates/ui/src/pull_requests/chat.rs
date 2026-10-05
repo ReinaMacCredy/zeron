@@ -141,6 +141,60 @@ impl PullRequestsPage {
     }
 }
 
+impl PullRequestsPage {
+    pub fn git_tab_active(&self) -> bool {
+        self.prefs.tab == super::PageTab::Git
+    }
+
+    pub fn set_chat_open(&mut self, open: bool, cx: &mut gpui::Context<Self>) {
+        if self.chat_open != open {
+            self.chat_open = open;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn render_chat_button(
+        &self,
+        theme: &crate::theme::Theme,
+        cx: &mut gpui::Context<Self>,
+    ) -> AnyElement {
+        use gpui::prelude::*;
+        use gpui::{div, px};
+        super::top_chip("pull-requests-chat", "Chat", theme)
+            .debug_selector(|| "pull-requests-chat".into())
+            .aria_toggled(if self.chat_open {
+                gpui::Toggled::True
+            } else {
+                gpui::Toggled::False
+            })
+            .mr(px(12.0))
+            .when(self.chat_open, |chip| {
+                chip.bg(theme.accent_wash)
+                    .border_color(theme.accent.opacity(0.35))
+            })
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(super::PullRequestsEvent::ToggleChat)))
+            .child(
+                div()
+                    .when(self.chat_open, |spark| {
+                        spark.debug_selector(|| "pull-requests-chat-active".into())
+                    })
+                    .text_color(theme.accent)
+                    .child("✦"),
+            )
+            .child("Chat")
+            .child(
+                crate::popover::kbd_hint(theme, &chat_shortcut(cx))
+                    .debug_selector(|| "pull-requests-chat-shortcut".into()),
+            )
+            .into_any_element()
+    }
+}
+
+pub fn chat_shortcut(cx: &App) -> String {
+    let keymap = crate::settings::current(cx).keymap;
+    crate::settings::badge_combo(keymap.get(crate::settings::ShortcutId::ToggleTerminal))
+}
+
 pub(super) fn row_badge(_key: &PullRequestKey) -> Option<AnyElement> {
     None
 }

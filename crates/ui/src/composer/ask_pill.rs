@@ -834,7 +834,7 @@ mod tests {
         });
         let mini = cx.new(|cx| {
             let mut composer = Composer::new(mini_state.clone(), cx);
-            composer.set_pr_chat(cx);
+            composer.set_pr_chat("Ask or hand off work for this PR...", cx);
             composer
         });
         mini_state.update(cx, |_, cx| cx.notify());

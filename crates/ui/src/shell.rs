@@ -2152,6 +2152,7 @@ pub struct Shell {
     side_chat_seq: u64,
     side_chat_creating: bool,
     pr_chat: Option<pr_chat::PrChatPanel>,
+    pr_chat_trash: pr_chat::PrChatTrash,
     browsers: std::collections::HashMap<u64, Entity<crate::browser::BrowserSurface>>,
     browser_subs: std::collections::HashMap<u64, Subscription>,
     browser_seq: u64,
@@ -2764,6 +2765,7 @@ impl Shell {
             side_chat_seq: 0,
             side_chat_creating: false,
             pr_chat: None,
+            pr_chat_trash: Default::default(),
             browsers: std::collections::HashMap::new(),
             browser_subs: std::collections::HashMap::new(),
             browser_seq: 0,
@@ -11163,7 +11165,11 @@ impl Shell {
             }
             if event.keystroke.key == "escape" && self.add_space.is_none() {
                 if !self.dismiss_pull_requests_overlay(cx) {
-                    self.close_pull_requests(cx);
+                    if self.pr_chat_open() {
+                        self.minimize_pr_chat(cx);
+                    } else {
+                        self.close_pull_requests(cx);
+                    }
                 }
                 cx.stop_propagation();
             }
@@ -14769,9 +14775,10 @@ impl Render for Shell {
                     self.composer
                         .update(cx, |c, cx| c.open_model_menu(window, cx));
                 }
-                if let Some(open_first) = match self.debug_dialog.as_deref() {
-                    Some("pr-chat") => Some(false),
-                    Some("pr-chat-open") => Some(true),
+                if let Some((open_first, minimized)) = match self.debug_dialog.as_deref() {
+                    Some("pr-chat") => Some((false, false)),
+                    Some("pr-chat-open") => Some((true, false)),
+                    Some("pr-chat-minimized") => Some((true, true)),
                     _ => None,
                 } && matches!(self.route, Route::PullRequests)
                     && let Some(page) = self.pull_requests_page.clone()
@@ -14779,6 +14786,9 @@ impl Render for Shell {
                 {
                     self.debug_dialog = None;
                     self.toggle_pr_chat(cx);
+                    if minimized {
+                        self.minimize_pr_chat(cx);
+                    }
                 }
                 // `=user-menu` opens the bottom-of-sidebar account menu (its
                 // Usage section) once the first usage probe has landed.
