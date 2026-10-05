@@ -193,6 +193,28 @@ fn parse_status(bytes: &[u8], truncated: bool) -> Status {
         }
     }
     status.files.sort_by(|a, b| a.path.cmp(&b.path));
+    let mut merged: Vec<WorkingTreeFile> = Vec::with_capacity(status.files.len());
+    for file in std::mem::take(&mut status.files) {
+        match merged
+            .last_mut()
+            .filter(|previous| previous.path == file.path)
+        {
+            Some(previous) => {
+                if !matches!(
+                    file.index,
+                    GitFileState::Unchanged | GitFileState::Untracked
+                ) {
+                    previous.index = file.index;
+                }
+                if file.worktree != GitFileState::Unchanged {
+                    previous.worktree = file.worktree;
+                }
+                previous.old_path = previous.old_path.take().or(file.old_path);
+            }
+            None => merged.push(file),
+        }
+    }
+    status.files = merged;
     status
 }
 
@@ -397,6 +419,20 @@ mod tests {
                 ("notes/new file.txt", None, Untracked, Untracked),
                 ("src/a b.rs", None, Modified, Unchanged),
             ]
+        );
+    }
+
+    #[test]
+    fn a_staged_deletion_and_its_untracked_replacement_are_one_row() {
+        let status = parse_status(
+            b"1 D. N... 100644 000000 000000 aaa 000 notes.md\0? notes.md\0",
+            false,
+        );
+        assert!(status.complete);
+        assert_eq!(status.files.len(), 1);
+        assert_eq!(
+            (status.files[0].index, status.files[0].worktree),
+            (GitFileState::Deleted, GitFileState::Untracked)
         );
     }
 
