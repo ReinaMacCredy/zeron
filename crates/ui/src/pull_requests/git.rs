@@ -4472,13 +4472,18 @@ impl Render for GitTab {
 
 pub(super) fn pull_request_scope(
     listing: &ChangeRequestListing,
-    space_id: &str,
+    space: &GitSpace,
+    searched: Option<&str>,
 ) -> (Option<PrTarget>, Option<HashSet<String>>) {
+    let viewer_key = |host: &str| match &space.device {
+        Some(device) => format!("{device} {host}"),
+        None => host.to_owned(),
+    };
     let Some(project) = listing
         .projects
         .iter()
-        .find(|project| project.space_id == space_id)
-        .filter(|project| listing.viewers.contains_key(&project.host))
+        .find(|project| project.space_id == space.space_id)
+        .filter(|project| listing.viewers.contains_key(&viewer_key(&project.host)))
     else {
         return (None, None);
     };
@@ -4486,6 +4491,9 @@ pub(super) fn pull_request_scope(
         host: project.host.clone(),
         repository: project.repository.clone(),
     };
+    if searched.is_some_and(|repository| !repository.eq_ignore_ascii_case(&project.repository)) {
+        return (Some(target), None);
+    }
     let failed = listing.errors.iter().any(|error| {
         error.path == project.path
             || error
@@ -4636,7 +4644,9 @@ impl PullRequestsPage {
             _ => HashMap::new(),
         };
         let (target, heads) = match (&space, self.listing.ready()) {
-            (Some(space), Some(listing)) => pull_request_scope(listing, &space.space_id),
+            (Some(space), Some(listing)) => {
+                pull_request_scope(listing, space, self.listed_repository.as_deref())
+            }
             _ => (None, None),
         };
         let visible = self.visible;
@@ -6808,8 +6818,13 @@ mod tests {
 
     #[test]
     fn the_pull_request_scope_knows_open_heads_only_when_the_listing_read_the_project() {
+        let local = |space_id: &str| GitSpace {
+            space_id: space_id.into(),
+            path: "/lab/repo".into(),
+            device: None,
+        };
         let mut listing = listing();
-        let (target, heads) = pull_request_scope(&listing, "space-1");
+        let (target, heads) = pull_request_scope(&listing, &local("space-1"), None);
         assert_eq!(
             target,
             Some(PrTarget {
@@ -6819,17 +6834,39 @@ mod tests {
         );
         assert_eq!(heads, Some(HashSet::from(["feature/7".to_string()])));
         assert_eq!(
-            pull_request_scope(&listing, "space-2"),
+            pull_request_scope(&listing, &local("space-2"), None),
             (None, None),
             "a project with no GitHub remote gets no pull request card"
         );
         let mut unknown_host = listing.clone();
         unknown_host.projects[0].host = "gitlab.example.com".into();
         assert_eq!(
-            pull_request_scope(&unknown_host, "space-1"),
+            pull_request_scope(&unknown_host, &local("space-1"), None),
             (None, None),
             "a host the page has no viewer for is not one it can open pull requests on"
         );
+        assert_eq!(
+            pull_request_scope(&listing, &local("space-1"), Some("ACME/zeron")).1,
+            Some(HashSet::from(["feature/7".to_string()])),
+            "a listing searched for this repository read it"
+        );
+        assert_eq!(
+            pull_request_scope(&listing, &local("space-1"), Some("acme/other")),
+            (Some(target.clone().unwrap()), None),
+            "a listing searched for another repository did not"
+        );
+        let remote = GitSpace {
+            device: Some("studio".into()),
+            ..local("space-1")
+        };
+        assert_eq!(
+            pull_request_scope(&listing, &remote, None),
+            (None, None),
+            "a remote project needs its own device's viewer"
+        );
+        let mut remote_viewer = listing.clone();
+        remote_viewer.viewers = [("studio github.com".to_string(), "bob".to_string())].into();
+        assert_eq!(pull_request_scope(&remote_viewer, &remote, None).0, target);
         listing.errors = vec![
             serde_json::from_value(serde_json::json!({
                 "host": "github.com", "repository": "acme/zeron", "path": "/lab/repo",
@@ -6837,7 +6874,10 @@ mod tests {
             }))
             .unwrap(),
         ];
-        assert_eq!(pull_request_scope(&listing, "space-1").1, None);
+        assert_eq!(
+            pull_request_scope(&listing, &local("space-1"), None).1,
+            None
+        );
     }
 
     #[gpui::test]
@@ -7948,5 +7988,106 @@ mod tests {
         tab.update(cx, |tab, cx| tab.confirm_pr(cx));
         cx.run_until_parked();
         assert!(remote_calls(&calls).is_empty(), "feature/b is not pushed");
+    }
+
+    #[gpui::test]
+    fn a_listing_searched_for_another_repository_leaves_the_pr_state_unknown(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        let (page, cx, _calls, _dir, tab) = open_with_listing(cx, lab_state(), lab.clone());
+        let mut other = listing();
+        other.items.retain(|item| item.repository == "acme/other");
+        *lab.listed.lock().unwrap() = Some(other);
+        page.update(cx, |page, cx| {
+            page.sent = filters::parse_query("repo:acme/other");
+            page.refresh(cx);
+        });
+        settle(cx, |cx| {
+            page.read_with(cx, |page, _| {
+                !page.refreshing
+                    && page
+                        .listing
+                        .ready()
+                        .is_some_and(|listing| listing.items.len() == 1)
+            })
+        });
+        cx.run_until_parked();
+        tab.read_with(cx, |tab, _| {
+            assert!(tab.pr_target.is_some());
+            assert_eq!(
+                tab.pr_heads, None,
+                "a listing of acme/other did not read acme/zeron's pull requests"
+            );
+        });
+    }
+
+    fn remote_state() -> AppState {
+        let mut state = lab_state();
+        state.spaces.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "space-r", "deviceId": "studio", "path": "/studio/repo", "gitDetected": true,
+                "createdAt": "2026-10-01T00:00:00Z"
+            }))
+            .unwrap(),
+        );
+        state.devices.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "studio", "name": "Studio", "platform": "macos",
+                "lastSeenAt": chrono::Utc::now().to_rfc3339(),
+                "capabilities": [
+                    zeron_proto::capabilities::PULL_REQUESTS_PAGE_V1,
+                    zeron_proto::capabilities::SOURCE_CONTROL_V1,
+                    zeron_proto::capabilities::SOURCE_CONTROL_SYNC_V1,
+                    zeron_proto::capabilities::SOURCE_CONTROL_COMMITS_V1,
+                ],
+            }))
+            .unwrap(),
+        );
+        state
+    }
+
+    fn remote_prefs() -> filters::PullRequestListPrefs {
+        filters::PullRequestListPrefs {
+            tab: PageTab::Git,
+            git_space_id: Some("space-r".into()),
+            ..Default::default()
+        }
+    }
+
+    #[gpui::test]
+    fn a_remote_project_gets_the_pull_request_target_from_its_own_devices_viewer(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let lab = Arc::new(GitLab::default());
+        let mut remote = listing();
+        remote.projects[0].space_id = "space-r".into();
+        remote.projects[0].path = "/studio/repo".into();
+        *lab.remote_listing.lock().unwrap() = Some(remote);
+        let (page, cx, _calls, _dir) = open_lab(cx, remote_state(), remote_prefs(), lab);
+        settle(cx, |cx| {
+            page.read_with(cx, |page, _| page.listing.ready().is_some())
+                && cx.debug_bounds("git-commit-button").is_some()
+        });
+        let tab = git_tab(&page, cx);
+        page.read_with(cx, |page, _| {
+            let listing = page.listing.ready().unwrap();
+            assert!(listing.viewers.contains_key("studio github.com"));
+            assert!(!listing.viewers.contains_key("github.com"));
+        });
+        settle(cx, |cx| tab.read_with(cx, |tab, _| tab.pr_heads.is_some()));
+        tab.read_with(cx, |tab, _| {
+            assert_eq!(
+                tab.pr_target,
+                Some(PrTarget {
+                    host: "github.com".into(),
+                    repository: "acme/zeron".into(),
+                })
+            );
+        });
     }
 }
