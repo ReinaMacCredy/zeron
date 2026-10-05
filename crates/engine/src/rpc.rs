@@ -1000,6 +1000,19 @@ impl EngineRpc {
         Ok(workspace)
     }
 
+    async fn project_folder_in_checkout(
+        &self,
+        target: &zeron_proto::WorkspaceTarget,
+        root: &std::path::Path,
+    ) -> Option<String> {
+        let space = self.workspace.space(target.space_id.as_deref()?).ok()??;
+        let requested = target.checkout_path.clone().unwrap_or(space.path);
+        let requested = tokio::fs::canonicalize(requested).await.ok()?;
+        let root = tokio::fs::canonicalize(root).await.ok()?;
+        let folder = requested.strip_prefix(&root).ok()?;
+        (!folder.as_os_str().is_empty()).then(|| folder.to_string_lossy().replace('\\', "/"))
+    }
+
     async fn agent_active_on_checkout(&self, checkout_id: &str) -> bool {
         let local_device = self.doc_host.device_id();
         let chats = self.workspace.watch_chats().borrow().clone();
@@ -3826,24 +3839,33 @@ impl RpcService for EngineRpc {
                 Box::pin(async move {
                     let request: zeron_proto::RunWorkingTreeActionRequest = parse_params(params)?;
                     let workspace = self.source_control_checkout(&request.target).await?;
-                    if self.agent_active_on_checkout(&workspace.checkout_id).await
-                        && !request.busy_policy.allows(&request.action)
+                    if let Some(folder) = self
+                        .project_folder_in_checkout(&request.target, &workspace.root)
+                        .await
                     {
-                        return Err(RpcError::Failed(
-                            match request.busy_policy {
-                                zeron_proto::GitAgentBusyPolicy::BlockAll => {
-                                    "An agent is running in this checkout, and Git is read-only while it runs (Settings > Source Control)."
-                                }
-                                _ => {
-                                    "An agent is running in this checkout. Only stage, unstage and commit of staged files run until it stops (Settings > Source Control)."
-                                }
-                            }
-                            .into(),
-                        ));
+                        crate::working_tree::refuse_outside_folder(&request.action, &folder)
+                            .map_err(|error| RpcError::Failed(error.to_string()))?;
                     }
                     let reply = tokio::time::timeout(crate::working_tree::WRITE_TIMEOUT, async {
                         let _guard =
-                            crate::working_tree::lock_checkout(&workspace.checkout_id).await;
+                            crate::working_tree::lock_checkout_briefly(&workspace.checkout_id)
+                                .await
+                                .map_err(|error| RpcError::Failed(error.to_string()))?;
+                        if self.agent_active_on_checkout(&workspace.checkout_id).await
+                            && !request.busy_policy.allows(&request.action)
+                        {
+                            return Err(RpcError::Failed(
+                                match request.busy_policy {
+                                    zeron_proto::GitAgentBusyPolicy::BlockAll => {
+                                        "An agent is running in this checkout, and Git is read-only while it runs (Settings > Source Control)."
+                                    }
+                                    _ => {
+                                        "An agent is running in this checkout. Only stage, unstage and commit of staged files run until it stops (Settings > Source Control)."
+                                    }
+                                }
+                                .into(),
+                            ));
+                        }
                         let tree =
                             crate::working_tree::read(&workspace.root, &workspace.checkout_id)
                                 .await
@@ -3871,6 +3893,9 @@ impl RpcService for EngineRpc {
                 Box::pin(async move {
                     let request: zeron_proto::SyncBranchRequest = parse_params(params)?;
                     let workspace = self.source_control_checkout(&request.target).await?;
+                    let _guard = crate::working_tree::lock_checkout_briefly(&workspace.checkout_id)
+                        .await
+                        .map_err(|error| RpcError::Failed(error.to_string()))?;
                     if self.agent_active_on_checkout(&workspace.checkout_id).await
                         && !request.busy_policy.allows_sync(request.direction)
                     {
@@ -3886,7 +3911,6 @@ impl RpcService for EngineRpc {
                             .into(),
                         ));
                     }
-                    let _guard = crate::working_tree::lock_checkout(&workspace.checkout_id).await;
                     let read = |root: std::path::PathBuf, checkout_id: String| async move {
                         tokio::time::timeout(
                             crate::working_tree::READ_TIMEOUT,
@@ -6547,6 +6571,257 @@ mod tests {
         );
         assert_eq!(reply["commits"], 0);
         assert_eq!(reply["headSha"], head);
+        core.shutdown().await;
+    }
+
+    async fn locked_checkout_lab() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        crate::EngineCore,
+        std::sync::Arc<EngineRpc>,
+        zeron_proto::WorkingTree,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let repo = root.join("repo");
+        let data = root.join("data");
+        for path in [&repo, &data] {
+            std::fs::create_dir(path).unwrap();
+        }
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &["config", "user.name", "Test"],
+            &["config", "user.email", "test@example.com"],
+            &["config", "commit.gpgsign", "false"],
+        ] {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        for args in [&["add", "."][..], &["commit", "-q", "-m", "first"]] {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        std::fs::write(repo.join("a.txt"), "edited\n").unwrap();
+        let core = crate::EngineCore::assemble(
+            &data,
+            std::sync::Arc::new(HarnessRegistry::new()),
+            HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        let rpc = core.rpc_service();
+        for params in [
+            serde_json::json!({
+                "op": "createSpace", "spaceId": "space-repo", "deviceId": core.device_id,
+                "path": repo, "gitDetected": true,
+            }),
+            serde_json::json!({
+                "op": "createChat", "chatId": "chat-later", "deviceId": core.device_id,
+                "spaceId": "space-repo", "cwd": repo,
+            }),
+        ] {
+            rpc.handle(methods::MUTATE, params).await.unwrap();
+        }
+        let tree = serde_json::from_value(through_the_wire(
+            rpc.handle(
+                methods::GET_WORKING_TREE,
+                serde_json::json!({ "spaceId": "space-repo" }),
+            )
+            .await
+            .unwrap(),
+        ))
+        .unwrap();
+        (dir, repo, core, rpc, tree)
+    }
+
+    #[tokio::test]
+    async fn a_git_action_behind_a_long_one_is_refused_instead_of_waiting_out_its_timeout() {
+        let (_dir, _repo, core, rpc, tree) = locked_checkout_lab().await;
+        let held = crate::working_tree::lock_checkout(&tree.checkout_id).await;
+        let stage = rpc.handle(
+            methods::RUN_WORKING_TREE_ACTION,
+            serde_json::json!({
+                "spaceId": "space-repo", "expectedRevision": tree.revision,
+                "action": {"kind": "stage", "paths": ["a.txt"]},
+            }),
+        );
+        let push = rpc.handle(
+            methods::SYNC_BRANCH,
+            serde_json::json!({
+                "spaceId": "space-repo", "expectedHeadSha": tree.head_sha,
+                "direction": {"kind": "push", "setUpstream": true},
+            }),
+        );
+        let (stage, push) =
+            tokio::time::timeout(Duration::from_secs(30), async { tokio::join!(stage, push) })
+                .await
+                .expect("a queued Git action must not wait for the lock holder");
+        for result in [stage, push] {
+            let error = result.err().expect("refused while the lock is held");
+            assert!(
+                error.to_string().contains("Another Git action is running"),
+                "{error}"
+            );
+        }
+        drop(held);
+        rpc.handle(
+            methods::RUN_WORKING_TREE_ACTION,
+            serde_json::json!({
+                "spaceId": "space-repo", "expectedRevision": tree.revision,
+                "action": {"kind": "stage", "paths": ["a.txt"]},
+            }),
+        )
+        .await
+        .expect("runs once the lock is free");
+        core.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_project_in_a_subfolder_keeps_whole_repository_writes_out_of_the_rest() {
+        let (_dir, repo, core, rpc, _) = locked_checkout_lab().await;
+        for (path, text) in [("sub/mine.txt", "mine\n"), ("other/theirs.txt", "theirs\n")] {
+            std::fs::create_dir_all(repo.join(path).parent().unwrap()).unwrap();
+            std::fs::write(repo.join(path), text).unwrap();
+        }
+        for args in [&["add", "."][..], &["commit", "-q", "-m", "second"]] {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        for path in ["sub/mine.txt", "other/theirs.txt"] {
+            std::fs::write(repo.join(path), "edited\n").unwrap();
+        }
+        std::fs::write(repo.join("other/untracked.txt"), "keep\n").unwrap();
+        rpc.handle(
+            methods::MUTATE,
+            serde_json::json!({
+                "op": "createSpace", "spaceId": "space-sub", "deviceId": core.device_id,
+                "path": repo.join("sub"), "gitDetected": true,
+            }),
+        )
+        .await
+        .unwrap();
+        let tree: zeron_proto::WorkingTree = serde_json::from_value(through_the_wire(
+            rpc.handle(
+                methods::GET_WORKING_TREE,
+                serde_json::json!({ "spaceId": "space-sub" }),
+            )
+            .await
+            .unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(
+            std::path::Path::new(&tree.root),
+            repo,
+            "the enclosing repository"
+        );
+        assert!(
+            tree.files
+                .iter()
+                .any(|file| file.path == "other/theirs.txt")
+        );
+        let action = |action: serde_json::Value| {
+            serde_json::json!({
+                "spaceId": "space-sub", "expectedRevision": tree.revision,
+                "busyPolicy": "allowAll", "action": action,
+            })
+        };
+        for (request, expected) in [
+            (
+                serde_json::json!({"kind": "stashPush"}),
+                "Stash all would reach",
+            ),
+            (
+                serde_json::json!({"kind": "commit", "message": "All", "all": true}),
+                "Commit all would reach",
+            ),
+            (
+                serde_json::json!({"kind": "discard", "paths": ["sub/mine.txt", "other/theirs.txt"]}),
+                "other/theirs.txt is outside this project's folder, sub/",
+            ),
+        ] {
+            let error = rpc
+                .handle(methods::RUN_WORKING_TREE_ACTION, action(request.clone()))
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{request} must be refused"));
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+        for path in ["sub/mine.txt", "other/theirs.txt"] {
+            assert_eq!(
+                std::fs::read_to_string(repo.join(path)).unwrap(),
+                "edited\n"
+            );
+        }
+        assert!(repo.join("other/untracked.txt").exists());
+        rpc.handle(
+            methods::RUN_WORKING_TREE_ACTION,
+            action(serde_json::json!({"kind": "discard", "paths": ["sub/mine.txt"]})),
+        )
+        .await
+        .expect("a file inside the project folder discards");
+        assert_eq!(
+            std::fs::read_to_string(repo.join("sub/mine.txt")).unwrap(),
+            "mine\n"
+        );
+        core.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn an_agent_that_starts_while_a_git_action_waits_for_the_lock_still_blocks_it() {
+        let (_dir, repo, core, rpc, tree) = locked_checkout_lab().await;
+        let requests = [
+            (
+                methods::RUN_WORKING_TREE_ACTION,
+                serde_json::json!({
+                    "spaceId": "space-repo", "expectedRevision": tree.revision,
+                    "busyPolicy": "safeOnly", "action": {"kind": "discard", "paths": ["a.txt"]},
+                }),
+                "Only stage",
+            ),
+            (
+                methods::SYNC_BRANCH,
+                serde_json::json!({
+                    "spaceId": "space-repo", "expectedHeadSha": tree.head_sha,
+                    "busyPolicy": "safeOnly", "direction": {"kind": "pull"},
+                }),
+                "Pull waits",
+            ),
+        ];
+        for (method, params, expected) in requests {
+            core.sessions
+                .set_status_for_test("chat-later", zeron_proto::SessionStatus::Idle);
+            let held = crate::working_tree::lock_checkout(&tree.checkout_id).await;
+            let (result, ()) = tokio::join!(rpc.handle(method, params), async {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                core.sessions
+                    .set_status_for_test("chat-later", zeron_proto::SessionStatus::Working);
+                drop(held);
+            });
+            let error = result
+                .err()
+                .unwrap_or_else(|| panic!("{method} ran under an agent that started first"));
+            assert!(error.to_string().contains(expected), "{method}: {error}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+            "edited\n"
+        );
         core.shutdown().await;
     }
 

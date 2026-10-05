@@ -610,6 +610,18 @@ pub(crate) async fn lock_checkout(checkout_id: &str) -> tokio::sync::OwnedMutexG
     lock.lock_owned().await
 }
 
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+pub(crate) async fn lock_checkout_briefly(
+    checkout_id: &str,
+) -> Result<tokio::sync::OwnedMutexGuard<()>, EngineError> {
+    tokio::time::timeout(LOCK_WAIT, lock_checkout(checkout_id))
+        .await
+        .map_err(|_| {
+            refused("Another Git action is running in this checkout. Try again when it finishes.")
+        })
+}
+
 pub(crate) fn is_staged(file: &WorkingTreeFile) -> bool {
     !matches!(
         file.index,
@@ -735,6 +747,34 @@ pub(crate) async fn apply(
 
 fn refused(message: &str) -> EngineError {
     EngineError::Other(message.into())
+}
+
+pub(crate) fn refuse_outside_folder(
+    action: &WorkingTreeAction,
+    folder: &str,
+) -> Result<(), EngineError> {
+    let inside = |path: &str| {
+        path == folder
+            || path
+                .strip_prefix(folder)
+                .is_some_and(|rest| rest.starts_with('/'))
+    };
+    let whole = match action {
+        WorkingTreeAction::StashPush { .. } => "Stash all",
+        WorkingTreeAction::Commit { all: true, .. } => "Commit all",
+        WorkingTreeAction::Discard { paths } => {
+            return match paths.iter().find(|path| !inside(path)) {
+                Some(path) => Err(refused(&format!(
+                    "{path} is outside this project's folder, {folder}/. Discard it from a terminal."
+                ))),
+                None => Ok(()),
+            };
+        }
+        _ => return Ok(()),
+    };
+    Err(refused(&format!(
+        "This project is the folder {folder}/ inside a larger repository, so {whole} would reach files outside it. Run it from a terminal."
+    )))
 }
 
 fn is_directory(root: &Path, path: &str) -> bool {
