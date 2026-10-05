@@ -494,6 +494,35 @@ pub fn compact_model_picker(cx: &App) -> bool {
         .is_some_and(|store| store.current.compact_model_picker)
 }
 
+pub fn git_agent_busy_policy(cx: &App) -> GitAgentBusyPolicy {
+    cx.try_global::<SettingsStore>()
+        .map(|store| store.current.git_agent_busy_policy)
+        .unwrap_or_default()
+}
+
+pub fn commit_message_model(cx: &App) -> Option<CommitModelChoice> {
+    cx.try_global::<SettingsStore>()
+        .and_then(|store| store.current.commit_message_model.clone())
+}
+
+pub fn pr_chat_style_and_history(cx: &App) -> (PrChatStyle, PrChatHistory) {
+    cx.try_global::<SettingsStore>()
+        .map(|store| (store.current.pr_chat_style, store.current.pr_chat_history))
+        .unwrap_or_default()
+}
+
+pub fn pull_requests_merge_method(cx: &App) -> Option<zeron_proto::ChangeRequestMergeMethod> {
+    cx.try_global::<SettingsStore>()
+        .and_then(|store| store.current.pull_requests_merge_method)
+}
+
+pub fn shortcut_combo(id: ShortcutId, cx: &App) -> String {
+    match cx.try_global::<SettingsStore>() {
+        Some(store) => store.current.keymap.get(id).to_owned(),
+        None => KeymapConfig::default().get(id).to_owned(),
+    }
+}
+
 pub fn compact_effort_slider(cx: &App) -> EffortSliderStyle {
     cx.try_global::<SettingsStore>()
         .map(|store| store.current.compact_effort_slider)

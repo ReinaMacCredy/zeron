@@ -184,8 +184,10 @@ impl PullRequestsPage {
 }
 
 pub fn chat_shortcut(cx: &App) -> String {
-    let keymap = crate::settings::current(cx).keymap;
-    crate::settings::badge_combo(keymap.get(crate::settings::ShortcutId::ToggleTerminal))
+    crate::settings::badge_combo(&crate::settings::shortcut_combo(
+        crate::settings::ShortcutId::ToggleTerminal,
+        cx,
+    ))
 }
 
 pub(super) fn row_badge(

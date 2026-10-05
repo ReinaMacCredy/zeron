@@ -832,7 +832,7 @@ impl Shell {
         let Some(suggestion) = self.pr_chat_suggestion(&key, cx) else {
             return;
         };
-        let last = settings::current(cx).pull_requests_merge_method;
+        let last = settings::pull_requests_merge_method(cx);
         if suggestion.confirmation(last).is_some() {
             if let Some(panel) = self.pr_chat.as_mut() {
                 panel.confirm = Some(key);
@@ -881,7 +881,7 @@ impl Shell {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        let last = settings::current(cx).pull_requests_merge_method;
+        let last = settings::pull_requests_merge_method(cx);
         let Some(panel) = self.pr_chat.as_mut() else {
             return;
         };
@@ -987,10 +987,7 @@ impl Shell {
                 .is_some_and(|page| page.read(cx).git_tab_active());
             return (!git_tab).then(|| self.render_pr_chat_pill(&theme, cx));
         };
-        let (style, history) = {
-            let settings = settings::current(cx);
-            (settings.pr_chat_style, settings.pr_chat_history)
-        };
+        let (style, history) = settings::pr_chat_style_and_history(cx);
         let sessions = (history == PrChatHistory::KeepPerPr).then(|| self.pr_chat_session_rows(cx));
         let promotable = self.pr_chat_promotable(cx);
         let menu_open = panel.sessions_menu;
@@ -1366,7 +1363,7 @@ impl Shell {
         let (posted, dismissed) = settings::pr_chat_session(&panel.chat_id, cx)
             .map(|session| (session.posted, session.dismissed))
             .unwrap_or_default();
-        let last = settings::current(cx).pull_requests_merge_method;
+        let last = settings::pull_requests_merge_method(cx);
         let now = chrono::Local::now();
         let cards: Vec<AnyElement> = suggestions
             .into_iter()
@@ -1582,7 +1579,7 @@ impl Shell {
 
     fn render_pr_chat_confirm(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let key = self.pr_chat.as_ref()?.confirm.clone()?;
-        let last = settings::current(cx).pull_requests_merge_method;
+        let last = settings::pull_requests_merge_method(cx);
         let confirm = self.pr_chat_suggestion(&key, cx)?.confirmation(last)?;
         Some(
             div()

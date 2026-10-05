@@ -249,7 +249,7 @@ fn push_direction(tree: &WorkingTree) -> SyncDirection {
 }
 
 fn busy_policy(cx: &App) -> GitAgentBusyPolicy {
-    crate::settings::current(cx).git_agent_busy_policy.into()
+    crate::settings::git_agent_busy_policy(cx).into()
 }
 
 fn in_section(tree: &WorkingTree, staged: bool, path: &str) -> bool {
@@ -531,13 +531,13 @@ impl GitTab {
         let model_picks = cx.subscribe(
             &model_picker,
             |tab: &mut Self, _, event: &CommitModelPicked, cx| {
-                let default = crate::settings::current(cx).commit_message_model;
+                let default = crate::settings::commit_message_model(cx);
                 tab.model_override = (default.as_ref() != Some(&event.0)).then(|| event.0.clone());
                 cx.notify();
             },
         );
         let settings_changes = cx.observe_global::<crate::settings::SettingsStore>(|tab, cx| {
-            let default = crate::settings::current(cx).commit_message_model;
+            let default = crate::settings::commit_message_model(cx);
             if default != tab.shown_default {
                 tab.shown_default = default;
                 if tab.model_override.is_none() {
