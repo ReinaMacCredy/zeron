@@ -978,6 +978,28 @@ impl EngineRpc {
             .map(|(space, _)| space.id.clone())
     }
 
+    async fn source_control_checkout(
+        &self,
+        target: &zeron_proto::WorkspaceTarget,
+    ) -> Result<crate::workspace_files::ResolvedWorkspace, RpcError> {
+        if target.chat_id.is_some() || target.space_id.is_none() {
+            return Err(RpcError::Failed(
+                "source control needs a spaceId target".into(),
+            ));
+        }
+        let workspace = self
+            .workspace_files
+            .resolve_target(target)
+            .await
+            .map_err(RpcError::from)?;
+        if workspace.checkout_id.starts_with("folder-") {
+            return Err(RpcError::Failed(
+                "this project is not a Git checkout".into(),
+            ));
+        }
+        Ok(workspace)
+    }
+
     async fn agent_active_on_checkout(&self, checkout_id: &str) -> bool {
         let local_device = self.doc_host.device_id();
         let chats = self.workspace.watch_chats().borrow().clone();
@@ -1617,6 +1639,8 @@ fn forward_deadline(method: &str) -> std::time::Duration {
         // queueing, verification, and the relayed response itself.
         methods::APPLY_HARNESS_UPDATE => Duration::from_secs(20 * 60),
         methods::CREATE_WORKTREE => Duration::from_secs(120),
+        // Outlives the engine's own write timeout, which covers commit hooks.
+        methods::RUN_WORKING_TREE_ACTION => Duration::from_secs(180),
         // Outlives the engine's own compaction timeout, so a forwarded call
         // reports the harness's outcome rather than a transport timeout.
         methods::COMPACT_CHAT => Duration::from_secs(660),
@@ -3758,22 +3782,8 @@ impl RpcService for EngineRpc {
             methods::GET_WORKING_TREE => {
                 Box::pin(async move {
                     let request: zeron_proto::GetWorkingTreeRequest = parse_params(params)?;
-                    if request.target.chat_id.is_some() || request.target.space_id.is_none() {
-                        return Err(RpcError::Failed(
-                            "working tree reads need a spaceId target".into(),
-                        ));
-                    }
                     let mut tree = tokio::time::timeout(crate::working_tree::READ_TIMEOUT, async {
-                        let workspace = self
-                            .workspace_files
-                            .resolve_target(&request.target)
-                            .await
-                            .map_err(RpcError::from)?;
-                        if workspace.checkout_id.starts_with("folder-") {
-                            return Err(RpcError::Failed(
-                                "this project is not a Git checkout".into(),
-                            ));
-                        }
+                        let workspace = self.source_control_checkout(&request.target).await?;
                         crate::working_tree::read(&workspace.root, &workspace.checkout_id)
                             .await
                             .map_err(|error| RpcError::Failed(error.to_string()))
@@ -3782,6 +3792,72 @@ impl RpcService for EngineRpc {
                     .map_err(|_| RpcError::Failed("working tree read timed out".into()))??;
                     tree.agent_active = self.agent_active_on_checkout(&tree.checkout_id).await;
                     RpcReply::value(&tree)
+                })
+                .await
+            }
+            methods::GET_WORKING_TREE_FILE_DIFF => {
+                Box::pin(async move {
+                    let request: zeron_proto::GetWorkingTreeFileDiffRequest =
+                        parse_params(params)?;
+                    let diff = tokio::time::timeout(crate::working_tree::READ_TIMEOUT, async {
+                        let workspace = self.source_control_checkout(&request.target).await?;
+                        crate::working_tree::file_diff(
+                            &workspace.root,
+                            &workspace.checkout_id,
+                            &request.path,
+                            request.staged,
+                        )
+                        .await
+                        .map_err(|error| RpcError::Failed(error.to_string()))
+                    })
+                    .await
+                    .map_err(|_| RpcError::Failed("file diff read timed out".into()))??;
+                    RpcReply::value(&diff)
+                })
+                .await
+            }
+            methods::RUN_WORKING_TREE_ACTION => {
+                Box::pin(async move {
+                    let request: zeron_proto::RunWorkingTreeActionRequest = parse_params(params)?;
+                    let workspace = self.source_control_checkout(&request.target).await?;
+                    if self.agent_active_on_checkout(&workspace.checkout_id).await
+                        && !request.busy_policy.allows(&request.action)
+                    {
+                        return Err(RpcError::Failed(
+                            match request.busy_policy {
+                                zeron_proto::GitAgentBusyPolicy::BlockAll => {
+                                    "An agent is running in this checkout, and Git is read-only while it runs (Settings > Source Control)."
+                                }
+                                _ => {
+                                    "An agent is running in this checkout. Only stage, unstage and commit of staged files run until it stops (Settings > Source Control)."
+                                }
+                            }
+                            .into(),
+                        ));
+                    }
+                    tokio::time::timeout(crate::working_tree::WRITE_TIMEOUT, async {
+                        let _guard =
+                            crate::working_tree::lock_checkout(&workspace.checkout_id).await;
+                        let tree =
+                            crate::working_tree::read(&workspace.root, &workspace.checkout_id)
+                                .await
+                                .map_err(|error| RpcError::Failed(error.to_string()))?;
+                        if tree.revision != request.expected_revision {
+                            return Err(RpcError::Failed(
+                                "The working tree changed since it was shown. Check the refreshed list and try again."
+                                    .into(),
+                            ));
+                        }
+                        let result =
+                            crate::working_tree::apply(&workspace.root, &tree, &request.action)
+                                .await
+                                .map_err(|error| RpcError::Failed(error.to_string()));
+                        self.diff_sync.sync_all();
+                        result
+                    })
+                    .await
+                    .map_err(|_| RpcError::Failed("the Git action timed out".into()))??;
+                    RpcReply::value(&zeron_proto::WorkingTreeActionReply::default())
                 })
                 .await
             }
@@ -5198,6 +5274,271 @@ mod tests {
         }
     }
 
+    fn through_the_wire(reply: RpcReply) -> serde_json::Value {
+        let RpcReply::Value(value) = reply else {
+            panic!("unary reply expected");
+        };
+        let frame = zeron_rpc::ServerFrame {
+            id: 1,
+            ok: Some(value),
+            ..Default::default()
+        };
+        let received: zeron_rpc::ServerFrame =
+            serde_json::from_str(&serde_json::to_string(&frame).unwrap()).unwrap();
+        received.ok.expect("a reply, never null")
+    }
+
+    #[tokio::test]
+    async fn engine_info_advertises_source_control_through_the_wire() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble(
+            dir.path(),
+            std::sync::Arc::new(HarnessRegistry::new()),
+            HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        let info: zeron_proto::EngineInfo = serde_json::from_value(through_the_wire(
+            core.rpc_service()
+                .handle(methods::ENGINE_INFO, serde_json::json!({}))
+                .await
+                .unwrap(),
+        ))
+        .unwrap();
+        assert!(info.supports(zeron_proto::capabilities::SOURCE_CONTROL_V1));
+    }
+
+    #[tokio::test]
+    async fn working_tree_actions_check_the_revision_the_target_and_the_busy_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap()
+        };
+        let repo = root.join("repo");
+        let outside = root.join("outside");
+        let data = root.join("data");
+        for path in [&repo, &outside, &data] {
+            std::fs::create_dir(path).unwrap();
+        }
+        git(&repo, &["init", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "first"]);
+        std::fs::write(repo.join("a.txt"), "a\nb\n").unwrap();
+        std::fs::write(repo.join("new file.txt"), "n\n").unwrap();
+        git(&outside, &["init", "-b", "main"]);
+
+        let core = crate::EngineCore::assemble(
+            &data,
+            std::sync::Arc::new(HarnessRegistry::new()),
+            HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        let rpc = core.rpc_service();
+        rpc.handle(
+            methods::MUTATE,
+            serde_json::json!({
+                "op": "createSpace", "spaceId": "space-repo", "deviceId": core.device_id,
+                "path": repo, "gitDetected": true,
+            }),
+        )
+        .await
+        .unwrap();
+        async fn revision(rpc: &EngineRpc) -> String {
+            let tree: zeron_proto::WorkingTree = serde_json::from_value(through_the_wire(
+                rpc.handle(
+                    methods::GET_WORKING_TREE,
+                    serde_json::json!({ "spaceId": "space-repo" }),
+                )
+                .await
+                .unwrap(),
+            ))
+            .unwrap();
+            tree.revision
+        }
+        let action = |revision: &str, policy: &str, action: serde_json::Value| {
+            serde_json::json!({
+                "spaceId": "space-repo", "expectedRevision": revision,
+                "busyPolicy": policy, "action": action,
+            })
+        };
+        let stage_a = serde_json::json!({"kind": "stage", "paths": ["a.txt"]});
+
+        let error = rpc
+            .handle(
+                methods::RUN_WORKING_TREE_ACTION,
+                action("stale", "safeOnly", stage_a.clone()),
+            )
+            .await
+            .err()
+            .expect("a stale revision is refused");
+        assert!(error.to_string().contains("changed since"), "{error}");
+        assert_eq!(
+            git(&repo, &["status", "--porcelain"]).replace('"', ""),
+            " M a.txt\n?? new file.txt\n"
+        );
+
+        for (params, expected) in [
+            (
+                serde_json::json!({
+                    "spaceId": "space-repo", "checkoutPath": outside,
+                    "expectedRevision": "r", "action": stage_a,
+                }),
+                "not a workspace checkout",
+            ),
+            (
+                serde_json::json!({
+                    "chatId": "chat-1", "expectedRevision": "r", "action": stage_a,
+                }),
+                "spaceId",
+            ),
+        ] {
+            let error = rpc
+                .handle(methods::RUN_WORKING_TREE_ACTION, params.clone())
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{params} must be refused"));
+            assert!(error.to_string().contains(expected), "{params}: {error}");
+        }
+
+        let current = revision(&rpc).await;
+        let reply = through_the_wire(
+            rpc.handle(
+                methods::RUN_WORKING_TREE_ACTION,
+                action(&current, "safeOnly", stage_a.clone()),
+            )
+            .await
+            .unwrap(),
+        );
+        assert_eq!(reply, serde_json::json!({}));
+        assert_eq!(
+            git(&repo, &["status", "--porcelain"]).replace('"', ""),
+            "M  a.txt\n?? new file.txt\n"
+        );
+
+        let diff: zeron_proto::WorkingTreeFileDiff = serde_json::from_value(through_the_wire(
+            rpc.handle(
+                methods::GET_WORKING_TREE_FILE_DIFF,
+                serde_json::json!({ "spaceId": "space-repo", "path": "a.txt", "staged": true }),
+            )
+            .await
+            .unwrap(),
+        ))
+        .unwrap();
+        assert!(diff.patch.contains("+b"), "{}", diff.patch);
+        let error = rpc
+            .handle(
+                methods::GET_WORKING_TREE_FILE_DIFF,
+                serde_json::json!({ "spaceId": "space-repo", "path": "../outside/x", "staged": false }),
+            )
+            .await
+            .err()
+            .expect("escape refused");
+        assert!(
+            error.to_string().contains("not a working tree path"),
+            "{error}"
+        );
+
+        rpc.handle(
+            methods::MUTATE,
+            serde_json::json!({
+                "op": "createChat", "chatId": "chat-busy", "deviceId": core.device_id,
+                "spaceId": "space-repo", "cwd": repo,
+            }),
+        )
+        .await
+        .unwrap();
+        core.sessions
+            .set_status_for_test("chat-busy", zeron_proto::SessionStatus::Working);
+        let tree: zeron_proto::WorkingTree = serde_json::from_value(through_the_wire(
+            rpc.handle(
+                methods::GET_WORKING_TREE,
+                serde_json::json!({ "spaceId": "space-repo" }),
+            )
+            .await
+            .unwrap(),
+        ))
+        .unwrap();
+        assert!(tree.agent_active);
+
+        let unstage_all = serde_json::json!({"kind": "unstageAll"});
+        let discard = serde_json::json!({"kind": "discard", "paths": ["a.txt"]});
+        let error = rpc
+            .handle(
+                methods::RUN_WORKING_TREE_ACTION,
+                action(&tree.revision, "blockAll", unstage_all.clone()),
+            )
+            .await
+            .err()
+            .expect("BlockAll refuses every write while an agent runs");
+        assert!(error.to_string().contains("read-only"), "{error}");
+        let error = rpc
+            .handle(
+                methods::RUN_WORKING_TREE_ACTION,
+                action(&tree.revision, "safeOnly", discard.clone()),
+            )
+            .await
+            .err()
+            .expect("SafeOnly refuses discard while an agent runs");
+        assert!(error.to_string().contains("Only stage"), "{error}");
+        let error = rpc
+            .handle(
+                methods::RUN_WORKING_TREE_ACTION,
+                action(&tree.revision, "allowAll", discard),
+            )
+            .await
+            .err()
+            .expect("AllowAll passes the policy; discard itself is not built yet");
+        assert!(error.to_string().contains("not available yet"), "{error}");
+        assert_eq!(
+            git(&repo, &["status", "--porcelain"]).replace('"', ""),
+            "M  a.txt\n?? new file.txt\n"
+        );
+
+        rpc.handle(
+            methods::RUN_WORKING_TREE_ACTION,
+            action(&tree.revision, "safeOnly", unstage_all),
+        )
+        .await
+        .expect("SafeOnly allows unstage while an agent runs");
+        assert_eq!(
+            git(&repo, &["status", "--porcelain"]).replace('"', ""),
+            " M a.txt\n?? new file.txt\n"
+        );
+        let current = revision(&rpc).await;
+        rpc.handle(
+            methods::RUN_WORKING_TREE_ACTION,
+            action(
+                &current,
+                "allowAll",
+                serde_json::json!({"kind": "stage", "paths": ["new file.txt"]}),
+            ),
+        )
+        .await
+        .expect("AllowAll allows stage while an agent runs");
+        assert_eq!(
+            git(&repo, &["status", "--porcelain"]).replace('"', ""),
+            " M a.txt\nA  new file.txt\n"
+        );
+    }
+
     /// Every forwardable unary method gets a bounded reply deadline —
     /// interactive calls fail fast, network-bound git/update calls get the
     /// long leash, and nothing awaits forever (the "Sending…" wedge).
@@ -5218,6 +5559,15 @@ mod tests {
             forward_deadline(methods::CREATE_WORKTREE),
             Duration::from_secs(120)
         );
+        assert_eq!(
+            forward_deadline(methods::RUN_WORKING_TREE_ACTION),
+            Duration::from_secs(180)
+        );
+        assert!(
+            forward_deadline(methods::RUN_WORKING_TREE_ACTION) > crate::working_tree::WRITE_TIMEOUT,
+            "a forwarded write reports the engine's own outcome"
+        );
+        assert!(crate::working_tree::WRITE_TIMEOUT >= Duration::from_secs(120 + 20));
         for method in [
             methods::CLONE_REPO,
             methods::FETCH_ALL,

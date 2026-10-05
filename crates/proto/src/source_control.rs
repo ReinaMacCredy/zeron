@@ -12,6 +12,16 @@ pub enum GitAgentBusyPolicy {
     AllowAll,
 }
 
+impl GitAgentBusyPolicy {
+    pub fn allows(self, action: &WorkingTreeAction) -> bool {
+        match self {
+            Self::SafeOnly => action.safe_while_agent_runs(),
+            Self::BlockAll => false,
+            Self::AllowAll => true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetWorkingTreeRequest {
@@ -159,6 +169,23 @@ pub enum WorkingTreeAction {
     },
 }
 
+impl WorkingTreeAction {
+    pub fn safe_while_agent_runs(&self) -> bool {
+        matches!(
+            self,
+            Self::Stage { .. }
+                | Self::Unstage { .. }
+                | Self::StageAll
+                | Self::UnstageAll
+                | Self::Commit {
+                    amend: false,
+                    all: false,
+                    ..
+                }
+        )
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkingTreeActionReply {
@@ -292,6 +319,56 @@ mod tests {
             (GitAgentBusyPolicy::AllowAll, "allowAll"),
         ] {
             assert_eq!(round_trip(&policy), json!(wire));
+        }
+    }
+
+    #[test]
+    fn each_busy_policy_gates_actions_while_an_agent_runs() {
+        let commit = |amend: bool, all: bool| WorkingTreeAction::Commit {
+            message: "m".into(),
+            amend,
+            all,
+        };
+        let safe = [
+            WorkingTreeAction::Stage {
+                paths: vec!["a".into()],
+            },
+            WorkingTreeAction::Unstage {
+                paths: vec!["a".into()],
+            },
+            WorkingTreeAction::StageAll,
+            WorkingTreeAction::UnstageAll,
+            commit(false, false),
+        ];
+        let unsafe_actions = [
+            commit(false, true),
+            commit(true, false),
+            WorkingTreeAction::Discard {
+                paths: vec!["a".into()],
+            },
+            WorkingTreeAction::StashPush { message: None },
+            WorkingTreeAction::StashPop { oid: "o".into() },
+            WorkingTreeAction::StashDrop { oid: "o".into() },
+            WorkingTreeAction::Checkout {
+                target_ref: "main".into(),
+            },
+            WorkingTreeAction::CherryPick { sha: "s".into() },
+            WorkingTreeAction::AbortCherryPick,
+            WorkingTreeAction::CreateBranch {
+                name: "b".into(),
+                start_point: None,
+                checkout: false,
+            },
+        ];
+        for action in &safe {
+            assert!(GitAgentBusyPolicy::SafeOnly.allows(action), "{action:?}");
+            assert!(!GitAgentBusyPolicy::BlockAll.allows(action), "{action:?}");
+            assert!(GitAgentBusyPolicy::AllowAll.allows(action), "{action:?}");
+        }
+        for action in &unsafe_actions {
+            assert!(!GitAgentBusyPolicy::SafeOnly.allows(action), "{action:?}");
+            assert!(!GitAgentBusyPolicy::BlockAll.allows(action), "{action:?}");
+            assert!(GitAgentBusyPolicy::AllowAll.allows(action), "{action:?}");
         }
     }
 

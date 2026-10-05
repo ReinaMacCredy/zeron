@@ -1,9 +1,13 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Weak};
 
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
-use zeron_proto::{GitFileState, LineDelta, StashEntry, WorkingTree, WorkingTreeFile};
+use zeron_proto::{
+    GitFileState, LineDelta, StashEntry, WorkingTree, WorkingTreeAction, WorkingTreeFile,
+    WorkingTreeFileDiff,
+};
 
 use crate::EngineError;
 
@@ -20,6 +24,15 @@ pub(crate) struct GitOutput {
 }
 
 pub(crate) async fn git(root: &Path, args: &[&str]) -> Result<GitOutput, EngineError> {
+    git_with(root, args, OUTPUT_MAX_BYTES, false).await
+}
+
+async fn git_with(
+    root: &Path,
+    args: &[&str],
+    max_bytes: usize,
+    exit_one_ok: bool,
+) -> Result<GitOutput, EngineError> {
     let mut cmd = tokio::process::Command::new("git");
     #[cfg(windows)]
     {
@@ -56,7 +69,7 @@ pub(crate) async fn git(root: &Path, args: &[&str]) -> Result<GitOutput, EngineE
         if n == 0 {
             break;
         }
-        let remaining = OUTPUT_MAX_BYTES.saturating_sub(out.len());
+        let remaining = max_bytes.saturating_sub(out.len());
         if n > remaining {
             out.extend_from_slice(&buf[..remaining]);
             truncated = true;
@@ -69,7 +82,8 @@ pub(crate) async fn git(root: &Path, args: &[&str]) -> Result<GitOutput, EngineE
         .wait_with_output()
         .await
         .map_err(|e| EngineError::Other(format!("git wait failed: {e}")))?;
-    if !output.status.success() && !truncated {
+    let accepted = output.status.success() || (exit_one_ok && output.status.code() == Some(1));
+    if !accepted && !truncated {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let message = stderr.trim();
         return Err(EngineError::Other(if message.is_empty() {
@@ -388,6 +402,194 @@ pub(crate) async fn read(root: &Path, checkout_id: &str) -> Result<WorkingTree, 
     })
 }
 
+pub(crate) const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(150);
+const PATCH_MAX_BYTES: usize = 1024 * 1024;
+const MAX_PATH_BYTES: usize = 4096;
+
+type CheckoutLocks = HashMap<String, Weak<tokio::sync::Mutex<()>>>;
+static CHECKOUT_LOCKS: LazyLock<std::sync::Mutex<CheckoutLocks>> = LazyLock::new(Default::default);
+
+pub(crate) async fn lock_checkout(checkout_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+    let lock = {
+        let mut locks = CHECKOUT_LOCKS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        locks.retain(|_, slot| slot.strong_count() > 0);
+        match locks.get(checkout_id).and_then(Weak::upgrade) {
+            Some(lock) => lock,
+            None => {
+                let lock = Arc::new(tokio::sync::Mutex::new(()));
+                locks.insert(checkout_id.to_owned(), Arc::downgrade(&lock));
+                lock
+            }
+        }
+    };
+    lock.lock_owned().await
+}
+
+pub(crate) fn is_staged(file: &WorkingTreeFile) -> bool {
+    !matches!(
+        file.index,
+        GitFileState::Unchanged | GitFileState::Untracked | GitFileState::Unmerged
+    )
+}
+
+fn checked_path(path: &str) -> Result<(), EngineError> {
+    let invalid = path.is_empty()
+        || path.len() > MAX_PATH_BYTES
+        || path.contains('\0')
+        || path.starts_with('/')
+        || path.split(['/', '\\']).any(|part| {
+            part.is_empty() || part == "." || part == ".." || part.eq_ignore_ascii_case(".git")
+        });
+    if invalid {
+        return Err(EngineError::Other(format!(
+            "not a working tree path: {path:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn listed<'a>(
+    tree: &'a WorkingTree,
+    paths: &[String],
+    wanted: impl Fn(&WorkingTreeFile) -> bool,
+    missing: &str,
+) -> Result<Vec<&'a WorkingTreeFile>, EngineError> {
+    if paths.is_empty() {
+        return Err(EngineError::Other("no files were named".into()));
+    }
+    if paths.len() > MAX_FILES {
+        return Err(EngineError::Other("too many files in one action".into()));
+    }
+    let mut files: Vec<&WorkingTreeFile> = Vec::with_capacity(paths.len());
+    for path in paths {
+        checked_path(path)?;
+        let file = tree
+            .files
+            .iter()
+            .find(|file| &file.path == path)
+            .filter(|file| wanted(file))
+            .ok_or_else(|| EngineError::Other(format!("{path} {missing}")))?;
+        if !files.iter().any(|known| known.path == file.path) {
+            files.push(file);
+        }
+    }
+    Ok(files)
+}
+
+async fn run_with_paths(root: &Path, command: &[&str], paths: &[&str]) -> Result<(), EngineError> {
+    let mut args: Vec<&str> = command.to_vec();
+    args.push("--");
+    args.extend_from_slice(paths);
+    git(root, &args).await.map(drop)
+}
+
+pub(crate) async fn apply(
+    root: &Path,
+    tree: &WorkingTree,
+    action: &WorkingTreeAction,
+) -> Result<(), EngineError> {
+    match action {
+        WorkingTreeAction::Stage { paths } => {
+            let files = listed(
+                tree,
+                paths,
+                |file| file.worktree != GitFileState::Unchanged,
+                "has no unstaged changes",
+            )?;
+            let paths: Vec<&str> = files.iter().map(|file| file.path.as_str()).collect();
+            run_with_paths(root, &["add", "-A"], &paths).await
+        }
+        WorkingTreeAction::Unstage { paths } => {
+            let files = listed(tree, paths, is_staged, "is not staged")?;
+            let mut paths: Vec<&str> = Vec::with_capacity(files.len());
+            for file in &files {
+                paths.push(&file.path);
+                if let Some(old) = file.old_path.as_deref() {
+                    checked_path(old)?;
+                    paths.push(old);
+                }
+            }
+            run_with_paths(root, &["reset", "-q"], &paths).await
+        }
+        WorkingTreeAction::StageAll => git(root, &["add", "-A"]).await.map(drop),
+        WorkingTreeAction::UnstageAll => run_with_paths(root, &["reset", "-q"], &["."]).await,
+        _ => Err(EngineError::Other(
+            "this Git action is not available yet".into(),
+        )),
+    }
+}
+
+pub(crate) async fn file_diff(
+    root: &Path,
+    checkout_id: &str,
+    path: &str,
+    staged: bool,
+) -> Result<WorkingTreeFileDiff, EngineError> {
+    checked_path(path)?;
+    let status = git(
+        root,
+        &["status", "--porcelain=v2", "-z", "--untracked-files=all"],
+    )
+    .await?;
+    let file = parse_status(&status.stdout, status.truncated)
+        .files
+        .into_iter()
+        .find(|file| file.path == path)
+        .filter(|file| {
+            if staged {
+                is_staged(file)
+            } else {
+                file.worktree != GitFileState::Unchanged
+            }
+        })
+        .ok_or_else(|| {
+            EngineError::Other(format!(
+                "{path} has no {} changes",
+                if staged { "staged" } else { "unstaged" }
+            ))
+        })?;
+    let common = ["--no-ext-diff", "--no-color", "--no-textconv"];
+    let output = if staged {
+        let mut args = vec!["diff", "--cached", "-M"];
+        args.extend(common);
+        args.extend(["--", path]);
+        if let Some(old) = file.old_path.as_deref() {
+            args.push(old);
+        }
+        git_with(root, &args, PATCH_MAX_BYTES, false).await?
+    } else if file.worktree == GitFileState::Untracked {
+        let mut args = vec!["diff", "--no-index"];
+        args.extend(common);
+        args.extend(["--", "/dev/null", path]);
+        git_with(root, &args, PATCH_MAX_BYTES, true).await?
+    } else {
+        let mut args = vec!["diff"];
+        args.extend(common);
+        args.extend(["--", path]);
+        git_with(root, &args, PATCH_MAX_BYTES, false).await?
+    };
+    let mut bytes = output.stdout;
+    if output.truncated
+        && let Some(end) = bytes.iter().rposition(|byte| *byte == b'\n')
+    {
+        bytes.truncate(end + 1);
+    }
+    let patch = String::from_utf8_lossy(&bytes).into_owned();
+    let binary = patch
+        .lines()
+        .any(|line| line.starts_with("Binary files ") || line == "GIT binary patch");
+    Ok(WorkingTreeFileDiff {
+        checkout_id: checkout_id.to_owned(),
+        path: path.to_owned(),
+        staged,
+        patch,
+        binary,
+        truncated: output.truncated,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -573,6 +775,263 @@ mod tests {
         assert_ne!(
             read(&repo, "checkout-1").await.unwrap().revision,
             tree.revision
+        );
+    }
+
+    fn porcelain(cwd: &Path) -> String {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(["-c", "core.quotePath=false", "status", "--porcelain"])
+            .output()
+            .unwrap();
+        String::from_utf8(output.stdout).unwrap().replace('"', "")
+    }
+
+    fn committed_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        run(dir.path(), &["init", "-b", "main", "."]);
+        std::fs::write(dir.path().join("tracked.txt"), "one\n").unwrap();
+        std::fs::write(dir.path().join("old name.txt"), "rename me\n").unwrap();
+        run(dir.path(), &["add", "."]);
+        run(dir.path(), &["commit", "-m", "first"]);
+        dir
+    }
+
+    fn stage(paths: &[&str]) -> WorkingTreeAction {
+        WorkingTreeAction::Stage {
+            paths: paths.iter().map(|path| (*path).to_owned()).collect(),
+        }
+    }
+
+    fn unstage(paths: &[&str]) -> WorkingTreeAction {
+        WorkingTreeAction::Unstage {
+            paths: paths.iter().map(|path| (*path).to_owned()).collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn staging_treats_every_name_as_a_literal_path() {
+        let dir = committed_repo();
+        let root = dir.path();
+        for name in [
+            "with space.txt",
+            "ünïcødé 文件.txt",
+            "-leading-dash",
+            ":(glob)*",
+            "glob-bait.txt",
+        ] {
+            std::fs::write(root.join(name), "x\n").unwrap();
+        }
+        let tree = read(root, "c").await.unwrap();
+        apply(
+            root,
+            &tree,
+            &stage(&[
+                "with space.txt",
+                "ünïcødé 文件.txt",
+                "-leading-dash",
+                ":(glob)*",
+            ]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            porcelain(root),
+            "A  -leading-dash\nA  :(glob)*\nA  with space.txt\nA  ünïcødé 文件.txt\n?? glob-bait.txt\n",
+            "`:(glob)*` is a file name, not a pattern"
+        );
+
+        let tree = read(root, "c").await.unwrap();
+        apply(root, &tree, &unstage(&[":(glob)*", "-leading-dash"]))
+            .await
+            .unwrap();
+        assert_eq!(
+            porcelain(root),
+            "A  with space.txt\nA  ünïcødé 文件.txt\n?? -leading-dash\n?? :(glob)*\n?? glob-bait.txt\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn paths_outside_the_listed_tree_are_refused() {
+        let dir = committed_repo();
+        let root = dir.path();
+        std::fs::write(root.join("tracked.txt"), "two\n").unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "s\n").unwrap();
+        let tree = read(root, "c").await.unwrap();
+        let escape = format!(
+            "../{}/secret.txt",
+            outside.path().file_name().unwrap().to_string_lossy()
+        );
+        let absolute = outside.path().join("secret.txt");
+        for path in [
+            escape.as_str(),
+            absolute.to_str().unwrap(),
+            "sub/../tracked.txt",
+            "./tracked.txt",
+            ".git/config",
+            ".GIT/HEAD",
+            "",
+            "tracked.txt/",
+            "nul\0byte",
+        ] {
+            let error = apply(root, &tree, &stage(&[path])).await.unwrap_err();
+            assert!(
+                error.to_string().contains("not a working tree path"),
+                "{path:?}: {error}"
+            );
+        }
+        let error = apply(root, &tree, &stage(&["old name.txt"]))
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("has no unstaged changes"),
+            "{error}"
+        );
+        let error = apply(root, &tree, &unstage(&["tracked.txt"]))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("is not staged"), "{error}");
+        let error = apply(root, &tree, &stage(&[])).await.unwrap_err();
+        assert!(error.to_string().contains("no files"), "{error}");
+        let error = apply(root, &tree, &WorkingTreeAction::AbortCherryPick)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("not available yet"), "{error}");
+        assert_eq!(porcelain(root), " M tracked.txt\n");
+        assert!(file_diff(root, "c", &escape, false).await.is_err());
+        assert!(
+            file_diff(root, "c", absolute.to_str().unwrap(), false)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn unstage_takes_a_rename_back_whole_and_the_all_actions_cover_the_tree() {
+        let dir = committed_repo();
+        let root = dir.path();
+        run(root, &["mv", "old name.txt", "new name.txt"]);
+        std::fs::remove_file(root.join("tracked.txt")).unwrap();
+        std::fs::write(root.join("fresh.txt"), "f\n").unwrap();
+        let tree = read(root, "c").await.unwrap();
+        let renamed = tree
+            .files
+            .iter()
+            .find(|file| file.path == "new name.txt")
+            .unwrap();
+        assert_eq!(renamed.old_path.as_deref(), Some("old name.txt"));
+        apply(root, &tree, &unstage(&["new name.txt"]))
+            .await
+            .unwrap();
+        assert_eq!(
+            porcelain(root),
+            " D old name.txt\n D tracked.txt\n?? fresh.txt\n?? new name.txt\n"
+        );
+
+        let tree = read(root, "c").await.unwrap();
+        apply(root, &tree, &WorkingTreeAction::StageAll)
+            .await
+            .unwrap();
+        assert_eq!(
+            porcelain(root),
+            "A  fresh.txt\nR  old name.txt -> new name.txt\nD  tracked.txt\n"
+        );
+        let tree = read(root, "c").await.unwrap();
+        apply(root, &tree, &WorkingTreeAction::UnstageAll)
+            .await
+            .unwrap();
+        assert_eq!(
+            porcelain(root),
+            " D old name.txt\n D tracked.txt\n?? fresh.txt\n?? new name.txt\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn unstaging_works_before_the_first_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        run(root, &["init", "-b", "main", "."]);
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        std::fs::write(root.join("b.txt"), "b\n").unwrap();
+        run(root, &["add", "."]);
+        std::fs::write(root.join("a.txt"), "a\nmore\n").unwrap();
+        let tree = read(root, "c").await.unwrap();
+        apply(root, &tree, &unstage(&["a.txt"])).await.unwrap();
+        assert_eq!(porcelain(root), "A  b.txt\n?? a.txt\n");
+        let tree = read(root, "c").await.unwrap();
+        apply(root, &tree, &WorkingTreeAction::UnstageAll)
+            .await
+            .unwrap();
+        assert_eq!(porcelain(root), "?? a.txt\n?? b.txt\n");
+    }
+
+    #[tokio::test]
+    async fn file_diffs_cover_staged_unstaged_untracked_and_binary_files() {
+        let dir = committed_repo();
+        let root = dir.path();
+        std::fs::write(root.join("tracked.txt"), "one\ntwo\n").unwrap();
+        run(root, &["add", "tracked.txt"]);
+        std::fs::write(root.join("tracked.txt"), "one\ntwo\nthree\n").unwrap();
+        std::fs::write(root.join("-new file.txt"), "x\ny\n").unwrap();
+        std::fs::write(root.join("blob.bin"), [0u8, 1, 2, 0, 255]).unwrap();
+
+        let staged = file_diff(root, "c", "tracked.txt", true).await.unwrap();
+        assert!(staged.patch.contains("+two"), "{}", staged.patch);
+        assert!(!staged.patch.contains("+three"));
+        assert!(staged.staged && !staged.binary && !staged.truncated);
+        let unstaged = file_diff(root, "c", "tracked.txt", false).await.unwrap();
+        assert!(unstaged.patch.contains("+three") && !unstaged.patch.contains("+two"));
+        let untracked = file_diff(root, "c", "-new file.txt", false).await.unwrap();
+        assert!(
+            untracked.patch.contains("new file mode"),
+            "{}",
+            untracked.patch
+        );
+        assert!(untracked.patch.contains("+x\n+y"), "{}", untracked.patch);
+        let parsed = untracked
+            .patch
+            .lines()
+            .filter(|line| line.starts_with('+') && !line.starts_with("+++"))
+            .count();
+        assert_eq!(parsed, 2);
+        let binary = file_diff(root, "c", "blob.bin", false).await.unwrap();
+        assert!(binary.binary, "{}", binary.patch);
+
+        let error = file_diff(root, "c", "old name.txt", false)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("no unstaged changes"), "{error}");
+        let error = file_diff(root, "c", "-new file.txt", true)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("no staged changes"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn checkout_locks_serialize_one_checkout_only() {
+        let first = lock_checkout("lock-a").await;
+        let other = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            lock_checkout("lock-b"),
+        )
+        .await;
+        assert!(other.is_ok(), "another checkout is not blocked");
+        let same = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            lock_checkout("lock-a"),
+        )
+        .await;
+        assert!(same.is_err(), "the same checkout waits");
+        drop(first);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                lock_checkout("lock-a")
+            )
+            .await
+            .is_ok()
         );
     }
 

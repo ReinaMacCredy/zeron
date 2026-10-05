@@ -2156,6 +2156,11 @@ impl SessionsEngine {
     fn set_status(&self, chat_id: &str, status: SessionStatus, fresh_start: bool) {
         self.inner.set_status(chat_id, status, fresh_start);
     }
+
+    #[cfg(test)]
+    pub(crate) fn set_status_for_test(&self, chat_id: &str, status: SessionStatus) {
+        self.set_status(chat_id, status, false);
+    }
 }
 
 /// What a rewind hands back: the removed prompt, for the composer.
