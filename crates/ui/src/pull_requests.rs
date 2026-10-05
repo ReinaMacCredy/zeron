@@ -13,7 +13,7 @@ mod tabs;
 
 pub use chat::{
     ACTION_NOTE as CHAT_ACTION_NOTE, CONTEXT_HEADER as CHAT_CONTEXT_HEADER, ContextCall,
-    ContextChip, GithubWrite, PrChatContext, PrChatScope, Suggestion, chat_shortcut,
+    ContextChip, GithubWrite, PrChatContext, Suggestion, chat_shortcut,
     extract_badge as extract_chat_context_badge, failure_text as chat_write_failure,
     first_prompt as first_chat_prompt, latest_reply as latest_chat_reply,
     live_sessions as live_chat_sessions,
@@ -1749,7 +1749,7 @@ impl PullRequestsPage {
                 .into_any_element(),
             ListEntry::More => div()
                 .pt(px(12.0))
-                .children(self.render_more(true, &theme, cx))
+                .child(self.render_more(&theme, cx))
                 .into_any_element(),
         };
         div()

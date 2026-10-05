@@ -13,20 +13,7 @@ use zeron_proto::{
 use super::handoff::bounded;
 use super::{ListEntry, PullRequestKey, PullRequestsPage, change_size, filters, group_thousands};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PrChatScope {
-    pub repository: Option<String>,
-    pub pull_request: Option<PullRequestKey>,
-}
-
 impl PullRequestsPage {
-    pub fn chat_scope(&self) -> PrChatScope {
-        PrChatScope {
-            repository: self.prefs.repository.clone(),
-            pull_request: self.active.clone(),
-        }
-    }
-
     pub fn chat_context(&self, cx: &App) -> PrChatContext {
         let listing = self.listing.ready();
         if let Some(key) = &self.active {
@@ -870,10 +857,6 @@ pub struct Confirmation {
 }
 
 impl Suggestion {
-    pub fn number(&self) -> u64 {
-        self.target.number
-    }
-
     pub fn target_label(&self) -> String {
         format!("#{} {}", self.target.number, self.target.repository)
     }
@@ -1555,7 +1538,7 @@ mod tests {
                 ),
             ]
         );
-        assert!(cards.iter().all(|card| card.number() == 7));
+        assert!(cards.iter().all(|card| card.target.number == 7));
         assert_eq!(cards[0].header(), "Draft review comment, not posted");
         assert_eq!(cards[1].header(), "Suggestion, not run");
         assert!(cards[0].offers_request_changes());

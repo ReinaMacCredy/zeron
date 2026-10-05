@@ -620,7 +620,7 @@ fn resized_history_column_widths(
     widths
 }
 
-pub(crate) const WORKING_TREE_ROW: &str = "working-tree";
+const WORKING_TREE_ROW: &str = "working-tree";
 
 #[derive(Debug, Clone)]
 struct ActiveLane {
@@ -1336,14 +1336,10 @@ fn decode_history_avatar(encoded: &str) -> Option<Arc<Image>> {
     Some(Arc::new(Image::from_bytes(format, bytes)))
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GitHistoryTarget {
-    #[default]
     SelectedChat,
-    Pinned {
-        cwd: String,
-        device: Option<String>,
-    },
+    Pinned { cwd: String, device: Option<String> },
     Nothing,
 }
 

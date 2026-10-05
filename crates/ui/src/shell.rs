@@ -6330,14 +6330,11 @@ impl Shell {
                     .into_any_element()
             }
             SettingsSection::SourceControl => {
-                if self.source_control_page.is_none() {
-                    let state = self.state.clone();
-                    self.source_control_page = Some(cx.new(|cx| SourceControlPage::new(state, cx)));
-                }
-                match &self.source_control_page {
-                    Some(page) => page.clone().into_any_element(),
-                    None => Empty.into_any_element(),
-                }
+                let state = self.state.clone();
+                self.source_control_page
+                    .get_or_insert_with(|| cx.new(|cx| SourceControlPage::new(state, cx)))
+                    .clone()
+                    .into_any_element()
             }
             SettingsSection::Archived => {
                 if self.archived_page.is_none() {

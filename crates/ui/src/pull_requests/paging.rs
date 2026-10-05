@@ -165,22 +165,14 @@ impl PullRequestsPage {
         self.refresh(cx);
     }
 
-    pub(super) fn render_more(
-        &self,
-        truncated: bool,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        if !truncated {
-            return None;
-        }
+    pub(super) fn render_more(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let footer = div()
             .flex()
             .justify_center()
             .py(px(12.0))
             .text_size(px(12.0))
             .text_color(theme.text_muted);
-        Some(if self.limit < MAX_PAGE_SIZE {
+        if self.limit < MAX_PAGE_SIZE {
             footer
                 .child(
                     super::actions::button(
@@ -202,7 +194,7 @@ impl PullRequestsPage {
             footer
                 .child("Narrow your search to find more pull requests.")
                 .into_any_element()
-        })
+        }
     }
 
     pub(super) fn hydrate_detail(&mut self, key: &PullRequestKey, cx: &mut Context<Self>) {
