@@ -631,12 +631,14 @@ mod tests {
         );
         let (state, _calls) = app_state(cx, &runtime, state);
         cx.update(|cx| settings::init(settings::UiSettings::default(), dir.path(), cx));
+        let opened = std::rc::Rc::new(std::cell::Cell::new(false));
+        let on_open = opened.clone();
         let float = cx.new(|cx| {
             DeviceFloat::new(
                 state,
                 "chat".into(),
                 ("local".into(), "SIM".into()),
-                |_, _| {},
+                move |_, _| on_open.set(true),
                 cx,
             )
         });
@@ -685,6 +687,31 @@ mod tests {
             (card.origin.x, card.origin.y, card.size.width),
             (px(448.0), px(112.0), px(300.0))
         );
+
+        let closed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let seen = closed.clone();
+        let _subscription = cx.update(|_, cx| {
+            cx.subscribe(&float, move |_, event: &DeviceFloatEvent, _| {
+                let DeviceFloatEvent::Close = event;
+                seen.set(true);
+            })
+        });
+        assert!(cx.debug_bounds("device-float-open").is_none());
+        let handle = cx.debug_bounds("device-float-handle").unwrap().center();
+        cx.simulate_mouse_move(handle, None, Modifiers::default());
+        wait(cx, |cx| cx.debug_bounds("device-float-open").is_some());
+        let open = cx.debug_bounds("device-float-open").unwrap().center();
+        cx.simulate_click(open, Modifiers::default());
+        cx.run_until_parked();
+        assert!(
+            opened.get(),
+            "Open in right panel reaches the shell callback"
+        );
+        assert_eq!(frame(cx), Some(resized), "a button press is not a drag");
+        let close = cx.debug_bounds("device-float-close").unwrap().center();
+        cx.simulate_click(close, Modifiers::default());
+        cx.run_until_parked();
+        assert!(closed.get(), "Close floating preview emits Close");
     }
 
     const CONTAINER: Size<f32> = Size {
