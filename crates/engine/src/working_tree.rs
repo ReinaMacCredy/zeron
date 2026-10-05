@@ -812,13 +812,7 @@ async fn discard(root: &Path, tree: &WorkingTree, paths: &[String]) -> Result<()
         let paths: Vec<&str> = untracked.iter().map(|file| file.path.as_str()).collect();
         run_with_paths(root, &["clean", "-f", "-q"], &paths).await?;
         for path in paths {
-            let mut parent = root.join(path).parent().map(Path::to_path_buf);
-            while let Some(directory) = parent {
-                if directory == root || std::fs::remove_dir(&directory).is_err() {
-                    break;
-                }
-                parent = directory.parent().map(Path::to_path_buf);
-            }
+            crate::diff_sync::remove_empty_ancestors(root, &root.join(path));
         }
     }
     Ok(())

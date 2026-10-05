@@ -1525,6 +1525,16 @@ async fn run_git_for_path_batch(
     }))
 }
 
+pub(crate) fn remove_empty_ancestors(root: &Path, file: &Path) {
+    let mut parent = file.parent();
+    while let Some(directory) = parent {
+        if directory == root || std::fs::remove_dir(directory).is_err() {
+            break;
+        }
+        parent = directory.parent();
+    }
+}
+
 /// Restore staged and unstaged tracked paths to the snapshot's HEAD, then ask
 /// Git to remove only the exact untracked paths it reported. Ignored files are
 /// excluded by porcelain status and `git clean` intentionally omits `-x`;
@@ -1600,14 +1610,7 @@ pub async fn discard_working_tree(
     // their now-empty parent directories behind. Remove only empty ancestors;
     // ignored files or any concurrent writer make `remove_dir` stop safely.
     for path in &untracked {
-        let full = root.join(PathBuf::from(path_argument(path)));
-        let mut parent = full.parent();
-        while let Some(directory) = parent {
-            if directory == root || std::fs::remove_dir(directory).is_err() {
-                break;
-            }
-            parent = directory.parent();
-        }
+        remove_empty_ancestors(root, &root.join(PathBuf::from(path_argument(path))));
     }
 
     let final_snapshot = capture_diff(repos, root).await?;
