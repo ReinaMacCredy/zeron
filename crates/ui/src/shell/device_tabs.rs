@@ -1,5 +1,15 @@
 use super::*;
+use crate::device_panel::float::{DeviceFloat, DeviceFloatEvent};
 use crate::device_panel::{DevicePanel, DevicePanelEvent};
+use zeron_proto::device_hub::DevicePlatform;
+
+type DeviceTarget = (String, String);
+
+#[derive(Default)]
+pub(super) struct DeviceShellState {
+    dismissed: std::collections::HashMap<String, std::collections::HashSet<DeviceTarget>>,
+    floats: std::collections::HashMap<String, (Entity<DeviceFloat>, [Subscription; 2])>,
+}
 
 impl Shell {
     pub(super) fn device_surface_unavailable(&self, cx: &App) -> Option<&'static str> {
@@ -23,18 +33,30 @@ impl Shell {
         None
     }
 
-    pub(super) fn add_device_surface(
+    fn device_tab_ids(&self, key: &str) -> Vec<u64> {
+        self.right_tabs
+            .get(key)
+            .into_iter()
+            .flatten()
+            .filter_map(|surface| match surface {
+                RightSurface::Device(id) if self.device_panels.contains_key(id) => Some(*id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn device_tab_target(&self, id: u64, cx: &App) -> Option<DeviceTarget> {
+        self.device_panels.get(&id)?.0.read(cx).target().cloned()
+    }
+
+    fn new_device_panel(
         &mut self,
+        chat_id: String,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<u64> {
-        if self.device_surface_unavailable(cx).is_some() {
-            return None;
-        }
-        let key = self.panel_key(cx);
+    ) -> u64 {
         self.device_seq += 1;
         let id = self.device_seq;
-        let chat_id = self.active_chat.clone();
         let state = self.state.clone();
         let panel = cx.new(|cx| DevicePanel::new(state, chat_id, cx));
         let observer = cx.observe(&panel, |_, _, cx| cx.notify());
@@ -45,15 +67,369 @@ impl Shell {
                 DevicePanelEvent::Close => {
                     this.close_right_surface(RightSurface::Device(id), window, cx)
                 }
+                DevicePanelEvent::Bound => this.device_tab_bound(id, cx),
+                DevicePanelEvent::Float => this.float_device_tab(id, cx),
             },
         );
         self.device_panels.insert(id, (panel, [observer, events]));
-        self.right_tabs
-            .entry(key)
-            .or_default()
-            .push(RightSurface::Device(id));
-        self.set_right_active(RightSurface::Device(id), cx);
+        id
+    }
+
+    fn show_device_tab(&mut self, chat_id: &str, id: u64, cx: &mut Context<Self>) {
+        if chat_id == self.panel_key(cx) {
+            self.set_right_active(RightSurface::Device(id), cx);
+        } else {
+            self.panels.update(chat_id, |panels| {
+                panels.right_active = RightSurface::Device(id)
+            });
+        }
+    }
+
+    fn remove_device_tab(&mut self, chat_id: &str, id: u64) {
+        if let Some(tabs) = self.right_tabs.get_mut(chat_id) {
+            tabs.retain(|surface| *surface != RightSurface::Device(id));
+        }
+        self.panels
+            .forget_right_surface(chat_id, RightSurface::Device(id));
+        self.device_panels.remove(&id);
+    }
+
+    pub(super) fn add_device_surface(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<u64> {
+        if self.device_surface_unavailable(cx).is_some() {
+            return None;
+        }
+        let key = self.panel_key(cx);
+        let placeholder = self
+            .device_tab_ids(&key)
+            .into_iter()
+            .find(|id| self.device_tab_target(*id, cx).is_none());
+        let id = match placeholder {
+            Some(id) => id,
+            None => {
+                let id = self.new_device_panel(self.active_chat.clone(), window, cx);
+                self.right_tabs
+                    .entry(key.clone())
+                    .or_default()
+                    .push(RightSurface::Device(id));
+                id
+            }
+        };
+        self.show_device_tab(&key, id, cx);
         Some(id)
+    }
+
+    pub(super) fn open_device_tab(
+        &mut self,
+        chat_id: &str,
+        target: DeviceTarget,
+        automatic: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<u64> {
+        let dismissed = self
+            .device_shell
+            .dismissed
+            .entry(chat_id.to_string())
+            .or_default();
+        if automatic && dismissed.contains(&target) {
+            return None;
+        }
+        dismissed.remove(&target);
+        let ids = self.device_tab_ids(chat_id);
+        let existing = ids
+            .iter()
+            .copied()
+            .find(|id| self.device_tab_target(*id, cx).as_ref() == Some(&target));
+        let placeholder = ids
+            .iter()
+            .copied()
+            .find(|id| self.device_tab_target(*id, cx).is_none());
+        let id = match (existing, placeholder) {
+            (Some(_), _) if automatic => return None,
+            (Some(existing), placeholder) => {
+                if let Some(placeholder) = placeholder {
+                    self.remove_device_tab(chat_id, placeholder);
+                }
+                existing
+            }
+            (None, Some(placeholder)) => placeholder,
+            (None, None) => {
+                let id = self.new_device_panel(chat_id.to_string(), window, cx);
+                self.right_tabs
+                    .entry(chat_id.to_string())
+                    .or_default()
+                    .push(RightSurface::Device(id));
+                id
+            }
+        };
+        if existing.is_none()
+            && let Some((panel, _)) = self.device_panels.get(&id)
+        {
+            panel.update(cx, |panel, cx| panel.bind(target.0, target.1, cx));
+        }
+        self.show_device_tab(chat_id, id, cx);
+        Some(id)
+    }
+
+    fn device_tab_bound(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some((panel, _)) = self.device_panels.get(&id) else {
+            return;
+        };
+        let (chat_id, target) = {
+            let panel = panel.read(cx);
+            (panel.chat_id().to_string(), panel.target().cloned())
+        };
+        let Some(target) = target else {
+            return;
+        };
+        if let Some(dismissed) = self.device_shell.dismissed.get_mut(&chat_id) {
+            dismissed.remove(&target);
+        }
+        let shown = self.device_tab_ids(&chat_id).into_iter().find(|other| {
+            *other != id && self.device_tab_target(*other, cx).as_ref() == Some(&target)
+        });
+        if let Some(shown) = shown {
+            self.remove_device_tab(&chat_id, id);
+            self.show_device_tab(&chat_id, shown, cx);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn drop_device_tab(&mut self, id: u64, cx: &App) {
+        let Some((panel, _)) = self.device_panels.remove(&id) else {
+            return;
+        };
+        let panel = panel.read(cx);
+        if let Some(target) = panel.target() {
+            self.device_shell
+                .dismissed
+                .entry(panel.chat_id().to_string())
+                .or_default()
+                .insert(target.clone());
+        }
+    }
+
+    pub(super) fn device_tab_icon(&self, id: u64, cx: &App) -> &'static str {
+        match self
+            .device_panels
+            .get(&id)
+            .and_then(|(panel, _)| panel.read(cx).platform(cx))
+        {
+            Some(DevicePlatform::Ios) => icons::APPLE,
+            Some(DevicePlatform::Android) => icons::ANDROID,
+            None => icons::SMARTPHONE,
+        }
+    }
+
+    pub(super) fn device_tab_detail(&self, id: u64, cx: &App) -> Option<SharedString> {
+        let panel = self.device_panels.get(&id)?.0.read(cx);
+        let description = panel.description(cx)?;
+        Some(format!("{}\n{description}", panel.title(cx)).into())
+    }
+
+    pub(super) fn device_tab_label(
+        &self,
+        surface: RightSurface,
+        title: SharedString,
+        cx: &App,
+    ) -> AnyElement {
+        let input = match surface {
+            RightSurface::Device(id) => self
+                .device_panels
+                .get(&id)
+                .and_then(|(panel, _)| panel.read(cx).rename_input()),
+            _ => None,
+        };
+        match input {
+            Some(input) => div()
+                .id("device-tab-rename")
+                .debug_selector(|| "device-tab-rename".into())
+                .w_full()
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(input)
+                .into_any_element(),
+            None => title.into_any_element(),
+        }
+    }
+
+    pub(super) fn rename_device_tab(
+        &mut self,
+        surface: RightSurface,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let RightSurface::Device(id) = surface
+            && let Some((panel, _)) = self.device_panels.get(&id)
+        {
+            panel.update(cx, |panel, cx| panel.begin_rename(window, cx));
+        }
+    }
+
+    pub(super) fn cancel_device_rename(&mut self, cx: &mut Context<Self>) -> bool {
+        let mut cancelled = false;
+        for (panel, _) in self.device_panels.values() {
+            cancelled |= panel.update(cx, |panel, cx| panel.finish_rename(false, cx));
+        }
+        cancelled
+    }
+
+    pub(super) fn device_rename_menu_row(
+        &self,
+        surface: RightSurface,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let RightSurface::Device(_) = surface else {
+            return None;
+        };
+        Some(
+            popover::menu_row(theme, false, "device-tab-menu-rename")
+                .id("device-tab-menu-rename")
+                .debug_selector(|| "device-tab-menu-rename".into())
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.close_chat_menu(cx);
+                    this.rename_device_tab(surface, window, cx);
+                }))
+                .child("Rename")
+                .into_any_element(),
+        )
+    }
+
+    fn float_device_tab(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some((panel, _)) = self.device_panels.get(&id) else {
+            return;
+        };
+        let (chat_id, target) = {
+            let panel = panel.read(cx);
+            (panel.chat_id().to_string(), panel.target().cloned())
+        };
+        let Some(target) = target else {
+            return;
+        };
+        self.open_device_float(chat_id.clone(), target, cx);
+        if chat_id == self.panel_key(cx) {
+            self.set_surfaces_open(false, cx);
+        }
+    }
+
+    pub(super) fn float_active_device_tab(&mut self, cx: &mut Context<Self>) {
+        if let RightSurface::Device(id) = self.resolved_right_active(cx)
+            && let Some(target) = self.device_tab_target(id, cx)
+        {
+            self.open_device_float(self.active_chat.clone(), target, cx);
+        }
+    }
+
+    pub(super) fn open_device_float(
+        &mut self,
+        chat_id: String,
+        target: DeviceTarget,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .device_shell
+            .floats
+            .get(&chat_id)
+            .is_some_and(|(float, _)| float.read(cx).target() == &target)
+        {
+            return;
+        }
+        let shell = cx.weak_entity();
+        let (open_chat, open_target) = (chat_id.clone(), target.clone());
+        let state = self.state.clone();
+        let float_chat = chat_id.clone();
+        let float = cx.new(|cx| {
+            DeviceFloat::new(
+                state,
+                float_chat,
+                target,
+                move |window, cx| {
+                    shell
+                        .update(cx, |shell, cx| {
+                            shell.open_float_in_panel(&open_chat, open_target.clone(), window, cx)
+                        })
+                        .ok();
+                },
+                cx,
+            )
+        });
+        let observer = cx.observe(&float, |_, _, cx| cx.notify());
+        let close_chat = chat_id.clone();
+        let events = cx.subscribe(&float, move |this, float, event, cx| match event {
+            DeviceFloatEvent::Close => this.close_device_float(&close_chat, &float, cx),
+        });
+        self.device_shell
+            .floats
+            .insert(chat_id, (float, [observer, events]));
+        cx.notify();
+    }
+
+    fn close_device_float(
+        &mut self,
+        chat_id: &str,
+        float: &Entity<DeviceFloat>,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .device_shell
+            .floats
+            .get(chat_id)
+            .is_some_and(|(current, _)| current == float)
+        {
+            self.device_shell.floats.remove(chat_id);
+            cx.notify();
+        }
+    }
+
+    fn open_float_in_panel(
+        &mut self,
+        chat_id: &str,
+        target: DeviceTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.device_shell.floats.remove(chat_id);
+        self.open_device_tab(chat_id, target, false, window, cx);
+        if chat_id == self.panel_key(cx) {
+            self.set_surfaces_open(true, cx);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn sync_device_visibility(
+        &mut self,
+        chat_visible: bool,
+        pane_visible: bool,
+        selected: RightSurface,
+        cx: &mut Context<Self>,
+    ) {
+        let shown = match selected {
+            RightSurface::Device(id) if pane_visible => Some(id),
+            _ => None,
+        };
+        let shown_target = shown.and_then(|id| self.device_tab_target(id, cx));
+        for (id, (panel, _)) in &self.device_panels {
+            let visible = shown == Some(*id);
+            panel.update(cx, |panel, cx| panel.set_visible(visible, cx));
+        }
+        for (chat_id, (float, _)) in &self.device_shell.floats {
+            let visible = chat_visible
+                && *chat_id == self.active_chat
+                && shown_target.as_ref() != Some(float.read(cx).target());
+            float.update(cx, |float, cx| float.set_visible(visible, cx));
+        }
+    }
+
+    pub(super) fn render_device_float(&self, cx: &App) -> Option<AnyElement> {
+        let (float, _) = self.device_shell.floats.get(&self.active_chat)?;
+        float
+            .read(cx)
+            .is_visible()
+            .then(|| float.clone().into_any_element())
     }
 
     pub(super) fn device_tab_title(&self, id: u64, cx: &App) -> Option<SharedString> {
@@ -157,5 +533,508 @@ mod tests {
                 );
             })
             .unwrap();
+    }
+
+    use crate::device_panel::tests::{Calls, fake_engine, open_frame_streams};
+    use zeron_proto::device_hub::{DeviceHubState, DeviceSession, HubDevice};
+
+    fn two_devices(revision: u64) -> DeviceHubState {
+        let mut hub = crate::device_panel::tests::hub(true);
+        hub.revision = revision;
+        hub.devices[0].version = "iOS 27.0".into();
+        hub.devices.push(HubDevice {
+            host_id: "local".into(),
+            id: "PAD".into(),
+            name: "iPad Air".into(),
+            version: "iOS 27.0".into(),
+            ..Default::default()
+        });
+        for device_id in ["SIM", "PAD"] {
+            hub.sessions.push(DeviceSession {
+                chat_id: "chat".into(),
+                host_id: "local".into(),
+                device_id: device_id.into(),
+                ..Default::default()
+            });
+        }
+        hub
+    }
+
+    fn target(device_id: &str) -> DeviceTarget {
+        ("local".into(), device_id.into())
+    }
+
+    fn device_shell(
+        cx: &mut gpui::TestAppContext,
+    ) -> (gpui::WindowHandle<Shell>, tempfile::TempDir) {
+        let (window, dir) = shell_window(cx);
+        cx.executor().allow_parking();
+        window
+            .update(cx, |shell, _, cx| {
+                shell.state.update(cx, |state, cx| {
+                    state.selected_chat = Some("chat".into());
+                    state.device_hub = Some(two_devices(1));
+                    cx.notify();
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+        (window, dir)
+    }
+
+    fn device_tabs(shell: &Shell) -> Vec<u64> {
+        shell.device_tab_ids("chat")
+    }
+
+    fn settle(
+        cx: &mut gpui::TestAppContext,
+        mut done: impl FnMut(&mut gpui::TestAppContext) -> bool,
+    ) {
+        for _ in 0..400 {
+            cx.run_until_parked();
+            if done(cx) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("condition never held");
+    }
+
+    #[gpui::test]
+    fn a_placeholder_is_retargeted_in_place_and_a_shown_device_is_focused_not_duplicated(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (window, _dir) = device_shell(cx);
+        let (picker, second) = window
+            .update(cx, |shell, window, cx| {
+                let picker = shell.add_device_surface(window, cx).unwrap();
+                assert_eq!(
+                    shell.add_device_surface(window, cx),
+                    Some(picker),
+                    "+ -> Device focuses the open picker instead of adding another"
+                );
+                assert_eq!(
+                    shell.open_device_tab("chat", target("SIM"), false, window, cx),
+                    Some(picker),
+                    "choosing a device retargets the placeholder in place"
+                );
+                assert_eq!(device_tabs(shell), vec![picker]);
+                let rows = shell.right_surface_rows(cx);
+                assert_eq!(rows[0].1.as_ref(), "iPhone 17");
+                assert_eq!(
+                    rows[0].3.as_ref().map(|detail| detail.to_string()),
+                    Some("iPhone 17\nThis machine · iOS 27.0".to_string())
+                );
+                assert_eq!(shell.device_tab_icon(picker, cx), icons::APPLE);
+
+                let second = shell.add_device_surface(window, cx).unwrap();
+                assert_ne!(
+                    second, picker,
+                    "a bound tab gets a second picker tab beside it"
+                );
+                assert_eq!(device_tabs(shell), vec![picker, second]);
+                assert_eq!(shell.device_tab_icon(second, cx), icons::SMARTPHONE);
+                assert_eq!(
+                    shell.resolved_right_active(cx),
+                    RightSurface::Device(second)
+                );
+                let panel = shell.device_panels[&second].0.clone();
+                panel.update(cx, |panel, cx| {
+                    panel.bind("local".into(), "SIM".into(), cx);
+                    cx.emit(DevicePanelEvent::Bound);
+                });
+                (picker, second)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, window, cx| {
+                assert_eq!(
+                    device_tabs(shell),
+                    vec![picker],
+                    "opening a device shown elsewhere drops the picker"
+                );
+                assert!(!shell.device_panels.contains_key(&second));
+                assert_eq!(
+                    shell.resolved_right_active(cx),
+                    RightSurface::Device(picker)
+                );
+                assert!(
+                    shell
+                        .device_shell
+                        .dismissed
+                        .values()
+                        .all(|ids| ids.is_empty()),
+                    "the dropped picker was never bound, so nothing is dismissed"
+                );
+                let pad = shell.add_device_surface(window, cx).unwrap();
+                assert_eq!(
+                    shell.open_device_tab("chat", target("SIM"), false, window, cx),
+                    Some(picker),
+                    "a manual open of a shown device focuses its tab"
+                );
+                assert_eq!(
+                    device_tabs(shell),
+                    vec![picker],
+                    "and removes the open picker"
+                );
+                assert!(!shell.device_panels.contains_key(&pad));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn closing_a_bound_tab_is_remembered_for_automatic_opens_until_a_manual_open(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (window, _dir) = device_shell(cx);
+        window
+            .update(cx, |shell, window, cx| {
+                let id = shell
+                    .open_device_tab("chat", target("SIM"), false, window, cx)
+                    .unwrap();
+                shell.close_right_surface(RightSurface::Device(id), window, cx);
+                assert!(device_tabs(shell).is_empty());
+                assert_eq!(
+                    shell.open_device_tab("chat", target("SIM"), true, window, cx),
+                    None,
+                    "an automatic open skips a dismissed device"
+                );
+                assert!(device_tabs(shell).is_empty());
+                assert!(
+                    shell
+                        .open_device_tab("chat", target("PAD"), true, window, cx)
+                        .is_some(),
+                    "other devices still open automatically"
+                );
+                let again = shell
+                    .open_device_tab("chat", target("SIM"), false, window, cx)
+                    .unwrap();
+                assert_eq!(
+                    shell.open_device_tab("chat", target("SIM"), true, window, cx),
+                    None,
+                    "an automatic open never duplicates a shown device"
+                );
+                assert_eq!(device_tabs(shell).len(), 2);
+                shell.close_right_surface(RightSurface::Device(again), window, cx);
+                let picker = shell.add_device_surface(window, cx).unwrap();
+                shell.device_panels[&picker].0.update(cx, |panel, cx| {
+                    panel.bind("local".into(), "SIM".into(), cx);
+                    cx.emit(DevicePanelEvent::Bound);
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, window, cx| {
+                assert!(
+                    !shell.device_shell.dismissed["chat"].contains(&target("SIM")),
+                    "opening from the picker clears the dismissal"
+                );
+                assert_eq!(
+                    shell.open_device_tab("chat", target("SIM"), true, window, cx),
+                    None
+                );
+                assert_eq!(device_tabs(shell).len(), 2);
+            })
+            .unwrap();
+    }
+
+    fn attach_engine(
+        window: gpui::WindowHandle<Shell>,
+        runtime: &tokio::runtime::Runtime,
+        cx: &mut gpui::TestAppContext,
+    ) -> Calls {
+        let (engine, calls) = fake_engine(runtime);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.state.update(cx, |state, cx| {
+                    state.set_test_engine(engine);
+                    state.device_hub = Some(two_devices(2));
+                    cx.notify();
+                });
+            })
+            .unwrap();
+        calls
+    }
+
+    fn set_pane(
+        window: gpui::WindowHandle<Shell>,
+        cx: &mut gpui::TestAppContext,
+        open: bool,
+        selected: Option<u64>,
+    ) {
+        window
+            .update(cx, |shell, _, cx| {
+                shell.panels.update("chat", |panels| {
+                    panels.changes_open = open;
+                    if let Some(id) = selected {
+                        panels.right_active = RightSurface::Device(id);
+                    }
+                });
+                cx.notify();
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn only_the_shown_tab_or_float_keeps_a_frame_subscription(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (window, _dir) = device_shell(cx);
+        let (sim, pad) = window
+            .update(cx, |shell, window, cx| {
+                shell.debug_gate = Some(GatePhase::Ready);
+                let sim = shell.open_device_tab("chat", target("SIM"), false, window, cx);
+                let pad = shell.open_device_tab("chat", target("PAD"), false, window, cx);
+                (sim.unwrap(), pad.unwrap())
+            })
+            .unwrap();
+        set_pane(window, cx, true, Some(pad));
+        let calls = attach_engine(window, &runtime, cx);
+        let watches = |calls: &Calls| {
+            crate::device_panel::tests::calls_of(calls, zeron_rpc::methods::WATCH_HUB_DEVICE_FRAMES)
+                .into_iter()
+                .map(|params| params["deviceId"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        settle(cx, |_| {
+            watches(&calls) == ["PAD"] && open_frame_streams(&calls) == 1
+        });
+
+        set_pane(window, cx, true, Some(sim));
+        settle(cx, |_| {
+            watches(&calls) == ["PAD", "SIM"] && open_frame_streams(&calls) == 1
+        });
+
+        set_pane(window, cx, false, None);
+        settle(cx, |_| open_frame_streams(&calls) == 0);
+
+        window
+            .update(cx, |shell, _, cx| {
+                shell.open_device_float("chat".into(), target("SIM"), cx)
+            })
+            .unwrap();
+        settle(cx, |_| {
+            watches(&calls).len() == 3 && open_frame_streams(&calls) == 1
+        });
+        assert!(
+            window
+                .update(cx, |shell, _, cx| shell.device_shell.floats["chat"]
+                    .0
+                    .read(cx)
+                    .is_visible())
+                .unwrap(),
+            "the float counts as visible"
+        );
+
+        set_pane(window, cx, true, Some(sim));
+        settle(cx, |_| {
+            watches(&calls).len() == 4 && open_frame_streams(&calls) == 1
+        });
+        assert!(
+            window
+                .update(cx, |shell, _, cx| !shell.device_shell.floats["chat"]
+                    .0
+                    .read(cx)
+                    .is_visible())
+                .unwrap(),
+            "the float hides while the pane shows the same device"
+        );
+
+        window
+            .update(cx, |shell, _, cx| {
+                shell.state.update(cx, |state, cx| {
+                    state.selected_chat = Some("other".into());
+                    cx.notify();
+                })
+            })
+            .unwrap();
+        settle(cx, |_| open_frame_streams(&calls) == 0);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.state.update(cx, |state, cx| {
+                    state.selected_chat = Some("chat".into());
+                    cx.notify();
+                })
+            })
+            .unwrap();
+        settle(cx, |_| {
+            watches(&calls).len() == 5 && open_frame_streams(&calls) == 1
+        });
+        assert_eq!(watches(&calls).last().map(String::as_str), Some("SIM"));
+        assert!(
+            crate::device_panel::tests::calls_of(&calls, zeron_rpc::methods::CLOSE_HUB_DEVICE)
+                .is_empty(),
+            "hiding never ends a device session"
+        );
+    }
+
+    #[gpui::test]
+    fn closing_the_pane_or_the_more_menu_floats_the_device_and_the_float_follows_its_session(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (window, _dir) = device_shell(cx);
+        let id = window
+            .update(cx, |shell, window, cx| {
+                let id = shell
+                    .open_device_tab("chat", target("SIM"), false, window, cx)
+                    .unwrap();
+                shell.set_surfaces_open(true, cx);
+                assert!(shell.right_pane_open(cx));
+                shell.toggle_right_pane(cx);
+                assert!(!shell.right_pane_open(cx));
+                id
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let float_target = |window: gpui::WindowHandle<Shell>, cx: &mut gpui::TestAppContext| {
+            window
+                .update(cx, |shell, _, cx| {
+                    shell
+                        .device_shell
+                        .floats
+                        .get("chat")
+                        .map(|(float, _)| float.read(cx).target().clone())
+                })
+                .unwrap()
+        };
+        assert_eq!(float_target(window, cx), Some(target("SIM")));
+
+        window
+            .update(cx, |shell, window, cx| {
+                shell.device_shell.floats.clear();
+                shell.set_surfaces_open(true, cx);
+                shell.open_device_tab("chat", target("PAD"), false, window, cx);
+                shell.toggle_right_pane(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            float_target(window, cx),
+            Some(target("PAD")),
+            "the active tab floats, replacing the chat's float"
+        );
+
+        window
+            .update(cx, |shell, _, cx| {
+                shell.set_surfaces_open(true, cx);
+                shell.device_panels[&id]
+                    .0
+                    .update(cx, |_, cx| cx.emit(DevicePanelEvent::Float));
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(float_target(window, cx), Some(target("SIM")));
+        window
+            .update(cx, |shell, _, cx| {
+                assert!(!shell.right_pane_open(cx), "floating closes the pane");
+                assert_eq!(
+                    device_tabs(shell).len(),
+                    2,
+                    "the tab stays in the strip while it floats"
+                );
+                shell.state.update(cx, |state, cx| {
+                    let mut hub = two_devices(3);
+                    hub.sessions.retain(|session| session.device_id != "SIM");
+                    state.device_hub = Some(hub);
+                    cx.notify();
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            float_target(window, cx),
+            None,
+            "powering the device off elsewhere closes its float"
+        );
+    }
+
+    #[gpui::test]
+    fn open_in_right_panel_moves_the_float_into_a_tab(cx: &mut gpui::TestAppContext) {
+        let (window, _dir) = device_shell(cx);
+        window
+            .update(cx, |shell, window, cx| {
+                shell.open_device_float("chat".into(), target("PAD"), cx);
+                shell.open_float_in_panel("chat", target("PAD"), window, cx);
+                assert!(shell.device_shell.floats.is_empty());
+                assert!(shell.right_pane_open(cx));
+                let tabs = device_tabs(shell);
+                assert_eq!(tabs.len(), 1);
+                assert_eq!(shell.device_tab_target(tabs[0], cx), Some(target("PAD")));
+                assert_eq!(
+                    shell.resolved_right_active(cx),
+                    RightSurface::Device(tabs[0])
+                );
+            })
+            .unwrap();
+    }
+
+    struct StripHost(Entity<Shell>);
+
+    impl Render for StripHost {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let strip = self
+                .0
+                .update(cx, |shell, cx| shell.render_right_tab_strip(cx));
+            div().size_full().child(div().h(px(40.)).child(strip))
+        }
+    }
+
+    #[gpui::test]
+    fn double_clicking_a_device_tab_renames_it_and_escape_reverts(cx: &mut gpui::TestAppContext) {
+        let (window, _dir) = device_shell(cx);
+        let shell = window.root(cx).unwrap();
+        window
+            .update(cx, |shell, window, cx| {
+                shell.open_device_tab("chat", target("SIM"), false, window, cx);
+            })
+            .unwrap();
+        let (_, cx) = cx.add_window_view(|_, _| StripHost(shell.clone()));
+        cx.run_until_parked();
+        let tab = cx
+            .debug_bounds("right-surface-tab-0")
+            .expect("the device tab renders");
+        let at = tab.center();
+        for click_count in [1, 2] {
+            cx.simulate_event(gpui::MouseDownEvent {
+                position: at,
+                button: MouseButton::Left,
+                modifiers: gpui::Modifiers::default(),
+                click_count,
+                first_mouse: false,
+            });
+            cx.simulate_event(gpui::MouseUpEvent {
+                position: at,
+                button: MouseButton::Left,
+                modifiers: gpui::Modifiers::default(),
+                click_count,
+            });
+        }
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("device-tab-rename").is_some());
+        cx.simulate_input("My phone");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("device-tab-rename").is_none());
+        let title = |cx: &mut gpui::VisualTestContext| {
+            shell.read_with(cx, |shell, cx| {
+                shell.right_surface_rows(cx)[0].1.to_string()
+            })
+        };
+        assert_eq!(title(cx), "My phone");
+
+        let id = shell.read_with(cx, |shell, _| device_tabs(shell)[0]);
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.rename_device_tab(RightSurface::Device(id), window, cx)
+            })
+        });
+        cx.run_until_parked();
+        cx.simulate_input("Discarded");
+        assert!(shell.update(cx, |shell, cx| shell.capture_escape_surface(cx)));
+        cx.run_until_parked();
+        assert_eq!(title(cx), "My phone");
+        assert!(cx.debug_bounds("device-tab-rename").is_none());
     }
 }

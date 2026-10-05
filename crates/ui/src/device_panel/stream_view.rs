@@ -207,6 +207,7 @@ pub struct DeviceStreamView {
     inputs: mpsc::UnboundedSender<DeviceInput>,
     fps: Option<FpsCounter>,
     debug_tap: Option<(f32, f32)>,
+    rail_inset: f32,
     drain: Task<()>,
     timer: Task<()>,
     _tasks: [Task<()>; 2],
@@ -282,12 +283,18 @@ impl DeviceStreamView {
             fps: (std::env::var("ZERON_DEVICE_FPS").as_deref() == Ok("1"))
                 .then(FpsCounter::default),
             debug_tap: debug_tap_from_env(),
+            rail_inset: geometry::RAIL_WIDTH,
             drain: Task::ready(()),
             timer: Task::ready(()),
             _tasks: [sender, pump],
         };
         view.subscribe(cx);
         view
+    }
+
+    pub fn without_rail(mut self) -> Self {
+        self.rail_inset = 0.0;
+        self
     }
 
     fn subscribe(&mut self, cx: &mut Context<Self>) {
@@ -523,6 +530,7 @@ impl Render for DeviceStreamView {
         let aspect = self.aspect();
         let frame_box = self.frame_box.clone();
         let fps = self.fps.as_ref().map(|fps| fps.shown);
+        let rail_inset = self.rail_inset;
         let dragging = self.pressed.is_some().then(|| cx.entity().downgrade());
         let connecting = self.awaiting_frame && self.video_error.is_none();
         let input_down = (!self.awaiting_frame && self.video_error.is_none() && !self.input_live())
@@ -552,7 +560,7 @@ impl Render for DeviceStreamView {
                 gpui::canvas(
                     |_, _, _| (),
                     move |bounds, _, window, _| {
-                        let frame = geometry::centered_frame(bounds, aspect, geometry::RAIL_WIDTH);
+                        let frame = geometry::centered_frame(bounds, aspect, rail_inset);
                         frame_box.set(Some(frame));
                         match image {
                             Some(image) => {
@@ -607,7 +615,7 @@ impl Render for DeviceStreamView {
                     div()
                         .absolute()
                         .inset_0()
-                        .right(px(geometry::RAIL_WIDTH))
+                        .right(px(rail_inset))
                         .child(loading::render(
                             LoadingView {
                                 name: self.label.0.clone(),
@@ -630,7 +638,7 @@ impl Render for DeviceStreamView {
                     div()
                         .absolute()
                         .left_0()
-                        .right(px(geometry::RAIL_WIDTH))
+                        .right(px(rail_inset))
                         .bottom_0()
                         .p(px(8.0))
                         .flex()
@@ -652,7 +660,7 @@ impl Render for DeviceStreamView {
                     div()
                         .absolute()
                         .bottom(px(6.0))
-                        .right(px(8.0 + geometry::RAIL_WIDTH))
+                        .right(px(8.0 + rail_inset))
                         .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.text_muted)
                         .child(SharedString::from(format!("{fps:.0} fps"))),

@@ -158,6 +158,18 @@ impl DevicePanel {
             .on_mouse_down_out(cx.listener(|panel, _, _, cx| panel.close_more(cx)))
             .child(
                 row(
+                    "device-float",
+                    icons::LUCIDE_PICTURE_IN_PICTURE_2,
+                    "Float device over chat",
+                    false,
+                )
+                .on_click(cx.listener(|panel, _, _, cx| {
+                    panel.close_more(cx);
+                    cx.emit(DevicePanelEvent::Float);
+                })),
+            )
+            .child(
+                row(
                     "device-close-panel",
                     icons::LUCIDE_X,
                     "Close device panel",

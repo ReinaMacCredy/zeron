@@ -2175,6 +2175,7 @@ pub struct Shell {
         (Entity<crate::device_panel::DevicePanel>, [Subscription; 2]),
     >,
     device_seq: u64,
+    device_shell: device_tabs::DeviceShellState,
     browser_context: crate::browser::BrowserContext,
     browser_profile: Option<String>,
     /// Ordered surface tabs per panel key (drag-reorderable; stale entries —
@@ -2788,6 +2789,7 @@ impl Shell {
             browser_seq: 0,
             device_panels: std::collections::HashMap::new(),
             device_seq: 0,
+            device_shell: Default::default(),
             browser_context: crate::browser::BrowserContext::default(),
             browser_profile: None,
             right_tabs: std::collections::HashMap::new(),
@@ -3601,6 +3603,9 @@ impl Shell {
     /// it opens the surface host beside it, and it never hides the explorer —
     /// only the explorer's own toggle undocks that portion.
     fn toggle_right_pane(&mut self, cx: &mut Context<Self>) {
+        if self.right_pane_open(cx) {
+            self.float_active_device_tab(cx);
+        }
         self.set_surfaces_open(!self.right_pane_open(cx), cx);
     }
 
@@ -3744,7 +3749,7 @@ impl Shell {
                 }),
                 RightSurface::Device(id) => self
                     .device_tab_title(*id, cx)
-                    .map(|title| (*surface, title, false, None)),
+                    .map(|title| (*surface, title, false, self.device_tab_detail(*id, cx))),
                 RightSurface::Picker => None,
             })
             .collect()
@@ -5278,9 +5283,7 @@ impl Shell {
                 }
                 self.browser_subs.remove(&id);
             }
-            RightSurface::Device(id) => {
-                self.device_panels.remove(&id);
-            }
+            RightSurface::Device(id) => self.drop_device_tab(id, cx),
             RightSurface::Diff(id) => {
                 // Dropping the entity tears down its diff watch.
                 self.diffs.remove(&id);
@@ -11090,6 +11093,9 @@ impl Shell {
             self.finish_rename_chat(false, cx);
             return true;
         }
+        if self.cancel_device_rename(cx) {
+            return true;
+        }
         if self.rename_space_dialog.is_some() {
             self.rename_space_dialog = None;
             cx.notify();
@@ -11502,6 +11508,7 @@ impl Shell {
                 if !chat_id.is_empty() {
                     menu = menu.child(popover::menu_separator());
                 }
+                menu = menu.children(self.device_rename_menu_row(surface, &theme, cx));
                 for (action, label) in [
                     (TabCloseAction::This, "Close tab"),
                     (TabCloseAction::Others, "Close other tabs"),
@@ -12164,6 +12171,7 @@ impl Shell {
                         })
                         .child(self.transcript.clone()),
                 )
+                .children(self.render_device_float(cx))
                 // A departing transcript is visual history, not an active
                 // interaction surface bound to the newly blank route.
                 .when(departing_transcript, |el| {
@@ -13149,7 +13157,7 @@ impl Shell {
                 RightSurface::Sidechat(_) => icons::CHAT_ROUND_LINE,
                 RightSurface::Terminal(_) => icons::TERMINAL,
                 RightSurface::Browser(_) => icons::GLOBE,
-                RightSurface::Device(_) => icons::SMARTPHONE,
+                RightSurface::Device(id) => self.device_tab_icon(id, cx),
                 RightSurface::Picker => icons::PLUS,
             };
             // A live subagent tab swaps its icon for the mini working
@@ -13236,10 +13244,15 @@ impl Shell {
                 .when(!is_active, |el| {
                     el.hover(|s| s.bg(crate::theme::wash(0.06)))
                 })
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    cx.stop_propagation();
-                    this.activate_right_surface(surface, window, cx);
-                }))
+                .on_click(
+                    cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.activate_right_surface(surface, window, cx);
+                        if event.click_count() == 2 {
+                            this.rename_device_tab(surface, window, cx);
+                        }
+                    }),
+                )
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
@@ -13355,7 +13368,7 @@ impl Shell {
                         } else {
                             theme.text_muted
                         })
-                        .child(title),
+                        .child(self.device_tab_label(surface, title, cx)),
                 )
                 .child(
                     // Trailing slot: the unsaved dot normally, ✕ on tab
@@ -14512,6 +14525,10 @@ impl Render for Shell {
                 browser.set_presentation(presentation, cx);
             });
         }
+        let chat_visible = matches!(gate, GatePhase::Ready)
+            && !restart_required
+            && matches!(self.route, Route::Chat);
+        self.sync_device_visibility(chat_visible, browser_active, selected_surface, cx);
 
         // Fullscreen hides the macOS traffic lights — reflow the control
         // cluster with a 200ms ease-out tween (§1.1). A fullscreen transition
