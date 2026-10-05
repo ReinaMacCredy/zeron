@@ -10,6 +10,13 @@ impl Shell {
         self.pull_requests_sub = Some(cx.subscribe(&page, |shell, _, event, cx| match event {
             PullRequestsEvent::Close => shell.close_pull_requests(cx),
             PullRequestsEvent::OpenChat(handoff) => shell.open_pull_request_chat(handoff.clone(), cx),
+            PullRequestsEvent::ToggleChat => {}
+            PullRequestsEvent::OpenSettings(section) => {
+                if let Some(page) = &shell.pull_requests_page {
+                    page.update(cx, |page, _| page.set_visible(false));
+                }
+                shell.open_settings(*section, cx);
+            }
         }));
         self.pull_requests_page = Some(page.clone());
         page

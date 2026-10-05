@@ -6,7 +6,7 @@ use zeron_proto::{
     ChangeRequestReviewFilter, ChangeRequestState, ListChangeRequestsRequest,
 };
 
-use super::{PullRequestsPage, avatar, change_size, label_color, rank_by_merge_readiness};
+use super::{PageTab, PullRequestsPage, avatar, change_size, label_color, rank_by_merge_readiness};
 use crate::icons::{self, icon};
 use crate::popover;
 use crate::theme::Theme;
@@ -39,6 +39,9 @@ pub struct PullRequestListPrefs {
     pub host: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device: Option<String>,
+    pub tab: PageTab,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_space_id: Option<String>,
 }
 
 fn qualifier_value(raw: &str) -> String {
@@ -687,7 +690,7 @@ impl PullRequestsPage {
         }
     }
 
-    fn update_prefs(
+    pub(super) fn update_prefs(
         &mut self,
         refetch: bool,
         cx: &mut Context<Self>,
@@ -1492,6 +1495,25 @@ mod tests {
         let older: PullRequestListPrefs =
             serde_json::from_value(serde_json::json!({"repository": "acme/zeron"})).unwrap();
         assert_eq!(older.repository.as_deref(), Some("acme/zeron"));
+    }
+
+    #[test]
+    fn the_page_tab_and_git_project_persist_and_default_for_older_prefs() {
+        let prefs = PullRequestListPrefs {
+            tab: PageTab::Git,
+            git_space_id: Some("space-1".into()),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&prefs).unwrap();
+        assert_eq!(json["tab"], "git");
+        assert_eq!(json["gitSpaceId"], "space-1");
+        let back: PullRequestListPrefs = serde_json::from_value(json).unwrap();
+        assert_eq!(back, prefs);
+        let older: PullRequestListPrefs =
+            serde_json::from_value(serde_json::json!({"repository": "acme/zeron"})).unwrap();
+        assert_eq!(older.tab, PageTab::PullRequests);
+        assert_eq!(older.git_space_id, None);
+        assert_eq!(filter_count(&prefs), 0);
     }
 
     #[test]

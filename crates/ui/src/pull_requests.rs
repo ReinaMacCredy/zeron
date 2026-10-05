@@ -1,14 +1,17 @@
 mod actions;
 mod activity;
+mod chat;
 mod code;
 mod detail;
 mod devices;
 mod filters;
+mod git;
 mod handoff;
 mod paging;
 mod review;
 mod tabs;
 
+pub use chat::PrChatScope;
 pub use filters::PullRequestListPrefs;
 
 use std::collections::{BTreeMap, HashMap};
@@ -38,6 +41,14 @@ const CONTAINER_MAX_WIDTH: f32 = 1152.0;
 const CONTAINER_PAD_X: f32 = 24.0;
 const GHOST_ROWS: usize = 7;
 const ROW_HEIGHT_HINT: f32 = 74.0;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PageTab {
+    #[default]
+    PullRequests,
+    Git,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PullRequestGroup {
@@ -294,7 +305,7 @@ impl Tones {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct PullRequestKey {
+pub struct PullRequestKey {
     host: String,
     repository: String,
     number: u64,
@@ -359,6 +370,8 @@ pub(crate) fn link_targets(state: &AppState) -> Vec<Option<String>> {
 pub enum PullRequestsEvent {
     Close,
     OpenChat(ChatHandoff),
+    ToggleChat,
+    OpenSettings(crate::shell::SettingsSection),
 }
 
 pub struct PullRequestsPage {
@@ -399,6 +412,7 @@ pub struct PullRequestsPage {
     checkout_menu: Option<(PullRequestKey, crate::popover::Popup<()>)>,
     toast_seq: u64,
     tab_menu: crate::popover::Popup<(PullRequestKey, gpui::Point<gpui::Pixels>)>,
+    git_view: Option<Entity<git::GitTab>>,
 }
 
 impl EventEmitter<PullRequestsEvent> for PullRequestsPage {}
@@ -465,6 +479,7 @@ impl PullRequestsPage {
             checkout_menu: None,
             toast_seq: 0,
             tab_menu: Default::default(),
+            git_view: None,
         };
         if let Some(listing) = paging::snapshot_dir(cx).and_then(|dir| paging::load_list(&dir)) {
             page.listing = Loadable::Ready(listing);
@@ -649,6 +664,9 @@ impl PullRequestsPage {
     }
 
     pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.prefs.tab != PageTab::PullRequests {
+            return;
+        }
         self.list_state.scroll_to(gpui::ListOffset::default());
         let handle = gpui::Focusable::focus_handle(self.search.read(cx), cx);
         window.focus(&handle, cx);
@@ -667,6 +685,7 @@ impl PullRequestsPage {
             window.is_fullscreen(),
             0.0,
         );
+        let condensed = self.prefs.tab == PageTab::PullRequests && self.list_condensed();
         div()
             .h(px(Theme::TITLEBAR_HEIGHT))
             .pt(px(Theme::TITLEBAR_TOP_PAD))
@@ -698,14 +717,9 @@ impl PullRequestsPage {
                     )
                     .child("Back"),
             )
-            .child(
-                div()
-                    .text_size(px(14.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text)
-                    .child("Pull Requests"),
-            )
-            .when(self.list_condensed(), |el| {
+            .child(self.render_page_tabs(theme, cx))
+            .child(self.render_project_control(theme, cx))
+            .when(condensed, |el| {
                 let compact = |id: &'static str, label: &'static str| {
                     div()
                         .id(id)
@@ -748,36 +762,130 @@ impl PullRequestsPage {
                         theme,
                         cx,
                     ))
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .id("pull-requests-compact-search")
-                            .role(gpui::Role::Button)
-                            .aria_label("Search pull requests")
-                            .size(px(28.0))
-                            .mr(px(12.0))
-                            .rounded(px(8.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .hover(|style| style.bg(theme.ink(0.06)))
-                            .on_click(
-                                cx.listener(|page, _, window, cx| page.focus_search(window, cx)),
-                            )
-                            .child(
-                                icon(icons::LUCIDE_SEARCH)
-                                    .size(px(16.0))
-                                    .text_color(theme.text_muted),
-                            ),
-                    )
             })
+            .child(div().flex_1())
+            .when(condensed, |el| {
+                el.child(
+                    div()
+                        .id("pull-requests-compact-search")
+                        .role(gpui::Role::Button)
+                        .aria_label("Search pull requests")
+                        .size(px(28.0))
+                        .rounded(px(8.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.ink(0.06)))
+                        .on_click(cx.listener(|page, _, window, cx| page.focus_search(window, cx)))
+                        .child(
+                            icon(icons::LUCIDE_SEARCH)
+                                .size(px(16.0))
+                                .text_color(theme.text_muted),
+                        ),
+                )
+            })
+            .child(
+                top_chip("pull-requests-chat", "Chat", theme)
+                    .debug_selector(|| "pull-requests-chat".into())
+                    .mr(px(12.0))
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(PullRequestsEvent::ToggleChat)))
+                    .child(div().text_color(theme.text_muted).child("✦"))
+                    .child("Chat"),
+            )
             .into_any_element()
     }
 
     fn list_condensed(&self) -> bool {
         let top = self.list_state.logical_scroll_top();
         top.item_ix > 0 || top.offset_in_item > px(64.0)
+    }
+
+    fn set_tab(&mut self, tab: PageTab, cx: &mut Context<Self>) {
+        self.close_menu(cx);
+        self.update_prefs(false, cx, |prefs| prefs.tab = tab);
+    }
+
+    fn render_page_tabs(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id("pull-requests-page-tabs")
+            .role(gpui::Role::TabList)
+            .flex_none()
+            .flex()
+            .gap(px(2.0))
+            .p(px(2.0))
+            .rounded(px(9.0))
+            .border_1()
+            .border_color(theme.hairline(0.09))
+            .children(
+                [
+                    (PageTab::PullRequests, "Pull Requests"),
+                    (PageTab::Git, "Git"),
+                ]
+                .map(|(tab, label)| {
+                    let active = self.prefs.tab == tab;
+                    let selector = format!("pull-requests-tab-{tab:?}");
+                    div()
+                        .id(SharedString::from(selector.clone()))
+                        .debug_selector(move || selector.clone())
+                        .role(gpui::Role::Tab)
+                        .aria_label(label)
+                        .h(px(24.0))
+                        .px(px(12.0))
+                        .flex()
+                        .items_center()
+                        .rounded(px(7.0))
+                        .text_size(px(13.0))
+                        .whitespace_nowrap()
+                        .when(active, |el| el.bg(theme.ink(0.08)).text_color(theme.text))
+                        .when(!active, |el| {
+                            el.text_color(theme.text_muted)
+                                .cursor_pointer()
+                                .hover(|style| style.text_color(theme.text))
+                                .on_click(cx.listener(move |page, _, _, cx| page.set_tab(tab, cx)))
+                        })
+                        .child(label)
+                }),
+            )
+            .into_any_element()
+    }
+
+    fn render_project_control(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let picked = self.prefs.repository.is_some();
+        self.menu_trigger(
+            filters::MenuKind::Project,
+            top_chip("pull-requests-project", "Project", theme)
+                .debug_selector(|| "pull-requests-project".into())
+                .max_w(px(240.0))
+                .child(
+                    icon(icons::LUCIDE_FOLDER)
+                        .size(px(14.0))
+                        .flex_none()
+                        .text_color(if picked { theme.text } else { theme.text_muted }),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(
+                            self.prefs
+                                .repository
+                                .clone()
+                                .unwrap_or_else(|| "All projects".into()),
+                        ),
+                )
+                .child(
+                    icon(icons::LUCIDE_CHEVRON_DOWN)
+                        .size(px(12.0))
+                        .flex_none()
+                        .text_color(theme.text_muted.opacity(0.7)),
+                ),
+            theme,
+            cx,
+        )
+        .into_any_element()
     }
 
     fn render_controls(
@@ -874,36 +982,6 @@ impl PullRequestsPage {
                                 .text_color(theme.text),
                         )
                         .child("Sort"),
-                    theme,
-                    cx,
-                ),
-            )
-            .child(
-                self.menu_trigger(
-                    filters::MenuKind::Project,
-                    menu_button("pull-requests-project", "Project")
-                        .debug_selector(|| "pull-requests-project".into())
-                        .max_w(px(240.0))
-                        .child(icon(icons::LUCIDE_FOLDER).size(px(16.0)).text_color(
-                            if self.prefs.repository.is_some() {
-                                theme.text
-                            } else {
-                                theme.text_muted
-                            },
-                        ))
-                        .child(
-                            div()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .child(
-                                    self.prefs
-                                        .repository
-                                        .clone()
-                                        .unwrap_or_else(|| "All projects".into()),
-                                ),
-                        ),
                     theme,
                     cx,
                 ),
@@ -1125,7 +1203,8 @@ impl PullRequestsPage {
         let (glyph, glyph_tone, _) = tones.glyph(item);
         let matched_elsewhere =
             !search.trim().is_empty() && filters::score_match(item, search) <= 10;
-        let selected = self.active.as_ref() == Some(&PullRequestKey::of(item));
+        let key = PullRequestKey::of(item);
+        let selected = self.active.as_ref() == Some(&key);
         let muted70 = theme.text_muted.opacity(0.7);
         let muted50 = theme.text_muted.opacity(0.5);
         let meta_width = (row_width - 24.0 - 28.0 - 160.0).max(0.0);
@@ -1225,7 +1304,8 @@ impl PullRequestsPage {
             .justify_end()
             .gap(px(8.0))
             .max_w(px(144.0))
-            .text_size(px(12.0));
+            .text_size(px(12.0))
+            .children(chat::row_badge(&key));
         if row_width >= 448.0 {
             match item.review_decision {
                 Some(ChangeRequestReviewDecision::Approved) => {
@@ -1741,6 +1821,26 @@ fn state_button(
         .child(label)
 }
 
+fn top_chip(id: &'static str, label: &'static str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .role(gpui::Role::Button)
+        .aria_label(label)
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .h(px(28.0))
+        .px(px(10.0))
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(theme.hairline(0.09))
+        .text_size(px(13.0))
+        .text_color(theme.text)
+        .cursor_pointer()
+        .hover(|style| style.bg(theme.ink(0.06)))
+}
+
 fn branch_mark(theme: &Theme) -> AnyElement {
     icon(icons::PR_BRANCH_MARK)
         .w(px(128.0))
@@ -1834,22 +1934,36 @@ impl Render for PullRequestsPage {
         self.note_focus(window, cx);
         let theme = Theme::of(cx).clone();
         let viewport = f32::from(window.viewport_size().width);
-        let panel_width = self
-            .active
-            .is_some()
-            .then(|| self.panel_width(viewport, cx));
-        let list_width = viewport - panel_width.map_or(0.0, |width| width + 1.0);
-        let container = list_width.min(CONTAINER_MAX_WIDTH);
-        let row_width = (container - 2.0 * CONTAINER_PAD_X).max(0.0);
+        let on_list = self.prefs.tab == PageTab::PullRequests;
+        let panel_width =
+            (on_list && self.active.is_some()).then(|| self.panel_width(viewport, cx));
         let topbar = self.render_topbar(&theme, window, cx);
-        let search_busy = self.search_busy(cx);
-        let (entries, search_text) = self.list_entries(search_busy, cx);
-        self.sync_entries(entries, cx);
-        self.frame = ListFrame {
-            row_width,
-            search_text,
-            search_busy,
-            devices: self.list_devices(cx),
+        let body: AnyElement = if on_list {
+            let list_width = viewport - panel_width.map_or(0.0, |width| width + 1.0);
+            let container = list_width.min(CONTAINER_MAX_WIDTH);
+            let row_width = (container - 2.0 * CONTAINER_PAD_X).max(0.0);
+            let search_busy = self.search_busy(cx);
+            let (entries, search_text) = self.list_entries(search_busy, cx);
+            self.sync_entries(entries, cx);
+            self.frame = ListFrame {
+                row_width,
+                search_text,
+                search_busy,
+                devices: self.list_devices(cx),
+            };
+            gpui::list(
+                self.list_state.clone(),
+                cx.processor(|page, ix, _, cx| page.render_entry(ix, cx)),
+            )
+            .flex_1()
+            .min_h_0()
+            .into_any_element()
+        } else {
+            let git_view = self
+                .git_view
+                .get_or_insert_with(|| cx.new(|_| git::GitTab))
+                .clone();
+            div().flex_1().min_h_0().child(git_view).into_any_element()
         };
         let list = div()
             .flex_1()
@@ -1858,14 +1972,7 @@ impl Render for PullRequestsPage {
             .flex()
             .flex_col()
             .child(topbar)
-            .child(
-                gpui::list(
-                    self.list_state.clone(),
-                    cx.processor(|page, ix, _, cx| page.render_entry(ix, cx)),
-                )
-                .flex_1()
-                .min_h_0(),
-            );
+            .child(body);
         let panel = panel_width.map(|width| {
             let resizer = div()
                 .id("pull-requests-panel-resizer")
@@ -2300,13 +2407,23 @@ mod tests {
 
     #[gpui::test]
     fn the_project_control_picks_a_known_project_and_persists_it(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
         });
+        let (out, mut frames) = tokio::sync::mpsc::channel::<String>(16);
+        let (replies, inbound) = tokio::sync::mpsc::channel::<String>(16);
+        std::mem::forget(replies);
         let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(
+                zeron_rpc::RpcClient::new(out, inbound),
+            ))
+        });
         let (page, cx) = cx.add_window_view(|_, cx| PullRequestsPage::new(state, cx));
         page.update(cx, |page, cx| {
             page.listing = Loadable::Ready(ChangeRequestListing {
@@ -2317,9 +2434,14 @@ mod tests {
             cx.notify();
         });
         cx.run_until_parked();
+        while frames.try_recv().is_ok() {}
         let control = cx
             .debug_bounds("pull-requests-project")
             .expect("project control drawn");
+        assert!(
+            control.bottom() <= px(Theme::TITLEBAR_HEIGHT),
+            "the project control sits in the top bar: {control:?}"
+        );
         cx.simulate_click(control.center(), gpui::Modifiers::default());
         cx.run_until_parked();
         let maestro = cx
@@ -2345,6 +2467,82 @@ mod tests {
                 Some("ReinaMacCredy/maestro")
             );
         });
+        let sent: Vec<serde_json::Value> = std::iter::from_fn(|| frames.try_recv().ok())
+            .map(|frame| serde_json::from_str(&frame).unwrap())
+            .filter(|frame: &serde_json::Value| frame["method"] == methods::LIST_CHANGE_REQUESTS)
+            .collect();
+        assert_eq!(sent.len(), 1, "picking a project refetches once: {sent:?}");
+        assert_eq!(
+            sent[0]["params"]["filters"]["repository"],
+            "ReinaMacCredy/maestro"
+        );
+    }
+
+    #[gpui::test]
+    fn the_page_tab_persists_and_the_git_tab_replaces_the_list(cx: &mut gpui::TestAppContext) {
+        let (page, cx, _dir) = scroll_fixture(cx, 60);
+        scroll_step(cx, -900.0);
+        let top = |page: &Entity<PullRequestsPage>, cx: &mut gpui::VisualTestContext| {
+            page.update(cx, |page, _| {
+                let top = page.list_state.logical_scroll_top();
+                (top.item_ix, top.offset_in_item)
+            })
+        };
+        let before = top(&page, cx);
+        assert!(before.0 > 0, "{before:?}");
+
+        let git = cx.debug_bounds("pull-requests-tab-Git").expect("Git tab");
+        cx.simulate_click(git.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        page.update(cx, |page, cx| {
+            assert_eq!(page.prefs.tab, PageTab::Git);
+            assert_eq!(
+                crate::settings::current(cx).pull_requests_list.tab,
+                PageTab::Git
+            );
+            assert!(page.git_view.is_some());
+        });
+        ROWS_RENDERED.with(|rows| rows.set(0));
+        page.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(ROWS_RENDERED.with(|rows| rows.get()), 0);
+        assert!(cx.debug_bounds("pull-requests-project").is_some());
+        assert!(cx.debug_bounds("pull-requests-chat").is_some());
+
+        let list = cx
+            .debug_bounds("pull-requests-tab-PullRequests")
+            .expect("Pull Requests tab");
+        cx.simulate_click(list.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        page.update(cx, |page, cx| {
+            assert_eq!(page.prefs.tab, PageTab::PullRequests);
+            assert_eq!(
+                crate::settings::current(cx).pull_requests_list.tab,
+                PageTab::PullRequests
+            );
+        });
+        assert!(ROWS_RENDERED.with(|rows| rows.get()) > 0);
+        assert_eq!(top(&page, cx), before);
+    }
+
+    #[gpui::test]
+    fn the_chat_button_emits_toggle_chat(cx: &mut gpui::TestAppContext) {
+        let (page, cx, _dir) = scroll_fixture(cx, 3);
+        let toggles = std::rc::Rc::new(std::cell::Cell::new(0));
+        cx.update(|_, cx| {
+            let toggles = toggles.clone();
+            cx.subscribe(&page, move |_, event, _| {
+                if matches!(event, PullRequestsEvent::ToggleChat) {
+                    toggles.set(toggles.get() + 1);
+                }
+            })
+            .detach();
+        });
+        let chat = cx.debug_bounds("pull-requests-chat").expect("chat button");
+        assert!(chat.bottom() <= px(Theme::TITLEBAR_HEIGHT), "{chat:?}");
+        cx.simulate_click(chat.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(toggles.get(), 1);
     }
 
     #[test]
