@@ -123,6 +123,13 @@ fn available(platforms: &[DevicePlatformAvailability], platform: DevicePlatform)
         .any(|candidate| candidate.platform == platform && candidate.available)
 }
 
+fn idle_host() -> DeviceHostState {
+    DeviceHostState {
+        status: DeviceHostStatus::Idle,
+        detail: None,
+    }
+}
+
 fn is_local_key(key: &str) -> bool {
     !key.contains('/')
 }
@@ -390,9 +397,7 @@ impl DeviceHub {
             for summary in &added {
                 state.hosts.push(summary.clone());
                 if state.settings.enabled {
-                    state
-                        .host_statuses
-                        .insert(summary.id.clone(), DeviceHostState::default());
+                    state.host_statuses.insert(summary.id.clone(), idle_host());
                 }
             }
         });
@@ -429,9 +434,11 @@ impl DeviceHub {
                     return;
                 };
                 runtime.spawn(async move {
-                    if let Some(hub) = me.upgrade()
-                        && let Err(error) = hub.reattach(&host_id, &origin).await
-                    {
+                    let Some(hub) = me.upgrade() else {
+                        return;
+                    };
+                    hub.repin_remote_agent(&host_id);
+                    if let Err(error) = hub.reattach(&host_id, &origin).await {
                         tracing::warn!(%error, "reattaching a device host failed");
                     }
                 });
@@ -783,7 +790,10 @@ impl DeviceHub {
         if enabled {
             self.publish(|state| {
                 for host in &hosts {
-                    state.host_statuses.entry(host.id.clone()).or_default();
+                    state
+                        .host_statuses
+                        .entry(host.id.clone())
+                        .or_insert_with(idle_host);
                 }
             });
         }
@@ -2089,6 +2099,13 @@ mod tests {
             "a target that resolves to this machine is skipped"
         );
         assert_eq!(ids(&state), ["local", "mini", "studio", "unreachable"]);
+        let restarted = super::DeviceHub::start(_dir.path());
+        assert_eq!(
+            restarted.snapshot().host_statuses["mini"].status,
+            DeviceHostStatus::Idle,
+            "saved hosts load idle and connect on the next list"
+        );
+        drop(restarted);
         let mut owners: Vec<&str> = state
             .devices
             .iter()

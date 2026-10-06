@@ -689,6 +689,19 @@ impl DeviceHub {
             .map_err(|e| format!("Could not write the agent-device host config: {e}"))
     }
 
+    pub(super) fn repin_remote_agent(&self, host_id: &str) {
+        let agent = self
+            .remote(host_id)
+            .and_then(|host| host.current())
+            .and_then(|ready| ready.agent);
+        if let Some((base_url, token)) = agent
+            && self.agent_gate().is_ok()
+            && let Err(error) = write_host_config(&self.host_config(host_id), &base_url, &token)
+        {
+            tracing::warn!(%error, "could not repin agent-device to the reconnected host");
+        }
+    }
+
     pub(super) fn host_config(&self, host_id: &str) -> PathBuf {
         self.device_dir()
             .join("hosts")
@@ -1595,6 +1608,35 @@ if (args[0] === "daemon" && args[1] === "stop") {
         assert_eq!(
             listed["hostStatuses"],
             json!({"local": "ready", "mini": "ready"})
+        );
+        let pid: i32 = std::fs::read_to_string(fake.dir.path().join("forward.pid"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        let read = || {
+            serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&config).unwrap())
+                .unwrap()["daemonBaseUrl"]
+                .clone()
+        };
+        for _ in 0..200 {
+            if read() != forwarded.0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let again = hub
+            .remote("mini")
+            .unwrap()
+            .current()
+            .unwrap()
+            .agent
+            .unwrap();
+        assert_ne!(again.0, forwarded.0);
+        assert_eq!(
+            read(),
+            again.0,
+            "a reconnect repins agent-device to the new forward"
         );
         hub.configure(agent_access(false)).await.unwrap();
         assert!(!config.exists());
