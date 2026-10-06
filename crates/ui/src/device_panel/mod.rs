@@ -1685,6 +1685,58 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
+    fn a_duo_rotate_waits_in_the_hinge_queue_and_a_refusal_shows_on_the_fold_line(
+        cx: &mut TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let refused =
+            "The device did not rotate. The foreground app may not allow that orientation.";
+        let (state, calls) = app_state_with(
+            cx,
+            &runtime,
+            duo(true),
+            Arc::new(move |method| match method {
+                methods::SET_HUB_DEVICE_HINGE => serde_json::json!({"err": refused}),
+                _ => serde_json::json!({}),
+            }),
+        );
+        let (panel, cx) = cx.add_window_view(|_, cx| {
+            let mut panel = DevicePanel::new(state, "chat".into(), cx);
+            panel.target = Some(("local".into(), "SIM".into()));
+            panel.revision = None;
+            panel.sync(cx);
+            panel
+        });
+        cx.simulate_resize(gpui::size(gpui::px(700.0), gpui::px(1200.0)));
+        wait(cx, |cx| cx.debug_bounds("device-pose-tent").is_some());
+        click(cx, "device-rotate");
+        wait(cx, |_| {
+            !calls_of(&calls, methods::SET_HUB_DEVICE_HINGE).is_empty()
+        });
+        let hinge = calls_of(&calls, methods::SET_HUB_DEVICE_HINGE);
+        assert_eq!(hinge.len(), 1);
+        assert_eq!(hinge[0]["deviceId"], "SIM");
+        assert_eq!(hinge[0]["orientation"], "landscape_left");
+        wait(cx, |cx| cx.debug_bounds("device-fold-error").is_some());
+        assert_eq!(
+            panel.read_with(cx, |panel, cx| panel
+                .fold()
+                .unwrap()
+                .read(cx)
+                .error()
+                .cloned()),
+            Some(refused.into())
+        );
+        assert!(
+            calls_of(&calls, methods::SEND_HUB_DEVICE_INPUT)
+                .iter()
+                .all(|params| params["input"].get("orientation").is_none()),
+            "no plain 0x07 beside the hinge queue"
+        );
+    }
+
+    #[gpui::test]
     fn a_duo_rail_stays_inside_a_short_pane(cx: &mut TestAppContext) {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();

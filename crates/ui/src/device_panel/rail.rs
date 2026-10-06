@@ -1,10 +1,11 @@
 use gpui::{AnyElement, Context, Entity, MouseButton, SharedString, Stateful, div, prelude::*, px};
 use zeron_proto::device_hub::{
     DeviceAction, DeviceAppearance, DeviceButton, DeviceOrientation, DevicePlatform, FoldPosture,
+    HingeCommand,
 };
 
 use super::fold;
-use super::geometry::RAIL_WIDTH;
+use super::geometry::{self, RAIL_WIDTH};
 use super::stream_view::DeviceStreamView;
 use super::tools::TEXT_SIZES;
 use super::{DevicePanel, DevicePanelEvent};
@@ -123,6 +124,7 @@ impl DevicePanel {
                 self.render_rotate_menu(theme, cx),
             ]
         } else {
+            let hinge = self.fold().cloned();
             vec![
                 rail_button(
                     "device-rotate",
@@ -132,7 +134,25 @@ impl DevicePanel {
                     theme,
                 )
                 .when(input_live, |button| {
-                    button.on_click(move |_, _, cx| rotate.update(cx, |view, _| view.rotate()))
+                    button.on_click(move |_, _, cx| {
+                        let (hinged, current) = {
+                            let screen = rotate.read(cx).screen();
+                            (
+                                fold::hinged(screen),
+                                screen.map_or(DeviceOrientation::Portrait, |screen| {
+                                    screen.orientation
+                                }),
+                            )
+                        };
+                        match hinge.clone().filter(|_| hinged) {
+                            Some(hinge) => {
+                                let command =
+                                    HingeCommand::Orientation(geometry::next_orientation(current));
+                                hinge.update(cx, |hinge, cx| hinge.command(command, cx));
+                            }
+                            None => rotate.update(cx, |view, _| view.rotate()),
+                        }
+                    })
                 })
                 .into_any_element(),
             ]
