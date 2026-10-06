@@ -89,6 +89,7 @@ pub(crate) const QUEUE_COMPOSER_OVERLAP: f32 = 18.0;
 /// The original floating selector rows use the same 20px chip height as the
 /// established-thread footer. Their surrounding rows own no plate or border.
 const NEW_THREAD_SELECTOR_ROW_HEIGHT: f32 = 20.0;
+const RUNNING_TAB_FADE: motion::MotionSpec = motion::MotionSpec::new(200, motion::EASE_OUT);
 // Accommodate the 24px usage indicator and PR badge without overflowing the
 // row's equal 8px top/bottom gutters.
 pub(crate) const SESSION_FOOTER_HEIGHT: f32 = 24.0;
@@ -6851,6 +6852,9 @@ pub struct Composer {
     #[cfg(test)]
     model_bounds: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     dock_frame: Option<crate::composer_dock::DockFrame>,
+    running_tab: bool,
+    running_tab_since: Option<Instant>,
+    running_ticker: Option<Task<()>>,
     dock_reflow: crate::composer_dock::DockReflow,
     /// The shared clock owns this frame's height, including its final step.
     dock_height_changed: bool,
@@ -6898,6 +6902,11 @@ impl Composer {
             .dock_frame
             .is_none_or(|previous| previous.amount != frame.amount);
         self.dock_frame = Some(frame);
+        if frame.docked {
+            self.running_tab = false;
+            self.running_tab_since = None;
+            self.running_ticker = None;
+        }
         if frame.active {
             self.flip_morph = None;
             self.height_morph = None;
@@ -6913,6 +6922,183 @@ impl Composer {
 
     pub(crate) fn surface_bounds(&self) -> crate::new_thread_background_mask::SurfaceBounds {
         self.surface_bounds.clone()
+    }
+
+    fn set_running_tab(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.running_tab == on {
+            return;
+        }
+        self.running_tab = on;
+        self.running_tab_since = Some(Instant::now());
+        self.running_ticker = on.then(|| {
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(Duration::from_secs(1)).await;
+                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                        break;
+                    }
+                }
+            })
+        });
+        cx.notify();
+    }
+
+    fn running_reveal(&self, window: &mut Window, cx: &App) -> f32 {
+        let target = if self.running_tab { 1.0 } else { 0.0 };
+        let Some(since) = self.running_tab_since else {
+            return target;
+        };
+        if motion::reduced_motion(cx) {
+            return target;
+        }
+        let total = RUNNING_TAB_FADE.total().as_secs_f32() * motion::speed_scale();
+        let raw = since.elapsed().as_secs_f32() / total.max(f32::EPSILON);
+        if raw < 1.0 {
+            window.request_animation_frame();
+        }
+        let progress = RUNNING_TAB_FADE.progress(raw);
+        if self.running_tab {
+            progress
+        } else {
+            1.0 - progress
+        }
+    }
+
+    fn render_home_tabs(
+        &self,
+        theme: &Theme,
+        running: usize,
+        reveal: f32,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let tab = |id: &'static str, label: &'static str, count: Option<usize>, amount: f32| {
+            div()
+                .id(id)
+                .debug_selector(move || id.to_string())
+                .h(px(NEW_THREAD_SELECTOR_ROW_HEIGHT))
+                .px(px(8.0))
+                .flex()
+                .items_center()
+                .gap(px(5.0))
+                .rounded(px(6.0))
+                .text_size(crate::typography::ui_rems(12.0))
+                .cursor_pointer()
+                .role(Role::Tab)
+                .aria_label(label)
+                .bg(theme.wash(0.08 * amount))
+                .text_color(theme.text_muted.blend(theme.text.opacity(amount)))
+                .hover(|style| style.text_color(theme.text))
+                .child(label)
+                .when_some(count, |el, count| {
+                    el.child(div().text_color(theme.text_faint).child(count.to_string()))
+                })
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .child(
+                tab("composer-tab-new-task", "New task", None, 1.0 - reveal).on_click(cx.listener(
+                    |this, _, window, cx| {
+                        this.set_running_tab(false, cx);
+                        window.focus(&this.input.focus_handle(cx), cx);
+                    },
+                )),
+            )
+            .child(
+                tab(
+                    "composer-tab-running",
+                    "Running agents",
+                    Some(running),
+                    reveal,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.set_running_tab(true, cx))),
+            )
+    }
+
+    fn render_running_list(&self, theme: &Theme, reveal: f32, cx: &mut Context<Self>) -> gpui::Div {
+        let now = chrono::Utc::now();
+        let rows: Vec<(String, String, i64)> = {
+            let state = self.state.read(cx);
+            crate::home::running_agents(state, now)
+                .into_iter()
+                .map(|(chat, started)| {
+                    (
+                        chat.id.clone(),
+                        crate::home::chat_title(chat),
+                        (now - started).num_seconds(),
+                    )
+                })
+                .collect()
+        };
+        let entity = cx.entity_id();
+        div()
+            .absolute()
+            .left_0()
+            .right_0()
+            .top(px(6.0 * (1.0 - reveal)))
+            .bottom_0()
+            .opacity(reveal)
+            .when(self.running_tab, |el| el.occlude())
+            .child(
+                div()
+                    .id("composer-running-list")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .p(px(8.0))
+                    .when(rows.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .px(px(10.0))
+                                .py(px(8.0))
+                                .text_size(crate::typography::ui_rems(13.0))
+                                .text_color(theme.text_faint)
+                                .child("No agents running"),
+                        )
+                    })
+                    .children(rows.into_iter().map(|(chat_id, title, secs)| {
+                        let id: SharedString = format!("composer-running-{chat_id}").into();
+                        div()
+                            .id(id.clone())
+                            .h(px(32.0))
+                            .px(px(10.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(10.0))
+                            .rounded(px(10.0))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(theme.wash(0.05)))
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(ComposerEvent::OpenChat(chat_id.clone()))
+                            }))
+                            .child(crate::loaders::mini_glyph_spinner(
+                                format!("{id}-spin"),
+                                2.0,
+                                theme.glyph,
+                                entity,
+                                cx,
+                            ))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
+                                    .text_size(crate::typography::ui_rems(13.0))
+                                    .text_color(theme.text)
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .font_family(theme.font_mono.clone())
+                                    .text_size(crate::typography::ui_rems(11.0))
+                                    .text_color(theme.text_faint)
+                                    .child(crate::composer::background::elapsed_label(secs)),
+                            )
+                    })),
+            )
     }
 
     /// The picker entity, for the shell's canvas target selectors.
@@ -7152,6 +7338,9 @@ impl Composer {
             #[cfg(test)]
             model_bounds: Default::default(),
             dock_frame: None,
+            running_tab: false,
+            running_tab_since: None,
+            running_ticker: None,
             dock_reflow: Default::default(),
             dock_height_changed: false,
             dock_clearance_correction: 0.0,
@@ -13596,7 +13785,7 @@ impl Render for Composer {
                 cx.listener(|this, _, window, cx| {
                     // Padding and action controls are part of the text composer.
                     // Open menus keep their own keyboard/search focus.
-                    if !this.pickers.read(cx).is_open() {
+                    if !this.pickers.read(cx).is_open() && !this.running_tab {
                         window.focus(&this.input.focus_handle(cx), cx);
                         window.prevent_default();
                     }
@@ -13611,6 +13800,12 @@ impl Render for Composer {
         // the bottom of the shell column; growth moves the TOP edge), so the
         // controls pin to the bottom and only the text glides with the reveal
         // while the model selector stays in the right action group.
+        let running_reveal = if self.dock_frame.is_some() {
+            self.running_reveal(window, cx)
+        } else {
+            0.0
+        };
+        let prompt_opacity = 1.0 - running_reveal;
         let cluster_dy = morph_cluster_dy(layout_morph_t);
         let action_inset = morph_cluster_inset(expanded, layout_morph_t);
         let surface_width = self.last_available_width.map_or_else(
@@ -13697,6 +13892,7 @@ impl Render for Composer {
                         .px(px(16.0))
                         .pt(px(text_pt))
                         .pb(px(4.0))
+                        .opacity(prompt_opacity)
                         .child(self.render_input_with_completion()),
                 )
                 .child(
@@ -13704,6 +13900,7 @@ impl Render for Composer {
                         .absolute()
                         .left_0()
                         .right_0()
+                        .opacity(prompt_opacity)
                         .bottom(px(-cluster_dy))
                         .h(px(ACTIONS_ROW_HEIGHT))
                         .flex()
@@ -13736,6 +13933,9 @@ impl Render for Composer {
                         )
                         .children(voice_track),
                 )
+                .when(running_reveal > 0.0, |el| {
+                    el.child(self.render_running_list(&theme, running_reveal, cx))
+                })
         } else {
             // Compact pill: attachment on the left, input in the middle,
             // then model, microphone and Send on the right, all on one 47px line.
@@ -13891,20 +14091,25 @@ impl Render for Composer {
         // the top-right, no surrounding surface. Cancel the column gap as the
         // row collapses so the pill never jumps at the route boundary.
         let container = if self.dock_frame.is_some() {
+            let running =
+                crate::home::running_agents(self.state.read(cx), chrono::Utc::now()).len();
+            let tabs = (new_thread_chrome_opacity > 0.0)
+                .then(|| self.render_home_tabs(&theme, running, running_reveal, cx));
             // Floating selectors share the surface's origin and never change its height.
             container.relative().child(
                 div()
                     .id("dock-target-selectors")
                     .absolute()
                     .top(px(-28.0))
-                    .left(px(Theme::SPACE_LG + 10.0))
+                    .left(px(Theme::SPACE_LG + 4.0))
                     .right(px(Theme::SPACE_LG + 10.0))
                     .h(px(NEW_THREAD_SELECTOR_ROW_HEIGHT))
                     .flex()
                     .items_start()
-                    .justify_end()
+                    .justify_between()
                     .opacity(new_thread_chrome_opacity)
-                    .children(new_thread_target_selectors),
+                    .children(tabs)
+                    .child(div().flex().children(new_thread_target_selectors)),
             )
         } else if new_thread_chrome > 0.0 {
             container.child(

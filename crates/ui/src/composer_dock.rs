@@ -268,6 +268,7 @@ pub(crate) struct DockState {
     panel_departure: bool,
     column_width: Option<f32>,
     departing_column_width: Option<f32>,
+    hero_anchor: f32,
 }
 
 impl Default for DockState {
@@ -289,6 +290,7 @@ impl Default for DockState {
             panel_departure: false,
             column_width: None,
             departing_column_width: None,
+            hero_anchor: 0.5,
         }
     }
 }
@@ -338,10 +340,23 @@ impl DockState {
         let y = if self.frame.docked {
             viewport - height - reserved
         } else {
-            (viewport - height) * 0.5 + 8.0
+            self.hero_y(viewport, height)
         };
         let bottom = self.position_at(0.0, y, reduced, now).1.value + height;
         (viewport - bottom).max(0.0)
+    }
+
+    /// Moving the hero anchor glides the composer on the route spring
+    /// instead of snapping it, even while the route itself is settled.
+    pub fn set_hero_anchor(&mut self, anchor: f32) {
+        if (self.hero_anchor - anchor).abs() > f32::EPSILON {
+            self.hero_anchor = anchor;
+            self.moving = true;
+        }
+    }
+
+    pub fn hero_y(&self, viewport: f32, height: f32) -> f32 {
+        (viewport - height) * self.hero_anchor + 8.0
     }
 
     /// Retained transcript pixels belong to the source column. Letting them
@@ -569,7 +584,9 @@ impl Element for DockedComposer {
                 .reserved_height
                 .min((clearance * scale).floor() / scale);
             if !state.frame.docked {
-                let hero_limit = ((self.viewport_height - height) * 0.5 - 8.0).max(0.0);
+                let hero_limit =
+                    (self.viewport_height - height - state.hero_y(self.viewport_height, height))
+                        .max(0.0);
                 geometry.limit = geometry.limit.min(hero_limit);
                 geometry.content_height =
                     geometry.content_height.min(hero_limit).max(geometry.height);
@@ -603,7 +620,7 @@ impl Element for DockedComposer {
         let y = if docked {
             f32::from(bounds.top())
         } else {
-            (self.viewport_height - f32::from(bounds.size.height)) * 0.5 + 8.0
+            state.hero_y(self.viewport_height, f32::from(bounds.size.height))
         };
         let position = state.position_at(x, y, self.reduced, self.now);
         state.last_geometry = Some(self.now);

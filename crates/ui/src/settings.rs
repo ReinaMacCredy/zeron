@@ -26,6 +26,7 @@ pub mod device_hub;
 pub mod devices;
 pub mod files;
 pub mod harnesses;
+pub mod home;
 pub mod notifications;
 pub mod permission_guide;
 pub mod shortcuts;
@@ -277,6 +278,48 @@ impl Default for FrostTuning {
             dim_backdrop: true,
             ..Self::UNDIMMED
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct HomeWidgets {
+    pub working_now: bool,
+    pub pull_requests: bool,
+    pub git_activity: bool,
+    pub this_mac: bool,
+    pub running_services: bool,
+    pub recent_areas: bool,
+    pub ci_failures: bool,
+    pub services_all_ports: bool,
+    pub collapsed: bool,
+}
+
+impl Default for HomeWidgets {
+    fn default() -> Self {
+        Self {
+            working_now: true,
+            pull_requests: true,
+            git_activity: true,
+            this_mac: true,
+            running_services: true,
+            recent_areas: true,
+            ci_failures: true,
+            services_all_ports: false,
+            collapsed: false,
+        }
+    }
+}
+
+impl HomeWidgets {
+    pub fn any_visible(&self) -> bool {
+        self.working_now
+            || self.pull_requests
+            || self.git_activity
+            || self.this_mac
+            || self.running_services
+            || self.recent_areas
+            || self.ci_failures
     }
 }
 
@@ -766,6 +809,20 @@ pub fn pr_chat_sessions(scope: &str, cx: &App) -> Vec<PrChatSession> {
         .filter(|store| store.current.pr_chat_history == PrChatHistory::KeepPerPr)
         .and_then(|store| store.current.pr_chat_sessions.get(scope).cloned())
         .unwrap_or_default()
+}
+
+pub fn home_widgets(cx: &App) -> HomeWidgets {
+    cx.try_global::<SettingsStore>()
+        .map(|store| store.current.home_widgets)
+        .unwrap_or_default()
+}
+
+pub fn update_home_widgets(cx: &mut App, mutate: impl FnOnce(&mut HomeWidgets)) {
+    if update(SavePolicy::Immediate, cx, |settings| {
+        mutate(&mut settings.home_widgets)
+    }) {
+        cx.refresh_windows();
+    }
 }
 
 pub fn set_transcript_compact_mode(enabled: bool, cx: &mut App) {
@@ -1387,6 +1444,7 @@ pub struct UiSettings {
     pub device_auto_float: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device_float_frame: Option<crate::device_panel::float::DeviceFloatFrame>,
+    pub home_widgets: HomeWidgets,
     /// Pre-theme settings used `accentColor`. Read it once, migrate to
     /// [`Self::accent`], and never write it again.
     #[serde(default, rename = "accentColor", skip_serializing)]
@@ -1502,6 +1560,7 @@ impl Default for UiSettings {
             git_agent_busy_policy: GitAgentBusyPolicy::default(),
             device_auto_float: true,
             device_float_frame: None,
+            home_widgets: HomeWidgets::default(),
             legacy_accent_color: None,
         }
     }
@@ -2178,6 +2237,7 @@ impl UiSettings {
             git_agent_busy_policy,
             device_auto_float,
             device_float_frame,
+            home_widgets,
         );
         current
     }
@@ -3609,6 +3669,11 @@ mod tests {
                 width: 240.0,
                 height: 520.0,
             }),
+            home_widgets: HomeWidgets {
+                git_activity: false,
+                services_all_ports: true,
+                ..HomeWidgets::default()
+            },
             legacy_accent_color: None,
         };
         settings.save(dir.path()).unwrap();
@@ -3620,6 +3685,7 @@ mod tests {
         assert!(json.contains(r#""gitAgentBusyPolicy": "block-all""#));
         assert!(json.contains(r#""deviceAutoFloat": false"#));
         assert!(json.contains(r#""deviceFloatFrame": {"#));
+        assert!(json.contains(r#""servicesAllPorts": true"#));
         assert!(json.contains(r#""github.com/acme/zeron#7": ["#));
         assert!(json.contains(r#""chatId": "pr-chat-1""#));
         assert!(json.contains(r#""entryId": "m2""#));
