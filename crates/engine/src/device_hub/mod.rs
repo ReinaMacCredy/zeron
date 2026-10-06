@@ -9,6 +9,8 @@ mod ssh_host;
 mod stream;
 mod toolchain;
 
+use std::collections::{BTreeMap, HashSet};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
@@ -16,10 +18,11 @@ use std::time::Duration;
 
 use tokio::sync::watch;
 use zeron_proto::device_hub::{
-    CloseHubDeviceParams, ConfigureDeviceHubParams, DeviceBooting, DeviceHostStatus, DeviceHubHost,
-    DeviceHubSettings, DeviceHubState, DeviceInput, DeviceOpener, DevicePlatform,
-    DevicePlatformAvailability, DeviceSession, DeviceVideoCodec, LOCAL_DEVICE_HOST_ID,
-    OpenHubDeviceParams, SetHubDeviceHingeParams, ShutdownHubDeviceParams, StreamLinkStatus,
+    CloseHubDeviceParams, ConfigureDeviceHubParams, DeviceBooting, DeviceHostState,
+    DeviceHostStatus, DeviceHostTest, DeviceHubHost, DeviceHubSettings, DeviceHubState,
+    DeviceInput, DeviceOpener, DevicePlatform, DevicePlatformAvailability, DeviceSession,
+    DeviceVideoCodec, LOCAL_DEVICE_HOST_ID, OpenHubDeviceParams, SetHubDeviceHingeParams,
+    ShutdownHubDeviceParams, SshDeviceHostConfig, StreamLinkStatus, device_key,
 };
 
 pub use actions::DEVICE_ACTION_UNAVAILABLE;
@@ -29,6 +32,7 @@ pub use agent::{
 };
 use hub_client::HubClient;
 use hub_process::{Backoff, HubProcess};
+use ssh_host::{HostEvent, SshHost};
 use stream::{AvccFeed, DeviceStreams, FrameSlot};
 pub(crate) use stream::{AvccSubscription, FrameSubscription, avcc_batches};
 
@@ -39,6 +43,8 @@ const UNKNOWN_DEVICE: &str = "That device is not available.";
 const IOS_ONLY: &str = "Only iOS Simulators support this so far.";
 const ANDROID_H264_ONLY: &str = "Android emulators stream H.264 only.";
 const HUB_NOT_RUNNING: &str = "The device hub is not running.";
+const UNKNOWN_HOST: &str = "That device host is not configured.";
+const REMOTE_STOP_GRACE: Duration = Duration::from_secs(10);
 const HINGE_TIMEOUT: Duration = Duration::from_secs(5);
 pub const DEVICE_SUPPORT_OFF: &str = "Device support is off. Enable it in the Device panel before installing or starting device tools.";
 
@@ -61,6 +67,9 @@ pub struct DeviceHub {
     android_boots: tokio::sync::Mutex<()>,
     session_avds: Mutex<std::collections::HashMap<String, String>>,
     refreshing: tokio::sync::Mutex<()>,
+    remotes: Mutex<BTreeMap<String, Arc<SshHost>>>,
+    #[cfg(test)]
+    test_ssh: Mutex<Option<(PathBuf, HashSet<IpAddr>)>>,
     #[cfg(test)]
     test_spawn: Mutex<Option<TestSpawn>>,
     #[cfg(test)]
@@ -89,7 +98,11 @@ fn running_tools(running: bool) -> impl Fn(&mut DeviceHubState) {
     let tools = toolchain::versions(running);
     let installed = toolchain::hub_installed();
     move |state| {
-        for host in &mut state.hosts {
+        for host in state
+            .hosts
+            .iter_mut()
+            .filter(|host| host.id == LOCAL_DEVICE_HOST_ID)
+        {
             host.tools = Some(tools.clone());
             host.hub_installed = installed;
         }
@@ -110,8 +123,21 @@ fn available(platforms: &[DevicePlatformAvailability], platform: DevicePlatform)
         .any(|candidate| candidate.platform == platform && candidate.available)
 }
 
+fn is_local_key(key: &str) -> bool {
+    !key.contains('/')
+}
+
+fn split_key(key: &str) -> (&str, &str) {
+    key.split_once('/').unwrap_or((LOCAL_DEVICE_HOST_ID, key))
+}
+
+fn host_scope(host_id: &str) -> impl Fn(&str) -> bool + '_ {
+    move |key: &str| split_key(key).0 == host_id
+}
+
 fn stopped_avds(
     stdout: &str,
+    host_id: &str,
     devices: &[zeron_proto::device_hub::HubDevice],
 ) -> Vec<zeron_proto::device_hub::HubDevice> {
     stdout
@@ -124,7 +150,7 @@ fn stopped_avds(
                 .any(|device| device.platform == DevicePlatform::Android && device.name == *name)
         })
         .map(|name| zeron_proto::device_hub::HubDevice {
-            host_id: LOCAL_DEVICE_HOST_ID.into(),
+            host_id: host_id.into(),
             id: name.into(),
             platform: DevicePlatform::Android,
             name: name.into(),
@@ -150,13 +176,13 @@ fn reused_serials(
         .filter(|device| device.platform == DevicePlatform::Android && device.name != device.id)
         .filter(|device| {
             names
-                .get(&device.id)
+                .get(&device_key(&device.host_id, &device.id))
                 .is_some_and(|name| *name != device.name && *name != device.id)
         })
         .map(|device| device.id.clone())
         .collect();
-    for id in &reused {
-        names.remove(id);
+    for device in devices.iter().filter(|device| reused.contains(&device.id)) {
+        names.remove(&device_key(&device.host_id, &device.id));
     }
     reused
 }
@@ -179,10 +205,23 @@ impl<F: FnOnce()> Drop for OnDrop<F> {
 
 impl DeviceHub {
     pub fn start(data_dir: &Path) -> Arc<Self> {
-        let settings: DeviceHubSettings = std::fs::read_to_string(data_dir.join(SETTINGS_FILE))
+        let mut settings: DeviceHubSettings = std::fs::read_to_string(data_dir.join(SETTINGS_FILE))
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
+        let mut seen = HashSet::new();
+        settings.device_hosts.retain(|host| {
+            let checked = ssh_host::check_identity(host).and_then(|()| {
+                seen.insert(host.id.clone())
+                    .then_some(())
+                    .ok_or_else(|| "Device host ids must be unique.".to_string())
+            });
+            if let Err(error) = &checked {
+                tracing::warn!(host = %host.id, %error, "skipping a saved device host");
+            }
+            checked.is_ok()
+        });
+        let device_hosts = settings.device_hosts.clone();
         let agent_on = settings.enabled && settings.agent_access_enabled;
         let state = DeviceHubState {
             host_status: if settings.enabled {
@@ -206,7 +245,7 @@ impl DeviceHub {
             agent::remove_agent_files(&data_dir.join("device"));
             zeron_harness::clear_child_path_prefix(&data_dir.join("device").join("bin"));
         }
-        Arc::new_cyclic(|me| Self {
+        let hub = Arc::new_cyclic(|me| Self {
             me: me.clone(),
             data_dir: data_dir.to_path_buf(),
             http: reqwest::Client::builder()
@@ -227,6 +266,9 @@ impl DeviceHub {
             android_boots: tokio::sync::Mutex::new(()),
             session_avds: Mutex::default(),
             refreshing: tokio::sync::Mutex::new(()),
+            remotes: Mutex::default(),
+            #[cfg(test)]
+            test_ssh: Mutex::new(None),
             #[cfg(test)]
             test_spawn: Mutex::new(None),
             #[cfg(test)]
@@ -250,7 +292,168 @@ impl DeviceHub {
                     }
                 }
             })),
-        })
+        });
+        hub.reconcile(&device_hosts);
+        hub
+    }
+
+    fn remotes_slot(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, Arc<SshHost>>> {
+        self.remotes.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn remote(&self, host_id: &str) -> Option<Arc<SshHost>> {
+        self.remotes_slot().get(host_id).cloned()
+    }
+
+    fn all_remotes(&self) -> Vec<Arc<SshHost>> {
+        self.remotes_slot().values().cloned().collect()
+    }
+
+    fn ssh_program(&self) -> PathBuf {
+        #[cfg(test)]
+        if let Some((ssh, _)) = self
+            .test_ssh
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+        {
+            return ssh;
+        }
+        PathBuf::from("ssh")
+    }
+
+    fn own_addresses(&self) -> HashSet<IpAddr> {
+        #[cfg(test)]
+        if let Some((_, addresses)) = self
+            .test_ssh
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+        {
+            return addresses;
+        }
+        ssh_host::local_addresses()
+    }
+
+    fn new_remote(&self, config: SshDeviceHostConfig) -> Arc<SshHost> {
+        let me = self.me.clone();
+        let owner = ssh_host::owner_for(&self.data_dir, &config.id);
+        SshHost::new(
+            config,
+            owner,
+            self.ssh_program(),
+            self.http.clone(),
+            Arc::new(move |host: &SshHost, event| {
+                if let Some(hub) = me.upgrade() {
+                    hub.on_host_event(host, event);
+                }
+            }),
+        )
+    }
+
+    fn reconcile(&self, next: &[SshDeviceHostConfig]) -> Vec<Arc<SshHost>> {
+        let (removed, added) = {
+            let mut remotes = self.remotes_slot();
+            let gone: Vec<String> = remotes
+                .values()
+                .filter(|host| !next.contains(&host.config))
+                .map(|host| host.config.id.clone())
+                .collect();
+            let removed: Vec<Arc<SshHost>> =
+                gone.iter().filter_map(|id| remotes.remove(id)).collect();
+            let mut added = Vec::new();
+            for config in next {
+                if !remotes.contains_key(&config.id) {
+                    let host = self.new_remote(config.clone());
+                    added.push(host.summary());
+                    remotes.insert(config.id.clone(), host);
+                }
+            }
+            (removed, added)
+        };
+        let gone: Vec<String> = removed.iter().map(|host| host.config.id.clone()).collect();
+        if gone.is_empty() && added.is_empty() {
+            return removed;
+        }
+        for id in &gone {
+            self.streams.clear(&host_scope(id));
+            let _ = std::fs::remove_file(self.host_config(id));
+        }
+        self.publish(|state| {
+            let keep = |host: &str| !gone.iter().any(|id| id == host);
+            state.sessions.retain(|session| keep(&session.host_id));
+            state.devices.retain(|device| keep(&device.host_id));
+            state.booting.retain(|entry| keep(&entry.device.host_id));
+            state.screens.retain(|key, _| keep(split_key(key).0));
+            state.hosts.retain(|host| keep(&host.id));
+            state.host_statuses.retain(|id, _| keep(id));
+            for summary in &added {
+                state.hosts.push(summary.clone());
+                if state.settings.enabled {
+                    state
+                        .host_statuses
+                        .insert(summary.id.clone(), DeviceHostState::default());
+                }
+            }
+        });
+        removed
+    }
+
+    fn on_host_event(&self, host: &SshHost, event: HostEvent) {
+        let host_id = host.config.id.clone();
+        if !self
+            .remote(&host_id)
+            .is_some_and(|current| std::ptr::eq(current.as_ref(), host))
+        {
+            return;
+        }
+        match event {
+            HostEvent::Status(status, detail) => {
+                let summary = host.summary();
+                self.publish(|state| {
+                    if !state.settings.enabled {
+                        return;
+                    }
+                    state
+                        .host_statuses
+                        .insert(host_id.clone(), DeviceHostState { status, detail });
+                    if let Some(entry) = state.hosts.iter_mut().find(|entry| entry.id == host_id) {
+                        *entry = summary;
+                    }
+                });
+            }
+            HostEvent::Lost => self.streams.pause(&host_scope(&host_id)),
+            HostEvent::Ready(origin) => {
+                let (me, Ok(runtime)) = (self.me.clone(), tokio::runtime::Handle::try_current())
+                else {
+                    return;
+                };
+                runtime.spawn(async move {
+                    if let Some(hub) = me.upgrade()
+                        && let Err(error) = hub.reattach(&host_id, &origin).await
+                    {
+                        tracing::warn!(%error, "reattaching a device host failed");
+                    }
+                });
+            }
+        }
+    }
+
+    pub async fn test_host(&self, config: SshDeviceHostConfig) -> DeviceHostTest {
+        let owner = ssh_host::owner_for(&self.data_dir, &config.id);
+        ssh_host::test_host(&self.ssh_program(), &config, &owner, &self.own_addresses()).await
+    }
+
+    fn origin_for(&self, host_id: &str) -> Result<String, String> {
+        if host_id == LOCAL_DEVICE_HOST_ID {
+            return self
+                .live_origin()
+                .ok_or_else(|| HUB_NOT_RUNNING.to_string());
+        }
+        self.remote(host_id)
+            .and_then(|host| host.current())
+            .map(|ready| ready.origin)
+            .ok_or_else(|| HUB_NOT_RUNNING.to_string())
     }
 
     pub fn watch(&self) -> watch::Receiver<DeviceHubState> {
@@ -280,18 +483,16 @@ impl DeviceHub {
             .unwrap_or_default()
     }
 
-    fn platform_of(&self, device_id: &str) -> DevicePlatform {
+    fn platform_of(&self, host_id: &str, device_id: &str) -> DevicePlatform {
         let state = self.state.borrow();
         state
-            .devices
-            .iter()
-            .find(|device| device.id == device_id)
+            .device(host_id, device_id)
             .map(|device| device.platform)
             .or_else(|| {
                 state
                     .sessions
                     .iter()
-                    .find(|session| session.device_id == device_id)
+                    .find(|session| session.host_id == host_id && session.device_id == device_id)
                     .map(|session| session.platform)
             })
             .unwrap_or_default()
@@ -303,6 +504,7 @@ impl DeviceHub {
             if !state.settings.enabled {
                 state.host_status = DeviceHostStatus::Disabled;
                 state.host_status_detail = None;
+                state.host_statuses.clear();
             }
             if !(state.settings.enabled && state.settings.agent_access_enabled) {
                 state.agent_status = DeviceHostStatus::Disabled;
@@ -344,7 +546,7 @@ impl DeviceHub {
         if slot.as_mut().is_none_or(HubProcess::alive) {
             return None;
         }
-        self.streams.pause();
+        self.streams.pause(&is_local_key);
         slot.take()
     }
 
@@ -357,7 +559,7 @@ impl DeviceHub {
             return HubWatch::Alive;
         }
         let uptime = hub.uptime();
-        self.streams.pause();
+        self.streams.pause(&is_local_key);
         let dead = slot.take();
         drop(slot);
         drop(dead);
@@ -449,30 +651,36 @@ impl DeviceHub {
         }
     }
 
-    async fn reattach(&self, origin: &str) -> Result<(), String> {
+    async fn reattach(&self, host_id: &str, origin: &str) -> Result<(), String> {
         let before = self.snapshot();
         let mut ids: std::collections::BTreeSet<String> = before
             .sessions
             .iter()
+            .filter(|session| session.host_id == host_id)
             .map(|session| session.device_id.clone())
             .collect();
-        ids.extend(self.streams.device_ids());
+        ids.extend(
+            self.streams
+                .device_ids(&host_scope(host_id))
+                .iter()
+                .map(|key| split_key(key).1.to_string()),
+        );
         if ids.is_empty() {
             return Ok(());
         }
-        if let Err(error) = self.refresh(origin).await {
+        if let Err(error) = self.refresh(host_id, origin).await {
             tracing::warn!(%error, "device list unavailable after the hub restarted");
         } else {
             self.publish(|state| {
                 let booted: Vec<String> = state
                     .devices
                     .iter()
-                    .filter(|device| device.booted)
+                    .filter(|device| device.host_id == host_id && device.booted)
                     .map(|device| device.id.clone())
                     .collect();
-                state
-                    .sessions
-                    .retain(|session| booted.contains(&session.device_id));
+                state.sessions.retain(|session| {
+                    session.host_id != host_id || booted.contains(&session.device_id)
+                });
             });
         }
         let client = HubClient {
@@ -481,41 +689,60 @@ impl DeviceHub {
         };
         let state = self.snapshot();
         for id in &ids {
-            if state.devices.iter().any(|device| {
-                &device.id == id && device.booted && device.platform == DevicePlatform::Ios
-            }) && let Err(error) = client.attach_stream(id).await
+            if state
+                .device(host_id, id)
+                .is_some_and(|device| device.booted && device.platform == DevicePlatform::Ios)
+                && let Err(error) = client.attach_stream(id).await
             {
                 tracing::warn!(%error, "reattaching a device stream failed");
             }
+        }
+        let resume = || {
+            self.streams.resume(
+                &host_scope(host_id),
+                |key, frames, link| self.start_reader(origin, key, frames, link),
+                |key, feed, link| self.start_avcc_reader(origin, key, feed, link),
+            )
+        };
+        if host_id != LOCAL_DEVICE_HOST_ID {
+            if self.origin_for(host_id).as_deref() != Ok(origin) {
+                return Err(HUB_NOT_RUNNING.into());
+            }
+            resume();
+            return Ok(());
         }
         let slot = self.hub_slot();
         if slot.as_ref().map(|hub| hub.origin.as_str()) != Some(origin) {
             return Err(HUB_NOT_RUNNING.into());
         }
-        self.streams.resume(
-            |device_id, frames, link| self.start_reader(origin, device_id, frames, link),
-            |device_id, feed, link| self.start_avcc_reader(origin, device_id, feed, link),
-        );
+        resume();
         drop(slot);
         Ok(())
     }
 
-    fn known_device(&self, device_id: &str) -> bool {
+    fn known_device(&self, host_id: &str, device_id: &str) -> bool {
         let state = self.state.borrow();
         hub_client::valid_device_id(device_id)
-            && (state.devices.iter().any(|device| device.id == device_id)
+            && (state.device(host_id, device_id).is_some()
                 || state
                     .sessions
                     .iter()
-                    .any(|session| session.device_id == device_id))
+                    .any(|session| session.host_id == host_id && session.device_id == device_id))
     }
 
     pub async fn configure(
         &self,
         params: ConfigureDeviceHubParams,
     ) -> Result<DeviceHubState, String> {
+        let device_hosts = match params.device_hosts {
+            Some(hosts) => Some(self.remote_hosts(hosts).await?),
+            None => None,
+        };
         let settings_lock = self.settings_lock.lock().await;
         let mut settings = self.state.borrow().settings.clone();
+        if let Some(hosts) = device_hosts {
+            settings.device_hosts = hosts;
+        }
         if let Some(enabled) = params.enabled {
             settings.enabled = enabled;
         }
@@ -534,6 +761,7 @@ impl DeviceHub {
             .map_err(|e| format!("Could not save device settings: {e}"))?;
         let enabled = settings.enabled;
         let agent_on = settings.agent_access_enabled;
+        let hosts = settings.device_hosts.clone();
         let stopped = running_tools(false);
         self.publish(|state| {
             state.settings = settings;
@@ -551,13 +779,23 @@ impl DeviceHub {
                 stopped(state);
             }
         });
+        let removed = self.reconcile(&hosts);
+        if enabled {
+            self.publish(|state| {
+                for host in &hosts {
+                    state.host_statuses.entry(host.id.clone()).or_default();
+                }
+            });
+        }
         if !agent_on {
             self.stop_agent().await;
         }
         if !enabled {
             self.stop_hub().await;
+            futures::future::join_all(self.all_remotes().iter().map(|host| host.stop())).await;
         }
         drop(settings_lock);
+        futures::future::join_all(removed.iter().map(|host| host.retire())).await;
         if enabled {
             self.list(false).await?;
         }
@@ -577,16 +815,64 @@ impl DeviceHub {
         let platforms = self.detect_platforms().await;
         let host = host_summary(platforms, self.live_origin().is_some());
         let any_available = host.platforms.iter().any(|platform| platform.available);
-        self.publish(|state| state.hosts = vec![host]);
-        if inspect_only || !any_available {
+        self.publish(
+            |state| match state.hosts.iter_mut().find(|entry| entry.id == host.id) {
+                Some(entry) => *entry = host,
+                None => state.hosts.insert(0, host),
+            },
+        );
+        if inspect_only {
             return Ok(self.snapshot());
         }
-        if let Ok(origin) = self.ensure_ready().await
-            && let Err(error) = self.refresh(&origin).await
-        {
-            self.set_status(DeviceHostStatus::Failed, Some(error));
-        }
+        let local = async {
+            if any_available
+                && let Ok(origin) = self.ensure_ready().await
+                && let Err(error) = self.refresh(LOCAL_DEVICE_HOST_ID, &origin).await
+            {
+                self.set_status(DeviceHostStatus::Failed, Some(error));
+            }
+        };
+        let remotes =
+            futures::future::join_all(self.all_remotes().into_iter().map(|host| async move {
+                let id = host.config.id.clone();
+                if let Ok(ready) = host.ensure_ready().await
+                    && let Err(error) = self.refresh(&id, &ready.origin).await
+                {
+                    self.publish(|state| {
+                        state.host_statuses.insert(
+                            id,
+                            DeviceHostState {
+                                status: DeviceHostStatus::Failed,
+                                detail: Some(error),
+                            },
+                        );
+                    });
+                }
+            }));
+        tokio::join!(local, remotes);
         Ok(self.snapshot())
+    }
+
+    async fn remote_hosts(
+        &self,
+        hosts: Vec<SshDeviceHostConfig>,
+    ) -> Result<Vec<SshDeviceHostConfig>, String> {
+        zeron_proto::device_hub::validate_device_hosts(&hosts)?;
+        for host in &hosts {
+            ssh_host::check_identity(host)?;
+        }
+        let (ssh, own) = (self.ssh_program(), self.own_addresses());
+        let local = futures::future::join_all(
+            hosts
+                .iter()
+                .map(|host| ssh_host::is_local(&ssh, host, &own)),
+        )
+        .await;
+        Ok(hosts
+            .into_iter()
+            .zip(local)
+            .filter_map(|(host, local)| (!local).then_some(host))
+            .collect())
     }
 
     async fn ensure_ready(&self) -> Result<String, String> {
@@ -644,7 +930,7 @@ impl DeviceHub {
             running(state);
         });
         drop((settle, lifecycle));
-        self.reattach(&origin).await?;
+        self.reattach(LOCAL_DEVICE_HOST_ID, &origin).await?;
         Ok(origin)
     }
 
@@ -689,7 +975,7 @@ impl DeviceHub {
         .await
     }
 
-    async fn refresh(&self, origin: &str) -> Result<(), String> {
+    async fn refresh(&self, host_id: &str, origin: &str) -> Result<(), String> {
         let _serial = self.refreshing.lock().await;
         let (mut devices, errors) = HubClient {
             http: &self.http,
@@ -697,11 +983,15 @@ impl DeviceHub {
         }
         .list()
         .await?;
+        for device in &mut devices {
+            device.host_id = host_id.to_string();
+        }
         let android = {
             let state = self.state.borrow();
             let platforms: Vec<_> = state
                 .hosts
                 .iter()
+                .filter(|host| host.id == host_id)
                 .flat_map(|host| host.platforms.clone())
                 .collect();
             available(&platforms, DevicePlatform::Android)
@@ -712,14 +1002,16 @@ impl DeviceHub {
                 .borrow()
                 .devices
                 .iter()
-                .filter(|device| device.platform == DevicePlatform::Android)
+                .filter(|device| {
+                    device.host_id == host_id && device.platform == DevicePlatform::Android
+                })
                 .filter(|device| !devices.iter().any(|listed| listed.id == device.id))
                 .cloned()
                 .collect();
             devices.extend(known);
         } else if android {
-            let avds = self.list_avds().await;
-            devices.extend(stopped_avds(&avds, &devices));
+            let avds = self.list_avds(host_id).await;
+            devices.extend(stopped_avds(&avds, host_id, &devices));
         }
         let reused = reused_serials(
             &mut self
@@ -732,12 +1024,24 @@ impl DeviceHub {
             if !state.settings.enabled {
                 return;
             }
-            state
-                .sessions
-                .retain(|session| !reused.contains(&session.device_id));
-            state.devices = devices;
-            state.host_status = DeviceHostStatus::Ready;
-            state.host_status_detail = host_diagnostics(errors, android);
+            state.sessions.retain(|session| {
+                session.host_id != host_id || !reused.contains(&session.device_id)
+            });
+            state.devices.retain(|device| device.host_id != host_id);
+            state.devices.extend(devices);
+            let detail = host_diagnostics(errors, android);
+            if host_id == LOCAL_DEVICE_HOST_ID {
+                state.host_status = DeviceHostStatus::Ready;
+                state.host_status_detail = detail;
+            } else {
+                state.host_statuses.insert(
+                    host_id.to_string(),
+                    DeviceHostState {
+                        status: DeviceHostStatus::Ready,
+                        detail,
+                    },
+                );
+            }
         });
         Ok(())
     }
@@ -757,20 +1061,32 @@ impl DeviceHub {
         if !hub_client::valid_device_id(&params.device_id) {
             return Err(UNKNOWN_DEVICE.into());
         }
-        let support = self
-            .detect_platforms()
-            .await
-            .into_iter()
-            .find(|candidate| candidate.platform == params.platform)
-            .unwrap_or_default();
-        if !support.available {
-            return Err(support.reason.unwrap_or_default());
-        }
         let host_id = params
             .host_id
             .unwrap_or_else(|| LOCAL_DEVICE_HOST_ID.into());
-        let origin = self.ensure_ready().await?;
-        self.refresh(&origin).await?;
+        let unavailable = |support: DevicePlatformAvailability| {
+            (!support.available).then(|| support.reason.unwrap_or_default())
+        };
+        let origin = if host_id == LOCAL_DEVICE_HOST_ID {
+            let support = self
+                .detect_platforms()
+                .await
+                .into_iter()
+                .find(|candidate| candidate.platform == params.platform)
+                .unwrap_or_default();
+            if let Some(reason) = unavailable(support) {
+                return Err(reason);
+            }
+            self.ensure_ready().await?
+        } else {
+            let host = self.remote(&host_id).ok_or(UNKNOWN_HOST)?;
+            let ready = host.ensure_ready().await?;
+            if let Some(reason) = unavailable(host.platform(params.platform)) {
+                return Err(reason);
+            }
+            ready.origin
+        };
+        self.refresh(&host_id, &origin).await?;
         let resolve = || {
             let state = self.snapshot();
             state
@@ -791,7 +1107,7 @@ impl DeviceHub {
         let ios = device.platform == DevicePlatform::Ios;
         let _android_boot = if !ios && !device.booted && params.boot {
             let boot = self.android_boots.lock().await;
-            self.refresh(&origin).await?;
+            self.refresh(&host_id, &origin).await?;
             device = resolve()?;
             Some(boot)
         } else {
@@ -806,14 +1122,15 @@ impl DeviceHub {
                 device: device.clone(),
                 chat_id: params.chat_id.clone(),
             };
+            let other = |entry: &DeviceBooting| {
+                entry.device.host_id != device.host_id || entry.device.id != device.id
+            };
             self.publish(|state| {
-                state.booting.retain(|entry| entry.device.id != device.id);
+                state.booting.retain(other);
                 state.booting.push(booting);
             });
             let booted = {
-                let _clear = OnDrop(Some(|| {
-                    self.publish(|state| state.booting.retain(|entry| entry.device.id != device.id))
-                }));
+                let _clear = OnDrop(Some(|| self.publish(|state| state.booting.retain(other))));
                 async {
                     let id = client.boot(&device).await?;
                     if !hub_client::valid_device_id(&id) {
@@ -827,7 +1144,7 @@ impl DeviceHub {
                 .await
             };
             let id = booted?;
-            self.refresh(&origin).await?;
+            self.refresh(&host_id, &origin).await?;
             if let Some(listed) = self.snapshot().device(&host_id, &id)
                 && !ios
                 && listed.name != device.name
@@ -852,7 +1169,7 @@ impl DeviceHub {
             self.session_avds
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .insert(device_id.clone(), device.name.clone());
+                .insert(device_key(&host_id, &device_id), device.name.clone());
         }
         let session = DeviceSession {
             chat_id: params.chat_id,
@@ -874,37 +1191,52 @@ impl DeviceHub {
         Ok(session)
     }
 
-    pub(crate) fn watch_frames(&self, device_id: &str) -> Result<FrameSubscription, String> {
-        if self.platform_of(device_id) == DevicePlatform::Android {
+    pub(crate) fn watch_frames(
+        &self,
+        host_id: Option<&str>,
+        device_id: &str,
+    ) -> Result<FrameSubscription, String> {
+        let host_id = host_id.unwrap_or(LOCAL_DEVICE_HOST_ID);
+        if self.platform_of(host_id, device_id) == DevicePlatform::Android {
             return Err(ANDROID_H264_ONLY.into());
         }
-        self.with_live_hub(device_id, |origin| {
-            self.streams.subscribe(device_id, |frames, link| {
-                self.start_reader(origin, device_id, frames, link)
+        self.with_live_hub(host_id, device_id, |origin, key| {
+            self.streams.subscribe(key, |frames, link| {
+                self.start_reader(origin, key, frames, link)
             })
         })
     }
 
-    pub(crate) fn watch_avcc(&self, device_id: &str) -> Result<AvccSubscription, String> {
-        let platform = self.platform_of(device_id);
-        self.with_live_hub(device_id, |origin| {
-            self.streams
-                .subscribe_avcc(device_id, platform, |feed, link| {
-                    self.start_avcc_reader(origin, device_id, feed, link)
-                })
+    pub(crate) fn watch_avcc(
+        &self,
+        host_id: Option<&str>,
+        device_id: &str,
+    ) -> Result<AvccSubscription, String> {
+        let host_id = host_id.unwrap_or(LOCAL_DEVICE_HOST_ID);
+        let platform = self.platform_of(host_id, device_id);
+        self.with_live_hub(host_id, device_id, |origin, key| {
+            self.streams.subscribe_avcc(key, platform, |feed, link| {
+                self.start_avcc_reader(origin, key, feed, link)
+            })
         })
     }
 
     fn with_live_hub<T>(
         &self,
+        host_id: &str,
         device_id: &str,
-        subscribe: impl FnOnce(&str) -> T,
+        subscribe: impl FnOnce(&str, &str) -> T,
     ) -> Result<T, String> {
         if !self.enabled() {
             return Err(DEVICE_SUPPORT_OFF.into());
         }
-        if !self.known_device(device_id) {
+        if !self.known_device(host_id, device_id) {
             return Err(UNKNOWN_DEVICE.into());
+        }
+        let key = device_key(host_id, device_id);
+        if host_id != LOCAL_DEVICE_HOST_ID {
+            let origin = self.origin_for(host_id)?;
+            return Ok(subscribe(&origin, &key));
         }
         let origin = self
             .live_origin()
@@ -913,7 +1245,7 @@ impl DeviceHub {
         if slot.as_ref().map(|hub| hub.origin.as_str()) != Some(origin.as_str()) {
             return Err(HUB_NOT_RUNNING.into());
         }
-        let subscription = subscribe(&origin);
+        let subscription = subscribe(&origin, &key);
         drop(slot);
         Ok(subscription)
     }
@@ -921,7 +1253,7 @@ impl DeviceHub {
     fn start_reader(
         &self,
         origin: &str,
-        device_id: &str,
+        key: &str,
         frames: FrameSlot,
         link: u64,
     ) -> tokio::task::JoinHandle<()> {
@@ -929,8 +1261,9 @@ impl DeviceHub {
             http: &self.http,
             origin,
         };
+        let device_id = split_key(key).1;
         let (on_status, on_first_frame) = self.link_callbacks(
-            device_id,
+            key,
             link,
             DeviceVideoCodec::Mjpeg,
             client.input_url(device_id),
@@ -947,7 +1280,7 @@ impl DeviceHub {
     fn start_avcc_reader(
         &self,
         origin: &str,
-        device_id: &str,
+        key: &str,
         feed: Arc<AvccFeed>,
         link: u64,
     ) -> tokio::task::JoinHandle<()> {
@@ -955,11 +1288,12 @@ impl DeviceHub {
             http: &self.http,
             origin,
         };
+        let device_id = split_key(key).1;
         if feed.platform == DevicePlatform::Android {
-            return self.start_semu_reader(client.semu_url(device_id), device_id, feed, link);
+            return self.start_semu_reader(client.semu_url(device_id), key, feed, link);
         }
         let (on_status, on_first_frame) = self.link_callbacks(
-            device_id,
+            key,
             link,
             DeviceVideoCodec::H264,
             client.input_url(device_id),
@@ -1060,30 +1394,39 @@ impl DeviceHub {
         self.streams.set_input(device_id, link, socket);
     }
 
-    pub fn send_input(&self, device_id: &str, input: &DeviceInput) -> Result<(), String> {
-        if !self.known_device(device_id) {
+    pub fn send_input(
+        &self,
+        host_id: Option<&str>,
+        device_id: &str,
+        input: &DeviceInput,
+    ) -> Result<(), String> {
+        let host_id = host_id.unwrap_or(LOCAL_DEVICE_HOST_ID);
+        if !self.known_device(host_id, device_id) {
             return Err(UNKNOWN_DEVICE.into());
         }
-        self.streams.send_input(device_id, input)
+        self.streams
+            .send_input(&device_key(host_id, device_id), input)
     }
 
     pub async fn set_hinge(&self, params: SetHubDeviceHingeParams) -> Result<(), String> {
         if !self.enabled() {
             return Err(DEVICE_SUPPORT_OFF.into());
         }
-        if !self.known_device(&params.device_id) {
+        let host_id = params.host_id.as_deref().unwrap_or(LOCAL_DEVICE_HOST_ID);
+        if !self.known_device(host_id, &params.device_id) {
             return Err(UNKNOWN_DEVICE.into());
         }
+        let key = device_key(host_id, &params.device_id);
         let hinged = self
             .state
             .borrow()
             .screens
-            .get(&params.device_id)
+            .get(&key)
             .is_some_and(|screen| screen.supports_hinge_angle == Some(true));
         if !hinged {
             return Err("This device has no hinge.".into());
         }
-        let reply = self.streams.hinge(&params.device_id, params.pose)?;
+        let reply = self.streams.hinge(&key, params.pose)?;
         match tokio::time::timeout(HINGE_TIMEOUT, reply).await {
             Err(_) => Err("Device control timed out. Its position is unknown.".into()),
             Ok(Err(_)) => Err("Device is disconnected.".into()),
@@ -1117,9 +1460,9 @@ impl DeviceHub {
             }
             return Ok(());
         }
-        let mut targets: Vec<(String, DevicePlatform)> = closing
+        let mut targets: Vec<(String, String, DevicePlatform)> = closing
             .into_iter()
-            .map(|session| (session.device_id, session.platform))
+            .map(|session| (session.host_id, session.device_id, session.platform))
             .collect();
         if targets.is_empty()
             && let Some(device_id) = params.device_id
@@ -1130,42 +1473,41 @@ impl DeviceHub {
                 .device(host_id, &device_id)
                 .map(|device| device.platform)
                 .ok_or_else(|| UNKNOWN_DEVICE.to_string())?;
-            targets.push((device_id, platform));
+            targets.push((host_id.to_string(), device_id, platform));
         }
-        for (device_id, platform) in targets {
-            self.shutdown_device(&device_id, platform).await?;
+        for (host_id, device_id, platform) in targets {
+            self.shutdown_device(&host_id, &device_id, platform).await?;
         }
         Ok(())
     }
 
     pub async fn power_off(&self, params: ShutdownHubDeviceParams) -> Result<(), String> {
-        self.shutdown_device(&params.device_id, params.platform)
+        let host_id = params.host_id.as_deref().unwrap_or(LOCAL_DEVICE_HOST_ID);
+        self.shutdown_device(host_id, &params.device_id, params.platform)
             .await
     }
 
     async fn shutdown_device(
         &self,
+        host_id: &str,
         device_id: &str,
         platform: DevicePlatform,
     ) -> Result<(), String> {
         if !self.enabled() {
             return Err(DEVICE_SUPPORT_OFF.into());
         }
-        if !self.known_device(device_id) {
+        if !self.known_device(host_id, device_id) {
             return Err(UNKNOWN_DEVICE.into());
         }
         if self
             .state
             .borrow()
-            .devices
-            .iter()
-            .any(|device| device.id == device_id && device.physical)
+            .device(host_id, device_id)
+            .is_some_and(|device| device.physical)
         {
             return Err(DEVICE_ACTION_UNAVAILABLE.into());
         }
-        let origin = self
-            .live_origin()
-            .ok_or_else(|| HUB_NOT_RUNNING.to_string())?;
+        let origin = self.origin_for(host_id)?;
         let client = HubClient {
             http: &self.http,
             origin: &origin,
@@ -1192,16 +1534,20 @@ impl DeviceHub {
                 return Err(error);
             }
         }
-        if let Err(error) = self.refresh(&origin).await {
+        if let Err(error) = self.refresh(host_id, &origin).await {
             tracing::warn!(%error, "device list unavailable after shutdown");
         }
         self.publish(|state| {
-            for device in state.devices.iter_mut().filter(|d| d.id == device_id) {
+            for device in state
+                .devices
+                .iter_mut()
+                .filter(|d| d.host_id == host_id && d.id == device_id)
+            {
                 device.booted = false;
             }
             state
                 .sessions
-                .retain(|session| session.device_id != device_id);
+                .retain(|session| session.host_id != host_id || session.device_id != device_id);
         });
         Ok(())
     }
@@ -1212,7 +1558,7 @@ impl DeviceHub {
         }
         let hub = {
             let mut slot = self.hub_slot();
-            self.streams.clear();
+            self.streams.clear(&is_local_key);
             slot.take()
         };
         if let Some(hub) = hub {
@@ -1231,6 +1577,9 @@ impl DeviceHub {
         if let Some(daemon) = self.agent_slot().as_ref() {
             daemon.signal_stop();
         }
+        for host in self.all_remotes() {
+            host.signal_stop();
+        }
     }
 
     pub async fn shutdown(&self) {
@@ -1240,6 +1589,19 @@ impl DeviceHub {
         if let Some(daemon) = daemon {
             daemon.stop().await;
         }
+        let remotes = self.all_remotes();
+        let stops = futures::future::join_all(remotes.iter().map(|host| host.stop()));
+        if tokio::time::timeout(REMOTE_STOP_GRACE, stops)
+            .await
+            .is_err()
+        {
+            tracing::warn!("device hosts did not stop in time");
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn use_ssh_for_test(&self, ssh: PathBuf, own: HashSet<IpAddr>) {
+        *self.test_ssh.lock().unwrap_or_else(PoisonError::into_inner) = Some((ssh, own));
     }
 
     #[cfg(test)]
@@ -1676,6 +2038,155 @@ mod tests {
         (dir, hub, origin)
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hosts_stay_independent_when_ids_collide_and_one_host_is_offline() {
+        use zeron_proto::device_hub::{
+            CloseHubDeviceParams, ConfigureDeviceHubParams, DeviceHostStatus, SshDeviceHostConfig,
+        };
+        let Some(fake) = super::ssh_host::tests::fake_ssh().await else {
+            return;
+        };
+        let (_dir, hub, _) = enabled_hub(HEALTHY).await;
+        for target in ["mini", "studio"] {
+            let (origin, _) = fake_hub_with(HEALTHY).await;
+            std::fs::write(
+                fake.dir.path().join(format!("hub-port-{target}")),
+                origin.rsplit(':').next().unwrap(),
+            )
+            .unwrap();
+        }
+        hub.use_ssh_for_test(fake.ssh.clone(), std::collections::HashSet::new());
+        let host = super::ssh_host::tests::host;
+        let hosts = |hosts: Vec<SshDeviceHostConfig>| ConfigureDeviceHubParams {
+            device_hosts: Some(hosts),
+            ..Default::default()
+        };
+        assert!(
+            hub.configure(hosts(vec![host("-oProxyCommand=x")]))
+                .await
+                .is_err()
+        );
+        let state = hub
+            .configure(hosts(vec![
+                host("mini"),
+                host("studio"),
+                host("unreachable"),
+                host("loopback"),
+            ]))
+            .await
+            .unwrap();
+        let ids = |state: &DeviceHubState| -> Vec<String> {
+            state.hosts.iter().map(|host| host.id.clone()).collect()
+        };
+        assert_eq!(
+            state
+                .settings
+                .device_hosts
+                .iter()
+                .map(|host| host.id.as_str())
+                .collect::<Vec<_>>(),
+            ["mini", "studio", "unreachable"],
+            "a target that resolves to this machine is skipped"
+        );
+        assert_eq!(ids(&state), ["local", "mini", "studio", "unreachable"]);
+        let mut owners: Vec<&str> = state
+            .devices
+            .iter()
+            .filter(|device| device.id == "SIM-1")
+            .map(|device| device.host_id.as_str())
+            .collect();
+        owners.sort();
+        assert_eq!(owners, ["local", "mini", "studio"]);
+        assert_eq!(state.host_statuses["mini"].status, DeviceHostStatus::Ready);
+        assert_eq!(
+            state.host_statuses["studio"].status,
+            DeviceHostStatus::Ready
+        );
+        let offline = &state.host_statuses["unreachable"];
+        assert_eq!(offline.status, DeviceHostStatus::Failed);
+        assert!(
+            offline
+                .detail
+                .as_deref()
+                .unwrap()
+                .contains("Connection refused")
+        );
+        assert_eq!(state.host_status, DeviceHostStatus::Ready);
+
+        for host_id in ["mini", "studio"] {
+            let params = serde_json::from_value(serde_json::json!({"chatId": "chat-1",
+                "hostId": host_id, "deviceId": "SIM-1", "platform": "ios"}))
+            .unwrap();
+            assert_eq!(hub.open(params).await.unwrap().host_id, host_id);
+        }
+        hub.close(CloseHubDeviceParams {
+            chat_id: "chat-1".into(),
+            host_id: Some("mini".into()),
+            device_id: Some("SIM-1".into()),
+            shutdown: false,
+        })
+        .await
+        .unwrap();
+        let sessions = |hub: &super::DeviceHub| -> Vec<(String, String)> {
+            hub.snapshot()
+                .sessions
+                .iter()
+                .map(|session| (session.host_id.clone(), session.device_id.clone()))
+                .collect()
+        };
+        assert_eq!(
+            sessions(&hub),
+            [("studio".to_string(), "SIM-1".to_string())]
+        );
+        let frames = hub.watch_frames(Some("studio"), "SIM-1").unwrap();
+        eventually(|| hub.snapshot().streams.contains_key("studio/SIM-1")).await;
+        assert!(!hub.snapshot().streams.contains_key("SIM-1"));
+        assert!(
+            hub.watch_frames(Some("elsewhere"), "SIM-1").is_err(),
+            "an unknown host never falls back to the local hub"
+        );
+
+        let old = hub.remote("studio").unwrap();
+        let state = hub
+            .configure(hosts(vec![host("mini"), host("unreachable")]))
+            .await
+            .unwrap();
+        assert!(state.sessions.is_empty());
+        assert!(
+            !state
+                .devices
+                .iter()
+                .any(|device| device.host_id == "studio")
+        );
+        assert!(!state.host_statuses.contains_key("studio"));
+        assert_eq!(ids(&state), ["local", "mini", "unreachable"]);
+        assert!(!state.streams.keys().any(|key| key.starts_with("studio/")));
+        drop(frames);
+        let stopped = |target: &str| {
+            fake.lines("modes")
+                .iter()
+                .any(|line| line.starts_with("stop ") && line.ends_with(&format!(" {target}")))
+        };
+        assert!(
+            stopped("studio"),
+            "removing a host stops its remote helpers"
+        );
+        assert!(old.ensure_ready().await.is_err());
+        assert!(
+            !hub.snapshot().host_statuses.contains_key("studio"),
+            "a removed host's late status is ignored"
+        );
+
+        hub.configure(ConfigureDeviceHubParams {
+            enabled: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        assert!(hub.snapshot().host_statuses.is_empty());
+        assert!(stopped("mini"));
+    }
+
     fn open_params(device_id: &str) -> zeron_proto::device_hub::OpenHubDeviceParams {
         serde_json::from_value(
             serde_json::json!({"chatId": "chat-1", "deviceId": device_id, "platform": "ios"}),
@@ -1997,12 +2508,13 @@ mod tests {
         let (_dir, hub, _) = enabled_hub(HEALTHY).await;
         for id in ["..", ".", "ws", "SIM-2", "SIM-1/../x", "SIM-1?device=x"] {
             assert_eq!(
-                hub.watch_frames(id).err().as_deref(),
+                hub.watch_frames(None, id).err().as_deref(),
                 Some(super::UNKNOWN_DEVICE),
                 "{id}"
             );
             assert_eq!(
                 hub.send_input(
+                    None,
                     id,
                     &DeviceInput::Touch {
                         phase: zeron_proto::device_hub::TouchPhase::Begin,
@@ -2020,7 +2532,7 @@ mod tests {
             hub.open(open_params("../SIM-1")).await.err().as_deref(),
             Some(super::UNKNOWN_DEVICE)
         );
-        assert!(hub.watch_frames("SIM-1").is_ok());
+        assert!(hub.watch_frames(None, "SIM-1").is_ok());
         hub.shutdown().await;
     }
 
@@ -2049,7 +2561,7 @@ mod tests {
             Err("This device has no hinge.".into()),
             "no 0x82 has said so yet"
         );
-        let mut video = Box::pin(super::avcc_batches(hub.watch_avcc("SIM-1").unwrap()));
+        let mut video = Box::pin(super::avcc_batches(hub.watch_avcc(None, "SIM-1").unwrap()));
         next_tags(&mut video, 3).await;
         let screen = || {
             hub.snapshot()
@@ -2267,8 +2779,8 @@ mod tests {
                 .get("SIM-1")
                 .map(|status| status.subscribers)
         };
-        let tab = hub.watch_frames("SIM-1").unwrap();
-        let float = hub.watch_frames("SIM-1").unwrap();
+        let tab = hub.watch_frames(None, "SIM-1").unwrap();
+        let float = hub.watch_frames(None, "SIM-1").unwrap();
         assert_eq!(subscribers(), Some(2));
         drop(tab);
         assert_eq!(subscribers(), Some(1));
@@ -2320,7 +2832,7 @@ mod tests {
                 .filter(|line| line.contains(route))
                 .count()
         };
-        let mut tab = Box::pin(super::avcc_batches(hub.watch_avcc("SIM-1").unwrap()));
+        let mut tab = Box::pin(super::avcc_batches(hub.watch_avcc(None, "SIM-1").unwrap()));
         assert_eq!(next_tags(&mut tab, 5).await[..4], [4, 1, 2, 3]);
         eventually(|| count("helper/ws?device=SIM-1") > 0).await;
         assert_eq!(count("stream.mjpeg"), 0, "an AVCC read alone opens input");
@@ -2333,11 +2845,11 @@ mod tests {
             ),
             "the AVCC read reports on its own status"
         );
-        let mut float = Box::pin(super::avcc_batches(hub.watch_avcc("SIM-1").unwrap()));
+        let mut float = Box::pin(super::avcc_batches(hub.watch_avcc(None, "SIM-1").unwrap()));
         let replay = next_tags(&mut float, 3).await;
         assert_eq!(replay[..2], [1, 2], "description and keyframe first");
         assert!(replay[2..].iter().all(|tag| *tag == 3), "{replay:?}");
-        let mjpeg = hub.watch_frames("SIM-1").unwrap();
+        let mjpeg = hub.watch_frames(None, "SIM-1").unwrap();
         let streams = || hub.snapshot().streams.get("SIM-1").cloned();
         assert_eq!(streams().map(|status| status.subscribers), Some(3));
         assert_eq!(count("stream.avcc"), 1, "one shared hub read");
@@ -2345,7 +2857,7 @@ mod tests {
         assert_eq!(streams().map(|status| status.subscribers), Some(1));
         drop(mjpeg);
         assert_eq!(streams(), None);
-        let mut again = Box::pin(super::avcc_batches(hub.watch_avcc("SIM-1").unwrap()));
+        let mut again = Box::pin(super::avcc_batches(hub.watch_avcc(None, "SIM-1").unwrap()));
         assert_eq!(
             next_tags(&mut again, 1).await[0],
             1,
@@ -2457,11 +2969,11 @@ mod tests {
         assert!(state.booting.is_empty());
 
         assert_eq!(
-            hub.watch_frames("emulator-5554").err().as_deref(),
+            hub.watch_frames(None, "emulator-5554").err().as_deref(),
             Some(super::ANDROID_H264_ONLY)
         );
         let mut tab = Box::pin(super::avcc_batches(
-            hub.watch_avcc("emulator-5554").unwrap(),
+            hub.watch_avcc(None, "emulator-5554").unwrap(),
         ));
         assert_eq!(next_tags(&mut tab, 8).await, [1, 2, 3, 3, 3, 1, 2, 3]);
         eventually(|| {
@@ -2473,6 +2985,7 @@ mod tests {
         })
         .await;
         hub.send_input(
+            None,
             "emulator-5554",
             &DeviceInput::Button {
                 button: DeviceButton::Back,
@@ -2481,6 +2994,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             hub.send_input(
+                None,
                 "emulator-5554",
                 &DeviceInput::Orientation {
                     orientation: DeviceOrientation::LandscapeLeft
@@ -2517,7 +3031,7 @@ mod tests {
             "a keyframe is asked for on connect and after the encoder restart"
         );
         let mut float = Box::pin(super::avcc_batches(
-            hub.watch_avcc("emulator-5554").unwrap(),
+            hub.watch_avcc(None, "emulator-5554").unwrap(),
         ));
         assert_eq!(
             next_tags(&mut float, 3).await,
@@ -2542,6 +3056,7 @@ mod tests {
         });
         let origin = hub.live_origin().unwrap();
         hub.streams.resume(
+            &|_| true,
             |device_id, frames, link| hub.start_reader(&origin, device_id, frames, link),
             |device_id, feed, link| hub.start_avcc_reader(&origin, device_id, feed, link),
         );
@@ -2664,6 +3179,7 @@ mod tests {
     fn a_serial_reused_by_another_avd_drops_the_sessions_opened_on_the_old_one() {
         use zeron_proto::device_hub::{DevicePlatform, HubDevice};
         let device = |id: &str, name: &str| HubDevice {
+            host_id: "local".into(),
             id: id.into(),
             name: name.into(),
             platform: DevicePlatform::Android,
@@ -2715,7 +3231,7 @@ mod tests {
         .await
         .unwrap();
         hub.open(open_params("SIM-1")).await.unwrap();
-        let mut subscription = hub.watch_frames("SIM-1").unwrap();
+        let mut subscription = hub.watch_frames(None, "SIM-1").unwrap();
         let before = frame_from(&mut subscription.frames, "A").await;
 
         let seen: Arc<std::sync::Mutex<Vec<DeviceHubState>>> = Arc::default();

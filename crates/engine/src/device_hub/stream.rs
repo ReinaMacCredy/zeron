@@ -480,20 +480,27 @@ impl DeviceStreams {
         }
     }
 
-    pub(crate) fn device_ids(&self) -> Vec<String> {
-        self.lock().by_device.keys().cloned().collect()
+    pub(crate) fn device_ids(&self, scope: &dyn Fn(&str) -> bool) -> Vec<String> {
+        self.lock()
+            .by_device
+            .keys()
+            .filter(|key| scope(key))
+            .cloned()
+            .collect()
     }
 
-    pub(crate) fn pause(&self) {
-        self.relink(&|_, _, _| None, &|_, _, _| None);
+    pub(crate) fn pause(&self, scope: &dyn Fn(&str) -> bool) {
+        self.relink(scope, &|_, _, _| None, &|_, _, _| None);
     }
 
     pub(crate) fn resume(
         &self,
+        scope: &dyn Fn(&str) -> bool,
         mjpeg: impl Fn(&str, FrameSlot, u64) -> tokio::task::JoinHandle<()>,
         avcc: impl Fn(&str, Arc<AvccFeed>, u64) -> tokio::task::JoinHandle<()>,
     ) {
         self.relink(
+            scope,
             &|device_id, frames, link| Some(mjpeg(device_id, frames, link)),
             &|device_id, feed, link| Some(avcc(device_id, feed, link)),
         );
@@ -501,6 +508,7 @@ impl DeviceStreams {
 
     fn relink(
         &self,
+        scope: &dyn Fn(&str) -> bool,
         mjpeg: &dyn Fn(&str, FrameSlot, u64) -> Option<tokio::task::JoinHandle<()>>,
         avcc: &dyn Fn(&str, Arc<AvccFeed>, u64) -> Option<tokio::task::JoinHandle<()>>,
     ) {
@@ -511,10 +519,10 @@ impl DeviceStreams {
                 by_device,
                 descriptions,
             } = &mut *entries;
-            descriptions.clear();
+            descriptions.retain(|key, _| !scope(key));
             let mut retired = Vec::new();
             let mut inputs = Vec::new();
-            for (device_id, entry) in by_device.iter_mut() {
+            for (device_id, entry) in by_device.iter_mut().filter(|(key, _)| scope(key)) {
                 *next_generation += 1;
                 let link = *next_generation;
                 entry.link = link;
@@ -536,11 +544,14 @@ impl DeviceStreams {
         drop((retired, inputs));
     }
 
-    pub(crate) fn clear(&self) {
+    pub(crate) fn clear(&self, scope: &dyn Fn(&str) -> bool) {
         let cleared = {
             let mut entries = self.lock();
-            entries.descriptions.clear();
-            let cleared = std::mem::take(&mut entries.by_device);
+            entries.descriptions.retain(|key, _| !scope(key));
+            let (cleared, kept) = std::mem::take(&mut entries.by_device)
+                .into_iter()
+                .partition(|(key, _)| scope(key));
+            entries.by_device = kept;
             self.publish(&entries);
             cleared
         };
@@ -905,7 +916,7 @@ mod tests {
         let streams = Arc::new(DeviceStreams::default());
         let idle = |_: FrameSlot, _| tokio::spawn(std::future::pending::<()>());
         let stale = streams.subscribe("UDID", idle);
-        streams.clear();
+        streams.clear(&|_| true);
         let current = streams.subscribe("UDID", idle);
         drop(stale);
         assert_eq!(streams.subscribers("UDID"), 1);
@@ -984,7 +995,7 @@ mod tests {
         drop(second);
         assert!(last().is_empty());
         let _third = streams.subscribe("UDID", idle);
-        streams.clear();
+        streams.clear(&|_| true);
         assert!(last().is_empty());
     }
 
@@ -1159,7 +1170,7 @@ mod tests {
         let live = streams.subscribe_avcc("LIVE", DevicePlatform::Ios, idle);
         live.feed.push(envelope(AVCC_DESCRIPTION, b"old"));
         live.feed.push(envelope(AVCC_KEYFRAME, b"idr"));
-        streams.pause();
+        streams.pause(&|_| true);
         assert!(live.feed.join().0.is_empty(), "the live feed starts over");
         let parked = streams.subscribe_avcc("PARKED", DevicePlatform::Ios, idle);
         assert!(
@@ -1186,8 +1197,29 @@ mod tests {
         assert_eq!(tags(&second.feed.join().0), [AVCC_DESCRIPTION]);
         drop((second, mjpeg));
         assert_eq!(streams.subscribers("UDID"), 0);
-        streams.clear();
+        streams.clear(&|_| true);
         let third = streams.subscribe_avcc("UDID", DevicePlatform::Ios, idle);
         assert!(third.feed.join().0.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_scoped_pause_and_clear_leave_other_hosts_streams_alone() {
+        let streams = Arc::new(DeviceStreams::default());
+        let idle = |_: Arc<AvccFeed>, _| tokio::spawn(std::future::pending::<()>());
+        let local = streams.subscribe_avcc("emulator-5554", DevicePlatform::Android, idle);
+        let remote = streams.subscribe_avcc("mini/emulator-5554", DevicePlatform::Android, idle);
+        local.feed.push(envelope(AVCC_DESCRIPTION, b"local"));
+        remote.feed.push(envelope(AVCC_DESCRIPTION, b"remote"));
+        let is_local = |key: &str| !key.contains('/');
+        streams.pause(&is_local);
+        assert!(local.feed.join().0.is_empty());
+        assert_eq!(tags(&remote.feed.join().0), [AVCC_DESCRIPTION]);
+        assert_eq!(
+            streams.device_ids(&|key| !is_local(key)),
+            ["mini/emulator-5554"]
+        );
+        streams.clear(&|key| key.starts_with("mini/"));
+        assert_eq!(streams.subscribers("mini/emulator-5554"), 0);
+        assert_eq!(streams.subscribers("emulator-5554"), 1);
     }
 }

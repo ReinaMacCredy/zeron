@@ -472,8 +472,6 @@ impl RemoteTool {
 struct RemoteTools {
     #[serde(default)]
     hub: RemoteTool,
-    #[serde(default)]
-    agent: RemoteTool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -759,7 +757,7 @@ pub(crate) enum HostEvent {
     Ready(String),
 }
 
-type Events = Arc<dyn Fn(&str, HostEvent) + Send + Sync>;
+type Events = Arc<dyn Fn(&SshHost, HostEvent) + Send + Sync>;
 
 #[derive(Default)]
 struct Inner {
@@ -818,7 +816,7 @@ impl SshHost {
     }
 
     fn emit(&self, event: HostEvent) {
-        (self.events)(&self.config.id, event);
+        (self.events)(self, event);
     }
 
     pub(crate) fn summary(&self) -> DeviceHubHost {
@@ -1251,7 +1249,7 @@ impl Drop for SshHost {
 }
 
 #[cfg(all(test, target_os = "macos"))]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -1284,20 +1282,26 @@ if (args.includes('-N')) {
   });
   return;
 }
+const remote = args.slice(args.indexOf('--') + 2).join(' ');
+if (!remote.endsWith("exec node'")) {
+  const ran = require('node:child_process').spawnSync('/bin/sh', ['-c', remote], { stdio: 'inherit' });
+  process.exit(ran.status ?? 1);
+}
 let script = '';
 process.stdin.on('data', chunk => { script += chunk; });
 process.stdin.on('end', () => {
   const mode = /const mode = "([^"]+)"/.exec(script)?.[1];
-  fs.appendFileSync(dir + '/modes', mode + ' ' + /const owner = "([^"]+)"/.exec(script)?.[1] + '\n');
+  fs.appendFileSync(dir + '/modes', mode + ' ' + /const owner = "([^"]+)"/.exec(script)?.[1] + ' ' + target + '\n');
   const platforms = [{ platform: 'ios', available: true }, { platform: 'android', available: false, reason: 'Android SDK missing. Set ANDROID_HOME or put adb on the SSH PATH.' }];
   const tool = { requiredVersion: '0.12.0', installedVersions: [], runningVersion: null };
-  const hubPort = Number(fs.readFileSync(dir + '/hub-port', 'utf8'));
+  const portFile = fs.existsSync(dir + '/hub-port-' + target) ? dir + '/hub-port-' + target : dir + '/hub-port';
+  const hubPort = Number(fs.readFileSync(portFile, 'utf8'));
   if (mode === 'probe') console.log(JSON.stringify({ nodePath: '/node', nodeVersion: target === 'oldnode' ? '20.11.0' : '22.22.3', npmVersion: '10.9.0', platforms, tools: { hub: tool, agent: tool } }));
   else if (mode === 'start' || mode === 'agent-start') console.log(JSON.stringify({ nodePath: '/node', platforms, hubPort, helpers: { serveSimAxSettings: null, serveSimCli: '/remote/serve-sim.js' }, androidHome: null, ...(mode === 'agent-start' ? { daemonPort: hubPort, token: 'fixture', entryPath: '/agent.mjs' } : {}) }));
 });
 "#;
 
-    fn host(target: &str) -> SshDeviceHostConfig {
+    pub(crate) fn host(target: &str) -> SshDeviceHostConfig {
         SshDeviceHostConfig {
             id: target.into(),
             label: target.into(),
@@ -1306,13 +1310,13 @@ process.stdin.on('end', () => {
         }
     }
 
-    struct Fake {
-        dir: tempfile::TempDir,
-        ssh: PathBuf,
+    pub(crate) struct Fake {
+        pub dir: tempfile::TempDir,
+        pub ssh: PathBuf,
     }
 
     impl Fake {
-        fn lines(&self, name: &str) -> Vec<String> {
+        pub(crate) fn lines(&self, name: &str) -> Vec<String> {
             std::fs::read_to_string(self.dir.path().join(name))
                 .unwrap_or_default()
                 .lines()
@@ -1327,7 +1331,7 @@ process.stdin.on('end', () => {
                 .collect()
         }
 
-        fn modes(&self) -> Vec<String> {
+        pub(crate) fn modes(&self) -> Vec<String> {
             self.lines("modes")
                 .iter()
                 .map(|line| line.split(' ').next().unwrap().to_string())
@@ -1335,7 +1339,7 @@ process.stdin.on('end', () => {
         }
     }
 
-    async fn fake_ssh() -> Option<Fake> {
+    pub(crate) async fn fake_ssh() -> Option<Fake> {
         let Some(node) = super::super::agent::tests::node() else {
             eprintln!("node not found; skipping");
             return None;
@@ -1592,6 +1596,49 @@ process.stdin.on('end', () => {
     }
 
     #[tokio::test]
+    async fn host_commands_reach_the_remote_shell_as_quoted_words() {
+        let Some(fake) = fake_ssh().await else {
+            return;
+        };
+        let ssh_host = SshHost::new(
+            host("mini"),
+            "o".into(),
+            fake.ssh.clone(),
+            http(),
+            Arc::new(|_: &SshHost, _| {}),
+        );
+        let word = "a b'c $(touch /tmp/zeron-pwned) ;";
+        let output = ssh_host.runner()(vec![
+            "printf".into(),
+            "%s|%s".into(),
+            word.into(),
+            "$HOME".into(),
+        ])
+        .await;
+        assert_eq!(output.code, 0, "{}", output.stderr);
+        assert_eq!(output.stdout, format!("{word}|$HOME"));
+        let failed = ssh_host.runner()(vec![
+            "sh".into(),
+            "-c".into(),
+            "echo nope >&2; exit 3".into(),
+        ])
+        .await;
+        assert_eq!((failed.code, failed.stderr.trim()), (3, "nope"));
+        let last = fake.calls().pop().unwrap();
+        assert_eq!(
+            last[..6],
+            [
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                "--",
+                "mini"
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn the_forward_retries_reconnects_after_it_dies_and_stops_the_remote_helpers() {
         let Some(fake) = fake_ssh().await else {
             return;
@@ -1604,7 +1651,8 @@ process.stdin.on('end', () => {
             "owner-1".into(),
             fake.ssh.clone(),
             http(),
-            Arc::new(move |id: &str, event| {
+            Arc::new(move |host: &SshHost, event| {
+                let id = &host.config.id;
                 let text = match event {
                     HostEvent::Status(status, _) => format!("{id} {status:?}"),
                     HostEvent::Lost => format!("{id} lost"),
@@ -1720,7 +1768,7 @@ process.stdin.on('end', () => {
         assert!(
             fake.lines("modes")
                 .iter()
-                .all(|line| line.ends_with(" owner-1")),
+                .all(|line| line.split(' ').nth(1) == Some("owner-1")),
             "every call runs under this engine's owner"
         );
     }

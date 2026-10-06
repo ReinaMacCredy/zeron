@@ -10,7 +10,7 @@ use zeron_proto::device_hub::{
     DeviceEventLogBatch, DeviceEventLogEntry, DeviceFoldState, DeviceOrientation, DevicePermission,
     DevicePlatform, DeviceSettingsSnapshot, DeviceTextSize, DeviceToggle, FoldPosture,
     ForegroundApp, HubDevice, HubDeviceFoldParams, HubDeviceScreenshot, HubDeviceTargetParams,
-    LOCAL_DEVICE_HOST_ID, LiquidGlass, PermissionDecision, RunHubDeviceActionParams,
+    LOCAL_DEVICE_HOST_ID, LiquidGlass, PermissionDecision, RunHubDeviceActionParams, device_key,
 };
 
 use super::hub_client::{HubClient, SseStream};
@@ -29,6 +29,8 @@ const REFUSED_URL_SCHEME: &str =
 const INVALID_PUSH: &str = "A push notification needs alert text or a JSON object payload.";
 const PUSH_TOO_LARGE: &str = "A push notification payload must be at most 4096 bytes.";
 const PUSH_LIMIT: usize = 4096;
+const REMOTE_PUSH_UNAVAILABLE: &str =
+    "Push notifications are not available on SSH device hosts yet.";
 pub(crate) const ANDROID_SDK_MISSING: &str = "The Android SDK is not available on this machine.";
 const EVENT_SUMMARY_LIMIT: usize = 1000;
 const EVENT_FIELD_LIMIT: usize = 64;
@@ -837,7 +839,12 @@ async fn read_android_detail(
 }
 
 impl DeviceHub {
-    fn action_env(&self) -> (Runner, Helpers) {
+    fn action_env(&self, host_id: &str) -> Result<(Runner, Helpers), String> {
+        if host_id != LOCAL_DEVICE_HOST_ID {
+            let host = self.remote(host_id).ok_or(UNKNOWN_DEVICE)?;
+            let ready = host.current().ok_or(HUB_NOT_RUNNING)?;
+            return Ok((host.runner(), ready.helpers));
+        }
         #[cfg(test)]
         if let Some(env) = self
             .test_actions
@@ -845,9 +852,9 @@ impl DeviceHub {
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
         {
-            return env;
+            return Ok(env);
         }
-        (system_runner(), Helpers::installed())
+        Ok((system_runner(), Helpers::installed()))
     }
 
     #[cfg(test)]
@@ -858,8 +865,10 @@ impl DeviceHub {
             .unwrap_or_else(PoisonError::into_inner) = Some((runner, helpers));
     }
 
-    pub(super) async fn list_avds(&self) -> String {
-        let (runner, helpers) = self.action_env();
+    pub(super) async fn list_avds(&self, host_id: &str) -> String {
+        let Ok((runner, helpers)) = self.action_env(host_id) else {
+            return String::new();
+        };
         let Some(root) = helpers.android_sdk else {
             return String::new();
         };
@@ -876,11 +885,11 @@ impl DeviceHub {
         output.stdout
     }
 
-    fn device_lock(&self, device_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    fn device_lock(&self, device: &HubDevice) -> Arc<tokio::sync::Mutex<()>> {
         self.action_locks
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .entry(device_id.to_string())
+            .entry(device_key(&device.host_id, &device.id))
             .or_default()
             .clone()
     }
@@ -898,9 +907,11 @@ impl DeviceHub {
             .ok_or_else(|| UNKNOWN_DEVICE.into())
     }
 
-    fn hub_client_origin(&self) -> Result<String, String> {
-        self.live_origin()
-            .ok_or_else(|| HUB_NOT_RUNNING.to_string())
+    pub(super) async fn capture(&self, device: &HubDevice) -> Result<Vec<u8>, String> {
+        match self.remote(&device.host_id) {
+            Some(host) => host.screenshot(device.platform, &device.id).await,
+            None => super::agent::capture_device(device).await,
+        }
     }
 
     pub async fn device_detail(
@@ -908,13 +919,20 @@ impl DeviceHub {
         params: HubDeviceTargetParams,
     ) -> Result<DeviceDetail, String> {
         let device = self.action_target(params.host_id.as_deref(), &params.device_id)?;
-        let lock = self.device_lock(&device.id);
+        let lock = self.device_lock(&device);
         let _serial = lock.lock().await;
         Ok(self.read_detail(&device, true).await)
     }
 
     async fn read_detail(&self, device: &HubDevice, foreground: bool) -> DeviceDetail {
-        let (runner, helpers) = self.action_env();
+        let Ok((runner, helpers)) = self.action_env(&device.host_id) else {
+            return DeviceDetail {
+                host_id: device.host_id.clone(),
+                device_id: device.id.clone(),
+                read_at: chrono::Utc::now().to_rfc3339(),
+                ..Default::default()
+            };
+        };
         if device.platform == DevicePlatform::Android {
             return read_android_detail(device, &runner, helpers.adb()).await;
         }
@@ -987,7 +1005,12 @@ impl DeviceHub {
         params: RunHubDeviceActionParams,
     ) -> Result<DeviceDetail, String> {
         let device = self.action_target(params.host_id.as_deref(), &params.device_id)?;
-        let (runner, helpers) = self.action_env();
+        if device.host_id != LOCAL_DEVICE_HOST_ID
+            && matches!(params.action, DeviceAction::SendPush { .. })
+        {
+            return Err(REMOTE_PUSH_UNAVAILABLE.into());
+        }
+        let (runner, helpers) = self.action_env(&device.host_id)?;
         let dir = match &params.action {
             DeviceAction::SendPush { .. } => Some(private_dir().map_err(|e| e.to_string())?),
             _ => None,
@@ -1027,12 +1050,14 @@ impl DeviceHub {
             }
             _ => None,
         };
-        let lock = self.device_lock(&device.id);
+        let lock = self.device_lock(&device);
         let _serial = lock.lock().await;
+        let rotate_key = device_key(&device.host_id, &device.id);
         if let Some((value, adb)) = &rotation
             && *value != DeviceOrientation::Portrait
         {
-            self.save_auto_rotate(&runner, adb, &device.id).await;
+            self.save_auto_rotate(&runner, adb, &device.id, &rotate_key)
+                .await;
         }
         for (step, argv) in argvs.into_iter().enumerate() {
             let output = runner(argv).await;
@@ -1063,18 +1088,18 @@ impl DeviceHub {
             return Err(format!("The device action failed: {detail}"));
         }
         if let Some((value, adb)) = &rotation {
-            self.settle_rotation(&runner, adb, &device.id, *value)
+            self.settle_rotation(&runner, adb, &device.id, &rotate_key, *value)
                 .await?;
         }
         Ok(self.read_detail(&device, false).await)
     }
 
-    async fn save_auto_rotate(&self, runner: &Runner, adb: &str, serial: &str) {
+    async fn save_auto_rotate(&self, runner: &Runner, adb: &str, serial: &str, key: &str) {
         let saved = |hub: &Self| {
             hub.auto_rotate
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .contains_key(serial)
+                .contains_key(key)
         };
         if saved(self) {
             return;
@@ -1090,7 +1115,7 @@ impl DeviceHub {
             self.auto_rotate
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .insert(serial.to_string(), value.to_string());
+                .insert(key.to_string(), value.to_string());
         }
     }
 
@@ -1100,6 +1125,7 @@ impl DeviceHub {
         runner: &Runner,
         adb: &str,
         serial: &str,
+        key: &str,
         value: DeviceOrientation,
     ) -> Result<(), String> {
         let landscape_or_flipped = value != DeviceOrientation::Portrait;
@@ -1139,7 +1165,7 @@ impl DeviceHub {
             .auto_rotate
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .remove(serial);
+            .remove(key);
         if let Some(previous) = previous {
             runner(adb_shell(
                 adb,
@@ -1166,7 +1192,7 @@ impl DeviceHub {
         params: HubDeviceTargetParams,
     ) -> Result<HubDeviceScreenshot, String> {
         let device = self.action_target(params.host_id.as_deref(), &params.device_id)?;
-        let png = super::agent::capture_device(&device).await?;
+        let png = self.capture(&device).await?;
         let (width, height) = super::agent::png_dimensions(&png);
         let downloads = crate::repos::session_home_dir()
             .map_err(|e| format!("Could not save the screenshot: {e}"))?
@@ -1198,7 +1224,7 @@ impl DeviceHub {
         {
             return Err("A device can only be folded or unfolded.".into());
         }
-        let origin = self.hub_client_origin()?;
+        let origin = self.origin_for(&device.host_id)?;
         HubClient {
             http: &self.http,
             origin: &origin,
@@ -1215,7 +1241,7 @@ impl DeviceHub {
         if device.platform != DevicePlatform::Ios {
             return Err(IOS_ONLY.into());
         }
-        let origin = self.hub_client_origin()?;
+        let origin = self.origin_for(&device.host_id)?;
         let nodes = HubClient {
             http: &self.http,
             origin: &origin,
@@ -1257,7 +1283,7 @@ impl DeviceHub {
         if device.platform != DevicePlatform::Ios {
             return Err(IOS_ONLY.into());
         }
-        let origin = self.hub_client_origin()?;
+        let origin = self.origin_for(&device.host_id)?;
         let client = HubClient {
             http: &self.http,
             origin: &origin,

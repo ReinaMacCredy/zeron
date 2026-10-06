@@ -4598,7 +4598,7 @@ impl RpcService for EngineRpc {
                 if p.codec == zeron_proto::device_hub::DeviceVideoCodec::H264 {
                     let subscription = self
                         .device_hub()?
-                        .watch_avcc(&p.device_id)
+                        .watch_avcc(p.host_id.as_deref(), &p.device_id)
                         .map_err(RpcError::Failed)?;
                     let mut seq = 0;
                     return Ok(RpcReply::Stream(
@@ -4617,7 +4617,7 @@ impl RpcService for EngineRpc {
                 }
                 let subscription = self
                     .device_hub()?
-                    .watch_frames(&p.device_id)
+                    .watch_frames(p.host_id.as_deref(), &p.device_id)
                     .map_err(RpcError::Failed)?;
                 Ok(RpcReply::Stream(
                     futures::stream::unfold(subscription, |mut subscription| async move {
@@ -4646,9 +4646,13 @@ impl RpcService for EngineRpc {
             methods::SEND_HUB_DEVICE_INPUT => {
                 let p: zeron_proto::device_hub::SendHubDeviceInputParams = parse_params(params)?;
                 self.device_hub()?
-                    .send_input(&p.device_id, &p.input)
+                    .send_input(p.host_id.as_deref(), &p.device_id, &p.input)
                     .map_err(RpcError::Failed)?;
                 RpcReply::value(&serde_json::json!({}))
+            }
+            methods::TEST_DEVICE_HOST => {
+                let p: zeron_proto::device_hub::SshDeviceHostConfig = parse_params(params)?;
+                RpcReply::value(&self.device_hub()?.test_host(p).await)
             }
             methods::SET_HUB_DEVICE_HINGE => {
                 let p: zeron_proto::device_hub::SetHubDeviceHingeParams = parse_params(params)?;

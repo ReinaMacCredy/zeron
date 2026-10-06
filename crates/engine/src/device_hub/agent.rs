@@ -672,9 +672,24 @@ impl DeviceHub {
         if let Some(daemon) = daemon {
             daemon.stop().await;
         }
+        let remotes = self.all_remotes();
+        for host in &remotes {
+            let _ = std::fs::remove_file(self.host_config(&host.config.id));
+        }
+        futures::future::join_all(remotes.iter().map(|host| host.stop_agent())).await;
     }
 
-    fn host_config(&self, host_id: &str) -> PathBuf {
+    async fn ensure_remote_agent(&self, host_id: &str) -> Result<(), String> {
+        let Some(host) = self.remote(host_id) else {
+            return Ok(());
+        };
+        let (base_url, token) = host.ensure_agent().await?;
+        self.agent_gate()?;
+        write_host_config(&self.host_config(host_id), &base_url, &token)
+            .map_err(|e| format!("Could not write the agent-device host config: {e}"))
+    }
+
+    pub(super) fn host_config(&self, host_id: &str) -> PathBuf {
         self.device_dir()
             .join("hosts")
             .join(format!("{}.json", key(host_id)))
@@ -696,12 +711,18 @@ impl DeviceHub {
         let state = self.list(false).await?;
         let host = params.host_id.as_deref();
         let keep = |id: &str| host.is_none_or(|host| host == id);
-        let status = serde_json::to_value(state.host_status).unwrap_or_default();
+        let status_of = |id: &str| {
+            let status = match state.host_statuses.get(id) {
+                Some(remote) => remote.status,
+                None => state.host_status,
+            };
+            serde_json::to_value(status).unwrap_or_default()
+        };
         let hosts: Vec<_> = state.hosts.iter().filter(|h| keep(&h.id)).collect();
         Ok(json!({
             "hostStatuses": hosts
                 .iter()
-                .map(|h| (h.id.clone(), status.clone()))
+                .map(|h| (h.id.clone(), status_of(&h.id)))
                 .collect::<serde_json::Map<_, _>>(),
             "hosts": hosts,
             "devices": state.devices.iter().filter(|d| keep(&d.host_id)).collect::<Vec<_>>(),
@@ -725,6 +746,7 @@ impl DeviceHub {
         )?
         .clone();
         self.ensure_agent().await?;
+        self.ensure_remote_agent(&device.host_id).await?;
         let session = self
             .open_as(
                 OpenHubDeviceParams {
@@ -789,7 +811,7 @@ impl DeviceHub {
                 .cloned()
                 .ok_or_else(|| UNKNOWN_DEVICE.to_string())?,
         };
-        let png = capture_device(&device).await?;
+        let png = self.capture(&device).await?;
         let (png, width, height) = tokio::task::spawn_blocking(move || fit_screenshot(png))
             .await
             .map_err(|e| e.to_string())??;
@@ -1508,6 +1530,75 @@ if (args[0] === "daemon" && args[1] === "stop") {
             "the agent session follows the serial the AVD booted under"
         );
         hub.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_remote_device_pins_agent_device_to_the_hosts_forwarded_daemon() {
+        let _serial = PROVISIONING.lock().await;
+        let Some(fake) = super::super::ssh_host::tests::fake_ssh().await else {
+            return;
+        };
+        let (dir, hub, _) = enabled_hub(HEALTHY).await;
+        let Some(tool) = fake_agent(dir.path()) else {
+            return;
+        };
+        let (remote, _) = super::super::tests::fake_hub().await;
+        std::fs::write(
+            fake.dir.path().join("hub-port-mini"),
+            remote.rsplit(':').next().unwrap(),
+        )
+        .unwrap();
+        hub.use_ssh_for_test(fake.ssh.clone(), Default::default());
+        hub.use_agent_for_test(tool);
+        hub.configure(ConfigureDeviceHubParams {
+            agent_access_enabled: Some(true),
+            device_hosts: Some(vec![super::super::ssh_host::tests::host("mini")]),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let opened = hub
+            .tool_open(DeviceToolParams {
+                chat_id: "chat-1".into(),
+                host_id: Some("mini".into()),
+                device_id: Some("SIM-1".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(opened["device"]["hostId"], "mini");
+        let config = hub.host_config("mini");
+        assert_eq!(opened["agentDevice"]["targetArgs"][5], json!(config));
+        let endpoint: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
+        let forwarded = hub
+            .remote("mini")
+            .unwrap()
+            .current()
+            .unwrap()
+            .agent
+            .unwrap();
+        assert_eq!(endpoint["daemonBaseUrl"], forwarded.0);
+        assert_eq!(endpoint["daemonAuthToken"], "fixture");
+        assert_ne!(
+            forwarded.0, remote,
+            "the daemon is reached through the SSH forward"
+        );
+        assert!(fake.modes().contains(&"agent-start".to_string()));
+        let listed = hub
+            .tool_list(DeviceToolParams {
+                chat_id: "chat-1".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            listed["hostStatuses"],
+            json!({"local": "ready", "mini": "ready"})
+        );
+        hub.configure(agent_access(false)).await.unwrap();
+        assert!(!config.exists());
+        assert!(fake.modes().contains(&"stop-agent".to_string()));
     }
 
     #[tokio::test(flavor = "multi_thread")]
