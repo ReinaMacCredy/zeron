@@ -47,6 +47,7 @@ use crate::settings::device_hub::DeviceHubPage;
 use crate::settings::devices::DevicesPage;
 use crate::settings::files::{FilesSettingsEvent, FilesSettingsPage};
 use crate::settings::harnesses::HarnessesPage;
+use crate::settings::home::HomeSettingsPage;
 use crate::settings::notifications::{NotificationsEvent, NotificationsPage};
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::source_control::SourceControlPage;
@@ -72,6 +73,8 @@ mod chat_dropzone;
 mod chat_dropzone_tests;
 #[cfg(test)]
 mod chat_rename_tests;
+#[cfg(test)]
+mod home_grid_tests;
 mod command_palette;
 mod device_tabs;
 mod file_mutations;
@@ -573,13 +576,15 @@ pub enum SettingsSection {
     Computer,
     DeviceHub,
     SourceControl,
+    Home,
     Archived,
 }
 
 impl SettingsSection {
     /// Sections shown in Settings. `Agents` is a legacy Accounts route alias.
-    pub const ALL: [SettingsSection; 13] = [
+    pub const ALL: [SettingsSection; 14] = [
         SettingsSection::General,
+        SettingsSection::Home,
         SettingsSection::Appearance,
         SettingsSection::Notifications,
         SettingsSection::Voice,
@@ -636,6 +641,7 @@ impl SettingsSection {
             SettingsSection::Computer => "computer",
             SettingsSection::DeviceHub => "device-hub",
             SettingsSection::SourceControl => "source-control",
+            SettingsSection::Home => "home",
             SettingsSection::Archived => "archived",
         }
     }
@@ -656,6 +662,7 @@ impl SettingsSection {
             "computer" => SettingsSection::Computer,
             "device-hub" => SettingsSection::DeviceHub,
             "source-control" => SettingsSection::SourceControl,
+            "home" => SettingsSection::Home,
             "archived" => SettingsSection::Archived,
             _ => return None,
         })
@@ -684,6 +691,7 @@ impl SettingsSection {
             SettingsSection::Computer => "Computer",
             SettingsSection::DeviceHub => "Device hub",
             SettingsSection::SourceControl => "Source Control",
+            SettingsSection::Home => "Home",
             SettingsSection::Archived => "Archived sessions",
         }
     }
@@ -702,6 +710,7 @@ impl SettingsSection {
             SettingsSection::Computer => &["computer use", "desktop", "cursor", "permission"],
             SettingsSection::DeviceHub => &["simulator", "emulator", "ios", "android"],
             SettingsSection::SourceControl => &["git", "commit", "pull request"],
+            SettingsSection::Home => &["widget", "dashboard", "new thread", "customize"],
             SettingsSection::Archived => &["archive", "old sessions"],
             _ => &[],
         }
@@ -790,6 +799,16 @@ impl SettingsSection {
                 ("Style", &["mini chat", "floating", "bottom bar"]),
                 ("Chat history", &["mini chat", "keep per pr", "fresh"]),
                 ("While an agent is running", &["git", "agent", "busy"]),
+            ],
+            SettingsSection::Home => &[
+                ("Working now", &["running", "agents"]),
+                ("Pull requests", &["review"]),
+                ("Git activity", &["commits"]),
+                ("This Mac", &["cpu", "memory", "disk"]),
+                ("Running services", &["ports", "server"]),
+                ("Recent areas", &["worktree", "project"]),
+                ("CI failures", &["checks"]),
+                ("Show ports", &["by zeron", "all ports"]),
             ],
             _ => &[],
         }
@@ -1256,6 +1275,8 @@ const GITHUB_REPO_URL: &str = "https://github.com/zeronsh/comet";
 const NEW_THREAD_BACKGROUND_FROSTED_OPACITY: f32 = 0.84;
 const NEW_THREAD_BACKGROUND_VIEWPORT_RATIO: f32 = 0.72;
 const NEW_THREAD_BACKGROUND_MAX_HEIGHT: f32 = 760.0;
+const HOME_HERO_ANCHOR: f32 = 0.3;
+const HOME_GRID_GAP: f32 = 44.0;
 
 /// Drag marker for the sidebar resize handle.
 struct SidebarResize;
@@ -1551,7 +1572,7 @@ pub(crate) fn new_thread_background_height(viewport_height: f32) -> f32 {
 fn new_thread_background(
     artwork: Option<std::sync::Arc<gpui::RenderImage>>,
     adjustment: settings::NewThreadBackgroundAdjustment,
-    viewport_height: f32,
+    hero_height: f32,
     hero_width: f32,
     composer_bounds: crate::new_thread_background_mask::SurfaceBounds,
     dissolve: f32,
@@ -1560,7 +1581,6 @@ fn new_thread_background(
     let Some(artwork) = artwork else {
         return Empty.into_any_element();
     };
-    let hero_height = new_thread_background_height(viewport_height);
     let dissolve = dissolve.clamp(0.0, 1.0);
     // Image and treatment share a fixed crop and fade together in place.
     // The hero uses the full conversation canvas even while the destination
@@ -2230,6 +2250,10 @@ pub struct Shell {
     devices_page: Option<Entity<DevicesPage>>,
     archived_page: Option<Entity<ArchivedPage>>,
     source_control_page: Option<Entity<SourceControlPage>>,
+    home_settings_page: Option<Entity<HomeSettingsPage>>,
+    home_view: Option<Entity<crate::home::HomeView>>,
+    home_raise: Option<WidthTween>,
+    _home_events: Option<Subscription>,
     appearance_page: Option<Entity<AppearancePage>>,
     files_settings_page: Option<Entity<FilesSettingsPage>>,
     notifications_page: Option<Entity<NotificationsPage>>,
@@ -2822,6 +2846,10 @@ impl Shell {
             devices_page: None,
             archived_page: None,
             source_control_page: None,
+            home_settings_page: None,
+            home_view: None,
+            home_raise: None,
+            _home_events: None,
             appearance_page: None,
             files_settings_page: None,
             notifications_page: None,
@@ -6331,6 +6359,11 @@ impl Shell {
                     .clone()
                     .into_any_element()
             }
+            SettingsSection::Home => self
+                .home_settings_page
+                .get_or_insert_with(|| cx.new(|_| HomeSettingsPage::default()))
+                .clone()
+                .into_any_element(),
             SettingsSection::Archived => {
                 if self.archived_page.is_none() {
                     let state = self.state.clone();
@@ -8393,6 +8426,7 @@ impl Shell {
             SettingsSection::Computer => icons::CURSOR,
             SettingsSection::DeviceHub => icons::SMARTPHONE,
             SettingsSection::SourceControl => icons::GIT_BRANCH,
+            SettingsSection::Home => icons::HOME,
             SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
         };
         let query = self.settings_search.read(cx).text().to_string();
@@ -12049,6 +12083,21 @@ impl Shell {
 
         let _ = (text, border, faint);
         let has_selection = self.state.read(cx).selected_chat.is_some();
+        let home = settings::home_widgets(cx);
+        let home_on = home.any_visible();
+        let home_raised = home_on && !home.collapsed;
+        self.composer_dock
+            .borrow_mut()
+            .set_hero_anchor(if home_raised { HOME_HERO_ANCHOR } else { 0.5 });
+        let raise_target = if home_raised { 1.0 } else { 0.0 };
+        self.home_raise = Some(match self.home_raise.take() {
+            Some(tween) if (tween.to - raise_target).abs() > f32::EPSILON => {
+                WidthTween::new(self.eval_tween(Some(tween), tween.to), raise_target)
+            }
+            Some(tween) => tween,
+            None => WidthTween::new(raise_target, raise_target),
+        });
+        let raise = self.eval_tween(self.home_raise, raise_target);
         let transcript_geometry_ready =
             bottom_stack_measurement_matches(self.bottom_stack_has_composer.get(), has_selection);
         let ui_settings = settings::current(cx);
@@ -12139,13 +12188,22 @@ impl Shell {
             let width = (self.viewport_width - self.sidebar_now()).max(0.0);
             let bounds = self.composer.read(cx).surface_bounds();
             let opacity = new_thread_background_opacity(theme.is_frost());
+            let full_height = new_thread_background_height(self.viewport_height);
+            let hero_height = match bounds.get().filter(|_| raise > 0.0) {
+                Some(pill) => motion::lerp(
+                    full_height,
+                    full_height.min(f32::from(pill.bottom()) + 24.0),
+                    raise,
+                ),
+                None => full_height,
+            };
             div()
                 .absolute()
                 .inset_0()
                 .child(new_thread_background(
                     artwork_frame.previous,
                     artwork_frame.previous_adjustment,
-                    self.viewport_height,
+                    hero_height,
                     width,
                     bounds.clone(),
                     dock_frame.dissolve(),
@@ -12154,7 +12212,7 @@ impl Shell {
                 .child(new_thread_background(
                     artwork_frame.current,
                     artwork_frame.current_adjustment,
-                    self.viewport_height,
+                    hero_height,
                     width,
                     bounds,
                     dock_frame.dissolve(),
@@ -12256,6 +12314,15 @@ impl Shell {
         } else {
             None
         };
+        let home_grid = self.render_home_grid(
+            home_on,
+            has_selection && !dock_frame.active,
+            has_selection,
+            chip_opacity,
+            harness_update_card.is_some(),
+            window,
+            cx,
+        );
         let status = self.render_status_strip(composer_width, cx);
         self.chat_dropzone("chat-dropzone", self.composer.clone(), cx)
             .debug_selector(|| "chat-dropzone".into())
@@ -12352,6 +12419,11 @@ impl Shell {
                     )
                 },
             )
+            .when_some(home_grid, |column, grid| {
+                column.child(div().absolute().inset_0().child(
+                    crate::terminal::dock::above_terminal(grid, terminal_geometry.clone()),
+                ))
+            })
             .when_some(harness_update_card, |column, chip| {
                 // Home notices stay anchored to the window bottom, behind the
                 // dock. Clip paint and hitboxes at the same measured terminal
@@ -12445,6 +12517,61 @@ impl Shell {
             })
             .child(Self::attachment_drop_overlay(theme))
             .into_any_element()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_home_grid(
+        &mut self,
+        home_on: bool,
+        settled_in_chat: bool,
+        has_selection: bool,
+        opacity: f32,
+        notice_below: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !home_on || opacity <= 0.001 || settled_in_chat {
+            return None;
+        }
+        let pill = self.composer.read(cx).surface_bounds().get()?;
+        let home = match &self.home_view {
+            Some(home) => home.clone(),
+            None => {
+                let home = cx.new(|cx| crate::home::HomeView::new(self.state.clone(), cx));
+                self._home_events = Some(cx.subscribe_in(
+                    &home,
+                    window,
+                    |this, _, event: &crate::home::HomeEvent, window, cx| match event {
+                        crate::home::HomeEvent::OpenChat(chat_id) => {
+                            this.open_chat(chat_id.clone(), cx)
+                        }
+                        crate::home::HomeEvent::OpenPullRequest(url) => {
+                            this.open_pull_request_link(url.clone(), true, window, cx)
+                        }
+                        crate::home::HomeEvent::OpenSettings => {
+                            this.open_settings(SettingsSection::Home, cx)
+                        }
+                    },
+                ));
+                self.home_view = Some(home.clone());
+                home
+            }
+        };
+        let top = f32::from(pill.bottom()) + HOME_GRID_GAP;
+        Some(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .top(px(top))
+                .bottom(px(if notice_below { 72.0 } else { 0.0 }))
+                .opacity(opacity)
+                .child(home)
+                .when(has_selection, |el| {
+                    el.child(div().absolute().inset_0().occlude())
+                })
+                .into_any_element(),
+        )
     }
 
     /// The "↓ Scroll to bottom" pill (round-9 §3): a LABELED rounded-full
@@ -19647,6 +19774,7 @@ mod settings_modal_regressions {
             ("settings/computer", SettingsSection::Computer),
             ("settings/device-hub", SettingsSection::DeviceHub),
             ("settings/source-control", SettingsSection::SourceControl),
+            ("settings/home", SettingsSection::Home),
             ("settings/archived", SettingsSection::Archived),
         ] {
             assert_eq!(
