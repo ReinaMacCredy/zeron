@@ -183,6 +183,15 @@ pub fn duo_raw_size((width, height): (u32, u32), rotation: DeviceOrientation) ->
     }
 }
 
+pub fn quarter_turns(rotation: DeviceOrientation) -> u8 {
+    match rotation {
+        DeviceOrientation::Portrait => 0,
+        DeviceOrientation::LandscapeLeft => 1,
+        DeviceOrientation::PortraitUpsideDown => 2,
+        DeviceOrientation::LandscapeRight => 3,
+    }
+}
+
 pub type DisplayKey = (Option<u32>, u32, u32, DeviceOrientation);
 
 pub fn duo_display_key(screen: Option<&DeviceScreenConfig>) -> Option<DisplayKey> {

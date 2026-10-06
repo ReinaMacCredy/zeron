@@ -201,7 +201,18 @@ impl FoldControls {
             self.error = None;
             self.send(command, cx);
         }
+        self.push_control(false, cx);
         cx.notify();
+    }
+
+    fn push_control(&mut self, failed: bool, cx: &mut Context<Self>) {
+        let queued = match self.hinge.requested() {
+            Some(HingeCommand::Angle(angle)) => Some(angle),
+            _ => None,
+        };
+        self.view
+            .update(cx, |view, cx| view.set_duo_control(queued, failed, cx))
+            .ok();
     }
 
     fn send(&mut self, command: HingeCommand, cx: &mut Context<Self>) {
@@ -229,6 +240,7 @@ impl FoldControls {
                 if let Some(next) = fold.hinge.finish(reply.is_ok()) {
                     fold.send(next, cx);
                 }
+                fold.push_control(reply.is_err(), cx);
                 cx.notify();
             })
             .ok();

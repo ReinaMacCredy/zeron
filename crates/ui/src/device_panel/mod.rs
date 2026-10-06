@@ -437,9 +437,7 @@ impl DevicePanel {
 
     fn three_d_blocked(&self, cx: &App) -> Option<&'static str> {
         let view = self.view.as_ref()?.read(cx);
-        if fold::hinged(view.screen()) {
-            Some("3D is not available for iPhone Duo")
-        } else if self
+        if self
             .controls()
             .is_some_and(|controls| controls.read(cx).ax_overlay())
         {
@@ -469,9 +467,10 @@ impl DevicePanel {
         let Some(view) = self.view.as_ref().map(|view| view.read(cx)) else {
             return false;
         };
-        if view
-            .screen()
-            .is_none_or(|screen| screen.orientation == DeviceOrientation::Portrait)
+        if fold::hinged(view.screen())
+            || view
+                .screen()
+                .is_none_or(|screen| screen.orientation == DeviceOrientation::Portrait)
         {
             return true;
         }
@@ -487,14 +486,17 @@ impl DevicePanel {
         let Some(view) = self.view.clone() else {
             return;
         };
-        let (orientation, android) = {
+        let (orientation, android, hinged) = {
             let view = view.read(cx);
             (
                 view.screen().map(|screen| screen.orientation),
                 view.platform() == DevicePlatform::Android,
+                fold::hinged(view.screen()),
             )
         };
-        if orientation.is_some_and(|orientation| orientation != DeviceOrientation::Portrait) {
+        if !hinged
+            && orientation.is_some_and(|orientation| orientation != DeviceOrientation::Portrait)
+        {
             match self.controls().cloned() {
                 Some(controls) if android => controls.update(cx, |controls, cx| {
                     controls.act(
@@ -1460,7 +1462,42 @@ pub(crate) mod tests {
             cx.notify();
         });
         cx.run_until_parked();
-        assert!(!shown(cx), "the iPhone Duo shows the flat view only");
+        assert!(shown(cx), "the iPhone Duo opens in 3D");
+        assert_eq!(
+            panel.read_with(cx, |panel, cx| panel.three_d_blocked(cx)),
+            None
+        );
+    }
+
+    #[gpui::test]
+    fn restore_on_a_duo_sends_no_portrait_orientation(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let mut hub = duo(true);
+        if let Some(screen) = hub.screens.get_mut("SIM") {
+            screen.orientation = DeviceOrientation::LandscapeLeft;
+        }
+        let (state, calls) = app_state(cx, &runtime, hub);
+        let (panel, cx) = cx.add_window_view(|_, cx| {
+            let mut panel = DevicePanel::new(state, "chat".into(), cx);
+            panel.target = Some(("local".into(), "SIM".into()));
+            panel.revision = None;
+            panel.sync(cx);
+            panel
+        });
+        cx.run_until_parked();
+        assert!(panel.read_with(cx, |panel, cx| panel.restore_ready(cx)));
+        panel.update(cx, |panel, cx| panel.restore_three_d(cx));
+        std::thread::sleep(Duration::from_millis(100));
+        cx.run_until_parked();
+        assert!(
+            calls_of(&calls, methods::SEND_HUB_DEVICE_INPUT)
+                .iter()
+                .all(|params| params["input"].get("orientation").is_none()),
+            "{:?}",
+            calls_of(&calls, methods::SEND_HUB_DEVICE_INPUT)
+        );
+        assert!(calls_of(&calls, methods::SET_HUB_DEVICE_HINGE).is_empty());
     }
 
     #[gpui::test]

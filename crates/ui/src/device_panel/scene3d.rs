@@ -2,8 +2,11 @@ use std::f64::consts::{FRAC_PI_2, PI};
 use std::ops::{Add, Mul, Range, Sub};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use zeron_proto::device_hub::{DeviceOrientation, DevicePlatform, DeviceScreenConfig, TouchPhase};
+use zeron_proto::device_hub::{
+    DeviceOrientation, DevicePlatform, DeviceScreenConfig, HingeCommand, TouchPhase,
+};
 
+use super::duo3d::DuoViewer;
 use super::geometry;
 
 pub const SCREEN_HEIGHT: f64 = 2.2;
@@ -1696,6 +1699,147 @@ impl Viewer {
 
     pub fn needs_frame(&self) -> bool {
         self.motion.needs_frame()
+    }
+}
+
+type Touches = Vec<(TouchPhase, (f32, f32))>;
+
+fn raw_touches(shown: DeviceOrientation, touches: Touches) -> Touches {
+    touches
+        .into_iter()
+        .map(|(phase, (x, y))| (phase, geometry::raw_point(shown, x, y)))
+        .collect()
+}
+
+pub enum Scene3d {
+    Phone(Viewer),
+    Duo(DuoViewer),
+}
+
+impl Default for Scene3d {
+    fn default() -> Self {
+        Scene3d::Phone(Viewer::default())
+    }
+}
+
+impl Scene3d {
+    pub fn is_duo(&self) -> bool {
+        matches!(self, Scene3d::Duo(_))
+    }
+
+    pub fn duo(&mut self) -> Option<&mut DuoViewer> {
+        match self {
+            Scene3d::Duo(duo) => Some(duo),
+            Scene3d::Phone(_) => None,
+        }
+    }
+
+    pub fn motion(&self) -> &Motion {
+        match self {
+            Scene3d::Phone(viewer) => &viewer.motion,
+            Scene3d::Duo(duo) => &duo.motion,
+        }
+    }
+
+    pub fn interaction(&self) -> &Interaction {
+        match self {
+            Scene3d::Phone(viewer) => &viewer.interaction,
+            Scene3d::Duo(duo) => &duo.interaction,
+        }
+    }
+
+    pub fn viewport(&self) -> Option<(f64, f64, f64, f64)> {
+        match self {
+            Scene3d::Phone(viewer) => viewer.viewport(),
+            Scene3d::Duo(duo) => duo.viewport(),
+        }
+    }
+
+    pub fn press(
+        &mut self,
+        x: f64,
+        y: f64,
+        orbit: bool,
+        now: f64,
+        shown: DeviceOrientation,
+    ) -> Touches {
+        match self {
+            Scene3d::Phone(viewer) => raw_touches(shown, viewer.press(x, y, orbit, now)),
+            Scene3d::Duo(duo) => duo.press(x, y, orbit, now),
+        }
+    }
+
+    pub fn drag(&mut self, x: f64, y: f64, now: f64, shown: DeviceOrientation) -> Touches {
+        match self {
+            Scene3d::Phone(viewer) => raw_touches(shown, viewer.drag(x, y, now)),
+            Scene3d::Duo(duo) => duo.drag(x, y, now),
+        }
+    }
+
+    pub fn lift(&mut self, now: f64, shown: DeviceOrientation) -> Touches {
+        match self {
+            Scene3d::Phone(viewer) => raw_touches(shown, viewer.lift(now)),
+            Scene3d::Duo(duo) => duo.lift(now),
+        }
+    }
+
+    pub fn wheel(&mut self, dx: f64, dy: f64, now: f64) -> bool {
+        match self {
+            Scene3d::Phone(viewer) => viewer.wheel(dx, dy, now),
+            Scene3d::Duo(duo) => duo.wheel(dx, dy, now),
+        }
+    }
+
+    pub fn end_wheel(&mut self, now: f64) {
+        match self {
+            Scene3d::Phone(viewer) => viewer.end_wheel(now),
+            Scene3d::Duo(duo) => duo.end_wheel(now),
+        }
+    }
+
+    pub fn restore(&mut self, now: f64) {
+        match self {
+            Scene3d::Phone(viewer) => viewer.restore(now),
+            Scene3d::Duo(duo) => duo.restore(now),
+        }
+    }
+
+    pub fn advance(&mut self, now: f64, reduced: bool) -> bool {
+        match self {
+            Scene3d::Phone(viewer) => viewer.advance(now, reduced),
+            Scene3d::Duo(duo) => duo.advance(now, reduced),
+        }
+    }
+
+    pub fn needs_frame(&self) -> bool {
+        match self {
+            Scene3d::Phone(viewer) => viewer.needs_frame(),
+            Scene3d::Duo(duo) => duo.needs_frame(),
+        }
+    }
+
+    pub fn tap_position(&self, point: (f32, f32)) -> Option<(f64, f64)> {
+        match self {
+            Scene3d::Phone(viewer) => viewer.position_of(point),
+            Scene3d::Duo(duo) => duo
+                .accepts_touch()
+                .then(|| duo.position_of(duo.active_panel(), point))
+                .flatten(),
+        }
+    }
+
+    pub fn handoff_deadline(&self) -> Option<f64> {
+        match self {
+            Scene3d::Phone(_) => None,
+            Scene3d::Duo(duo) => duo.handoff_deadline(),
+        }
+    }
+
+    pub fn take_requests(&mut self) -> Vec<HingeCommand> {
+        match self {
+            Scene3d::Phone(_) => Vec::new(),
+            Scene3d::Duo(duo) => duo.take_requests(),
+        }
     }
 }
 
