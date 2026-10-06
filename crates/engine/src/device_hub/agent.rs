@@ -672,11 +672,9 @@ impl DeviceHub {
         if let Some(daemon) = daemon {
             daemon.stop().await;
         }
-        let remotes = self.all_remotes();
-        for host in &remotes {
+        for host in self.all_remotes() {
             let _ = std::fs::remove_file(self.host_config(&host.config.id));
         }
-        futures::future::join_all(remotes.iter().map(|host| host.stop_agent())).await;
     }
 
     async fn ensure_remote_agent(&self, host_id: &str) -> Result<(), String> {
@@ -750,7 +748,12 @@ impl DeviceHub {
 
     pub async fn tool_open(&self, params: DeviceToolParams) -> Result<Value, String> {
         self.agent_gate()?;
-        let state = self.list(false).await?;
+        let mut state = self.list(false).await?;
+        if let Some(host) = params.host_id.as_deref().and_then(|id| self.remote(id)) {
+            let ready = host.ensure_ready().await?;
+            self.refresh(&host.config.id, &ready.origin).await?;
+            state = self.snapshot();
+        }
         let device = pick_device(
             &state.devices,
             params.device_id.as_deref(),
@@ -1640,7 +1643,104 @@ if (args[0] === "daemon" && args[1] === "stop") {
         );
         hub.configure(agent_access(false)).await.unwrap();
         assert!(!config.exists());
-        assert!(fake.modes().contains(&"stop-agent".to_string()));
+        eventually(|| fake.modes().contains(&"stop-agent".to_string())).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_host_stuck_connecting_never_holds_up_local_devices_or_its_removal() {
+        let _serial = PROVISIONING.lock().await;
+        let Some(fake) = super::super::ssh_host::tests::fake_ssh().await else {
+            return;
+        };
+        let (dir, hub, _) = enabled_hub(HEALTHY).await;
+        let Some(tool) = fake_agent(dir.path()) else {
+            return;
+        };
+        hub.use_ssh_for_test(fake.ssh.clone(), Default::default());
+        hub.use_agent_for_test(tool);
+        let quick = Duration::from_secs(5);
+        let hang = || ConfigureDeviceHubParams {
+            device_hosts: Some(vec![super::super::ssh_host::tests::host("hang")]),
+            ..Default::default()
+        };
+        let pid_file = fake.dir.path().join("hang-probe.pid");
+        let stuck = || eventually(|| pid_file.exists());
+        tokio::time::timeout(quick, hub.configure(agent_access(true)))
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(quick, hub.configure(hang()))
+            .await
+            .expect("saving a host does not wait for it to connect")
+            .unwrap();
+        stuck().await;
+        let state = tokio::time::timeout(quick, hub.list(false))
+            .await
+            .expect("a local list does not wait for the stuck host")
+            .unwrap();
+        assert!(state.device("local", "SIM-1").is_some());
+        let listed = tokio::time::timeout(
+            quick,
+            hub.tool_list(DeviceToolParams {
+                chat_id: "chat-1".into(),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("device_list does not wait for the stuck host")
+        .unwrap();
+        assert!(
+            listed["devices"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|device| device["hostId"] == "local")
+        );
+        tokio::time::timeout(
+            quick,
+            hub.tool_open(DeviceToolParams {
+                chat_id: "chat-1".into(),
+                device_id: Some("SIM-1".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("device_open on a local device does not wait for the stuck host")
+        .unwrap();
+        tokio::time::timeout(quick, hub.configure(agent_access(false)))
+            .await
+            .expect("turning agent access off does not wait for the stuck host")
+            .unwrap();
+
+        let pid = |file: &Path| -> i32 { std::fs::read_to_string(file).unwrap().parse().unwrap() };
+        let first = pid(&pid_file);
+        tokio::time::timeout(
+            quick,
+            hub.configure(ConfigureDeviceHubParams {
+                device_hosts: Some(Vec::new()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("removing the stuck host returns at once")
+        .unwrap();
+        eventually(|| super::super::ssh_host::tests::exited(first)).await;
+
+        std::fs::remove_file(&pid_file).unwrap();
+        hub.configure(hang()).await.unwrap();
+        stuck().await;
+        let second = pid(&pid_file);
+        tokio::time::timeout(
+            quick,
+            hub.configure(ConfigureDeviceHubParams {
+                enabled: Some(false),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("disabling returns while the host is stuck")
+        .unwrap();
+        eventually(|| super::super::ssh_host::tests::exited(second)).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]

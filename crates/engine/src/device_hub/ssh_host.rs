@@ -24,6 +24,8 @@ const FORWARD_READY: Duration = Duration::from_secs(15);
 const HEALTH_EVERY: Duration = Duration::from_secs(10);
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 const RECONNECT_MAX: Duration = Duration::from_secs(30);
+const HEALTH_MISSES: u32 = 3;
+const RETRY_AFTER: Duration = Duration::from_secs(30);
 const SCRIPT_OUTPUT_LIMIT: usize = 1 << 20;
 const SCREENSHOT_LIMIT: usize = 64 << 20;
 const STDERR_TAIL: usize = 2000;
@@ -285,9 +287,18 @@ pub(crate) fn owner_for(data_dir: &Path, host_id: &str) -> String {
 }
 
 pub(crate) fn ssh_args(config: &SshDeviceHostConfig, options: &[&str]) -> Vec<String> {
-    let mut args: Vec<String> = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
-        .map(String::from)
-        .to_vec();
+    let mut args: Vec<String> = [
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=10",
+        "-o",
+        "ControlMaster=no",
+        "-o",
+        "ControlPath=none",
+    ]
+    .map(String::from)
+    .to_vec();
     if let Some(port) = config.port {
         args.extend(["-p".into(), port.to_string()]);
     }
@@ -768,6 +779,8 @@ struct Inner {
     retired: bool,
     activated: bool,
     wants_agent: bool,
+    cancel: tokio_util::sync::CancellationToken,
+    failed_at: Option<tokio::time::Instant>,
     summary: DeviceHubHost,
 }
 
@@ -880,33 +893,74 @@ impl SshHost {
         }
     }
 
+    fn halted(&self) -> Result<(), String> {
+        let inner = self.inner();
+        if inner.retired {
+            Err(HOST_REMOVED.into())
+        } else if inner.stopped {
+            Err(super::DEVICE_SUPPORT_OFF.into())
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn cancellable<T>(
+        &self,
+        work: impl std::future::Future<Output = Result<T, String>>,
+    ) -> Result<T, String> {
+        let cancel = self.inner().cancel.clone();
+        tokio::select! {
+            result = work => result,
+            () = cancel.cancelled() => Err(self.halted().err().unwrap_or_else(|| HOST_REMOVED.into())),
+        }
+    }
+
+    pub(crate) fn wants_connect(&self) -> bool {
+        let inner = self.inner();
+        !inner.stopped
+            && !inner.retired
+            && inner.ready.is_none()
+            && inner.watcher.is_none()
+            && inner
+                .failed_at
+                .is_none_or(|failed| failed.elapsed() >= RETRY_AFTER)
+            && self.lock.try_lock().is_ok()
+    }
+
+    pub(crate) fn resume(&self) {
+        let mut inner = self.inner();
+        if !inner.retired {
+            inner.stopped = false;
+            inner.failed_at = None;
+        }
+    }
+
     pub(crate) async fn ensure_ready(&self) -> Result<RemoteReady, String> {
         let _lock = self.lock.lock().await;
-        {
-            let mut inner = self.inner();
-            if inner.retired {
-                return Err(HOST_REMOVED.into());
-            }
-            inner.stopped = false;
-        }
+        self.halted()?;
         if let Some(ready) = self.current() {
             return Ok(ready);
         }
-        let result = async {
-            let summary = self.probe().await?;
-            let installing = !summary.hub_installed;
-            self.emit(HostEvent::Status(
-                if installing {
-                    DeviceHostStatus::Installing
-                } else {
-                    DeviceHostStatus::Starting
-                },
-                installing.then(|| "Installing device support...".to_string()),
-            ));
-            self.connect().await
-        }
-        .await;
-        if let Err(error) = &result {
+        let result = self
+            .cancellable(async {
+                check_identity(&self.config)?;
+                let summary = self.probe().await?;
+                let installing = !summary.hub_installed;
+                self.emit(HostEvent::Status(
+                    if installing {
+                        DeviceHostStatus::Installing
+                    } else {
+                        DeviceHostStatus::Starting
+                    },
+                    installing.then(|| "Installing device support...".to_string()),
+                ));
+                self.connect().await
+            })
+            .await;
+        if let Err(error) = &result
+            && self.halted().is_ok()
+        {
+            self.inner().failed_at = Some(tokio::time::Instant::now());
             self.emit(HostEvent::Status(
                 DeviceHostStatus::Failed,
                 Some(error.clone()),
@@ -918,37 +972,49 @@ impl SshHost {
     pub(crate) async fn ensure_agent(&self) -> Result<(String, String), String> {
         self.ensure_ready().await?;
         let _lock = self.lock.lock().await;
+        self.halted()?;
         self.inner().wants_agent = true;
         if let Some(agent) = self.current().and_then(|ready| ready.agent) {
             return Ok(agent);
         }
-        self.teardown();
-        let connected = self.connect().await.and_then(|ready| {
-            ready
-                .agent
-                .ok_or_else(|| "Starting agent tools: daemon endpoint missing.".to_string())
-        });
-        if connected.is_err() {
+        self.cancellable(async {
             self.teardown();
-            self.inner().wants_agent = false;
-            let _ = self.run_mode(Mode::StopAgent).await;
-        }
-        connected
+            let connected = self.connect().await.and_then(|ready| {
+                ready
+                    .agent
+                    .ok_or_else(|| "Starting agent tools: daemon endpoint missing.".to_string())
+            });
+            if connected.is_err() {
+                self.teardown();
+                self.inner().wants_agent = false;
+                let _ = self.run_mode(Mode::StopAgent).await;
+                if let Err(error) = self.connect().await {
+                    self.emit(HostEvent::Status(DeviceHostStatus::Failed, Some(error)));
+                }
+            }
+            connected
+        })
+        .await
     }
 
     pub(crate) async fn stop_agent(&self) {
         let _lock = self.lock.lock().await;
         self.inner().wants_agent = false;
-        if self.current().is_none_or(|ready| ready.agent.is_none()) {
+        if self.halted().is_err() || self.current().is_none_or(|ready| ready.agent.is_none()) {
             return;
         }
-        self.teardown();
-        if let Err(error) = self.run_mode(Mode::StopAgent).await {
-            tracing::warn!(%error, "stopping remote agent tools failed");
-        }
-        if let Err(error) = self.connect().await {
-            self.emit(HostEvent::Status(DeviceHostStatus::Failed, Some(error)));
-        }
+        let _ = self
+            .cancellable(async {
+                self.teardown();
+                if let Err(error) = self.run_mode(Mode::StopAgent).await {
+                    tracing::warn!(%error, "stopping remote agent tools failed");
+                }
+                if let Err(error) = self.connect().await {
+                    self.emit(HostEvent::Status(DeviceHostStatus::Failed, Some(error)));
+                }
+                Ok(())
+            })
+            .await;
     }
 
     pub(crate) async fn retire(&self) {
@@ -957,17 +1023,30 @@ impl SshHost {
     }
 
     pub(crate) fn signal_stop(&self) {
-        self.inner().stopped = true;
+        {
+            let mut inner = self.inner();
+            inner.stopped = true;
+            std::mem::take(&mut inner.cancel).cancel();
+        }
         self.teardown();
     }
 
     pub(crate) async fn stop(&self) {
         self.signal_stop();
         let _lock = self.lock.lock().await;
-        self.signal_stop();
-        let activated = std::mem::take(&mut self.inner().activated);
-        self.inner().wants_agent = false;
-        if activated && let Err(error) = self.run_mode(Mode::Stop).await {
+        let (activated, retired) = {
+            let mut inner = self.inner();
+            if !inner.stopped {
+                return;
+            }
+            inner.wants_agent = false;
+            (std::mem::take(&mut inner.activated), inner.retired)
+        };
+        self.teardown();
+        // A removed host may have started its hub under an earlier engine run.
+        if (activated || retired)
+            && let Err(error) = self.run_mode(Mode::Stop).await
+        {
             tracing::warn!(%error, "stopping the remote device hub failed");
         }
     }
@@ -985,11 +1064,9 @@ impl SshHost {
     }
 
     async fn connect_once(&self) -> Result<RemoteReady, (bool, String)> {
+        self.halted().map_err(|error| (false, error))?;
         let mode = {
             let mut inner = self.inner();
-            if inner.stopped {
-                return Err((false, HOST_REMOVED.into()));
-            }
             inner.activated = true;
             if inner.wants_agent {
                 Mode::AgentStart
@@ -1015,14 +1092,12 @@ impl SshHost {
             (hub_port, started.hub_port),
             daemon.as_ref().map(|(local, remote, _)| (*local, *remote)),
         );
-        let mut child = tokio::process::Command::new(&self.ssh)
-            .args(&args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
+        let mut command = hub_process::lifeline_command(&self.ssh);
+        command.args(&args).stdout(Stdio::null());
+        let mut child = command
             .spawn()
             .map_err(|e| (true, format!("Forwarding ports: {e}")))?;
+        let lifeline = child.stdin.take();
         let stderr = Arc::new(Mutex::new(String::new()));
         if let Some(pipe) = child.stderr.take() {
             let stderr = stderr.clone();
@@ -1068,11 +1143,9 @@ impl SshHost {
                 .map(|cli| (started.node_path.clone(), cli)),
             android_sdk: started.android_home.map(PathBuf::from),
         };
+        self.halted().map_err(|error| (false, error))?;
         let ready = {
             let mut inner = self.inner();
-            if inner.stopped {
-                return Err((false, HOST_REMOVED.into()));
-            }
             inner.generation += 1;
             let ready = RemoteReady {
                 origin: origin.clone(),
@@ -1081,7 +1154,7 @@ impl SshHost {
                 generation: inner.generation,
             };
             inner.ready = Some(ready.clone());
-            inner.watcher = Some(self.watch(child, ready.clone()));
+            inner.watcher = Some(self.watch(child, lifeline, ready.clone()));
             ready
         };
         self.emit(HostEvent::Status(DeviceHostStatus::Ready, None));
@@ -1115,11 +1188,13 @@ impl SshHost {
     fn watch(
         &self,
         mut child: tokio::process::Child,
+        lifeline: Option<tokio::process::ChildStdin>,
         ready: RemoteReady,
     ) -> tokio::task::JoinHandle<()> {
         let me = self.me.clone();
         tokio::spawn(async move {
             let health = async {
+                let mut misses = 0;
                 loop {
                     tokio::time::sleep(HEALTH_EVERY).await;
                     let Some(host) = me.upgrade() else {
@@ -1130,7 +1205,8 @@ impl SshHost {
                         Some((base, _)) => host.healthy(&format!("{base}/health")).await,
                         None => true,
                     };
-                    if !hub || !daemon {
+                    misses = if hub && daemon { 0 } else { misses + 1 };
+                    if misses >= HEALTH_MISSES {
                         return;
                     }
                 }
@@ -1139,7 +1215,7 @@ impl SshHost {
                 _ = child.wait() => {}
                 _ = health => {}
             }
-            drop(child);
+            drop((child, lifeline));
             if let Some(host) = me.upgrade() {
                 host.reconnect(ready.generation).await;
             }
@@ -1169,8 +1245,9 @@ impl SshHost {
                     return;
                 }
             }
-            match self.connect().await {
+            match self.cancellable(self.connect()).await {
                 Ok(_) => return,
+                Err(_) if self.halted().is_err() => return,
                 Err(error) => {
                     self.emit(HostEvent::Status(DeviceHostStatus::Failed, Some(error)));
                     delay = (delay * 2).min(RECONNECT_MAX);
@@ -1270,6 +1347,13 @@ const configs = {
   unresolved: 'hostname example.invalid\nport 22\n',
 };
 if (args.includes('-G')) { process.stdout.write(configs[target] ?? 'hostname 192.0.2.7\nport 22\n'); process.exit(0); }
+if (target === 'hang') {
+  let input = '';
+  process.stdin.on('data', chunk => { input += chunk; });
+  process.stdin.on('end', () => fs.writeFileSync(dir + '/hang-' + /const mode = "([^"]+)"/.exec(input)?.[1] + '.pid', String(process.pid)));
+  setInterval(() => {}, 1 << 30);
+  return;
+}
 if (target === 'unreachable') { console.error('ssh: connect to host unreachable port 22: Connection refused'); process.exit(255); }
 if (target === 'nonode') { console.error('Node is missing from the non-interactive SSH PATH'); process.exit(1); }
 if (args.includes('-N')) {
@@ -1296,6 +1380,7 @@ process.stdin.on('end', () => {
   const tool = { requiredVersion: '0.12.0', installedVersions: [], runningVersion: null };
   const portFile = fs.existsSync(dir + '/hub-port-' + target) ? dir + '/hub-port-' + target : dir + '/hub-port';
   const hubPort = Number(fs.readFileSync(portFile, 'utf8'));
+  if (mode === 'agent-start' && fs.existsSync(dir + '/fail-agent-once')) { fs.unlinkSync(dir + '/fail-agent-once'); console.error('agent-device daemon did not become ready'); process.exit(1); }
   if (mode === 'probe') console.log(JSON.stringify({ nodePath: '/node', nodeVersion: target === 'oldnode' ? '20.11.0' : '22.22.3', npmVersion: '10.9.0', platforms, tools: { hub: tool, agent: tool } }));
   else if (mode === 'start' || mode === 'agent-start') console.log(JSON.stringify({ nodePath: '/node', platforms, hubPort, helpers: { serveSimAxSettings: null, serveSimCli: '/remote/serve-sim.js' }, androidHome: null, ...(mode === 'agent-start' ? { daemonPort: hubPort, token: 'fixture', entryPath: '/agent.mjs' } : {}) }));
 });
@@ -1397,6 +1482,15 @@ process.stdin.on('end', () => {
         panic!("condition never held");
     }
 
+    pub(crate) fn exited(pid: i32) -> bool {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .unwrap();
+        let stat = String::from_utf8_lossy(&out.stdout);
+        stat.trim().is_empty() || stat.trim_start().starts_with('Z')
+    }
+
     #[test]
     fn ssh_argv_is_batch_mode_with_the_destination_after_a_double_dash() {
         let config = SshDeviceHostConfig {
@@ -1411,6 +1505,10 @@ process.stdin.on('end', () => {
                 "BatchMode=yes",
                 "-o",
                 "ConnectTimeout=10",
+                "-o",
+                "ControlMaster=no",
+                "-o",
+                "ControlPath=none",
                 "-p",
                 "2222",
                 "-i",
@@ -1427,6 +1525,10 @@ process.stdin.on('end', () => {
                 "BatchMode=yes",
                 "-o",
                 "ConnectTimeout=10",
+                "-o",
+                "ControlMaster=no",
+                "-o",
+                "ControlPath=none",
                 "-o",
                 "ExitOnForwardFailure=yes",
                 "-o",
@@ -1626,15 +1728,25 @@ process.stdin.on('end', () => {
         assert_eq!((failed.code, failed.stderr.trim()), (3, "nope"));
         let last = fake.calls().pop().unwrap();
         assert_eq!(
-            last[..6],
+            last[..10],
             [
                 "-o",
                 "BatchMode=yes",
                 "-o",
                 "ConnectTimeout=10",
+                "-o",
+                "ControlMaster=no",
+                "-o",
+                "ControlPath=none",
                 "--",
                 "mini"
             ]
+        );
+        assert!(
+            fake.calls().iter().all(|args| args
+                .windows(2)
+                .any(|pair| pair == ["-o", "ControlPath=none"])),
+            "no call reuses or creates a shared connection"
         );
     }
 
@@ -1699,6 +1811,11 @@ process.stdin.on('end', () => {
             .unwrap()
             .parse()
             .unwrap();
+        assert_eq!(
+            unsafe { libc::getpgid(pid) },
+            pid,
+            "the forward runs in its own lifeline group"
+        );
         unsafe { libc::kill(pid, libc::SIGKILL) };
         let host_ref = ssh_host.clone();
         let first = ready.origin.clone();
@@ -1771,6 +1888,89 @@ process.stdin.on('end', () => {
                 .all(|line| line.split(' ').nth(1) == Some("owner-1")),
             "every call runs under this engine's owner"
         );
+    }
+
+    #[tokio::test]
+    async fn a_failed_agent_start_restores_the_plain_hub_and_a_stopped_host_never_restarts() {
+        let Some(fake) = fake_ssh().await else {
+            return;
+        };
+        let ssh_host = SshHost::new(
+            host("mini"),
+            "o".into(),
+            fake.ssh.clone(),
+            http(),
+            Arc::new(|_: &SshHost, _| {}),
+        );
+        ssh_host.ensure_ready().await.unwrap();
+        std::fs::write(fake.dir.path().join("fail-agent-once"), "").unwrap();
+        assert!(ssh_host.ensure_agent().await.is_err());
+        assert!(
+            ssh_host
+                .current()
+                .is_some_and(|ready| ready.agent.is_none()),
+            "the host stays connected without agent tools"
+        );
+        assert_eq!(
+            fake.modes()[fake.modes().len() - 3..],
+            ["agent-start", "stop-agent", "start"]
+        );
+        ssh_host.ensure_agent().await.unwrap();
+        ssh_host.signal_stop();
+        let before = fake.modes().len();
+        ssh_host.stop_agent().await;
+        assert!(ssh_host.ensure_ready().await.is_err());
+        assert_eq!(
+            fake.modes().len(),
+            before,
+            "a stopped host neither reconnects nor restarts its hub"
+        );
+        ssh_host.stop().await;
+        assert_eq!(fake.modes().last().unwrap(), "stop");
+
+        let fresh = SshHost::new(
+            host("studio"),
+            "o".into(),
+            fake.ssh.clone(),
+            http(),
+            Arc::new(|_: &SshHost, _| {}),
+        );
+        fresh.retire().await;
+        assert_eq!(
+            fake.lines("modes").last().unwrap(),
+            "stop o studio",
+            "removing a host stops a hub an earlier engine run started"
+        );
+    }
+
+    #[tokio::test]
+    async fn stopping_cancels_an_install_in_flight_and_kills_its_ssh() {
+        let Some(fake) = fake_ssh().await else {
+            return;
+        };
+        let ssh_host = SshHost::new(
+            host("hang"),
+            "o".into(),
+            fake.ssh.clone(),
+            http(),
+            Arc::new(|_: &SshHost, _| {}),
+        );
+        let connecting = tokio::spawn({
+            let ssh_host = ssh_host.clone();
+            async move { ssh_host.ensure_ready().await }
+        });
+        let pid_file = fake.dir.path().join("hang-probe.pid");
+        eventually(|| pid_file.exists()).await;
+        let pid: i32 = std::fs::read_to_string(&pid_file).unwrap().parse().unwrap();
+        assert!(!ssh_host.wants_connect(), "a connect is already in flight");
+        let started = std::time::Instant::now();
+        ssh_host.signal_stop();
+        assert!(connecting.await.unwrap().is_err());
+        assert!(started.elapsed() < Duration::from_secs(5));
+        eventually(|| exited(pid)).await;
+        assert!(!ssh_host.wants_connect(), "a stopped host waits for resume");
+        ssh_host.resume();
+        assert!(ssh_host.wants_connect());
     }
 
     #[tokio::test]

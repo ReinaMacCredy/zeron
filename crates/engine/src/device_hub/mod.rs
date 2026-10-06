@@ -66,7 +66,7 @@ pub struct DeviceHub {
     auto_rotate: Mutex<std::collections::HashMap<String, String>>,
     android_boots: tokio::sync::Mutex<()>,
     session_avds: Mutex<std::collections::HashMap<String, String>>,
-    refreshing: tokio::sync::Mutex<()>,
+    refreshing: Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     remotes: Mutex<BTreeMap<String, Arc<SshHost>>>,
     #[cfg(test)]
     test_ssh: Mutex<Option<(PathBuf, HashSet<IpAddr>)>>,
@@ -218,7 +218,7 @@ impl DeviceHub {
             .unwrap_or_default();
         let mut seen = HashSet::new();
         settings.device_hosts.retain(|host| {
-            let checked = ssh_host::check_identity(host).and_then(|()| {
+            let checked = host.validate().and_then(|()| {
                 seen.insert(host.id.clone())
                     .then_some(())
                     .ok_or_else(|| "Device host ids must be unique.".to_string())
@@ -272,7 +272,7 @@ impl DeviceHub {
             auto_rotate: Mutex::default(),
             android_boots: tokio::sync::Mutex::new(()),
             session_avds: Mutex::default(),
-            refreshing: tokio::sync::Mutex::new(()),
+            refreshing: Mutex::default(),
             remotes: Mutex::default(),
             #[cfg(test)]
             test_ssh: Mutex::new(None),
@@ -378,6 +378,11 @@ impl DeviceHub {
             }
             (removed, added)
         };
+        if !self.enabled() {
+            for host in added.iter().filter_map(|summary| self.remote(&summary.id)) {
+                host.signal_stop();
+            }
+        }
         let gone: Vec<String> = removed.iter().map(|host| host.config.id.clone()).collect();
         if gone.is_empty() && added.is_empty() {
             return removed;
@@ -672,11 +677,14 @@ impl DeviceHub {
                 .iter()
                 .map(|key| split_key(key).1.to_string()),
         );
-        if ids.is_empty() {
+        if ids.is_empty() && host_id == LOCAL_DEVICE_HOST_ID {
             return Ok(());
         }
         if let Err(error) = self.refresh(host_id, origin).await {
             tracing::warn!(%error, "device list unavailable after the hub restarted");
+            if host_id != LOCAL_DEVICE_HOST_ID {
+                self.host_failed(host_id, error);
+            }
         } else {
             self.publish(|state| {
                 let booted: Vec<String> = state
@@ -747,6 +755,7 @@ impl DeviceHub {
         };
         let settings_lock = self.settings_lock.lock().await;
         let mut settings = self.state.borrow().settings.clone();
+        let agent_was_on = settings.enabled && settings.agent_access_enabled;
         if let Some(hosts) = device_hosts {
             settings.device_hosts = hosts;
         }
@@ -787,6 +796,7 @@ impl DeviceHub {
             }
         });
         let removed = self.reconcile(&hosts);
+        let remotes = self.all_remotes();
         if enabled {
             self.publish(|state| {
                 for host in &hosts {
@@ -796,18 +806,38 @@ impl DeviceHub {
                         .or_insert_with(idle_host);
                 }
             });
+            for host in &remotes {
+                host.resume();
+            }
+        } else {
+            for host in &remotes {
+                host.signal_stop();
+            }
+        }
+        for host in &removed {
+            host.signal_stop();
         }
         if !agent_on {
             self.stop_agent().await;
         }
         if !enabled {
             self.stop_hub().await;
-            futures::future::join_all(self.all_remotes().iter().map(|host| host.stop())).await;
         }
         drop(settings_lock);
-        futures::future::join_all(removed.iter().map(|host| host.retire())).await;
+        for host in removed {
+            tokio::spawn(async move { host.retire().await });
+        }
+        if !enabled {
+            for host in remotes {
+                tokio::spawn(async move { host.stop().await });
+            }
+        } else if agent_was_on && !agent_on {
+            for host in remotes {
+                tokio::spawn(async move { host.stop_agent().await });
+            }
+        }
         if enabled {
-            self.list_with(false, false).await?;
+            self.list(false).await?;
         }
         if agent_on
             && params.agent_access_enabled == Some(true)
@@ -819,14 +849,6 @@ impl DeviceHub {
     }
 
     pub async fn list(&self, inspect_only: bool) -> Result<DeviceHubState, String> {
-        self.list_with(inspect_only, true).await
-    }
-
-    async fn list_with(
-        &self,
-        inspect_only: bool,
-        wait_for_hosts: bool,
-    ) -> Result<DeviceHubState, String> {
         if !inspect_only && !self.enabled() {
             return Err(DEVICE_SUPPORT_OFF.into());
         }
@@ -850,37 +872,36 @@ impl DeviceHub {
                 self.set_status(DeviceHostStatus::Failed, Some(error));
             }
         };
-        if wait_for_hosts {
-            tokio::join!(local, self.connect_hosts());
-        } else {
-            local.await;
-            if let (Some(hub), Ok(runtime)) =
-                (self.me.upgrade(), tokio::runtime::Handle::try_current())
-            {
-                runtime.spawn(async move { hub.connect_hosts().await });
-            }
+        let remotes = self.all_remotes();
+        let ready = remotes.iter().filter_map(|host| {
+            let origin = host.current()?.origin;
+            Some(async move {
+                let id = &host.config.id;
+                if let Err(error) = self.refresh(id, &origin).await {
+                    self.host_failed(id, error);
+                }
+            })
+        });
+        tokio::join!(local, futures::future::join_all(ready));
+        // A host that is not Ready connects on its own; the Ready event lists its devices.
+        for host in remotes.into_iter().filter(|host| host.wants_connect()) {
+            tokio::spawn(async move {
+                let _ = host.ensure_ready().await;
+            });
         }
         Ok(self.snapshot())
     }
 
-    async fn connect_hosts(&self) {
-        futures::future::join_all(self.all_remotes().into_iter().map(|host| async move {
-            let id = host.config.id.clone();
-            if let Ok(ready) = host.ensure_ready().await
-                && let Err(error) = self.refresh(&id, &ready.origin).await
-            {
-                self.publish(|state| {
-                    state.host_statuses.insert(
-                        id,
-                        DeviceHostState {
-                            status: DeviceHostStatus::Failed,
-                            detail: Some(error),
-                        },
-                    );
-                });
-            }
-        }))
-        .await;
+    fn host_failed(&self, host_id: &str, error: String) {
+        self.publish(|state| {
+            state.host_statuses.insert(
+                host_id.to_string(),
+                DeviceHostState {
+                    status: DeviceHostStatus::Failed,
+                    detail: Some(error),
+                },
+            );
+        });
     }
 
     async fn remote_hosts(
@@ -888,7 +909,8 @@ impl DeviceHub {
         hosts: Vec<SshDeviceHostConfig>,
     ) -> Result<Vec<SshDeviceHostConfig>, String> {
         zeron_proto::device_hub::validate_device_hosts(&hosts)?;
-        for host in &hosts {
+        let saved = self.state.borrow().settings.device_hosts.clone();
+        for host in hosts.iter().filter(|host| !saved.contains(host)) {
             ssh_host::check_identity(host)?;
         }
         let (ssh, own) = (self.ssh_program(), self.own_addresses());
@@ -1005,8 +1027,18 @@ impl DeviceHub {
         .await
     }
 
+    fn refresh_lock(&self, host_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.refreshing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(host_id.to_string())
+            .or_default()
+            .clone()
+    }
+
     async fn refresh(&self, host_id: &str, origin: &str) -> Result<(), String> {
-        let _serial = self.refreshing.lock().await;
+        let lock = self.refresh_lock(host_id);
+        let _serial = lock.lock().await;
         let (mut devices, errors) = HubClient {
             http: &self.http,
             origin,
@@ -2104,6 +2136,17 @@ mod tests {
         ]))
         .await
         .unwrap();
+        eventually(|| {
+            let state = hub.snapshot();
+            let status = |id: &str| state.host_statuses.get(id).map(|host| host.status);
+            status("mini") == Some(DeviceHostStatus::Ready)
+                && status("studio") == Some(DeviceHostStatus::Ready)
+                && status("unreachable") == Some(DeviceHostStatus::Failed)
+                && ["mini", "studio"]
+                    .iter()
+                    .all(|id| state.device(id, "SIM-1").is_some())
+        })
+        .await;
         let state = hub.list(false).await.unwrap();
         let ids = |state: &DeviceHubState| -> Vec<String> {
             state.hosts.iter().map(|host| host.id.clone()).collect()
@@ -2204,10 +2247,7 @@ mod tests {
                 .iter()
                 .any(|line| line.starts_with("stop ") && line.ends_with(&format!(" {target}")))
         };
-        assert!(
-            stopped("studio"),
-            "removing a host stops its remote helpers"
-        );
+        eventually(|| stopped("studio")).await;
         assert!(old.ensure_ready().await.is_err());
         assert!(
             !hub.snapshot().host_statuses.contains_key("studio"),
@@ -2221,7 +2261,91 @@ mod tests {
         .await
         .unwrap();
         assert!(hub.snapshot().host_statuses.is_empty());
-        assert!(stopped("mini"));
+        eventually(|| stopped("mini")).await;
+        let starts = fake.modes().iter().filter(|mode| *mode == "start").count();
+        assert!(
+            hub.remote("mini").unwrap().ensure_ready().await.is_err(),
+            "a disabled host never reconnects"
+        );
+        assert_eq!(
+            fake.modes().iter().filter(|mode| *mode == "start").count(),
+            starts
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_saved_host_with_a_missing_key_is_kept_and_reported_failed() {
+        use zeron_proto::device_hub::{ConfigureDeviceHubParams, DeviceHostStatus};
+        let Some(fake) = super::ssh_host::tests::fake_ssh().await else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let saved = serde_json::json!({"id": "mini", "label": "mini", "target": "mini",
+            "identityFile": "/nonexistent/zeron-key"});
+        std::fs::write(
+            dir.path().join(super::SETTINGS_FILE),
+            serde_json::json!({"enabled": true, "deviceHosts": [saved]}).to_string(),
+        )
+        .unwrap();
+        let hub = super::DeviceHub::start(dir.path());
+        let (origin, _) = fake_hub_with(HEALTHY).await;
+        hub.attach_hub_for_test(origin);
+        hub.use_ssh_for_test(fake.ssh.clone(), std::collections::HashSet::new());
+        assert_eq!(hub.snapshot().settings.device_hosts.len(), 1);
+        hub.list(false).await.unwrap();
+        eventually(|| {
+            hub.snapshot()
+                .host_statuses
+                .get("mini")
+                .is_some_and(|host| {
+                    host.status == DeviceHostStatus::Failed
+                        && host
+                            .detail
+                            .as_deref()
+                            .is_some_and(|detail| detail.contains("identity file"))
+                })
+        })
+        .await;
+        let hosts = |hosts: serde_json::Value| ConfigureDeviceHubParams {
+            device_hosts: Some(serde_json::from_value(hosts).unwrap()),
+            ..Default::default()
+        };
+        let studio = serde_json::json!({"id": "studio", "label": "studio", "target": "studio"});
+        let state = hub
+            .configure(hosts(serde_json::json!([saved, studio])))
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .settings
+                .device_hosts
+                .iter()
+                .map(|host| host.id.as_str())
+                .collect::<Vec<_>>(),
+            ["mini", "studio"],
+            "saving other hosts keeps a host whose key is missing for now"
+        );
+        let changed = serde_json::json!({"id": "mini", "label": "mini", "target": "mini",
+            "identityFile": "/nonexistent/other-key"});
+        assert!(
+            hub.configure(hosts(serde_json::json!([changed])))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_slow_remote_refresh_never_holds_up_the_local_list() {
+        let (_dir, hub, origin) = enabled_hub(HEALTHY).await;
+        let remote = hub.refresh_lock("mini");
+        let _held = remote.lock().await;
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            hub.refresh(zeron_proto::device_hub::LOCAL_DEVICE_HOST_ID, &origin),
+        )
+        .await
+        .expect("the local list does not wait for a remote one")
+        .unwrap();
     }
 
     fn open_params(device_id: &str) -> zeron_proto::device_hub::OpenHubDeviceParams {
@@ -2232,7 +2356,7 @@ mod tests {
     }
 
     pub(super) async fn eventually(mut done: impl FnMut() -> bool) {
-        for _ in 0..500 {
+        for _ in 0..2000 {
             if done() {
                 return;
             }
