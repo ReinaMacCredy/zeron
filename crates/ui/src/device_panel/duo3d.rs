@@ -1,9 +1,16 @@
+use std::cell::RefCell;
 use std::f64::consts::{FRAC_PI_2, PI};
 use std::ops::Range;
+use std::rc::Rc;
 
-use zeron_proto::device_hub::{DeviceOrientation, DeviceScreenConfig};
+use zeron_proto::device_hub::{
+    DeviceFacing, DeviceOrientation, DeviceScreenConfig, HingeCommand, HingePose, TouchPhase,
+};
 
-use super::scene3d::{self, Builder, Camera, IOS_PHONE, Quat, SCREEN_HEIGHT, Vec3, Vertex};
+use super::scene3d::{
+    self, Action, Builder, Camera, IOS_PHONE, Interaction, Mode, Motion, Quat, SCREEN_HEIGHT, Vec3,
+    Vertex,
+};
 
 pub const COVER_SIZE: (u32, u32) = (1398, 2034);
 pub const INNER_SIZE: (u32, u32) = (2006, 2852);
@@ -266,13 +273,6 @@ pub struct DuoRig {
 
 impl DuoRig {
     pub fn new(cover: (u32, u32), inner: (u32, u32)) -> Self {
-        let sane = |size: (u32, u32), fallback| {
-            if size.0 > 0 && size.1 > 0 {
-                size
-            } else {
-                fallback
-            }
-        };
         let (cover, inner) = (sane(cover, COVER_SIZE), sane(inner, INNER_SIZE));
         let half = SCREEN_HEIGHT * f64::from(inner.1) / f64::from(inner.0) / 2.0;
         let leaf_width = half + HINGE_INSET + BEZEL;
@@ -627,6 +627,757 @@ pub fn nearest_duo_view(rotation: Quat, snaps: &[DuoViewSnap]) -> Option<DuoView
         rotation,
         ..snaps[index]
     })
+}
+
+const HANDOFF_MS: f64 = 5000.0;
+
+pub fn default_angle(screen: Option<&DeviceScreenConfig>) -> f64 {
+    let screen_id = screen.and_then(|screen| screen.screen_id);
+    match screen.and_then(|screen| screen.hinge_angle) {
+        Some(angle) => f64::from(angle),
+        None if screen_id == Some(1) => 0.0,
+        None => 180.0,
+    }
+}
+
+pub fn pinch_log_scale(delta: f32) -> Option<f64> {
+    (delta.is_finite() && delta > -1.0).then(|| f64::from(1.0 + delta).ln())
+}
+
+// Ported from t3code (duoControl createDuoPinch): the accumulator ignores readback while active.
+#[derive(Debug, Default, PartialEq)]
+pub struct DuoPinch {
+    angle: Option<f64>,
+}
+
+impl DuoPinch {
+    pub fn begin(&mut self, contains: bool, angle: f64) -> bool {
+        if !contains {
+            return false;
+        }
+        self.angle = Some(angle.clamp(0.0, 180.0));
+        true
+    }
+
+    pub fn moved(&mut self, log_scale: f64) -> Option<f64> {
+        let angle = self.angle?;
+        if !log_scale.is_finite() {
+            return None;
+        }
+        let next = (angle + log_scale * 120.0).clamp(0.0, 180.0);
+        if next == angle {
+            return None;
+        }
+        self.angle = Some(next);
+        Some(next)
+    }
+
+    pub fn end(&mut self) -> bool {
+        self.angle.take().is_some()
+    }
+
+    pub fn active(&self) -> bool {
+        self.angle.is_some()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Handoff {
+    panel: DuoPanel,
+    deadline: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Captured {
+    display: usize,
+    key: DisplayKey,
+}
+
+#[derive(Default)]
+struct SnapState {
+    candidates: Vec<DuoViewSnap>,
+    chosen: Option<DuoViewSnap>,
+}
+
+fn euler_yxz(x: f64, y: f64, z: f64) -> Quat {
+    Quat::axis_angle(Y, y)
+        .mul(Quat::axis_angle(Vec3::new(1.0, 0.0, 0.0), x))
+        .mul(Quat::axis_angle(Vec3::new(0.0, 0.0, 1.0), z))
+}
+
+// Ported from t3code (duoViewer): presentation, snaps, display handoff, hinge preview and touch.
+pub struct DuoViewer {
+    pub motion: Motion,
+    pub interaction: Interaction,
+    snaps: Rc<RefCell<SnapState>>,
+    rig: Option<Rc<DuoRig>>,
+    viewport: Option<(f64, f64, f64, f64)>,
+    screen: Option<DeviceScreenConfig>,
+    angle: f64,
+    target_angle: f64,
+    applied_angle: f64,
+    preview: Option<f64>,
+    queued: Option<f64>,
+    held_leaf: Option<Leaf>,
+    touch_active: bool,
+    rest_face: DuoFace,
+    requested_orientation: Option<DeviceOrientation>,
+    view_orientation: Option<DeviceOrientation>,
+    handoff: Option<Handoff>,
+    first_pose: bool,
+    physical_pose: HingePose,
+    presentation_angle: f64,
+    target_presentation: Quat,
+    last_time: f64,
+    ready_key: Option<DisplayKey>,
+    captured: Option<Captured>,
+    pinch: DuoPinch,
+    requests: Vec<HingeCommand>,
+}
+
+impl Default for DuoViewer {
+    fn default() -> Self {
+        let snaps = Rc::new(RefCell::new(SnapState::default()));
+        let shared = snaps.clone();
+        let motion = Motion::new(move |rotation| {
+            let mut state = shared.borrow_mut();
+            match nearest_duo_view(rotation, &state.candidates) {
+                Some(snap) => {
+                    state.chosen = Some(snap);
+                    snap.rotation
+                }
+                None => rotation,
+            }
+        });
+        Self {
+            motion,
+            interaction: Interaction::default(),
+            snaps,
+            rig: None,
+            viewport: None,
+            screen: None,
+            angle: 180.0,
+            target_angle: 180.0,
+            applied_angle: f64::NAN,
+            preview: None,
+            queued: None,
+            held_leaf: None,
+            touch_active: false,
+            rest_face: DuoFace::Inside,
+            requested_orientation: None,
+            view_orientation: None,
+            handoff: None,
+            first_pose: true,
+            physical_pose: HingePose::Open,
+            presentation_angle: 180.0,
+            target_presentation: Quat::IDENTITY,
+            last_time: 0.0,
+            ready_key: None,
+            captured: None,
+            pinch: DuoPinch::default(),
+            requests: Vec::new(),
+        }
+    }
+}
+
+impl DuoViewer {
+    pub fn set_rig(&mut self, cover: (u32, u32), inner: (u32, u32)) -> Rc<DuoRig> {
+        if let Some(rig) = &self.rig
+            && rig.sizes == [sane(cover, COVER_SIZE), sane(inner, INNER_SIZE)]
+        {
+            return rig.clone();
+        }
+        let rig = Rc::new(DuoRig::new(cover, inner));
+        self.rig = Some(rig.clone());
+        self.applied_angle = f64::NAN;
+        rig
+    }
+
+    pub fn rig(&self) -> Option<Rc<DuoRig>> {
+        self.rig.clone()
+    }
+
+    pub fn screen(&self) -> Option<&DeviceScreenConfig> {
+        self.screen.as_ref()
+    }
+
+    pub fn angle(&self) -> f64 {
+        self.angle
+    }
+
+    pub fn viewport(&self) -> Option<(f64, f64, f64, f64)> {
+        self.viewport
+    }
+
+    fn panel(&self) -> DuoPanel {
+        DuoPanel::of(self.screen.as_ref().and_then(|screen| screen.screen_id))
+    }
+
+    fn snaps_for(&self, panel: DuoPanel, angle: f64) -> Vec<DuoViewSnap> {
+        self.rig.as_ref().map_or_else(Vec::new, |rig| {
+            duo_view_snaps(&rig.rest_frames(angle, panel), panel)
+        })
+    }
+
+    fn active_snaps(&self) -> Vec<DuoViewSnap> {
+        self.snaps_for(self.panel(), self.angle)
+    }
+
+    fn all_snaps(&self) -> Vec<DuoViewSnap> {
+        let physical = self
+            .screen
+            .as_ref()
+            .is_some_and(|screen| screen.supports_physical_orientation == Some(true));
+        if !physical || !(self.angle > 20.0 && self.angle < 180.0) {
+            return self.active_snaps();
+        }
+        let mut snaps = self.snaps_for(DuoPanel::Inner, self.angle);
+        snaps.extend(self.snaps_for(DuoPanel::Cover, self.angle));
+        snaps
+    }
+
+    fn moving(&self) -> bool {
+        (self.angle - self.target_angle).abs() > 0.01
+    }
+
+    fn hold_rule(&self) -> Leaf {
+        if self.panel() == DuoPanel::Cover && self.angle > 20.0 {
+            Leaf::Left
+        } else {
+            Leaf::Right
+        }
+    }
+
+    fn release<R>(&mut self, now: f64, act: impl FnOnce(&mut Motion) -> R) -> R {
+        self.snaps.borrow_mut().candidates = self.all_snaps();
+        let result = act(&mut self.motion);
+        let chosen = self.snaps.borrow_mut().chosen.take();
+        if let Some(snap) = chosen {
+            self.chose(snap, now);
+        }
+        result
+    }
+
+    fn chose(&mut self, snap: DuoViewSnap, now: f64) {
+        self.rest_face = snap.face;
+        let Some(screen) = &self.screen else {
+            return;
+        };
+        let panel = if snap.face == DuoFace::Cover {
+            DuoPanel::Cover
+        } else {
+            DuoPanel::Inner
+        };
+        let current = self
+            .handoff
+            .map(|handoff| Some(handoff.panel as u32))
+            .unwrap_or(screen.screen_id);
+        if Some(panel as u32) != current {
+            self.handoff = Some(Handoff {
+                panel,
+                deadline: now + HANDOFF_MS,
+            });
+            self.captured = None;
+            self.requests.push(HingeCommand::Physical(match panel {
+                DuoPanel::Cover => DeviceFacing::FaceDown,
+                DuoPanel::Inner => DeviceFacing::FaceUp,
+            }));
+        } else if self.handoff.is_none() && Some(snap.orientation) != self.view_orientation {
+            self.view_orientation = Some(snap.orientation);
+            self.requested_orientation = Some(snap.orientation);
+            self.requests
+                .push(HingeCommand::Orientation(snap.orientation));
+        }
+    }
+
+    fn hold_motion(&mut self, now: f64) {
+        let held = self.touch_active || self.preview.is_some();
+        self.release(now, |motion| motion.hold(held, now));
+    }
+
+    fn apply_pose(&mut self, now: f64) {
+        if let Some(leaf) = self.held_leaf
+            && self.applied_angle.is_finite()
+            && self.applied_angle != self.angle
+        {
+            let correction = leaf_rotation(leaf, self.applied_angle)
+                .mul(leaf_rotation(leaf, self.angle).inverse());
+            if correction.angle_to(Quat::IDENTITY) > 1e-8 {
+                let rotation = self.motion.rotation.mul(correction);
+                self.motion.set_pose(rotation, now, true);
+            }
+        }
+        self.applied_angle = self.angle;
+    }
+
+    fn presentation(&self, screen: Option<&DeviceScreenConfig>) -> Quat {
+        let fold = (180.0 - self.presentation_angle) * PI / 360.0;
+        let mut roll = if self.physical_pose == HingePose::Closed {
+            0.0
+        } else {
+            FRAC_PI_2
+        };
+        if let Some(screen) = screen {
+            if screen.width < screen.height {
+                match screen.orientation {
+                    DeviceOrientation::LandscapeLeft => roll -= FRAC_PI_2,
+                    DeviceOrientation::LandscapeRight => roll += FRAC_PI_2,
+                    _ => {}
+                }
+            }
+            if screen.orientation == DeviceOrientation::PortraitUpsideDown {
+                roll -= PI;
+            }
+        }
+        match self.physical_pose {
+            HingePose::Laptop => euler_yxz(-fold + PI / 9.0, -PI / 9.0, FRAC_PI_2),
+            HingePose::Tent => euler_yxz(FRAC_PI_2 + PI / 18.0, -PI / 9.0, -FRAC_PI_2),
+            _ => Quat::axis_angle(Vec3::new(0.0, 0.0, 1.0), roll).mul(euler_yxz(
+                0.0,
+                FRAC_PI_2 * (1.0 - self.presentation_angle / 180.0).powi(3),
+                0.0,
+            )),
+        }
+    }
+
+    pub fn set_screen(&mut self, next: Option<DeviceScreenConfig>, now: f64) {
+        let was_moving = self.moving() || self.motion.needs_frame();
+        if duo_display_key(self.screen.as_ref()) != duo_display_key(next.as_ref()) {
+            self.ready_key = None;
+            self.captured = None;
+        }
+        let previous = self.screen.take();
+        let id = |screen: &Option<DeviceScreenConfig>| screen.as_ref().and_then(|s| s.screen_id);
+        let pose = |screen: &Option<DeviceScreenConfig>| screen.as_ref().and_then(|s| s.hinge_pose);
+        let hinge =
+            |screen: &Option<DeviceScreenConfig>| screen.as_ref().and_then(|s| s.hinge_angle);
+        let turned = |screen: &Option<DeviceScreenConfig>| screen.as_ref().map(|s| s.orientation);
+        let owned_handoff = self.handoff.is_some();
+        if next.is_none()
+            || self
+                .handoff
+                .is_some_and(|handoff| Some(handoff.panel as u32) == id(&next))
+        {
+            self.handoff = None;
+        }
+        let owned_rotation = self.requested_orientation.is_some() && id(&next) == id(&previous);
+        let changed_display = id(&next) != id(&previous);
+        self.requested_orientation = None;
+        let changed_pose = pose(&next).is_some() && pose(&next) != pose(&previous);
+        let folding = self.held_leaf.is_some() && !changed_pose;
+        let rotated = id(&next) == id(&previous)
+            && hinge(&next) == hinge(&previous)
+            && turned(&next) != turned(&previous);
+        let unowned = rotated && !owned_rotation && !owned_handoff && !folding;
+        let cover = id(&next) == Some(1);
+        if self.first_pose
+            || changed_pose
+            || (unowned && pose(&next).is_none() && self.preview.is_none())
+        {
+            self.physical_pose = pose(&next).unwrap_or(if cover {
+                HingePose::Closed
+            } else {
+                HingePose::Open
+            });
+            self.presentation_angle =
+                hinge(&next).map_or(if cover { 0.0 } else { 180.0 }, f64::from);
+        }
+        self.target_angle = self.preview.unwrap_or_else(|| default_angle(next.as_ref()));
+        self.screen = next;
+        if self.first_pose || changed_pose || unowned {
+            self.held_leaf = None;
+            self.view_orientation = turned(&self.screen);
+            if self.first_pose {
+                self.angle = self.target_angle;
+            }
+            let mut target = self.presentation(self.screen.as_ref());
+            if cover
+                && let Some(snap) =
+                    nearest_duo_view(target, &self.snaps_for(DuoPanel::Cover, self.target_angle))
+            {
+                target = snap.rotation;
+            }
+            self.target_presentation = target;
+            self.rest_face = if cover {
+                DuoFace::Cover
+            } else if self.physical_pose == HingePose::Laptop {
+                DuoFace::Right
+            } else {
+                DuoFace::Inside
+            };
+            self.motion.set_pose(target, now, self.first_pose);
+            self.first_pose = false;
+        } else if self.screen.is_some() && changed_display && !owned_handoff && !folding {
+            if let Some(snap) = nearest_duo_view(self.motion.rotation, &self.active_snaps()) {
+                self.rest_face = snap.face;
+                self.motion.set_pose(snap.rotation, now, false);
+            }
+        }
+        if !was_moving {
+            self.last_time = now;
+        }
+        self.apply_pose(now);
+    }
+
+    fn set_hinge_preview(&mut self, next: Option<f64>, now: f64) {
+        if next.is_some_and(|angle| !(angle.is_finite() && (0.0..=180.0).contains(&angle))) {
+            return;
+        }
+        if !self.moving() {
+            self.last_time = now;
+        }
+        self.preview = next;
+        if next.is_some() && self.held_leaf.is_none() && self.rig.is_some() {
+            self.handoff = None;
+            self.requested_orientation = None;
+            self.held_leaf = Some(self.hold_rule());
+            self.motion.set_pose(self.motion.rotation, now, true);
+        }
+        self.hold_motion(now);
+        self.target_angle = next.unwrap_or_else(|| default_angle(self.screen.as_ref()));
+        if let Some(angle) = next {
+            self.angle = angle;
+            self.apply_pose(now);
+        }
+        self.captured = None;
+    }
+
+    pub fn set_control(&mut self, queued: Option<f64>, failed: bool, now: f64) {
+        self.queued = queued;
+        if failed {
+            self.pinch.end();
+            self.set_hinge_preview(queued, now);
+            self.reject_orientation(now);
+        } else if !self.pinch.active() {
+            self.set_hinge_preview(queued, now);
+        }
+    }
+
+    pub fn reject_orientation(&mut self, now: f64) {
+        if self.requested_orientation.is_none() && self.handoff.is_none() {
+            return;
+        }
+        self.handoff = None;
+        self.requested_orientation = None;
+        let orientation = self.screen.as_ref().map(|screen| screen.orientation);
+        self.view_orientation = orientation;
+        let confirmed: Vec<_> = self
+            .active_snaps()
+            .into_iter()
+            .filter(|snap| Some(snap.orientation) == orientation)
+            .collect();
+        if let Some(snap) = nearest_duo_view(self.motion.rotation, &confirmed) {
+            self.rest_face = snap.face;
+            self.motion.set_pose(snap.rotation, now, false);
+        }
+    }
+
+    pub fn fit(&mut self, viewport: (f64, f64, f64, f64)) -> Option<Camera> {
+        self.viewport = Some(viewport);
+        self.camera().map(|(camera, _)| camera)
+    }
+
+    fn camera(&self) -> Option<(Camera, Fold)> {
+        let (rig, (_, _, width, height)) = (self.rig.as_ref()?, self.viewport?);
+        if width <= 0.0 || height <= 0.0 {
+            return None;
+        }
+        let fold = rig.fold(self.angle);
+        Some((
+            Camera::fit(fold.bounds, self.motion.rotation, width / height),
+            fold,
+        ))
+    }
+
+    fn normalized(&self, x: f64, y: f64) -> Option<(f64, f64)> {
+        let (left, top, width, height) = self.viewport?;
+        (width > 0.0 && height > 0.0).then(|| ((x - left) / width, (y - top) / height))
+    }
+
+    pub fn matrices(&self) -> Option<[(Range<usize>, [[f32; 4]; 4], [[f32; 4]; 4]); 2]> {
+        let (camera, fold) = self.camera()?;
+        let rig = self.rig.as_ref()?;
+        Some(
+            [
+                (Leaf::Left, rig.left.clone()),
+                (Leaf::Right, rig.right.clone()),
+            ]
+            .map(|(leaf, range)| {
+                let rigid = fold.leaves[leaf as usize].turned(self.motion.rotation);
+                let (mvp, rotation) = camera.matrices_for(rigid.matrix(), rigid.rotation.matrix());
+                (range, mvp, rotation)
+            }),
+        )
+    }
+
+    pub fn position_of(&self, panel: DuoPanel, raw: (f32, f32)) -> Option<(f64, f64)> {
+        let (camera, fold) = self.camera()?;
+        let (left, top, width, height) = self.viewport?;
+        let world = self
+            .rig
+            .as_ref()?
+            .position_of(&fold, self.motion.rotation, panel, raw);
+        let (x, y) = camera.project(Quat::IDENTITY, world);
+        Some((left + x * width, top + y * height))
+    }
+
+    pub fn active_panel(&self) -> DuoPanel {
+        self.panel()
+    }
+
+    pub fn accepts_touch(&self) -> bool {
+        !self.moving()
+            && self.preview.is_none()
+            && self.requested_orientation.is_none()
+            && self.handoff.is_none()
+            && self.ready_key.is_some()
+            && self.ready_key == duo_display_key(self.screen.as_ref())
+    }
+
+    pub fn frame_ready(&mut self, key: Option<DisplayKey>) {
+        if key.is_some() && key == duo_display_key(self.screen.as_ref()) {
+            self.ready_key = key;
+        }
+    }
+
+    fn screen_point(&mut self, x: f64, y: f64, captured: bool, now: f64) -> Option<(f32, f32)> {
+        if self.moving()
+            || self.preview.is_some()
+            || self.requested_orientation.is_some()
+            || self.handoff.is_some()
+        {
+            return None;
+        }
+        self.apply_pose(now);
+        let key = duo_display_key(self.screen.as_ref());
+        if key.is_none() || self.ready_key != key {
+            self.captured = None;
+            return None;
+        }
+        let key = key?;
+        let (camera, fold) = self.camera()?;
+        let (x, y) = self.normalized(x, y)?;
+        let rig = self.rig.clone()?;
+        let rotation = self.motion.rotation;
+        if captured && let Some(held) = self.captured.filter(|held| held.key == key) {
+            let (u, v) = rig.plane_uv(&fold, &camera, rotation, held.display, x, y)?;
+            return Some(duo_raw_point(rig.displays[held.display].panel, u, v));
+        }
+        let hit = rig.hit(&fold, &camera, rotation, x, y)?;
+        if Some(hit.panel as u32) != key.0 {
+            return None;
+        }
+        self.captured = Some(Captured {
+            display: hit.display,
+            key,
+        });
+        Some(duo_raw_point(hit.panel, hit.uv.0, hit.uv.1))
+    }
+
+    fn apply(&mut self, actions: Vec<Action>, now: f64) -> Vec<(TouchPhase, (f32, f32))> {
+        let mut touches = Vec::new();
+        for action in actions {
+            match action {
+                Action::Touch(phase, point) => touches.push((phase, point)),
+                Action::Orbit(x, y) => {
+                    self.held_leaf = None;
+                    self.motion.orbit(x, y, now);
+                }
+                Action::Active(active, Mode::Touch) => {
+                    self.touch_active = active;
+                    self.hold_motion(now);
+                }
+                Action::Active(active, Mode::Orbit) => {
+                    if active {
+                        self.held_leaf = None;
+                    }
+                    self.release(now, |motion| motion.drag_active(active, now));
+                }
+            }
+        }
+        touches
+    }
+
+    pub fn press(
+        &mut self,
+        x: f64,
+        y: f64,
+        orbit: bool,
+        now: f64,
+    ) -> Vec<(TouchPhase, (f32, f32))> {
+        if self.interaction.mode().is_some() {
+            return Vec::new();
+        }
+        let screen = if orbit {
+            None
+        } else {
+            self.screen_point(x, y, false, now)
+        };
+        let actions = self.interaction.begin((x, y), screen);
+        self.apply(actions, now)
+    }
+
+    pub fn drag(&mut self, x: f64, y: f64, now: f64) -> Vec<(TouchPhase, (f32, f32))> {
+        let screen = match self.interaction.mode() {
+            Some(Mode::Touch) => self.screen_point(x, y, true, now),
+            _ => None,
+        };
+        let actions = self.interaction.move_to((x, y), screen);
+        self.apply(actions, now)
+    }
+
+    pub fn lift(&mut self, now: f64) -> Vec<(TouchPhase, (f32, f32))> {
+        let actions = self.interaction.end();
+        self.apply(actions, now)
+    }
+
+    pub fn wheel(&mut self, dx: f64, dy: f64, now: f64) -> bool {
+        match self.interaction.navigate(dx, dy) {
+            Some(action) => {
+                self.apply(vec![action], now);
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn end_wheel(&mut self, now: f64) {
+        let actions = self.interaction.end_wheel().into_iter().collect();
+        self.apply(actions, now);
+    }
+
+    fn begin_hinge(&mut self, x: f64, y: f64, now: f64) -> bool {
+        if self.screen.is_none() {
+            return false;
+        }
+        self.apply_pose(now);
+        let (Some((camera, fold)), Some((x, y)), Some(rig)) =
+            (self.camera(), self.normalized(x, y), self.rig.clone())
+        else {
+            return false;
+        };
+        if rig
+            .leaf_at(&fold, &camera, self.motion.rotation, x, y)
+            .is_none()
+        {
+            return false;
+        }
+        self.handoff = None;
+        self.requested_orientation = None;
+        self.held_leaf = Some(self.hold_rule());
+        self.motion.set_pose(self.motion.rotation, now, true);
+        self.captured = None;
+        true
+    }
+
+    pub fn pinch_begin(&mut self, x: f64, y: f64, now: f64) -> bool {
+        if self.pinch.active() {
+            return true;
+        }
+        let contains = self.begin_hinge(x, y, now);
+        let angle = self
+            .queued
+            .unwrap_or_else(|| default_angle(self.screen.as_ref()));
+        self.pinch.begin(contains, angle)
+    }
+
+    pub fn pinch_move(&mut self, log_scale: f64, now: f64) {
+        if let Some(angle) = self.pinch.moved(log_scale) {
+            self.set_hinge_preview(Some(angle), now);
+            self.requests.push(HingeCommand::Angle(angle));
+        }
+    }
+
+    pub fn pinch_end(&mut self, now: f64) {
+        if self.pinch.end() {
+            self.set_hinge_preview(self.queued, now);
+        }
+    }
+
+    pub fn pinching(&self) -> bool {
+        self.pinch.active()
+    }
+
+    pub fn restore(&mut self, now: f64) {
+        self.held_leaf = None;
+        self.requested_orientation = None;
+        self.handoff = None;
+        let orientation = self.screen.as_ref().map(|screen| screen.orientation);
+        let snap = self
+            .active_snaps()
+            .into_iter()
+            .find(|snap| Some(snap.orientation) == orientation);
+        if let Some(snap) = snap
+            && Some(snap.orientation) != self.view_orientation
+        {
+            self.view_orientation = Some(snap.orientation);
+            self.requested_orientation = Some(snap.orientation);
+            self.requests
+                .push(HingeCommand::Orientation(snap.orientation));
+        }
+        let target = snap.map_or(self.target_presentation, |snap| snap.rotation);
+        self.motion.reset(target, now);
+        self.apply_pose(now);
+    }
+
+    pub fn advance(&mut self, now: f64, reduced: bool) -> bool {
+        let mut changed = false;
+        if let Some(handoff) = self.handoff
+            && now >= handoff.deadline
+        {
+            self.handoff = None;
+            if let Some(snap) = nearest_duo_view(self.motion.rotation, &self.active_snaps()) {
+                self.rest_face = snap.face;
+                self.motion.set_pose(snap.rotation, now, false);
+            }
+            changed = true;
+        }
+        let elapsed = (now - self.last_time) / 1000.0;
+        let elapsed = if elapsed == 0.0 || elapsed.is_nan() {
+            0.016
+        } else {
+            elapsed
+        };
+        let amount = if reduced {
+            1.0
+        } else {
+            1.0 - (-14.0 * elapsed.max(0.0)).exp()
+        };
+        self.last_time = now;
+        let folding = self.moving();
+        let orbiting = self.motion.advance(now, reduced);
+        if folding {
+            self.angle += (self.target_angle - self.angle) * amount;
+            if (self.angle - self.target_angle).abs() <= 0.01 {
+                self.angle = self.target_angle;
+            }
+            self.apply_pose(now);
+        }
+        if orbiting {
+            self.apply_pose(now);
+        }
+        changed || folding || orbiting
+    }
+
+    pub fn needs_frame(&self) -> bool {
+        self.moving() || self.motion.needs_frame()
+    }
+
+    pub fn handoff_deadline(&self) -> Option<f64> {
+        self.handoff.map(|handoff| handoff.deadline)
+    }
+
+    pub fn take_requests(&mut self) -> Vec<HingeCommand> {
+        std::mem::take(&mut self.requests)
+    }
+}
+
+fn sane(size: (u32, u32), fallback: (u32, u32)) -> (u32, u32) {
+    if size.0 > 0 && size.1 > 0 {
+        size
+    } else {
+        fallback
+    }
 }
 
 #[cfg(test)]
@@ -1002,5 +1753,326 @@ mod tests {
         assert!(!duo_frame_matches(COVER_SIZE, INNER_SIZE));
         assert!(duo_frame_matches(COVER_SIZE, COVER_SIZE));
         assert!(!duo_frame_matches((0, 10), COVER_SIZE));
+    }
+
+    const VIEWPORT: (f64, f64, f64, f64) = (100.0, 50.0, 500.0, 700.0);
+
+    fn inner_screen(angle: u8, pose: Option<HingePose>) -> DeviceScreenConfig {
+        DeviceScreenConfig {
+            width: 2007,
+            height: 2853,
+            orientation: DeviceOrientation::Portrait,
+            screen_id: Some(3),
+            supports_hinge_angle: Some(true),
+            supports_physical_orientation: Some(true),
+            hinge_angle: Some(angle),
+            hinge_pose: pose,
+        }
+    }
+
+    fn cover_screen(angle: u8, pose: Option<HingePose>) -> DeviceScreenConfig {
+        DeviceScreenConfig {
+            width: 1398,
+            height: 2034,
+            screen_id: Some(1),
+            ..inner_screen(angle, pose)
+        }
+    }
+
+    fn viewer(screen: DeviceScreenConfig) -> DuoViewer {
+        let mut viewer = DuoViewer::default();
+        viewer.set_rig(COVER_SIZE, INNER_SIZE);
+        viewer.fit(VIEWPORT);
+        viewer.set_screen(Some(screen), 0.0);
+        viewer.advance(0.0, true);
+        viewer
+    }
+
+    fn ready(viewer: &mut DuoViewer) {
+        let key = duo_display_key(viewer.screen());
+        viewer.frame_ready(key);
+    }
+
+    fn settle(viewer: &mut DuoViewer, from: f64) -> f64 {
+        let mut now = from;
+        while viewer.needs_frame() && now < from + 10_000.0 {
+            now += 16.0;
+            viewer.advance(now, false);
+        }
+        now
+    }
+
+    #[test]
+    fn pinches_only_a_hit_device_accumulates_independently_of_readback_clamps_and_cancels() {
+        let mut pinch = DuoPinch::default();
+        assert!(!pinch.begin(false, 90.0));
+        assert_eq!(pinch.moved(1.0), None);
+        assert!(pinch.begin(true, 90.0));
+        assert_eq!(pinch.moved(0.25), Some(120.0));
+        assert_eq!(pinch.moved(0.25), Some(150.0));
+        assert_eq!(pinch.moved(2.0), Some(180.0));
+        assert_eq!(pinch.moved(2.0), None, "already at the stop");
+        assert_eq!(pinch.moved(-3.0), Some(0.0));
+        assert_eq!(pinch.moved(f64::NAN), None);
+        assert!(pinch.end());
+        assert_eq!(pinch.moved(1.0), None);
+        assert!(!pinch.end());
+        assert!(!pinch.active());
+        let step = pinch_log_scale(0.1).unwrap();
+        assert!((step - 1.1f64.ln()).abs() < 1e-6, "{step}");
+        assert_eq!(pinch_log_scale(-1.0), None);
+        assert_eq!(pinch_log_scale(f32::NAN), None);
+    }
+
+    #[test]
+    fn the_rig_is_rebuilt_only_when_a_display_size_changes() {
+        let mut viewer = DuoViewer::default();
+        let first = viewer.set_rig(COVER_SIZE, INNER_SIZE).id;
+        assert_eq!(viewer.set_rig(COVER_SIZE, INNER_SIZE).id, first);
+        assert_eq!(viewer.set_rig((0, 0), INNER_SIZE).id, first);
+        assert_ne!(viewer.set_rig(COVER_SIZE, (2007, 2853)).id, first);
+    }
+
+    #[test]
+    fn touches_only_the_active_display_and_only_once_its_frame_was_painted() {
+        let inner = inner_screen(180, Some(HingePose::Open));
+        let mut viewer = viewer(inner.clone());
+        let (x, y) = viewer.position_of(DuoPanel::Inner, (0.75, 0.75)).unwrap();
+        assert!(
+            viewer.press(x, y, false, 0.0).is_empty(),
+            "no painted frame yet"
+        );
+        viewer.lift(0.0);
+        ready(&mut viewer);
+        let touches = viewer.press(x, y, false, 0.0);
+        assert!(
+            matches!(touches[..], [(TouchPhase::Begin, (u, v))] if (u - 0.75).abs() < 1e-3 && (v - 0.75).abs() < 1e-3),
+            "{touches:?}"
+        );
+        let moved = viewer.drag(x + 10_000.0, y, 16.0);
+        assert!(
+            matches!(moved[..], [(TouchPhase::Move, (u, v))] if (0.0..=1.0).contains(&u) && (0.0..=1.0).contains(&v)),
+            "{moved:?}"
+        );
+        assert!(matches!(viewer.lift(32.0)[..], [(TouchPhase::End, _)]));
+
+        let stale = duo_display_key(Some(&inner_screen(90, None)));
+        viewer.set_screen(Some(cover_screen(180, Some(HingePose::Open))), 40.0);
+        viewer.frame_ready(stale);
+        assert!(
+            !viewer.accepts_touch(),
+            "a stale frame key never opens touch"
+        );
+        ready(&mut viewer);
+        assert!(
+            viewer.press(x, y, false, 40.0).is_empty(),
+            "the inner display is not the elected one"
+        );
+        viewer.lift(40.0);
+    }
+
+    #[test]
+    fn snaps_onto_the_opposite_screen_requests_the_handoff_once_and_keeps_the_view_on_readback() {
+        let inner = inner_screen(90, None);
+        let mut viewer = viewer(inner.clone());
+        ready(&mut viewer);
+        assert!(viewer.accepts_touch());
+        let half_turn = PI / 3.0 * VIEWPORT.2;
+        assert!(viewer.wheel(half_turn, 0.0, 10.0));
+        viewer.end_wheel(10.0);
+        viewer.advance(20.0, true);
+        assert_eq!(
+            viewer.take_requests(),
+            [HingeCommand::Physical(DeviceFacing::FaceDown)]
+        );
+        assert!(
+            !viewer.accepts_touch(),
+            "no touch until the hub elects the cover"
+        );
+        let chosen = viewer.motion.rotation;
+        viewer.set_screen(Some(inner.clone()), 30.0);
+        viewer.advance(40.0, true);
+        assert!(viewer.motion.rotation.angle_to(chosen) < 1e-6);
+        viewer.set_screen(Some(cover_screen(90, None)), 50.0);
+        viewer.advance(60.0, true);
+        assert!(viewer.motion.rotation.angle_to(chosen) < 1e-6);
+        assert_eq!(viewer.handoff_deadline(), None, "the cover confirmed");
+        viewer.advance(6000.0, true);
+        assert!(viewer.take_requests().is_empty());
+        assert!(viewer.motion.rotation.angle_to(chosen) < 1e-6);
+
+        assert!(viewer.wheel(-half_turn, 0.0, 6010.0));
+        viewer.end_wheel(6010.0);
+        viewer.advance(6020.0, true);
+        assert_eq!(
+            viewer.take_requests(),
+            [HingeCommand::Physical(DeviceFacing::FaceUp)]
+        );
+        let reverse = viewer.motion.rotation;
+        viewer.set_screen(Some(inner), 6030.0);
+        viewer.advance(6040.0, true);
+        assert!(viewer.motion.rotation.angle_to(reverse) < 1e-6);
+        viewer.advance(12_000.0, true);
+        assert!(viewer.take_requests().is_empty());
+        assert!(!viewer.needs_frame());
+    }
+
+    #[test]
+    fn rolls_an_unconfirmed_opposite_screen_snap_back_to_the_active_screen_after_the_timeout() {
+        let mut viewer = viewer(inner_screen(90, None));
+        assert!(viewer.wheel(PI / 3.0 * VIEWPORT.2, 0.0, 10.0));
+        viewer.end_wheel(10.0);
+        viewer.advance(20.0, true);
+        let unconfirmed = viewer.motion.rotation;
+        assert_eq!(
+            viewer.take_requests(),
+            [HingeCommand::Physical(DeviceFacing::FaceDown)]
+        );
+        assert_eq!(viewer.handoff_deadline(), Some(10.0 + HANDOFF_MS));
+        viewer.advance(4000.0, true);
+        assert!(viewer.motion.rotation.angle_to(unconfirmed) < 1e-6);
+        viewer.advance(5010.0, true);
+        assert!(viewer.motion.rotation.angle_to(unconfirmed) > 0.5);
+        assert!(viewer.take_requests().is_empty(), "no second request");
+        assert!(!viewer.needs_frame());
+    }
+
+    #[test]
+    fn a_failed_or_timed_out_command_drops_the_preview_and_snaps_back() {
+        let mut viewer = viewer(inner_screen(90, None));
+        assert!(viewer.wheel(PI / 3.0 * VIEWPORT.2, 0.0, 10.0));
+        viewer.end_wheel(10.0);
+        viewer.advance(20.0, true);
+        let unconfirmed = viewer.motion.rotation;
+        viewer.take_requests();
+        viewer.set_control(None, true, 30.0);
+        viewer.advance(40.0, true);
+        assert_eq!(viewer.handoff_deadline(), None);
+        assert!(viewer.motion.rotation.angle_to(unconfirmed) > 0.5);
+
+        let (x, y) = viewer.position_of(DuoPanel::Inner, (0.5, 0.25)).unwrap();
+        assert!(viewer.pinch_begin(x, y, 50.0));
+        viewer.pinch_move(-0.25, 50.0);
+        assert_eq!(viewer.take_requests(), [HingeCommand::Angle(60.0)]);
+        viewer.set_control(Some(60.0), false, 60.0);
+        assert!(
+            viewer.pinching(),
+            "pushes while pinching keep the accumulator"
+        );
+        viewer.set_control(None, true, 70.0);
+        assert!(!viewer.pinching());
+        viewer.advance(80.0, true);
+        assert_eq!(viewer.angle(), 90.0, "back to the hub angle");
+        viewer.set_control(None, false, 90.0);
+        viewer.advance(100.0, true);
+        assert_eq!(viewer.angle(), 90.0);
+        assert!(viewer.take_requests().is_empty());
+    }
+
+    #[test]
+    fn previewing_the_hinge_keeps_the_held_leaf_still_in_camera_space_and_blocks_unconfirmed_touch()
+    {
+        for start in [(0.5f32, 0.75f32), (0.5, 0.25)] {
+            let mut viewer = viewer(inner_screen(180, Some(HingePose::Open)));
+            ready(&mut viewer);
+            assert!(!viewer.begin_hinge(-1000.0, -1000.0, 0.0));
+            let (x, y) = viewer.position_of(DuoPanel::Inner, start).unwrap();
+            assert!(viewer.begin_hinge(x, y, 0.0));
+            let held = |viewer: &DuoViewer, angle| {
+                viewer
+                    .motion
+                    .rotation
+                    .mul(leaf_rotation(Leaf::Right, angle))
+            };
+            let partner = |viewer: &DuoViewer, angle| {
+                viewer.motion.rotation.mul(leaf_rotation(Leaf::Left, angle))
+            };
+            let orientation = held(&viewer, 180.0);
+            let partner_start = partner(&viewer, 180.0);
+            let mut now = 0.0;
+            for value in [150u8, 90, 30, 0, 30, 90, 180] {
+                now += 100.0;
+                let angle = f64::from(value);
+                viewer.set_hinge_preview(Some(angle), now);
+                viewer.advance(now, true);
+                assert!(
+                    held(&viewer, angle).angle_to(orientation) < 1e-6,
+                    "{start:?} {value}"
+                );
+                assert!(!viewer.accepts_touch());
+                if value == 90 {
+                    assert!(partner(&viewer, angle).angle_to(partner_start) > 1.0);
+                }
+                let next = if value == 0 {
+                    cover_screen(0, None)
+                } else {
+                    inner_screen(value, None)
+                };
+                let changed = duo_display_key(Some(&next)) != duo_display_key(viewer.screen());
+                viewer.set_screen(Some(next.clone()), now);
+                viewer.set_hinge_preview(None, now);
+                viewer.advance(now + 8.0, true);
+                viewer.set_screen(Some(next), now + 8.0);
+                viewer.advance(now + 16.0, true);
+                assert!(
+                    held(&viewer, angle).angle_to(orientation) < 1e-6,
+                    "{start:?} {value} after readback"
+                );
+                assert_eq!(
+                    viewer.accepts_touch(),
+                    !changed,
+                    "{start:?} {value}: a new display waits for its frame"
+                );
+                ready(&mut viewer);
+                assert!(viewer.accepts_touch(), "{start:?} {value}");
+                if value == 0 {
+                    let (x, y) = viewer.position_of(DuoPanel::Cover, (0.5, 0.5)).unwrap();
+                    assert!(viewer.begin_hinge(x, y, now + 16.0));
+                }
+            }
+            assert!(viewer.take_requests().is_empty());
+            assert!(!viewer.needs_frame());
+        }
+    }
+
+    #[test]
+    fn restore_faces_the_active_display_and_asks_for_an_orientation_only_when_the_view_turned() {
+        let cover = cover_screen(0, Some(HingePose::Closed));
+        let mut viewer = viewer(cover.clone());
+        let normal = |viewer: &DuoViewer| {
+            viewer
+                .motion
+                .rotation
+                .rotate(leaf_rotation(Leaf::Left, viewer.angle()).rotate(Vec3::new(0.0, 0.0, -1.0)))
+        };
+        assert!(normal(&viewer).z > 0.99, "{:?}", normal(&viewer));
+        assert!(viewer.wheel(200.0, 0.0, 10.0));
+        viewer.end_wheel(10.0);
+        let now = settle(&mut viewer, 10.0);
+        assert!(normal(&viewer).z < 0.99, "the snap keeps a little yaw");
+        assert!(viewer.take_requests().is_empty());
+        viewer.restore(now);
+        let now = settle(&mut viewer, now);
+        assert!(normal(&viewer).z > 0.99);
+        assert!(viewer.take_requests().is_empty(), "already upright");
+
+        assert!(viewer.wheel(0.0, PI / 0.006, now));
+        viewer.end_wheel(now);
+        let now = settle(&mut viewer, now);
+        assert_eq!(
+            viewer.take_requests(),
+            [HingeCommand::Orientation(
+                DeviceOrientation::PortraitUpsideDown
+            )]
+        );
+        viewer.set_screen(Some(cover), now);
+        viewer.restore(now);
+        let now = settle(&mut viewer, now);
+        assert_eq!(
+            viewer.take_requests(),
+            [HingeCommand::Orientation(DeviceOrientation::Portrait)]
+        );
+        assert!(normal(&viewer).z > 0.99);
+        assert!(!viewer.needs_frame(), "{now}");
     }
 }
