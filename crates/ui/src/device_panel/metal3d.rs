@@ -1,5 +1,6 @@
 use std::ffi::c_void;
 use std::ptr::{NonNull, null_mut};
+use std::sync::OnceLock;
 
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -91,24 +92,15 @@ struct Uniforms {
 pub enum Source<'a> {
     Surface(&'a Surface),
     Bgra {
-        id: usize,
         bytes: &'a [u8],
         width: usize,
         height: usize,
     },
 }
 
-impl Source<'_> {
-    fn id(&self) -> usize {
-        match self {
-            Source::Surface(surface) => CFRetained::as_ptr(&surface.0).as_ptr() as usize,
-            Source::Bgra { id, .. } => *id,
-        }
-    }
-}
-
 pub struct Job<'a> {
     pub source: Source<'a>,
+    pub frame: usize,
     pub model: &'a Model,
     pub mvp: [[f32; 4]; 4],
     pub rotation: [[f32; 4]; 4],
@@ -124,13 +116,19 @@ struct Targets {
     outputs: Vec<Surface>,
 }
 
-pub struct Renderer {
+struct Shared {
     device: Retained<Device>,
-    queue: Retained<ProtocolObject<dyn objc2_metal::MTLCommandQueue>>,
     scene: Pipeline,
     luma: Pipeline,
     chroma: Pipeline,
     depth_state: Retained<ProtocolObject<dyn MTLDepthStencilState>>,
+}
+
+static SHARED: OnceLock<Option<Shared>> = OnceLock::new();
+
+pub struct Renderer {
+    shared: &'static Shared,
+    queue: Retained<ProtocolObject<dyn objc2_metal::MTLCommandQueue>>,
     cache: CFRetained<CVMetalTextureCache>,
     mesh: Option<(u64, Retained<ProtocolObject<dyn MTLBuffer>>, usize)>,
     bgra: Option<(usize, Texture)>,
@@ -138,6 +136,7 @@ pub struct Renderer {
     next: usize,
     schedule: Schedule,
     shown: Option<Surface>,
+    pub failures: u32,
     pub gpu_ms: f64,
 }
 
@@ -192,8 +191,8 @@ fn texture(
     device.newTextureWithDescriptor(&descriptor)
 }
 
-impl Renderer {
-    pub fn new() -> Option<Self> {
+impl Shared {
+    fn compile() -> Option<Self> {
         let device = MTLCreateSystemDefaultDevice()?;
         let library = device
             .newLibraryWithSource_options_error(&NSString::from_str(SHADERS), None)
@@ -223,27 +222,7 @@ impl Renderer {
         let depth = MTLDepthStencilDescriptor::new();
         depth.setDepthCompareFunction(MTLCompareFunction::Less);
         depth.setDepthWriteEnabled(true);
-        let usage = CFNumber::new_i32(
-            (MTLTextureUsage::ShaderRead | MTLTextureUsage::RenderTarget).0 as i32,
-        );
-        // SAFETY: the key is an immutable CoreVideo constant.
-        let keys = unsafe { [kCVMetalTextureUsage] };
-        let values: [&CFType; 1] = [usage.as_ref()];
-        let attributes = CFDictionary::from_slices(&keys, &values);
-        let mut cache: *mut CVMetalTextureCache = null_mut();
-        // SAFETY: the device, attributes and out pointer outlive the call.
-        let status = unsafe {
-            CVMetalTextureCache::create(
-                None,
-                None,
-                &device,
-                Some(attributes.as_opaque()),
-                NonNull::from(&mut cache),
-            )
-        };
-        let cache = NonNull::new(cache).filter(|_| status == 0)?;
         Some(Self {
-            queue: device.newCommandQueue()?,
             scene: pipeline(
                 "scene_vertex",
                 "scene_fragment",
@@ -260,15 +239,45 @@ impl Renderer {
                 1,
             )?,
             depth_state: device.newDepthStencilStateWithDescriptor(&depth)?,
+            device,
+        })
+    }
+}
+
+impl Renderer {
+    pub fn new() -> Option<Self> {
+        let shared = SHARED.get_or_init(Shared::compile).as_ref()?;
+        let usage = CFNumber::new_i32(
+            (MTLTextureUsage::ShaderRead | MTLTextureUsage::RenderTarget).0 as i32,
+        );
+        // SAFETY: the key is an immutable CoreVideo constant.
+        let keys = unsafe { [kCVMetalTextureUsage] };
+        let values: [&CFType; 1] = [usage.as_ref()];
+        let attributes = CFDictionary::from_slices(&keys, &values);
+        let mut cache: *mut CVMetalTextureCache = null_mut();
+        // SAFETY: the device, attributes and out pointer outlive the call.
+        let status = unsafe {
+            CVMetalTextureCache::create(
+                None,
+                None,
+                &shared.device,
+                Some(attributes.as_opaque()),
+                NonNull::from(&mut cache),
+            )
+        };
+        let cache = NonNull::new(cache).filter(|_| status == 0)?;
+        Some(Self {
+            queue: shared.device.newCommandQueue()?,
             // SAFETY: a successful Create returns a +1 reference.
             cache: unsafe { CFRetained::from_raw(cache) },
-            device,
+            shared,
             mesh: None,
             bgra: None,
             targets: None,
             next: 0,
             schedule: Schedule::default(),
             shown: None,
+            failures: 0,
             gpu_ms: 0.0,
         })
     }
@@ -315,21 +324,21 @@ impl Renderer {
         self.targets = Some(Targets {
             size,
             msaa: texture(
-                &self.device,
+                &self.shared.device,
                 MTLPixelFormat::BGRA8Unorm,
                 size,
                 SAMPLES,
                 render,
             )?,
             depth: texture(
-                &self.device,
+                &self.shared.device,
                 MTLPixelFormat::Depth32Float,
                 size,
                 SAMPLES,
                 render,
             )?,
             resolve: texture(
-                &self.device,
+                &self.shared.device,
                 MTLPixelFormat::BGRA8Unorm,
                 size,
                 1,
@@ -350,7 +359,7 @@ impl Renderer {
         let pointer = NonNull::new(model.vertices.as_ptr().cast_mut().cast::<c_void>())?;
         // SAFETY: `pointer` addresses `bytes` readable bytes; Metal copies them before returning.
         let buffer = unsafe {
-            self.device.newBufferWithBytes_length_options(
+            self.shared.device.newBufferWithBytes_length_options(
                 pointer,
                 bytes,
                 MTLResourceOptions::StorageModeShared,
@@ -384,7 +393,7 @@ impl Renderer {
             )
         };
         descriptor.setUsage(MTLTextureUsage::ShaderRead);
-        let texture = self.device.newTextureWithDescriptor(&descriptor)?;
+        let texture = self.shared.device.newTextureWithDescriptor(&descriptor)?;
         let region = MTLRegion {
             origin: MTLOrigin { x: 0, y: 0, z: 0 },
             size: MTLSize {
@@ -412,7 +421,7 @@ impl Renderer {
             return None;
         }
         let key = RenderKey {
-            source: job.source.id(),
+            source: job.frame,
             model: job.model.id,
             mvp: job.mvp,
             size,
@@ -426,6 +435,9 @@ impl Renderer {
         let rendered = self.draw(&job, size);
         if rendered.is_none() {
             self.schedule.forget();
+            self.failures += 1;
+        } else {
+            self.failures = 0;
         }
         self.shown = rendered.clone();
         rendered
@@ -447,12 +459,11 @@ impl Renderer {
                 (0, [luma.clone(), chroma, luma])
             }
             Source::Bgra {
-                id,
                 bytes,
                 width,
                 height,
             } => {
-                let texture = self.upload(*id, bytes, (*width, *height))?;
+                let texture = self.upload(job.frame, bytes, (*width, *height))?;
                 (1, [texture.clone(), texture.clone(), texture])
             }
         };
@@ -490,8 +501,8 @@ impl Renderer {
             depth.setClearDepth(1.0);
         }
         let encoder = commands.renderCommandEncoderWithDescriptor(&pass)?;
-        encoder.setRenderPipelineState(&self.scene);
-        encoder.setDepthStencilState(Some(&self.depth_state));
+        encoder.setRenderPipelineState(&self.shared.scene);
+        encoder.setDepthStencilState(Some(&self.shared.depth_state));
         let uniforms = Uniforms {
             mvp: job.mvp,
             model: job.rotation,
@@ -511,7 +522,10 @@ impl Renderer {
             encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, *count);
         }
         encoder.endEncoding();
-        for (target, pipeline) in [(&y_plane, &self.luma), (&c_plane, &self.chroma)] {
+        for (target, pipeline) in [
+            (&y_plane, &self.shared.luma),
+            (&c_plane, &self.shared.chroma),
+        ] {
             let pass = MTLRenderPassDescriptor::new();
             // SAFETY: attachment 0 exists and the target matches the pipeline's format.
             unsafe {
@@ -568,28 +582,29 @@ mod tests {
         }
     }
 
-    fn filled(width: usize, height: usize, (y, cb, cr): (u8, u8, u8)) -> Surface {
+    fn filled(width: usize, height: usize, color: (u8, u8, u8)) -> Surface {
         let surface = pixel_buffer(width, height).unwrap();
-        planes(
-            &surface,
-            true,
-            |luma, luma_stride, chroma, chroma_stride| {
-                for row in 0..height {
-                    // SAFETY: each row holds at least `width` luma bytes.
-                    unsafe { std::ptr::write_bytes(luma.add(row * luma_stride), y, width) };
-                }
-                for row in 0..height / 2 {
-                    for column in 0..width / 2 {
-                        // SAFETY: each chroma row holds `width / 2` interleaved CbCr pairs.
-                        unsafe {
-                            *chroma.add(row * chroma_stride + column * 2) = cb;
-                            *chroma.add(row * chroma_stride + column * 2 + 1) = cr;
-                        }
+        fill(&surface, color);
+        surface
+    }
+
+    fn fill(surface: &Surface, (y, cb, cr): (u8, u8, u8)) {
+        let (width, height) = (surface.width() as usize, surface.height() as usize);
+        planes(surface, true, |luma, luma_stride, chroma, chroma_stride| {
+            for row in 0..height {
+                // SAFETY: each row holds at least `width` luma bytes.
+                unsafe { std::ptr::write_bytes(luma.add(row * luma_stride), y, width) };
+            }
+            for row in 0..height / 2 {
+                for column in 0..width / 2 {
+                    // SAFETY: each chroma row holds `width / 2` interleaved CbCr pairs.
+                    unsafe {
+                        *chroma.add(row * chroma_stride + column * 2) = cb;
+                        *chroma.add(row * chroma_stride + column * 2 + 1) = cr;
                     }
                 }
-            },
-        );
-        surface
+            }
+        });
     }
 
     fn sample(surface: &Surface, x: usize, y: usize) -> (u8, u8, u8) {
@@ -613,12 +628,19 @@ mod tests {
         d(actual.0, expected.0) && d(actual.1, expected.1) && d(actual.2, expected.2)
     }
 
-    fn job<'a>(source: Source<'a>, model: &'a Model, pose: Quat, size: (usize, usize)) -> Job<'a> {
+    fn job<'a>(
+        source: Source<'a>,
+        frame: usize,
+        model: &'a Model,
+        pose: Quat,
+        size: (usize, usize),
+    ) -> Job<'a> {
         let rotation = model.rotation(pose);
         let camera = Camera::fit(model.bounds(None), rotation, size.0 as f64 / size.1 as f64);
         let (mvp, rotation) = camera.matrices(rotation);
         Job {
             source,
+            frame,
             model,
             mvp,
             rotation,
@@ -634,7 +656,13 @@ mod tests {
         let model = Model::new(&IOS_PHONE, 590.0 / 1280.0, DeviceOrientation::Portrait);
         let size = (800, 1000);
         let first = renderer
-            .render(job(Source::Surface(&source), &model, Quat::IDENTITY, size))
+            .render(job(
+                Source::Surface(&source),
+                1,
+                &model,
+                Quat::IDENTITY,
+                size,
+            ))
             .unwrap();
         assert_eq!((first.width(), first.height()), (800, 1000));
         assert!(
@@ -655,7 +683,13 @@ mod tests {
         );
 
         let again = renderer
-            .render(job(Source::Surface(&source), &model, Quat::IDENTITY, size))
+            .render(job(
+                Source::Surface(&source),
+                1,
+                &model,
+                Quat::IDENTITY,
+                size,
+            ))
             .unwrap();
         assert_eq!(
             again.buffer() as *const _,
@@ -664,7 +698,7 @@ mod tests {
         );
         let turned = Quat::axis_angle(Vec3::new(0.0, 1.0, 0.0), 0.5);
         let next = renderer
-            .render(job(Source::Surface(&source), &model, turned, size))
+            .render(job(Source::Surface(&source), 1, &model, turned, size))
             .unwrap();
         assert_ne!(
             next.buffer() as *const _,
@@ -676,11 +710,11 @@ mod tests {
         let image = renderer
             .render(job(
                 Source::Bgra {
-                    id: 7,
                     bytes: &bgra,
                     width: 40,
                     height: 80,
                 },
+                2,
                 &model,
                 Quat::IDENTITY,
                 size,
@@ -711,7 +745,7 @@ mod tests {
                 let pose = Quat::axis_angle(Vec3::new(0.0, 1.0, 0.0), frame as f64 * 0.01);
                 let started = std::time::Instant::now();
                 renderer
-                    .render(job(Source::Surface(&source), &model, pose, size))
+                    .render(job(Source::Surface(&source), 1, &model, pose, size))
                     .unwrap();
                 if frame >= 20 {
                     wall.push(started.elapsed().as_secs_f64() * 1e3);
@@ -729,5 +763,45 @@ mod tests {
             );
             assert!(mean(&wall) < 16.0);
         }
+    }
+
+    #[test]
+    fn a_decoder_buffer_reused_for_a_new_frame_renders_the_new_picture() {
+        let mut renderer = Renderer::new().expect("a Metal device");
+        let source = filled(590, 1280, (150, 90, 170));
+        let model = Model::new(&IOS_PHONE, 590.0 / 1280.0, DeviceOrientation::Portrait);
+        let size = (800, 1000);
+        renderer
+            .render(job(
+                Source::Surface(&source),
+                1,
+                &model,
+                Quat::IDENTITY,
+                size,
+            ))
+            .unwrap();
+        fill(&source, (60, 140, 100));
+        let next = renderer
+            .render(job(
+                Source::Surface(&source),
+                2,
+                &model,
+                Quat::IDENTITY,
+                size,
+            ))
+            .unwrap();
+        assert!(
+            near(sample(&next, 400, 500), (60.0, 140.0, 100.0), 2.0),
+            "{:?}",
+            sample(&next, 400, 500)
+        );
+    }
+
+    #[test]
+    fn a_second_renderer_reuses_the_shaders_the_first_one_compiled() {
+        let first = Renderer::new().expect("a Metal device");
+        let second = Renderer::new().expect("a Metal device");
+        assert!(std::ptr::eq(first.shared, second.shared));
+        assert!(!std::ptr::eq(&*first.queue, &*second.queue));
     }
 }

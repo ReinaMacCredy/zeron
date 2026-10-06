@@ -464,6 +464,24 @@ impl DevicePanel {
         cx.notify();
     }
 
+    fn restore_ready(&self, cx: &App) -> bool {
+        let Some(view) = self.view.as_ref().map(|view| view.read(cx)) else {
+            return false;
+        };
+        if view
+            .screen()
+            .is_none_or(|screen| screen.orientation == DeviceOrientation::Portrait)
+        {
+            return true;
+        }
+        match self.controls() {
+            Some(controls) if view.platform() == DevicePlatform::Android => {
+                !controls.read(cx).disabled()
+            }
+            _ => view.input_live(),
+        }
+    }
+
     fn restore_three_d(&mut self, cx: &mut Context<Self>) {
         let Some(view) = self.view.clone() else {
             return;
@@ -1441,6 +1459,61 @@ pub(crate) mod tests {
         });
         cx.run_until_parked();
         assert!(!shown(cx), "the iPhone Duo shows the flat view only");
+    }
+
+    #[gpui::test]
+    fn restore_waits_for_live_input_when_it_must_turn_the_device_upright(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let hub = |input, orientation, revision| {
+            let mut state = streaming(input);
+            state.revision = revision;
+            state.screens.insert(
+                "SIM".into(),
+                zeron_proto::device_hub::DeviceScreenConfig {
+                    width: 588,
+                    height: 1280,
+                    orientation,
+                    ..Default::default()
+                },
+            );
+            state
+        };
+        let (state, _) = app_state(
+            cx,
+            &runtime,
+            hub(
+                StreamLinkStatus::Connecting,
+                DeviceOrientation::LandscapeLeft,
+                0,
+            ),
+        );
+        let panel_state = state.clone();
+        let (panel, cx) = cx.add_window_view(|_, cx| {
+            let mut panel = DevicePanel::new(panel_state, "chat".into(), cx);
+            panel.target = Some(("local".into(), "SIM".into()));
+            panel.revision = None;
+            panel.sync(cx);
+            panel
+        });
+        cx.run_until_parked();
+        let ready =
+            |cx: &mut VisualTestContext| panel.read_with(cx, |panel, cx| panel.restore_ready(cx));
+        assert!(
+            !ready(cx),
+            "the portrait request would be dropped while input is down"
+        );
+        for (input, orientation, revision) in [
+            (StreamLinkStatus::Connecting, DeviceOrientation::Portrait, 1),
+            (StreamLinkStatus::Live, DeviceOrientation::LandscapeLeft, 2),
+        ] {
+            state.update(cx, |state, cx| {
+                state.device_hub = Some(hub(input.clone(), orientation, revision));
+                cx.notify();
+            });
+            cx.run_until_parked();
+            assert!(ready(cx), "{input:?} {orientation:?}");
+        }
     }
 
     fn android(mut state: DeviceHubState) -> DeviceHubState {

@@ -30,6 +30,8 @@ const FPS_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const LINK_TICK: Duration = Duration::from_secs(1);
 const LINK_FAILED_TICKS: u32 = 3;
 const KEPT_SURFACES: usize = 3;
+#[cfg(target_os = "macos")]
+const RENDER_ATTEMPTS: u32 = 3;
 pub const NO_VIDEO_TIMEOUT: Duration = Duration::from_secs(15);
 pub const NO_VIDEO: &str = "No video received from the device. Reconnect to try again.";
 
@@ -475,6 +477,7 @@ pub struct DeviceStreamView {
     platform: DevicePlatform,
     label: (SharedString, SharedString),
     image: Option<DecodedFrame>,
+    frame_number: usize,
     painted: bool,
     retired: Vec<Arc<RenderImage>>,
     #[cfg(target_os = "macos")]
@@ -587,6 +590,7 @@ impl DeviceStreamView {
             device_id,
             platform,
             image: None,
+            frame_number: 0,
             painted: false,
             retired: Vec::new(),
             #[cfg(target_os = "macos")]
@@ -805,6 +809,20 @@ impl DeviceStreamView {
         cx.notify();
     }
 
+    #[cfg(target_os = "macos")]
+    fn retry_three_d(&mut self, cx: &mut Context<Self>) {
+        if self
+            .three_d
+            .as_ref()
+            .is_some_and(|three_d| three_d.renderer.borrow().failures >= RENDER_ATTEMPTS)
+        {
+            tracing::warn!(device = %self.device_id, "device 3D rendering keeps failing; showing the flat view");
+            self.set_three_d(false, cx);
+            self.three_d_failed = true;
+        }
+        cx.notify();
+    }
+
     pub fn three_d_shown(&self) -> bool {
         self.three_d.is_some()
     }
@@ -852,7 +870,7 @@ impl DeviceStreamView {
                 three_d.wheel_end = Task::ready(());
                 viewer.end_wheel(now);
             }
-            scene3d::WheelStep::Orbit => {
+            step @ (scene3d::WheelStep::Orbit | scene3d::WheelStep::Wheel) => {
                 let Some((_, _, width, height)) = viewer.viewport() else {
                     return;
                 };
@@ -860,20 +878,23 @@ impl DeviceStreamView {
                     scene3d::wheel_orbit(f64::from(dx), f64::from(dy), lines, width, height)
                     && viewer.wheel(x, y, now)
                 {
-                    // A mouse wheel never reports the end of its gesture.
-                    three_d.wheel_end = cx.spawn(async move |this, cx| {
-                        cx.background_executor()
-                            .timer(Duration::from_millis(scene3d::WHEEL_IDLE_MS))
-                            .await;
-                        this.update(cx, |view, cx| {
-                            let now = view.now();
-                            if let Some(three_d) = &view.three_d {
-                                three_d.viewer.borrow_mut().end_wheel(now);
-                                cx.notify();
-                            }
-                        })
-                        .ok();
-                    });
+                    three_d.wheel_end = match step {
+                        // A mouse wheel never reports the end of its gesture.
+                        scene3d::WheelStep::Wheel => cx.spawn(async move |this, cx| {
+                            cx.background_executor()
+                                .timer(Duration::from_millis(scene3d::WHEEL_IDLE_MS))
+                                .await;
+                            this.update(cx, |view, cx| {
+                                let now = view.now();
+                                if let Some(three_d) = &view.three_d {
+                                    three_d.viewer.borrow_mut().end_wheel(now);
+                                    cx.notify();
+                                }
+                            })
+                            .ok();
+                        }),
+                        _ => Task::ready(()),
+                    };
                 }
             }
         }
@@ -978,6 +999,7 @@ impl DeviceStreamView {
         };
         self.awaiting_frame = false;
         let codec = frame.codec;
+        self.frame_number += 1;
         if self.frame_size() != Some((frame.width, frame.height)) {
             cx.emit(StreamChanged);
         }
@@ -1000,21 +1022,20 @@ impl DeviceStreamView {
             fps.tick(&self.device_id, codec);
         }
         if let Some(frame) = self.frame_box.get()
-            && let Some((x, y)) = self.debug_tap.take()
-        {
-            let position = match &self.three_d {
+            && let Some((x, y)) = self.debug_tap
+            && let Some(position) = match &self.three_d {
                 Some(three_d) => three_d
                     .viewer
                     .borrow()
                     .position_of((x, y))
                     .map(|(x, y)| gpui::point(px(x as f32), px(y as f32))),
                 None => Some(geometry::position_at(frame, x, y)),
-            };
-            if let Some(position) = position {
-                tracing::info!(device = %self.device_id, x, y, "ZERON_DEVICE_TAP: synthetic tap");
-                self.pointer(TouchPhase::Begin, position);
-                self.pointer(TouchPhase::End, position);
             }
+        {
+            self.debug_tap = None;
+            tracing::info!(device = %self.device_id, x, y, "ZERON_DEVICE_TAP: synthetic tap");
+            self.pointer(TouchPhase::Begin, position);
+            self.pointer(TouchPhase::End, position);
         }
         cx.notify();
     }
@@ -1197,6 +1218,7 @@ fn paint_3d(
     renderer: &RefCell<super::metal3d::Renderer>,
     frame: Bounds<Pixels>,
     picture: Option<&Picture>,
+    frame_number: usize,
     clear: [f32; 3],
     window: &mut Window,
 ) -> bool {
@@ -1221,7 +1243,6 @@ fn paint_3d(
         Some(Picture::Image(image)) => {
             let size = image.size(0);
             Source::Bgra {
-                id: Arc::as_ptr(image) as usize,
                 bytes: image.as_bytes(0).unwrap_or_default(),
                 width: size.width.0.max(0) as usize,
                 height: size.height.0.max(0) as usize,
@@ -1233,6 +1254,7 @@ fn paint_3d(
     let scale = f64::from(window.scale_factor());
     let job = Job {
         source,
+        frame: frame_number,
         model: &model,
         mvp,
         rotation,
@@ -1286,18 +1308,13 @@ impl Render for DeviceStreamView {
             .map(|ax| ax.displayed(rotation))
             .collect();
         let ax_color = theme.accent;
-        #[cfg(target_os = "macos")]
-        let theme_bg = theme.bg;
         let dragging = self.dragging().then(|| cx.entity().downgrade());
         let scene = self
             .three_d
             .as_ref()
             .filter(|_| self.image.is_some())
             .map(|three_d| {
-                let orientation = self
-                    .screen
-                    .as_ref()
-                    .map_or(DeviceOrientation::Portrait, |screen| screen.orientation);
+                let orientation = scene3d::body_orientation(rotation, self.screen.as_ref());
                 let aspect = f64::from(aspect);
                 let profile =
                     scene3d::resolve_shape(self.platform, &self.label.0, aspect.min(1.0 / aspect));
@@ -1317,6 +1334,8 @@ impl Render for DeviceStreamView {
         let clear = gpui::Rgba::from(theme.bg);
         #[cfg(target_os = "macos")]
         let clear = [clear.r, clear.g, clear.b];
+        #[cfg(target_os = "macos")]
+        let (frame_number, this) = (self.frame_number, cx.entity().downgrade());
         let connecting = self.awaiting_frame && self.video_error.is_none();
         let input_down = (!self.awaiting_frame && self.video_error.is_none() && !self.input_live())
             .then(|| match &self.link.input {
@@ -1364,18 +1383,36 @@ impl Render for DeviceStreamView {
                             );
                         }
                         #[cfg(target_os = "macos")]
-                        if let Some((viewer, renderer)) = &scene {
-                            if !paint_3d(viewer, renderer, frame, picture.as_ref(), clear, window) {
-                                window.paint_quad(gpui::fill(frame, theme_bg));
+                        let shown_3d = scene.as_ref().is_some_and(|(viewer, renderer)| {
+                            let shown = paint_3d(
+                                viewer,
+                                renderer,
+                                frame,
+                                picture.as_ref(),
+                                frame_number,
+                                clear,
+                                window,
+                            );
+                            if renderer.borrow().failures > 0 {
+                                window.on_next_frame(move |_, cx| {
+                                    this.update(cx, |view, cx| view.retry_three_d(cx)).ok();
+                                });
                             }
-                        }
-                        match picture.filter(|_| scene.is_none()) {
+                            shown
+                        });
+                        #[cfg(not(target_os = "macos"))]
+                        let shown_3d = false;
+                        let flat = match &scene {
+                            Some(_) => geometry::centered_frame(bounds, aspect, rail_inset),
+                            None => frame,
+                        };
+                        match picture.filter(|_| !shown_3d) {
                             Some(Picture::Image(image)) => {
-                                let _ = window.paint_image(frame, corners, image, 0, false);
+                                let _ = window.paint_image(flat, corners, image, 0, false);
                             }
                             #[cfg(target_os = "macos")]
                             Some(Picture::Surface(surface)) => {
-                                window.paint_surface(frame, surface.to_gpui())
+                                window.paint_surface(flat, surface.to_gpui())
                             }
                             None if scene.is_some() => {}
                             None => window.paint_quad(
@@ -1872,6 +1909,94 @@ mod tests {
             frame.size.width < area.size.width,
             "flat again: the frame hugs the stream"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    fn three_d_view<'a>(
+        cx: &'a mut TestAppContext,
+        runtime: &tokio::runtime::Runtime,
+        tap: Option<(f32, f32)>,
+    ) -> (Entity<DeviceStreamView>, Inputs, &'a mut VisualTestContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+        });
+        cx.executor().allow_parking();
+        let (engine, inputs, _) = fake_engine_with(runtime, false);
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            let mut view = DeviceStreamView::new(
+                engine,
+                "local".into(),
+                "SIM".into(),
+                DevicePlatform::Ios,
+                cx,
+            );
+            view.debug_tap = tap;
+            view.three_d = ThreeD::new();
+            view
+        });
+        cx.run_until_parked();
+        (view, inputs, cx)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn push_frame(view: &Entity<DeviceStreamView>, cx: &mut VisualTestContext, seq: u64) {
+        view.update(cx, |view, cx| {
+            let item = json!({ "seq": seq, "jpeg": jpeg() });
+            *view.slot.lock().unwrap() = decode(item, DeviceOrientation::Portrait);
+            view.take_frame(cx);
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn the_debug_tap_waits_until_the_3d_view_has_placed_its_screen(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (view, inputs, cx) = three_d_view(cx, &runtime, Some((0.5, 0.5)));
+        push_frame(&view, cx, 1);
+        assert!(view.read_with(cx, |view, _| view.frame_box().is_some()));
+        assert!(inputs.lock().unwrap().is_empty());
+        assert_eq!(
+            view.read_with(cx, |view, _| view.debug_tap),
+            Some((0.5, 0.5)),
+            "no camera yet, so the tap is kept for a later frame"
+        );
+        cx.run_until_parked();
+        push_frame(&view, cx, 2);
+        wait(cx, |_| inputs.lock().unwrap().len() >= 3);
+        assert_touches(
+            &touches(&inputs),
+            &[("begin", 0.5, 0.5), ("move", 0.5, 0.5), ("end", 0.5, 0.5)],
+        );
+        assert_eq!(view.read_with(cx, |view, _| view.debug_tap), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn a_3d_view_whose_renders_keep_failing_falls_back_to_flat(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (view, _, cx) = three_d_view(cx, &runtime, None);
+        push_frame(&view, cx, 1);
+        cx.run_until_parked();
+        let fail = |cx: &mut VisualTestContext, failures| {
+            view.update(cx, |view, cx| {
+                view.three_d
+                    .as_ref()
+                    .unwrap()
+                    .renderer
+                    .borrow_mut()
+                    .failures = failures;
+                view.retry_three_d(cx);
+            });
+            cx.run_until_parked();
+            view.read_with(cx, |view, _| (view.three_d_shown(), view.three_d_failed()))
+        };
+        assert_eq!(fail(cx, RENDER_ATTEMPTS - 1), (true, false));
+        assert_eq!(fail(cx, RENDER_ATTEMPTS), (false, true));
+        view.update(cx, |view, cx| view.set_three_d(true, cx));
+        assert!(!view.read_with(cx, |view, _| view.three_d_shown()));
     }
 
     fn duo_screen(

@@ -2,7 +2,7 @@ use std::f64::consts::{FRAC_PI_2, PI};
 use std::ops::{Add, Mul, Range, Sub};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use zeron_proto::device_hub::{DeviceOrientation, DevicePlatform, TouchPhase};
+use zeron_proto::device_hub::{DeviceOrientation, DevicePlatform, DeviceScreenConfig, TouchPhase};
 
 use super::geometry;
 
@@ -703,6 +703,28 @@ pub fn resolve_shape(
     }
 }
 
+fn body_aspect(aspect: f64, orientation: DeviceOrientation) -> f64 {
+    if !(aspect.is_finite() && aspect > 0.0) {
+        return geometry::IOS_PLACEHOLDER_ASPECT as f64;
+    }
+    match orientation {
+        DeviceOrientation::LandscapeLeft | DeviceOrientation::LandscapeRight => 1.0 / aspect,
+        _ => aspect,
+    }
+}
+
+pub fn body_orientation(
+    shown: DeviceOrientation,
+    screen: Option<&DeviceScreenConfig>,
+) -> DeviceOrientation {
+    match (shown, geometry::display_rotation(screen)) {
+        (DeviceOrientation::Portrait, DeviceOrientation::Portrait) => {
+            screen.map_or(DeviceOrientation::Portrait, |screen| screen.orientation)
+        }
+        _ => shown,
+    }
+}
+
 pub fn orientation_angle(orientation: DeviceOrientation) -> f64 {
     match orientation {
         DeviceOrientation::Portrait => 0.0,
@@ -1006,11 +1028,7 @@ impl Model {
         aspect: f64,
         orientation: DeviceOrientation,
     ) -> Self {
-        let aspect = if aspect.is_finite() && aspect > 0.0 {
-            aspect.min(1.0 / aspect)
-        } else {
-            geometry::IOS_PLACEHOLDER_ASPECT as f64
-        };
+        let aspect = body_aspect(aspect, orientation);
         let screen_width = SCREEN_HEIGHT * aspect;
         let width = screen_width + profile.bezel * 2.0;
         let height = SCREEN_HEIGHT + profile.bezel * 2.0;
@@ -1392,6 +1410,7 @@ pub fn wheel_orbit(dx: f64, dy: f64, lines: bool, width: f64, height: f64) -> Op
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WheelStep {
     Orbit,
+    Wheel,
     End,
     Ignore,
 }
@@ -1399,6 +1418,7 @@ pub enum WheelStep {
 // gpui reports momentum scrolls as Moved after Ended; a trackpad orbit ends with the fingers.
 #[derive(Default)]
 pub struct Wheel {
+    gesture: bool,
     coasting: bool,
 }
 
@@ -1406,15 +1426,18 @@ impl Wheel {
     pub fn step(&mut self, phase: gpui::TouchPhase, lines: bool) -> WheelStep {
         match phase {
             gpui::TouchPhase::Started => {
+                self.gesture = true;
                 self.coasting = false;
                 WheelStep::Orbit
             }
             gpui::TouchPhase::Ended | gpui::TouchPhase::Cancelled => {
+                self.gesture = false;
                 self.coasting = true;
                 WheelStep::End
             }
+            gpui::TouchPhase::Moved if self.gesture => WheelStep::Orbit,
             gpui::TouchPhase::Moved if self.coasting && !lines => WheelStep::Ignore,
-            gpui::TouchPhase::Moved => WheelStep::Orbit,
+            gpui::TouchPhase::Moved => WheelStep::Wheel,
         }
     }
 }
@@ -1476,12 +1499,12 @@ impl Viewer {
         aspect: f64,
         orientation: DeviceOrientation,
     ) -> std::rc::Rc<Model> {
-        let portrait = aspect.min(1.0 / aspect);
+        let body = body_aspect(aspect, orientation);
         match &self.model {
             Some(model)
                 if std::ptr::eq(model.profile, profile)
                     && model.orientation == orientation
-                    && (model.aspect - portrait).abs() < 1e-9 =>
+                    && (model.aspect - body).abs() < 1e-9 =>
             {
                 model.clone()
             }
@@ -1702,9 +1725,8 @@ mod tests {
         for profile in [&IOS_PHONE, &IOS_TABLET, &ANDROID_PHONE, &ANDROID_TABLET] {
             for aspect in [0.46, 0.75, 1950.0 / 900.0] {
                 let model = Model::new(profile, aspect, DeviceOrientation::Portrait);
-                let portrait = aspect.min(1.0 / aspect);
                 let (lo, hi) = model.bounds(Some(Part::Screen));
-                let screen_width = SCREEN_HEIGHT * portrait;
+                let screen_width = SCREEN_HEIGHT * aspect;
                 assert!((hi.x - lo.x - screen_width).abs() < 1e-5, "{}", profile.id);
                 assert!((hi.y - lo.y - SCREEN_HEIGHT).abs() < 1e-5, "{}", profile.id);
                 assert!((lo.z - SCREEN_Z).abs() < 1e-6 && (hi.z - SCREEN_Z).abs() < 1e-6);
@@ -2022,7 +2044,13 @@ mod tests {
                 } else {
                     0.45
                 };
-                let model = Model::new(profile, aspect, orientation);
+                let shown = match orientation {
+                    DeviceOrientation::LandscapeLeft | DeviceOrientation::LandscapeRight => {
+                        1.0 / aspect
+                    }
+                    _ => aspect,
+                };
+                let model = Model::new(profile, shown, orientation);
                 let camera = Camera {
                     center: (0.0, 0.0),
                     distance: 6.0,
@@ -2173,7 +2201,12 @@ mod tests {
             aspect: 1.0,
         };
         for orientation in ORIENTATIONS {
-            let model = Model::new(&IOS_PHONE, 0.46, orientation);
+            let landscape = matches!(
+                orientation,
+                DeviceOrientation::LandscapeLeft | DeviceOrientation::LandscapeRight
+            );
+            let shown = if landscape { 1.0 / 0.46 } else { 0.46 };
+            let model = Model::new(&IOS_PHONE, shown, orientation);
             let front = model.rotation(Quat::IDENTITY);
             let at = |x, y| camera.project(front, model.screen_local((x, y)));
             let (left, right, top, bottom) =
@@ -2189,10 +2222,6 @@ mod tests {
             let (lo, hi) = model.bounds(Some(Part::Screen));
             let span = |p: Vec3| front.rotate(p);
             let (a, b) = (span(lo), span(hi));
-            let landscape = matches!(
-                orientation,
-                DeviceOrientation::LandscapeLeft | DeviceOrientation::LandscapeRight
-            );
             assert_eq!(
                 (a.x - b.x).abs() > (a.y - b.y).abs(),
                 landscape,
@@ -2211,6 +2240,82 @@ mod tests {
                 "{orientation:?}: the device top turns to the right for LandscapeLeft, as the Rotator does"
             );
         }
+    }
+
+    fn shown_screen_aspect(model: &Model) -> f64 {
+        let front = model.rotation(Quat::IDENTITY);
+        let (lo, hi) = model.bounds(Some(Part::Screen));
+        let (a, b) = (front.rotate(lo), front.rotate(hi));
+        (a.x - b.x).abs() / (a.y - b.y).abs()
+    }
+
+    #[test]
+    fn the_screen_keeps_the_shape_of_the_shown_frame_even_when_the_orientation_disagrees() {
+        let tablet = Model::new(
+            &ANDROID_TABLET,
+            1600.0 / 1000.0,
+            DeviceOrientation::Portrait,
+        );
+        assert!(
+            (shown_screen_aspect(&tablet) - 1.6).abs() < 0.01,
+            "a natural-landscape tablet at rotation 0 is not squeezed onto a tall screen: {}",
+            shown_screen_aspect(&tablet)
+        );
+        for orientation in ORIENTATIONS {
+            for shown in [0.46, 1.0 / 0.46] {
+                let model = Model::new(&IOS_PHONE, shown, orientation);
+                assert!(
+                    (shown_screen_aspect(&model) - shown).abs() < 0.01,
+                    "{orientation:?} {shown}: {}",
+                    shown_screen_aspect(&model)
+                );
+            }
+        }
+        let mut viewer = Viewer::default();
+        let first = viewer.set_model(&ANDROID_TABLET, 1.6, DeviceOrientation::Portrait);
+        let again = viewer.set_model(&ANDROID_TABLET, 1.6, DeviceOrientation::Portrait);
+        assert_eq!(first.id, again.id, "an unchanged frame keeps its mesh");
+    }
+
+    #[test]
+    fn the_body_turns_with_the_shown_frame_not_ahead_of_it() {
+        let screen = |width, height, orientation| DeviceScreenConfig {
+            width,
+            height,
+            orientation,
+            ..Default::default()
+        };
+        let raw_portrait = screen(588, 1280, DeviceOrientation::LandscapeLeft);
+        assert_eq!(
+            body_orientation(DeviceOrientation::Portrait, Some(&raw_portrait)),
+            DeviceOrientation::Portrait,
+            "the portrait frame decoded before the turn keeps an upright body"
+        );
+        assert_eq!(
+            body_orientation(DeviceOrientation::LandscapeLeft, Some(&raw_portrait)),
+            DeviceOrientation::LandscapeLeft
+        );
+        let back = screen(588, 1280, DeviceOrientation::Portrait);
+        assert_eq!(
+            body_orientation(DeviceOrientation::LandscapeRight, Some(&back)),
+            DeviceOrientation::LandscapeRight
+        );
+        let landscape = screen(1280, 588, DeviceOrientation::LandscapeLeft);
+        assert_eq!(
+            body_orientation(DeviceOrientation::Portrait, Some(&landscape)),
+            DeviceOrientation::LandscapeLeft,
+            "an already-landscape framebuffer is never rotated, so the screen config turns the body"
+        );
+        assert_eq!(
+            body_orientation(DeviceOrientation::Portrait, None),
+            DeviceOrientation::Portrait
+        );
+        let stale = Model::new(
+            &IOS_PHONE,
+            588.0 / 1280.0,
+            body_orientation(DeviceOrientation::Portrait, Some(&raw_portrait)),
+        );
+        assert!((shown_screen_aspect(&stale) - 588.0 / 1280.0).abs() < 0.01);
     }
 
     #[test]
@@ -2330,16 +2435,34 @@ mod tests {
         let mut wheel = Wheel::default();
         assert_eq!(
             wheel.step(Phase::Moved, true),
-            WheelStep::Orbit,
+            WheelStep::Wheel,
             "a mouse wheel has no phases"
         );
         assert_eq!(wheel.step(Phase::Started, false), WheelStep::Orbit);
         assert_eq!(wheel.step(Phase::Moved, false), WheelStep::Orbit);
         assert_eq!(wheel.step(Phase::Ended, false), WheelStep::End);
         assert_eq!(wheel.step(Phase::Moved, false), WheelStep::Ignore);
-        assert_eq!(wheel.step(Phase::Moved, true), WheelStep::Orbit);
+        assert_eq!(wheel.step(Phase::Moved, true), WheelStep::Wheel);
         assert_eq!(wheel.step(Phase::Started, false), WheelStep::Orbit);
         assert_eq!(wheel.step(Phase::Moved, false), WheelStep::Orbit);
+    }
+
+    #[test]
+    fn only_a_phaseless_wheel_ends_by_idle_time_so_a_resting_trackpad_gesture_keeps_orbiting() {
+        use gpui::TouchPhase as Phase;
+        let mut wheel = Wheel::default();
+        assert_eq!(wheel.step(Phase::Started, false), WheelStep::Orbit);
+        for _ in 0..3 {
+            assert_eq!(
+                wheel.step(Phase::Moved, false),
+                WheelStep::Orbit,
+                "fingers on the trackpad end with Ended, not the idle timer"
+            );
+        }
+        assert_eq!(wheel.step(Phase::Moved, true), WheelStep::Orbit);
+        assert_eq!(wheel.step(Phase::Ended, false), WheelStep::End);
+        assert_eq!(wheel.step(Phase::Moved, true), WheelStep::Wheel);
+        assert_eq!(Wheel::default().step(Phase::Moved, false), WheelStep::Wheel);
     }
 
     #[test]

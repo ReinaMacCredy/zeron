@@ -230,15 +230,18 @@ impl DevicePanel {
             .into_any_element(),
         ];
         if shown && streaming {
+            let ready = self.restore_ready(cx);
             buttons.push(
                 rail_button(
                     "device-view-restore",
                     icons::LUCIDE_MAXIMIZE_2,
                     "Restore 3D view",
-                    true,
+                    ready,
                     theme,
                 )
-                .on_click(cx.listener(|panel, _, _, cx| panel.restore_three_d(cx)))
+                .when(ready, |button| {
+                    button.on_click(cx.listener(|panel, _, _, cx| panel.restore_three_d(cx)))
+                })
                 .into_any_element(),
             );
         }
