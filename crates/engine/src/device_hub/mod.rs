@@ -807,7 +807,7 @@ impl DeviceHub {
         drop(settings_lock);
         futures::future::join_all(removed.iter().map(|host| host.retire())).await;
         if enabled {
-            self.list(false).await?;
+            self.list_with(false, false).await?;
         }
         if agent_on
             && params.agent_access_enabled == Some(true)
@@ -819,6 +819,14 @@ impl DeviceHub {
     }
 
     pub async fn list(&self, inspect_only: bool) -> Result<DeviceHubState, String> {
+        self.list_with(inspect_only, true).await
+    }
+
+    async fn list_with(
+        &self,
+        inspect_only: bool,
+        wait_for_hosts: bool,
+    ) -> Result<DeviceHubState, String> {
         if !inspect_only && !self.enabled() {
             return Err(DEVICE_SUPPORT_OFF.into());
         }
@@ -842,25 +850,37 @@ impl DeviceHub {
                 self.set_status(DeviceHostStatus::Failed, Some(error));
             }
         };
-        let remotes =
-            futures::future::join_all(self.all_remotes().into_iter().map(|host| async move {
-                let id = host.config.id.clone();
-                if let Ok(ready) = host.ensure_ready().await
-                    && let Err(error) = self.refresh(&id, &ready.origin).await
-                {
-                    self.publish(|state| {
-                        state.host_statuses.insert(
-                            id,
-                            DeviceHostState {
-                                status: DeviceHostStatus::Failed,
-                                detail: Some(error),
-                            },
-                        );
-                    });
-                }
-            }));
-        tokio::join!(local, remotes);
+        if wait_for_hosts {
+            tokio::join!(local, self.connect_hosts());
+        } else {
+            local.await;
+            if let (Some(hub), Ok(runtime)) =
+                (self.me.upgrade(), tokio::runtime::Handle::try_current())
+            {
+                runtime.spawn(async move { hub.connect_hosts().await });
+            }
+        }
         Ok(self.snapshot())
+    }
+
+    async fn connect_hosts(&self) {
+        futures::future::join_all(self.all_remotes().into_iter().map(|host| async move {
+            let id = host.config.id.clone();
+            if let Ok(ready) = host.ensure_ready().await
+                && let Err(error) = self.refresh(&id, &ready.origin).await
+            {
+                self.publish(|state| {
+                    state.host_statuses.insert(
+                        id,
+                        DeviceHostState {
+                            status: DeviceHostStatus::Failed,
+                            detail: Some(error),
+                        },
+                    );
+                });
+            }
+        }))
+        .await;
     }
 
     async fn remote_hosts(
@@ -2076,15 +2096,15 @@ mod tests {
                 .await
                 .is_err()
         );
-        let state = hub
-            .configure(hosts(vec![
-                host("mini"),
-                host("studio"),
-                host("unreachable"),
-                host("loopback"),
-            ]))
-            .await
-            .unwrap();
+        hub.configure(hosts(vec![
+            host("mini"),
+            host("studio"),
+            host("unreachable"),
+            host("loopback"),
+        ]))
+        .await
+        .unwrap();
+        let state = hub.list(false).await.unwrap();
         let ids = |state: &DeviceHubState| -> Vec<String> {
             state.hosts.iter().map(|host| host.id.clone()).collect()
         };
