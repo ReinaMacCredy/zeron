@@ -186,6 +186,8 @@ pub(crate) fn hinge_request(request_id: u64, command: HingeCommand) -> Vec<u8> {
 const HINGE_TIMEOUT: Duration = Duration::from_secs(5);
 const FIRST_HINGE_TIMEOUT: Duration = Duration::from_secs(15);
 const HINGE_TIMED_OUT: &str = "Device control timed out. Its position is unknown.";
+const ORIENTATION_REFUSED: &str =
+    "The device did not rotate. The foreground app may not allow that orientation.";
 const DISCONNECTED: &str = "Device is disconnected.";
 const REPLACED: &str = "Replaced by a newer hinge command.";
 
@@ -273,8 +275,12 @@ impl HingeQueue {
         if self.active.as_ref().map(|(active, ..)| *active) != Some(id) {
             return None;
         }
-        let (_, _, waiting) = self.active.take()?;
-        fail(waiting, HINGE_TIMED_OUT);
+        let (_, command, waiting) = self.active.take()?;
+        let error = match command {
+            HingeCommand::Orientation(_) => ORIENTATION_REFUSED,
+            _ => HINGE_TIMED_OUT,
+        };
+        fail(waiting, error);
         self.drain()
     }
 
@@ -1007,6 +1013,20 @@ mod tests {
         assert!(folded.try_recv().is_err());
         assert_eq!(queue.receive(2, Ok(())), None);
         assert_eq!(folded.try_recv(), Ok(Ok(())));
+    }
+
+    #[test]
+    fn an_orientation_that_never_shows_reads_as_a_refused_rotation() {
+        let mut queue = HingeQueue::default();
+        let turn = HingeCommand::Orientation(DeviceOrientation::LandscapeLeft);
+        let (reply, mut turned) = waiter();
+        assert_eq!(queue.enqueue(turn, reply), Some((1, turn)));
+        let (reply, mut folded) = waiter();
+        assert_eq!(queue.enqueue(angle(45.0), reply), None);
+        assert_eq!(queue.timed_out(1), Some((2, angle(45.0))));
+        assert_eq!(turned.try_recv(), Ok(Err(ORIENTATION_REFUSED.into())));
+        assert_eq!(queue.timed_out(2), None);
+        assert_eq!(folded.try_recv(), Ok(Err(HINGE_TIMED_OUT.into())));
     }
 
     #[tokio::test(start_paused = true)]
