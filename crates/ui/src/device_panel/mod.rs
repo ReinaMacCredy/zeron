@@ -277,7 +277,7 @@ impl DevicePanel {
             controls: None,
             fold: None,
             panel_width: Rc::default(),
-            three_d: false,
+            three_d: true,
             screenshot_task: None,
             toast: None,
             revision: None,
@@ -1389,6 +1389,58 @@ pub(crate) mod tests {
         click(cx, "device-close-panel");
         wait(cx, |_| *closed.lock().unwrap());
         assert!(calls_of(&calls, methods::CLOSE_HUB_DEVICE).is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn a_device_tab_opens_in_3d_keeps_its_choice_across_hiding_and_falls_back_flat_when_blocked(
+        cx: &mut TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (state, panel, _, cx) = streaming_panel(cx, &runtime, StreamLinkStatus::Live);
+        let shown = |cx: &mut VisualTestContext| {
+            panel.read_with(cx, |panel, cx| {
+                panel.view.as_ref().unwrap().read(cx).three_d_shown()
+            })
+        };
+        assert!(shown(cx), "the full panel defaults to 3D");
+        assert!(cx.debug_bounds("device-view-3d").is_some());
+        assert!(cx.debug_bounds("device-view-flat").is_some());
+
+        let controls = panel.read_with(cx, |panel, _| panel.controls().cloned().unwrap());
+        controls.update(cx, |controls, cx| controls.set_ax_overlay(true, cx));
+        cx.run_until_parked();
+        assert!(!shown(cx), "accessibility frames need the flat view");
+        assert_eq!(
+            panel.read_with(cx, |panel, cx| panel.three_d_blocked(cx)),
+            Some("Turn off accessibility frames to use 3D")
+        );
+        controls.update(cx, |controls, cx| controls.set_ax_overlay(false, cx));
+        cx.run_until_parked();
+        assert!(shown(cx));
+
+        panel.update(cx, |panel, cx| panel.set_three_d(false, cx));
+        panel.update(cx, |panel, cx| panel.set_visible(false, cx));
+        panel.update(cx, |panel, cx| panel.set_visible(true, cx));
+        wait(cx, |cx| {
+            panel.read_with(cx, |panel, _| panel.view.is_some())
+        });
+        assert!(
+            !shown(cx),
+            "the tab keeps Flat view for its next stream view"
+        );
+        panel.update(cx, |panel, cx| panel.set_three_d(true, cx));
+        assert!(shown(cx));
+
+        state.update(cx, |state, cx| {
+            let mut duo = duo(true);
+            duo.revision = 2;
+            state.device_hub = Some(duo);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(!shown(cx), "the iPhone Duo shows the flat view only");
     }
 
     fn android(mut state: DeviceHubState) -> DeviceHubState {
