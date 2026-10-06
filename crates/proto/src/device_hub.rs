@@ -428,13 +428,6 @@ impl DeviceHubState {
                 && session.device_id == device_id
         })
     }
-
-    pub fn host_label(&self, host_id: &str) -> Option<&str> {
-        self.hosts
-            .iter()
-            .find(|host| host.id == host_id)
-            .map(|host| host.label.as_str())
-    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

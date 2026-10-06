@@ -1,11 +1,17 @@
+use std::collections::HashMap;
+
 use gpui::{
-    AnyElement, Context, Entity, SharedString, Subscription, Task, Window, div, prelude::*, px,
+    AnyElement, Context, Entity, SharedString, Stateful, Subscription, Task, Window, div,
+    prelude::*, px,
 };
-use zeron_proto::device_hub::{DeviceHubState, DevicePlatform};
+use zeron_proto::device_hub::{
+    DeviceHostStatus, DeviceHostTest, DeviceHubState, DevicePlatform, SshDeviceHostConfig,
+};
 use zeron_rpc::methods;
 
 use super::permission_guide::row;
 use super::widgets;
+use crate::composer::ComposerInput;
 use crate::device_panel::setup::{self, SetupPending, activate, button, switch};
 use crate::popover;
 use crate::settings::{self, SavePolicy};
@@ -15,6 +21,23 @@ use crate::theme::Theme;
 pub const AUTO_FLOAT_DESCRIPTION: &str =
     "Show the floating preview when an agent opens a device unless the agent says otherwise.";
 const UPDATE_FAILED: &str = "Update failed. Check this host's network connection and try again.";
+pub const DEVICE_HOSTS_DESCRIPTION: &str = "Add remote machines with simulator or emulator runtimes installed, and the selected environments will connect over SSH and set up device tools automatically.";
+const SAME_MACHINE: &str = "Hosts on the same machine are skipped.";
+
+enum HostCheck {
+    Pending,
+    Done(DeviceHostTest),
+    Failed(String),
+}
+
+struct HostEditor {
+    id: String,
+    name: Entity<ComposerInput>,
+    target: Entity<ComposerInput>,
+    identity: Entity<ComposerInput>,
+    port: Entity<ComposerInput>,
+    error: Option<SharedString>,
+}
 
 pub struct DeviceHubPage {
     state: Entity<AppState>,
@@ -22,6 +45,11 @@ pub struct DeviceHubPage {
     pending: Option<SetupPending>,
     update_error: Option<SharedString>,
     task: Option<Task<()>>,
+    editor: Option<HostEditor>,
+    checks: HashMap<String, HostCheck>,
+    check_tasks: HashMap<String, Task<()>>,
+    hosts_task: Option<Task<()>>,
+    hosts_error: Option<SharedString>,
     _state: Subscription,
 }
 
@@ -34,6 +62,11 @@ impl DeviceHubPage {
             pending: None,
             update_error: None,
             task: None,
+            editor: None,
+            checks: HashMap::new(),
+            check_tasks: HashMap::new(),
+            hosts_task: None,
+            hosts_error: None,
             _state: observer,
         };
         page.call(
@@ -91,6 +124,432 @@ impl DeviceHubPage {
             serde_json::json!({})
         };
         self.call(Some(pending), methods::LIST_HUB_DEVICES, params, cx);
+    }
+
+    fn saved_hosts(&self, cx: &gpui::App) -> Vec<SshDeviceHostConfig> {
+        self.hub(cx)
+            .map(|hub| hub.settings.device_hosts.clone())
+            .unwrap_or_default()
+    }
+
+    fn open_editor(&mut self, cx: &mut Context<Self>) {
+        let field = |placeholder: &str, cx: &mut Context<Self>| {
+            let placeholder = SharedString::from(placeholder.to_string());
+            cx.new(|cx| ComposerInput::new(placeholder, cx))
+        };
+        self.editor = Some(HostEditor {
+            id: format!("host-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]),
+            name: field("Mac mini", cx),
+            target: field("user@host or SSH alias", cx),
+            identity: field("SSH config default", cx),
+            port: field("Default", cx),
+            error: None,
+        });
+        cx.notify();
+    }
+
+    fn draft(editor: &HostEditor, cx: &gpui::App) -> Result<SshDeviceHostConfig, String> {
+        let text = |input: &Entity<ComposerInput>| input.read(cx).text().trim().to_string();
+        let (name, target, identity, port) = (
+            text(&editor.name),
+            text(&editor.target),
+            text(&editor.identity),
+            text(&editor.port),
+        );
+        let port = match port.as_str() {
+            "" => None,
+            port => Some(
+                port.parse::<u16>()
+                    .ok()
+                    .filter(|port| *port > 0)
+                    .ok_or("The SSH port must be between 1 and 65535.")?,
+            ),
+        };
+        let config = SshDeviceHostConfig {
+            id: editor.id.clone(),
+            label: if name.is_empty() {
+                target.clone()
+            } else {
+                name
+            },
+            target,
+            identity_file: (!identity.is_empty()).then_some(identity),
+            port,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn test_host(&mut self, host: SshDeviceHostConfig, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let id = host.id.clone();
+        self.checks.insert(id.clone(), HostCheck::Pending);
+        let params = serde_json::to_value(&host).unwrap_or_default();
+        let task = cx.spawn({
+            let id = id.clone();
+            async move |this, cx| {
+                let reply = engine
+                    .client()
+                    .call(methods::TEST_DEVICE_HOST, params)
+                    .await;
+                let check = match reply.map_err(|e| e.to_string()).and_then(|value| {
+                    serde_json::from_value::<DeviceHostTest>(value).map_err(|e| e.to_string())
+                }) {
+                    Ok(test) => HostCheck::Done(test),
+                    Err(error) => HostCheck::Failed(error),
+                };
+                this.update(cx, |page, cx| {
+                    page.checks.insert(id.clone(), check);
+                    page.check_tasks.remove(&id);
+                    cx.notify();
+                })
+                .ok();
+            }
+        });
+        self.check_tasks.insert(id, task);
+        cx.notify();
+    }
+
+    fn test_draft(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.editor.as_mut() else {
+            return;
+        };
+        match Self::draft(editor, cx) {
+            Ok(host) => {
+                editor.error = None;
+                self.test_host(host, cx);
+            }
+            Err(error) => {
+                editor.error = Some(error.into());
+                cx.notify();
+            }
+        }
+    }
+
+    fn save_hosts(
+        &mut self,
+        hosts: Vec<SshDeviceHostConfig>,
+        close_editor: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        self.hosts_error = None;
+        let params = serde_json::json!({ "deviceHosts": hosts });
+        self.hosts_task = Some(cx.spawn(async move |this, cx| {
+            let reply = engine
+                .client()
+                .call(methods::CONFIGURE_DEVICE_HUB, params)
+                .await;
+            this.update(cx, |page, cx| {
+                page.hosts_task = None;
+                match reply {
+                    Ok(_) if close_editor => page.editor = None,
+                    Ok(_) => {}
+                    Err(error) => page.hosts_error = Some(error.to_string().into()),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn save_draft(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.editor.as_mut() else {
+            return;
+        };
+        let host = match Self::draft(editor, cx) {
+            Ok(host) => host,
+            Err(error) => {
+                editor.error = Some(error.into());
+                cx.notify();
+                return;
+            }
+        };
+        let mut hosts = self.saved_hosts(cx);
+        hosts.retain(|existing| existing.id != host.id);
+        hosts.push(host);
+        self.save_hosts(hosts, true, cx);
+    }
+
+    fn remove_host(&mut self, id: &str, cx: &mut Context<Self>) {
+        let mut hosts = self.saved_hosts(cx);
+        hosts.retain(|host| host.id != id);
+        self.checks.remove(id);
+        self.save_hosts(hosts, false, cx);
+    }
+
+    fn render_check(theme: &Theme, check: &HostCheck) -> AnyElement {
+        let line = |ok: bool, text: String| {
+            div()
+                .flex()
+                .items_start()
+                .gap(px(6.0))
+                .text_size(crate::typography::ui_rems(12.0))
+                .text_color(if ok { theme.text_muted } else { theme.danger })
+                .child(
+                    crate::icons::icon(if ok {
+                        crate::icons::CHECK
+                    } else {
+                        crate::icons::CLOSE
+                    })
+                    .size(px(12.0))
+                    .flex_none()
+                    .mt(px(2.0)),
+                )
+                .child(div().min_w_0().child(SharedString::from(text)))
+        };
+        let body = div().flex().flex_col().gap(px(4.0));
+        match check {
+            HostCheck::Pending => body.child(
+                div()
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .text_color(theme.text_muted)
+                    .child("Checking connection..."),
+            ),
+            HostCheck::Failed(error) => body.child(line(false, error.clone())),
+            HostCheck::Done(test) if test.local => {
+                body.child(line(true, "Already available locally".into()))
+            }
+            HostCheck::Done(test) => body.children(test.checks.iter().map(|check| {
+                let text = match &check.detail {
+                    Some(detail) => format!("{}: {detail}", check.name),
+                    None => check.name.clone(),
+                };
+                line(check.ok, text)
+            })),
+        }
+        .id("device-host-check")
+        .debug_selector(|| "device-host-check".into())
+        .role(gpui::Role::Status)
+        .into_any_element()
+    }
+
+    fn host_button(theme: &Theme, id: String, label: &'static str) -> Stateful<gpui::Div> {
+        let selector = id.clone();
+        super::permission_guide::outline_button(theme)
+            .id(SharedString::from(id))
+            .debug_selector(move || selector.clone())
+            .tab_index(0)
+            .role(gpui::Role::Button)
+            .aria_label(label)
+            .child(label)
+    }
+
+    fn render_hosts(
+        &mut self,
+        theme: &Theme,
+        hub: &DeviceHubState,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let saving = self.hosts_task.is_some();
+        let small = |text: String, color| {
+            div()
+                .text_size(crate::typography::ui_rems(12.0))
+                .text_color(color)
+                .child(SharedString::from(text))
+        };
+        let mut list = div().flex().flex_col().gap(px(10.0));
+        if hub.settings.device_hosts.is_empty() && self.editor.is_none() {
+            list = list.child(small("No device hosts.".into(), theme.text_muted));
+        }
+        for host in &hub.settings.device_hosts {
+            let summary = hub.hosts.iter().find(|entry| entry.id == host.id);
+            let marks: Vec<&str> = summary
+                .map(|entry| {
+                    entry
+                        .platforms
+                        .iter()
+                        .filter(|platform| platform.available)
+                        .map(|platform| match platform.platform {
+                            DevicePlatform::Ios => "iOS",
+                            DevicePlatform::Android => "Android",
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let status = hub.host_statuses.get(&host.id);
+            let checking = matches!(self.checks.get(&host.id), Some(HostCheck::Pending));
+            let progress = match status.map(|status| status.status) {
+                _ if checking => Some("Checking connection...".to_string()),
+                Some(DeviceHostStatus::Installing) => Some("Installing device support...".into()),
+                Some(DeviceHostStatus::Starting) => Some(
+                    status
+                        .and_then(|status| status.detail.clone())
+                        .unwrap_or_else(|| "Connecting...".into()),
+                ),
+                _ => None,
+            };
+            let failure = status
+                .filter(|status| status.status == DeviceHostStatus::Failed)
+                .and_then(|status| status.detail.clone());
+            let id = host.id.clone();
+            let remove_id = host.id.clone();
+            let test_host = host.clone();
+            let header = div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .text_size(crate::typography::ui_rems(13.0))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child(SharedString::from(host.label.clone()))
+                                .children(marks.into_iter().map(|mark| {
+                                    div()
+                                        .text_size(crate::typography::ui_rems(11.0))
+                                        .text_color(theme.text_muted)
+                                        .child(format!("{mark} available"))
+                                })),
+                        )
+                        .child(
+                            div()
+                                .text_size(crate::typography::ui_rems(12.0))
+                                .text_color(theme.text_muted)
+                                .truncate()
+                                .child(SharedString::from(host.target.clone())),
+                        ),
+                )
+                .children(progress.map(|text| small(text, theme.text_muted)))
+                .child(activate(
+                    Self::host_button(
+                        theme,
+                        format!("settings-device-host-test-{id}"),
+                        "Test connection",
+                    ),
+                    !saving && !checking,
+                    cx,
+                    move |page: &mut Self, cx| page.test_host(test_host.clone(), cx),
+                ))
+                .child(activate(
+                    Self::host_button(theme, format!("settings-device-host-remove-{id}"), "Remove"),
+                    !saving,
+                    cx,
+                    move |page: &mut Self, cx| page.remove_host(&remove_id, cx),
+                ));
+            list =
+                list.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.0))
+                        .child(header)
+                        .children(failure.map(|detail| {
+                            small(format!("Connection failed: {detail}"), theme.danger)
+                        }))
+                        .children(
+                            self.checks
+                                .get(&host.id)
+                                .filter(|check| !matches!(check, HostCheck::Pending))
+                                .map(|check| Self::render_check(theme, check)),
+                        ),
+                );
+        }
+        if let Some(editor) = &self.editor {
+            let field = |label: &'static str, input: &Entity<ComposerInput>| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(small(label.into(), theme.text_muted))
+                    .child(crate::popover::dialog_field(
+                        input.clone().into_any_element(),
+                    ))
+            };
+            let check = self.checks.get(&editor.id);
+            let checking = matches!(check, Some(HostCheck::Pending));
+            list = list.child(
+                div()
+                    .id("settings-device-host-editor")
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.0))
+                    .p(px(12.0))
+                    .rounded(px(10.0))
+                    .border_1()
+                    .border_color(theme.border)
+                    .child(small(SAME_MACHINE.into(), theme.text_muted))
+                    .child(field("Name", &editor.name))
+                    .child(field("SSH target", &editor.target))
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(12.0))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .child(field("Identity file", &editor.identity)),
+                            )
+                            .child(div().w(px(110.0)).child(field("Port", &editor.port))),
+                    )
+                    .children(
+                        editor
+                            .error
+                            .clone()
+                            .map(|error| small(error.to_string(), theme.danger)),
+                    )
+                    .children(check.map(|check| Self::render_check(theme, check)))
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap(px(8.0))
+                            .child(activate(
+                                button(theme, "settings-device-host-cancel", "Cancel"),
+                                !saving,
+                                cx,
+                                |page: &mut Self, cx| {
+                                    page.editor = None;
+                                    cx.notify();
+                                },
+                            ))
+                            .child(activate(
+                                button(
+                                    theme,
+                                    "settings-device-host-editor-test",
+                                    if checking {
+                                        "Checking..."
+                                    } else {
+                                        "Test connection"
+                                    },
+                                ),
+                                !saving && !checking,
+                                cx,
+                                |page: &mut Self, cx| page.test_draft(cx),
+                            ))
+                            .child(activate(
+                                button(
+                                    theme,
+                                    "settings-device-host-save",
+                                    if saving { "Saving..." } else { "Save host" },
+                                ),
+                                !saving && !checking,
+                                cx,
+                                |page: &mut Self, cx| page.save_draft(cx),
+                            )),
+                    ),
+            );
+        }
+        list.children(
+            self.hosts_error
+                .clone()
+                .map(|error| small(error.to_string(), theme.danger)),
+        )
+        .into_any_element()
     }
 
     fn on_scroll_hovered(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
@@ -380,6 +839,30 @@ impl Render for DeviceHubPage {
             .into_any_element(),
             None,
         ));
+        let hosts = self.render_hosts(&theme, &hub, cx);
+        let editing = self.editor.is_some();
+        card = card.child(row(
+            &theme,
+            false,
+            "Device hosts",
+            DEVICE_HOSTS_DESCRIPTION,
+            None,
+            None,
+            activate(
+                button(&theme, "settings-device-host-add", "Add host"),
+                loaded && !editing && self.hosts_task.is_none(),
+                cx,
+                |page: &mut Self, cx| page.open_editor(cx),
+            )
+            .into_any_element(),
+            Some(
+                div()
+                    .px(px(20.0))
+                    .pb(px(14.0))
+                    .child(hosts)
+                    .into_any_element(),
+            ),
+        ));
         let update_banner: Option<AnyElement> =
             setup::host_update(&hub).map(|(label, detail, failed)| {
                 setup::host_update_banner(&theme, label, detail, failed, |el| {
@@ -538,5 +1021,160 @@ mod tests {
             android.right() <= refresh.right(),
             "the reason runs past the card: {android:?} vs {refresh:?}"
         );
+    }
+
+    fn with_hosts(mut state: DeviceHubState) -> DeviceHubState {
+        use zeron_proto::device_hub::{DeviceHostState, DeviceHubHost, DevicePlatformAvailability};
+        state.settings.device_hosts = vec![
+            SshDeviceHostConfig {
+                id: "mini".into(),
+                label: "Mac mini".into(),
+                target: "me@mini.local".into(),
+                ..Default::default()
+            },
+            SshDeviceHostConfig {
+                id: "studio".into(),
+                label: "Studio".into(),
+                target: "studio".into(),
+                port: Some(2222),
+                ..Default::default()
+            },
+        ];
+        state.hosts.push(DeviceHubHost {
+            id: "mini".into(),
+            kind: "ssh".into(),
+            label: "Mac mini".into(),
+            platforms: vec![DevicePlatformAvailability {
+                platform: DevicePlatform::Ios,
+                available: true,
+                reason: None,
+            }],
+            ..Default::default()
+        });
+        state.host_statuses.insert(
+            "studio".into(),
+            DeviceHostState {
+                status: DeviceHostStatus::Failed,
+                detail: Some("Host key verification failed.".into()),
+            },
+        );
+        state
+    }
+
+    #[gpui::test]
+    fn host_rows_test_each_host_and_remove_saves_the_rest(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (state, calls) = crate::device_panel::tests::app_state_with(
+            cx,
+            &runtime,
+            with_hosts(hub(true)),
+            std::sync::Arc::new(|method| match method {
+                methods::TEST_DEVICE_HOST => serde_json::json!({"local": true}),
+                _ => serde_json::json!({}),
+            }),
+        );
+        let (page, cx) = cx.add_window_view(|_, cx| DeviceHubPage::new(state, cx));
+        cx.simulate_resize(gpui::size(gpui::px(900.0), gpui::px(2400.0)));
+        wait(cx, |cx| {
+            cx.debug_bounds("settings-device-host-test-mini").is_some()
+        });
+        assert!(
+            cx.debug_bounds("settings-device-host-remove-studio")
+                .is_some()
+        );
+        click(cx, "settings-device-host-test-mini");
+        wait(cx, |_| {
+            !calls_of(&calls, methods::TEST_DEVICE_HOST).is_empty()
+        });
+        assert_eq!(
+            calls_of(&calls, methods::TEST_DEVICE_HOST),
+            vec![serde_json::json!({"id": "mini", "label": "Mac mini", "target": "me@mini.local"})]
+        );
+        wait(cx, |cx| {
+            page.read_with(cx, |page, _| {
+                matches!(page.checks.get("mini"), Some(HostCheck::Done(test)) if test.local)
+            })
+        });
+        wait(cx, |cx| cx.debug_bounds("device-host-check").is_some());
+        click(cx, "settings-device-host-remove-mini");
+        wait(cx, |_| {
+            !calls_of(&calls, methods::CONFIGURE_DEVICE_HUB).is_empty()
+        });
+        assert_eq!(
+            calls_of(&calls, methods::CONFIGURE_DEVICE_HUB),
+            vec![serde_json::json!({"deviceHosts": [
+                {"id": "studio", "label": "Studio", "target": "studio", "port": 2222}
+            ]})]
+        );
+    }
+
+    #[gpui::test]
+    fn the_editor_validates_tests_and_saves_a_new_host(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (state, calls) = crate::device_panel::tests::app_state_with(
+            cx,
+            &runtime,
+            with_hosts(hub(true)),
+            std::sync::Arc::new(|method| match method {
+                methods::TEST_DEVICE_HOST => serde_json::json!({"checks": [
+                    {"name": "SSH", "ok": true},
+                    {"name": "Node 22 or newer", "ok": false, "detail": "Node 20.11.0 is installed."}
+                ]}),
+                _ => serde_json::json!({}),
+            }),
+        );
+        let (page, cx) = cx.add_window_view(|_, cx| DeviceHubPage::new(state, cx));
+        cx.simulate_resize(gpui::size(gpui::px(900.0), gpui::px(2400.0)));
+        click(cx, "settings-device-host-add");
+        wait(cx, |cx| {
+            cx.debug_bounds("settings-device-host-save").is_some()
+        });
+        let type_into = |cx: &mut gpui::VisualTestContext,
+                         field: fn(&HostEditor) -> &Entity<ComposerInput>,
+                         text: &str| {
+            let text = text.to_string();
+            page.update(cx, |page, cx| {
+                let input = field(page.editor.as_ref().unwrap()).clone();
+                input.update(cx, |input, cx| input.set_text(text, cx));
+            });
+        };
+        type_into(cx, |editor| &editor.target, "-oProxyCommand=touch /tmp/x");
+        click(cx, "settings-device-host-editor-test");
+        cx.run_until_parked();
+        assert!(calls_of(&calls, methods::TEST_DEVICE_HOST).is_empty());
+        assert!(page.read_with(cx, |page, _| page.editor.as_ref().unwrap().error.is_some()));
+
+        type_into(cx, |editor| &editor.name, "Lab Mac");
+        type_into(cx, |editor| &editor.target, "me@lab.local");
+        type_into(cx, |editor| &editor.identity, "/Users/me/.ssh/id_ed25519");
+        type_into(cx, |editor| &editor.port, "2200");
+        click(cx, "settings-device-host-editor-test");
+        wait(cx, |_| {
+            !calls_of(&calls, methods::TEST_DEVICE_HOST).is_empty()
+        });
+        let id = page.read_with(cx, |page, _| page.editor.as_ref().unwrap().id.clone());
+        assert!(id.starts_with("host-"));
+        assert_eq!(
+            calls_of(&calls, methods::TEST_DEVICE_HOST),
+            vec![
+                serde_json::json!({"id": id, "label": "Lab Mac", "target": "me@lab.local",
+                "identityFile": "/Users/me/.ssh/id_ed25519", "port": 2200})
+            ]
+        );
+        wait(cx, |cx| {
+            page.read_with(cx, |page, _| {
+                matches!(page.checks.get(&id), Some(HostCheck::Done(test)) if !test.passed())
+            })
+        });
+        click(cx, "settings-device-host-save");
+        wait(cx, |_| {
+            !calls_of(&calls, methods::CONFIGURE_DEVICE_HUB).is_empty()
+        });
+        let saved = &calls_of(&calls, methods::CONFIGURE_DEVICE_HUB)[0]["deviceHosts"];
+        assert_eq!(saved.as_array().unwrap().len(), 3);
+        assert_eq!(saved[2]["target"], "me@lab.local");
+        wait(cx, |cx| page.read_with(cx, |page, _| page.editor.is_none()));
     }
 }

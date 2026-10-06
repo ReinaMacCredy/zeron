@@ -194,7 +194,8 @@ impl FoldControls {
             .update(cx, |view, cx| view.release_held(true, cx))
             .ok();
         let engine = self.engine.clone();
-        let params = serde_json::json!({ "deviceId": self.device_id, "pose": pose });
+        let mut params = super::device_target(&self.host_id, &self.device_id);
+        params["pose"] = serde_json::json!(pose);
         self.request = cx.spawn(async move |this, cx| {
             let reply = engine
                 .client()

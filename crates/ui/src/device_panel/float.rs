@@ -5,7 +5,7 @@ use gpui::{
     Window, canvas, div, point, prelude::*, px, size,
 };
 use serde::{Deserialize, Serialize};
-use zeron_proto::device_hub::{DeviceOrientation, DevicePlatform, DeviceScreenConfig};
+use zeron_proto::device_hub::{DeviceOrientation, DevicePlatform, DeviceScreenConfig, device_key};
 
 use super::feed_view;
 use super::stream_view::DeviceStreamView;
@@ -295,9 +295,9 @@ impl DeviceFloat {
             && self.visible
             && let Some(engine) = self.state.read(cx).engine().cloned()
         {
-            let (id, platform) = (device_id.clone(), self.platform);
+            let (host, id, platform) = (host_id.clone(), device_id.clone(), self.platform);
             self.view = Some(cx.new(|cx| {
-                DeviceStreamView::new(engine, id, platform, cx)
+                DeviceStreamView::new(engine, host, id, platform, cx)
                     .without_rail()
                     .with_corner_radius(CORNER_RADIUS)
             }));
@@ -314,7 +314,7 @@ impl DeviceFloat {
             .read(cx)
             .device_hub
             .as_ref()
-            .and_then(|hub| hub.screens.get(&self.target.1));
+            .and_then(|hub| hub.screens.get(&device_key(&self.target.0, &self.target.1)));
         source_size(self.platform, screen)
     }
 

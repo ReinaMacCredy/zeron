@@ -167,7 +167,7 @@ pub fn coalesce_moves(queue: &mut VecDeque<DeviceInput>) {
 
 async fn send_inputs(
     engine: EngineHandle,
-    device_id: String,
+    target: serde_json::Value,
     mut inputs: mpsc::UnboundedReceiver<DeviceInput>,
 ) {
     let mut queue = VecDeque::new();
@@ -185,7 +185,8 @@ async fn send_inputs(
         let Some(input) = queue.pop_front() else {
             continue;
         };
-        let params = serde_json::json!({ "deviceId": device_id, "input": input });
+        let mut params = target.clone();
+        params["input"] = serde_json::json!(input);
         if let Err(error) = engine
             .client()
             .call(methods::SEND_HUB_DEVICE_INPUT, params)
@@ -397,6 +398,7 @@ async fn drain_h264(
 async fn drain_frames(
     executor: gpui::BackgroundExecutor,
     engine: EngineHandle,
+    target: serde_json::Value,
     device_id: String,
     mut sink: FrameSink,
     (mut codec, forced): (DeviceVideoCodec, bool),
@@ -404,7 +406,8 @@ async fn drain_frames(
 ) {
     loop {
         *sink.codec.lock().unwrap_or_else(PoisonError::into_inner) = codec;
-        let params = serde_json::json!({ "deviceId": device_id, "codec": codec });
+        let mut params = target.clone();
+        params["codec"] = serde_json::json!(codec);
         if let Ok(mut frames) = engine
             .client()
             .subscribe_scoped(methods::WATCH_HUB_DEVICE_FRAMES, params)
@@ -444,6 +447,7 @@ async fn drain_frames(
 
 pub struct DeviceStreamView {
     engine: EngineHandle,
+    host_id: String,
     device_id: String,
     platform: DevicePlatform,
     label: (SharedString, SharedString),
@@ -495,20 +499,29 @@ fn debug_tap_from_env() -> Option<(f32, f32)> {
 impl DeviceStreamView {
     pub fn new(
         engine: EngineHandle,
+        host_id: String,
         device_id: String,
         platform: DevicePlatform,
         cx: &mut Context<Self>,
     ) -> Self {
         let (nudge, mut nudged) = mpsc::unbounded::<()>();
         let (inputs, queued) = mpsc::unbounded::<DeviceInput>();
-        let sender = cx.background_spawn(send_inputs(engine.clone(), device_id.clone(), queued));
+        let sender = cx.background_spawn(send_inputs(
+            engine.clone(),
+            super::device_target(&host_id, &device_id),
+            queued,
+        ));
         cx.on_release(|view: &mut Self, cx| {
             let held = view.release(true);
             if !held.is_empty() {
-                let (engine, device_id) = (view.engine.clone(), view.device_id.clone());
+                let (engine, target) = (
+                    view.engine.clone(),
+                    super::device_target(&view.host_id, &view.device_id),
+                );
                 cx.background_spawn(async move {
                     for input in held {
-                        let params = serde_json::json!({ "deviceId": device_id, "input": input });
+                        let mut params = target.clone();
+                        params["input"] = serde_json::json!(input);
                         if let Err(error) = engine
                             .client()
                             .call(methods::SEND_HUB_DEVICE_INPUT, params)
@@ -544,6 +557,7 @@ impl DeviceStreamView {
                 SharedString::from(device_id.clone()),
                 SharedString::default(),
             ),
+            host_id,
             device_id,
             platform,
             image: None,
@@ -601,6 +615,7 @@ impl DeviceStreamView {
         self.drain = cx.background_spawn(drain_frames(
             cx.background_executor().clone(),
             self.engine.clone(),
+            super::device_target(&self.host_id, &self.device_id),
             self.device_id.clone(),
             FrameSink {
                 slot: self.slot.clone(),
@@ -1368,8 +1383,15 @@ mod tests {
             cx.set_global(Theme::default());
         });
         let (engine, _) = fake_engine(&runtime);
-        let view =
-            cx.new(|cx| DeviceStreamView::new(engine, "SIM".into(), DevicePlatform::Ios, cx));
+        let view = cx.new(|cx| {
+            DeviceStreamView::new(
+                engine,
+                "local".into(),
+                "SIM".into(),
+                DevicePlatform::Ios,
+                cx,
+            )
+        });
         view.update(cx, |view, cx| {
             for seq in 0..20 {
                 let item = json!({ "seq": seq, "jpeg": jpeg() });
@@ -1403,7 +1425,13 @@ mod tests {
         cx.executor().allow_parking();
         let (engine, inputs) = fake_engine(&runtime);
         let (view, cx) = cx.add_window_view(|_, cx| {
-            DeviceStreamView::new(engine, "SIM".into(), DevicePlatform::Ios, cx)
+            DeviceStreamView::new(
+                engine,
+                "local".into(),
+                "SIM".into(),
+                DevicePlatform::Ios,
+                cx,
+            )
         });
         wait(cx, |cx| {
             view.read_with(cx, |view, _| view.has_frame() && view.frame_box().is_some())
@@ -1481,7 +1509,13 @@ mod tests {
         setup(cx);
         let (engine, inputs) = fake_engine(&runtime);
         let (view, cx) = cx.add_window_view(|_, cx| {
-            DeviceStreamView::new(engine, "SIM".into(), DevicePlatform::Ios, cx)
+            DeviceStreamView::new(
+                engine,
+                "local".into(),
+                "SIM".into(),
+                DevicePlatform::Ios,
+                cx,
+            )
         });
         wait(cx, |cx| {
             view.read_with(cx, |view, _| view.has_frame() && view.frame_box().is_some())
@@ -1529,7 +1563,13 @@ mod tests {
         let (engine, inputs) = fake_engine(&runtime);
         let fold_engine = engine.clone();
         let (view, cx) = cx.add_window_view(|_, cx| {
-            DeviceStreamView::new(engine, "SIM".into(), DevicePlatform::Ios, cx)
+            DeviceStreamView::new(
+                engine,
+                "local".into(),
+                "SIM".into(),
+                DevicePlatform::Ios,
+                cx,
+            )
         });
         wait(cx, |cx| {
             view.read_with(cx, |view, _| view.has_frame() && view.frame_box().is_some())
@@ -1599,7 +1639,11 @@ mod tests {
         });
         let engine = EngineHandle::from_test_client(zeron_rpc::RpcClient::new(out, inbound));
         let (inputs, queued) = mpsc::unbounded::<DeviceInput>();
-        runtime.spawn(send_inputs(engine, "SIM".into(), queued));
+        runtime.spawn(send_inputs(
+            engine,
+            crate::device_panel::device_target("local", "SIM"),
+            queued,
+        ));
         let touch = |phase, x| DeviceInput::Touch { phase, x, y: 0.5 };
         inputs
             .unbounded_send(touch(TouchPhase::Begin, 0.1))
@@ -1651,8 +1695,15 @@ mod tests {
         let _guard = runtime.enter();
         setup(cx);
         let (engine, inputs) = fake_engine(&runtime);
-        let view =
-            cx.new(|cx| DeviceStreamView::new(engine, "SIM".into(), DevicePlatform::Ios, cx));
+        let view = cx.new(|cx| {
+            DeviceStreamView::new(
+                engine,
+                "local".into(),
+                "SIM".into(),
+                DevicePlatform::Ios,
+                cx,
+            )
+        });
         let host = view.clone();
         let (_, cx) = cx.add_window_view(|_, _| Host(host));
         wait(cx, |cx| {
@@ -1684,7 +1735,13 @@ mod tests {
         setup(cx);
         let (engine, _, subscriptions) = fake_engine_with(&runtime, false);
         let (view, cx) = cx.add_window_view(|_, cx| {
-            DeviceStreamView::new(engine, "SIM".into(), DevicePlatform::Ios, cx)
+            DeviceStreamView::new(
+                engine,
+                "local".into(),
+                "SIM".into(),
+                DevicePlatform::Ios,
+                cx,
+            )
         });
         wait(cx, |_| subscriptions.load(Ordering::SeqCst) == 1);
         assert!(view.read_with(cx, |view, _| view.video_error.is_none()));
@@ -1751,7 +1808,8 @@ mod tests {
     ) {
         setup(cx);
         let (engine, inputs) = fake_engine(runtime);
-        let view = cx.new(|cx| DeviceStreamView::new(engine, "SIM".into(), platform, cx));
+        let view =
+            cx.new(|cx| DeviceStreamView::new(engine, "local".into(), "SIM".into(), platform, cx));
         let hosted = view.clone();
         let (host, cx) = cx.add_window_view(|_, _| KeyHost {
             view: Some(hosted),
@@ -1982,7 +2040,13 @@ mod tests {
         setup(cx);
         let (engine, inputs) = fake_engine(&runtime);
         let (view, cx) = cx.add_window_view(|_, cx| {
-            DeviceStreamView::new(engine, "SIM".into(), DevicePlatform::Ios, cx)
+            DeviceStreamView::new(
+                engine,
+                "local".into(),
+                "SIM".into(),
+                DevicePlatform::Ios,
+                cx,
+            )
         });
         view.update(cx, |view, cx| {
             view.press_button(DeviceButton::Home);
@@ -2019,7 +2083,13 @@ mod tests {
         setup(cx);
         let (engine, _) = fake_engine(&runtime);
         let (view, cx) = cx.add_window_view(|_, cx| {
-            DeviceStreamView::new(engine, "SIM".into(), DevicePlatform::Ios, cx)
+            DeviceStreamView::new(
+                engine,
+                "local".into(),
+                "SIM".into(),
+                DevicePlatform::Ios,
+                cx,
+            )
         });
         view.update(cx, |view, cx| {
             view.set_screen(
@@ -2186,7 +2256,13 @@ mod tests {
             );
             let (engine, watches) = video_engine(&runtime, items);
             let (view, cx) = cx.add_window_view(|_, cx| {
-                DeviceStreamView::new(engine, "SIM".into(), DevicePlatform::Ios, cx)
+                DeviceStreamView::new(
+                    engine,
+                    "local".into(),
+                    "SIM".into(),
+                    DevicePlatform::Ios,
+                    cx,
+                )
             });
             wait(cx, |cx| shown(&view, cx).is_some());
             assert_eq!(
@@ -2206,7 +2282,13 @@ mod tests {
             let envelopes = AvccDemuxer::default().push(FIXTURE).unwrap();
             let (engine, watches) = video_engine(&runtime, vec![item(&envelopes[1..2])]);
             let (view, cx) = cx.add_window_view(|_, cx| {
-                DeviceStreamView::new(engine, "SIM".into(), DevicePlatform::Ios, cx)
+                DeviceStreamView::new(
+                    engine,
+                    "local".into(),
+                    "SIM".into(),
+                    DevicePlatform::Ios,
+                    cx,
+                )
             });
             wait(cx, |cx| shown(&view, cx).is_some());
             assert_eq!(
@@ -2247,7 +2329,13 @@ mod tests {
             }
             let (engine, watches) = video_engine(&runtime, items);
             let (view, cx) = cx.add_window_view(|_, cx| {
-                DeviceStreamView::new(engine, "SIM".into(), DevicePlatform::Ios, cx)
+                DeviceStreamView::new(
+                    engine,
+                    "local".into(),
+                    "SIM".into(),
+                    DevicePlatform::Ios,
+                    cx,
+                )
             });
             wait(cx, |cx| shown(&view, cx).is_some());
             pump(cx, Duration::from_millis(4500));
@@ -2262,7 +2350,13 @@ mod tests {
             setup(cx);
             let (engine, watches) = video_engine(&runtime, Vec::new());
             let (view, cx) = cx.add_window_view(|_, cx| {
-                DeviceStreamView::new(engine, "SIM".into(), DevicePlatform::Ios, cx)
+                DeviceStreamView::new(
+                    engine,
+                    "local".into(),
+                    "SIM".into(),
+                    DevicePlatform::Ios,
+                    cx,
+                )
             });
             wait(cx, |_| codecs(&watches).len() == 1);
             let failed = |detail: &str| DeviceStreamStatus {
@@ -2310,7 +2404,13 @@ mod tests {
             let envelopes = AvccDemuxer::default().push(FIXTURE).unwrap();
             let (engine, _) = video_engine(&runtime, vec![item(&envelopes[..2])]);
             let (view, cx) = cx.add_window_view(|_, cx| {
-                DeviceStreamView::new(engine, "SIM".into(), DevicePlatform::Ios, cx)
+                DeviceStreamView::new(
+                    engine,
+                    "local".into(),
+                    "SIM".into(),
+                    DevicePlatform::Ios,
+                    cx,
+                )
             });
             wait(cx, |cx| shown(&view, cx).is_some());
             let link = |video, avcc| DeviceStreamStatus {
@@ -2346,8 +2446,15 @@ mod tests {
             let _guard = runtime.enter();
             setup(cx);
             let (engine, _) = video_engine(&runtime, Vec::new());
-            let view =
-                cx.new(|cx| DeviceStreamView::new(engine, "SIM".into(), DevicePlatform::Ios, cx));
+            let view = cx.new(|cx| {
+                DeviceStreamView::new(
+                    engine,
+                    "local".into(),
+                    "SIM".into(),
+                    DevicePlatform::Ios,
+                    cx,
+                )
+            });
             let envelopes = AvccDemuxer::default().push(FIXTURE).unwrap();
             let decoder = crate::device_panel::h264::Decoder::new(&envelopes[0].payload).unwrap();
             let surfaces: Vec<_> = envelopes[1..]
@@ -2386,7 +2493,13 @@ mod tests {
             setup(cx);
             let (engine, watches) = backlog_engine(&runtime, 1);
             let (view, cx) = cx.add_window_view(|_, cx| {
-                DeviceStreamView::new(engine, "SIM".into(), DevicePlatform::Ios, cx)
+                DeviceStreamView::new(
+                    engine,
+                    "local".into(),
+                    "SIM".into(),
+                    DevicePlatform::Ios,
+                    cx,
+                )
             });
             wait(cx, |cx| shown(&view, cx).is_some());
             std::thread::sleep(Duration::from_millis(1200));
@@ -2500,7 +2613,13 @@ mod tests {
             setup(cx);
             let (engine, watches) = video_engine(&runtime, Vec::new());
             let (view, cx) = cx.add_window_view(|_, cx| {
-                DeviceStreamView::new(engine, "SIM".into(), DevicePlatform::Ios, cx)
+                DeviceStreamView::new(
+                    engine,
+                    "local".into(),
+                    "SIM".into(),
+                    DevicePlatform::Ios,
+                    cx,
+                )
             });
             wait(cx, |_| codecs(&watches).len() == 1);
             let failed = DeviceStreamStatus {
@@ -2535,7 +2654,13 @@ mod tests {
             screen: DeviceScreenConfig,
             cx: &mut Context<DeviceStreamView>,
         ) -> DeviceStreamView {
-            let mut view = DeviceStreamView::new(engine, "SIM".into(), DevicePlatform::Ios, cx);
+            let mut view = DeviceStreamView::new(
+                engine,
+                "local".into(),
+                "SIM".into(),
+                DevicePlatform::Ios,
+                cx,
+            );
             view.set_screen(Some(screen), cx);
             view
         }
@@ -2570,7 +2695,13 @@ mod tests {
             wire.extend(items[4..].iter().map(|envelopes| item(envelopes)));
             let (engine, watches) = video_engine(&runtime, wire);
             let (view, cx) = cx.add_window_view(|_, cx| {
-                DeviceStreamView::new(engine, "emulator-5554".into(), DevicePlatform::Android, cx)
+                DeviceStreamView::new(
+                    engine,
+                    "local".into(),
+                    "emulator-5554".into(),
+                    DevicePlatform::Android,
+                    cx,
+                )
             });
             wait(cx, |cx| shown(&view, cx).is_some());
             assert_eq!(
@@ -2601,7 +2732,13 @@ mod tests {
             let keyframe = android_items()[0][1].clone();
             let (engine, watches) = video_engine(&runtime, vec![item(&[keyframe])]);
             let (view, cx) = cx.add_window_view(|_, cx| {
-                DeviceStreamView::new(engine, "emulator-5554".into(), DevicePlatform::Android, cx)
+                DeviceStreamView::new(
+                    engine,
+                    "local".into(),
+                    "emulator-5554".into(),
+                    DevicePlatform::Android,
+                    cx,
+                )
             });
             wait(cx, |cx| {
                 view.read_with(cx, |view, _| view.video_error.is_some())
@@ -2625,7 +2762,13 @@ mod tests {
             setup(cx);
             let (engine, watches) = backlog_engine(&runtime, 14);
             let (view, cx) = cx.add_window_view(|_, cx| {
-                DeviceStreamView::new(engine, "SIM".into(), DevicePlatform::Ios, cx)
+                DeviceStreamView::new(
+                    engine,
+                    "local".into(),
+                    "SIM".into(),
+                    DevicePlatform::Ios,
+                    cx,
+                )
             });
             pump(cx, Duration::from_millis(4500));
             wait(cx, |_| codecs(&watches).len() == 2);

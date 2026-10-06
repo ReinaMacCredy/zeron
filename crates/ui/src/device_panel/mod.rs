@@ -17,7 +17,8 @@ use gpui::{
     Window, div, prelude::*, px,
 };
 use zeron_proto::device_hub::{
-    DeviceHostStatus, DeviceHubState, DevicePlatform, DeviceSession, HubDevice, HubDeviceScreenshot,
+    DeviceHostStatus, DeviceHubState, DevicePlatform, DeviceSession, HubDevice,
+    HubDeviceScreenshot, LOCAL_DEVICE_HOST_ID, device_key,
 };
 use zeron_rpc::methods;
 
@@ -45,6 +46,14 @@ pub enum PanelPhase {
     Picker,
 }
 
+pub(crate) fn device_target(host_id: &str, device_id: &str) -> serde_json::Value {
+    let mut target = serde_json::json!({ "deviceId": device_id });
+    if host_id != LOCAL_DEVICE_HOST_ID {
+        target["hostId"] = host_id.into();
+    }
+    target
+}
+
 pub fn device_description(hub: &DeviceHubState, device: &HubDevice) -> String {
     let label = hub
         .hosts
@@ -61,8 +70,9 @@ pub(crate) fn feed_view(
     device_id: &str,
     cx: &mut App,
 ) {
-    let screen = hub.screens.get(device_id).cloned();
-    let link = hub.streams.get(device_id).cloned();
+    let key = device_key(host_id, device_id);
+    let screen = hub.screens.get(&key).cloned();
+    let link = hub.streams.get(&key).cloned();
     let label = hub
         .device(host_id, device_id)
         .map(|device| (device.name.clone(), device_description(hub, device)));
@@ -75,24 +85,43 @@ pub(crate) fn feed_view(
     });
 }
 
-pub fn picker_groups(hub: &DeviceHubState) -> Vec<(DevicePlatform, &'static str, Vec<HubDevice>)> {
-    [
-        (DevicePlatform::Ios, "iOS Simulators"),
-        (DevicePlatform::Android, "Android Emulators"),
-    ]
-    .into_iter()
-    .map(|(platform, title)| {
-        let mut devices: Vec<HubDevice> = hub
-            .devices
-            .iter()
-            .filter(|device| device.platform == platform)
-            .cloned()
-            .collect();
-        devices.sort_by(|a, b| b.booted.cmp(&a.booted).then_with(|| a.name.cmp(&b.name)));
-        (platform, title, devices)
-    })
-    .filter(|(_, _, devices)| !devices.is_empty())
-    .collect()
+pub fn picker_groups(hub: &DeviceHubState) -> Vec<(DevicePlatform, String, Vec<HubDevice>)> {
+    let mut hosts: Vec<&str> = Vec::new();
+    for host_id in hub
+        .hosts
+        .iter()
+        .map(|host| host.id.as_str())
+        .chain(hub.devices.iter().map(|device| device.host_id.as_str()))
+    {
+        if !hosts.contains(&host_id) && hub.devices.iter().any(|d| d.host_id == host_id) {
+            hosts.push(host_id);
+        }
+    }
+    let several = hosts.len() > 1;
+    hosts
+        .into_iter()
+        .flat_map(|host_id| {
+            [
+                (DevicePlatform::Ios, "iOS Simulators"),
+                (DevicePlatform::Android, "Android Emulators"),
+            ]
+            .map(|(platform, title)| {
+                let mut devices: Vec<HubDevice> = hub
+                    .devices
+                    .iter()
+                    .filter(|device| device.host_id == host_id && device.platform == platform)
+                    .cloned()
+                    .collect();
+                devices.sort_by(|a, b| b.booted.cmp(&a.booted).then_with(|| a.name.cmp(&b.name)));
+                let title = match hub.hosts.iter().find(|host| host.id == host_id) {
+                    Some(host) if several => format!("{} · {title}", host.label),
+                    _ => title.to_string(),
+                };
+                (platform, title, devices)
+            })
+        })
+        .filter(|(_, _, devices)| !devices.is_empty())
+        .collect()
 }
 
 pub fn booting_banner(hub: &DeviceHubState, chat_id: &str) -> Option<String> {
@@ -128,7 +157,11 @@ pub fn panel_phase(
         return PanelPhase::Stream;
     }
     if let Some(opening) = opening {
-        return match hub.devices.iter().find(|device| device.id == opening) {
+        return match hub
+            .devices
+            .iter()
+            .find(|device| device_key(&device.host_id, &device.id) == opening)
+        {
             Some(device) => loading(
                 &device.name,
                 device_description(hub, device),
@@ -275,7 +308,8 @@ impl DevicePanel {
     }
 
     pub fn shows(&self, target: &(String, String)) -> bool {
-        self.target.as_ref() == Some(target) || self.opening.as_deref() == Some(target.1.as_str())
+        self.target.as_ref() == Some(target)
+            || self.opening.as_deref() == Some(device_key(&target.0, &target.1).as_str())
     }
 
     pub fn bind(&mut self, host_id: String, device_id: String, cx: &mut Context<Self>) {
@@ -391,9 +425,15 @@ impl DevicePanel {
             .target
             .as_ref()
             .and_then(|(host, device)| hub.session(&self.chat_id, host, device))
-            .map(|session| (session.device_id.clone(), session.platform));
+            .map(|session| {
+                (
+                    session.host_id.clone(),
+                    session.device_id.clone(),
+                    session.platform,
+                )
+            });
         match live {
-            Some((device_id, platform)) => {
+            Some((host_id, device_id, platform)) => {
                 self.seen_live = true;
                 if self.view.is_none()
                     && self.visible
@@ -401,8 +441,9 @@ impl DevicePanel {
                 {
                     let id = device_id.clone();
                     let physical = self.device(cx).is_some_and(|device| device.physical);
-                    let view = cx
-                        .new(|cx| DeviceStreamView::new(engine.clone(), id.clone(), platform, cx));
+                    let view = cx.new(|cx| {
+                        DeviceStreamView::new(engine.clone(), host_id, id.clone(), platform, cx)
+                    });
                     let host = self.target.as_ref().map(|(host, _)| host.clone());
                     let weak = view.downgrade();
                     let fold = cx.new(|cx| {
@@ -486,7 +527,7 @@ impl DevicePanel {
         if self.opening.is_some() {
             return;
         }
-        self.opening = Some(device.id.clone());
+        self.opening = Some(device_key(&device.host_id, &device.id));
         self.error = None;
         let params = serde_json::json!({
             "chatId": self.chat_id,
@@ -713,7 +754,11 @@ impl DevicePanel {
 
     fn render_picker(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let hub = self.hub(cx).cloned().unwrap_or_default();
-        let ready = hub.host_status == DeviceHostStatus::Ready;
+        let ready = hub.host_status == DeviceHostStatus::Ready
+            || hub
+                .host_statuses
+                .values()
+                .any(|host| host.status == DeviceHostStatus::Ready);
         let groups = if ready {
             picker_groups(&hub)
         } else {
@@ -739,11 +784,12 @@ impl DevicePanel {
                     platform.platform == DevicePlatform::Android && !platform.available
                 });
         let row = |device: HubDevice, cx: &mut Context<Self>| {
-            let opening = self.opening.as_deref() == Some(device.id.as_str());
+            let key = device_key(&device.host_id, &device.id);
+            let opening = self.opening.as_deref() == Some(key.as_str());
             let status = if device.booted { "Running" } else { "Stopped" };
             let action = if device.booted { "Open" } else { "Start" };
             let detail = format!("{} · {status}", device_description(&hub, &device));
-            let row_id = SharedString::from(format!("device-row-{}", device.id));
+            let row_id = SharedString::from(format!("device-row-{key}"));
             let selector = row_id.clone();
             let label = SharedString::from(format!("{action} {}", device.name));
             let clicked = device.clone();
@@ -812,14 +858,21 @@ impl DevicePanel {
         let empty_list = groups.is_empty();
         let mut sections = Vec::new();
         for (platform, title, devices) in groups {
-            let id = match platform {
-                DevicePlatform::Ios => "device-group-ios",
-                DevicePlatform::Android => "device-group-android",
+            let platform_id = match platform {
+                DevicePlatform::Ios => "ios",
+                DevicePlatform::Android => "android",
             };
+            let host_id = devices.first().map_or("", |device| device.host_id.as_str());
+            let id = SharedString::from(if host_id == LOCAL_DEVICE_HOST_ID {
+                format!("device-group-{platform_id}")
+            } else {
+                format!("device-group-{host_id}-{platform_id}")
+            });
+            let selector = id.clone();
             sections.push(
                 div()
                     .id(id)
-                    .debug_selector(move || id.into())
+                    .debug_selector(move || selector.to_string())
                     .text_size(crate::typography::ui_rems(11.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(theme.text_muted)
@@ -1500,15 +1553,21 @@ pub(crate) mod tests {
         assert_eq!(
             shape(&state),
             [
-                ("iOS Simulators", vec!["PAD".to_string(), "SIM".to_string()]),
                 (
-                    "Android Emulators",
+                    "iOS Simulators".to_string(),
+                    vec!["PAD".to_string(), "SIM".to_string()]
+                ),
+                (
+                    "Android Emulators".to_string(),
                     vec!["emulator-5554".to_string(), "Pixel_9".to_string()]
                 ),
             ]
         );
         state.devices.truncate(1);
-        assert_eq!(shape(&state), [("iOS Simulators", vec!["SIM".to_string()])]);
+        assert_eq!(
+            shape(&state),
+            [("iOS Simulators".to_string(), vec!["SIM".to_string()])]
+        );
     }
 
     #[gpui::test]
@@ -1903,6 +1962,111 @@ pub(crate) mod tests {
             }],
             ..Default::default()
         }
+    }
+
+    #[gpui::test]
+    fn a_device_on_an_ssh_host_is_grouped_opened_and_streamed_by_its_host(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let mut state = hub(true);
+        state.hosts.push(zeron_proto::device_hub::DeviceHubHost {
+            id: "mini".into(),
+            kind: "ssh".into(),
+            label: "Mac mini".into(),
+            ..Default::default()
+        });
+        state.devices.push(HubDevice {
+            host_id: "mini".into(),
+            id: "SIM".into(),
+            name: "iPhone 17".into(),
+            version: "iOS 27.0".into(),
+            booted: true,
+            ..Default::default()
+        });
+        let groups: Vec<(String, Vec<String>)> = picker_groups(&state)
+            .into_iter()
+            .map(|(_, title, devices)| {
+                let keys = devices
+                    .iter()
+                    .map(|device| device_key(&device.host_id, &device.id))
+                    .collect();
+                (title, keys)
+            })
+            .collect();
+        assert_eq!(
+            groups,
+            [
+                (
+                    "This machine · iOS Simulators".to_string(),
+                    vec!["SIM".to_string()]
+                ),
+                (
+                    "Mac mini · iOS Simulators".to_string(),
+                    vec!["mini/SIM".to_string()]
+                ),
+            ]
+        );
+        let (shared, calls) = app_state_with(
+            cx,
+            &runtime,
+            state.clone(),
+            Arc::new(|method| match method {
+                methods::OPEN_HUB_DEVICE => serde_json::json!({"chatId": "chat",
+                    "hostId": "mini", "deviceId": "SIM", "platform": "ios"}),
+                _ => serde_json::json!({}),
+            }),
+        );
+        let panel_state = shared.clone();
+        let (_panel, cx) =
+            cx.add_window_view(|_, cx| DevicePanel::new(panel_state, "chat".into(), cx));
+        wait(cx, |cx| cx.debug_bounds("device-group-mini-ios").is_some());
+        assert!(cx.debug_bounds("device-row-SIM").is_some());
+        click(cx, "device-row-mini/SIM");
+        wait(cx, |_| {
+            !calls_of(&calls, methods::OPEN_HUB_DEVICE).is_empty()
+        });
+        assert_eq!(
+            calls_of(&calls, methods::OPEN_HUB_DEVICE)[0]["hostId"],
+            "mini"
+        );
+        shared.update(cx, |shared, cx| {
+            let mut opened = state.clone();
+            opened.revision = 1;
+            opened.sessions.push(DeviceSession {
+                chat_id: "chat".into(),
+                host_id: "mini".into(),
+                device_id: "SIM".into(),
+                ..Default::default()
+            });
+            opened.streams.insert(
+                "mini/SIM".into(),
+                DeviceStreamStatus {
+                    video: StreamLinkStatus::Live,
+                    input: StreamLinkStatus::Live,
+                    subscribers: 1,
+                    ..Default::default()
+                },
+            );
+            shared.device_hub = Some(opened);
+            cx.notify();
+        });
+        wait(cx, |_| {
+            !calls_of(&calls, methods::WATCH_HUB_DEVICE_FRAMES).is_empty()
+        });
+        let watch = &calls_of(&calls, methods::WATCH_HUB_DEVICE_FRAMES)[0];
+        assert_eq!(
+            (&watch["hostId"], &watch["deviceId"]),
+            (&serde_json::json!("mini"), &serde_json::json!("SIM"))
+        );
+        click(cx, "device-home");
+        wait(cx, |_| {
+            !calls_of(&calls, methods::SEND_HUB_DEVICE_INPUT).is_empty()
+        });
+        assert_eq!(
+            calls_of(&calls, methods::SEND_HUB_DEVICE_INPUT)[0]["hostId"],
+            "mini",
+            "the live link is read under the host-scoped key and input goes to that host"
+        );
     }
 
     #[test]
