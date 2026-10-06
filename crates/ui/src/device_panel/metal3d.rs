@@ -1,4 +1,5 @@
 use std::ffi::c_void;
+use std::ops::Range;
 use std::ptr::{NonNull, null_mut};
 use std::sync::OnceLock;
 
@@ -22,7 +23,7 @@ use objc2_metal::{
 };
 
 use super::h264::Surface;
-use super::scene3d::{Model, RenderKey, Schedule};
+use super::scene3d::{RenderKey, Schedule, Vertex};
 
 type Device = ProtocolObject<dyn MTLDevice>;
 type Texture = Retained<ProtocolObject<dyn MTLTexture>>;
@@ -98,12 +99,19 @@ pub enum Source<'a> {
     },
 }
 
+pub struct Draw {
+    pub range: Range<usize>,
+    pub mvp: [[f32; 4]; 4],
+    pub rotation: [[f32; 4]; 4],
+}
+
 pub struct Job<'a> {
     pub source: Source<'a>,
     pub frame: usize,
-    pub model: &'a Model,
-    pub mvp: [[f32; 4]; 4],
-    pub rotation: [[f32; 4]; 4],
+    pub mesh: (u64, &'a [Vertex]),
+    pub draws: &'a [Draw],
+    pub live_panel: u8,
+    pub live_rotation: u8,
     pub size: (usize, usize),
     pub clear: [f32; 3],
 }
@@ -130,7 +138,7 @@ pub struct Renderer {
     shared: &'static Shared,
     queue: Retained<ProtocolObject<dyn objc2_metal::MTLCommandQueue>>,
     cache: CFRetained<CVMetalTextureCache>,
-    mesh: Option<(u64, Retained<ProtocolObject<dyn MTLBuffer>>, usize)>,
+    mesh: Option<(u64, Retained<ProtocolObject<dyn MTLBuffer>>)>,
     bgra: Option<(usize, Texture)>,
     targets: Option<Targets>,
     next: usize,
@@ -351,12 +359,12 @@ impl Renderer {
         Some(())
     }
 
-    fn ensure_mesh(&mut self, model: &Model) -> Option<()> {
-        if self.mesh.as_ref().is_some_and(|(id, ..)| *id == model.id) {
+    fn ensure_mesh(&mut self, (id, vertices): (u64, &[Vertex])) -> Option<()> {
+        if self.mesh.as_ref().is_some_and(|(known, _)| *known == id) {
             return Some(());
         }
-        let bytes = std::mem::size_of_val(model.vertices.as_slice());
-        let pointer = NonNull::new(model.vertices.as_ptr().cast_mut().cast::<c_void>())?;
+        let bytes = std::mem::size_of_val(vertices);
+        let pointer = NonNull::new(vertices.as_ptr().cast_mut().cast::<c_void>())?;
         // SAFETY: `pointer` addresses `bytes` readable bytes; Metal copies them before returning.
         let buffer = unsafe {
             self.shared.device.newBufferWithBytes_length_options(
@@ -365,7 +373,7 @@ impl Renderer {
                 MTLResourceOptions::StorageModeShared,
             )
         }?;
-        self.mesh = Some((model.id, buffer, model.vertices.len()));
+        self.mesh = Some((id, buffer));
         Some(())
     }
 
@@ -420,12 +428,18 @@ impl Renderer {
         if size.0 < 2 || size.1 < 2 {
             return None;
         }
+        let mut mvps = [[[0.0; 4]; 4]; 2];
+        for (slot, draw) in mvps.iter_mut().zip(job.draws) {
+            *slot = draw.mvp;
+        }
         let key = RenderKey {
             source: job.frame,
-            model: job.model.id,
-            mvp: job.mvp,
+            model: job.mesh.0,
+            mvps,
             size,
             clear: job.clear,
+            live_panel: job.live_panel,
+            rotation: job.live_rotation,
         };
         if !self.schedule.due(key)
             && let Some(shown) = &self.shown
@@ -445,7 +459,7 @@ impl Renderer {
 
     fn draw(&mut self, job: &Job, size: (usize, usize)) -> Option<Surface> {
         self.ensure_targets(size)?;
-        self.ensure_mesh(job.model)?;
+        self.ensure_mesh(job.mesh)?;
         let mut keep = Vec::new();
         let (source, screen) = match &job.source {
             Source::Surface(surface) => {
@@ -478,7 +492,7 @@ impl Renderer {
             1,
         )?;
         keep.extend([y_cv, c_cv]);
-        let (_, vertices, count) = self.mesh.as_ref()?;
+        let (_, vertices) = self.mesh.as_ref()?;
         let commands = self.queue.commandBuffer()?;
         let pass = MTLRenderPassDescriptor::new();
         // SAFETY: attachment 0 exists; the textures match the pipeline's formats and sample count.
@@ -503,23 +517,30 @@ impl Renderer {
         let encoder = commands.renderCommandEncoderWithDescriptor(&pass)?;
         encoder.setRenderPipelineState(&self.shared.scene);
         encoder.setDepthStencilState(Some(&self.shared.depth_state));
-        let uniforms = Uniforms {
-            mvp: job.mvp,
-            model: job.rotation,
-            source,
-            _pad: [0; 3],
-        };
+        let count = job.mesh.1.len();
         // SAFETY: the vertex buffer holds `count` Vertex records matching the shader's Vtx layout,
-        // and the uniform bytes outlive the encode call that copies them.
+        // each draw range lies inside it, and the uniform bytes outlive the encode call that copies them.
         unsafe {
             encoder.setVertexBuffer_offset_atIndex(Some(vertices), 0, 0);
-            let bytes = NonNull::from(&uniforms).cast::<c_void>();
-            encoder.setVertexBytes_length_atIndex(bytes, size_of::<Uniforms>(), 1);
-            encoder.setFragmentBytes_length_atIndex(bytes, size_of::<Uniforms>(), 0);
             for (index, texture) in screen.iter().enumerate() {
                 encoder.setFragmentTexture_atIndex(Some(texture), index);
             }
-            encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, *count);
+            for draw in job.draws.iter().filter(|draw| draw.range.end <= count) {
+                let uniforms = Uniforms {
+                    mvp: draw.mvp,
+                    model: draw.rotation,
+                    source,
+                    _pad: [0; 3],
+                };
+                let bytes = NonNull::from(&uniforms).cast::<c_void>();
+                encoder.setVertexBytes_length_atIndex(bytes, size_of::<Uniforms>(), 1);
+                encoder.setFragmentBytes_length_atIndex(bytes, size_of::<Uniforms>(), 0);
+                encoder.drawPrimitives_vertexStart_vertexCount(
+                    MTLPrimitiveType::Triangle,
+                    draw.range.start,
+                    draw.range.len(),
+                );
+            }
         }
         encoder.endEncoding();
         for (target, pipeline) in [
@@ -555,7 +576,7 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::device_panel::scene3d::{Camera, IOS_PHONE, Quat, Vec3};
+    use crate::device_panel::scene3d::{Camera, IOS_PHONE, Model, Quat, Vec3};
     use objc2_core_video::{
         CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
         CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
@@ -628,22 +649,31 @@ mod tests {
         d(actual.0, expected.0) && d(actual.1, expected.1) && d(actual.2, expected.2)
     }
 
+    fn draws(model: &Model, pose: Quat, size: (usize, usize)) -> [Draw; 1] {
+        let rotation = model.rotation(pose);
+        let camera = Camera::fit(model.bounds(None), rotation, size.0 as f64 / size.1 as f64);
+        let (mvp, rotation) = camera.matrices(rotation);
+        [Draw {
+            range: 0..model.vertices.len(),
+            mvp,
+            rotation,
+        }]
+    }
+
     fn job<'a>(
         source: Source<'a>,
         frame: usize,
         model: &'a Model,
-        pose: Quat,
+        draws: &'a [Draw],
         size: (usize, usize),
     ) -> Job<'a> {
-        let rotation = model.rotation(pose);
-        let camera = Camera::fit(model.bounds(None), rotation, size.0 as f64 / size.1 as f64);
-        let (mvp, rotation) = camera.matrices(rotation);
         Job {
             source,
             frame,
-            model,
-            mvp,
-            rotation,
+            mesh: (model.id, &model.vertices),
+            draws,
+            live_panel: 1,
+            live_rotation: 0,
             size,
             clear: [0.2, 0.3, 0.4],
         }
@@ -660,7 +690,7 @@ mod tests {
                 Source::Surface(&source),
                 1,
                 &model,
-                Quat::IDENTITY,
+                &draws(&model, Quat::IDENTITY, size),
                 size,
             ))
             .unwrap();
@@ -687,7 +717,7 @@ mod tests {
                 Source::Surface(&source),
                 1,
                 &model,
-                Quat::IDENTITY,
+                &draws(&model, Quat::IDENTITY, size),
                 size,
             ))
             .unwrap();
@@ -698,7 +728,13 @@ mod tests {
         );
         let turned = Quat::axis_angle(Vec3::new(0.0, 1.0, 0.0), 0.5);
         let next = renderer
-            .render(job(Source::Surface(&source), 1, &model, turned, size))
+            .render(job(
+                Source::Surface(&source),
+                1,
+                &model,
+                &draws(&model, turned, size),
+                size,
+            ))
             .unwrap();
         assert_ne!(
             next.buffer() as *const _,
@@ -716,7 +752,7 @@ mod tests {
                 },
                 2,
                 &model,
-                Quat::IDENTITY,
+                &draws(&model, Quat::IDENTITY, size),
                 size,
             ))
             .unwrap();
@@ -745,7 +781,13 @@ mod tests {
                 let pose = Quat::axis_angle(Vec3::new(0.0, 1.0, 0.0), frame as f64 * 0.01);
                 let started = std::time::Instant::now();
                 renderer
-                    .render(job(Source::Surface(&source), 1, &model, pose, size))
+                    .render(job(
+                        Source::Surface(&source),
+                        1,
+                        &model,
+                        &draws(&model, pose, size),
+                        size,
+                    ))
                     .unwrap();
                 if frame >= 20 {
                     wall.push(started.elapsed().as_secs_f64() * 1e3);
@@ -776,7 +818,7 @@ mod tests {
                 Source::Surface(&source),
                 1,
                 &model,
-                Quat::IDENTITY,
+                &draws(&model, Quat::IDENTITY, size),
                 size,
             ))
             .unwrap();
@@ -786,7 +828,7 @@ mod tests {
                 Source::Surface(&source),
                 2,
                 &model,
-                Quat::IDENTITY,
+                &draws(&model, Quat::IDENTITY, size),
                 size,
             ))
             .unwrap();

@@ -1222,7 +1222,7 @@ fn paint_3d(
     clear: [f32; 3],
     window: &mut Window,
 ) -> bool {
-    use super::metal3d::{Job, Source};
+    use super::metal3d::{Draw, Job, Source};
     let mut viewer = viewer.borrow_mut();
     let viewport = (
         f64::from(f32::from(frame.origin.x)),
@@ -1252,12 +1252,18 @@ fn paint_3d(
     };
     let (mvp, rotation) = camera.matrices(rotation);
     let scale = f64::from(window.scale_factor());
+    let draws = [Draw {
+        range: 0..model.vertices.len(),
+        mvp,
+        rotation,
+    }];
     let job = Job {
         source,
         frame: frame_number,
-        model: &model,
-        mvp,
-        rotation,
+        mesh: (model.id, &model.vertices),
+        draws: &draws,
+        live_panel: 1,
+        live_rotation: 0,
         size: (
             (viewport.2 * scale).round() as usize,
             (viewport.3 * scale).round() as usize,

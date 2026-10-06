@@ -145,6 +145,46 @@ impl Quat {
         }
     }
 
+    pub fn from_basis(right: Vec3, up: Vec3, normal: Vec3) -> Quat {
+        let (m11, m12, m13) = (right.x, up.x, normal.x);
+        let (m21, m22, m23) = (right.y, up.y, normal.y);
+        let (m31, m32, m33) = (right.z, up.z, normal.z);
+        let trace = m11 + m22 + m33;
+        if trace > 0.0 {
+            let s = 0.5 / (trace + 1.0).sqrt();
+            Quat {
+                x: (m32 - m23) * s,
+                y: (m13 - m31) * s,
+                z: (m21 - m12) * s,
+                w: 0.25 / s,
+            }
+        } else if m11 > m22 && m11 > m33 {
+            let s = 2.0 * (1.0 + m11 - m22 - m33).sqrt();
+            Quat {
+                x: 0.25 * s,
+                y: (m12 + m21) / s,
+                z: (m13 + m31) / s,
+                w: (m32 - m23) / s,
+            }
+        } else if m22 > m33 {
+            let s = 2.0 * (1.0 + m22 - m11 - m33).sqrt();
+            Quat {
+                x: (m12 + m21) / s,
+                y: 0.25 * s,
+                z: (m23 + m32) / s,
+                w: (m13 - m31) / s,
+            }
+        } else {
+            let s = 2.0 * (1.0 + m33 - m11 - m22).sqrt();
+            Quat {
+                x: (m13 + m31) / s,
+                y: (m23 + m32) / s,
+                z: 0.25 * s,
+                w: (m21 - m12) / s,
+            }
+        }
+    }
+
     pub fn angle_to(self, o: Quat) -> f64 {
         let dot = self.x * o.x + self.y * o.y + self.z * o.z + self.w * o.w;
         2.0 * dot.abs().clamp(-1.0, 1.0).acos()
@@ -194,7 +234,7 @@ impl Quat {
         .normalize()
     }
 
-    fn matrix(self) -> [[f32; 4]; 4] {
+    pub(super) fn matrix(self) -> [[f32; 4]; 4] {
         let Quat { x, y, z, w } = self;
         [
             [
@@ -257,10 +297,10 @@ fn from_vector(vector: Vec3) -> Quat {
     }
 }
 
-pub fn nearest_view(rotation: Quat, snaps: &[(Quat, f64)]) -> Option<Quat> {
+pub fn nearest_index(rotation: Quat, snaps: &[(Quat, f64)]) -> Option<(usize, Quat)> {
     let mut closest = None;
     let mut distance = f64::INFINITY;
-    for &(snap, yaw_limit) in snaps {
+    for (index, &(snap, yaw_limit)) in snaps.iter().enumerate() {
         let relative = rotation.mul(snap.inverse());
         let turn = 2.0 * relative.y.atan2(relative.w);
         let yaw = turn.sin().atan2(turn.cos()).clamp(-yaw_limit, yaw_limit);
@@ -268,10 +308,14 @@ pub fn nearest_view(rotation: Quat, snaps: &[(Quat, f64)]) -> Option<Quat> {
         let next = candidate.angle_to(rotation);
         if next < distance - 1e-8 {
             distance = next;
-            closest = Some(candidate);
+            closest = Some((index, candidate));
         }
     }
     closest
+}
+
+pub fn nearest_view(rotation: Quat, snaps: &[(Quat, f64)]) -> Option<Quat> {
+    nearest_index(rotation, snaps).map(|(_, rotation)| rotation)
 }
 
 pub fn screen_facing(rotation: Quat) -> Quat {
@@ -757,16 +801,16 @@ pub enum Part {
     Flash,
 }
 
-fn rgb(hex: u32) -> [f32; 3] {
+pub(super) fn rgb(hex: u32) -> [f32; 3] {
     [16, 8, 0].map(|shift| ((hex >> shift) & 0xff) as f32 / 255.0)
 }
 
-const METAL: u32 = 0xb5bcc7;
-const GLASS: u32 = 0x141820;
+pub(super) const METAL: u32 = 0xb5bcc7;
+pub(super) const GLASS: u32 = 0x141820;
 const LENS: u32 = 0x071326;
 const FLASH: u32 = 0xf2ead6;
 
-fn rounded(width: f64, height: f64, radius: f64, segments: usize) -> Vec<(f64, f64)> {
+pub(super) fn rounded(width: f64, height: f64, radius: f64, segments: usize) -> Vec<(f64, f64)> {
     let (x, y) = (-width / 2.0, -height / 2.0);
     let r = radius.min(width / 2.0).min(height / 2.0);
     let corners = [
@@ -844,13 +888,23 @@ impl Place {
     }
 }
 
-struct Builder {
-    vertices: Vec<Vertex>,
+pub(super) struct Builder {
+    pub(super) vertices: Vec<Vertex>,
     parts: Vec<(Part, Range<usize>)>,
     place: Place,
+    pub(super) screen_tag: f32,
 }
 
 impl Builder {
+    pub(super) fn new() -> Self {
+        Self {
+            vertices: Vec::new(),
+            parts: Vec::new(),
+            place: Place::MODEL,
+            screen_tag: 1.0,
+        }
+    }
+
     fn vertex(&mut self, position: Vec3, normal: Vec3, color: [f32; 3], uv: Option<(f32, f32)>) {
         let f = |v: Vec3| [v.x as f32, v.y as f32, v.z as f32];
         self.vertices.push(Vertex {
@@ -858,7 +912,7 @@ impl Builder {
             normal: f(self.place.turn(normal).normalize()),
             color,
             uv: uv.map_or([0.0; 2], |(u, v)| [u, v]),
-            screen: if uv.is_some() { 1.0 } else { 0.0 },
+            screen: if uv.is_some() { self.screen_tag } else { 0.0 },
         });
     }
 
@@ -868,7 +922,7 @@ impl Builder {
         self.parts.push((part, start..self.vertices.len()));
     }
 
-    fn cap(
+    pub(super) fn cap(
         &mut self,
         center: (f64, f64),
         outline: &[(f64, f64)],
@@ -915,7 +969,7 @@ impl Builder {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn extrude(
+    pub(super) fn extrude(
         &mut self,
         (width, height, radius): (f64, f64, f64),
         z0: f64,
@@ -1035,11 +1089,7 @@ impl Model {
         let back_z = 0.01 - profile.depth;
         let (metal, back) = (rgb(METAL), rgb(profile.back_color));
         let screen = rounded(screen_width, SCREEN_HEIGHT, profile.screen_radius, 20);
-        let mut mesh = Builder {
-            vertices: Vec::new(),
-            parts: Vec::new(),
-            place: Place::MODEL,
-        };
+        let mut mesh = Builder::new();
         mesh.part(Part::Body, |mesh| {
             let radius = profile.body_radius;
             mesh.extrude(
@@ -1237,6 +1287,15 @@ impl Camera {
     }
 
     pub fn matrices(&self, rotation: Quat) -> ([[f32; 4]; 4], [[f32; 4]; 4]) {
+        let model = rotation.matrix();
+        self.matrices_for(model, model)
+    }
+
+    pub fn matrices_for(
+        &self,
+        model: [[f32; 4]; 4],
+        rotation: [[f32; 4]; 4],
+    ) -> ([[f32; 4]; 4], [[f32; 4]; 4]) {
         let f = (1.0 / (FOV_Y / 2.0).tan()) as f32;
         let (near, far) = (0.1f32, 30.0f32);
         let mut projection = [[0.0f32; 4]; 4];
@@ -1252,8 +1311,7 @@ impl Camera {
             -self.distance as f32,
             1.0,
         ];
-        let model = rotation.matrix();
-        (multiply(&projection, &multiply(&view, &model)), model)
+        (multiply(&projection, &multiply(&view, &model)), rotation)
     }
 }
 
@@ -1446,9 +1504,11 @@ impl Wheel {
 pub struct RenderKey {
     pub source: usize,
     pub model: u64,
-    pub mvp: [[f32; 4]; 4],
+    pub mvps: [[[f32; 4]; 4]; 2],
     pub size: (usize, usize),
     pub clear: [f32; 3],
+    pub live_panel: u8,
+    pub rotation: u8,
 }
 
 #[derive(Default)]
@@ -2478,9 +2538,11 @@ mod tests {
             let key = RenderKey {
                 source,
                 model: model.id,
-                mvp,
+                mvps: [mvp, [[0.0; 4]; 4]],
                 size: (size.0 as usize, size.1 as usize),
                 clear: [0.1, 0.1, 0.1],
+                live_panel: 1,
+                rotation: 0,
             };
             if schedule.due(key) {
                 renders.set(renders.get() + 1);
