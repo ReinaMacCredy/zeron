@@ -844,7 +844,11 @@ impl DeviceHub {
 
     pub async fn tool_close(&self, params: DeviceToolParams) -> Result<(), String> {
         self.agent_gate()?;
-        let (host, device) = (params.host_id.as_deref(), params.device_id.as_deref());
+        let device = params.device_id.as_deref();
+        let host = params
+            .host_id
+            .as_deref()
+            .or(device.is_some().then_some(LOCAL_DEVICE_HOST_ID));
         let open = self.snapshot().sessions.iter().any(|session| {
             session.chat_id == params.chat_id
                 && host.is_none_or(|host| session.host_id == host)

@@ -908,10 +908,13 @@ impl DeviceHub {
     }
 
     pub(super) async fn capture(&self, device: &HubDevice) -> Result<Vec<u8>, String> {
-        match self.remote(&device.host_id) {
-            Some(host) => host.screenshot(device.platform, &device.id).await,
-            None => super::agent::capture_device(device).await,
+        if device.host_id == LOCAL_DEVICE_HOST_ID {
+            return super::agent::capture_device(device).await;
         }
+        self.remote(&device.host_id)
+            .ok_or(super::UNKNOWN_HOST)?
+            .screenshot(device.platform, &device.id)
+            .await
     }
 
     pub async fn device_detail(

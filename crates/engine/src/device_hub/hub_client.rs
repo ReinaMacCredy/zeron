@@ -51,7 +51,8 @@ impl HubClient<'_> {
         body: serde_json::Value,
         operation: &str,
     ) -> Result<ActionResult, String> {
-        let result: ActionResult = self
+        let failed = |e: reqwest::Error| format!("{operation} failed: {}", e.without_url());
+        let body = self
             .http
             .post(format!("{}{path}", self.origin))
             .json(&body)
@@ -59,10 +60,11 @@ impl HubClient<'_> {
             .send()
             .await
             .and_then(|r| r.error_for_status())
-            .map_err(|e| format!("{operation} failed: {}", e.without_url()))?
-            .json()
+            .map_err(failed)?
+            .bytes_stream();
+        let result: ActionResult = read_json(body, ACTION_BODY_LIMIT)
             .await
-            .map_err(|e| format!("{operation} failed: {}", e.without_url()))?;
+            .map_err(|e| format!("{operation} failed: {e}"))?;
         if result.ok {
             Ok(result)
         } else {
@@ -74,7 +76,7 @@ impl HubClient<'_> {
     }
 
     pub(crate) async fn list(&self) -> Result<(Vec<HubDevice>, Vec<String>), String> {
-        let list: DeviceList = self
+        let body = self
             .http
             .get(format!("{}/api/devices", self.origin))
             .timeout(LIST_TIMEOUT)
@@ -82,9 +84,10 @@ impl HubClient<'_> {
             .await
             .and_then(|r| r.error_for_status())
             .map_err(|e| format!("Listing devices failed: {}", e.without_url()))?
-            .json()
+            .bytes_stream();
+        let list: DeviceList = read_json(body, LIST_BODY_LIMIT)
             .await
-            .map_err(|e| format!("Listing devices failed: {}", e.without_url()))?;
+            .map_err(|e| format!("Listing devices failed: {e}"))?;
         let ios = list
             .simulators
             .into_iter()
@@ -316,6 +319,8 @@ const AX_TIMEOUT: Duration = Duration::from_secs(10);
 // serve-emu runs `adb emu fold` and polls the posture for up to 2 s; t3code waits 12 s.
 const FOLD_TIMEOUT: Duration = Duration::from_secs(12);
 const FOLD_BODY_LIMIT: usize = 64 << 10;
+const ACTION_BODY_LIMIT: usize = 64 << 10;
+const LIST_BODY_LIMIT: usize = 4 << 20;
 pub(crate) const AX_NODE_LIMIT: usize = 500;
 pub(crate) const AX_BODY_LIMIT: usize = 4 << 20;
 pub(crate) const AX_TOO_LARGE: &str = "The accessibility tree is too large to show.";
@@ -336,6 +341,17 @@ async fn read_capped<B: AsRef<[u8]>, E>(
         }
     }
     Ok(Some(body))
+}
+
+async fn read_json<T: serde::de::DeserializeOwned, B: AsRef<[u8]>>(
+    chunks: impl futures::Stream<Item = reqwest::Result<B>>,
+    limit: usize,
+) -> Result<T, String> {
+    let body = read_capped(chunks, limit)
+        .await
+        .map_err(|e| e.without_url().to_string())?
+        .ok_or("the device hub reply is too large.")?;
+    serde_json::from_slice(&body).map_err(|e| e.to_string())
 }
 
 pub(crate) fn ax_nodes(items: &[serde_json::Value], budget: &mut usize) -> Vec<DeviceAxNode> {
@@ -503,6 +519,37 @@ mod tests {
         assert!(parser.push(line.repeat(3).as_bytes()).is_empty());
         assert!(parser.data.is_empty(), "an oversized event is not buffered");
         assert_eq!(parser.push(b"\ndata: {\"ok\":1}\n\n"), vec!["{\"ok\":1}"]);
+    }
+
+    #[tokio::test]
+    async fn oversized_list_and_action_replies_are_refused() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let _ = socket.read(&mut buf).await;
+                    let body = format!("{{\"ok\":true,\"pad\":\"{}\"}}", "x".repeat(5 << 20));
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = socket.write_all(head.as_bytes()).await;
+                    let _ = socket.write_all(body.as_bytes()).await;
+                });
+            }
+        });
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let client = HubClient {
+            http: &http,
+            origin: &origin,
+        };
+        let listed = client.list().await.err().unwrap();
+        assert!(listed.contains("too large"), "{listed}");
+        let shut = client.shutdown_simulator("SIM-1").await.err().unwrap();
+        assert!(shut.contains("too large"), "{shut}");
     }
 
     #[tokio::test]

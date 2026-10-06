@@ -88,10 +88,13 @@ const versions = () => {
   };
   return result.hub && result.agent ? result : undefined;
 };
+const ours = hub => {
+  const command = run('ps', ['-p', String(hub.pid), '-o', 'command=']).stdout || '';
+  return command.includes(hub.entryPath) && command.includes(' --port ' + hub.port + ' ');
+};
 const stopHub = hub => {
   if (!hub || hub.owner !== owner) return;
-  const command = run('ps', ['-p', String(hub.pid), '-o', 'command=']).stdout || '';
-  if (command.includes(hub.entryPath) && command.includes(String(hub.port))) {
+  if (ours(hub)) {
     try { process.kill(hub.pid, 'SIGTERM'); } catch {}
   }
 };
@@ -181,7 +184,7 @@ async function install(name, version, entry) {
   const guard = path.join(state, 'hub-guard.mjs');
   fs.writeFileSync(guard, guardSource, { mode: 0o600 });
   let hub = read(hubFile);
-  if (!hub || hub.owner !== owner || hub.entryPath !== hubEntry || !await healthy(hub.port, '/readyz')) {
+  if (!hub || hub.owner !== owner || hub.entryPath !== hubEntry || !ours(hub) || !await healthy(hub.port, '/readyz')) {
     stopHub(hub);
     const env = { ...process.env, FORCE_COLOR: '0', NO_COLOR: '1' };
     for (const key of Object.keys(env)) if (key.startsWith('EXPO_DEVICE_HUB_')) delete env[key];
@@ -310,18 +313,31 @@ pub(crate) fn ssh_args(config: &SshDeviceHostConfig, options: &[&str]) -> Vec<St
     args
 }
 
-pub(crate) fn remote_command(script: &str) -> Vec<String> {
-    vec![
-        "sh".into(),
-        "-c".into(),
-        quote(&format!("{REMOTE_ENV}{script}")),
-    ]
+// The login shell only parses `sh -s`, so csh or fish never sees the script.
+const REMOTE_SHELL: [&str; 2] = ["sh", "-s"];
+const SCRIPT_END: &str = "ZERON_DEVICE_SCRIPT_END";
+
+fn remote_input(script: &str) -> String {
+    format!("{REMOTE_ENV}{script}\n")
 }
 
-fn bootstrap_command() -> Vec<String> {
-    remote_command(&format!(
-        "command -v node >/dev/null 2>&1 || {{ echo \"{NODE_MISSING}\" >&2; exit 1; }}; exec node"
+pub(crate) fn bootstrap_input(owner: &str, mode: Mode) -> String {
+    remote_input(&format!(
+        "command -v node >/dev/null 2>&1 || {{ echo \"{NODE_MISSING}\" >&2; exit 1; }}\nexec node <<'{SCRIPT_END}'\n{}\n{SCRIPT_END}",
+        remote_script(owner, mode)
     ))
+}
+
+async fn run_remote(
+    ssh: &Path,
+    config: &SshDeviceHostConfig,
+    input: String,
+    timeout: Duration,
+    limit: usize,
+) -> Result<Ran, String> {
+    let mut args = ssh_args(config, &[]);
+    args.extend(REMOTE_SHELL.map(String::from));
+    run_ssh(ssh, args, Some(input), timeout, limit).await
 }
 
 pub(crate) fn forward_args(
@@ -417,8 +433,20 @@ fn failure(ran: &Ran) -> String {
     if detail.is_empty() {
         format!("SSH exited with {}.", ran.code.unwrap_or(-1))
     } else {
-        tail(&detail, STDERR_TAIL)
+        redact(&tail(&detail, STDERR_TAIL))
     }
+}
+
+fn redact(text: &str) -> String {
+    static SECRET: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(_authToken=)\S+|://[^/\s@]+@").expect("valid pattern")
+    });
+    SECRET
+        .replace_all(text, |caps: &regex::Captures| match caps.get(1) {
+            Some(key) => format!("{}<redacted>", key.as_str()),
+            None => "://<redacted>@".into(),
+        })
+        .into_owned()
 }
 
 fn tail(text: &str, limit: usize) -> String {
@@ -436,12 +464,10 @@ async fn bootstrap(
         Mode::Start | Mode::AgentStart => START_TIMEOUT,
         _ => PROBE_TIMEOUT,
     };
-    let mut args = ssh_args(config, &[]);
-    args.extend(bootstrap_command());
-    run_ssh(
+    run_remote(
         ssh,
-        args,
-        Some(remote_script(owner, mode)),
+        config,
+        bootstrap_input(owner, mode),
         timeout,
         SCRIPT_OUTPUT_LIMIT,
     )
@@ -894,7 +920,10 @@ impl SshHost {
     }
 
     fn halted(&self) -> Result<(), String> {
-        let inner = self.inner();
+        Self::halted_in(&self.inner())
+    }
+
+    fn halted_in(inner: &Inner) -> Result<(), String> {
         if inner.retired {
             Err(HOST_REMOVED.into())
         } else if inner.stopped {
@@ -908,7 +937,11 @@ impl SshHost {
         &self,
         work: impl std::future::Future<Output = Result<T, String>>,
     ) -> Result<T, String> {
-        let cancel = self.inner().cancel.clone();
+        let cancel = {
+            let inner = self.inner();
+            Self::halted_in(&inner)?;
+            inner.cancel.clone()
+        };
         tokio::select! {
             result = work => result,
             () = cancel.cancelled() => Err(self.halted().err().unwrap_or_else(|| HOST_REMOVED.into())),
@@ -1262,12 +1295,10 @@ impl SshHost {
             let (ssh, config) = (ssh.clone(), config.clone());
             Box::pin(async move {
                 let words: Vec<String> = argv.iter().map(|word| quote(word)).collect();
-                let mut args = ssh_args(&config, &[]);
-                args.extend(remote_command(&format!("exec {}", words.join(" "))));
-                match run_ssh(
+                match run_remote(
                     &ssh,
-                    args,
-                    None,
+                    &config,
+                    remote_input(&format!("exec {}", words.join(" "))),
                     super::actions::ACTION_TIMEOUT,
                     super::actions::OUTPUT_LIMIT,
                 )
@@ -1300,12 +1331,10 @@ impl SshHost {
             ),
             DevicePlatform::Android => format!("exec adb -s {id} exec-out screencap -p"),
         };
-        let mut args = ssh_args(&self.config, &[]);
-        args.extend(remote_command(&script));
-        let ran = run_ssh(
+        let ran = run_remote(
             &self.ssh,
-            args,
-            None,
+            &self.config,
+            remote_input(&script),
             Duration::from_secs(30),
             SCREENSHOT_LIMIT,
         )
@@ -1366,14 +1395,15 @@ if (args.includes('-N')) {
   });
   return;
 }
-const remote = args.slice(args.indexOf('--') + 2).join(' ');
-if (!remote.endsWith("exec node'")) {
-  const ran = require('node:child_process').spawnSync('/bin/sh', ['-c', remote], { stdio: 'inherit' });
-  process.exit(ran.status ?? 1);
-}
-let script = '';
-process.stdin.on('data', chunk => { script += chunk; });
+if (args.slice(args.indexOf('--') + 2).join(' ') !== 'sh -s') { console.error('expected sh -s'); process.exit(2); }
+let input = '';
+process.stdin.on('data', chunk => { input += chunk; });
 process.stdin.on('end', () => {
+  const script = /\nexec node <<'ZERON_DEVICE_SCRIPT_END'\n([\s\S]*)\nZERON_DEVICE_SCRIPT_END\n$/.exec(input)?.[1];
+  if (script === undefined) {
+    const ran = require('node:child_process').spawnSync('/bin/sh', ['-s'], { input, stdio: ['pipe', 'inherit', 'inherit'] });
+    process.exit(ran.status ?? 1);
+  }
   const mode = /const mode = "([^"]+)"/.exec(script)?.[1];
   fs.appendFileSync(dir + '/modes', mode + ' ' + /const owner = "([^"]+)"/.exec(script)?.[1] + ' ' + target + '\n');
   const platforms = [{ platform: 'ios', available: true }, { platform: 'android', available: false, reason: 'Android SDK missing. Set ANDROID_HOME or put adb on the SSH PATH.' }];
@@ -1544,9 +1574,21 @@ process.stdin.on('end', () => {
                 "mini"
             ]
         );
-        let command = bootstrap_command();
-        assert_eq!(command[..2], ["sh", "-c"]);
-        assert!(command[2].starts_with("'export PATH=") && command[2].ends_with("exec node'"));
+        let input = bootstrap_input("o", Mode::Probe);
+        assert!(input.starts_with(REMOTE_ENV));
+        assert!(input.contains("\nexec node <<'ZERON_DEVICE_SCRIPT_END'\nconst owner = \"o\";"));
+        assert!(input.ends_with("\nZERON_DEVICE_SCRIPT_END\n"));
+        assert_eq!(
+            input.lines().filter(|line| *line == SCRIPT_END).count(),
+            1,
+            "the script never ends its own heredoc early"
+        );
+        assert_eq!(
+            redact(
+                "npm error 401 https://me:hunter2@registry.example/x //registry/:_authToken=npm_abc next"
+            ),
+            "npm error 401 https://<redacted>@registry.example/x //registry/:_authToken=<redacted> next"
+        );
         assert!(check_identity(&host("-oProxyCommand=x")).is_err());
         let missing = SshDeviceHostConfig {
             identity_file: Some("/nonexistent/zeron-key".into()),
@@ -1747,6 +1789,11 @@ process.stdin.on('end', () => {
                 .windows(2)
                 .any(|pair| pair == ["-o", "ControlPath=none"])),
             "no call reuses or creates a shared connection"
+        );
+        assert_eq!(
+            last[10..],
+            ["sh", "-s"],
+            "the command words travel on stdin"
         );
     }
 
@@ -2003,9 +2050,10 @@ process.stdin.on('end', () => {
             std::env::var("PATH").unwrap_or_default()
         );
         let invoke = |owner: &'static str, mode: Mode| {
-            let (node, home, path) = (node.clone(), home.path().to_path_buf(), path.clone());
+            let (home, path) = (home.path().to_path_buf(), path.clone());
             async move {
-                let mut child = tokio::process::Command::new(node)
+                let mut child = tokio::process::Command::new("/bin/sh")
+                    .arg("-s")
                     .env("HOME", home)
                     .env("PATH", path)
                     .stdin(Stdio::piped())
@@ -2015,7 +2063,7 @@ process.stdin.on('end', () => {
                     .unwrap();
                 let mut stdin = child.stdin.take().unwrap();
                 stdin
-                    .write_all(remote_script(owner, mode).as_bytes())
+                    .write_all(bootstrap_input(owner, mode).as_bytes())
                     .await
                     .unwrap();
                 drop(stdin);
@@ -2051,10 +2099,39 @@ process.stdin.on('end', () => {
             }
         }
         let _cleanup = Cleanup(home.path().to_path_buf());
+        let decoy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let decoy_port = decoy.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = decoy.accept().await {
+                let _ = socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                    )
+                    .await;
+            }
+        });
+        let stranger = tokio::process::Command::new("sleep")
+            .arg("60")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let state = home.path().join(".zeron/device/hosts/one");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(
+            state.join("hub.json"),
+            serde_json::json!({"owner": "one", "pid": stranger.id(),
+                "port": decoy_port, "entryPath": entry})
+            .to_string(),
+        )
+        .unwrap();
         {
             let (first, concurrent) =
                 tokio::join!(invoke("one", Mode::Start), invoke("one", Mode::Start));
             assert_eq!(first["hubPort"], concurrent["hubPort"]);
+            assert_ne!(
+                first["hubPort"], decoy_port,
+                "a healthy listener that is not this owner's hub is never reused"
+            );
             let one = format!("http://127.0.0.1:{}/readyz", first["hubPort"]);
             assert_eq!(http().get(&one).send().await.unwrap().status(), 200);
             assert_eq!(

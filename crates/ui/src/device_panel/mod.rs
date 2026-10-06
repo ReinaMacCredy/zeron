@@ -124,6 +124,26 @@ pub fn picker_groups(hub: &DeviceHubState) -> Vec<(DevicePlatform, String, Vec<H
         .collect()
 }
 
+pub fn host_notes(hub: &DeviceHubState) -> Vec<(String, String)> {
+    hub.hosts
+        .iter()
+        .filter(|host| host.kind == "ssh")
+        .filter_map(|host| {
+            let state = hub.host_statuses.get(&host.id)?;
+            let text = match (state.status, state.detail.clone()) {
+                (DeviceHostStatus::Installing, _) => "Installing device support...".to_string(),
+                (DeviceHostStatus::Starting, detail) => {
+                    detail.unwrap_or_else(|| "Connecting...".into())
+                }
+                (DeviceHostStatus::Failed, Some(detail)) => format!("Connection failed: {detail}"),
+                (DeviceHostStatus::Failed, None) => "Connection failed.".into(),
+                _ => return None,
+            };
+            Some((host.id.clone(), format!("{} · {text}", host.label)))
+        })
+        .collect()
+}
+
 pub fn booting_banner(hub: &DeviceHubState, chat_id: &str) -> Option<String> {
     let names: Vec<&str> = hub
         .booting
@@ -856,6 +876,17 @@ impl DevicePanel {
                 .child(SharedString::from(text))
         };
         let empty_list = groups.is_empty();
+        let notes: Vec<AnyElement> = host_notes(&hub)
+            .into_iter()
+            .map(|(id, text)| {
+                let id = SharedString::from(format!("device-host-note-{id}"));
+                let selector = id.clone();
+                small(text)
+                    .id(id)
+                    .debug_selector(move || selector.to_string())
+                    .into_any_element()
+            })
+            .collect();
         let mut sections = Vec::new();
         for (platform, title, devices) in groups {
             let platform_id = match platform {
@@ -893,6 +924,7 @@ impl DevicePanel {
             .p(px(16.0))
             .when(empty_list, |el| el.child(small(empty)))
             .children(sections)
+            .children(notes)
             .when(android_hint, |el| {
                 el.child(small(
                     "No Android virtual devices found. Create one in Android Studio's Device \
@@ -1983,6 +2015,26 @@ pub(crate) mod tests {
             booted: true,
             ..Default::default()
         });
+        state.hosts.push(zeron_proto::device_hub::DeviceHubHost {
+            id: "studio".into(),
+            kind: "ssh".into(),
+            label: "Studio".into(),
+            ..Default::default()
+        });
+        state.host_statuses.insert(
+            "studio".into(),
+            zeron_proto::device_hub::DeviceHostState {
+                status: DeviceHostStatus::Failed,
+                detail: Some("Connection refused".into()),
+            },
+        );
+        assert_eq!(
+            host_notes(&state),
+            [(
+                "studio".to_string(),
+                "Studio · Connection failed: Connection refused".to_string()
+            )]
+        );
         let groups: Vec<(String, Vec<String>)> = picker_groups(&state)
             .into_iter()
             .map(|(_, title, devices)| {
@@ -2021,6 +2073,7 @@ pub(crate) mod tests {
             cx.add_window_view(|_, cx| DevicePanel::new(panel_state, "chat".into(), cx));
         wait(cx, |cx| cx.debug_bounds("device-group-mini-ios").is_some());
         assert!(cx.debug_bounds("device-row-SIM").is_some());
+        assert!(cx.debug_bounds("device-host-note-studio").is_some());
         click(cx, "device-row-mini/SIM");
         wait(cx, |_| {
             !calls_of(&calls, methods::OPEN_HUB_DEVICE).is_empty()

@@ -424,6 +424,9 @@ impl DeviceHub {
                     if !state.settings.enabled {
                         return;
                     }
+                    if status == DeviceHostStatus::Failed {
+                        state.devices.retain(|device| device.host_id != host_id);
+                    }
                     state
                         .host_statuses
                         .insert(host_id.clone(), DeviceHostState { status, detail });
@@ -432,7 +435,10 @@ impl DeviceHub {
                     }
                 });
             }
-            HostEvent::Lost => self.streams.pause(&host_scope(&host_id)),
+            HostEvent::Lost => {
+                self.streams.pause(&host_scope(&host_id));
+                self.publish(|state| state.devices.retain(|device| device.host_id != host_id));
+            }
             HostEvent::Ready(origin) => {
                 let (me, Ok(runtime)) = (self.me.clone(), tokio::runtime::Handle::try_current())
                 else {
@@ -1497,12 +1503,13 @@ impl DeviceHub {
     }
 
     pub async fn close(&self, params: CloseHubDeviceParams) -> Result<(), String> {
+        let host = params
+            .host_id
+            .as_deref()
+            .or(params.device_id.is_some().then_some(LOCAL_DEVICE_HOST_ID));
         let closes = |session: &DeviceSession| {
             session.chat_id == params.chat_id
-                && params
-                    .host_id
-                    .as_deref()
-                    .is_none_or(|host| session.host_id == host)
+                && host.is_none_or(|host| session.host_id == host)
                 && params
                     .device_id
                     .as_deref()
@@ -1529,7 +1536,7 @@ impl DeviceHub {
         if targets.is_empty()
             && let Some(device_id) = params.device_id
         {
-            let host_id = params.host_id.as_deref().unwrap_or(LOCAL_DEVICE_HOST_ID);
+            let host_id = host.unwrap_or(LOCAL_DEVICE_HOST_ID);
             let platform = self
                 .snapshot()
                 .device(host_id, &device_id)
@@ -2199,6 +2206,23 @@ mod tests {
             .unwrap();
             assert_eq!(hub.open(params).await.unwrap().host_id, host_id);
         }
+        hub.open(open_params("SIM-1")).await.unwrap();
+        hub.close(CloseHubDeviceParams {
+            chat_id: "chat-1".into(),
+            device_id: Some("SIM-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            hub.snapshot()
+                .sessions
+                .iter()
+                .map(|session| session.host_id.as_str())
+                .collect::<Vec<_>>(),
+            ["mini", "studio"],
+            "a close without a host closes the device on this machine only"
+        );
         hub.close(CloseHubDeviceParams {
             chat_id: "chat-1".into(),
             host_id: Some("mini".into()),
@@ -2332,6 +2356,39 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn a_device_on_a_missing_host_is_never_captured_on_this_machine() {
+        let (_dir, hub, _) = enabled_hub(HEALTHY).await;
+        let device = zeron_proto::device_hub::HubDevice {
+            host_id: "gone".into(),
+            id: "SIM-1".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            hub.capture(&device).await.err().as_deref(),
+            Some(super::UNKNOWN_HOST)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lost_host_drops_its_devices_from_the_list() {
+        let (_dir, hub, _) = enabled_hub(HEALTHY).await;
+        let host = hub.new_remote(super::ssh_host::tests::host("mini"));
+        hub.remotes_slot().insert("mini".into(), host.clone());
+        hub.publish(|state| {
+            state.devices.push(zeron_proto::device_hub::HubDevice {
+                host_id: "mini".into(),
+                id: "SIM-1".into(),
+                booted: true,
+                ..Default::default()
+            })
+        });
+        hub.on_host_event(&host, super::HostEvent::Lost);
+        let state = hub.snapshot();
+        assert!(state.device("mini", "SIM-1").is_none());
+        assert!(state.device("local", "SIM-1").is_some());
     }
 
     #[tokio::test]
