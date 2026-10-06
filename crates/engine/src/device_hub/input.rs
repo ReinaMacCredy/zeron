@@ -316,8 +316,8 @@ fn send_hinge(
         held.clear(DISCONNECTED);
         return;
     }
-    // A live iPhone Duo answered its first hinge command after boot in up to 6.2 s.
-    let budget = match held.warm {
+    // A live Duo's first 0x10 took up to 6.2 s; an orientation is a 0x07 acked in under 1 s.
+    let budget = match held.warm || matches!(command, HingeCommand::Orientation(_)) {
         true => HINGE_TIMEOUT,
         false => FIRST_HINGE_TIMEOUT,
     };
@@ -1027,6 +1027,23 @@ mod tests {
         assert_eq!(turned.try_recv(), Ok(Err(ORIENTATION_REFUSED.into())));
         assert_eq!(queue.timed_out(2), None);
         assert_eq!(folded.try_recv(), Ok(Err(HINGE_TIMED_OUT.into())));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_orientation_on_a_cold_socket_fails_on_the_short_budget() {
+        let shared: SharedQueue = Arc::default();
+        let (tx, _sent) = mpsc::unbounded_channel();
+        let (reply, mut turned) = waiter();
+        {
+            let mut held = lock(&shared);
+            let request = held.enqueue(
+                HingeCommand::Orientation(DeviceOrientation::LandscapeLeft),
+                reply,
+            );
+            send_hinge(&shared, &mut held, &tx, request);
+        }
+        tokio::time::sleep(HINGE_TIMEOUT + Duration::from_millis(1)).await;
+        assert_eq!(turned.try_recv(), Ok(Err(ORIENTATION_REFUSED.into())));
     }
 
     #[tokio::test(start_paused = true)]
