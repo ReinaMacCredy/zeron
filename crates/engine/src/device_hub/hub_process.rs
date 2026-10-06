@@ -11,23 +11,22 @@ const STOP_GRACE: Duration = Duration::from_secs(5);
 const STATE_FILE: &str = "hub.json";
 const GUARD_FILE: &str = "hub-guard.mjs";
 // Browsers reach a loopback port with a foreign Host (DNS rebinding) or an Origin; the engine sends neither.
+// Any port passes because an SSH forward delivers the engine's local port as Host to the remote hub.
 pub(crate) const GUARD: &str = r#"import http from "node:http";
 const emit = http.Server.prototype.emit;
-const local = (server, request) => {
-  const address = server.address();
-  if (typeof address !== "object" || address === null) return false;
-  const host = String(request.headers.host ?? "").toLowerCase();
-  return [`127.0.0.1:${address.port}`, `localhost:${address.port}`, `[::1]:${address.port}`].includes(host);
+const local = (request) => {
+  const host = String(request.headers.host ?? "").toLowerCase().replace(/:\d+$/, "");
+  return ["127.0.0.1", "localhost", "[::1]"].includes(host);
 };
 http.Server.prototype.emit = function (event, request, target) {
   if (
     ["request", "checkContinue", "checkExpectation"].includes(event) &&
-    (!local(this, request) || request.headers.origin !== undefined)
+    (!local(request) || request.headers.origin !== undefined)
   ) {
     target.writeHead(403, { Connection: "close" }).end();
     return true;
   }
-  if (event === "upgrade" && (!local(this, request) || request.headers.origin !== undefined)) {
+  if (event === "upgrade" && (!local(request) || request.headers.origin !== undefined)) {
     target.destroy();
     return true;
   }
@@ -931,7 +930,12 @@ server.listen(port, "127.0.0.1");
         );
 
         let get = |host: &str| format!("GET /api/devices HTTP/1.1\r\nHost: {host}\r\n\r\n");
-        for host in [format!("localhost:{port}"), format!("[::1]:{port}")] {
+        for host in [
+            format!("localhost:{port}"),
+            format!("[::1]:{port}"),
+            format!("127.0.0.1:{}", port.wrapping_add(1)),
+            "localhost".to_string(),
+        ] {
             assert!(
                 first_reply(port, &get(&host))
                     .await
@@ -942,7 +946,8 @@ server.listen(port, "127.0.0.1");
         for host in [
             "evil.example".to_string(),
             format!("evil.example:{port}"),
-            format!("127.0.0.1:{}", port.wrapping_add(1)),
+            format!("127.0.0.1.evil.example:{port}"),
+            "::1".to_string(),
         ] {
             assert!(
                 first_reply(port, &get(&host))
@@ -978,6 +983,53 @@ server.listen(port, "127.0.0.1");
         ] {
             assert_eq!(first_reply(port, &request).await, "", "{request}");
         }
+
+        let forward = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let forwarded = forward.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = forward.accept().await {
+                tokio::spawn(async move {
+                    if let Ok(mut hub) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+                        let _ = tokio::io::copy_bidirectional(&mut socket, &mut hub).await;
+                    }
+                });
+            }
+        });
+        assert_ne!(forwarded, port);
+        assert_eq!(
+            http.get(format!("http://127.0.0.1:{forwarded}/readyz"))
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16(),
+            200,
+            "the engine reaches a hub through a forward on another local port"
+        );
+        assert!(
+            first_reply(forwarded, &get(&format!("evil.example:{forwarded}")))
+                .await
+                .starts_with("HTTP/1.1 403")
+        );
+        let origin_post = format!(
+            "POST /api/devices/boot HTTP/1.1\r\nHost: 127.0.0.1:{forwarded}\r\nOrigin: http://127.0.0.1:{forwarded}\r\nContent-Length: 2\r\n\r\n{{}}"
+        );
+        assert!(
+            first_reply(forwarded, &origin_post)
+                .await
+                .starts_with("HTTP/1.1 403")
+        );
+        assert_eq!(
+            first_reply(
+                forwarded,
+                &upgrade(
+                    &format!("127.0.0.1:{forwarded}"),
+                    "Origin: http://evil.example\r\n"
+                )
+            )
+            .await,
+            ""
+        );
         hub.stop().await;
     }
 
