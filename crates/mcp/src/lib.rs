@@ -259,6 +259,23 @@ pub fn tool_list() -> Value {
             }
         },
         {
+            "name": "project_actions",
+            "description": "Manage the Actions of this chat's project: the saved commands in the project's Actions menu (play button in the toolbar), the same ones the person adds with Add action. `list` returns them, plus `importableActions` found in the project's zeron.json. `upsert` saves one: omit `actionId` to add, pass it to replace that Action (list first; do not add a duplicate). `runOnWorktreeCreate` makes it the project's setup Action: Zeron runs it in a new terminal, in the new worktree, whenever Zeron itself creates a worktree for a chat (a `git worktree add` from a shell does not trigger it). Use it for the steps a fresh checkout needs, such as installing dependencies or copying env files. Only one Action per project is the setup Action; saving another with the flag clears it on the previous one. The command runs in the person's shell with ZERON_PROJECT_ROOT (the main checkout) and ZERON_WORKTREE_PATH set. `delete` removes one by `actionId`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["list", "upsert", "delete"] },
+                    "actionId": { "type": "string" },
+                    "name": { "type": "string", "maxLength": 80 },
+                    "command": { "type": "string", "maxLength": 16384 },
+                    "icon": { "type": "string", "enum": ["play", "test", "lint", "configure", "build", "debug"], "description": "Defaults to play." },
+                    "runOnWorktreeCreate": { "type": "boolean", "description": "Defaults to false." }
+                },
+                "required": ["action"],
+                "additionalProperties": false
+            }
+        },
+        {
             "name": "device_list",
             "description": "List iOS Simulators and Android Emulators on this environment's device hosts, which platforms each host can run, and which devices are already open in this thread's Device panel. Call this before device_open when you do not know a device id.",
             "inputSchema": {
@@ -487,6 +504,7 @@ impl ThreadTools {
             "respond_to_input" => self.respond_to_input(args).await,
             "ask_user" => self.ask_user(args).await,
             "terminal" => self.terminal(args).await,
+            "project_actions" => self.project_actions(args).await,
             "device_list" | "device_open" | "device_close" => self.device_tool(name, args).await,
             "list_projects" => self.list_projects().await,
             "list_harnesses" => self.list_harnesses().await,
@@ -1276,6 +1294,48 @@ impl ThreadTools {
         }
     }
 
+    pub async fn project_actions(&self, args: &Value) -> Result<Value, String> {
+        let (caller, _) = self.peers().await?;
+        let space_id = caller
+            .space_id
+            .ok_or("this chat has no project, so it has no Actions")?;
+        let action_id = args["actionId"].as_str().filter(|id| !id.is_empty());
+        match args["action"].as_str().unwrap_or_default() {
+            "list" => {
+                self.call_engine(
+                    methods::LIST_PROJECT_ACTIONS,
+                    json!({ "spaceId": space_id }),
+                )
+                .await
+            }
+            "upsert" => {
+                self.call_engine(
+                    methods::UPSERT_PROJECT_ACTION,
+                    json!({
+                        "spaceId": space_id,
+                        "actionId": action_id,
+                        "action": {
+                            "name": args["name"].as_str().unwrap_or_default(),
+                            "command": args["command"].as_str().unwrap_or_default(),
+                            "icon": args["icon"].as_str().unwrap_or("play"),
+                            "runOnWorktreeCreate": args["runOnWorktreeCreate"].as_bool().unwrap_or(false),
+                        },
+                    }),
+                )
+                .await
+            }
+            "delete" => {
+                let action_id = action_id.ok_or("actionId is required")?;
+                self.call_engine(
+                    methods::DELETE_PROJECT_ACTION,
+                    json!({ "spaceId": space_id, "actionId": action_id }),
+                )
+                .await
+            }
+            _ => Err("action must be list, upsert or delete".into()),
+        }
+    }
+
     async fn device_tool(&self, name: &str, args: &Value) -> Result<Value, String> {
         let method = match name {
             "device_list" => methods::DEVICE_TOOL_LIST,
@@ -1884,7 +1944,7 @@ mod tests {
 
     use super::*;
 
-    const THREAD_TOOLS: [&str; 22] = [
+    const THREAD_TOOLS: [&str; 23] = [
         "list_threads",
         "read_thread",
         "create_thread",
@@ -1896,6 +1956,7 @@ mod tests {
         "respond_to_input",
         "ask_user",
         "terminal",
+        "project_actions",
         "device_list",
         "device_open",
         "device_screenshot",
@@ -2105,6 +2166,17 @@ mod tests {
                         { "id": "t-old", "cwd": "/w", "shell": "zsh", "exitCode": 0 },
                         { "id": "t-live", "cwd": "/w", "shell": "zsh", "selection": "boom" }
                     ])))
+                }
+                methods::LIST_PROJECT_ACTIONS
+                | methods::UPSERT_PROJECT_ACTION
+                | methods::DELETE_PROJECT_ACTION => {
+                    self.calls
+                        .lock()
+                        .unwrap()
+                        .push((method.to_string(), params.clone()));
+                    Ok(RpcReply::Value(
+                        json!({ "spaceId": params["spaceId"], "actions": [], "importableActions": [] }),
+                    ))
                 }
                 methods::OPEN_TERMINAL => {
                     self.calls
@@ -3002,6 +3074,71 @@ mod tests {
             tools: rig.tools.with_run_secret(secret.map(str::to_owned)),
             calls: rig.calls,
         }
+    }
+
+    #[tokio::test]
+    async fn project_actions_write_only_the_callers_project() {
+        let rig = rig(fixture());
+        let saved = rig
+            .tools
+            .call(
+                "project_actions",
+                &json!({ "action": "upsert", "name": "Setup", "command": "bun install", "runOnWorktreeCreate": true }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(saved["spaceId"], "s1");
+        rig.tools
+            .call(
+                "project_actions",
+                &json!({ "action": "upsert", "actionId": "setup", "name": "Setup", "command": "bun i", "icon": "build" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            logged(&rig.calls, methods::UPSERT_PROJECT_ACTION),
+            vec![
+                json!({ "spaceId": "s1", "actionId": null, "action": {
+                    "name": "Setup", "command": "bun install", "icon": "play", "runOnWorktreeCreate": true
+                } }),
+                json!({ "spaceId": "s1", "actionId": "setup", "action": {
+                    "name": "Setup", "command": "bun i", "icon": "build", "runOnWorktreeCreate": false
+                } }),
+            ]
+        );
+        for params in logged(&rig.calls, methods::UPSERT_PROJECT_ACTION) {
+            serde_json::from_value::<zeron_proto::ProjectActionDraft>(params["action"].clone())
+                .unwrap();
+        }
+        assert!(
+            rig.tools
+                .call("project_actions", &json!({ "action": "delete" }))
+                .await
+                .is_err()
+        );
+        rig.tools
+            .call(
+                "project_actions",
+                &json!({ "action": "delete", "actionId": "setup" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            logged(&rig.calls, methods::DELETE_PROJECT_ACTION),
+            vec![json!({ "spaceId": "s1", "actionId": "setup" })]
+        );
+
+        let mut fake = fixture();
+        fake.chats[0]["spaceId"] = Value::Null;
+        let projectless = self::rig(fake);
+        assert!(
+            projectless
+                .tools
+                .call("project_actions", &json!({ "action": "list" }))
+                .await
+                .is_err()
+        );
+        assert!(logged(&projectless.calls, methods::LIST_PROJECT_ACTIONS).is_empty());
     }
 
     #[tokio::test]
