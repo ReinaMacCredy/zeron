@@ -131,6 +131,7 @@ impl AvccFeed {
 
 struct Feed<S> {
     sink: S,
+    link: u64,
     subscribers: usize,
     reader: tokio::task::JoinHandle<()>,
 }
@@ -181,13 +182,13 @@ struct Entries {
 }
 
 impl Entries {
-    fn entry(&mut self, device_id: &str) -> &mut Entry {
+    fn entry(&mut self, device_id: &str) -> (&mut Entry, &mut u64) {
         let Entries {
             next_generation,
             by_device,
             ..
         } = self;
-        by_device.entry(device_id.to_string()).or_insert_with(|| {
+        let entry = by_device.entry(device_id.to_string()).or_insert_with(|| {
             *next_generation += 1;
             Entry {
                 generation: *next_generation,
@@ -199,7 +200,8 @@ impl Entries {
                 avcc_status: BTreeMap::new(),
                 input_status: StreamLinkStatus::Idle,
             }
-        })
+        });
+        (entry, next_generation)
     }
 }
 
@@ -335,16 +337,18 @@ impl DeviceStreams {
         start: impl FnOnce(FrameSlot, u64) -> tokio::task::JoinHandle<()>,
     ) -> FrameSubscription {
         let mut entries = self.lock();
-        let entry = entries.entry(device_id);
-        let link = entry.link;
+        let (entry, next_generation) = entries.entry(device_id);
         if entry.mjpeg.is_none() {
             entry.video_status = StreamLinkStatus::Connecting;
         }
         let feed = entry.mjpeg.get_or_insert_with(|| {
             let (frames, _) = watch::channel(None);
+            *next_generation += 1;
+            let link = *next_generation;
             Feed {
                 reader: start(frames.clone(), link),
                 sink: frames,
+                link,
                 subscribers: 0,
             }
         });
@@ -371,8 +375,7 @@ impl DeviceStreams {
             .descriptions
             .get(&(device_id.to_string(), panel))
             .cloned();
-        let entry = entries.entry(device_id);
-        let link = entry.link;
+        let (entry, next_generation) = entries.entry(device_id);
         if !entry.avcc.contains_key(&panel) {
             entry
                 .avcc_status
@@ -380,9 +383,12 @@ impl DeviceStreams {
         }
         let feed = entry.avcc.entry(panel).or_insert_with(|| {
             let sink = AvccFeed::new(cached, platform);
+            *next_generation += 1;
+            let link = *next_generation;
             Feed {
                 reader: start(sink.clone(), link),
                 sink,
+                link,
                 subscribers: 0,
             }
         });
@@ -423,10 +429,11 @@ impl DeviceStreams {
         input: Option<StreamLinkStatus>,
     ) {
         let mut entries = self.lock();
+        // Links come from one counter, so every link issued since the last relink is current.
         let Some(entry) = entries
             .by_device
             .get_mut(device_id)
-            .filter(|entry| entry.link == link)
+            .filter(|entry| link >= entry.link)
         else {
             return;
         };
@@ -439,8 +446,14 @@ impl DeviceStreams {
         };
         let before = snapshot(entry);
         match video {
-            Some((DeviceVideoCodec::Mjpeg, status)) => entry.video_status = status,
-            Some((DeviceVideoCodec::H264, status)) if entry.avcc.contains_key(&None) => {
+            Some((DeviceVideoCodec::Mjpeg, status))
+                if entry.mjpeg.as_ref().is_some_and(|feed| feed.link == link) =>
+            {
+                entry.video_status = status
+            }
+            Some((DeviceVideoCodec::H264, status))
+                if entry.avcc.get(&None).is_some_and(|feed| feed.link == link) =>
+            {
                 entry.avcc_status.insert(None, status);
             }
             _ => {}
@@ -461,11 +474,12 @@ impl DeviceStreams {
         status: StreamLinkStatus,
     ) {
         let mut entries = self.lock();
-        let Some(entry) = entries
-            .by_device
-            .get_mut(device_id)
-            .filter(|entry| entry.link == link && entry.avcc.contains_key(&Some(panel)))
-        else {
+        let Some(entry) = entries.by_device.get_mut(device_id).filter(|entry| {
+            entry
+                .avcc
+                .get(&Some(panel))
+                .is_some_and(|feed| feed.link == link)
+        }) else {
             return;
         };
         if entry.avcc_status.get(&Some(panel)) != Some(&status) {
@@ -483,7 +497,7 @@ impl DeviceStreams {
 
     pub(crate) fn set_input(&self, device_id: &str, link: u64, input: InputSocket) {
         if let Some(entry) = self.lock().by_device.get_mut(device_id)
-            && entry.link == link
+            && link >= entry.link
             && entry.input.is_none()
         {
             entry.input = Some(input);
@@ -569,10 +583,12 @@ impl DeviceStreams {
                 let link = *next_generation;
                 entry.link = link;
                 if let Some(feed) = &mut entry.mjpeg {
+                    feed.link = link;
                     retired.extend(feed.relink(mjpeg(device_id, feed.sink.clone(), link)));
                     entry.video_status = StreamLinkStatus::Connecting;
                 }
                 for (panel, feed) in &mut entry.avcc {
+                    feed.link = link;
                     feed.sink.reset();
                     retired.extend(feed.relink(avcc(device_id, *panel, feed.sink.clone(), link)));
                     entry
@@ -977,7 +993,11 @@ mod tests {
         }));
         let last = || published.lock().unwrap().last().cloned().unwrap();
         let idle = |_: FrameSlot, _| tokio::spawn(std::future::pending::<()>());
-        let first = streams.subscribe("UDID", idle);
+        let mut mjpeg = 0;
+        let first = streams.subscribe("UDID", |_, link| {
+            mjpeg = link;
+            tokio::spawn(std::future::pending::<()>())
+        });
         let second = streams.subscribe("UDID", idle);
         assert_eq!(
             last()["UDID"],
@@ -990,10 +1010,10 @@ mod tests {
             }
         );
         let live = |codec| Some((codec, StreamLinkStatus::Live));
-        streams.set_status("UDID", 1, live(DeviceVideoCodec::Mjpeg), None);
+        streams.set_status("UDID", mjpeg, live(DeviceVideoCodec::Mjpeg), None);
         streams.set_status(
             "UDID",
-            1,
+            mjpeg,
             None,
             Some(StreamLinkStatus::Failed {
                 detail: "socket closed".into(),
@@ -1006,10 +1026,12 @@ mod tests {
             Some((DeviceVideoCodec::Mjpeg, StreamLinkStatus::Idle)),
             None,
         );
-        streams.set_status("UDID", 1, live(DeviceVideoCodec::Mjpeg), None);
+        streams.set_status("UDID", mjpeg, live(DeviceVideoCodec::Mjpeg), None);
         assert_eq!(published.lock().unwrap().len(), count, "no-op changes");
         assert_eq!(last()["UDID"].video, StreamLinkStatus::Live);
-        let avcc = streams.subscribe_avcc("UDID", None, DevicePlatform::Ios, |_, _| {
+        let mut h264 = 0;
+        let avcc = streams.subscribe_avcc("UDID", None, DevicePlatform::Ios, |_, link| {
+            h264 = link;
             tokio::spawn(std::future::pending::<()>())
         });
         assert_eq!(last()["UDID"].avcc, StreamLinkStatus::Connecting);
@@ -1018,7 +1040,7 @@ mod tests {
         };
         streams.set_status(
             "UDID",
-            1,
+            h264,
             Some((DeviceVideoCodec::H264, failed.clone())),
             None,
         );
@@ -1053,18 +1075,82 @@ mod tests {
         }));
         let last = || published.lock().unwrap().last().cloned().unwrap();
         let pending = |_: Arc<AvccFeed>, _| tokio::spawn(std::future::pending::<()>());
-        let main = streams.subscribe_avcc("UDID", None, DevicePlatform::Ios, pending);
+        let mut link = 0;
+        let main = streams.subscribe_avcc("UDID", None, DevicePlatform::Ios, |_, main| {
+            link = main;
+            tokio::spawn(std::future::pending::<()>())
+        });
         let _panel = streams.subscribe_avcc("UDID", Some(1), DevicePlatform::Ios, pending);
         let live = Some((DeviceVideoCodec::H264, StreamLinkStatus::Live));
-        streams.set_status("UDID", 1, live.clone(), None);
+        streams.set_status("UDID", link, live.clone(), None);
         assert_eq!(last()["UDID"].avcc, StreamLinkStatus::Live);
         drop(main);
         assert_eq!(last()["UDID"].avcc, StreamLinkStatus::Idle);
         let count = published.lock().unwrap().len();
-        streams.set_status("UDID", 1, live, None);
+        streams.set_status("UDID", link, live, None);
         assert_eq!(published.lock().unwrap().len(), count);
         assert_eq!(last()["UDID"].avcc, StreamLinkStatus::Idle);
         assert_eq!(last()["UDID"].subscribers, 1);
+    }
+
+    #[tokio::test]
+    async fn a_released_or_replaced_feed_cannot_overwrite_the_status_of_the_feed_after_it() {
+        let published: Arc<Mutex<Vec<BTreeMap<String, DeviceStreamStatus>>>> = Arc::default();
+        let sink = published.clone();
+        let streams = Arc::new(DeviceStreams::with_sink(move |map| {
+            sink.lock().unwrap().push(map)
+        }));
+        let last = || published.lock().unwrap().last().cloned().unwrap()["UDID"].clone();
+        let links: Arc<Mutex<Vec<u64>>> = Arc::default();
+        let mjpeg = |_: FrameSlot, link| {
+            links.lock().unwrap().push(link);
+            tokio::spawn(std::future::pending::<()>())
+        };
+        let avcc = |_: Arc<AvccFeed>, link| {
+            links.lock().unwrap().push(link);
+            tokio::spawn(std::future::pending::<()>())
+        };
+        let newest = || *links.lock().unwrap().last().unwrap();
+        let live = |codec| Some((codec, StreamLinkStatus::Live));
+
+        let frames = streams.subscribe("UDID", mjpeg);
+        let released = newest();
+        let main = streams.subscribe_avcc("UDID", None, DevicePlatform::Ios, avcc);
+        drop(frames);
+        let count = published.lock().unwrap().len();
+        streams.set_status("UDID", released, live(DeviceVideoCodec::Mjpeg), None);
+        assert_eq!(published.lock().unwrap().len(), count);
+        assert_eq!(last().video, StreamLinkStatus::Idle, "MJPEG was released");
+
+        let panel = streams.subscribe_avcc("UDID", Some(1), DevicePlatform::Ios, avcc);
+        let old_panel = newest();
+        drop(panel);
+        let _panel = streams.subscribe_avcc("UDID", Some(1), DevicePlatform::Ios, avcc);
+        streams.set_panel_status("UDID", old_panel, 1, StreamLinkStatus::Live);
+        assert_eq!(last().panels[&1], StreamLinkStatus::Connecting);
+        streams.set_panel_status("UDID", newest(), 1, StreamLinkStatus::Live);
+        assert_eq!(last().panels[&1], StreamLinkStatus::Live);
+
+        let old_main = links.lock().unwrap()[1];
+        drop(main);
+        let _main = streams.subscribe_avcc("UDID", None, DevicePlatform::Ios, avcc);
+        streams.set_status("UDID", old_main, live(DeviceVideoCodec::H264), None);
+        assert_eq!(last().avcc, StreamLinkStatus::Connecting);
+        streams.set_status("UDID", newest(), live(DeviceVideoCodec::H264), None);
+        assert_eq!(last().avcc, StreamLinkStatus::Live);
+
+        let input = |link| {
+            streams.set_status("UDID", link, None, Some(StreamLinkStatus::Live));
+            let live = last().input == StreamLinkStatus::Live;
+            streams.set_status("UDID", newest(), None, Some(StreamLinkStatus::Idle));
+            live
+        };
+        assert!(
+            input(old_main),
+            "the input socket outlives the feed that opened it"
+        );
+        streams.pause(&|_| true);
+        assert!(!input(old_main), "a relink retires every earlier link");
     }
 
     #[tokio::test]
