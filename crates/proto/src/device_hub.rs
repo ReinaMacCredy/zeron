@@ -187,14 +187,31 @@ pub enum HingePose {
     Tent,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DeviceFacing {
+    FaceUp,
+    FaceDown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HingeCommand {
+    Pose(HingePose),
+    Angle(f64),
+    Physical(DeviceFacing),
+    Orientation(DeviceOrientation),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetHubDeviceHingeParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_id: Option<String>,
     #[serde(default)]
     pub device_id: String,
-    pub pose: HingePose,
+    #[serde(flatten)]
+    pub command: HingeCommand,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1245,12 +1262,68 @@ mod tests {
     }
 
     #[test]
+    fn duo_hinge_commands_wire_shapes() {
+        let hinge = |command| SetHubDeviceHingeParams {
+            host_id: None,
+            device_id: "DUO".into(),
+            command,
+        };
+        let cases = [
+            (
+                HingeCommand::Pose(HingePose::Book),
+                r#"{"deviceId":"DUO","pose":"book"}"#,
+            ),
+            (
+                HingeCommand::Angle(45.5),
+                r#"{"deviceId":"DUO","angle":45.5}"#,
+            ),
+            (
+                HingeCommand::Physical(DeviceFacing::FaceDown),
+                r#"{"deviceId":"DUO","physical":"facedown"}"#,
+            ),
+            (
+                HingeCommand::Physical(DeviceFacing::FaceUp),
+                r#"{"deviceId":"DUO","physical":"faceup"}"#,
+            ),
+            (
+                HingeCommand::Orientation(DeviceOrientation::LandscapeLeft),
+                r#"{"deviceId":"DUO","orientation":"landscape_left"}"#,
+            ),
+        ];
+        for (command, wire) in cases {
+            assert_eq!(serde_json::to_string(&hinge(command)).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_str::<SetHubDeviceHingeParams>(wire).unwrap(),
+                hinge(command)
+            );
+        }
+        let remote: SetHubDeviceHingeParams =
+            serde_json::from_value(json!({"hostId": "mini", "deviceId": "DUO", "angle": 45}))
+                .unwrap();
+        assert_eq!(
+            (remote.host_id.as_deref(), remote.command),
+            (Some("mini"), HingeCommand::Angle(45.0))
+        );
+        for refused in [
+            json!({"deviceId": "DUO"}),
+            json!({"deviceId": "DUO", "angle": "45"}),
+            json!({"deviceId": "DUO", "physical": "sideways"}),
+            json!({"deviceId": "DUO", "table": true}),
+        ] {
+            assert!(
+                serde_json::from_value::<SetHubDeviceHingeParams>(refused.clone()).is_err(),
+                "{refused}"
+            );
+        }
+    }
+
+    #[test]
     fn hinge_fold_and_opener_wire_shapes() {
         assert_eq!(
             serde_json::to_value(SetHubDeviceHingeParams {
                 host_id: None,
                 device_id: "DUO".into(),
-                pose: HingePose::Laptop,
+                command: HingeCommand::Pose(HingePose::Laptop),
             })
             .unwrap(),
             json!({"deviceId": "DUO", "pose": "laptop"})

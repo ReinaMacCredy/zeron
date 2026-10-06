@@ -467,7 +467,7 @@ impl DeviceStreams {
     pub(crate) fn hinge(
         &self,
         device_id: &str,
-        pose: zeron_proto::device_hub::HingePose,
+        command: zeron_proto::device_hub::HingeCommand,
     ) -> Result<tokio::sync::oneshot::Receiver<Result<(), String>>, String> {
         match self
             .lock()
@@ -475,7 +475,7 @@ impl DeviceStreams {
             .get(device_id)
             .and_then(|entry| entry.input.as_ref())
         {
-            Some(socket) => socket.hinge(pose),
+            Some(socket) => socket.hinge(command),
             None => Err("Input is not connected; open the device's video first".into()),
         }
     }

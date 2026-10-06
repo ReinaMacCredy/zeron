@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -8,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message;
 use zeron_proto::device_hub::{
-    DeviceButton, DeviceInput, DeviceOrientation, DeviceScreenConfig, HingePose, KeyPhase,
-    StreamLinkStatus, TouchPhase,
+    DeviceButton, DeviceFacing, DeviceInput, DeviceOrientation, DeviceScreenConfig, HingeCommand,
+    HingePose, KeyPhase, StreamLinkStatus, TouchPhase,
 };
 
 const TOUCH: u8 = 0x03;
@@ -150,29 +149,155 @@ pub(crate) fn screen_config(bytes: &[u8]) -> Option<DeviceScreenConfig> {
 }
 
 #[derive(Serialize)]
-struct HingeCommand {
-    control: &'static str,
-    value: HingePose,
+#[serde(tag = "control", content = "value", rename_all = "lowercase")]
+enum HingeControl {
+    Pose(HingePose),
+    Angle(f64),
+    Physical(DeviceFacing),
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct HingeRequest {
     request_id: u64,
-    command: HingeCommand,
+    command: HingeControl,
 }
 
-pub(crate) fn hinge_request(request_id: u64, pose: HingePose) -> Vec<u8> {
+pub(crate) fn hinge_request(request_id: u64, command: HingeCommand) -> Vec<u8> {
+    let command = match command {
+        HingeCommand::Pose(pose) => HingeControl::Pose(pose),
+        HingeCommand::Angle(angle) => HingeControl::Angle(angle),
+        HingeCommand::Physical(facing) => HingeControl::Physical(facing),
+        // Serve-sim refuses `orientation` over 0x10; its 0x07 gets no 0x90, only a 0x82.
+        HingeCommand::Orientation(orientation) => {
+            return message(ORIENTATION, &Orientation { orientation });
+        }
+    };
     message(
         HINGE,
         &HingeRequest {
             request_id,
-            command: HingeCommand {
-                control: "pose",
-                value: pose,
-            },
+            command,
         },
     )
+}
+
+const HINGE_TIMEOUT: Duration = Duration::from_secs(5);
+const HINGE_TIMED_OUT: &str = "Device control timed out. Its position is unknown.";
+const DISCONNECTED: &str = "Device is disconnected.";
+
+fn valid_hinge(command: HingeCommand) -> Result<(), String> {
+    match command {
+        HingeCommand::Angle(angle) if !(0.0..=180.0).contains(&angle) => {
+            Err("Hinge angle must be a number from 0 to 180 degrees.".into())
+        }
+        _ => Ok(()),
+    }
+}
+
+type HingeRequestOut = (u64, HingeCommand);
+
+#[derive(Default)]
+struct HingeQueue {
+    last_id: u64,
+    active: Option<(u64, HingeCommand, Vec<HingeReply>)>,
+    queued: Option<(HingeCommand, Vec<HingeReply>)>,
+}
+
+impl HingeQueue {
+    fn enqueue(&mut self, command: HingeCommand, reply: HingeReply) -> Option<HingeRequestOut> {
+        let mut waiting = self
+            .queued
+            .take()
+            .map(|(_, waiting)| waiting)
+            .unwrap_or_default();
+        waiting.push(reply);
+        self.queued = Some((command, waiting));
+        self.drain()
+    }
+
+    fn drain(&mut self) -> Option<HingeRequestOut> {
+        if self.active.is_some() {
+            return None;
+        }
+        let (command, waiting) = self.queued.take()?;
+        self.last_id += 1;
+        self.active = Some((self.last_id, command, waiting));
+        Some((self.last_id, command))
+    }
+
+    fn receive(&mut self, id: u64, result: Result<(), String>) -> Option<HingeRequestOut> {
+        if self.active.as_ref().map(|(active, ..)| *active) != Some(id) {
+            return None;
+        }
+        let (_, _, waiting) = self.active.take()?;
+        for reply in waiting {
+            let _ = reply.send(result.clone());
+        }
+        match result {
+            Ok(()) => self.drain(),
+            Err(error) => {
+                self.clear(&error);
+                None
+            }
+        }
+    }
+
+    fn screen_changed(&mut self) -> Option<HingeRequestOut> {
+        match self.active {
+            Some((id, HingeCommand::Orientation(_), _)) => self.receive(id, Ok(())),
+            _ => None,
+        }
+    }
+
+    fn timed_out(&mut self, id: u64) {
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|(active, ..)| *active == id)
+        {
+            self.clear(HINGE_TIMED_OUT);
+        }
+    }
+
+    fn clear(&mut self, error: &str) {
+        let active = self.active.take().map(|(_, _, waiting)| waiting);
+        let queued = self.queued.take().map(|(_, waiting)| waiting);
+        for reply in active.into_iter().chain(queued).flatten() {
+            let _ = reply.send(Err(error.to_string()));
+        }
+    }
+}
+
+type SharedQueue = Arc<Mutex<HingeQueue>>;
+
+fn lock(queue: &SharedQueue) -> std::sync::MutexGuard<'_, HingeQueue> {
+    queue.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn send_hinge(
+    queue: &SharedQueue,
+    held: &mut HingeQueue,
+    tx: &mpsc::UnboundedSender<Message>,
+    request: Option<HingeRequestOut>,
+) {
+    let Some((id, command)) = request else {
+        return;
+    };
+    if tx
+        .send(Message::Binary(hinge_request(id, command)))
+        .is_err()
+    {
+        held.clear(DISCONNECTED);
+        return;
+    }
+    let queue = Arc::downgrade(queue);
+    tokio::spawn(async move {
+        tokio::time::sleep(HINGE_TIMEOUT).await;
+        if let Some(queue) = queue.upgrade() {
+            lock(&queue).timed_out(id);
+        }
+    });
 }
 
 #[derive(Deserialize)]
@@ -206,8 +331,7 @@ pub(crate) struct InputSocket {
     tx: mpsc::UnboundedSender<Message>,
     live: Arc<AtomicBool>,
     encode: fn(&DeviceInput) -> Option<Message>,
-    replies: Option<Arc<Mutex<HashMap<u64, HingeReply>>>>,
-    next_request: AtomicU64,
+    hinges: Option<SharedQueue>,
     task: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -220,8 +344,8 @@ impl InputSocket {
         let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
         let live = Arc::new(AtomicBool::new(false));
         let flag = live.clone();
-        let replies: Arc<Mutex<HashMap<u64, HingeReply>>> = Arc::default();
-        let waiting = replies.clone();
+        let hinges: SharedQueue = Arc::default();
+        let (waiting, hinge_tx) = (hinges.clone(), tx.clone());
         let task = tokio::spawn(async move {
             loop {
                 on_status(StreamLinkStatus::Connecting);
@@ -255,13 +379,13 @@ impl InputSocket {
                                         Some(Ok(Message::Binary(bytes))) => {
                                             if let Some(screen) = screen_config(&bytes) {
                                                 on_screen(screen);
-                                            } else if let Some((id, result)) = control_reply(&bytes)
-                                                && let Some(reply) = waiting
-                                                    .lock()
-                                                    .unwrap_or_else(PoisonError::into_inner)
-                                                    .remove(&id)
-                                            {
-                                                let _ = reply.send(result);
+                                                let mut held = lock(&waiting);
+                                                let next = held.screen_changed();
+                                                send_hinge(&waiting, &mut held, &hinge_tx, next);
+                                            } else if let Some((id, result)) = control_reply(&bytes) {
+                                                let mut held = lock(&waiting);
+                                                let next = held.receive(id, result);
+                                                send_hinge(&waiting, &mut held, &hinge_tx, next);
                                             }
                                         }
                                         Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
@@ -272,10 +396,7 @@ impl InputSocket {
                                 }
                             };
                             flag.store(false, Ordering::SeqCst);
-                            waiting
-                                .lock()
-                                .unwrap_or_else(PoisonError::into_inner)
-                                .clear();
+                            lock(&waiting).clear(DISCONNECTED);
                             detail
                         }
                     }
@@ -290,8 +411,7 @@ impl InputSocket {
             tx,
             live,
             encode: |input| encode(input).map(Message::Binary),
-            replies: Some(replies),
-            next_request: AtomicU64::new(1),
+            hinges: Some(hinges),
             task: Some(task),
         }
     }
@@ -301,8 +421,7 @@ impl InputSocket {
             tx,
             live,
             encode: |input| encode_semu(input).map(Message::Text),
-            replies: None,
-            next_request: AtomicU64::new(1),
+            hinges: None,
             task: None,
         }
     }
@@ -319,24 +438,18 @@ impl InputSocket {
 
     pub(crate) fn hinge(
         &self,
-        pose: HingePose,
+        command: HingeCommand,
     ) -> Result<oneshot::Receiver<Result<(), String>>, String> {
-        let replies = self.replies.as_ref().ok_or(UNSUPPORTED_INPUT)?;
-        let id = self.next_request.fetch_add(1, Ordering::SeqCst);
+        let hinges = self.hinges.as_ref().ok_or(UNSUPPORTED_INPUT)?;
+        valid_hinge(command)?;
         let (reply, receiver) = oneshot::channel();
-        {
-            let mut replies = replies.lock().unwrap_or_else(PoisonError::into_inner);
-            replies.retain(|_, waiting| !waiting.is_closed());
-            replies.insert(id, reply);
-            // Checked after the insert: the reader drops `live` before it clears the waiters.
-            if !self.live.load(Ordering::SeqCst) {
-                replies.remove(&id);
-                return Err("Input disconnected, reconnecting...".into());
-            }
+        let mut held = lock(hinges);
+        // Checked under the queue lock: the reader drops `live` before it clears the queue.
+        if !self.live.load(Ordering::SeqCst) {
+            return Err("Input disconnected, reconnecting...".into());
         }
-        self.tx
-            .send(Message::Binary(hinge_request(id, pose)))
-            .map_err(|_| "Input disconnected".to_string())?;
+        let request = held.enqueue(command, reply);
+        send_hinge(hinges, &mut held, &self.tx, request);
         Ok(receiver)
     }
 }
@@ -562,22 +675,62 @@ mod tests {
     }
 
     #[test]
-    fn hinge_poses_go_out_as_tag_0x10_and_replies_come_back_as_tag_0x90() {
-        let mut expected = vec![0x10];
-        expected
-            .extend_from_slice(br#"{"requestId":7,"command":{"control":"pose","value":"closed"}}"#);
-        assert_eq!(hinge_request(7, HingePose::Closed), expected);
+    fn hinge_commands_go_out_as_tag_0x10_or_0x07_and_replies_come_back_as_tag_0x90() {
+        let tagged = |tag: u8, json: &str| [&[tag], json.as_bytes()].concat();
+        assert_eq!(
+            hinge_request(7, HingeCommand::Pose(HingePose::Closed)),
+            tagged(
+                0x10,
+                r#"{"requestId":7,"command":{"control":"pose","value":"closed"}}"#
+            )
+        );
         for (pose, wire) in [
             (HingePose::Book, "book"),
             (HingePose::Open, "open"),
             (HingePose::Laptop, "laptop"),
             (HingePose::Tent, "tent"),
         ] {
-            let bytes = hinge_request(1, pose);
+            let bytes = hinge_request(1, HingeCommand::Pose(pose));
             let body: serde_json::Value = serde_json::from_slice(&bytes[1..]).unwrap();
             assert_eq!(body["command"]["value"], wire);
         }
-        let tagged = |tag: u8, json: &str| [&[tag], json.as_bytes()].concat();
+        let cases = [
+            (
+                HingeCommand::Angle(45.5),
+                tagged(
+                    0x10,
+                    r#"{"requestId":2,"command":{"control":"angle","value":45.5}}"#,
+                ),
+            ),
+            (
+                HingeCommand::Angle(45.0),
+                tagged(
+                    0x10,
+                    r#"{"requestId":2,"command":{"control":"angle","value":45.0}}"#,
+                ),
+            ),
+            (
+                HingeCommand::Physical(DeviceFacing::FaceDown),
+                tagged(
+                    0x10,
+                    r#"{"requestId":2,"command":{"control":"physical","value":"facedown"}}"#,
+                ),
+            ),
+            (
+                HingeCommand::Physical(DeviceFacing::FaceUp),
+                tagged(
+                    0x10,
+                    r#"{"requestId":2,"command":{"control":"physical","value":"faceup"}}"#,
+                ),
+            ),
+            (
+                HingeCommand::Orientation(DeviceOrientation::LandscapeLeft),
+                tagged(0x07, r#"{"orientation":"landscape_left"}"#),
+            ),
+        ];
+        for (command, wire) in cases {
+            assert_eq!(hinge_request(2, command), wire, "{command:?}");
+        }
         assert_eq!(
             control_reply(&tagged(0x90, r#"{"requestId":1,"ok":true}"#)),
             Some((1, Ok(())))
@@ -603,18 +756,188 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let semu = InputSocket::semu(tx, Arc::new(AtomicBool::new(true)));
         assert_eq!(
-            semu.hinge(HingePose::Open).err().as_deref(),
+            semu.hinge(HingeCommand::Pose(HingePose::Open))
+                .err()
+                .as_deref(),
             Some(UNSUPPORTED_INPUT)
         );
         let (tx, _rx) = mpsc::unbounded_channel();
-        let replies: Arc<Mutex<HashMap<u64, HingeReply>>> = Arc::default();
+        let hinges: SharedQueue = Arc::default();
         let mut closed = InputSocket::semu(tx, Arc::new(AtomicBool::new(false)));
-        closed.replies = Some(replies.clone());
-        assert!(closed.hinge(HingePose::Open).is_err());
+        closed.hinges = Some(hinges.clone());
+        assert!(closed.hinge(HingeCommand::Pose(HingePose::Open)).is_err());
+        let held = lock(&hinges);
         assert!(
-            replies.lock().unwrap().is_empty(),
+            held.active.is_none() && held.queued.is_none(),
             "a request on a closed socket leaves no waiter behind"
         );
+    }
+
+    #[test]
+    fn a_hinge_angle_outside_0_to_180_degrees_never_leaves() {
+        for angle in [0.0, 45.5, 180.0] {
+            assert_eq!(valid_hinge(HingeCommand::Angle(angle)), Ok(()), "{angle}");
+        }
+        for angle in [
+            -0.5,
+            180.5,
+            200.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            assert_eq!(
+                valid_hinge(HingeCommand::Angle(angle)),
+                Err("Hinge angle must be a number from 0 to 180 degrees.".into()),
+                "{angle}"
+            );
+        }
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut socket = InputSocket::semu(tx, Arc::new(AtomicBool::new(true)));
+        socket.hinges = Some(Arc::default());
+        assert!(socket.hinge(HingeCommand::Angle(200.0)).is_err());
+        assert!(rx.try_recv().is_err(), "nothing was sent");
+    }
+
+    fn waiter() -> (HingeReply, oneshot::Receiver<Result<(), String>>) {
+        oneshot::channel()
+    }
+
+    fn angle(value: f64) -> HingeCommand {
+        HingeCommand::Angle(value)
+    }
+
+    #[tokio::test]
+    async fn a_failed_send_fails_its_request_including_a_disconnect_while_draining_queued_motion() {
+        let shared: SharedQueue = Arc::default();
+        let (dead, gone) = mpsc::unbounded_channel();
+        drop(gone);
+        let (live, mut sent) = mpsc::unbounded_channel();
+        let mut held = lock(&shared);
+        let (reply, mut forty) = waiter();
+        let request = held.enqueue(angle(40.0), reply);
+        assert_eq!(request, Some((1, angle(40.0))));
+        send_hinge(&shared, &mut held, &dead, request);
+        assert_eq!(forty.try_recv(), Ok(Err(DISCONNECTED.into())));
+        let (reply, mut book) = waiter();
+        let request = held.enqueue(HingeCommand::Pose(HingePose::Book), reply);
+        send_hinge(&shared, &mut held, &live, request);
+        assert_eq!(
+            sent.try_recv().unwrap(),
+            Message::Binary(hinge_request(2, HingeCommand::Pose(HingePose::Book)))
+        );
+        let (reply, mut sixty) = waiter();
+        assert_eq!(held.enqueue(angle(60.0), reply), None);
+        let request = held.receive(2, Ok(()));
+        assert_eq!(request, Some((3, angle(60.0))));
+        send_hinge(&shared, &mut held, &dead, request);
+        assert_eq!(book.try_recv(), Ok(Ok(())));
+        assert_eq!(sixty.try_recv(), Ok(Err(DISCONNECTED.into())));
+        assert!(held.active.is_none() && held.queued.is_none());
+    }
+
+    #[test]
+    fn hinge_edits_coalesce_behind_replies_and_a_preset_replaces_queued_edits() {
+        let mut queue = HingeQueue::default();
+        let (reply, mut forty) = waiter();
+        assert_eq!(queue.enqueue(angle(40.0), reply), Some((1, angle(40.0))));
+        let (reply, mut fifty) = waiter();
+        assert_eq!(queue.enqueue(angle(50.0), reply), None);
+        let (reply, mut sixty) = waiter();
+        assert_eq!(queue.enqueue(angle(60.0), reply), None);
+        assert_eq!(queue.receive(1, Ok(())), Some((2, angle(60.0))));
+        assert_eq!(forty.try_recv(), Ok(Ok(())));
+        assert!(
+            fifty.try_recv().is_err(),
+            "coalesced into 60, still waiting"
+        );
+        let (reply, mut hundred) = waiter();
+        assert_eq!(queue.enqueue(angle(100.0), reply), None);
+        let (reply, mut tent) = waiter();
+        let preset = HingeCommand::Pose(HingePose::Tent);
+        assert_eq!(queue.enqueue(preset, reply), None);
+        assert_eq!(queue.receive(2, Ok(())), Some((3, preset)));
+        assert_eq!(fifty.try_recv(), Ok(Ok(())));
+        assert_eq!(sixty.try_recv(), Ok(Ok(())));
+        assert_eq!(queue.receive(3, Ok(())), None);
+        assert_eq!(hundred.try_recv(), Ok(Ok(())));
+        assert_eq!(tent.try_recv(), Ok(Ok(())));
+        assert!(queue.active.is_none() && queue.queued.is_none());
+    }
+
+    #[test]
+    fn failure_timeout_and_disconnect_drop_queued_commands_and_late_replies_acknowledge_nothing() {
+        let mut queue = HingeQueue::default();
+        let mut sent = 0;
+        let (reply, mut ninety) = waiter();
+        sent += queue.enqueue(angle(90.0), reply).iter().count();
+        let (reply, mut hundred) = waiter();
+        sent += queue.enqueue(angle(100.0), reply).iter().count();
+        queue.timed_out(1);
+        assert_eq!(ninety.try_recv(), Ok(Err(HINGE_TIMED_OUT.into())));
+        assert_eq!(hundred.try_recv(), Ok(Err(HINGE_TIMED_OUT.into())));
+        let (reply, mut open) = waiter();
+        let request = queue.enqueue(HingeCommand::Pose(HingePose::Open), reply);
+        assert_eq!(request, Some((2, HingeCommand::Pose(HingePose::Open))));
+        sent += 1;
+        assert_eq!(queue.receive(1, Ok(())), None, "a late reply");
+        queue.timed_out(1);
+        assert!(open.try_recv().is_err(), "still pending");
+        let (reply, mut one_thirty) = waiter();
+        sent += queue.enqueue(angle(130.0), reply).iter().count();
+        assert_eq!(queue.receive(2, Err("native refused".into())), None);
+        assert_eq!(open.try_recv(), Ok(Err("native refused".into())));
+        assert_eq!(one_thirty.try_recv(), Ok(Err("native refused".into())));
+        let (reply, mut book) = waiter();
+        sent += queue
+            .enqueue(HingeCommand::Pose(HingePose::Book), reply)
+            .iter()
+            .count();
+        let (reply, mut closed) = waiter();
+        sent += queue
+            .enqueue(HingeCommand::Pose(HingePose::Closed), reply)
+            .iter()
+            .count();
+        queue.clear(DISCONNECTED);
+        assert_eq!(queue.receive(3, Ok(())), None);
+        assert_eq!(book.try_recv(), Ok(Err(DISCONNECTED.into())));
+        assert_eq!(closed.try_recv(), Ok(Err(DISCONNECTED.into())));
+        assert_eq!(sent, 3);
+        assert!(valid_hinge(angle(f64::INFINITY)).is_err());
+    }
+
+    #[test]
+    fn an_orientation_is_acknowledged_by_the_next_screen_config() {
+        let mut queue = HingeQueue::default();
+        assert_eq!(queue.screen_changed(), None);
+        let turn = HingeCommand::Orientation(DeviceOrientation::LandscapeLeft);
+        let (reply, mut turned) = waiter();
+        assert_eq!(queue.enqueue(turn, reply), Some((1, turn)));
+        let (reply, mut folded) = waiter();
+        assert_eq!(queue.enqueue(angle(45.0), reply), None);
+        assert_eq!(queue.screen_changed(), Some((2, angle(45.0))));
+        assert_eq!(turned.try_recv(), Ok(Ok(())));
+        assert_eq!(queue.screen_changed(), None, "an angle waits for its 0x90");
+        assert!(folded.try_recv().is_err());
+        assert_eq!(queue.receive(2, Ok(())), None);
+        assert_eq!(folded.try_recv(), Ok(Ok(())));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_request_without_a_reply_times_out_after_five_seconds() {
+        let shared: SharedQueue = Arc::default();
+        let (tx, mut sent) = mpsc::unbounded_channel();
+        let (reply, mut first) = waiter();
+        {
+            let mut held = lock(&shared);
+            let request = held.enqueue(angle(45.0), reply);
+            send_hinge(&shared, &mut held, &tx, request);
+        }
+        assert!(sent.try_recv().is_ok());
+        tokio::time::sleep(HINGE_TIMEOUT - Duration::from_millis(1)).await;
+        assert!(first.try_recv().is_err(), "not yet");
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        assert_eq!(first.try_recv(), Ok(Err(HINGE_TIMED_OUT.into())));
     }
 
     #[tokio::test]
@@ -628,6 +951,12 @@ mod tests {
             let mut hinges = 0;
             while let Some(Ok(Message::Binary(bytes))) = socket.next().await {
                 let _ = seen_tx.send(bytes.to_vec());
+                if bytes[0] == 0x07 {
+                    let config = br#"{"width":2006,"height":2852,"orientation":"landscape_left"}"#;
+                    let out = [&[0x82], &config[..]].concat();
+                    socket.send(Message::Binary(out)).await.unwrap();
+                    continue;
+                }
                 if bytes[0] != 0x10 {
                     continue;
                 }
@@ -656,28 +985,27 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(socket.hinge(HingePose::Closed).unwrap().await, Ok(Ok(())));
+        let closed = HingeCommand::Pose(HingePose::Closed);
+        let tent = HingeCommand::Pose(HingePose::Tent);
+        let turn = HingeCommand::Orientation(DeviceOrientation::LandscapeLeft);
+        assert_eq!(socket.hinge(closed).unwrap().await, Ok(Ok(())));
         assert_eq!(
-            socket.hinge(HingePose::Tent).unwrap().await,
+            socket.hinge(tent).unwrap().await,
             Ok(Err("Simulator could not change the device pose.".into()))
         );
-        let dropped = socket.hinge(HingePose::Open).unwrap();
-        assert!(
+        assert_eq!(socket.hinge(turn).unwrap().await, Ok(Ok(())));
+        let dropped = socket.hinge(HingeCommand::Pose(HingePose::Open)).unwrap();
+        assert_eq!(
             tokio::time::timeout(Duration::from_secs(5), dropped)
                 .await
-                .unwrap()
-                .is_err(),
+                .unwrap(),
+            Ok(Err(DISCONNECTED.into())),
             "a closed socket fails the waiting request"
         );
         assert_eq!(seen.recv().await.unwrap(), hardware_keyboard_off());
-        assert_eq!(
-            seen.recv().await.unwrap(),
-            hinge_request(1, HingePose::Closed)
-        );
-        assert_eq!(
-            seen.recv().await.unwrap(),
-            hinge_request(2, HingePose::Tent)
-        );
+        assert_eq!(seen.recv().await.unwrap(), hinge_request(1, closed));
+        assert_eq!(seen.recv().await.unwrap(), hinge_request(2, tent));
+        assert_eq!(seen.recv().await.unwrap(), hinge_request(3, turn));
     }
 
     #[test]

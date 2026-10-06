@@ -45,7 +45,7 @@ const ANDROID_H264_ONLY: &str = "Android emulators stream H.264 only.";
 const HUB_NOT_RUNNING: &str = "The device hub is not running.";
 const UNKNOWN_HOST: &str = "That device host is not configured.";
 const REMOTE_STOP_GRACE: Duration = Duration::from_secs(10);
-const HINGE_TIMEOUT: Duration = Duration::from_secs(5);
+const NO_HINGE: &str = "This device has no hinge.";
 pub const DEVICE_SUPPORT_OFF: &str = "Device support is off. Enable it in the Device panel before installing or starting device tools.";
 
 pub struct DeviceHub {
@@ -1289,6 +1289,14 @@ impl DeviceHub {
         })
     }
 
+    fn hinged(&self, key: &str) -> bool {
+        self.state
+            .borrow()
+            .screens
+            .get(key)
+            .is_some_and(|screen| screen.supports_hinge_angle == Some(true))
+    }
+
     fn with_live_hub<T>(
         &self,
         host_id: &str,
@@ -1485,21 +1493,13 @@ impl DeviceHub {
             return Err(UNKNOWN_DEVICE.into());
         }
         let key = device_key(host_id, &params.device_id);
-        let hinged = self
-            .state
-            .borrow()
-            .screens
-            .get(&key)
-            .is_some_and(|screen| screen.supports_hinge_angle == Some(true));
-        if !hinged {
-            return Err("This device has no hinge.".into());
+        if !self.hinged(&key) {
+            return Err(NO_HINGE.into());
         }
-        let reply = self.streams.hinge(&key, params.pose)?;
-        match tokio::time::timeout(HINGE_TIMEOUT, reply).await {
-            Err(_) => Err("Device control timed out. Its position is unknown.".into()),
-            Ok(Err(_)) => Err("Device is disconnected.".into()),
-            Ok(Ok(result)) => result,
-        }
+        let reply = self.streams.hinge(&key, params.command)?;
+        reply
+            .await
+            .unwrap_or_else(|_| Err("Device is disconnected.".into()))
     }
 
     pub async fn close(&self, params: CloseHubDeviceParams) -> Result<(), String> {
@@ -1796,22 +1796,13 @@ mod tests {
         let Ok(mut ws) = tokio_tungstenite::accept_async(socket).await else {
             return;
         };
-        let tagged = |tag: u8, body: serde_json::Value| {
+        let tagged = |tag: u8, body: &serde_json::Value| {
             Message::Binary([&[tag][..], body.to_string().as_bytes()].concat())
         };
-        let config = |pose: Option<&str>| {
-            let (screen, width, height) = match pose {
-                None | Some("closed") => (1, 1398, 2034),
-                _ => (3, 2006, 2852),
-            };
-            tagged(
-                0x82,
-                serde_json::json!({"width": width, "height": height, "orientation": "portrait",
-                    "screenId": screen, "supportsPhysicalOrientation": true,
-                    "supportsHingeAngle": true, "hingePose": pose}),
-            )
-        };
-        if ws.send(config(None)).await.is_err() {
+        let mut screen = serde_json::json!({"width": 1398, "height": 2034,
+            "orientation": "portrait", "screenId": 1, "supportsPhysicalOrientation": true,
+            "supportsHingeAngle": true, "hingePose": null});
+        if ws.send(tagged(0x82, &screen)).await.is_err() {
             return;
         }
         while let Some(Ok(Message::Binary(bytes))) = ws.next().await {
@@ -1819,22 +1810,61 @@ mod tests {
             seen.lock()
                 .unwrap()
                 .push(format!("HID {:#04x} {body}", bytes[0]));
+            let request: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            if bytes[0] == 0x07 {
+                screen["orientation"] = request["orientation"].clone();
+                if ws.send(tagged(0x82, &screen)).await.is_err() {
+                    return;
+                }
+                continue;
+            }
             if bytes[0] != 0x10 {
                 continue;
             }
-            let request: serde_json::Value = serde_json::from_str(&body).unwrap();
-            let id = request["requestId"].clone();
-            let pose = request["command"]["value"].as_str().unwrap_or_default();
-            let reply = if pose == "tent" {
+            let (id, value) = (&request["requestId"], &request["command"]["value"]);
+            let angle = screen["hingeAngle"].as_f64();
+            let ok = match request["command"]["control"].as_str() {
+                Some("pose") if value != "tent" => {
+                    let (id, width, height, angle) = match value.as_str() {
+                        Some("closed") => (1, 1398, 2034, 0),
+                        Some("open") => (3, 2006, 2852, 180),
+                        _ => (3, 2006, 2852, 90),
+                    };
+                    screen["screenId"] = id.into();
+                    screen["width"] = width.into();
+                    screen["height"] = height.into();
+                    screen["hingeAngle"] = angle.into();
+                    screen["hingePose"] = value.clone();
+                    true
+                }
+                Some("angle") => {
+                    if value == 10.0 {
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                    }
+                    screen["hingeAngle"] = value.clone();
+                    screen["hingePose"] = serde_json::Value::Null;
+                    true
+                }
+                Some("physical") => {
+                    let ok = value == "faceup" || angle.is_some_and(|a| a > 0.0 && a < 180.0);
+                    if ok {
+                        screen["physicalOrientation"] = value.clone();
+                        screen["screenId"] = if value == "facedown" { 1 } else { 3 }.into();
+                    }
+                    ok
+                }
+                _ => false,
+            };
+            if ok && ws.send(tagged(0x82, &screen)).await.is_err() {
+                return;
+            }
+            let reply = if ok {
+                serde_json::json!({"requestId": id, "ok": true})
+            } else {
                 serde_json::json!({"requestId": id, "ok": false,
                     "error": "Simulator could not change the device pose."})
-            } else {
-                if ws.send(config(Some(pose))).await.is_err() {
-                    return;
-                }
-                serde_json::json!({"requestId": id, "ok": true})
             };
-            if ws.send(tagged(0x90, reply)).await.is_err() {
+            if ws.send(tagged(0x90, &reply)).await.is_err() {
                 return;
             }
         }
@@ -2756,7 +2786,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_duo_hinge_pose_goes_out_as_0x10_and_waits_for_its_0x90_reply() {
-        use zeron_proto::device_hub::{DeviceOpener, HingePose, SetHubDeviceHingeParams};
+        use zeron_proto::device_hub::{
+            DeviceOpener, HingeCommand, HingePose, SetHubDeviceHingeParams,
+        };
         let dir = tempfile::tempdir().unwrap();
         let hub = super::DeviceHub::start(dir.path());
         let (origin, requests) = fake_hub_with(DUO).await;
@@ -2772,7 +2804,7 @@ mod tests {
         let hinge = |device_id: &str, pose| SetHubDeviceHingeParams {
             host_id: None,
             device_id: device_id.into(),
-            pose,
+            command: HingeCommand::Pose(pose),
         };
         assert_eq!(
             hub.set_hinge(hinge("SIM-1", HingePose::Closed)).await,
@@ -2824,6 +2856,97 @@ mod tests {
                 r#"HID 0x10 {"requestId":2,"command":{"control":"pose","value":"tent"}}"#,
                 r#"HID 0x10 {"requestId":3,"command":{"control":"pose","value":"closed"}}"#,
             ]
+        );
+        hub.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn duo_angle_physical_and_orientation_commands_go_out_one_at_a_time() {
+        use zeron_proto::device_hub::{
+            DeviceFacing, DeviceOrientation, HingeCommand, HingePose, SetHubDeviceHingeParams,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let hub = super::DeviceHub::start(dir.path());
+        let (origin, requests) = fake_hub_with(DUO).await;
+        hub.attach_hub_for_test(origin);
+        hub.configure(zeron_proto::device_hub::ConfigureDeviceHubParams {
+            enabled: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        hub.open(open_params("SIM-1")).await.unwrap();
+        let hinge = |command| SetHubDeviceHingeParams {
+            host_id: None,
+            device_id: "SIM-1".into(),
+            command,
+        };
+        let mut video = Box::pin(super::avcc_batches(hub.watch_avcc(None, "SIM-1").unwrap()));
+        next_tags(&mut video, 3).await;
+        let screen = || {
+            hub.snapshot()
+                .screens
+                .get("SIM-1")
+                .cloned()
+                .unwrap_or_default()
+        };
+        eventually(|| screen().supports_hinge_angle == Some(true)).await;
+        hub.set_hinge(hinge(HingeCommand::Angle(45.0)))
+            .await
+            .unwrap();
+        assert_eq!(
+            (screen().hinge_angle, screen().hinge_pose),
+            (Some(45), None)
+        );
+        hub.set_hinge(hinge(HingeCommand::Physical(DeviceFacing::FaceDown)))
+            .await
+            .unwrap();
+        assert_eq!(screen().screen_id, Some(1));
+        assert_eq!(
+            hub.set_hinge(hinge(HingeCommand::Angle(200.0))).await,
+            Err("Hinge angle must be a number from 0 to 180 degrees.".into())
+        );
+        hub.set_hinge(hinge(HingeCommand::Pose(HingePose::Open)))
+            .await
+            .unwrap();
+        assert_eq!(
+            hub.set_hinge(hinge(HingeCommand::Physical(DeviceFacing::FaceDown)))
+                .await,
+            Err("Simulator could not change the device pose.".into()),
+            "the hub turns face down only between 0 and 180 degrees"
+        );
+        hub.set_hinge(hinge(HingeCommand::Orientation(
+            DeviceOrientation::LandscapeLeft,
+        )))
+        .await
+        .unwrap();
+        assert_eq!(screen().orientation, DeviceOrientation::LandscapeLeft);
+        let (ten, twenty, thirty) = futures::join!(
+            hub.set_hinge(hinge(HingeCommand::Angle(10.0))),
+            hub.set_hinge(hinge(HingeCommand::Angle(20.0))),
+            hub.set_hinge(hinge(HingeCommand::Angle(30.0))),
+        );
+        assert_eq!((ten, twenty, thirty), (Ok(()), Ok(()), Ok(())));
+        assert_eq!(screen().hinge_angle, Some(30));
+        let sent: Vec<String> = requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|line| line.starts_with("HID 0x10") || line.starts_with("HID 0x07"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            sent,
+            [
+                r#"HID 0x10 {"requestId":1,"command":{"control":"angle","value":45.0}}"#,
+                r#"HID 0x10 {"requestId":2,"command":{"control":"physical","value":"facedown"}}"#,
+                r#"HID 0x10 {"requestId":3,"command":{"control":"pose","value":"open"}}"#,
+                r#"HID 0x10 {"requestId":4,"command":{"control":"physical","value":"facedown"}}"#,
+                r#"HID 0x07 {"orientation":"landscape_left"}"#,
+                r#"HID 0x10 {"requestId":6,"command":{"control":"angle","value":10.0}}"#,
+                r#"HID 0x10 {"requestId":7,"command":{"control":"angle","value":30.0}}"#,
+            ],
+            "an angle sent while another is in flight replaces the queued one"
         );
         hub.shutdown().await;
     }

@@ -76,6 +76,10 @@ async fn list_hub_devices_is_refused_while_disabled_and_installs_nothing() {
             serde_json::json!({"deviceId": "SIM", "pose": "closed"}),
         ),
         (
+            methods::SET_HUB_DEVICE_HINGE,
+            serde_json::json!({"deviceId": "SIM", "angle": 45}),
+        ),
+        (
             methods::WATCH_HUB_DEVICE_APP_STATE,
             serde_json::json!({"deviceId": "SIM"}),
         ),
