@@ -280,6 +280,10 @@ impl DeviceControls {
         self.drawer
     }
 
+    pub fn ax_overlay(&self) -> bool {
+        self.ax_overlay
+    }
+
     pub fn foreground_app(&self) -> Option<ForegroundApp> {
         match &self.foreground {
             Some(app) => app.clone(),

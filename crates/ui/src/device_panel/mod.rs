@@ -3,8 +3,11 @@ pub mod fold;
 pub mod geometry;
 pub mod h264;
 pub mod loading;
+#[cfg(target_os = "macos")]
+pub mod metal3d;
 pub mod presentation;
 mod rail;
+pub mod scene3d;
 pub mod setup;
 pub mod stream_view;
 pub mod tools;
@@ -17,8 +20,8 @@ use gpui::{
     Window, div, prelude::*, px,
 };
 use zeron_proto::device_hub::{
-    DeviceHostStatus, DeviceHubState, DevicePlatform, DeviceSession, HubDevice,
-    HubDeviceScreenshot, LOCAL_DEVICE_HOST_ID, device_key,
+    DeviceAction, DeviceHostStatus, DeviceHubState, DeviceOrientation, DevicePlatform,
+    DeviceSession, HubDevice, HubDeviceScreenshot, LOCAL_DEVICE_HOST_ID, device_key,
 };
 use zeron_rpc::methods;
 
@@ -237,6 +240,7 @@ pub struct DevicePanel {
     controls: Option<(Entity<DeviceControls>, Subscription)>,
     fold: Option<(Entity<FoldControls>, Subscription)>,
     panel_width: Rc<Cell<f32>>,
+    three_d: bool,
     screenshot_task: Option<Task<()>>,
     toast: Option<(u64, SharedString)>,
     revision: Option<u64>,
@@ -273,6 +277,7 @@ impl DevicePanel {
             controls: None,
             fold: None,
             panel_width: Rc::default(),
+            three_d: false,
             screenshot_task: None,
             toast: None,
             revision: None,
@@ -429,6 +434,63 @@ impl DevicePanel {
         self.view.as_ref()
     }
 
+    fn three_d_blocked(&self, cx: &App) -> Option<&'static str> {
+        let view = self.view.as_ref()?.read(cx);
+        if fold::hinged(view.screen()) {
+            Some("3D is not available for iPhone Duo")
+        } else if self
+            .controls()
+            .is_some_and(|controls| controls.read(cx).ax_overlay())
+        {
+            Some("Turn off accessibility frames to use 3D")
+        } else if view.three_d_failed() {
+            Some("3D is unavailable on this computer")
+        } else {
+            None
+        }
+    }
+
+    fn apply_three_d(&mut self, cx: &mut Context<Self>) {
+        let Some(view) = self.view.clone() else {
+            return;
+        };
+        let on = self.three_d && self.three_d_blocked(cx).is_none();
+        view.update(cx, |view, cx| view.set_three_d(on, cx));
+    }
+
+    fn set_three_d(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.three_d = on;
+        self.apply_three_d(cx);
+        cx.notify();
+    }
+
+    fn restore_three_d(&mut self, cx: &mut Context<Self>) {
+        let Some(view) = self.view.clone() else {
+            return;
+        };
+        let (orientation, android) = {
+            let view = view.read(cx);
+            (
+                view.screen().map(|screen| screen.orientation),
+                view.platform() == DevicePlatform::Android,
+            )
+        };
+        if orientation.is_some_and(|orientation| orientation != DeviceOrientation::Portrait) {
+            match self.controls().cloned() {
+                Some(controls) if android => controls.update(cx, |controls, cx| {
+                    controls.act(
+                        DeviceAction::SetOrientation {
+                            value: DeviceOrientation::Portrait,
+                        },
+                        cx,
+                    )
+                }),
+                _ => view.update(cx, |view, _| view.orient(DeviceOrientation::Portrait)),
+            }
+        }
+        view.update(cx, |view, cx| view.restore_three_d(cx));
+    }
+
     fn sync(&mut self, cx: &mut Context<Self>) {
         let Some(hub) = self.hub(cx).cloned() else {
             return;
@@ -489,13 +551,17 @@ impl DevicePanel {
                             cx,
                         )
                     });
-                    let observer = cx.observe(&controls, |_, _, cx| cx.notify());
+                    let observer = cx.observe(&controls, |panel, _, cx| {
+                        panel.apply_three_d(cx);
+                        cx.notify()
+                    });
                     self.controls = Some((controls, observer));
                     self.view = Some(view);
                 }
                 if let (Some(view), Some((host, _))) = (&self.view, &self.target) {
                     feed_view(view, &hub, host, &device_id, cx);
                 }
+                self.apply_three_d(cx);
             }
             None => {
                 self.drop_view();

@@ -328,6 +328,7 @@ icon_assets![
     (LUCIDE_BOOK_OPEN, "lucide-book-open"),
     (LUCIDE_HAMMER, "lucide-hammer"),
     (LUCIDE_PICTURE_IN_PICTURE_2, "lucide-picture-in-picture-2"),
+    (LUCIDE_BOX, "lucide-box"),
     (LUCIDE_PANEL_RIGHT, "lucide-panel-right"),
     (APPLE, "apple"),
     (ANDROID, "android"),

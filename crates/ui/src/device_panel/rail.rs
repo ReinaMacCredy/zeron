@@ -178,10 +178,71 @@ impl DevicePanel {
                     .children(turn)
                     .child(divider(theme))
                     .children(self.render_settings_buttons(theme, cx))
-                    .child(self.render_more(theme, cx)),
+                    .child(self.render_more(theme, cx))
+                    .child(divider(theme))
+                    .children(self.render_presentation(view, theme, cx)),
             )
             .children(self.render_fold(view, theme, cx))
             .into_any_element()
+    }
+
+    fn render_presentation(
+        &self,
+        view: &Entity<DeviceStreamView>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let (streaming, shown) = {
+            let view = view.read(cx);
+            (view.has_frame(), view.three_d_shown())
+        };
+        let blocked = self.three_d_blocked(cx);
+        let can_3d = streaming && blocked.is_none();
+        let mut buttons = vec![
+            pressed(
+                tipped_button(
+                    "device-view-3d",
+                    icons::LUCIDE_BOX,
+                    "3D view",
+                    blocked.unwrap_or("3D view"),
+                    can_3d,
+                    theme,
+                ),
+                shown,
+            )
+            .when(can_3d, |button| {
+                button.on_click(cx.listener(|panel, _, _, cx| panel.set_three_d(true, cx)))
+            })
+            .into_any_element(),
+            pressed(
+                rail_button(
+                    "device-view-flat",
+                    icons::SMARTPHONE,
+                    "Flat view",
+                    streaming,
+                    theme,
+                ),
+                !shown,
+            )
+            .when(streaming, |button| {
+                button.on_click(cx.listener(|panel, _, _, cx| panel.set_three_d(false, cx)))
+            })
+            .into_any_element(),
+        ];
+        if shown && streaming {
+            buttons.push(
+                rail_button(
+                    "device-view-restore",
+                    icons::LUCIDE_MAXIMIZE_2,
+                    "Restore 3D view",
+                    true,
+                    theme,
+                )
+                .on_click(cx.listener(|panel, _, _, cx| panel.restore_three_d(cx)))
+                .into_any_element(),
+            );
+        }
+        buttons
     }
 
     fn render_fold(

@@ -177,7 +177,7 @@ mod decoder {
     use super::{DecodeEvent, FallbackReason, Health, KeyframeGate, parse_avcc};
 
     #[derive(Clone)]
-    pub struct Surface(CFRetained<CVPixelBuffer>);
+    pub struct Surface(pub(crate) CFRetained<CVPixelBuffer>);
 
     // SAFETY: a decoded CVPixelBuffer is never written after decode, and CF retain/release are thread-safe.
     unsafe impl Send for Surface {}

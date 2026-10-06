@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,6 +21,7 @@ use zeron_rpc::{RpcSubscription, methods};
 
 use super::geometry::{self, KeyPress};
 use super::loading::{self, LoadingStage, LoadingView};
+use super::scene3d;
 use crate::state::EngineHandle;
 use crate::theme::Theme;
 
@@ -445,6 +446,28 @@ async fn drain_frames(
     }
 }
 
+struct ThreeD {
+    viewer: Rc<RefCell<scene3d::Viewer>>,
+    #[cfg(target_os = "macos")]
+    renderer: Rc<RefCell<super::metal3d::Renderer>>,
+    wheel: scene3d::Wheel,
+    wheel_end: Task<()>,
+}
+
+impl ThreeD {
+    fn new() -> Option<Self> {
+        #[cfg(target_os = "macos")]
+        return super::metal3d::Renderer::new().map(|renderer| Self {
+            viewer: Rc::default(),
+            renderer: Rc::new(RefCell::new(renderer)),
+            wheel: scene3d::Wheel::default(),
+            wheel_end: Task::ready(()),
+        });
+        #[cfg(not(target_os = "macos"))]
+        None
+    }
+}
+
 pub struct DeviceStreamView {
     engine: EngineHandle,
     host_id: String,
@@ -481,6 +504,9 @@ pub struct DeviceStreamView {
     rail_inset: f32,
     ax_boxes: Vec<AxBox>,
     pub(super) corner_radius: f32,
+    three_d: Option<ThreeD>,
+    three_d_failed: bool,
+    epoch: Instant,
     drain: Task<()>,
     timer: Task<()>,
     _tasks: [Task<()>; 2],
@@ -591,6 +617,9 @@ impl DeviceStreamView {
             rail_inset: geometry::RAIL_WIDTH,
             ax_boxes: Vec::new(),
             corner_radius: 0.0,
+            three_d: None,
+            three_d_failed: false,
+            epoch: Instant::now(),
             drain: Task::ready(()),
             timer: Task::ready(()),
             _tasks: [sender, pump],
@@ -762,6 +791,135 @@ impl DeviceStreamView {
         self.send(DeviceInput::Button { button });
     }
 
+    pub fn orient(&mut self, orientation: DeviceOrientation) {
+        self.send(DeviceInput::Orientation { orientation });
+    }
+
+    pub fn set_three_d(&mut self, on: bool, cx: &mut Context<Self>) {
+        if on == self.three_d.is_some() || (on && self.three_d_failed) {
+            return;
+        }
+        self.release_held(true, cx);
+        self.three_d = if on { ThreeD::new() } else { None };
+        self.three_d_failed = on && self.three_d.is_none();
+        cx.notify();
+    }
+
+    pub fn three_d_shown(&self) -> bool {
+        self.three_d.is_some()
+    }
+
+    pub fn three_d_failed(&self) -> bool {
+        self.three_d_failed
+    }
+
+    pub fn restore_three_d(&mut self, cx: &mut Context<Self>) {
+        let now = self.now();
+        if let Some(three_d) = &self.three_d {
+            three_d.viewer.borrow_mut().restore(now);
+            cx.notify();
+        }
+    }
+
+    fn now(&self) -> f64 {
+        self.epoch.elapsed().as_secs_f64() * 1000.0
+    }
+
+    fn shown_rotation(&self) -> DeviceOrientation {
+        self.image.as_ref().map_or_else(
+            || geometry::display_rotation(self.screen.as_ref()),
+            |shown| shown.rotation,
+        )
+    }
+
+    fn scroll(&mut self, event: &gpui::ScrollWheelEvent, cx: &mut Context<Self>) {
+        let now = self.now();
+        let Some(three_d) = &mut self.three_d else {
+            return;
+        };
+        if self.image.is_none() {
+            return;
+        }
+        cx.stop_propagation();
+        let (dx, dy, lines) = match event.delta {
+            gpui::ScrollDelta::Pixels(delta) => (f32::from(delta.x), f32::from(delta.y), false),
+            gpui::ScrollDelta::Lines(delta) => (delta.x, delta.y, true),
+        };
+        let mut viewer = three_d.viewer.borrow_mut();
+        match three_d.wheel.step(event.touch_phase, lines) {
+            scene3d::WheelStep::Ignore => return,
+            scene3d::WheelStep::End => {
+                three_d.wheel_end = Task::ready(());
+                viewer.end_wheel(now);
+            }
+            scene3d::WheelStep::Orbit => {
+                let Some((_, _, width, height)) = viewer.viewport() else {
+                    return;
+                };
+                if let Some((x, y)) =
+                    scene3d::wheel_orbit(f64::from(dx), f64::from(dy), lines, width, height)
+                    && viewer.wheel(x, y, now)
+                {
+                    // A mouse wheel never reports the end of its gesture.
+                    three_d.wheel_end = cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(scene3d::WHEEL_IDLE_MS))
+                            .await;
+                        this.update(cx, |view, cx| {
+                            let now = view.now();
+                            if let Some(three_d) = &view.three_d {
+                                three_d.viewer.borrow_mut().end_wheel(now);
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                    });
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn pointer_3d(&mut self, phase: TouchPhase, position: Point<Pixels>, orbit: bool) {
+        let now = self.now();
+        let Some(three_d) = &self.three_d else {
+            return;
+        };
+        let (x, y) = (
+            f64::from(f32::from(position.x)),
+            f64::from(f32::from(position.y)),
+        );
+        let touches = {
+            let mut viewer = three_d.viewer.borrow_mut();
+            match phase {
+                TouchPhase::Begin if self.image.is_some() && self.video_error.is_none() => {
+                    viewer.press(x, y, orbit, now)
+                }
+                TouchPhase::Begin => return,
+                TouchPhase::Move => viewer.drag(x, y, now),
+                TouchPhase::End => {
+                    let mut touches = viewer.drag(x, y, now);
+                    touches.extend(viewer.lift(now));
+                    touches
+                }
+            }
+        };
+        let rotation = self.shown_rotation();
+        for (phase, (x, y)) in touches {
+            let (x, y) = geometry::raw_point(rotation, x, y);
+            self.pressed = (phase != TouchPhase::End).then_some((x, y));
+            self.send(DeviceInput::Touch { phase, x, y });
+        }
+    }
+
+    fn dragging(&self) -> bool {
+        self.pressed.is_some()
+            || self
+                .three_d
+                .as_ref()
+                .is_some_and(|three_d| three_d.viewer.borrow().interaction.mode().is_some())
+    }
+
     pub fn rotate(&mut self) {
         let current = self
             .screen
@@ -778,6 +936,9 @@ impl DeviceStreamView {
 
     fn release(&mut self, touch: bool) -> Vec<DeviceInput> {
         let mut inputs: Vec<DeviceInput> = self.held_keys.drain().map(geometry::key_up).collect();
+        if touch && let Some(three_d) = &self.three_d {
+            three_d.viewer.borrow_mut().lift(self.now());
+        }
         if touch && let Some((x, y)) = self.pressed.take() {
             inputs.push(DeviceInput::Touch {
                 phase: TouchPhase::End,
@@ -841,10 +1002,19 @@ impl DeviceStreamView {
         if let Some(frame) = self.frame_box.get()
             && let Some((x, y)) = self.debug_tap.take()
         {
-            let position = geometry::position_at(frame, x, y);
-            tracing::info!(device = %self.device_id, x, y, "ZERON_DEVICE_TAP: synthetic tap");
-            self.pointer(TouchPhase::Begin, position);
-            self.pointer(TouchPhase::End, position);
+            let position = match &self.three_d {
+                Some(three_d) => three_d
+                    .viewer
+                    .borrow()
+                    .position_of((x, y))
+                    .map(|(x, y)| gpui::point(px(x as f32), px(y as f32))),
+                None => Some(geometry::position_at(frame, x, y)),
+            };
+            if let Some(position) = position {
+                tracing::info!(device = %self.device_id, x, y, "ZERON_DEVICE_TAP: synthetic tap");
+                self.pointer(TouchPhase::Begin, position);
+                self.pointer(TouchPhase::End, position);
+            }
         }
         cx.notify();
     }
@@ -866,6 +1036,9 @@ impl DeviceStreamView {
     }
 
     fn pointer(&mut self, phase: TouchPhase, position: Point<Pixels>) {
+        if self.three_d.is_some() {
+            return self.pointer_3d(phase, position, false);
+        }
         let Some(frame) = self.frame_box.get() else {
             return;
         };
@@ -1018,6 +1191,64 @@ impl gpui::EntityInputHandler for DeviceStreamView {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn paint_3d(
+    viewer: &RefCell<scene3d::Viewer>,
+    renderer: &RefCell<super::metal3d::Renderer>,
+    frame: Bounds<Pixels>,
+    picture: Option<&Picture>,
+    clear: [f32; 3],
+    window: &mut Window,
+) -> bool {
+    use super::metal3d::{Job, Source};
+    let mut viewer = viewer.borrow_mut();
+    let viewport = (
+        f64::from(f32::from(frame.origin.x)),
+        f64::from(f32::from(frame.origin.y)),
+        f64::from(f32::from(frame.size.width)),
+        f64::from(f32::from(frame.size.height)),
+    );
+    if viewport.2 < 1.0 || viewport.3 < 1.0 {
+        return false;
+    }
+    let (Some(camera), Some(rotation), Some(model)) =
+        (viewer.fit(viewport), viewer.rotation(), viewer.model())
+    else {
+        return false;
+    };
+    let source = match picture {
+        Some(Picture::Surface(surface)) => Source::Surface(surface),
+        Some(Picture::Image(image)) => {
+            let size = image.size(0);
+            Source::Bgra {
+                id: Arc::as_ptr(image) as usize,
+                bytes: image.as_bytes(0).unwrap_or_default(),
+                width: size.width.0.max(0) as usize,
+                height: size.height.0.max(0) as usize,
+            }
+        }
+        None => return false,
+    };
+    let (mvp, rotation) = camera.matrices(rotation);
+    let scale = f64::from(window.scale_factor());
+    let job = Job {
+        source,
+        model: &model,
+        mvp,
+        rotation,
+        size: (
+            (viewport.2 * scale).round() as usize,
+            (viewport.3 * scale).round() as usize,
+        ),
+        clear,
+    };
+    let Some(surface) = renderer.borrow_mut().render(job) else {
+        return false;
+    };
+    window.paint_surface(frame, surface.to_gpui());
+    true
+}
+
 impl Render for DeviceStreamView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         for old in self.retired.drain(..) {
@@ -1055,7 +1286,37 @@ impl Render for DeviceStreamView {
             .map(|ax| ax.displayed(rotation))
             .collect();
         let ax_color = theme.accent;
-        let dragging = self.pressed.is_some().then(|| cx.entity().downgrade());
+        #[cfg(target_os = "macos")]
+        let theme_bg = theme.bg;
+        let dragging = self.dragging().then(|| cx.entity().downgrade());
+        let scene = self
+            .three_d
+            .as_ref()
+            .filter(|_| self.image.is_some())
+            .map(|three_d| {
+                let orientation = self
+                    .screen
+                    .as_ref()
+                    .map_or(DeviceOrientation::Portrait, |screen| screen.orientation);
+                let aspect = f64::from(aspect);
+                let profile =
+                    scene3d::resolve_shape(self.platform, &self.label.0, aspect.min(1.0 / aspect));
+                let mut viewer = three_d.viewer.borrow_mut();
+                viewer.set_model(profile, aspect, orientation);
+                viewer.advance(self.now(), cx.reduce_motion());
+                if viewer.needs_frame() {
+                    window.request_animation_frame();
+                }
+                #[cfg(target_os = "macos")]
+                let scene = (three_d.viewer.clone(), three_d.renderer.clone());
+                #[cfg(not(target_os = "macos"))]
+                let scene = three_d.viewer.clone();
+                scene
+            });
+        #[cfg(target_os = "macos")]
+        let clear = gpui::Rgba::from(theme.bg);
+        #[cfg(target_os = "macos")]
+        let clear = [clear.r, clear.g, clear.b];
         let connecting = self.awaiting_frame && self.video_error.is_none();
         let input_down = (!self.awaiting_frame && self.video_error.is_none() && !self.input_live())
             .then(|| match &self.link.input {
@@ -1087,7 +1348,13 @@ impl Render for DeviceStreamView {
                 gpui::canvas(
                     |_, _, _| (),
                     move |bounds, _, window, cx| {
-                        let frame = geometry::centered_frame(bounds, aspect, rail_inset);
+                        let frame = match &scene {
+                            Some(_) => Bounds::new(
+                                bounds.origin,
+                                gpui::size(bounds.size.width - px(rail_inset), bounds.size.height),
+                            ),
+                            None => geometry::centered_frame(bounds, aspect, rail_inset),
+                        };
                         frame_box.set(Some(frame));
                         if let Some((focus, view)) = ime {
                             window.handle_input(
@@ -1096,7 +1363,13 @@ impl Render for DeviceStreamView {
                                 cx,
                             );
                         }
-                        match picture {
+                        #[cfg(target_os = "macos")]
+                        if let Some((viewer, renderer)) = &scene {
+                            if !paint_3d(viewer, renderer, frame, picture.as_ref(), clear, window) {
+                                window.paint_quad(gpui::fill(frame, theme_bg));
+                            }
+                        }
+                        match picture.filter(|_| scene.is_none()) {
                             Some(Picture::Image(image)) => {
                                 let _ = window.paint_image(frame, corners, image, 0, false);
                             }
@@ -1104,11 +1377,12 @@ impl Render for DeviceStreamView {
                             Some(Picture::Surface(surface)) => {
                                 window.paint_surface(frame, surface.to_gpui())
                             }
+                            None if scene.is_some() => {}
                             None => window.paint_quad(
                                 gpui::fill(frame, crate::theme::ink(0.04)).corner_radii(corners),
                             ),
                         }
-                        for ax in &ax_boxes {
+                        for ax in ax_boxes.iter().filter(|_| scene.is_none()) {
                             let at = |x: f32, y: f32| {
                                 gpui::point(
                                     frame.origin.x + frame.size.width * x,
@@ -1130,8 +1404,11 @@ impl Render for DeviceStreamView {
                         if let Some(view) = dragging {
                             window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
                                 if phase == gpui::DispatchPhase::Bubble {
-                                    view.update(cx, |view, _| {
-                                        view.pointer(TouchPhase::Move, event.position)
+                                    view.update(cx, |view, cx| {
+                                        view.pointer(TouchPhase::Move, event.position);
+                                        if view.three_d.is_some() {
+                                            cx.notify();
+                                        }
                                     })
                                     .ok();
                                 }
@@ -1223,10 +1500,17 @@ impl Render for DeviceStreamView {
                 MouseButton::Left,
                 cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
                     window.focus(&this.focus, cx);
-                    this.pointer(TouchPhase::Begin, event.position);
+                    if this.three_d.is_some() {
+                        this.pointer_3d(TouchPhase::Begin, event.position, event.modifiers.alt);
+                    } else {
+                        this.pointer(TouchPhase::Begin, event.position);
+                    }
                     cx.stop_propagation();
                     cx.notify();
                 }),
+            )
+            .on_scroll_wheel(
+                cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| this.scroll(event, cx)),
             )
             .on_mouse_up(
                 MouseButton::Left,
@@ -1479,6 +1763,115 @@ mod tests {
         });
         cx.run_until_parked();
         assert_touches(&tap(cx), &[("begin", 0.75, 0.75), ("end", 0.75, 0.75)]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn the_3d_view_touches_through_its_screen_orbits_off_it_and_restores_square(
+        cx: &mut TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+        });
+        cx.executor().allow_parking();
+        let (engine, inputs) = fake_engine(&runtime);
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            DeviceStreamView::new(
+                engine,
+                "local".into(),
+                "SIM".into(),
+                DevicePlatform::Ios,
+                cx,
+            )
+        });
+        view.update(cx, |view, cx| view.set_three_d(true, cx));
+        let viewer = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |view, _| view.three_d.as_ref().unwrap().viewer.clone())
+        };
+        wait(cx, |cx| {
+            view.read_with(cx, |view, _| view.has_frame())
+                && viewer(cx).borrow().viewport().is_some()
+        });
+        let at = |cx: &mut VisualTestContext, x: f32, y: f32| {
+            let (x, y) = viewer(cx).borrow().position_of((x, y)).unwrap();
+            point(px(x as f32), px(y as f32))
+        };
+        let none = Modifiers::default();
+        let (start, middle, finish) = (at(cx, 0.25, 0.5), at(cx, 0.5, 0.5), at(cx, 0.75, 0.6));
+        cx.simulate_mouse_down(start, MouseButton::Left, none);
+        cx.simulate_mouse_move(middle, MouseButton::Left, none);
+        cx.simulate_mouse_up(finish, MouseButton::Left, none);
+        wait(cx, |_| inputs.lock().unwrap().len() >= 4);
+        assert_touches(
+            &touches(&inputs),
+            &[
+                ("begin", 0.25, 0.5),
+                ("move", 0.5, 0.5),
+                ("move", 0.75, 0.6),
+                ("end", 0.75, 0.6),
+            ],
+        );
+
+        inputs.lock().unwrap().clear();
+        let area = view.read_with(cx, |view, _| view.frame_box().unwrap());
+        let corner = area.origin + point(px(4.0), px(4.0));
+        cx.simulate_mouse_down(corner, MouseButton::Left, none);
+        cx.simulate_mouse_move(corner + point(px(160.0), px(40.0)), MouseButton::Left, none);
+        cx.simulate_mouse_up(corner + point(px(160.0), px(40.0)), MouseButton::Left, none);
+        cx.run_until_parked();
+        assert!(
+            inputs.lock().unwrap().is_empty(),
+            "a press off the screen orbits"
+        );
+        let later = view.read_with(cx, |view, _| view.now()) + 300.0;
+        viewer(cx).borrow_mut().advance(later, false);
+        let turned = viewer(cx).borrow().motion.rotation;
+        assert!(turned.angle_to(scene3d::Quat::IDENTITY) > 0.01);
+
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: area.center(),
+            delta: gpui::ScrollDelta::Pixels(point(px(120.0), px(0.0))),
+            modifiers: none,
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        assert!(viewer(cx).borrow().interaction.mode().is_none());
+        view.update(cx, |view, cx| view.restore_three_d(cx));
+        let started = std::time::Instant::now();
+        while viewer(cx)
+            .borrow()
+            .motion
+            .rotation
+            .angle_to(scene3d::Quat::IDENTITY)
+            > 1e-6
+        {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "restore never settled"
+            );
+            std::thread::sleep(Duration::from_millis(16));
+            view.update(cx, |view, cx| {
+                let now = view.now();
+                view.three_d
+                    .as_ref()
+                    .unwrap()
+                    .viewer
+                    .borrow_mut()
+                    .advance(now, false);
+                cx.notify();
+            });
+            cx.run_until_parked();
+        }
+
+        view.update(cx, |view, cx| view.set_three_d(false, cx));
+        cx.run_until_parked();
+        let frame = view.read_with(cx, |view, _| view.frame_box().unwrap());
+        assert!(
+            frame.size.width < area.size.width,
+            "flat again: the frame hugs the stream"
+        );
     }
 
     fn duo_screen(
