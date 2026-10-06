@@ -637,6 +637,7 @@ fn relay_refused(method: &str) -> bool {
             | methods::GET_HUB_DEVICE_AX_TREE
             | methods::WATCH_HUB_DEVICE_APP_STATE
             | methods::WATCH_HUB_DEVICE_EVENTS
+            | methods::TEST_DEVICE_HOST
             | methods::DEVICE_TOOL_LIST
             | methods::DEVICE_TOOL_OPEN
             | methods::DEVICE_TOOL_SCREENSHOT

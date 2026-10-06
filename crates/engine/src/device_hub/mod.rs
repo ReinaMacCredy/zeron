@@ -2040,6 +2040,7 @@ mod tests {
         assert_eq!(session.opened_by, Some(DeviceOpener::User));
         let hinge = |device_id: &str, pose| SetHubDeviceHingeParams {
             device_id: device_id.into(),
+            host_id: None,
             pose,
         };
         assert_eq!(

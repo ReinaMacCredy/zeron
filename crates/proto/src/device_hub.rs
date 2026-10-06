@@ -190,6 +190,8 @@ pub enum HingePose {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetHubDeviceHingeParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<String>,
     #[serde(default)]
     pub device_id: String,
     pub pose: HingePose,
@@ -266,6 +268,119 @@ pub struct DeviceHubSettings {
     pub agent_access_enabled: bool,
     #[serde(default)]
     pub onboarding_completed: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub device_hosts: Vec<SshDeviceHostConfig>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshDeviceHostConfig {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+}
+
+fn plain_text(value: &str) -> bool {
+    !value.is_empty() && !value.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
+impl SshDeviceHostConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        let id_ok = self.id.len() <= 128
+            && self.id.starts_with(|c: char| c.is_ascii_alphanumeric())
+            && self
+                .id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        if !id_ok {
+            return Err("A device host id uses letters, digits, '-' and '_' only.".into());
+        }
+        if self.id == LOCAL_DEVICE_HOST_ID {
+            return Err("The local host id is reserved.".into());
+        }
+        if self.label.trim().is_empty() || self.label.chars().any(char::is_control) {
+            return Err("A device host needs a name.".into());
+        }
+        if !plain_text(&self.target) || self.target.starts_with('-') {
+            return Err(
+                "The SSH target must be user@host or an SSH alias, without spaces or a leading '-'."
+                    .into(),
+            );
+        }
+        if let Some(file) = &self.identity_file
+            && (!file.starts_with('/') || file.chars().any(char::is_control))
+        {
+            return Err("The identity file must be an absolute path.".into());
+        }
+        if self.port == Some(0) {
+            return Err("The SSH port must be between 1 and 65535.".into());
+        }
+        Ok(())
+    }
+}
+
+pub fn validate_device_hosts(hosts: &[SshDeviceHostConfig]) -> Result<(), String> {
+    for (index, host) in hosts.iter().enumerate() {
+        host.validate()?;
+        if hosts[..index].iter().any(|other| other.id == host.id) {
+            return Err("Device host ids must be unique.".into());
+        }
+    }
+    Ok(())
+}
+
+pub fn device_key(host_id: &str, device_id: &str) -> String {
+    if host_id == LOCAL_DEVICE_HOST_ID {
+        device_id.to_string()
+    } else {
+        format!("{host_id}/{device_id}")
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceHostState {
+    #[serde(default)]
+    pub status: DeviceHostStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceHostCheck {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceHostTest {
+    #[serde(default)]
+    pub local: bool,
+    #[serde(default)]
+    pub checks: Vec<DeviceHostCheck>,
+    #[serde(default)]
+    pub platforms: Vec<DevicePlatformAvailability>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<DeviceToolVersions>,
+}
+
+impl DeviceHostTest {
+    pub fn passed(&self) -> bool {
+        self.local || self.checks.iter().all(|check| check.ok)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -281,6 +396,8 @@ pub struct DeviceHubState {
     pub host_status: DeviceHostStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_status_detail: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub host_statuses: BTreeMap<String, DeviceHostState>,
     #[serde(default)]
     pub devices: Vec<HubDevice>,
     #[serde(default)]
@@ -310,6 +427,13 @@ impl DeviceHubState {
                 && session.host_id == host_id
                 && session.device_id == device_id
         })
+    }
+
+    pub fn host_label(&self, host_id: &str) -> Option<&str> {
+        self.hosts
+            .iter()
+            .find(|host| host.id == host_id)
+            .map(|host| host.label.as_str())
     }
 }
 
@@ -539,6 +663,8 @@ pub struct ConfigureDeviceHubParams {
     pub agent_access_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub onboarding_completed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_hosts: Option<Vec<SshDeviceHostConfig>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -570,6 +696,8 @@ pub struct OpenHubDeviceParams {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WatchHubDeviceFramesParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<String>,
     #[serde(default)]
     pub device_id: String,
     #[serde(default)]
@@ -579,6 +707,8 @@ pub struct WatchHubDeviceFramesParams {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendHubDeviceInputParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<String>,
     #[serde(default)]
     pub device_id: String,
     pub input: DeviceInput,
@@ -960,6 +1090,7 @@ mod tests {
     #[test]
     fn touch_input_is_externally_tagged() {
         let params = SendHubDeviceInputParams {
+            host_id: None,
             device_id: "UDID".into(),
             input: DeviceInput::Touch {
                 phase: TouchPhase::Begin,
@@ -1124,6 +1255,7 @@ mod tests {
     fn hinge_fold_and_opener_wire_shapes() {
         assert_eq!(
             serde_json::to_value(SetHubDeviceHingeParams {
+                host_id: None,
                 device_id: "DUO".into(),
                 pose: HingePose::Laptop,
             })
@@ -1562,6 +1694,134 @@ mod tests {
                 tag: AVCC_DELTA,
                 payload: b"x".to_vec()
             }]
+        );
+    }
+
+    fn ssh_host(id: &str, target: &str) -> SshDeviceHostConfig {
+        SshDeviceHostConfig {
+            id: id.into(),
+            label: "Mac mini".into(),
+            target: target.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn device_hosts_round_trip_with_the_settings_and_stay_off_the_wire_when_empty() {
+        let bare = DeviceHubSettings {
+            enabled: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_value(&bare).unwrap(),
+            json!({"enabled": true, "agentAccessEnabled": false, "onboardingCompleted": false})
+        );
+        let settings = DeviceHubSettings {
+            device_hosts: vec![SshDeviceHostConfig {
+                identity_file: Some("/Users/me/.ssh/id_ed25519".into()),
+                port: Some(2222),
+                ..ssh_host("mini", "me@mini.local")
+            }],
+            ..bare
+        };
+        let wire = json!({"enabled": true, "agentAccessEnabled": false, "onboardingCompleted": false,
+            "deviceHosts": [{"id": "mini", "label": "Mac mini", "target": "me@mini.local",
+                "identityFile": "/Users/me/.ssh/id_ed25519", "port": 2222}]});
+        assert_eq!(serde_json::to_value(&settings).unwrap(), wire);
+        assert_eq!(
+            serde_json::from_value::<DeviceHubSettings>(wire).unwrap(),
+            settings
+        );
+        let old: DeviceHubSettings = serde_json::from_value(json!({"enabled": true})).unwrap();
+        assert!(old.device_hosts.is_empty());
+        let configure: ConfigureDeviceHubParams =
+            serde_json::from_value(json!({"deviceHosts": []})).unwrap();
+        assert_eq!(configure.device_hosts, Some(Vec::new()));
+        assert_eq!(
+            serde_json::to_value(ConfigureDeviceHubParams::default()).unwrap(),
+            json!({})
+        );
+    }
+
+    #[test]
+    fn device_host_fields_are_refused_before_they_can_reach_an_ssh_argv() {
+        assert_eq!(ssh_host("mini", "me@mini.local").validate(), Ok(()));
+        assert_eq!(ssh_host("mac_2-b", "mini").validate(), Ok(()));
+        for target in [
+            "-oProxyCommand=touch /tmp/pwned",
+            "-G",
+            "me@mini local",
+            "mini\n-oProxyCommand=x",
+            "mini\t",
+            "",
+            " mini",
+            "mini\u{0}",
+        ] {
+            assert!(ssh_host("mini", target).validate().is_err(), "{target:?}");
+        }
+        for id in ["", "local", "-x", "a b", "a/b", "_a", &"a".repeat(129)] {
+            assert!(ssh_host(id, "mini").validate().is_err(), "{id:?}");
+        }
+        let with = |identity: &str, port: Option<u16>| SshDeviceHostConfig {
+            identity_file: Some(identity.into()),
+            port,
+            ..ssh_host("mini", "mini")
+        };
+        assert!(
+            with("/Users/me/.ssh/id with space", Some(22))
+                .validate()
+                .is_ok()
+        );
+        assert!(with("-i/etc/passwd", None).validate().is_err());
+        assert!(with("id_ed25519", None).validate().is_err());
+        assert!(
+            with("/Users/me/id\n-oProxyCommand=x", None)
+                .validate()
+                .is_err()
+        );
+        assert!(with("/Users/me/id", Some(0)).validate().is_err());
+        assert!(
+            serde_json::from_value::<SshDeviceHostConfig>(json!({"id": "a", "port": 70000}))
+                .is_err()
+        );
+        let blank = SshDeviceHostConfig {
+            label: "  ".into(),
+            ..ssh_host("mini", "mini")
+        };
+        assert!(blank.validate().is_err());
+        assert_eq!(
+            validate_device_hosts(&[ssh_host("a", "one"), ssh_host("a", "two")]),
+            Err("Device host ids must be unique.".into())
+        );
+        assert!(validate_device_hosts(&[ssh_host("a", "one"), ssh_host("b", "two")]).is_ok());
+    }
+
+    #[test]
+    fn device_keys_keep_local_ids_and_scope_remote_ones_by_host() {
+        assert_eq!(
+            device_key(LOCAL_DEVICE_HOST_ID, "emulator-5554"),
+            "emulator-5554"
+        );
+        assert_eq!(device_key("mini", "emulator-5554"), "mini/emulator-5554");
+        assert_ne!(
+            device_key("mini", "emulator-5554"),
+            device_key("studio", "emulator-5554")
+        );
+        let params: SendHubDeviceInputParams = serde_json::from_value(
+            json!({"hostId": "mini", "deviceId": "SIM", "input": {"button": {"button": "home"}}}),
+        )
+        .unwrap();
+        assert_eq!(params.host_id.as_deref(), Some("mini"));
+        let state: DeviceHubState = serde_json::from_value(
+            json!({"hostStatuses": {"mini": {"status": "failed", "detail": "offline"}}}),
+        )
+        .unwrap();
+        assert_eq!(state.host_statuses["mini"].status, DeviceHostStatus::Failed);
+        assert!(
+            serde_json::to_value(DeviceHubState::default())
+                .unwrap()
+                .get("hostStatuses")
+                .is_none()
         );
     }
 }

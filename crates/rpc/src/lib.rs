@@ -266,6 +266,7 @@ pub mod methods {
     pub const GET_HUB_DEVICE_AX_TREE: &str = "GetHubDeviceAxTree";
     pub const WATCH_HUB_DEVICE_APP_STATE: &str = "WatchHubDeviceAppState";
     pub const WATCH_HUB_DEVICE_EVENTS: &str = "WatchHubDeviceEvents";
+    pub const TEST_DEVICE_HOST: &str = "TestDeviceHost";
     pub const DEVICE_TOOL_LIST: &str = "DeviceToolList";
     pub const DEVICE_TOOL_OPEN: &str = "DeviceToolOpen";
     pub const DEVICE_TOOL_SCREENSHOT: &str = "DeviceToolScreenshot";
