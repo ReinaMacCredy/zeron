@@ -280,6 +280,9 @@ pub mod methods {
     pub const LIST_CHANGE_REQUESTS: &str = "ListChangeRequests";
     pub const GET_CHANGE_REQUEST: &str = "GetChangeRequest";
     pub const LIST_CHANGE_REQUEST_STATS: &str = "ListChangeRequestStats";
+    pub const GET_GIT_ACTIVITY: &str = "GetGitActivity";
+    pub const LIST_LISTENING_SERVICES: &str = "ListListeningServices";
+    pub const GET_SYSTEM_STATS: &str = "GetSystemStats";
     pub const GET_CHANGE_REQUEST_DIFF: &str = "GetChangeRequestDiff";
     pub const GET_CHANGE_REQUEST_ACTIVITY: &str = "GetChangeRequestActivity";
     pub const POST_CHANGE_REQUEST_COMMENT: &str = "PostChangeRequestComment";

@@ -3171,6 +3171,36 @@ impl RpcService for EngineRpc {
                     serde_json::to_value(stats).map_err(|e| RpcError::Failed(e.to_string()))?,
                 ))
             }
+            methods::GET_GIT_ACTIVITY => {
+                let p: zeron_proto::GitActivityRequest = parse_params(params)?;
+                let spaces = self.workspace.watch_spaces().borrow().clone();
+                let groups =
+                    crate::home_widgets::repo_groups(&spaces, self.doc_host.device_id());
+                let activity = crate::home_widgets::git_activity(
+                    groups,
+                    p.space_id.as_deref(),
+                    p.days.unwrap_or(14),
+                    chrono::Local::now().date_naive(),
+                )
+                .await;
+                RpcReply::value(&activity)
+            }
+            methods::LIST_LISTENING_SERVICES => {
+                let p: zeron_proto::ListeningServicesRequest = parse_params(params)?;
+                let spaces = self.workspace.watch_spaces().borrow().clone();
+                let chats = self.workspace.read_chats().unwrap_or_default();
+                let roots = crate::home_widgets::project_roots(
+                    &spaces,
+                    &chats,
+                    self.doc_host.device_id(),
+                );
+                let services =
+                    crate::home_widgets::listening_services(roots, p.all_ports).await;
+                RpcReply::value(&zeron_proto::ListeningServices { services })
+            }
+            methods::GET_SYSTEM_STATS => {
+                RpcReply::value(&crate::home_widgets::system_stats().await)
+            }
             methods::GET_CHANGE_REQUEST => {
                 let key = format!("detail:{params}");
                 if let Some(hit) = crate::source_control::cached_response(&key, DETAIL_CACHE_TTL) {
