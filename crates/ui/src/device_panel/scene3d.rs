@@ -261,7 +261,7 @@ impl Quat {
     }
 }
 
-fn cross(a: Vec3, b: Vec3) -> Vec3 {
+pub(super) fn cross(a: Vec3, b: Vec3) -> Vec3 {
     Vec3::new(
         a.y * b.z - a.z * b.y,
         a.z * b.x - a.x * b.z,
@@ -1063,6 +1063,10 @@ impl Builder {
 
 static MODEL_IDS: AtomicU64 = AtomicU64::new(1);
 
+pub(super) fn next_model_id() -> u64 {
+    MODEL_IDS.fetch_add(1, Ordering::Relaxed)
+}
+
 pub struct Model {
     pub id: u64,
     pub profile: &'static ShapeProfile,
@@ -1195,7 +1199,7 @@ impl Model {
             }
         });
         Self {
-            id: MODEL_IDS.fetch_add(1, Ordering::Relaxed),
+            id: next_model_id(),
             profile,
             aspect,
             orientation,

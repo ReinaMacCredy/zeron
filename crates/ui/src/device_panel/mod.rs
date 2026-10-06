@@ -1,3 +1,4 @@
+pub mod duo3d;
 pub mod float;
 pub mod fold;
 pub mod geometry;
