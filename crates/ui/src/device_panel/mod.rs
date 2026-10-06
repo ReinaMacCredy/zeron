@@ -1183,7 +1183,7 @@ pub(crate) mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use zeron_proto::device_hub::{
-        DeviceBooting, DeviceHubSettings, DeviceStreamStatus, StreamLinkStatus,
+        DeviceBooting, DeviceHubSettings, DeviceStreamStatus, HingeCommand, StreamLinkStatus,
     };
 
     pub(crate) type Calls = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
@@ -1734,6 +1734,51 @@ pub(crate) mod tests {
                 .all(|params| params["input"].get("orientation").is_none()),
             "no plain 0x07 beside the hinge queue"
         );
+    }
+
+    #[gpui::test]
+    fn a_duo_rotate_survives_a_pinch_and_a_second_click_turns_past_the_pending_one(
+        cx: &mut TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (state, calls) =
+            app_state_with(cx, &runtime, duo(true), Arc::new(|_| serde_json::json!({})));
+        let (panel, cx) = cx.add_window_view(|_, cx| {
+            let mut panel = DevicePanel::new(state, "chat".into(), cx);
+            panel.target = Some(("local".into(), "SIM".into()));
+            panel.revision = None;
+            panel.sync(cx);
+            panel
+        });
+        cx.simulate_resize(gpui::size(gpui::px(700.0), gpui::px(1200.0)));
+        wait(cx, |cx| cx.debug_bounds("device-pose-tent").is_some());
+        let fold = panel.read_with(cx, |panel, _| panel.fold().unwrap().clone());
+        fold.update(cx, |fold, cx| {
+            fold.command(HingeCommand::Angle(90.0), cx);
+            fold.rotate(DeviceOrientation::Portrait, cx);
+            fold.rotate(DeviceOrientation::Portrait, cx);
+            fold.command(HingeCommand::Angle(100.0), cx);
+        });
+        let orientations = || {
+            calls_of(&calls, methods::SET_HUB_DEVICE_HINGE)
+                .into_iter()
+                .filter_map(|params| params.get("orientation").cloned())
+                .collect::<Vec<_>>()
+        };
+        wait(cx, |_| orientations().len() == 2);
+        assert_eq!(
+            orientations(),
+            [
+                serde_json::json!("landscape_left"),
+                serde_json::json!("portrait_upside_down")
+            ]
+        );
+        wait(cx, |_| {
+            calls_of(&calls, methods::SET_HUB_DEVICE_HINGE)
+                .iter()
+                .any(|params| params.get("angle") == Some(&serde_json::json!(100.0)))
+        });
     }
 
     #[gpui::test]

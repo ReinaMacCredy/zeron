@@ -2,7 +2,8 @@ use std::time::Duration;
 
 use gpui::{Context, Entity, SharedString, Subscription, Task, WeakEntity};
 use zeron_proto::device_hub::{
-    DeviceFoldState, DevicePlatform, DeviceScreenConfig, FoldPosture, HingeCommand, HingePose,
+    DeviceFoldState, DeviceOrientation, DevicePlatform, DeviceScreenConfig, FoldPosture,
+    HingeCommand, HingePose,
 };
 use zeron_rpc::methods;
 
@@ -140,6 +141,7 @@ pub struct FoldControls {
     android_pending: bool,
     read_for: Option<Option<(u32, u32)>>,
     error: Option<SharedString>,
+    rotation: Option<DeviceOrientation>,
     request: Task<()>,
     view: WeakEntity<DeviceStreamView>,
     _view: [Subscription; 2],
@@ -174,6 +176,7 @@ impl FoldControls {
             android_pending: false,
             read_for: None,
             error: None,
+            rotation: None,
             request: Task::ready(()),
             view: view.downgrade(),
             _view: [observer, commands],
@@ -202,6 +205,40 @@ impl FoldControls {
             self.send(command, cx);
         }
         self.push_control(false, None, cx);
+        cx.notify();
+    }
+
+    // Not via the latest-wins gesture slot: the next pinch tick would overwrite the click.
+    pub fn rotate(&mut self, current: DeviceOrientation, cx: &mut Context<Self>) {
+        let next = super::geometry::next_orientation(self.rotation.unwrap_or(current));
+        self.rotation = Some(next);
+        self.error = None;
+        let engine = self.engine.clone();
+        let mut params = super::device_target(&self.host_id, &self.device_id);
+        if let (Some(target), Ok(serde_json::Value::Object(fields))) = (
+            params.as_object_mut(),
+            serde_json::to_value(HingeCommand::Orientation(next)),
+        ) {
+            target.extend(fields);
+        }
+        cx.spawn(async move |this, cx| {
+            let reply = engine
+                .client()
+                .call(methods::SET_HUB_DEVICE_HINGE, params)
+                .await
+                .map_err(|error| error.to_string());
+            this.update(cx, |fold, cx| {
+                if fold.rotation == Some(next) {
+                    fold.rotation = None;
+                }
+                if let Err(error) = reply {
+                    fold.error = Some(error.into());
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
         cx.notify();
     }
 

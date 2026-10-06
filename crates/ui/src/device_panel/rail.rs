@@ -1,11 +1,10 @@
 use gpui::{AnyElement, Context, Entity, MouseButton, SharedString, Stateful, div, prelude::*, px};
 use zeron_proto::device_hub::{
     DeviceAction, DeviceAppearance, DeviceButton, DeviceOrientation, DevicePlatform, FoldPosture,
-    HingeCommand,
 };
 
 use super::fold;
-use super::geometry::{self, RAIL_WIDTH};
+use super::geometry::RAIL_WIDTH;
 use super::stream_view::DeviceStreamView;
 use super::tools::TEXT_SIZES;
 use super::{DevicePanel, DevicePanelEvent};
@@ -145,11 +144,7 @@ impl DevicePanel {
                             )
                         };
                         match hinge.clone().filter(|_| hinged) {
-                            Some(hinge) => {
-                                let command =
-                                    HingeCommand::Orientation(geometry::next_orientation(current));
-                                hinge.update(cx, |hinge, cx| hinge.command(command, cx));
-                            }
+                            Some(hinge) => hinge.update(cx, |hinge, cx| hinge.rotate(current, cx)),
                             None => rotate.update(cx, |view, _| view.rotate()),
                         }
                     })
