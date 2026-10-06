@@ -736,7 +736,11 @@ impl DeviceStreamView {
                     DuoPanel::Inner => self.duo_sizes[1] = size,
                 }
             }
+            let shown = self.scene_shown();
             self.screen = screen;
+            if !shown && self.scene_shown() && self.pressed.is_some() {
+                self.release_held(true, cx);
+            }
             let now = self.now();
             if let Some(three_d) = &self.three_d {
                 let [cover, inner] = self.duo_sizes();
@@ -785,7 +789,13 @@ impl DeviceStreamView {
         }
     }
 
-    pub fn set_duo_control(&mut self, queued: Option<f64>, failed: bool, cx: &mut Context<Self>) {
+    pub fn set_duo_control(
+        &mut self,
+        queued: Option<f64>,
+        failed: bool,
+        accepted: Option<HingeCommand>,
+        cx: &mut Context<Self>,
+    ) {
         self.duo_queued = queued;
         let now = self.now();
         if let Some(three_d) = &mut self.three_d {
@@ -795,6 +805,9 @@ impl DeviceStreamView {
             }
             if let Some(duo) = three_d.viewer.borrow_mut().duo() {
                 duo.set_control(queued, failed, now);
+                if let Some(HingeCommand::Orientation(orientation)) = accepted {
+                    duo.orientation_accepted(orientation);
+                }
             }
         }
         self.emit_duo_requests(cx);
@@ -1539,9 +1552,10 @@ fn paint_3d(
             if surface.is_some() && live_panel == Some(active) {
                 let key = duo3d::duo_display_key(duo.screen());
                 duo.frame_ready(key);
-                if let Some(Picture::Surface(shown)) = picture {
-                    kept.borrow_mut()[slot(active)] = Some((shown.clone(), rotation, frame_number));
-                }
+                kept.borrow_mut()[slot(active)] = match picture {
+                    Some(Picture::Surface(shown)) => Some((shown.clone(), rotation, frame_number)),
+                    _ => None,
+                };
             }
             surface
         }
@@ -2783,6 +2797,64 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn an_accepted_orientation_the_screen_already_shows_reopens_touch_without_a_new_config(
+        cx: &mut TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (view, _, hinges, fold, cx) = duo_view(cx, &runtime, "iPhone Duo", |_| None);
+        let scene = duo_ready(&view, cx);
+        let idle = |cx: &mut VisualTestContext| !fold.read_with(cx, |fold, _| fold.hinge_pending());
+        view.update(cx, |view, cx| {
+            let now = view.now();
+            let mut scene = scene.borrow_mut();
+            let duo = scene.duo().unwrap();
+            assert!(duo.wheel(0.0, std::f64::consts::PI / 0.006, now));
+            duo.end_wheel(now);
+            drop(scene);
+            view.emit_duo_requests(cx);
+        });
+        settle_scene(&view, &scene, cx);
+        wait(cx, |cx| hinges.lock().unwrap().len() == 1 && idle(cx));
+        view.update(cx, |view, cx| {
+            let now = view.now();
+            scene.borrow_mut().duo().unwrap().restore(now);
+            view.emit_duo_requests(cx);
+        });
+        settle_scene(&view, &scene, cx);
+        wait(cx, |cx| hinges.lock().unwrap().len() == 2 && idle(cx));
+        assert_eq!(
+            hinges.lock().unwrap()[1]["orientation"],
+            json!("landscape_left")
+        );
+        assert!(scene.borrow_mut().duo().unwrap().accepts_touch());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn a_flat_press_on_a_duo_ends_when_its_first_screen_config_switches_to_3d(
+        cx: &mut TestAppContext,
+    ) {
+        use zeron_proto::device_hub::HingePose;
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (view, inputs, _, _fold, cx) = duo_view(cx, &runtime, "iPhone Duo", |_| None);
+        push_duo_frame(&view, cx, 1, DeviceOrientation::Portrait);
+        cx.run_until_parked();
+        let flat = view.read_with(cx, |view, _| view.frame_box().unwrap());
+        let at = geometry::position_at(flat, 0.5, 0.5);
+        cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::default());
+        view.update(cx, |view, cx| {
+            view.set_screen(Some(duo_screen(3, HingePose::Open)), cx)
+        });
+        cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::default());
+        std::thread::sleep(Duration::from_millis(100));
+        cx.run_until_parked();
+        assert_touches(&touches(&inputs), &[("begin", 0.5, 0.5), ("end", 0.5, 0.5)]);
+    }
+
     #[gpui::test]
     fn duo_commands_from_the_view_go_out_one_at_a_time_through_the_fold_queue(
         cx: &mut TestAppContext,
@@ -3855,6 +3927,42 @@ mod tests {
                 [Some((1398, 2034)), Some((2852, 2006))],
                 "the cover keeps its last picture while the inner display is live"
             );
+        }
+
+        #[gpui::test]
+        fn an_mjpeg_frame_on_the_active_duo_display_drops_the_h264_frame_it_kept(
+            cx: &mut TestAppContext,
+        ) {
+            use zeron_proto::device_hub::HingePose;
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let _guard = runtime.enter();
+            setup(cx);
+            let mut screens: Vec<Vec<AvccEnvelope>> = Vec::new();
+            for envelope in AvccDemuxer::default().push(DUO_FOLD).unwrap() {
+                if envelope.tag == zeron_proto::device_hub::AVCC_DESCRIPTION {
+                    screens.push(Vec::new());
+                }
+                screens.last_mut().unwrap().push(envelope);
+            }
+            let (engine, _) = video_engine(&runtime, vec![item(&screens[0])]);
+            let (view, cx) = cx.add_window_view(|_, cx| {
+                let mut view = view_with_screen(engine, duo_screen(1, HingePose::Closed), cx);
+                view.three_d = ThreeD::new();
+                view
+            });
+            let kept = |cx: &mut VisualTestContext| {
+                view.read_with(cx, |view, _| {
+                    view.three_d.as_ref().unwrap().kept.borrow()[0].is_some()
+                })
+            };
+            wait(cx, |cx| kept(cx));
+            pump(cx, Duration::from_millis(200));
+            view.update(cx, |view, cx| {
+                let item = json!({ "seq": 1, "jpeg": jpeg_sized(699, 1017) });
+                *view.slot.lock().unwrap() = decode(item, DeviceOrientation::Portrait);
+                view.take_frame(cx);
+            });
+            wait(cx, |cx| !kept(cx));
         }
 
         #[gpui::test]

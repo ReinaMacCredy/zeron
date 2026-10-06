@@ -993,6 +993,9 @@ impl DuoViewer {
         }
         self.target_angle = self.preview.unwrap_or_else(|| default_angle(next.as_ref()));
         self.screen = next;
+        if changed_display {
+            self.view_orientation = turned(&self.screen);
+        }
         if self.first_pose || changed_pose || unowned {
             self.held_leaf = None;
             self.view_orientation = turned(&self.screen);
@@ -1059,6 +1062,17 @@ impl DuoViewer {
             self.reject_orientation(now);
         } else if !self.pinch.active() {
             self.set_hinge_preview(queued, now);
+        }
+    }
+
+    pub fn orientation_accepted(&mut self, orientation: DeviceOrientation) {
+        if self.requested_orientation == Some(orientation)
+            && self
+                .screen
+                .as_ref()
+                .is_some_and(|screen| screen.orientation == orientation)
+        {
+            self.requested_orientation = None;
         }
     }
 
@@ -1924,6 +1938,29 @@ mod tests {
         viewer.advance(12_000.0, true);
         assert!(viewer.take_requests().is_empty());
         assert!(!viewer.needs_frame());
+    }
+
+    #[test]
+    fn restore_after_a_handoff_asks_for_no_orientation_the_new_display_already_has() {
+        let mut viewer = viewer(inner_screen(90, None));
+        ready(&mut viewer);
+        assert!(viewer.wheel(PI / 3.0 * VIEWPORT.2, 0.0, 10.0));
+        viewer.end_wheel(10.0);
+        viewer.advance(20.0, true);
+        assert_eq!(
+            viewer.take_requests(),
+            [HingeCommand::Physical(DeviceFacing::FaceDown)]
+        );
+        let cover = DeviceScreenConfig {
+            orientation: DeviceOrientation::PortraitUpsideDown,
+            ..cover_screen(90, None)
+        };
+        viewer.set_screen(Some(cover), 30.0);
+        ready(&mut viewer);
+        viewer.restore(40.0);
+        settle(&mut viewer, 40.0);
+        assert_eq!(viewer.take_requests(), Vec::<HingeCommand>::new());
+        assert!(viewer.accepts_touch());
     }
 
     #[test]
