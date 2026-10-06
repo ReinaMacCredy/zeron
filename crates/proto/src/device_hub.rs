@@ -274,6 +274,8 @@ pub struct DeviceStreamStatus {
     pub input: StreamLinkStatus,
     #[serde(default)]
     pub subscribers: u32,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub panels: BTreeMap<u32, StreamLinkStatus>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -712,6 +714,8 @@ pub struct WatchHubDeviceFramesParams {
     pub device_id: String,
     #[serde(default)]
     pub codec: DeviceVideoCodec,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panel: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1315,6 +1319,46 @@ mod tests {
                 "{refused}"
             );
         }
+    }
+
+    #[test]
+    fn duo_panel_feed_wire_shapes() {
+        let main: WatchHubDeviceFramesParams =
+            serde_json::from_value(json!({"deviceId": "DUO", "codec": "h264"})).unwrap();
+        assert_eq!(main.panel, None);
+        assert_eq!(
+            serde_json::to_value(&main).unwrap(),
+            json!({"deviceId": "DUO", "codec": "h264"})
+        );
+        let cover: WatchHubDeviceFramesParams =
+            serde_json::from_value(json!({"deviceId": "DUO", "codec": "h264", "panel": 1}))
+                .unwrap();
+        assert_eq!(cover.panel, Some(1));
+        assert_eq!(
+            serde_json::to_value(&cover).unwrap(),
+            json!({"deviceId": "DUO", "codec": "h264", "panel": 1})
+        );
+
+        let status = DeviceStreamStatus {
+            avcc: StreamLinkStatus::Live,
+            panels: BTreeMap::from([
+                (1, StreamLinkStatus::Live),
+                (
+                    3,
+                    StreamLinkStatus::Failed {
+                        detail: "HTTP 404".into(),
+                    },
+                ),
+            ]),
+            ..Default::default()
+        };
+        let wire = json!({"video": "idle", "avcc": "live", "input": "idle", "subscribers": 0,
+            "panels": {"1": "live", "3": {"failed": {"detail": "HTTP 404"}}}});
+        assert_eq!(serde_json::to_value(&status).unwrap(), wire);
+        assert_eq!(
+            serde_json::from_value::<DeviceStreamStatus>(wire).unwrap(),
+            status
+        );
     }
 
     #[test]

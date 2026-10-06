@@ -1324,6 +1324,7 @@ pub(crate) mod tests {
                 avcc: StreamLinkStatus::Live,
                 input,
                 subscribers: 1,
+                ..Default::default()
             },
         );
         state

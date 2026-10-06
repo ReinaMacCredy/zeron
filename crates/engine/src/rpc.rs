@@ -4595,10 +4595,14 @@ impl RpcService for EngineRpc {
             methods::WATCH_HUB_DEVICE_FRAMES => {
                 use base64::Engine as _;
                 let p: zeron_proto::device_hub::WatchHubDeviceFramesParams = parse_params(params)?;
+                if p.panel.is_some() && p.codec != zeron_proto::device_hub::DeviceVideoCodec::H264
+                {
+                    return Err(RpcError::Failed("A display feed needs H.264.".into()));
+                }
                 if p.codec == zeron_proto::device_hub::DeviceVideoCodec::H264 {
                     let subscription = self
                         .device_hub()?
-                        .watch_avcc(p.host_id.as_deref(), &p.device_id)
+                        .watch_avcc(p.host_id.as_deref(), &p.device_id, p.panel)
                         .map_err(RpcError::Failed)?;
                     let mut seq = 0;
                     return Ok(RpcReply::Stream(

@@ -155,17 +155,21 @@ struct Entry {
     generation: u64,
     link: u64,
     mjpeg: Option<Feed<FrameSlot>>,
-    avcc: Option<Feed<Arc<AvccFeed>>>,
+    avcc: BTreeMap<Option<u32>, Feed<Arc<AvccFeed>>>,
     input: Option<InputSocket>,
     video_status: StreamLinkStatus,
-    avcc_status: StreamLinkStatus,
+    avcc_status: BTreeMap<Option<u32>, StreamLinkStatus>,
     input_status: StreamLinkStatus,
 }
 
 impl Entry {
     fn subscribers(&self) -> usize {
         self.mjpeg.as_ref().map_or(0, |feed| feed.subscribers)
-            + self.avcc.as_ref().map_or(0, |feed| feed.subscribers)
+            + self
+                .avcc
+                .values()
+                .map(|feed| feed.subscribers)
+                .sum::<usize>()
     }
 }
 
@@ -173,7 +177,7 @@ impl Entry {
 struct Entries {
     next_generation: u64,
     by_device: HashMap<String, Entry>,
-    descriptions: HashMap<String, Arc<AvccEnvelope>>,
+    descriptions: HashMap<(String, Option<u32>), Arc<AvccEnvelope>>,
 }
 
 impl Entries {
@@ -189,10 +193,10 @@ impl Entries {
                 generation: *next_generation,
                 link: *next_generation,
                 mjpeg: None,
-                avcc: None,
+                avcc: BTreeMap::new(),
                 input: None,
                 video_status: StreamLinkStatus::Idle,
-                avcc_status: StreamLinkStatus::Idle,
+                avcc_status: BTreeMap::new(),
                 input_status: StreamLinkStatus::Idle,
             }
         })
@@ -222,6 +226,7 @@ struct Release {
     device_id: String,
     generation: u64,
     codec: DeviceVideoCodec,
+    panel: Option<u32>,
 }
 
 impl Drop for Release {
@@ -253,22 +258,23 @@ impl Drop for Release {
                         }
                     }
                     DeviceVideoCodec::H264 => {
-                        if let Some(feed) = &mut entry.avcc {
+                        if let Some(feed) = entry.avcc.get_mut(&self.panel) {
                             feed.subscribers -= 1;
                         }
                         if entry
                             .avcc
-                            .as_ref()
+                            .get(&self.panel)
                             .is_some_and(|feed| feed.subscribers == 0)
                         {
-                            let feed = entry.avcc.take();
+                            let feed = entry.avcc.remove(&self.panel);
                             if let Some(description) =
                                 feed.as_ref().and_then(|feed| feed.sink.description())
                             {
-                                descriptions.insert(self.device_id.clone(), description);
+                                descriptions
+                                    .insert((self.device_id.clone(), self.panel), description);
                             }
                             removed.1 = feed;
-                            entry.avcc_status = StreamLinkStatus::Idle;
+                            entry.avcc_status.remove(&self.panel);
                         }
                     }
                 }
@@ -307,9 +313,14 @@ impl DeviceStreams {
                     .map(|(id, entry)| {
                         let status = DeviceStreamStatus {
                             video: entry.video_status.clone(),
-                            avcc: entry.avcc_status.clone(),
+                            avcc: entry.avcc_status.get(&None).cloned().unwrap_or_default(),
                             input: entry.input_status.clone(),
                             subscribers: entry.subscribers() as u32,
+                            panels: entry
+                                .avcc_status
+                                .iter()
+                                .filter_map(|(panel, status)| Some(((*panel)?, status.clone())))
+                                .collect(),
                         };
                         (id.clone(), status)
                     })
@@ -344,24 +355,30 @@ impl DeviceStreams {
         self.publish(&entries);
         FrameSubscription {
             frames,
-            _release: self.release(device_id, generation, DeviceVideoCodec::Mjpeg),
+            _release: self.release(device_id, generation, DeviceVideoCodec::Mjpeg, None),
         }
     }
 
     pub(crate) fn subscribe_avcc(
         self: &Arc<Self>,
         device_id: &str,
+        panel: Option<u32>,
         platform: DevicePlatform,
         start: impl FnOnce(Arc<AvccFeed>, u64) -> tokio::task::JoinHandle<()>,
     ) -> AvccSubscription {
         let mut entries = self.lock();
-        let cached = entries.descriptions.get(device_id).cloned();
+        let cached = entries
+            .descriptions
+            .get(&(device_id.to_string(), panel))
+            .cloned();
         let entry = entries.entry(device_id);
         let link = entry.link;
-        if entry.avcc.is_none() {
-            entry.avcc_status = StreamLinkStatus::Connecting;
+        if !entry.avcc.contains_key(&panel) {
+            entry
+                .avcc_status
+                .insert(panel, StreamLinkStatus::Connecting);
         }
-        let feed = entry.avcc.get_or_insert_with(|| {
+        let feed = entry.avcc.entry(panel).or_insert_with(|| {
             let sink = AvccFeed::new(cached, platform);
             Feed {
                 reader: start(sink.clone(), link),
@@ -378,7 +395,7 @@ impl DeviceStreams {
         self.publish(&entries);
         AvccSubscription {
             feed,
-            _release: self.release(device_id, generation, DeviceVideoCodec::H264),
+            _release: self.release(device_id, generation, DeviceVideoCodec::H264, panel),
         }
     }
 
@@ -387,12 +404,14 @@ impl DeviceStreams {
         device_id: &str,
         generation: u64,
         codec: DeviceVideoCodec,
+        panel: Option<u32>,
     ) -> Release {
         Release {
             streams: self.clone(),
             device_id: device_id.to_string(),
             generation,
             codec,
+            panel,
         }
     }
 
@@ -421,13 +440,36 @@ impl DeviceStreams {
         let before = snapshot(entry);
         match video {
             Some((DeviceVideoCodec::Mjpeg, status)) => entry.video_status = status,
-            Some((DeviceVideoCodec::H264, status)) => entry.avcc_status = status,
+            Some((DeviceVideoCodec::H264, status)) => {
+                entry.avcc_status.insert(None, status);
+            }
             None => {}
         }
         if let Some(input) = input {
             entry.input_status = input;
         }
         if before != snapshot(entry) {
+            self.publish(&entries);
+        }
+    }
+
+    pub(crate) fn set_panel_status(
+        &self,
+        device_id: &str,
+        link: u64,
+        panel: u32,
+        status: StreamLinkStatus,
+    ) {
+        let mut entries = self.lock();
+        let Some(entry) = entries
+            .by_device
+            .get_mut(device_id)
+            .filter(|entry| entry.link == link && entry.avcc.contains_key(&Some(panel)))
+        else {
+            return;
+        };
+        if entry.avcc_status.get(&Some(panel)) != Some(&status) {
+            entry.avcc_status.insert(Some(panel), status);
             self.publish(&entries);
         }
     }
@@ -490,19 +532,19 @@ impl DeviceStreams {
     }
 
     pub(crate) fn pause(&self, scope: &dyn Fn(&str) -> bool) {
-        self.relink(scope, &|_, _, _| None, &|_, _, _| None);
+        self.relink(scope, &|_, _, _| None, &|_, _, _, _| None);
     }
 
     pub(crate) fn resume(
         &self,
         scope: &dyn Fn(&str) -> bool,
         mjpeg: impl Fn(&str, FrameSlot, u64) -> tokio::task::JoinHandle<()>,
-        avcc: impl Fn(&str, Arc<AvccFeed>, u64) -> tokio::task::JoinHandle<()>,
+        avcc: impl Fn(&str, Option<u32>, Arc<AvccFeed>, u64) -> tokio::task::JoinHandle<()>,
     ) {
         self.relink(
             scope,
             &|device_id, frames, link| Some(mjpeg(device_id, frames, link)),
-            &|device_id, feed, link| Some(avcc(device_id, feed, link)),
+            &|device_id, panel, feed, link| Some(avcc(device_id, panel, feed, link)),
         );
     }
 
@@ -510,7 +552,7 @@ impl DeviceStreams {
         &self,
         scope: &dyn Fn(&str) -> bool,
         mjpeg: &dyn Fn(&str, FrameSlot, u64) -> Option<tokio::task::JoinHandle<()>>,
-        avcc: &dyn Fn(&str, Arc<AvccFeed>, u64) -> Option<tokio::task::JoinHandle<()>>,
+        avcc: &dyn Fn(&str, Option<u32>, Arc<AvccFeed>, u64) -> Option<tokio::task::JoinHandle<()>>,
     ) {
         let (retired, inputs) = {
             let mut entries = self.lock();
@@ -519,7 +561,7 @@ impl DeviceStreams {
                 by_device,
                 descriptions,
             } = &mut *entries;
-            descriptions.retain(|key, _| !scope(key));
+            descriptions.retain(|(key, _), _| !scope(key));
             let mut retired = Vec::new();
             let mut inputs = Vec::new();
             for (device_id, entry) in by_device.iter_mut().filter(|(key, _)| scope(key)) {
@@ -530,10 +572,12 @@ impl DeviceStreams {
                     retired.extend(feed.relink(mjpeg(device_id, feed.sink.clone(), link)));
                     entry.video_status = StreamLinkStatus::Connecting;
                 }
-                if let Some(feed) = &mut entry.avcc {
+                for (panel, feed) in &mut entry.avcc {
                     feed.sink.reset();
-                    retired.extend(feed.relink(avcc(device_id, feed.sink.clone(), link)));
-                    entry.avcc_status = StreamLinkStatus::Connecting;
+                    retired.extend(feed.relink(avcc(device_id, *panel, feed.sink.clone(), link)));
+                    entry
+                        .avcc_status
+                        .insert(*panel, StreamLinkStatus::Connecting);
                 }
                 inputs.extend(entry.input.take());
                 entry.input_status = StreamLinkStatus::Idle;
@@ -547,7 +591,7 @@ impl DeviceStreams {
     pub(crate) fn clear(&self, scope: &dyn Fn(&str) -> bool) {
         let cleared = {
             let mut entries = self.lock();
-            entries.descriptions.retain(|key, _| !scope(key));
+            entries.descriptions.retain(|(key, _), _| !scope(key));
             let (cleared, kept) = std::mem::take(&mut entries.by_device)
                 .into_iter()
                 .partition(|(key, _)| scope(key));
@@ -942,6 +986,7 @@ mod tests {
                 avcc: StreamLinkStatus::Idle,
                 input: StreamLinkStatus::Idle,
                 subscribers: 2,
+                panels: BTreeMap::new(),
             }
         );
         let live = |codec| Some((codec, StreamLinkStatus::Live));
@@ -964,7 +1009,7 @@ mod tests {
         streams.set_status("UDID", 1, live(DeviceVideoCodec::Mjpeg), None);
         assert_eq!(published.lock().unwrap().len(), count, "no-op changes");
         assert_eq!(last()["UDID"].video, StreamLinkStatus::Live);
-        let avcc = streams.subscribe_avcc("UDID", DevicePlatform::Ios, |_, _| {
+        let avcc = streams.subscribe_avcc("UDID", None, DevicePlatform::Ios, |_, _| {
             tokio::spawn(std::future::pending::<()>())
         });
         assert_eq!(last()["UDID"].avcc, StreamLinkStatus::Connecting);
@@ -1075,7 +1120,7 @@ mod tests {
     async fn a_lagging_avcc_batch_stream_resyncs_from_the_cached_gop() {
         let streams = Arc::new(DeviceStreams::default());
         let idle = |_: Arc<AvccFeed>, _| tokio::spawn(std::future::pending::<()>());
-        let subscription = streams.subscribe_avcc("UDID", DevicePlatform::Ios, idle);
+        let subscription = streams.subscribe_avcc("UDID", None, DevicePlatform::Ios, idle);
         let feed = subscription.feed.clone();
         feed.push(envelope(AVCC_DESCRIPTION, b"avcC"));
         feed.push(envelope(AVCC_KEYFRAME, b"idr"));
@@ -1111,7 +1156,7 @@ mod tests {
     async fn avcc_items_stay_under_the_rpc_frame_limit() {
         let streams = Arc::new(DeviceStreams::default());
         let idle = |_: Arc<AvccFeed>, _| tokio::spawn(std::future::pending::<()>());
-        let subscription = streams.subscribe_avcc("UDID", DevicePlatform::Ios, idle);
+        let subscription = streams.subscribe_avcc("UDID", None, DevicePlatform::Ios, idle);
         let feed = subscription.feed.clone();
         feed.push(envelope(AVCC_DESCRIPTION, b"avcC"));
         feed.push(envelope(AVCC_KEYFRAME, &vec![2; AVCC_ITEM_BYTES / 2]));
@@ -1164,15 +1209,15 @@ mod tests {
     async fn a_hub_pause_forgets_every_cached_description() {
         let streams = Arc::new(DeviceStreams::default());
         let idle = |_: Arc<AvccFeed>, _| tokio::spawn(std::future::pending::<()>());
-        let parked = streams.subscribe_avcc("PARKED", DevicePlatform::Ios, idle);
+        let parked = streams.subscribe_avcc("PARKED", None, DevicePlatform::Ios, idle);
         parked.feed.push(envelope(AVCC_DESCRIPTION, b"old"));
         drop(parked);
-        let live = streams.subscribe_avcc("LIVE", DevicePlatform::Ios, idle);
+        let live = streams.subscribe_avcc("LIVE", None, DevicePlatform::Ios, idle);
         live.feed.push(envelope(AVCC_DESCRIPTION, b"old"));
         live.feed.push(envelope(AVCC_KEYFRAME, b"idr"));
         streams.pause(&|_| true);
         assert!(live.feed.join().0.is_empty(), "the live feed starts over");
-        let parked = streams.subscribe_avcc("PARKED", DevicePlatform::Ios, idle);
+        let parked = streams.subscribe_avcc("PARKED", None, DevicePlatform::Ios, idle);
         assert!(
             parked.feed.join().0.is_empty(),
             "the parked description is gone"
@@ -1183,7 +1228,7 @@ mod tests {
     async fn the_last_description_outlives_its_feed_until_the_streams_clear() {
         let streams = Arc::new(DeviceStreams::default());
         let idle = |_: Arc<AvccFeed>, _| tokio::spawn(std::future::pending::<()>());
-        let first = streams.subscribe_avcc("UDID", DevicePlatform::Ios, idle);
+        let first = streams.subscribe_avcc("UDID", None, DevicePlatform::Ios, idle);
         first.feed.push(envelope(AVCC_DESCRIPTION, b"avcC"));
         let mjpeg = streams.subscribe("UDID", |_, _| tokio::spawn(std::future::pending::<()>()));
         assert_eq!(streams.subscribers("UDID"), 2);
@@ -1193,12 +1238,12 @@ mod tests {
             1,
             "the MJPEG watcher keeps the entry"
         );
-        let second = streams.subscribe_avcc("UDID", DevicePlatform::Ios, idle);
+        let second = streams.subscribe_avcc("UDID", None, DevicePlatform::Ios, idle);
         assert_eq!(tags(&second.feed.join().0), [AVCC_DESCRIPTION]);
         drop((second, mjpeg));
         assert_eq!(streams.subscribers("UDID"), 0);
         streams.clear(&|_| true);
-        let third = streams.subscribe_avcc("UDID", DevicePlatform::Ios, idle);
+        let third = streams.subscribe_avcc("UDID", None, DevicePlatform::Ios, idle);
         assert!(third.feed.join().0.is_empty());
     }
 
@@ -1206,8 +1251,9 @@ mod tests {
     async fn a_scoped_pause_and_clear_leave_other_hosts_streams_alone() {
         let streams = Arc::new(DeviceStreams::default());
         let idle = |_: Arc<AvccFeed>, _| tokio::spawn(std::future::pending::<()>());
-        let local = streams.subscribe_avcc("emulator-5554", DevicePlatform::Android, idle);
-        let remote = streams.subscribe_avcc("mini/emulator-5554", DevicePlatform::Android, idle);
+        let local = streams.subscribe_avcc("emulator-5554", None, DevicePlatform::Android, idle);
+        let remote =
+            streams.subscribe_avcc("mini/emulator-5554", None, DevicePlatform::Android, idle);
         local.feed.push(envelope(AVCC_DESCRIPTION, b"local"));
         remote.feed.push(envelope(AVCC_DESCRIPTION, b"remote"));
         let is_local = |key: &str| !key.contains('/');

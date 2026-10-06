@@ -80,6 +80,10 @@ async fn list_hub_devices_is_refused_while_disabled_and_installs_nothing() {
             serde_json::json!({"deviceId": "SIM", "angle": 45}),
         ),
         (
+            methods::WATCH_HUB_DEVICE_FRAMES,
+            serde_json::json!({"deviceId": "SIM", "codec": "h264", "panel": 1}),
+        ),
+        (
             methods::WATCH_HUB_DEVICE_APP_STATE,
             serde_json::json!({"deviceId": "SIM"}),
         ),
@@ -93,6 +97,16 @@ async fn list_hub_devices_is_refused_while_disabled_and_installs_nothing() {
             Err(other) => panic!("{method}: {other}"),
             Ok(_) => panic!("{method} must be refused while disabled"),
         }
+    }
+    match rpc
+        .handle(
+            methods::WATCH_HUB_DEVICE_FRAMES,
+            serde_json::json!({"deviceId": "SIM", "panel": 1}),
+        )
+        .await
+    {
+        Err(RpcError::Failed(message)) => assert_eq!(message, "A display feed needs H.264."),
+        _ => panic!("a display feed over MJPEG must be refused"),
     }
     let input = rpc
         .handle(

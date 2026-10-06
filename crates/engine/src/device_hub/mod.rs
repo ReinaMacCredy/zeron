@@ -722,7 +722,7 @@ impl DeviceHub {
             self.streams.resume(
                 &host_scope(host_id),
                 |key, frames, link| self.start_reader(origin, key, frames, link),
-                |key, feed, link| self.start_avcc_reader(origin, key, feed, link),
+                |key, panel, feed, link| self.start_avcc_reader(origin, key, panel, feed, link),
             )
         };
         if host_id != LOCAL_DEVICE_HOST_ID {
@@ -1279,14 +1279,25 @@ impl DeviceHub {
         &self,
         host_id: Option<&str>,
         device_id: &str,
+        panel: Option<u32>,
     ) -> Result<AvccSubscription, String> {
         let host_id = host_id.unwrap_or(LOCAL_DEVICE_HOST_ID);
         let platform = self.platform_of(host_id, device_id);
         self.with_live_hub(host_id, device_id, |origin, key| {
-            self.streams.subscribe_avcc(key, platform, |feed, link| {
-                self.start_avcc_reader(origin, key, feed, link)
-            })
-        })
+            if let Some(panel) = panel {
+                if !matches!(panel, 1 | 3) {
+                    return Err(format!("This device has no display {panel}."));
+                }
+                if !self.hinged(key) {
+                    return Err(NO_HINGE.to_string());
+                }
+            }
+            Ok(self
+                .streams
+                .subscribe_avcc(key, panel, platform, |feed, link| {
+                    self.start_avcc_reader(origin, key, panel, feed, link)
+                }))
+        })?
     }
 
     fn hinged(&self, key: &str) -> bool {
@@ -1341,7 +1352,7 @@ impl DeviceHub {
         let (on_status, on_first_frame) = self.link_callbacks(
             key,
             link,
-            DeviceVideoCodec::Mjpeg,
+            (DeviceVideoCodec::Mjpeg, None),
             client.input_url(device_id),
         );
         stream::spawn_reader(
@@ -1357,6 +1368,7 @@ impl DeviceHub {
         &self,
         origin: &str,
         key: &str,
+        panel: Option<u32>,
         feed: Arc<AvccFeed>,
         link: u64,
     ) -> tokio::task::JoinHandle<()> {
@@ -1371,12 +1383,12 @@ impl DeviceHub {
         let (on_status, on_first_frame) = self.link_callbacks(
             key,
             link,
-            DeviceVideoCodec::H264,
+            (DeviceVideoCodec::H264, panel),
             client.input_url(device_id),
         );
         stream::spawn_avcc_reader(
             self.http.clone(),
-            client.avcc_url(device_id),
+            client.avcc_url(device_id, panel),
             feed,
             on_status,
             on_first_frame,
@@ -1423,7 +1435,7 @@ impl DeviceHub {
         &self,
         device_id: &str,
         link: u64,
-        codec: DeviceVideoCodec,
+        (codec, panel): (DeviceVideoCodec, Option<u32>),
         input: String,
     ) -> (
         impl Fn(StreamLinkStatus) + Send + 'static,
@@ -1433,9 +1445,16 @@ impl DeviceHub {
         let (id, status_id) = (device_id.to_string(), device_id.to_string());
         (
             move |status| {
-                if let Some(hub) = status_hub.upgrade() {
-                    hub.streams
-                        .set_status(&status_id, link, Some((codec, status)), None);
+                let Some(hub) = status_hub.upgrade() else {
+                    return;
+                };
+                match panel {
+                    None => hub
+                        .streams
+                        .set_status(&status_id, link, Some((codec, status)), None),
+                    Some(panel) => hub
+                        .streams
+                        .set_panel_status(&status_id, link, panel, status),
                 }
             },
             move || {
@@ -1965,9 +1984,22 @@ mod tests {
                         }
                         return;
                     }
-                    if line.starts_with("GET /vendor/serve-sim/helper/SIM-1/stream.avcc ") {
+                    let panel = ["1", "3"].into_iter().find(|panel| {
+                        line.starts_with(&format!(
+                            "GET /vendor/serve-sim/helper/SIM-1/panel/{panel}/stream.avcc "
+                        ))
+                    });
+                    if line.starts_with("GET /vendor/serve-sim/helper/SIM-1/stream.avcc ")
+                        || panel.is_some()
+                    {
+                        let description = match panel {
+                            Some(panel) => format!("panel-{panel}").into_bytes(),
+                            None => AVCC_RECORD.to_vec(),
+                        };
                         let mut stream = b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n".to_vec();
-                        for (tag, payload) in [(4, &b"seed"[..]), (1, AVCC_RECORD), (2, b"key")] {
+                        for (tag, payload) in
+                            [(4, &b"seed"[..]), (1, &description[..]), (2, b"key")]
+                        {
                             stream.extend(avcc_envelope(tag, payload));
                         }
                         let mut alive = socket.write_all(&stream).await.is_ok();
@@ -2811,7 +2843,9 @@ mod tests {
             Err("This device has no hinge.".into()),
             "no 0x82 has said so yet"
         );
-        let mut video = Box::pin(super::avcc_batches(hub.watch_avcc(None, "SIM-1").unwrap()));
+        let mut video = Box::pin(super::avcc_batches(
+            hub.watch_avcc(None, "SIM-1", None).unwrap(),
+        ));
         next_tags(&mut video, 3).await;
         let screen = || {
             hub.snapshot()
@@ -2881,7 +2915,9 @@ mod tests {
             device_id: "SIM-1".into(),
             command,
         };
-        let mut video = Box::pin(super::avcc_batches(hub.watch_avcc(None, "SIM-1").unwrap()));
+        let mut video = Box::pin(super::avcc_batches(
+            hub.watch_avcc(None, "SIM-1", None).unwrap(),
+        ));
         next_tags(&mut video, 3).await;
         let screen = || {
             hub.snapshot()
@@ -2948,6 +2984,100 @@ mod tests {
             ],
             "an angle sent while another is in flight replaces the queued one"
         );
+        hub.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn duo_panel_watches_request_their_panel_path_and_coexist_with_the_main_feed() {
+        use zeron_proto::device_hub::StreamLinkStatus;
+        let dir = tempfile::tempdir().unwrap();
+        let hub = super::DeviceHub::start(dir.path());
+        let (origin, requests) = fake_hub_with(DUO).await;
+        hub.attach_hub_for_test(origin);
+        hub.configure(zeron_proto::device_hub::ConfigureDeviceHubParams {
+            enabled: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        hub.open(open_params("SIM-1")).await.unwrap();
+        let count = |route: &str| {
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|line| line.contains(route))
+                .count()
+        };
+        assert_eq!(
+            hub.watch_avcc(None, "SIM-1", Some(1)).err().as_deref(),
+            Some(super::NO_HINGE),
+            "no 0x82 has said the device folds yet"
+        );
+        let mut main = Box::pin(super::avcc_batches(
+            hub.watch_avcc(None, "SIM-1", None).unwrap(),
+        ));
+        next_tags(&mut main, 3).await;
+        eventually(|| {
+            hub.snapshot()
+                .screens
+                .get("SIM-1")
+                .is_some_and(|screen| screen.supports_hinge_angle == Some(true))
+        })
+        .await;
+        assert_eq!(
+            hub.watch_avcc(None, "SIM-1", Some(2)).err().as_deref(),
+            Some("This device has no display 2.")
+        );
+        let cover = hub.watch_avcc(None, "SIM-1", Some(1)).unwrap();
+        let cover_feed = cover.feed.clone();
+        let mut cover = Box::pin(super::avcc_batches(cover));
+        let mut inner = Box::pin(super::avcc_batches(
+            hub.watch_avcc(None, "SIM-1", Some(3)).unwrap(),
+        ));
+        assert_eq!(next_tags(&mut cover, 4).await[..3], [4, 1, 2]);
+        assert_eq!(next_tags(&mut inner, 4).await[..3], [4, 1, 2]);
+        assert_eq!(
+            cover_feed.join().0[0].payload,
+            b"panel-1",
+            "the cover feed carries panel 1's description"
+        );
+        assert_eq!(count("GET /vendor/serve-sim/helper/SIM-1/stream.avcc "), 1);
+        assert_eq!(
+            count("GET /vendor/serve-sim/helper/SIM-1/panel/1/stream.avcc "),
+            1
+        );
+        assert_eq!(
+            count("GET /vendor/serve-sim/helper/SIM-1/panel/3/stream.avcc "),
+            1
+        );
+        let streams = || hub.snapshot().streams.get("SIM-1").cloned().unwrap();
+        eventually(|| streams().panels.len() == 2).await;
+        assert_eq!(streams().subscribers, 3);
+        eventually(|| {
+            streams()
+                .panels
+                .values()
+                .all(|status| *status == StreamLinkStatus::Live)
+        })
+        .await;
+        assert_eq!(streams().avcc, StreamLinkStatus::Live);
+        drop((cover, cover_feed));
+        assert_eq!(streams().subscribers, 2);
+        assert_eq!(streams().panels.keys().copied().collect::<Vec<_>>(), [3]);
+        assert!(next_tags(&mut inner, 2).await.iter().all(|tag| *tag == 3));
+        assert!(next_tags(&mut main, 2).await.iter().all(|tag| *tag == 3));
+        drop(main);
+        let again = hub.watch_avcc(None, "SIM-1", Some(1)).unwrap();
+        assert_eq!(
+            again.feed.join().0[0].payload,
+            b"panel-1",
+            "the cover's own description is cached for the next watcher"
+        );
+        let main = hub.watch_avcc(None, "SIM-1", None).unwrap();
+        assert_eq!(main.feed.join().0[0].payload, AVCC_RECORD);
+        drop((again, inner, main));
+        assert!(hub.snapshot().streams.get("SIM-1").is_none());
         hub.shutdown().await;
     }
 
@@ -3173,7 +3303,9 @@ mod tests {
                 .filter(|line| line.contains(route))
                 .count()
         };
-        let mut tab = Box::pin(super::avcc_batches(hub.watch_avcc(None, "SIM-1").unwrap()));
+        let mut tab = Box::pin(super::avcc_batches(
+            hub.watch_avcc(None, "SIM-1", None).unwrap(),
+        ));
         assert_eq!(next_tags(&mut tab, 5).await[..4], [4, 1, 2, 3]);
         eventually(|| count("helper/ws?device=SIM-1") > 0).await;
         assert_eq!(count("stream.mjpeg"), 0, "an AVCC read alone opens input");
@@ -3186,7 +3318,9 @@ mod tests {
             ),
             "the AVCC read reports on its own status"
         );
-        let mut float = Box::pin(super::avcc_batches(hub.watch_avcc(None, "SIM-1").unwrap()));
+        let mut float = Box::pin(super::avcc_batches(
+            hub.watch_avcc(None, "SIM-1", None).unwrap(),
+        ));
         let replay = next_tags(&mut float, 3).await;
         assert_eq!(replay[..2], [1, 2], "description and keyframe first");
         assert!(replay[2..].iter().all(|tag| *tag == 3), "{replay:?}");
@@ -3198,7 +3332,9 @@ mod tests {
         assert_eq!(streams().map(|status| status.subscribers), Some(1));
         drop(mjpeg);
         assert_eq!(streams(), None);
-        let mut again = Box::pin(super::avcc_batches(hub.watch_avcc(None, "SIM-1").unwrap()));
+        let mut again = Box::pin(super::avcc_batches(
+            hub.watch_avcc(None, "SIM-1", None).unwrap(),
+        ));
         assert_eq!(
             next_tags(&mut again, 1).await[0],
             1,
@@ -3314,7 +3450,7 @@ mod tests {
             Some(super::ANDROID_H264_ONLY)
         );
         let mut tab = Box::pin(super::avcc_batches(
-            hub.watch_avcc(None, "emulator-5554").unwrap(),
+            hub.watch_avcc(None, "emulator-5554", None).unwrap(),
         ));
         assert_eq!(next_tags(&mut tab, 8).await, [1, 2, 3, 3, 3, 1, 2, 3]);
         eventually(|| {
@@ -3372,7 +3508,7 @@ mod tests {
             "a keyframe is asked for on connect and after the encoder restart"
         );
         let mut float = Box::pin(super::avcc_batches(
-            hub.watch_avcc(None, "emulator-5554").unwrap(),
+            hub.watch_avcc(None, "emulator-5554", None).unwrap(),
         ));
         assert_eq!(
             next_tags(&mut float, 3).await,
@@ -3399,7 +3535,9 @@ mod tests {
         hub.streams.resume(
             &|_| true,
             |device_id, frames, link| hub.start_reader(&origin, device_id, frames, link),
-            |device_id, feed, link| hub.start_avcc_reader(&origin, device_id, feed, link),
+            |device_id, panel, feed, link| {
+                hub.start_avcc_reader(&origin, device_id, panel, feed, link)
+            },
         );
         let connects = |requests: &Requests| {
             requests

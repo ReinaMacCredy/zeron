@@ -172,11 +172,13 @@ impl HubClient<'_> {
         )
     }
 
-    pub(crate) fn avcc_url(&self, udid: &str) -> String {
+    pub(crate) fn avcc_url(&self, udid: &str, panel: Option<u32>) -> String {
+        let panel = panel.map(|panel| format!("/panel/{panel}"));
         format!(
-            "{}/vendor/serve-sim/helper/{}/stream.avcc",
+            "{}/vendor/serve-sim/helper/{}{}/stream.avcc",
             self.origin,
-            path_segment(udid)
+            path_segment(udid),
+            panel.unwrap_or_default()
         )
     }
 
