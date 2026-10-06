@@ -388,6 +388,7 @@ impl Shell {
                         ..drag.clone()
                     }),
                     None,
+                    false,
                     Some(&query),
                     &theme,
                     cx,

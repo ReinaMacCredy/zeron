@@ -109,7 +109,12 @@ fn assistant(id: &str, host: &str, at: i64, parts: Vec<MessagePart>) -> SessionM
 
 /// Paths the demo serves generated images for.
 pub(crate) const DEMO_IMAGES: &[(&str, u32, u32, u32)] = &[
-    ("/Users/dev/.zeron/uploads/veil-before.png", 960, 540, 1),
+    (
+        "/Users/dev/.zeron/uploads/4f1c9a2e-Image_1.png",
+        960,
+        540,
+        1,
+    ),
     ("/Users/dev/.zeron/uploads/scroll-tall.png", 400, 800, 2),
     ("/Users/dev/.zeron/uploads/square.png", 600, 600, 3),
 ];
@@ -209,9 +214,22 @@ gh pr create --base main --title "Stream pull request status on every client"
 PR **#90** is open: https://github.com/zeron-sh/zeron/pull/90"#;
 
 fn veil(host: &str, now: i64) -> Vec<SessionMessageEntry> {
+    // Sent from the desktop composer: file, folder and skill chips, plus the
+    // image and recording it attached, each mentioned by its chip.
+    let review = zeron_proto::invocation::Invocation::Skill {
+        name: "review".into(),
+        path: "/Users/dev/.claude/skills/review/SKILL.md".into(),
+        command: None,
+    };
     let attach = crate::attachments::with_attachments(
-        "Port the streaming fade-in veil from the desktop transcript. It must never affect layout — opacity only, split at chunk boundaries. Here's how it looks today:",
-        &[DEMO_IMAGES[0].0.to_owned()],
+        &format!(
+            "Port the streaming fade-in veil from [transcript.rs](zeron-file:crates/ui/src/transcript.rs) into [Transcript](zeron-file:apps/ios/Zeron/Transcript/). It must never affect layout — opacity only, split at chunk boundaries. Here's how it looks today: [Image 1](zeron-image:1), and the fade is in [veil-recording.zip](zeron-attachment:2). Run {} when done.",
+            review.link()
+        ),
+        &[
+            DEMO_IMAGES[0].0.to_owned(),
+            "/Users/dev/.zeron/uploads/7d03b6e1-veil-recording.zip".to_owned(),
+        ],
     );
     let mut live = assistant(
         "m6",

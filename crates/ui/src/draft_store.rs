@@ -21,7 +21,7 @@ use gpui::{App, Global, Image, Task};
 use serde::{Deserialize, Serialize};
 
 use crate::appshots::{AccessibilitySnapshot, CapturedAppshot};
-use crate::attachments::{StagedAttachment, format_by_extension};
+use crate::attachments::{AttachmentContent, StagedAttachment, format_by_extension};
 
 const FILE_NAME: &str = "composer-drafts.json";
 const DIR_NAME: &str = "composer-drafts";
@@ -100,6 +100,10 @@ struct PersistedAttachment {
     id: String,
     name: String,
     path: PathBuf,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    is_file: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mention: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -394,12 +398,22 @@ fn restore_entry(entry: PersistedEntry) -> DraftEntry {
 }
 
 fn restore_attachment(persisted: PersistedAttachment) -> Option<StagedAttachment> {
-    let format = format_by_extension(&persisted.path)?;
+    let format = if persisted.is_file {
+        None
+    } else {
+        Some(format_by_extension(&persisted.path)?)
+    };
     match std::fs::read(&persisted.path) {
         Ok(bytes) => Some(StagedAttachment {
             id: persisted.id,
             name: persisted.name,
-            image: Arc::new(Image::from_bytes(format, bytes)),
+            content: match format {
+                Some(format) => {
+                    AttachmentContent::Image(Arc::new(Image::from_bytes(format, bytes)))
+                }
+                None => AttachmentContent::File(Arc::new(bytes)),
+            },
+            mention: persisted.mention,
         }),
         Err(err) => {
             tracing::warn!(error = %err, path = %persisted.path.display(), "draft attachment missing; dropped");
@@ -495,6 +509,8 @@ fn persist_attachment(
         id: att.id.clone(),
         name: att.name.clone(),
         path,
+        is_file: att.image().is_none(),
+        mention: att.mention,
     })
 }
 
@@ -527,10 +543,11 @@ mod tests {
         StagedAttachment {
             id: "att-1".into(),
             name: "shot.png".into(),
-            image: Arc::new(Image::from_bytes(
+            content: AttachmentContent::Image(Arc::new(Image::from_bytes(
                 ImageFormat::Png,
                 vec![0x89, b'P', b'N', b'G'],
-            )),
+            ))),
+            mention: None,
         }
     }
 

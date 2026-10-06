@@ -60,6 +60,7 @@ pub mod pull_requests;
 pub mod queue;
 pub mod quotes;
 pub mod rail;
+mod roll_text;
 mod session_stats;
 pub mod settings;
 pub mod shell;

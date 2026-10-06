@@ -322,3 +322,124 @@ fn file_tab_drops_attach_to_side_chat_transcript_and_main_without_reordering(
         assert_eq!(shell.right_tabs[&shell.panel_key(cx)], original_tabs);
     });
 }
+
+/// Real files of each kind a user might drag in from the desktop: an archive,
+/// an image, a folder and a file over the size limit.
+fn external_files() -> (tempfile::TempDir, gpui::ExternalPaths) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("notes.zip"),
+        b"PK\x03\x04 not really zipped",
+    )
+    .unwrap();
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::RgbImage::new(1, 1)
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    std::fs::write(dir.path().join("shot.png"), png.into_inner()).unwrap();
+    std::fs::create_dir(dir.path().join("folder")).unwrap();
+    // Sparse, so the test never writes 24 MB to disk.
+    std::fs::File::create(dir.path().join("huge.bin"))
+        .unwrap()
+        .set_len(crate::attachments::MAX_ATTACHMENT_BYTES + 1)
+        .unwrap();
+    let paths = ["notes.zip", "shot.png", "folder", "huge.bin"]
+        .into_iter()
+        .map(|name| dir.path().join(name))
+        .collect();
+    (dir, gpui::ExternalPaths(paths))
+}
+
+/// Drag files in from outside the app and release them at `to` the way the
+/// platform reports it: enter, hover, then drop.
+fn drop_external(cx: &mut VisualTestContext, paths: gpui::ExternalPaths, to: Point<Pixels>) {
+    cx.simulate_event(gpui::FileDropEvent::Entered {
+        position: to,
+        paths,
+    });
+    cx.update(|window, cx| {
+        assert!(cx.has_active_drag());
+        window.draw(cx).clear();
+    });
+    cx.simulate_event(gpui::FileDropEvent::Pending { position: to });
+    cx.update(|window, cx| window.draw(cx).clear());
+    cx.simulate_event(gpui::FileDropEvent::Submit { position: to });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        assert!(!cx.has_active_drag());
+        window.draw(cx).clear();
+    });
+}
+
+fn staged_names(composer: &Entity<Composer>, cx: &App) -> Vec<String> {
+    composer
+        .read(cx)
+        .staged()
+        .iter()
+        .map(|att| att.name.clone())
+        .collect()
+}
+
+/// A mixed drop from outside the app lands in the conversation it is released
+/// over, main or side chat: the archive and the image are staged with chips in
+/// that draft, and the folder and the oversize file are both named in that
+/// composer's error notice. Composers not yet dropped on stay untouched.
+#[gpui::test]
+fn external_file_drops_stage_files_and_refuse_folders_and_oversize_files(cx: &mut TestAppContext) {
+    use zeron_proto::attachment_mentions::attachment_mention_link;
+    let (shell, cx) = setup_with_shell(cx, true);
+    let (_files, paths) = external_files();
+    let targets = [None, Some(2), Some(1)];
+    let composer = |shell: &Shell, target: Option<u64>| match target {
+        None => shell.composer.clone(),
+        Some(id) => shell.side_chats[&id].composer.clone(),
+    };
+    for (n, target) in targets.into_iter().enumerate() {
+        let to = match target {
+            None => cx.debug_bounds("chat-dropzone").unwrap().center(),
+            Some(id) => cx.update(|window, cx| {
+                shell.update(cx, |shell, cx| {
+                    shell.activate_right_surface(RightSurface::SideChat(id), window, cx);
+                    shell.right_tween = None;
+                });
+                window.draw(cx).clear();
+                let bounds = shell.read(cx).side_chats[&id]
+                    .composer
+                    .read(cx)
+                    .surface_bounds()
+                    .get()
+                    .unwrap();
+                // Over the side chat's transcript, not its input.
+                gpui::point(bounds.center().x, px(180.))
+            }),
+        };
+        drop_external(cx, paths.clone(), to);
+        shell.read_with(cx, |shell, cx| {
+            let dropped = composer(shell, target);
+            assert_eq!(
+                staged_names(&dropped, cx),
+                ["notes.zip", "Image 2.png"],
+                "target={target:?}"
+            );
+            assert_eq!(
+                text(&dropped, cx),
+                format!(
+                    "{} {} ",
+                    attachment_mention_link(1, Some("notes.zip")),
+                    attachment_mention_link(2, None)
+                ),
+                "target={target:?}"
+            );
+            assert_eq!(
+                dropped.read(cx).visible_failure().as_deref(),
+                Some("folder is not a file. huge.bin is too large (24 MB max)."),
+                "target={target:?}"
+            );
+            for other in targets[n + 1..].iter().map(|other| composer(shell, *other)) {
+                assert!(staged_names(&other, cx).is_empty(), "target={target:?}");
+                assert!(text(&other, cx).is_empty(), "target={target:?}");
+                assert!(other.read(cx).failure().is_none(), "target={target:?}");
+            }
+        });
+    }
+}

@@ -1609,11 +1609,20 @@ impl Shell {
                                     button.bg(crate::theme::wash(0.09))
                                 }),
                             )
-                            .child(header_icon_button(
+                            .child(header_icon_button_with(
                                 "toggle-changes",
-                                icons::SIDEBAR_MINIMALISTIC,
+                                icons::sidebar_glyph(
+                                    motion::state_t(
+                                        "toggle-changes",
+                                        right_pane_open,
+                                        motion::GLYPH_STATE,
+                                        self.reduced_motion,
+                                    ),
+                                    true,
+                                    16.0,
+                                    theme.text_muted,
+                                ),
                                 ShortcutId::ToggleChanges.label(),
-                                &theme,
                                 cx.listener(|this, _, _, cx| this.toggle_right_pane(cx)),
                             )),
                     )
@@ -1652,7 +1661,7 @@ impl Shell {
                 .child(
                     header_icon_button(
                         "session-fork",
-                        icons::GIT_BRANCH,
+                        icons::FORK,
                         "Fork this session",
                         &theme,
                         cx.listener(|this, _, _, cx| this.create_side_chat(cx)),

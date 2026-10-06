@@ -1009,6 +1009,7 @@ mod drag_regressions {
                         profile_key: "local".into(),
                     }),
                     None,
+                    true,
                     None,
                     &theme,
                     cx,
