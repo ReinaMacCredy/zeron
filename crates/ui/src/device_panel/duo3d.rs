@@ -146,6 +146,39 @@ impl DisplayQuad {
         )
     }
 
+    fn outline(&self, radius: f64) -> Vec<(f64, f64)> {
+        let (x0, x1, y0, y1) = (self.x.0, self.x.1, self.y.0, self.y.1);
+        let round = |outer: bool| if outer { radius } else { 0.0 };
+        let (left, right) = match (self.panel, self.leaf) {
+            (DuoPanel::Cover, _) => (true, true),
+            (DuoPanel::Inner, Leaf::Left) => (true, false),
+            (DuoPanel::Inner, Leaf::Right) => (false, true),
+        };
+        let corners = [
+            ((x1, y0), (-1.0, 0.0), (0.0, 1.0), round(right)),
+            ((x1, y1), (0.0, -1.0), (-1.0, 0.0), round(right)),
+            ((x0, y1), (1.0, 0.0), (0.0, -1.0), round(left)),
+            ((x0, y0), (0.0, 1.0), (1.0, 0.0), round(left)),
+        ];
+        let mut points = Vec::new();
+        for ((cx, cy), (ax, ay), (bx, by), r) in corners {
+            if r <= 0.0 {
+                points.push((cx, cy));
+                continue;
+            }
+            let (a, b) = ((cx + ax * r, cy + ay * r), (cx + bx * r, cy + by * r));
+            for i in 0..=16 {
+                let t = f64::from(i) / 16.0;
+                let s = 1.0 - t;
+                points.push((
+                    s * s * a.0 + 2.0 * s * t * cx + t * t * b.0,
+                    s * s * a.1 + 2.0 * s * t * cy + t * t * b.1,
+                ));
+            }
+        }
+        points
+    }
+
     fn corners(&self) -> [Vec3; 4] {
         [
             (self.x.0, self.y.0),
@@ -287,9 +320,9 @@ impl DuoRig {
         let leaf_width = half + HINGE_INSET + BEZEL;
         let leaf_height = SCREEN_HEIGHT + 2.0 * BEZEL;
         let aspect = f64::from(cover.0) / f64::from(cover.1);
-        let cover_height = SCREEN_HEIGHT.min((half + HINGE_INSET) / aspect);
+        let cover_height = SCREEN_HEIGHT.min((leaf_width - 2.0 * BEZEL) / aspect);
         let cover_width = cover_height * aspect;
-        let cover_x = -(HINGE_INSET + half / 2.0);
+        let cover_x = -leaf_width / 2.0;
         let screen_y = (-SCREEN_HEIGHT / 2.0, SCREEN_HEIGHT / 2.0);
         let displays = [
             DisplayQuad {
@@ -362,7 +395,7 @@ impl DuoRig {
             }
             for display in displays.iter().filter(|display| display.leaf == leaf) {
                 mesh.screen_tag = display.panel as u32 as f32;
-                let outline = display.corners().map(|corner| (corner.x, corner.y));
+                let outline = display.outline(IOS_PHONE.screen_radius);
                 let uv = |x: f64, y: f64| {
                     let (u, v) = display.panel_uv(x, y);
                     duo_raw_point(display.panel, u, v)
@@ -1584,6 +1617,56 @@ mod tests {
             for frame in &folded[1..] {
                 assert!(chosen.rotation.rotate(frame.normal).z > 0.02);
             }
+        }
+    }
+
+    #[test]
+    fn the_cover_sits_centered_on_its_leaf_and_screens_round_only_their_outer_corners() {
+        let rig = rig();
+        let [cover, left, right] = rig.displays;
+        let (body_lo, body_hi) = rig.leaf_boxes[0];
+        let sides = (cover.x.0 - body_lo.x, body_hi.x - cover.x.1);
+        let ends = (cover.y.0 - body_lo.y, body_hi.y - cover.y.1);
+        assert!((sides.0 - sides.1).abs() < 1e-9, "{sides:?}");
+        assert!((ends.0 - ends.1).abs() < 1e-9, "{ends:?}");
+        for margin in [sides.0, ends.0] {
+            assert!(margin >= BEZEL - 1e-9 && margin < BEZEL + 0.01, "{margin}");
+        }
+        let has = |range: &Range<usize>, tag: DuoPanel, x: f64, y: f64| {
+            rig.vertices[range.clone()].iter().any(|vertex| {
+                vertex.screen == tag as u32 as f32
+                    && (f64::from(vertex.position[0]) - x).abs() < 1e-6
+                    && (f64::from(vertex.position[1]) - y).abs() < 1e-6
+            })
+        };
+        for (x, y) in [
+            (cover.x.0, cover.y.0),
+            (cover.x.1, cover.y.0),
+            (cover.x.0, cover.y.1),
+            (cover.x.1, cover.y.1),
+        ] {
+            assert!(
+                !has(&rig.left, DuoPanel::Cover, x, y),
+                "cover corner rounded"
+            );
+        }
+        for y in [left.y.0, left.y.1] {
+            assert!(
+                !has(&rig.left, DuoPanel::Inner, left.x.0, y),
+                "outer corner rounded"
+            );
+            assert!(
+                has(&rig.left, DuoPanel::Inner, left.x.1, y),
+                "hinge corner square"
+            );
+            assert!(
+                !has(&rig.right, DuoPanel::Inner, right.x.1, y),
+                "outer corner rounded"
+            );
+            assert!(
+                has(&rig.right, DuoPanel::Inner, right.x.0, y),
+                "hinge corner square"
+            );
         }
     }
 
