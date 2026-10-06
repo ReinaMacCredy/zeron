@@ -1516,6 +1516,7 @@ pub struct RenderKey {
     pub clear: [f32; 3],
     pub live_panel: u8,
     pub rotation: u8,
+    pub retained: Option<(usize, u8, u8)>,
 }
 
 #[derive(Default)]
@@ -2691,6 +2692,7 @@ mod tests {
                 clear: [0.1, 0.1, 0.1],
                 live_panel: 1,
                 rotation: 0,
+                retained: None,
             };
             if schedule.due(key) {
                 renders.set(renders.get() + 1);

@@ -452,10 +452,15 @@ async fn drain_frames(
 
 const PINCH_IDLE: Duration = Duration::from_millis(180);
 
+#[cfg(target_os = "macos")]
+type Kept = Rc<RefCell<[Option<(super::h264::Surface, DeviceOrientation, usize)>; 2]>>;
+
 struct ThreeD {
     viewer: Rc<RefCell<Scene3d>>,
     #[cfg(target_os = "macos")]
     renderer: Rc<RefCell<super::metal3d::Renderer>>,
+    #[cfg(target_os = "macos")]
+    kept: Kept,
     wheel: scene3d::Wheel,
     wheel_end: Task<()>,
     pinch_wheel: bool,
@@ -469,6 +474,7 @@ impl ThreeD {
         return super::metal3d::Renderer::new().map(|renderer| Self {
             viewer: Rc::default(),
             renderer: Rc::new(RefCell::new(renderer)),
+            kept: Rc::default(),
             wheel: scene3d::Wheel::default(),
             wheel_end: Task::ready(()),
             pinch_wheel: false,
@@ -1415,6 +1421,7 @@ impl gpui::EntityInputHandler for DeviceStreamView {
 fn paint_3d(
     scene: &RefCell<Scene3d>,
     renderer: &RefCell<super::metal3d::Renderer>,
+    kept: &Kept,
     frame: Bounds<Pixels>,
     picture: Option<&Picture>,
     live: Option<(DeviceOrientation, (u32, u32))>,
@@ -1422,7 +1429,7 @@ fn paint_3d(
     clear: [f32; 3],
     window: &mut Window,
 ) -> bool {
-    use super::metal3d::{Draw, Job, Source};
+    use super::metal3d::{Draw, Job, RetainedFrame, Source};
     let mut scene = scene.borrow_mut();
     let viewport = (
         f64::from(f32::from(frame.origin.x)),
@@ -1470,6 +1477,7 @@ fn paint_3d(
                 draws: &draws,
                 live_panel: 1,
                 live_rotation: 0,
+                retained: None,
                 size,
                 clear,
             })
@@ -1487,28 +1495,53 @@ fn paint_3d(
                 DuoPanel::Cover => DuoPanel::Inner,
                 DuoPanel::Inner => DuoPanel::Cover,
             };
-            let live_panel = [active, other].into_iter().find(|&panel| {
-                let index = usize::from(panel == DuoPanel::Inner);
-                duo3d::duo_frame_matches(raw, rig.sizes[index])
-            });
+            let slot = |panel: DuoPanel| usize::from(panel == DuoPanel::Inner);
+            let live_panel = [active, other]
+                .into_iter()
+                .find(|&panel| duo3d::duo_frame_matches(raw, rig.sizes[slot(panel)]));
             let draws = matrices.map(|(range, mvp, rotation)| Draw {
                 range,
                 mvp,
                 rotation,
             });
-            let surface = renderer.borrow_mut().render(Job {
-                source,
-                frame: frame_number,
-                mesh: (rig.id, &rig.vertices),
-                draws: &draws,
-                live_panel: live_panel.map_or(0, |panel| panel as u8),
-                live_rotation: duo3d::quarter_turns(rotation),
-                size,
-                clear,
-            });
+            let dim = if live_panel == Some(other) {
+                active
+            } else {
+                other
+            };
+            let surface = {
+                let kept = kept.borrow();
+                let retained = kept[slot(dim)]
+                    .as_ref()
+                    .filter(|(surface, turned, _)| {
+                        let size =
+                            duo3d::duo_raw_size((surface.width(), surface.height()), *turned);
+                        duo3d::duo_frame_matches(size, rig.sizes[slot(dim)])
+                    })
+                    .map(|(surface, turned, frame)| RetainedFrame {
+                        surface,
+                        panel: dim as u8,
+                        rotation: duo3d::quarter_turns(*turned),
+                        frame: *frame,
+                    });
+                renderer.borrow_mut().render(Job {
+                    source,
+                    frame: frame_number,
+                    mesh: (rig.id, &rig.vertices),
+                    draws: &draws,
+                    live_panel: live_panel.map_or(0, |panel| panel as u8),
+                    live_rotation: duo3d::quarter_turns(rotation),
+                    retained,
+                    size,
+                    clear,
+                })
+            };
             if surface.is_some() && live_panel == Some(active) {
                 let key = duo3d::duo_display_key(duo.screen());
                 duo.frame_ready(key);
+                if let Some(Picture::Surface(shown)) = picture {
+                    kept.borrow_mut()[slot(active)] = Some((shown.clone(), rotation, frame_number));
+                }
             }
             surface
         }
@@ -1594,7 +1627,11 @@ impl Render for DeviceStreamView {
                     window.request_animation_frame();
                 }
                 #[cfg(target_os = "macos")]
-                let scene = (three_d.viewer.clone(), three_d.renderer.clone());
+                let scene = (
+                    three_d.viewer.clone(),
+                    three_d.renderer.clone(),
+                    three_d.kept.clone(),
+                );
                 #[cfg(not(target_os = "macos"))]
                 let scene = three_d.viewer.clone();
                 scene
@@ -1673,10 +1710,11 @@ impl Render for DeviceStreamView {
                             );
                         }
                         #[cfg(target_os = "macos")]
-                        let shown_3d = scene.as_ref().is_some_and(|(viewer, renderer)| {
+                        let shown_3d = scene.as_ref().is_some_and(|(viewer, renderer, kept)| {
                             let shown = paint_3d(
                                 viewer,
                                 renderer,
+                                kept,
                                 frame,
                                 picture.as_ref(),
                                 live,
@@ -3767,6 +3805,56 @@ mod tests {
             );
             assert_eq!(codecs(&watches), [json!("h264")]);
             assert!(view.read_with(cx, |view, _| view.video_error.is_none()));
+        }
+
+        #[gpui::test]
+        fn the_inactive_duo_display_keeps_the_last_frame_it_showed_in_3d(cx: &mut TestAppContext) {
+            use zeron_proto::device_hub::HingePose;
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let _guard = runtime.enter();
+            setup(cx);
+            let mut screens: Vec<Vec<AvccEnvelope>> = Vec::new();
+            for envelope in AvccDemuxer::default().push(DUO_FOLD).unwrap() {
+                if envelope.tag == zeron_proto::device_hub::AVCC_DESCRIPTION {
+                    screens.push(Vec::new());
+                }
+                screens.last_mut().unwrap().push(envelope);
+            }
+            let wire = vec![
+                item(&screens[0]),
+                json!("pause"),
+                json!("pause"),
+                json!("pause"),
+                json!("pause"),
+                item(&screens[1]),
+            ];
+            let (engine, _) = video_engine(&runtime, wire);
+            let (view, cx) = cx.add_window_view(|_, cx| {
+                let mut view = view_with_screen(engine, duo_screen(1, HingePose::Closed), cx);
+                view.three_d = ThreeD::new();
+                view
+            });
+            let kept = |cx: &mut VisualTestContext| {
+                view.read_with(cx, |view, _| {
+                    let kept = view.three_d.as_ref().unwrap().kept.borrow();
+                    [0, 1].map(|slot| {
+                        kept[slot]
+                            .as_ref()
+                            .map(|(surface, _, _)| (surface.width(), surface.height()))
+                    })
+                })
+            };
+            wait(cx, |cx| kept(cx)[0].is_some());
+            assert_eq!(kept(cx), [Some((1398, 2034)), None]);
+            view.update(cx, |view, cx| {
+                view.set_screen(Some(duo_screen(3, HingePose::Open)), cx)
+            });
+            wait(cx, |cx| kept(cx)[1].is_some());
+            assert_eq!(
+                kept(cx),
+                [Some((1398, 2034)), Some((2852, 2006))],
+                "the cover keeps its last picture while the inner display is live"
+            );
         }
 
         #[gpui::test]

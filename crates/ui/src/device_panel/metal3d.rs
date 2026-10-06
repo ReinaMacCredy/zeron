@@ -37,7 +37,7 @@ const SHADERS: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
 struct Vtx { packed_float3 position; packed_float3 normal; packed_float3 color; packed_float2 uv; float screen; };
-struct Uniforms { float4x4 mvp; float4x4 model; uint source; float live; uint live_rot; uint pad; };
+struct Uniforms { float4x4 mvp; float4x4 model; uint source; float live; uint live_rot; uint retained; uint retained_rot; };
 struct VO { float4 position [[position]]; float3 normal; float3 color; float2 uv; float screen; };
 vertex VO scene_vertex(uint id [[vertex_id]], const device Vtx* v [[buffer(0)]], constant Uniforms& u [[buffer(1)]]) {
   Vtx x = v[id];
@@ -59,10 +59,15 @@ float2 display_point(uint turns, float2 p) {
   }
 }
 fragment float4 scene_fragment(VO i [[stage_in]], constant Uniforms& u [[buffer(0)]],
-    texture2d<float> luma [[texture(0)]], texture2d<float> chroma [[texture(1)]], texture2d<float> bgra [[texture(2)]]) {
+    texture2d<float> luma [[texture(0)]], texture2d<float> chroma [[texture(1)]], texture2d<float> bgra [[texture(2)]],
+    texture2d<float> kept_luma [[texture(3)]], texture2d<float> kept_chroma [[texture(4)]]) {
   constexpr sampler s(mag_filter::linear, min_filter::linear, address::clamp_to_edge);
   if (i.screen > 0.5) {
-    if (abs(i.screen - u.live) >= 0.5) { return float4(0.0314, 0.0392, 0.0627, 1); }
+    if (abs(i.screen - u.live) >= 0.5) {
+      if (u.retained == 0 || abs(i.screen - float(u.retained)) >= 0.5) { return float4(0.0314, 0.0392, 0.0627, 1); }
+      float2 kept = display_point(u.retained_rot, i.uv);
+      return ycc * float4(kept_luma.sample(s, kept).r, kept_chroma.sample(s, kept).rg, 1);
+    }
     float2 uv = display_point(u.live_rot, i.uv);
     if (u.source == 0) { return ycc * float4(luma.sample(s, uv).r, chroma.sample(s, uv).rg, 1); }
     return float4(bgra.sample(s, uv).rgb, 1);
@@ -99,7 +104,9 @@ struct Uniforms {
     source: u32,
     live: f32,
     live_rotation: u32,
-    _pad: u32,
+    retained: u32,
+    retained_rotation: u32,
+    _pad: [u32; 3],
 }
 
 pub enum Source<'a> {
@@ -117,6 +124,13 @@ pub struct Draw {
     pub rotation: [[f32; 4]; 4],
 }
 
+pub struct RetainedFrame<'a> {
+    pub surface: &'a Surface,
+    pub panel: u8,
+    pub rotation: u8,
+    pub frame: usize,
+}
+
 pub struct Job<'a> {
     pub source: Source<'a>,
     pub frame: usize,
@@ -124,6 +138,7 @@ pub struct Job<'a> {
     pub draws: &'a [Draw],
     pub live_panel: u8,
     pub live_rotation: u8,
+    pub retained: Option<RetainedFrame<'a>>,
     pub size: (usize, usize),
     pub clear: [f32; 3],
 }
@@ -452,6 +467,10 @@ impl Renderer {
             clear: job.clear,
             live_panel: job.live_panel,
             rotation: job.live_rotation,
+            retained: job
+                .retained
+                .as_ref()
+                .map(|kept| (kept.frame, kept.panel, kept.rotation)),
         };
         if !self.schedule.due(key)
             && let Some(shown) = &self.shown
@@ -492,6 +511,22 @@ impl Renderer {
                 let texture = self.upload(job.frame, bytes, (*width, *height))?;
                 (1, [texture.clone(), texture.clone(), texture])
             }
+        };
+        let kept = match &job.retained {
+            Some(kept) => {
+                let buffer = kept.surface.buffer();
+                let (width, height) = (
+                    kept.surface.width() as usize,
+                    kept.surface.height() as usize,
+                );
+                let (luma_cv, luma) =
+                    self.plane(buffer, MTLPixelFormat::R8Unorm, (width, height), 0)?;
+                let (chroma_cv, chroma) =
+                    self.plane(buffer, MTLPixelFormat::RG8Unorm, (width / 2, height / 2), 1)?;
+                keep.extend([luma_cv, chroma_cv]);
+                [luma, chroma]
+            }
+            None => [screen[0].clone(), screen[1].clone()],
         };
         let targets = self.targets.as_ref()?;
         let output = targets.outputs[self.next].clone();
@@ -534,7 +569,7 @@ impl Renderer {
         // each draw range lies inside it, and the uniform bytes outlive the encode call that copies them.
         unsafe {
             encoder.setVertexBuffer_offset_atIndex(Some(vertices), 0, 0);
-            for (index, texture) in screen.iter().enumerate() {
+            for (index, texture) in screen.iter().chain(&kept).enumerate() {
                 encoder.setFragmentTexture_atIndex(Some(texture), index);
             }
             for draw in job.draws.iter().filter(|draw| draw.range.end <= count) {
@@ -544,7 +579,15 @@ impl Renderer {
                     source,
                     live: f32::from(job.live_panel),
                     live_rotation: u32::from(job.live_rotation),
-                    _pad: 0,
+                    retained: job
+                        .retained
+                        .as_ref()
+                        .map_or(0, |kept| u32::from(kept.panel)),
+                    retained_rotation: job
+                        .retained
+                        .as_ref()
+                        .map_or(0, |kept| u32::from(kept.rotation)),
+                    _pad: [0; 3],
                 };
                 let bytes = NonNull::from(&uniforms).cast::<c_void>();
                 encoder.setVertexBytes_length_atIndex(bytes, size_of::<Uniforms>(), 1);
@@ -688,6 +731,7 @@ mod tests {
             draws,
             live_panel: 1,
             live_rotation: 0,
+            retained: None,
             size,
             clear: [0.2, 0.3, 0.4],
         }
@@ -911,7 +955,7 @@ mod tests {
 
     #[test]
     fn two_draws_over_one_buffer_show_the_live_panel_turned_and_the_other_panel_dark() {
-        assert_eq!(size_of::<Uniforms>(), 144, "matches the Metal struct");
+        assert_eq!(size_of::<Uniforms>(), 160, "matches the Metal struct");
         let mut renderer = Renderer::new().expect("a Metal device");
         let colors = [
             (150, 90, 170),
@@ -951,6 +995,7 @@ mod tests {
                     draws: &draws,
                     live_panel: 3,
                     live_rotation: turns,
+                    retained: None,
                     size,
                     clear: [1.0, 1.0, 1.0],
                 })
@@ -967,6 +1012,57 @@ mod tests {
                 "{:?} vs {dark:?}",
                 sample(&output, 150, 50)
             );
+        }
+    }
+
+    #[test]
+    fn the_inactive_display_shows_its_retained_frame_turned_by_its_own_rotation() {
+        let mut renderer = Renderer::new().expect("a Metal device");
+        let live = filled(64, 64, (150, 90, 170));
+        let colors = [
+            (150, 90, 170),
+            (100, 160, 110),
+            (180, 128, 128),
+            (90, 128, 90),
+        ];
+        let kept = quadrants(64, 64, colors);
+        let vertices: Vec<Vertex> = quad(-1.0, 0.0, 3.0)
+            .into_iter()
+            .chain(quad(0.0, 1.0, 1.0))
+            .collect();
+        let identity = Quat::IDENTITY.matrix();
+        let draws = [0..6, 6..12].map(|range| Draw {
+            range,
+            mvp: identity,
+            rotation: identity,
+        });
+        for (turns, quadrant) in [(0, 0), (2, 3)] {
+            let output = renderer
+                .render(Job {
+                    source: Source::Surface(&live),
+                    frame: 1,
+                    mesh: (u64::MAX - 1, &vertices),
+                    draws: &draws,
+                    live_panel: 3,
+                    live_rotation: 0,
+                    retained: Some(RetainedFrame {
+                        surface: &kept,
+                        panel: 1,
+                        rotation: turns,
+                        frame: 7,
+                    }),
+                    size: (200, 100),
+                    clear: [1.0, 1.0, 1.0],
+                })
+                .unwrap();
+            let (y, cb, cr) = colors[quadrant];
+            let expected = (f32::from(y), f32::from(cb), f32::from(cr));
+            assert!(
+                near(sample(&output, 124, 24), expected, 2.0),
+                "turns {turns}: {:?} vs {expected:?}",
+                sample(&output, 124, 24)
+            );
+            assert!(near(sample(&output, 24, 24), (150.0, 90.0, 170.0), 2.0));
         }
     }
 
