@@ -13,8 +13,20 @@ pub(crate) fn hub_installed() -> bool {
     installed_hub().is_some()
 }
 
+fn pinned(pin: &'static str) -> &'static str {
+    pin.rsplit_once('@').map_or("", |(_, v)| v)
+}
+
+pub(crate) fn hub_version() -> &'static str {
+    pinned(HUB_PIN)
+}
+
+pub(crate) fn agent_version() -> &'static str {
+    pinned(AGENT_PIN)
+}
+
 pub(crate) fn versions(running: bool) -> DeviceToolVersions {
-    let required = HUB_PIN.rsplit_once('@').map_or("", |(_, v)| v).to_string();
+    let required = hub_version().to_string();
     DeviceToolVersions {
         hub: DeviceToolVersion {
             installed: zeron_harness::installed_npm_versions(HUB_PIN),

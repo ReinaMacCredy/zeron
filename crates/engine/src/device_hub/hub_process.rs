@@ -11,7 +11,7 @@ const STOP_GRACE: Duration = Duration::from_secs(5);
 const STATE_FILE: &str = "hub.json";
 const GUARD_FILE: &str = "hub-guard.mjs";
 // Browsers reach a loopback port with a foreign Host (DNS rebinding) or an Origin; the engine sends neither.
-const GUARD: &str = r#"import http from "node:http";
+pub(crate) const GUARD: &str = r#"import http from "node:http";
 const emit = http.Server.prototype.emit;
 const local = (server, request) => {
   const address = server.address();
@@ -206,7 +206,7 @@ async fn terminate(child: &mut Child, pgid: i32) {
     let _ = child.kill().await;
 }
 
-fn reserve_port() -> std::io::Result<u16> {
+pub(crate) fn reserve_port() -> std::io::Result<u16> {
     Ok(std::net::TcpListener::bind("127.0.0.1:0")?
         .local_addr()?
         .port())

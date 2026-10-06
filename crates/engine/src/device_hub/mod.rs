@@ -5,6 +5,7 @@ mod hub_process;
 mod input;
 mod mjpeg;
 mod platform;
+mod ssh_host;
 mod stream;
 mod toolchain;
 
@@ -2039,8 +2040,8 @@ mod tests {
         let session = hub.open(open_params("SIM-1")).await.unwrap();
         assert_eq!(session.opened_by, Some(DeviceOpener::User));
         let hinge = |device_id: &str, pose| SetHubDeviceHingeParams {
-            device_id: device_id.into(),
             host_id: None,
+            device_id: device_id.into(),
             pose,
         };
         assert_eq!(

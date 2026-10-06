@@ -34,7 +34,7 @@ const EVENT_SUMMARY_LIMIT: usize = 1000;
 const EVENT_FIELD_LIMIT: usize = 64;
 const SCREENSHOT_NAME_TRIES: usize = 100;
 pub(crate) const ACTION_TIMEOUT: Duration = Duration::from_secs(20);
-const OUTPUT_LIMIT: usize = 4 << 20;
+pub(crate) const OUTPUT_LIMIT: usize = 4 << 20;
 const FOREGROUND_READ: Duration = Duration::from_secs(1);
 pub(crate) const PORTRAIT_LOCKED: &str = "The foreground app is locked to portrait.";
 const ROTATION_SETTLE: Duration = Duration::from_secs(2);
@@ -53,7 +53,7 @@ pub(crate) fn system_runner() -> Runner {
     Arc::new(|argv| Box::pin(run_command(argv)))
 }
 
-async fn read_pipe(
+pub(crate) async fn read_pipe(
     pipe: Option<impl tokio::io::AsyncRead + Unpin>,
     limit: usize,
 ) -> std::io::Result<Vec<u8>> {

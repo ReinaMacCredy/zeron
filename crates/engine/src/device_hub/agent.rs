@@ -839,7 +839,7 @@ impl DeviceHub {
 }
 
 #[cfg(all(test, target_os = "macos"))]
-mod tests {
+pub(super) mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::Duration;
@@ -890,7 +890,7 @@ if (args[0] === "daemon" && args[1] === "stop") {
         std::fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 
-    fn node() -> Option<PathBuf> {
+    pub(crate) fn node() -> Option<PathBuf> {
         std::env::var_os("PATH")
             .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
             .unwrap_or_default()
