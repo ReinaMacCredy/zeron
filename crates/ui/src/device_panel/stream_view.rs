@@ -760,6 +760,10 @@ impl DeviceStreamView {
         duo
     }
 
+    fn scene_shown(&self) -> bool {
+        self.three_d.is_some() && !(self.duo_named() && self.screen.is_none())
+    }
+
     fn duo_named(&self) -> bool {
         self.platform == DevicePlatform::Ios
             && self.label.0.trim().eq_ignore_ascii_case("iPhone Duo")
@@ -1251,7 +1255,7 @@ impl DeviceStreamView {
     }
 
     fn pointer(&mut self, phase: TouchPhase, position: Point<Pixels>, cx: &mut Context<Self>) {
-        if self.three_d.is_some() {
+        if self.scene_shown() {
             return self.pointer_3d(phase, position, false, cx);
         }
         let Some(frame) = self.frame_box.get() else {
@@ -1556,11 +1560,10 @@ impl Render for DeviceStreamView {
         let dragging = self.dragging().then(|| cx.entity().downgrade());
         let now = self.now();
         // Without its first screen config a Duo would flash the phone body before the rig.
-        let waiting = self.duo_named() && self.screen.is_none();
         let scene = self
             .three_d
             .as_ref()
-            .filter(|_| self.image.is_some() && !waiting)
+            .filter(|_| self.image.is_some() && self.scene_shown())
             .map(|three_d| {
                 let mut viewer = three_d.viewer.borrow_mut();
                 if fold::hinged(self.screen.as_ref()) {
@@ -1825,7 +1828,7 @@ impl Render for DeviceStreamView {
                 MouseButton::Left,
                 cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
                     window.focus(&this.focus, cx);
-                    if this.three_d.is_some() {
+                    if this.scene_shown() {
                         this.pointer_3d(TouchPhase::Begin, event.position, event.modifiers.alt, cx);
                     } else {
                         this.pointer(TouchPhase::Begin, event.position, cx);
@@ -2604,10 +2607,9 @@ mod tests {
     ) {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();
-        let (view, _, hinges, fold, cx) = duo_view(cx, &runtime, "iPhone Duo", |_| None);
+        let (view, _, hinges, _fold, cx) = duo_view(cx, &runtime, "iPhone Duo", |_| None);
         let scene = duo_ready(&view, cx);
         let over = duo_point(&scene, DuoPanel::Inner, (0.5, 0.75));
-
         pinch_at(cx, over, gpui::TouchPhase::Started, 0.0);
         pinch_at(cx, over, gpui::TouchPhase::Moved, -0.1);
         pinch_at(cx, over, gpui::TouchPhase::Moved, -0.1);
@@ -2705,7 +2707,7 @@ mod tests {
     ) {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();
-        let (view, _, _, _fold, cx) = duo_view(cx, &runtime, "iPhone 17", |_| None);
+        let (view, inputs, _, _fold, cx) = duo_view(cx, &runtime, "iPhone 17", |_| None);
         push_duo_frame(&view, cx, 1, DeviceOrientation::Portrait);
         let scene = scene_of(&view, cx);
         wait(cx, |_| scene.borrow().viewport().is_some());
@@ -2728,6 +2730,11 @@ mod tests {
         );
         assert!(!scene.borrow().is_duo());
         let flat = view.read_with(cx, |view, _| view.frame_box().unwrap());
+        let at = geometry::position_at(flat, 0.5, 0.5);
+        cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::default());
+        wait(cx, |_| inputs.lock().unwrap().len() >= 2);
+        assert_touches(&touches(&inputs), &[("begin", 0.5, 0.5), ("end", 0.5, 0.5)]);
 
         duo_ready(&view, cx);
         assert!(scene.borrow().is_duo());
