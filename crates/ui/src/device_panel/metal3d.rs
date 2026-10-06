@@ -37,7 +37,7 @@ const SHADERS: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
 struct Vtx { packed_float3 position; packed_float3 normal; packed_float3 color; packed_float2 uv; float screen; };
-struct Uniforms { float4x4 mvp; float4x4 model; uint source; };
+struct Uniforms { float4x4 mvp; float4x4 model; uint source; float live; uint live_rot; uint pad; };
 struct VO { float4 position [[position]]; float3 normal; float3 color; float2 uv; float screen; };
 vertex VO scene_vertex(uint id [[vertex_id]], const device Vtx* v [[buffer(0)]], constant Uniforms& u [[buffer(1)]]) {
   Vtx x = v[id];
@@ -50,12 +50,22 @@ vertex VO scene_vertex(uint id [[vertex_id]], const device Vtx* v [[buffer(0)]],
   return o;
 }
 constant float4x4 ycc = float4x4(float4(1, 1, 1, 0), float4(0, -0.3441, 1.7720, 0), float4(1.4020, -0.7141, 0, 0), float4(-0.7010, 0.5291, -0.8860, 1));
+float2 display_point(uint turns, float2 p) {
+  switch (turns) {
+    case 1: return float2(1 - p.y, p.x);
+    case 2: return float2(1 - p.x, 1 - p.y);
+    case 3: return float2(p.y, 1 - p.x);
+    default: return p;
+  }
+}
 fragment float4 scene_fragment(VO i [[stage_in]], constant Uniforms& u [[buffer(0)]],
     texture2d<float> luma [[texture(0)]], texture2d<float> chroma [[texture(1)]], texture2d<float> bgra [[texture(2)]]) {
   constexpr sampler s(mag_filter::linear, min_filter::linear, address::clamp_to_edge);
   if (i.screen > 0.5) {
-    if (u.source == 0) { return ycc * float4(luma.sample(s, i.uv).r, chroma.sample(s, i.uv).rg, 1); }
-    return float4(bgra.sample(s, i.uv).rgb, 1);
+    if (abs(i.screen - u.live) >= 0.5) { return float4(0.0314, 0.0392, 0.0627, 1); }
+    float2 uv = display_point(u.live_rot, i.uv);
+    if (u.source == 0) { return ycc * float4(luma.sample(s, uv).r, chroma.sample(s, uv).rg, 1); }
+    return float4(bgra.sample(s, uv).rgb, 1);
   }
   float3 n = normalize(i.normal);
   float3 key = normalize(float3(-3, 4, 5));
@@ -87,7 +97,9 @@ struct Uniforms {
     mvp: [[f32; 4]; 4],
     model: [[f32; 4]; 4],
     source: u32,
-    _pad: [u32; 3],
+    live: f32,
+    live_rotation: u32,
+    _pad: u32,
 }
 
 pub enum Source<'a> {
@@ -530,7 +542,9 @@ impl Renderer {
                     mvp: draw.mvp,
                     model: draw.rotation,
                     source,
-                    _pad: [0; 3],
+                    live: f32::from(job.live_panel),
+                    live_rotation: u32::from(job.live_rotation),
+                    _pad: 0,
                 };
                 let bytes = NonNull::from(&uniforms).cast::<c_void>();
                 encoder.setVertexBytes_length_atIndex(bytes, size_of::<Uniforms>(), 1);
@@ -837,6 +851,123 @@ mod tests {
             "{:?}",
             sample(&next, 400, 500)
         );
+    }
+
+    fn quadrants(width: usize, height: usize, colors: [(u8, u8, u8); 4]) -> Surface {
+        let surface = pixel_buffer(width, height).unwrap();
+        let color = |x: usize, y: usize| {
+            colors[usize::from(x >= width / 2) + 2 * usize::from(y >= height / 2)]
+        };
+        planes(
+            &surface,
+            true,
+            |luma, luma_stride, chroma, chroma_stride| {
+                for y in 0..height {
+                    for x in 0..width {
+                        // SAFETY: (x, y) lies inside the luma plane.
+                        unsafe { *luma.add(y * luma_stride + x) = color(x, y).0 };
+                    }
+                }
+                for y in 0..height / 2 {
+                    for x in 0..width / 2 {
+                        let (_, cb, cr) = color(x * 2, y * 2);
+                        // SAFETY: (x, y) lies inside the half-size chroma plane.
+                        unsafe {
+                            *chroma.add(y * chroma_stride + x * 2) = cb;
+                            *chroma.add(y * chroma_stride + x * 2 + 1) = cr;
+                        }
+                    }
+                }
+            },
+        );
+        surface
+    }
+
+    fn quad(left: f32, right: f32, tag: f32) -> [Vertex; 6] {
+        let corner = |x: f32, y: f32, u: f32, v: f32| Vertex {
+            position: [x, y, 0.5],
+            normal: [0.0, 0.0, 1.0],
+            color: [0.0; 3],
+            uv: [u, v],
+            screen: tag,
+        };
+        let (tl, tr, bl, br) = (
+            corner(left, 1.0, 0.0, 0.0),
+            corner(right, 1.0, 1.0, 0.0),
+            corner(left, -1.0, 0.0, 1.0),
+            corner(right, -1.0, 1.0, 1.0),
+        );
+        [tl, tr, bl, tr, br, bl]
+    }
+
+    fn rgb_to_nv12((r, g, b): (f32, f32, f32)) -> (f32, f32, f32) {
+        let y = 0.299 * r + 0.587 * g + 0.114 * b;
+        (
+            255.0 * y,
+            255.0 * ((b - y) / 1.772 + 0.5),
+            255.0 * ((r - y) / 1.402 + 0.5),
+        )
+    }
+
+    #[test]
+    fn two_draws_over_one_buffer_show_the_live_panel_turned_and_the_other_panel_dark() {
+        assert_eq!(size_of::<Uniforms>(), 144, "matches the Metal struct");
+        let mut renderer = Renderer::new().expect("a Metal device");
+        let colors = [
+            (150, 90, 170),
+            (100, 160, 110),
+            (180, 128, 128),
+            (90, 128, 90),
+        ];
+        let source = quadrants(64, 64, colors);
+        let vertices: Vec<Vertex> = quad(-1.0, 0.0, 3.0)
+            .into_iter()
+            .chain(quad(0.0, 1.0, 1.0))
+            .collect();
+        let identity = Quat::IDENTITY.matrix();
+        let draws = [0..6, 6..12].map(|range| Draw {
+            range,
+            mvp: identity,
+            rotation: identity,
+        });
+        let size = (200, 100);
+        let near = |actual: (u8, u8, u8), expected: (u8, u8, u8)| {
+            near(
+                actual,
+                (
+                    f32::from(expected.0),
+                    f32::from(expected.1),
+                    f32::from(expected.2),
+                ),
+                2.0,
+            )
+        };
+        for (turns, live_quadrant) in [(0, 0), (1, 1)] {
+            let output = renderer
+                .render(Job {
+                    source: Source::Surface(&source),
+                    frame: 1,
+                    mesh: (u64::MAX, &vertices),
+                    draws: &draws,
+                    live_panel: 3,
+                    live_rotation: turns,
+                    size,
+                    clear: [1.0, 1.0, 1.0],
+                })
+                .unwrap();
+            let live = sample(&output, 24, 24);
+            assert!(
+                near(live, colors[live_quadrant]),
+                "turns {turns}: {live:?} vs {:?}",
+                colors[live_quadrant]
+            );
+            let dark = rgb_to_nv12((8.0 / 255.0, 10.0 / 255.0, 16.0 / 255.0));
+            assert!(
+                super::tests::near(sample(&output, 150, 50), dark, 2.0),
+                "{:?} vs {dark:?}",
+                sample(&output, 150, 50)
+            );
+        }
     }
 
     #[test]
