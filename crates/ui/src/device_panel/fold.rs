@@ -2,11 +2,11 @@ use std::time::Duration;
 
 use gpui::{Context, Entity, SharedString, Subscription, Task, WeakEntity};
 use zeron_proto::device_hub::{
-    DeviceFoldState, DevicePlatform, DeviceScreenConfig, FoldPosture, HingePose,
+    DeviceFoldState, DevicePlatform, DeviceScreenConfig, FoldPosture, HingeCommand, HingePose,
 };
 use zeron_rpc::methods;
 
-use super::stream_view::{DeviceStreamView, StreamChanged};
+use super::stream_view::{DeviceStreamView, DuoCommand, StreamChanged};
 use crate::icons;
 use crate::state::EngineHandle;
 
@@ -97,23 +97,32 @@ pub fn duo_selected(screen: &DeviceScreenConfig, pose: HingePose) -> bool {
 
 #[derive(Debug, Default, PartialEq)]
 pub struct HingeQueue {
-    active: Option<HingePose>,
-    queued: Option<HingePose>,
+    active: Option<HingeCommand>,
+    queued: Option<HingeCommand>,
 }
 
 impl HingeQueue {
-    pub fn enqueue(&mut self, pose: HingePose) -> Option<HingePose> {
-        if self.active.is_some() {
-            self.queued = Some(pose);
+    pub fn enqueue(&mut self, command: HingeCommand) -> Option<HingeCommand> {
+        if let HingeCommand::Angle(angle) = command
+            && !(angle.is_finite() && (0.0..=180.0).contains(&angle))
+        {
             return None;
         }
-        self.active = Some(pose);
+        if self.active.is_some() {
+            self.queued = Some(command);
+            return None;
+        }
+        self.active = Some(command);
         self.active
     }
 
-    pub fn finish(&mut self, ok: bool) -> Option<HingePose> {
+    pub fn finish(&mut self, ok: bool) -> Option<HingeCommand> {
         self.active = self.queued.take().filter(|_| ok);
         self.active
+    }
+
+    pub fn requested(&self) -> Option<HingeCommand> {
+        self.queued.or(self.active)
     }
 
     pub fn pending(&self) -> bool {
@@ -133,7 +142,7 @@ pub struct FoldControls {
     error: Option<SharedString>,
     request: Task<()>,
     view: WeakEntity<DeviceStreamView>,
-    _view: Subscription,
+    _view: [Subscription; 2],
 }
 
 impl FoldControls {
@@ -152,6 +161,9 @@ impl FoldControls {
             };
             fold.view_changed(live, size, cx);
         });
+        let commands = cx.subscribe(view, |fold, _, event: &DuoCommand, cx| {
+            fold.command(event.0, cx);
+        });
         Self {
             engine,
             host_id,
@@ -164,7 +176,7 @@ impl FoldControls {
             error: None,
             request: Task::ready(()),
             view: view.downgrade(),
-            _view: observer,
+            _view: [observer, commands],
         }
     }
 
@@ -181,21 +193,29 @@ impl FoldControls {
     }
 
     pub fn set_pose(&mut self, pose: HingePose, cx: &mut Context<Self>) {
-        if let Some(pose) = self.hinge.enqueue(pose) {
+        self.command(HingeCommand::Pose(pose), cx);
+    }
+
+    pub fn command(&mut self, command: HingeCommand, cx: &mut Context<Self>) {
+        if let Some(command) = self.hinge.enqueue(command) {
             self.error = None;
-            self.send_pose(pose, cx);
+            self.send(command, cx);
         }
         cx.notify();
     }
 
-    fn send_pose(&mut self, pose: HingePose, cx: &mut Context<Self>) {
+    fn send(&mut self, command: HingeCommand, cx: &mut Context<Self>) {
         // The hub moves touches to the new display before its screen config says so.
         self.view
             .update(cx, |view, cx| view.release_held(true, cx))
             .ok();
         let engine = self.engine.clone();
         let mut params = super::device_target(&self.host_id, &self.device_id);
-        params["pose"] = serde_json::json!(pose);
+        if let (Some(target), Ok(serde_json::Value::Object(fields))) =
+            (params.as_object_mut(), serde_json::to_value(command))
+        {
+            target.extend(fields);
+        }
         self.request = cx.spawn(async move |this, cx| {
             let reply = engine
                 .client()
@@ -207,7 +227,7 @@ impl FoldControls {
                     fold.error = Some(error.clone().into());
                 }
                 if let Some(next) = fold.hinge.finish(reply.is_ok()) {
-                    fold.send_pose(next, cx);
+                    fold.send(next, cx);
                 }
                 cx.notify();
             })
@@ -336,18 +356,58 @@ mod tests {
 
     #[test]
     fn one_pose_is_in_flight_the_newest_click_waits_and_a_failure_drops_it() {
+        let pose = HingeCommand::Pose;
         let mut queue = HingeQueue::default();
-        assert_eq!(queue.enqueue(HingePose::Closed), Some(HingePose::Closed));
+        assert_eq!(
+            queue.enqueue(pose(HingePose::Closed)),
+            Some(pose(HingePose::Closed))
+        );
         assert!(queue.pending());
-        assert_eq!(queue.enqueue(HingePose::Book), None);
-        assert_eq!(queue.enqueue(HingePose::Tent), None, "replaces Book");
-        assert_eq!(queue.finish(true), Some(HingePose::Tent));
+        assert_eq!(queue.enqueue(pose(HingePose::Book)), None);
+        assert_eq!(queue.enqueue(pose(HingePose::Tent)), None, "replaces Book");
+        assert_eq!(queue.finish(true), Some(pose(HingePose::Tent)));
         assert_eq!(queue.finish(true), None);
         assert!(!queue.pending());
 
-        assert_eq!(queue.enqueue(HingePose::Open), Some(HingePose::Open));
-        assert_eq!(queue.enqueue(HingePose::Laptop), None);
+        assert_eq!(
+            queue.enqueue(pose(HingePose::Open)),
+            Some(pose(HingePose::Open))
+        );
+        assert_eq!(queue.enqueue(pose(HingePose::Laptop)), None);
         assert_eq!(queue.finish(false), None, "an error drops the queued pose");
         assert_eq!(queue, HingeQueue::default());
+    }
+
+    #[test]
+    fn the_ui_hinge_queue_coalesces_angles_lets_a_preset_replace_them_and_a_failure_clears_both() {
+        use HingeCommand::{Angle, Pose};
+        let mut queue = HingeQueue::default();
+        assert_eq!(queue.enqueue(Angle(120.0)), Some(Angle(120.0)));
+        assert_eq!(queue.requested(), Some(Angle(120.0)));
+        assert_eq!(queue.enqueue(Angle(130.0)), None);
+        assert_eq!(queue.enqueue(Angle(140.0)), None);
+        assert_eq!(
+            queue.requested(),
+            Some(Angle(140.0)),
+            "the newest edit waits"
+        );
+        assert_eq!(queue.enqueue(Angle(f64::NAN)), None);
+        assert_eq!(queue.enqueue(Angle(200.0)), None);
+        assert_eq!(queue.enqueue(Angle(-1.0)), None);
+        assert_eq!(
+            queue.requested(),
+            Some(Angle(140.0)),
+            "invalid angles are dropped"
+        );
+        assert_eq!(queue.enqueue(Pose(HingePose::Book)), None);
+        assert_eq!(queue.requested(), Some(Pose(HingePose::Book)));
+        assert_eq!(queue.finish(true), Some(Pose(HingePose::Book)));
+        assert_eq!(queue.requested(), Some(Pose(HingePose::Book)));
+        assert_eq!(queue.enqueue(Angle(10.0)), None);
+        assert_eq!(queue.finish(false), None);
+        assert_eq!(queue.requested(), None);
+        assert!(!queue.pending());
+        assert_eq!(queue.enqueue(Angle(f64::INFINITY)), None);
+        assert!(!queue.pending());
     }
 }

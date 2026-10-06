@@ -15,7 +15,7 @@ use gpui::{
 };
 use zeron_proto::device_hub::{
     DeviceButton, DeviceFrame, DeviceInput, DeviceOrientation, DevicePlatform, DeviceScreenConfig,
-    DeviceStreamStatus, DeviceVideoCodec, StreamLinkStatus, TouchPhase,
+    DeviceStreamStatus, DeviceVideoCodec, HingeCommand, StreamLinkStatus, TouchPhase,
 };
 use zeron_rpc::{RpcSubscription, methods};
 
@@ -518,6 +518,10 @@ pub struct DeviceStreamView {
 pub struct StreamChanged;
 
 impl gpui::EventEmitter<StreamChanged> for DeviceStreamView {}
+
+pub struct DuoCommand(pub HingeCommand);
+
+impl gpui::EventEmitter<DuoCommand> for DeviceStreamView {}
 
 fn debug_tap_from_env() -> Option<(f32, f32)> {
     let value = std::env::var("ZERON_DEVICE_TAP").ok()?;
@@ -1604,10 +1608,21 @@ mod tests {
         runtime: &tokio::runtime::Runtime,
         frames_flow: bool,
     ) -> (EngineHandle, Inputs, Arc<AtomicUsize>) {
+        let (engine, inputs, subscriptions, _) = hinge_engine(runtime, frames_flow, |_| None);
+        (engine, inputs, subscriptions)
+    }
+
+    fn hinge_engine(
+        runtime: &tokio::runtime::Runtime,
+        frames_flow: bool,
+        refuse: impl Fn(usize) -> Option<&'static str> + Send + 'static,
+    ) -> (EngineHandle, Inputs, Arc<AtomicUsize>, Inputs) {
         let (out, mut frames) = tokio::sync::mpsc::channel::<String>(64);
         let (replies, inbound) = tokio::sync::mpsc::channel::<String>(64);
         let inputs: Inputs = Arc::default();
         let seen = inputs.clone();
+        let hinges: Inputs = Arc::default();
+        let hinged = hinges.clone();
         let subscriptions = Arc::new(AtomicUsize::new(0));
         let subscribed = subscriptions.clone();
         runtime.spawn(async move {
@@ -1625,6 +1640,17 @@ mod tests {
                         seen.lock().unwrap().push(frame["params"].clone());
                         json!({ "id": frame["id"], "ok": {} })
                     }
+                    Some(methods::SET_HUB_DEVICE_HINGE) => {
+                        let count = {
+                            let mut hinged = hinged.lock().unwrap();
+                            hinged.push(frame["params"].clone());
+                            hinged.len()
+                        };
+                        match refuse(count - 1) {
+                            Some(error) => json!({ "id": frame["id"], "err": error }),
+                            None => json!({ "id": frame["id"], "ok": {} }),
+                        }
+                    }
                     _ => continue,
                 };
                 if replies.send(reply.to_string()).await.is_err() {
@@ -1638,6 +1664,7 @@ mod tests {
             EngineHandle::from_test_client(client),
             inputs,
             subscriptions,
+            hinges,
         )
     }
 
@@ -2117,6 +2144,53 @@ mod tests {
         fold.update(cx, |fold, cx| fold.set_pose(HingePose::Open, cx));
         wait(cx, |_| inputs.lock().unwrap().len() == 2);
         assert_touches(&touches(&inputs), &[("begin", 0.5, 0.5), ("end", 0.5, 0.5)]);
+    }
+
+    #[gpui::test]
+    fn duo_commands_from_the_view_go_out_one_at_a_time_through_the_fold_queue(
+        cx: &mut TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        setup(cx);
+        let (engine, _, _, hinges) = hinge_engine(&runtime, true, |_| None);
+        let fold_engine = engine.clone();
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            DeviceStreamView::new(
+                engine,
+                "local".into(),
+                "SIM".into(),
+                DevicePlatform::Ios,
+                cx,
+            )
+        });
+        let fold = cx.update(|_, cx| {
+            cx.new(|cx| {
+                crate::device_panel::fold::FoldControls::new(
+                    fold_engine,
+                    "local".into(),
+                    "SIM".into(),
+                    DevicePlatform::Ios,
+                    &view,
+                    cx,
+                )
+            })
+        });
+        view.update(cx, |_, cx| {
+            for angle in [45.0, 50.0, 60.0] {
+                cx.emit(DuoCommand(HingeCommand::Angle(angle)));
+            }
+        });
+        wait(cx, |_| hinges.lock().unwrap().len() == 2);
+        wait(cx, |cx| !fold.read_with(cx, |fold, _| fold.hinge_pending()));
+        assert_eq!(
+            *hinges.lock().unwrap(),
+            [
+                json!({"deviceId": "SIM", "angle": 45.0}),
+                json!({"deviceId": "SIM", "angle": 60.0})
+            ],
+            "50 was replaced while 45 was in flight"
+        );
     }
 
     fn inputs_of(inputs: &Inputs, kind: &str) -> Vec<Value> {
