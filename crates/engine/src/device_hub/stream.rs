@@ -440,10 +440,10 @@ impl DeviceStreams {
         let before = snapshot(entry);
         match video {
             Some((DeviceVideoCodec::Mjpeg, status)) => entry.video_status = status,
-            Some((DeviceVideoCodec::H264, status)) => {
+            Some((DeviceVideoCodec::H264, status)) if entry.avcc.contains_key(&None) => {
                 entry.avcc_status.insert(None, status);
             }
-            None => {}
+            _ => {}
         }
         if let Some(input) = input {
             entry.input_status = input;
@@ -1042,6 +1042,29 @@ mod tests {
         let _third = streams.subscribe("UDID", idle);
         streams.clear(&|_| true);
         assert!(last().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_released_main_feed_ignores_a_late_status_while_a_panel_keeps_the_entry() {
+        let published: Arc<Mutex<Vec<BTreeMap<String, DeviceStreamStatus>>>> = Arc::default();
+        let sink = published.clone();
+        let streams = Arc::new(DeviceStreams::with_sink(move |map| {
+            sink.lock().unwrap().push(map)
+        }));
+        let last = || published.lock().unwrap().last().cloned().unwrap();
+        let pending = |_: Arc<AvccFeed>, _| tokio::spawn(std::future::pending::<()>());
+        let main = streams.subscribe_avcc("UDID", None, DevicePlatform::Ios, pending);
+        let _panel = streams.subscribe_avcc("UDID", Some(1), DevicePlatform::Ios, pending);
+        let live = Some((DeviceVideoCodec::H264, StreamLinkStatus::Live));
+        streams.set_status("UDID", 1, live.clone(), None);
+        assert_eq!(last()["UDID"].avcc, StreamLinkStatus::Live);
+        drop(main);
+        assert_eq!(last()["UDID"].avcc, StreamLinkStatus::Idle);
+        let count = published.lock().unwrap().len();
+        streams.set_status("UDID", 1, live, None);
+        assert_eq!(published.lock().unwrap().len(), count);
+        assert_eq!(last()["UDID"].avcc, StreamLinkStatus::Idle);
+        assert_eq!(last()["UDID"].subscribers, 1);
     }
 
     #[tokio::test]
