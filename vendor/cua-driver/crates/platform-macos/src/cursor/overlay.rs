@@ -1870,6 +1870,84 @@ mod tests {
     }
 
     #[test]
+    fn codex_arrow_rests_in_its_codex_orientation_after_any_move_or_observe() {
+        fn snap(key: &str, x: f64, y: f64) -> OverlayMsg {
+            OverlayMsg::Cmd(KeyedOverlayCommand {
+                key: key.to_owned(),
+                cmd: OverlayCommand::SnapTo {
+                    x,
+                    y,
+                    heading_radians: None,
+                },
+            })
+        }
+        fn settle(map: &mut RenderMap) {
+            for _ in 0..600 {
+                for rs in map.cursors.values_mut() {
+                    rs.core.screen_size = Some((1512.0, 982.0));
+                    rs.tick(1.0 / 60.0);
+                }
+            }
+        }
+        fn frame(map: &RenderMap, key: &str) -> Vec<u8> {
+            let rs = &map.cursors[key];
+            assert_eq!(rs.core.codex.channels().rotation, 0.0);
+            let mut pm = tiny_skia::Pixmap::new(400, 300).unwrap();
+            cursor_overlay::paint_cursor(&mut pm, &rs.core, 500.0, 300.0, None, 2.0);
+            pm.data().to_vec()
+        }
+        let codex_map = || {
+            let mut map = empty_map();
+            map.template.compact = true;
+            map.template.theme_id = cursor_overlay::CODEX_THEME_ID.into();
+            map.template.motion.idle_hide_ms = 0.0;
+            map
+        };
+
+        let mut reference = codex_map();
+        apply_msg(&mut reference, snap("s", 600.0, 400.0));
+        settle(&mut reference);
+        let rest = frame(&reference, "s");
+
+        for start in [1300.0, 100.0] {
+            let mut map = codex_map();
+            apply_msg(&mut map, snap("s", start, 400.0));
+            settle(&mut map);
+            apply_msg(&mut map, snap("s", 600.0, 400.0));
+            settle(&mut map);
+            assert!(
+                frame(&map, "s") == rest,
+                "move from x={start} must rest unrotated"
+            );
+        }
+
+        let mut map = codex_map();
+        apply_msg(&mut map, snap("s", 600.0, 400.0));
+        settle(&mut map);
+        apply_msg(
+            &mut map,
+            OverlayMsg::Cmd(KeyedOverlayCommand {
+                key: "s".into(),
+                cmd: OverlayCommand::BeginAction {
+                    action: cursor_overlay::CursorAction::Observe,
+                    delivery: None,
+                    target: None,
+                },
+            }),
+        );
+        for _ in 0..30 {
+            map.cursors.get_mut("s").unwrap().tick(1.0 / 60.0);
+            let rotation = map.cursors["s"].core.codex.channels().rotation;
+            assert!(
+                rotation <= 0.0 && rotation.abs() <= 17.4_f64.to_radians(),
+                "observing never turns the arrow past the Codex swing: {rotation}"
+            );
+        }
+        settle(&mut map);
+        assert!(frame(&map, "s") == rest, "observing must end unrotated");
+    }
+
+    #[test]
     fn seed_clamps_inside_a_display_above_the_primary() {
         let displays = reina_displays();
         let mut map = empty_map();

@@ -113,7 +113,11 @@ fn observing_spins_until_the_action_ends() {
         true,
     );
     run(&mut core, 0.5);
-    assert!(core.codex.channels().rotation > 1.0);
+    let swing = core.codex.channels().rotation;
+    assert!(
+        swing < -0.05 && swing >= -crate::codex_cursor::SWING_MAX_DEGREES.to_radians() - 0.02,
+        "{swing}"
+    );
     assert!(core.compact_animating());
     core.apply_command_base(OverlayCommand::EndAction(CursorAction::Observe), true, true);
     run(&mut core, 3.0);
