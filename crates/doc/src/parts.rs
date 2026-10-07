@@ -387,6 +387,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
             for p in out.iter_mut() {
                 if let MessagePart::Tool {
                     id: pid,
+                    call,
                     is_error: e,
                     resolved,
                     output: out_slot,
@@ -399,6 +400,9 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                 {
                     *e = *is_error;
                     *resolved = true;
+                    if let Some(summary) = output.as_deref() {
+                        stamp_computer_summary(call, summary);
+                    }
                     // Tool OUTPUTS never enter the doc (2026-08-10 product
                     // call: chips are one-liners — name + call info — like
                     // pre-output builds; the R2 sidecar is parked with them,
@@ -620,7 +624,7 @@ pub fn sanitize_tool_call(call: &ToolCall) -> ToolCall {
         ToolCall::Mcp { server, tool, .. } => ToolCall::Mcp {
             server: server.clone(),
             tool: tool.clone(),
-            input: spawn_badge(call),
+            input: spawn_badge(call).or_else(|| computer_badge(call)),
         },
         ToolCall::Unknown { name, .. } => ToolCall::Unknown {
             name: name.clone(),
@@ -655,6 +659,70 @@ fn spawn_badge(call: &ToolCall) -> Option<serde_json::Value> {
         })
         .collect();
     (!kept.is_empty()).then(|| serde_json::Value::Object(kept))
+}
+
+const COMPUTER_TITLE_MAX_CHARS: usize = 80;
+
+fn is_zeron_computer_script(call: &ToolCall) -> bool {
+    matches!(call, ToolCall::Mcp { server, tool, .. } if server == "zeron" && tool == "computer")
+}
+
+fn computer_badge(call: &ToolCall) -> Option<serde_json::Value> {
+    if !is_zeron_computer_script(call) {
+        return None;
+    }
+    let ToolCall::Mcp {
+        input: Some(input), ..
+    } = call
+    else {
+        return None;
+    };
+    let mut kept = serde_json::Map::new();
+    if let Some(title) = input.get("title").and_then(serde_json::Value::as_str) {
+        let title: String = title
+            .trim()
+            .chars()
+            .take(COMPUTER_TITLE_MAX_CHARS)
+            .collect();
+        if !title.is_empty() {
+            kept.insert("title".into(), title.into());
+        }
+    }
+    if let Some(app) = input.get("app").and_then(serde_json::Value::as_str) {
+        kept.insert("app".into(), app.into());
+    }
+    if let Some(actions) = input.get("actions").filter(|value| value.is_array()) {
+        kept.insert("actions".into(), actions.clone());
+    }
+    (!kept.is_empty()).then(|| serde_json::Value::Object(kept))
+}
+
+fn stamp_computer_summary(call: &mut ToolCall, output: &str) {
+    if !is_zeron_computer_script(call) {
+        return;
+    }
+    let Some(line) = output.lines().find(|line| !line.trim().is_empty()) else {
+        return;
+    };
+    if line.chars().count() > TOOL_OUTPUT_SUMMARY_MAX {
+        return;
+    }
+    let Ok(serde_json::Value::Object(summary)) = serde_json::from_str(line.trim()) else {
+        return;
+    };
+    let ToolCall::Mcp { input, .. } = call else {
+        return;
+    };
+    let fields = input.get_or_insert_with(|| serde_json::Value::Object(Default::default()));
+    let Some(fields) = fields.as_object_mut() else {
+        return;
+    };
+    if let Some(app) = summary.get("appName").and_then(serde_json::Value::as_str) {
+        fields.insert("app".into(), app.into());
+    }
+    if let Some(actions) = summary.get("actions").filter(|value| value.is_array()) {
+        fields.insert("actions".into(), actions.clone());
+    }
 }
 
 /// Deterministic continuation id: `"{root}#c{n}"`.
@@ -1357,5 +1425,52 @@ mod tests {
         .unwrap();
         assert_eq!(payload.part_id, "t");
         assert_eq!(payload.output.as_deref(), Some("full output"));
+    }
+    #[test]
+    fn a_zeron_computer_script_keeps_its_title_and_result_summary_but_never_its_code() {
+        let mut parts = Vec::new();
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolCall {
+                id: "cu".into(),
+                call: ToolCall::Mcp {
+                    server: "zeron".into(),
+                    tool: "computer".into(),
+                    input: Some(
+                        serde_json::json!({ "code": "await app.typeText('secret')", "title": "Type the note" }),
+                    ),
+                },
+            },
+        );
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolResult {
+                id: "cu".into(),
+                is_error: false,
+                output: Some("{\"appName\":\"TextEdit\",\"actions\":[{\"tool\":\"type_text\"}]}\nWindow: \"Notes\"".into()),
+                diff: None,
+            },
+        );
+        let MessagePart::Tool { call, output, .. } = &parts[0] else {
+            panic!("tool part");
+        };
+        assert_eq!(output.as_deref(), None);
+        let ToolCall::Mcp { input, .. } = sanitize_tool_call(call) else {
+            panic!("mcp call");
+        };
+        assert_eq!(
+            input,
+            Some(serde_json::json!({
+                "title": "Type the note",
+                "app": "TextEdit",
+                "actions": [{ "tool": "type_text" }]
+            }))
+        );
+        let other = sanitize_tool_call(&ToolCall::Mcp {
+            server: "zeron".into(),
+            tool: "list_threads".into(),
+            input: Some(serde_json::json!({ "title": "x", "app": "y" })),
+        });
+        assert!(matches!(other, ToolCall::Mcp { input: None, .. }));
     }
 }

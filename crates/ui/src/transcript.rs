@@ -1672,8 +1672,17 @@ pub fn rows_for_entry(
                 let js_actions = computer
                     .as_ref()
                     .filter(|computer| computer.tool == "computer")
-                    .and_then(|_| output.as_deref())
-                    .map(computer_js_actions)
+                    .map(|computer| {
+                        let badge = computer.args.and_then(|args| {
+                            let actions = args.get("actions")?;
+                            Some(serde_json::json!({ "appName": args.get("app"), "actions": actions }).to_string())
+                        });
+                        badge
+                            .as_deref()
+                            .or(output.as_deref())
+                            .map(computer_js_actions)
+                            .unwrap_or_default()
+                    })
                     .unwrap_or_default();
                 let detail = if output_hidden {
                     None
@@ -19798,6 +19807,31 @@ mod computer_tests {
     }
 
     const GHOSTTY_TYPED: &str = r#"{"action":"computer_type_text","appName":"Ghostty","computerId":"desktop","disclosure":"Computer control ON for this turn: the agent is driving the desktop and the user can switch …"#;
+
+    #[test]
+    fn a_computer_script_names_its_app_from_the_doc_badge_without_any_output() {
+        let mut part = tool_part(
+            "js1",
+            "computer",
+            serde_json::json!({
+                "title": "Compute 6 × 7",
+                "app": "Calculator",
+                "actions": [{ "tool": "get_state" }, { "tool": "click", "n": 4 }]
+            }),
+            "",
+            false,
+        );
+        if let MessagePart::Tool { output, .. } = &mut part {
+            *output = None;
+        }
+        let rows = rows_for_entry(
+            &entry(MessageRole::Assistant, vec![part]),
+            false,
+            false,
+            &mut parse,
+        );
+        assert_eq!(group_summaries(&rows), ["Used Calculator · 1 action"]);
+    }
 
     #[test]
     fn computer_calls_fold_into_one_used_app_group() {
