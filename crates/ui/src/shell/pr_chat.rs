@@ -1946,7 +1946,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn the_mini_chat_mints_an_ask_chat_with_the_context_and_stays_out_of_the_sidebar(
+    fn the_mini_chat_mints_a_chat_with_the_context_and_stays_out_of_the_sidebar(
         cx: &mut TestAppContext,
     ) {
         let (runtime, shell, cx, mut wire, _dir) = setup(cx);
@@ -2051,14 +2051,14 @@ mod tests {
         assert_eq!(create["spaceId"], "s1");
         assert_eq!(create["cwd"], "/wt/x");
         assert_eq!(create["createdByChatId"], serde_json::Value::Null);
-        assert_eq!(create["config"]["permissionMode"], "ask");
+        assert_eq!(create["config"]["permissionMode"], "full");
         let frames = wire.serve(&runtime, cx, |method, _| {
             (method == methods::QUEUE_COMMAND).then(|| serde_json::json!({}))
         });
         let run = calls(&frames, methods::QUEUE_COMMAND);
         assert_eq!(run.len(), 1, "{frames:?}");
         let request = &run[0].params["command"]["request"];
-        assert_eq!(request["permissionMode"], "ask");
+        assert_eq!(request["permissionMode"], "full");
         assert_eq!(request["cwd"], "/wt/x");
         let prompt = request["prompt"].as_str().unwrap();
         assert!(
@@ -2211,34 +2211,68 @@ mod tests {
     }
 
     #[gpui::test]
-    fn the_mini_chat_refuses_agents_that_do_not_ask_before_running_commands(
-        cx: &mut TestAppContext,
-    ) {
+    fn the_mini_chat_sends_with_any_agent_and_the_picked_permission_mode(cx: &mut TestAppContext) {
         let (runtime, shell, cx, mut wire, _dir) = setup(cx);
         let _guard = runtime.enter();
         let (chat_id, composer, side_state) = open_pr_chat(&runtime, &shell, cx, &mut wire);
-        for harness in ["pi", "opencode", "cursor", "grok"] {
-            let config: zeron_proto::ChatConfig = serde_json::from_value(serde_json::json!({
-                "harness": harness, "sandbox": "workspace-write",
-            }))
-            .unwrap();
-            side_state.update(cx, |state, _| state.apply_chat_config(&chat_id, config));
-            composer.update(cx, |composer, cx| {
-                composer.send_prompt("Approve and merge it".into(), cx)
-            });
-            let frames = wire.serve(&runtime, cx, |_, _| Some(serde_json::json!({})));
+        let config: zeron_proto::ChatConfig = serde_json::from_value(serde_json::json!({
+            "harness": "pi", "sandbox": "workspace-write", "permissionMode": "auto",
+        }))
+        .unwrap();
+        side_state.update(cx, |state, _| state.apply_chat_config(&chat_id, config));
+        composer.update(cx, |composer, cx| {
+            composer.send_prompt("Approve and merge it".into(), cx)
+        });
+        let frames = wire.serve(&runtime, cx, |method, params| {
+            (method == methods::MUTATE && params["op"] == "createChat")
+                .then(|| serde_json::json!({}))
+        });
+        let create = calls(&frames, methods::MUTATE);
+        assert_eq!(create.len(), 1, "{frames:?}");
+        assert_eq!(create[0].params["config"]["harness"], "pi");
+        assert_eq!(create[0].params["config"]["permissionMode"], "auto");
+        assert!(composer.read_with(cx, |composer, _| composer.failure().is_none()));
+        let frames = wire.serve(&runtime, cx, |method, _| {
+            (method == methods::QUEUE_COMMAND).then(|| serde_json::json!({}))
+        });
+        let run = calls(&frames, methods::QUEUE_COMMAND);
+        assert_eq!(run.len(), 1, "{frames:?}");
+        assert_eq!(
+            run[0].params["command"]["request"]["permissionMode"],
+            "auto"
+        );
+    }
+
+    #[gpui::test]
+    fn the_mini_chat_composer_shows_the_footer_and_permission_chip(cx: &mut TestAppContext) {
+        let (runtime, shell, cx, mut wire, _dir) = setup(cx);
+        let _guard = runtime.enter();
+        let (_, composer, _) = open_pr_chat(&runtime, &shell, cx, &mut wire);
+        let panel = cx.debug_bounds("pr-chat-floating").expect("panel drawn");
+        for selector in ["composer-footer", "picker-permission"] {
+            let bounds = cx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} drawn"));
             assert!(
-                calls(&frames, methods::MUTATE).is_empty()
-                    && calls(&frames, methods::QUEUE_COMMAND).is_empty(),
-                "{harness}: {frames:?}"
-            );
-            assert!(
-                composer.read_with(cx, |composer, _| composer
-                    .failure()
-                    .is_some_and(|failure| failure.contains("can't ask"))),
-                "{harness}"
+                panel.contains(&bounds.origin) && panel.contains(&bounds.bottom_right()),
+                "{selector} {bounds:?} inside {panel:?}"
             );
         }
+        let permission = cx.debug_bounds("picker-permission").unwrap();
+        let footer = cx.debug_bounds("composer-footer").unwrap();
+        assert!(
+            (permission.center().y - footer.center().y).abs() < px(4.0),
+            "one footer row: {permission:?} {footer:?}"
+        );
+        assert_eq!(
+            cx.update(|_, cx| composer
+                .read(cx)
+                .pickers()
+                .read(cx)
+                .effective_permission_mode(cx)),
+            zeron_proto::PermissionMode::Full,
+            "a new PR chat starts in the same mode as any new chat"
+        );
     }
 
     #[gpui::test]
@@ -2556,7 +2590,7 @@ mod tests {
         assert_eq!(run.len(), 1, "{frames:?}");
         let request = &run[0].params["command"]["request"];
         assert_eq!(request["prompt"], "What changed since we last talked?");
-        assert_eq!(request["permissionMode"], "ask");
+        assert_eq!(request["permissionMode"], "full");
         shell.read_with(cx, |shell, _| {
             assert!(shell.pr_chat.as_ref().unwrap().earlier.is_none())
         });

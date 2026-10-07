@@ -7684,8 +7684,6 @@ impl Composer {
     pub(crate) fn set_pr_chat(&mut self, placeholder: &'static str, cx: &mut Context<Self>) {
         self.side_chat = true;
         self.pr_chat = true;
-        self.pickers
-            .update(cx, |pickers, cx| pickers.set_asks_only(cx));
         self.idle_placeholder = placeholder.into();
         if self.wizard.is_none() {
             self.input
@@ -11037,23 +11035,11 @@ impl Composer {
             resolved.model_options = config.model_options;
             resolved.permission_mode = config.permission_mode;
         }
-        if self.pr_chat {
-            let Some(harness) = resolved.harness else {
-                self.failure = Some("Pick an agent before sending.".into());
-                self.failure_key = self.bound_chat_id(cx);
-                cx.notify();
-                return;
-            };
-            if !zeron_harness::asks_before_running_tools(harness) {
-                self.failure = Some(
-                    "This agent can't ask before running commands. Pick Claude Code or Codex for this chat."
-                        .into(),
-                );
-                self.failure_key = self.bound_chat_id(cx);
-                cx.notify();
-                return;
-            }
-            resolved.permission_mode = zeron_proto::PermissionMode::Ask;
+        if self.pr_chat && resolved.harness.is_none() {
+            self.failure = Some("Pick an agent before sending.".into());
+            self.failure_key = self.bound_chat_id(cx);
+            cx.notify();
+            return;
         }
         let existing_cwd = self.bound_chat_row(cx).and_then(|c| c.cwd.clone());
         // The PROJECT fixes the new chat's device + base folder — sessions are
@@ -14107,17 +14093,18 @@ impl Render for Composer {
             // The pickers carry the composer's chat binding, so a bound
             // composer's footer reads and writes ITS chat (split partner,
             // sidechat), never the selection's.
-            let footer = (session_chrome_opacity > 0.0 && !self.side_chat).then(|| {
+            let full_footer = !self.side_chat || self.pr_chat;
+            let footer = (session_chrome_opacity > 0.0 && full_footer).then(|| {
                 self.pickers
                     .update(cx, |pickers, cx| pickers.render_footer(cx))
             });
             let sidechat_pill = self.render_sidechat_pill(&theme, cx);
-            let permission_chip = (session_chrome_opacity > 0.0 && !self.pr_chat).then(|| {
+            let permission_chip = (session_chrome_opacity > 0.0).then(|| {
                 self.pickers
                     .update(cx, |pickers, cx| pickers.render_permission_chip(cx))
             });
             if session_chrome_opacity > 0.0 {
-                let harness = (!self.side_chat)
+                let harness = full_footer
                     .then(|| self.pickers.read(cx).resolved(cx).harness)
                     .flatten();
                 let target = self
