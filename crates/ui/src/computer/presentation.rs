@@ -769,10 +769,15 @@ pub struct ComputerJsAction {
     pub tool: &'static str,
     pub app: Option<String>,
     pub detail: Option<String>,
+    pub count: usize,
 }
 
 pub fn computer_js_actions(output: &str) -> Vec<ComputerJsAction> {
-    let Ok(Value::Object(payload)) = serde_json::from_str::<Value>(output.trim()) else {
+    let first_line = output
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default();
+    let Ok(Value::Object(payload)) = serde_json::from_str::<Value>(first_line.trim()) else {
         return Vec::new();
     };
     let Some(actions) = payload.get("actions").and_then(Value::as_array) else {
@@ -797,6 +802,10 @@ pub fn computer_js_actions(output: &str) -> Vec<ComputerJsAction> {
                 tool,
                 app: field("app"),
                 detail: field("detail"),
+                count: action
+                    .get("n")
+                    .and_then(Value::as_u64)
+                    .map_or(1, |n| n.max(1) as usize),
             })
         })
         .collect()
@@ -823,7 +832,12 @@ pub fn computer_js_action_label(action: &ComputerJsAction, done: bool) -> String
             }
         }
     }
-    computer_action_label(action.tool, Some(&args), action.app.as_deref(), done)
+    let label = computer_action_label(action.tool, Some(&args), action.app.as_deref(), done);
+    if action.count > 1 {
+        format!("{label} ×{}", action.count)
+    } else {
+        label
+    }
 }
 
 const TEXT_OUTPUT_TOOLS: [&str; 6] = [
@@ -1285,7 +1299,7 @@ mod tests {
         let output = json!({
             "result": "42",
             "actions": [
-                { "tool": "click", "app": "Calculator" },
+                { "tool": "click", "app": "Calculator", "n": 3 },
                 { "tool": "computer_type_text", "app": "Calculator", "detail": "12+30" },
                 { "tool": "scroll", "app": "Safari", "detail": "down" },
                 { "tool": "set_value", "detail": "Ada" },
@@ -1294,7 +1308,8 @@ mod tests {
                 "not an object"
             ]
         })
-        .to_string();
+        .to_string()
+            + "\nWindow: \"Calculator\", App: Calculator.";
         let actions = computer_js_actions(&output);
         assert_eq!(
             actions,
@@ -1303,21 +1318,25 @@ mod tests {
                     tool: "computer_click",
                     app: Some("Calculator".into()),
                     detail: None,
+                    count: 3,
                 },
                 ComputerJsAction {
                     tool: "computer_type_text",
                     app: Some("Calculator".into()),
                     detail: Some("12+30".into()),
+                    count: 1,
                 },
                 ComputerJsAction {
                     tool: "computer_scroll",
                     app: Some("Safari".into()),
                     detail: Some("down".into()),
+                    count: 1,
                 },
                 ComputerJsAction {
                     tool: "computer_set_value",
                     app: None,
                     detail: Some("Ada".into()),
+                    count: 1,
                 },
             ]
         );
@@ -1327,7 +1346,7 @@ mod tests {
                 .map(|action| computer_js_action_label(action, true))
                 .collect::<Vec<_>>(),
             [
-                "Clicked in Calculator",
+                "Clicked in Calculator ×3",
                 "Typed text “12+30” in Calculator",
                 "Scrolled down in Safari",
                 "Set to “Ada” in App",

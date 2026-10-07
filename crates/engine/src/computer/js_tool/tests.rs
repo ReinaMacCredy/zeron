@@ -304,12 +304,12 @@ async fn a_mid_line_redeclaration_after_a_semicolon_is_reassigned_too() {
 }
 
 #[tokio::test]
-async fn a_successful_result_carries_its_text_and_actions_without_structured_content() {
+async fn a_successful_result_leads_with_a_short_action_summary_and_has_no_structured_content() {
     let host = Arc::new(FakeHost::default());
     let result = exec(
         "js-l",
         &host,
-        "var c = await cua.getApp(\"Calculator\"); await c.click(3);",
+        "var c = await cua.getApp(\"Calculator\"); for (const i of [3, 4, 5]) await c.click(i); await c.typeText(\"hello world\");",
     )
     .await
     .into_result();
@@ -323,9 +323,28 @@ async fn a_successful_result_carries_its_text_and_actions_without_structured_con
         })
         .collect();
     assert!(text.iter().any(|t| t.contains("7 text Value: 42")));
+    assert!(text[0].chars().count() <= 160, "{}", text[0]);
     assert_eq!(
-        serde_json::from_str::<Value>(text.last().unwrap()).unwrap(),
-        json!({ "actions": [{ "tool": "click", "app": "Calculator" }] })
+        serde_json::from_str::<Value>(text[0]).unwrap(),
+        json!({ "appName": "Calculator", "actions": [
+            { "tool": "click", "app": "Calculator", "n": 3 },
+            { "tool": "type_text", "app": "Calculator", "detail": "hello world" }
+        ] })
+    );
+}
+
+#[test]
+fn a_long_action_list_stays_within_the_doc_summary_limit() {
+    let actions: Vec<Value> = (0..40)
+        .map(|n| json!({ "tool": "type_text", "app": "TextEdit", "detail": format!("line {n} of a long letter") }))
+        .collect();
+    let summary = super::action_summary(&actions).unwrap();
+    assert!(summary.chars().count() <= 160, "{summary}");
+    assert!(
+        serde_json::from_str::<Value>(&summary).unwrap()["more"]
+            .as_u64()
+            .unwrap()
+            > 0
     );
 }
 

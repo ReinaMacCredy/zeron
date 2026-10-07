@@ -62,10 +62,8 @@ impl JsOutcome {
                 text: error.clone(),
             });
         }
-        if !self.actions.is_empty() {
-            content.push(McpContent::Text {
-                text: json!({ "actions": self.actions }).to_string(),
-            });
+        if let Some(summary) = action_summary(&self.actions) {
+            content.insert(0, McpContent::Text { text: summary });
         }
         if content.is_empty() {
             content.push(McpContent::Text {
@@ -78,6 +76,46 @@ impl JsOutcome {
             is_error: self.error.is_some(),
         }
     }
+}
+
+const SUMMARY_MAX_CHARS: usize = 160;
+
+fn action_summary(actions: &[Value]) -> Option<String> {
+    let first_app = actions
+        .iter()
+        .find_map(|action| action.get("app").and_then(Value::as_str))?;
+    let mut runs: Vec<(Value, usize)> = Vec::new();
+    for action in actions {
+        let mut key = json!({ "tool": action.get("tool"), "app": action.get("app") });
+        if let Some(detail) = action.get("detail").and_then(Value::as_str) {
+            key["detail"] = json!(detail.chars().take(24).collect::<String>());
+        }
+        match runs.last_mut() {
+            Some((last, count)) if *last == key => *count += 1,
+            _ => runs.push((key, 1)),
+        }
+    }
+    let mut listed: Vec<Value> = Vec::new();
+    for (index, (key, count)) in runs.iter().enumerate() {
+        let mut entry = key.clone();
+        if *count > 1 {
+            entry["n"] = json!(count);
+        }
+        let mut candidate = listed.clone();
+        candidate.push(entry);
+        let more = runs.len() - index - 1;
+        let mut line = json!({ "appName": first_app, "actions": candidate });
+        if more > 0 {
+            line["more"] = json!(more);
+        }
+        if line.to_string().chars().count() > SUMMARY_MAX_CHARS && !listed.is_empty() {
+            let mut line = json!({ "appName": first_app, "actions": listed });
+            line["more"] = json!(runs.len() - index);
+            return Some(line.to_string());
+        }
+        listed = candidate;
+    }
+    Some(json!({ "appName": first_app, "actions": listed }).to_string())
 }
 
 struct Job {
