@@ -16,6 +16,7 @@ pub mod motion;
 pub mod preview;
 pub mod sidebar_pins;
 pub mod source_control;
+pub mod tools;
 pub mod view;
 pub mod workspace;
 

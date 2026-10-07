@@ -970,13 +970,16 @@ impl Shell {
         popover_mode: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let glyph_color = if theme.appearance.is_dark() {
+            gpui::white()
+        } else {
+            theme.text
+        };
         let rail_icon = |key: String, glyph: &'static str, tooltip: SharedString| {
-            let group = SharedString::from(key.clone());
             let selector = key.clone();
             div()
                 .id(SharedString::from(key))
                 .debug_selector(move || selector.clone())
-                .group(group.clone())
                 .size(px(24.0))
                 .flex()
                 .flex_none()
@@ -996,14 +999,7 @@ impl Shell {
                     })
                     .tooltip_show_delay(Duration::from_millis(260))
                 })
-                .child(
-                    icon(glyph)
-                        .size(px(14.0))
-                        .text_color(theme.text_muted)
-                        .when(interactive, |el| {
-                            el.group_hover(group, |s| s.text_color(theme.text))
-                        }),
-                )
+                .child(icon(glyph).size(px(16.0)).text_color(glyph_color))
         };
         let mut pill = div()
             .id("sidecar-pill")
@@ -1013,9 +1009,6 @@ impl Shell {
             .w(px(32.0))
             .p(px(4.0))
             .rounded(px(10.0))
-            .bg(theme.surface_raised.opacity(0.84))
-            .border_1()
-            .border_color(crate::theme::hairline(0.08))
             .max_h(px((self.viewport_height - SIDECAR_TOP - 16.0).max(64.0)))
             .overflow_y_scroll();
         for (ix, section) in sections.iter().enumerate() {

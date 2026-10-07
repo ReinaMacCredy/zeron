@@ -866,6 +866,19 @@ impl EngineRpc {
         self
     }
 
+    fn tool_settings_state(&self) -> zeron_proto::tools::ToolSettingsState {
+        let devices_off = !self
+            .device_hub
+            .as_ref()
+            .is_some_and(|hub| hub.agent_access_enabled());
+        let also_off = if devices_off {
+            vec![zeron_proto::tools::ToolGroup::Devices]
+        } else {
+            Vec::new()
+        };
+        self.registry.tool_settings().state(&also_off)
+    }
+
     fn device_hub(&self) -> Result<&std::sync::Arc<crate::device_hub::DeviceHub>, RpcError> {
         self.device_hub
             .as_ref()
@@ -1793,6 +1806,8 @@ fn forwardable(method: &str) -> bool {
             | methods::SET_TITLE_SETTINGS
             | methods::GET_DELEGATION_SETTINGS
             | methods::SET_DELEGATION_SETTINGS
+            | methods::GET_TOOL_SETTINGS
+            | methods::SET_TOOL_SETTINGS
             | methods::SET_HARNESS_ENABLED
             | methods::LIST_MODELS
             | methods::LIST_SKILLS
@@ -2233,6 +2248,12 @@ impl RpcService for EngineRpc {
                     .set_delegation_settings(p)
                     .map_err(RpcError::Failed)?;
                 RpcReply::value(&self.registry.delegation_settings())
+            }
+            methods::GET_TOOL_SETTINGS => RpcReply::value(&self.tool_settings_state()),
+            methods::SET_TOOL_SETTINGS => {
+                let p: zeron_proto::tools::ToolSettings = parse_params(params)?;
+                self.registry.set_tool_settings(p);
+                RpcReply::value(&self.tool_settings_state())
             }
             methods::SET_HARNESS_ENABLED => {
                 let p: SetHarnessEnabledParams = parse_params(params)?;

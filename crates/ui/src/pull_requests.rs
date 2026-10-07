@@ -47,6 +47,8 @@ const CONTAINER_MAX_WIDTH: f32 = 1152.0;
 const CONTAINER_PAD_X: f32 = 24.0;
 const GHOST_ROWS: usize = 7;
 const NARROW_TOPBAR_WIDTH: f32 = 1000.0;
+const COMPACT_WIDTH: f32 = 760.0;
+const TOPBAR_HEIGHT: f32 = 44.0;
 const ROW_HEIGHT_HINT: f32 = 74.0;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -390,8 +392,14 @@ pub(crate) fn link_targets(state: &AppState) -> Vec<Option<String>> {
     .collect()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageMode {
+    Page,
+    Surface(PageTab),
+}
+
 pub enum PullRequestsEvent {
-    Close,
+    OpenInPage(PageTab),
     OpenChat(ChatHandoff),
     ToggleChat,
     OpenSettings(crate::shell::SettingsSection),
@@ -440,12 +448,18 @@ pub struct PullRequestsPage {
     git_events: Vec<Subscription>,
     open_when_listed: Option<zeron_proto::CreatedChangeRequest>,
     chat_open: bool,
+    mode: PageMode,
+    layout_width: Option<f32>,
 }
 
 impl EventEmitter<PullRequestsEvent> for PullRequestsPage {}
 
 impl PullRequestsPage {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        Self::with_mode(state, PageMode::Page, cx)
+    }
+
+    pub fn with_mode(state: Entity<AppState>, mode: PageMode, cx: &mut Context<Self>) -> Self {
         let search = cx.new(|cx| {
             ComposerInput::with_context("Search pull requests, or label:bug", "PaletteSearch", cx)
         });
@@ -462,7 +476,10 @@ impl PullRequestsPage {
                 cx.notify();
             }
         });
-        let prefs = crate::settings::current(cx).pull_requests_list.clone();
+        let mut prefs = crate::settings::current(cx).pull_requests_list.clone();
+        if let PageMode::Surface(tab) = mode {
+            prefs.tab = tab;
+        }
         let listed_repository = prefs.repository.clone();
         let list_state = gpui::ListState::new(0, gpui::ListAlignment::Top, px(240.0));
         list_state.splice_focusable(
@@ -512,6 +529,8 @@ impl PullRequestsPage {
             git_events: Vec::new(),
             open_when_listed: None,
             chat_open: false,
+            mode,
+            layout_width: None,
         };
         if let Some(listing) = paging::snapshot_dir(cx).and_then(|dir| paging::load_list(&dir)) {
             page.listing = Loadable::Ready(listing);
@@ -727,52 +746,46 @@ impl PullRequestsPage {
         self.query(cx).trim() != self.sent_query || (self.refreshing && !self.sent_query.is_empty())
     }
 
+    pub fn mode(&self) -> PageMode {
+        self.mode
+    }
+
+    pub fn set_layout_width(&mut self, width: f32) {
+        self.layout_width = Some(width);
+    }
+
+    fn layout_width(&self, window: &Window) -> f32 {
+        self.layout_width
+            .unwrap_or_else(|| f32::from(window.viewport_size().width))
+    }
+
     fn render_topbar(&self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let spacer = crate::shell::titlebar_spacer_width(
-            cfg!(target_os = "macos"),
-            window.is_fullscreen(),
-            0.0,
-        );
-        let condensed = self.prefs.tab == PageTab::PullRequests && self.list_condensed();
-        let narrow = f32::from(window.viewport_size().width) < NARROW_TOPBAR_WIDTH;
+        let width = self.layout_width(window);
+        let surface = matches!(self.mode, PageMode::Surface(_));
+        let condensed =
+            !surface && self.prefs.tab == PageTab::PullRequests && self.list_condensed();
+        let narrow = width < NARROW_TOPBAR_WIDTH;
+        let compact = width < COMPACT_WIDTH;
         div()
-            .h(px(Theme::TITLEBAR_HEIGHT))
-            .pt(px(Theme::TITLEBAR_TOP_PAD))
+            .h(px(if surface {
+                crate::surface_chrome::HEADER_HEIGHT
+            } else {
+                TOPBAR_HEIGHT
+            }))
             .flex_none()
             .flex()
             .items_center()
-            .gap(px(12.0))
-            .child(div().w(px(spacer)).flex_none())
-            .child(
-                div()
-                    .id("pull-requests-back")
-                    .debug_selector(|| "pull-requests-back".into())
-                    .role(gpui::Role::Button)
-                    .aria_label("Back")
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .h(px(28.0))
-                    .px(px(8.0))
-                    .rounded(px(8.0))
-                    .text_size(px(13.0))
-                    .text_color(theme.text_muted)
-                    .cursor_pointer()
-                    .hover(|style| style.bg(theme.ink(0.06)).text_color(theme.text))
-                    .on_click(cx.listener(|_, _, _, cx| cx.emit(PullRequestsEvent::Close)))
-                    .child(
-                        icon(icons::LUCIDE_ARROW_LEFT)
-                            .size(px(14.0))
-                            .text_color(theme.text_muted),
-                    )
-                    .when(!narrow, |el| el.child("Back")),
-            )
-            .child(self.render_page_tabs(condensed || narrow, theme, cx))
+            .when(surface, |el| el.border_b_1().border_color(theme.border))
+            .gap(px(if compact { 6.0 } else { 12.0 }))
+            .px(px(if surface { 8.0 } else { 12.0 }))
+            .when(!surface, |el| {
+                el.child(self.render_page_tabs(condensed || narrow, compact, theme, cx))
+            })
             .map(|el| {
                 if self.prefs.tab == PageTab::Git {
                     el.child(self.render_git_project_control(theme, cx))
                         .children(self.render_git_checkout_control(theme, cx))
-                        .children(self.render_git_sync_controls(theme, cx))
+                        .children(self.render_git_sync_controls(compact, theme, cx))
                 } else {
                     el.child(self.render_project_control(theme, cx))
                 }
@@ -797,7 +810,7 @@ impl PullRequestsPage {
                         .hover(|style| style.bg(theme.ink(0.06)).text_color(theme.text))
                         .child(label)
                         .child(
-                            icon(icons::LUCIDE_CHEVRON_DOWN)
+                            icon(icons::ALT_ARROW_DOWN)
                                 .size(px(12.0))
                                 .text_color(theme.text_muted.opacity(0.7)),
                         )
@@ -838,19 +851,46 @@ impl PullRequestsPage {
                         .hover(|style| style.bg(theme.ink(0.06)))
                         .on_click(cx.listener(|page, _, window, cx| page.focus_search(window, cx)))
                         .child(
-                            icon(icons::LUCIDE_SEARCH)
+                            icon(icons::MAGNIFER)
                                 .size(px(16.0))
                                 .text_color(theme.text_muted),
                         ),
                 )
             })
-            .child(self.render_chat_button(theme, cx))
+            .map(|el| {
+                if surface {
+                    el.child(
+                        top_chip("pull-requests-open-page", "Open as page", theme)
+                            .debug_selector(|| "pull-requests-open-page".into())
+                            .w(px(28.0))
+                            .px_0()
+                            .justify_center()
+                            .tooltip(crate::settings::widgets::text_tooltip("Open as page"))
+                            .on_click(cx.listener(|page, _, _, cx| {
+                                cx.emit(PullRequestsEvent::OpenInPage(page.prefs.tab))
+                            }))
+                            .child(
+                                icon(icons::EXPAND_ARROWS)
+                                    .size(px(14.0))
+                                    .text_color(theme.text_muted),
+                            ),
+                    )
+                } else {
+                    el.child(self.render_chat_button(compact, theme, cx))
+                }
+            })
             .into_any_element()
     }
 
     fn list_condensed(&self) -> bool {
         let top = self.list_state.logical_scroll_top();
         top.item_ix > 0 || top.offset_in_item > px(64.0)
+    }
+
+    pub fn show_page_tab(&mut self, tab: PageTab, cx: &mut Context<Self>) {
+        if self.mode == PageMode::Page {
+            self.set_tab(tab, cx);
+        }
     }
 
     fn set_tab(&mut self, tab: PageTab, cx: &mut Context<Self>) {
@@ -875,7 +915,13 @@ impl PullRequestsPage {
         .filter(|count| *count > 0)
     }
 
-    fn render_page_tabs(&self, compact: bool, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_page_tabs(
+        &self,
+        compact: bool,
+        tight: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         div()
             .id("pull-requests-page-tabs")
             .role(gpui::Role::TabList)
@@ -888,10 +934,15 @@ impl PullRequestsPage {
             .border_color(theme.hairline(0.09))
             .children(
                 [
-                    (PageTab::PullRequests, "Pull Requests"),
-                    (PageTab::Git, "Git"),
+                    (
+                        PageTab::PullRequests,
+                        "Pull Requests",
+                        if tight { "PRs" } else { "Pull Requests" },
+                        icons::PULL_REQUEST,
+                    ),
+                    (PageTab::Git, "Git", "Git", icons::FORK),
                 ]
-                .map(|(tab, label)| {
+                .map(|(tab, label, text, glyph)| {
                     let active = self.prefs.tab == tab;
                     let selector = format!("pull-requests-tab-{tab:?}");
                     let count =
@@ -912,7 +963,7 @@ impl PullRequestsPage {
                         .role(gpui::Role::Tab)
                         .aria_label(label)
                         .h(px(24.0))
-                        .px(px(12.0))
+                        .px(px(if tight { 8.0 } else { 10.0 }))
                         .flex()
                         .items_center()
                         .gap(px(6.0))
@@ -926,7 +977,13 @@ impl PullRequestsPage {
                                 .hover(|style| style.text_color(theme.text))
                                 .on_click(cx.listener(move |page, _, _, cx| page.set_tab(tab, cx)))
                         })
-                        .child(label)
+                        .child(
+                            icon(glyph)
+                                .size(px(14.0))
+                                .flex_none()
+                                .text_color(if active { theme.text } else { theme.text_muted }),
+                        )
+                        .child(text)
                         .children(count)
                 }),
             )
@@ -962,9 +1019,11 @@ impl PullRequestsPage {
             kind,
             top_chip(id, "Project", theme)
                 .debug_selector(move || id.into())
+                .flex_shrink(1.0)
+                .min_w_0()
                 .max_w(px(240.0))
                 .child(
-                    icon(icons::LUCIDE_FOLDER)
+                    icon(icons::FOLDER)
                         .size(px(14.0))
                         .flex_none()
                         .text_color(if picked { theme.text } else { theme.text_muted }),
@@ -978,7 +1037,7 @@ impl PullRequestsPage {
                         .child(label),
                 )
                 .child(
-                    icon(icons::LUCIDE_CHEVRON_DOWN)
+                    icon(icons::ALT_ARROW_DOWN)
                         .size(px(12.0))
                         .flex_none()
                         .text_color(theme.text_muted.opacity(0.7)),
@@ -2036,14 +2095,29 @@ impl Render for PullRequestsPage {
         }
         self.note_focus(window, cx);
         let theme = Theme::of(cx).clone();
-        let viewport = f32::from(window.viewport_size().width);
+        let viewport = self.layout_width(window);
+        let compact = viewport < COMPACT_WIDTH;
         let on_list = self.prefs.tab == PageTab::PullRequests;
-        let panel_width =
-            (on_list && self.active.is_some()).then(|| self.panel_width(viewport, cx));
+        let panel_width = (on_list && self.active.is_some()).then(|| {
+            if compact {
+                viewport
+            } else {
+                self.panel_width(viewport, cx)
+            }
+        });
         let git_view = (!on_list).then(|| self.sync_git_tab(cx));
         let topbar = self.render_topbar(&theme, window, cx);
+        let compact_detail = compact && panel_width.is_some();
         let body: AnyElement = if let Some(git_view) = git_view {
+            git_view.update(cx, |tab, cx| tab.set_compact(compact, cx));
             div().flex_1().min_h_0().child(git_view).into_any_element()
+        } else if compact_detail {
+            div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .child(self.render_panel(&theme, viewport, window, cx))
+                .into_any_element()
         } else {
             let list_width = viewport - panel_width.map_or(0.0, |width| width + 1.0);
             let container = list_width.min(CONTAINER_MAX_WIDTH);
@@ -2073,7 +2147,7 @@ impl Render for PullRequestsPage {
             .flex_col()
             .child(topbar)
             .child(body);
-        let panel = panel_width.map(|width| {
+        let panel = panel_width.filter(|_| !compact_detail).map(|width| {
             let resizer = div()
                 .id("pull-requests-panel-resizer")
                 .w(px(1.0))
@@ -2298,7 +2372,7 @@ mod tests {
             cx.debug_bounds("pull-requests-tab-count-PullRequests")
                 .is_some()
         );
-        let wide_back = cx.debug_bounds("pull-requests-back").unwrap();
+        let wide_tab = cx.debug_bounds("pull-requests-tab-PullRequests").unwrap();
         scroll_step(cx, -600.0);
         cx.run_until_parked();
         page.read_with(cx, |page, _| assert!(page.list_condensed()));
@@ -2310,11 +2384,6 @@ mod tests {
 
         cx.simulate_resize(gpui::size(px(900.0), px(700.0)));
         cx.run_until_parked();
-        let back = cx.debug_bounds("pull-requests-back").unwrap();
-        assert!(
-            back.size.width < wide_back.size.width,
-            "a narrow window keeps only the arrow: {back:?} {wide_back:?}"
-        );
         let chat = cx.debug_bounds("pull-requests-chat").unwrap();
         assert!(chat.size.width > px(40.0), "{chat:?}");
         assert!(chat.right() <= px(900.0), "{chat:?}");
@@ -2325,6 +2394,45 @@ mod tests {
             involvement.right() < chat.left(),
             "{involvement:?} {chat:?}"
         );
+
+        cx.simulate_resize(gpui::size(px(700.0), px(700.0)));
+        cx.run_until_parked();
+        let tab = cx.debug_bounds("pull-requests-tab-PullRequests").unwrap();
+        assert!(
+            tab.size.width < wide_tab.size.width,
+            "a compact bar shortens the tab label: {tab:?} {wide_tab:?}"
+        );
+        let chat = cx.debug_bounds("pull-requests-chat").unwrap();
+        assert!(chat.size.width <= px(28.0), "{chat:?}");
+    }
+
+    #[gpui::test]
+    fn a_narrow_host_shows_the_open_pull_request_in_place_of_the_list(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (page, cx, _dir) = scroll_fixture(cx, 5);
+        let number = page.update(cx, |page, cx| {
+            let item = page.listing.ready().unwrap().items[0].clone();
+            page.open_pull_request(&item, cx);
+            item.number
+        });
+        cx.run_until_parked();
+        let selector: &'static str =
+            Box::leak(format!("pull-request-tab-{number}").into_boxed_str());
+        let wide = cx.debug_bounds(selector).unwrap();
+        assert!(wide.left() > px(400.0), "{wide:?}");
+
+        page.update(cx, |page, cx| {
+            page.set_layout_width(440.0);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let narrow = cx.debug_bounds(selector).unwrap();
+        assert!(
+            narrow.left() < px(40.0),
+            "the detail takes the whole host: {narrow:?}"
+        );
+        assert!(cx.debug_bounds("pull-requests-project").is_some());
     }
 
     #[gpui::test]

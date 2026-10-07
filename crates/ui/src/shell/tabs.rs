@@ -1164,7 +1164,11 @@ impl Shell {
                 })
                 .collect()
         };
-        let selected = self.state.read(cx).focused_id();
+        let selected = self
+            .state
+            .read(cx)
+            .focused_id()
+            .filter(|_| !matches!(self.route, Route::PullRequests));
         let split = self.split_chat_id().map(str::to_string);
         // Keep the selected tab visible: on selection change, scroll it into
         // view (minimal movement — a new session's tab materializes at the far
@@ -1434,6 +1438,7 @@ impl Shell {
         // The canvas shows no tabs-adjacent chrome beyond the strip itself;
         // the bar keeps its height, drag region, and buttons.
         let on_canvas = self.state.read(cx).selected_chat.is_none();
+        let pr_route = matches!(self.route, Route::PullRequests);
 
         // The new-session `+` renders in the WINDOW-CONTROL CLUSTER whenever a
         // session is selected (`render_titlebar_cluster`) — this row budgets
@@ -1452,9 +1457,8 @@ impl Shell {
         // entity; expand + close shell-side). It lives up here because the
         // titlebar overlay owns this band's hit-testing: controls mounted in
         // the pane itself would sit under the drag region and never see a
-        // click. Closed, it is just the stable open/close toggle. Hidden on
-        // the new-session canvas (user request) — nothing to diff yet.
-        let right_pane_open = !on_canvas && self.right_pane_open(cx);
+        // click. Closed, it is just the stable open/close toggle.
+        let right_pane_open = self.right_pane_open(cx);
         let takeover = right_pane_open && self.right_pane_expanded;
         // In takeover the tabs hide and the strip owns the whole band, so
         // the row's left inset pulls back to the sidebar seam — the tabs
@@ -1497,18 +1501,14 @@ impl Shell {
         // The trailing strip always carries the explorer slot with its two
         // toggles; the surface tabs reveal to their left only while the
         // surface host is open.
-        let trailing_width = if on_canvas {
-            0.0
-        } else {
+        let trailing_width = {
             let surface = if right_pane_open { surface_reveal } else { 0.0 };
             surface + widths.files_controls
         };
         let available_titlebar_width =
             (self.viewport_width - row_left - right_pad - trailing_width - row_gap * 3.0).max(0.0);
 
-        let trailing: Option<gpui::AnyElement> = if on_canvas {
-            None
-        } else {
+        let trailing: Option<gpui::AnyElement> = {
             let mut controls = div()
                 .id("right-titlebar-controls")
                 .flex_none()
@@ -1593,22 +1593,24 @@ impl Shell {
                             // second one on the slot stacked on the same
                             // pixels and read lighter than the seam beneath
                             // it (user report).
-                            .child(
-                                header_icon_button(
-                                    "toggle-files-panel",
-                                    icons::FILE_TREE,
-                                    files_panel_label,
-                                    &theme,
-                                    cx.listener(|this, _, window, cx| {
-                                        this.toggle_files_panel(window, cx)
+                            .when(!on_canvas, |slot| {
+                                slot.child(
+                                    header_icon_button(
+                                        "toggle-files-panel",
+                                        icons::FILE_TREE,
+                                        files_panel_label,
+                                        &theme,
+                                        cx.listener(|this, _, window, cx| {
+                                            this.toggle_files_panel(window, cx)
+                                        }),
+                                    )
+                                    .role(gpui::Role::Button)
+                                    .aria_label(files_panel_label)
+                                    .when(self.files_panel_open(cx), |button| {
+                                        button.bg(crate::theme::wash(0.09))
                                     }),
                                 )
-                                .role(gpui::Role::Button)
-                                .aria_label(files_panel_label)
-                                .when(self.files_panel_open(cx), |button| {
-                                    button.bg(crate::theme::wash(0.09))
-                                }),
-                            )
+                            })
                             .child(header_icon_button_with(
                                 "toggle-changes",
                                 icons::sidebar_glyph(
@@ -1633,12 +1635,15 @@ impl Shell {
         // In panel takeover the header strip spans the whole band — the tabs
         // would sit UNDER it (both flex_none, the row overflows and paint
         // order stacks them), so they hide for the duration.
+        let page_tab = (!takeover)
+            .then(|| self.render_pull_requests_strip_tab(&theme, cx))
+            .flatten();
         let session_tabs = (!takeover).then(|| self.render_session_tabs(cx));
         // The session's own side-chat controls: "+" mints a fresh side chat
         // under this session, fork copies its history into one. Same pair
         // the side-chat header carries, so a family reads the same from
         // either end.
-        let session_controls = (!takeover && !on_canvas).then(|| {
+        let session_controls = (!takeover && !on_canvas && !pr_route).then(|| {
             let busy = self.side_chat_creating;
             div()
                 .flex_none()
@@ -1676,7 +1681,7 @@ impl Shell {
         } else {
             available_titlebar_width
         };
-        let actions = (!takeover && !on_canvas)
+        let actions = (!takeover && !on_canvas && !pr_route)
             .then(|| {
                 self.render_project_actions_control(available_titlebar_width, viewport_height, cx)
             })
@@ -1690,6 +1695,7 @@ impl Shell {
             .gap(px(row_gap))
             .pl(px(row_left))
             .pr(px(right_pad))
+            .children(page_tab)
             .children(session_tabs)
             .child(div().flex_1())
             .children(session_controls)

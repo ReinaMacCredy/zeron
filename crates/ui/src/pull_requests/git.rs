@@ -207,6 +207,7 @@ pub struct GitTab {
     _settings_changes: Subscription,
     _message_edits: Subscription,
     _history_events: Subscription,
+    compact: bool,
 }
 
 impl EventEmitter<GitTabEvent> for GitTab {}
@@ -593,6 +594,7 @@ impl GitTab {
             _settings_changes: settings_changes,
             _message_edits: message_edits,
             _history_events: history_events,
+            compact: false,
         }
     }
 
@@ -623,6 +625,13 @@ impl GitTab {
         }
         self.checkout_path = path;
         self.retarget(cx);
+    }
+
+    pub(super) fn set_compact(&mut self, compact: bool, cx: &mut Context<Self>) {
+        if self.compact != compact {
+            self.compact = compact;
+            cx.notify();
+        }
     }
 
     pub(super) fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
@@ -2482,10 +2491,14 @@ impl GitTab {
         };
         div()
             .id("pull-requests-git-panel")
-            .w(px(PANEL_WIDTH))
             .flex_none()
-            .h_full()
-            .border_l_1()
+            .map(|el| {
+                if self.compact {
+                    el.w_full().h(gpui::relative(0.5)).border_b_1()
+                } else {
+                    el.w(px(PANEL_WIDTH)).h_full().border_l_1()
+                }
+            })
             .border_color(theme.hairline(0.07))
             .flex()
             .flex_col()
@@ -2568,9 +2581,14 @@ impl GitTab {
             .cursor_pointer()
             .hover(|style| style.text_color(theme.text).bg(theme.ink(0.06)))
             .when(self.stash_menu, |el| el.bg(theme.ink(0.06)))
+            .child(
+                icon(icons::ARCHIVE_UP_MINIMALISTIC)
+                    .size(px(13.0))
+                    .text_color(theme.text_muted),
+            )
             .child("Stash")
             .child(
-                icon(icons::LUCIDE_CHEVRON_DOWN)
+                icon(icons::ALT_ARROW_DOWN)
                     .size(px(12.0))
                     .text_color(theme.text_muted),
             )
@@ -2830,7 +2848,10 @@ impl GitTab {
                 )
                 .into_any_element()
         } else {
-            div().child("✦").into_any_element()
+            icon(icons::MAGIC_STICK_3)
+                .size(px(12.0))
+                .text_color(theme.text)
+                .into_any_element()
         };
         let write_button = div()
             .id("git-write-ai")
@@ -3555,10 +3576,13 @@ impl GitTab {
         div()
             .id("git-commit-detail")
             .debug_selector(|| "git-commit-detail".into())
-            .w(px(PANEL_WIDTH))
-            .flex_none()
-            .h_full()
-            .border_l_1()
+            .map(|el| {
+                if self.compact {
+                    el.size_full()
+                } else {
+                    el.w(px(PANEL_WIDTH)).flex_none().h_full().border_l_1()
+                }
+            })
             .border_color(theme.hairline(0.07))
             .flex()
             .flex_col()
@@ -4316,6 +4340,26 @@ impl Render for GitTab {
         let files = self.tree.as_ref().map(|tree| tree.files.len()).unwrap_or(0);
         self.history
             .update(cx, |history, cx| history.set_working_tree(Some(files), cx));
+        let history = div()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(div().flex_1().min_h_0().child(self.history.clone()));
+        if self.compact {
+            return div()
+                .id("pull-requests-git")
+                .role(gpui::Role::Group)
+                .aria_label("Git")
+                .size_full()
+                .flex()
+                .flex_col()
+                .map(|el| match &self.detail {
+                    Some(detail) => el.child(self.render_detail_panel(detail, &theme, cx)),
+                    None => el.child(self.render_panel(&theme, cx)).child(history),
+                });
+        }
         div()
             .id("pull-requests-git")
             .role(gpui::Role::Group)
@@ -4323,15 +4367,7 @@ impl Render for GitTab {
             .size_full()
             .flex()
             .flex_row()
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .flex()
-                    .flex_col()
-                    .child(div().flex_1().min_h_0().child(self.history.clone())),
-            )
+            .child(history)
             .child(match &self.detail {
                 Some(detail) => self.render_detail_panel(detail, &theme, cx),
                 None => self.render_panel(&theme, cx),
@@ -4531,6 +4567,7 @@ impl PullRequestsPage {
 
     pub(super) fn render_git_sync_controls(
         &self,
+        compact: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
@@ -4549,29 +4586,42 @@ impl PullRequestsPage {
                 tab.sync_refusal(SyncKind::Push, cx).is_some(),
             )
         };
-        let chip = |id: &'static str, label: &'static str, text: String, quiet: bool| {
+        let chip = |id: &'static str,
+                    label: &'static str,
+                    glyph: &'static str,
+                    text: Option<String>,
+                    quiet: bool| {
             top_chip(id, label, theme)
                 .debug_selector(move || id.into())
                 .when(quiet, |el| el.text_color(theme.text_muted))
-                .child(SharedString::from(text))
+                .when(text.is_none(), |el| el.w(px(28.0)).px_0().justify_center())
+                .child(icon(glyph).size(px(14.0)).flex_none().text_color(if quiet {
+                    theme.text_muted
+                } else {
+                    theme.text
+                }))
+                .children(text.map(SharedString::from))
         };
         let pull = chip(
             "pull-requests-git-pull",
             "Pull",
-            if syncing == Some(SyncKind::Pull) {
-                "↓ Pulling…".into()
-            } else {
-                "↓ Pull".into()
+            icons::ARROW_DOWN,
+            match syncing {
+                Some(SyncKind::Pull) => Some("Pulling…".into()),
+                _ if compact => None,
+                _ => Some("Pull".into()),
             },
             pull_blocked && syncing != Some(SyncKind::Pull),
         );
         let push = chip(
             "pull-requests-git-push",
             "Push",
+            icons::ARROW_UP,
             match (syncing, ahead) {
-                (Some(SyncKind::Push), _) => "↑ Pushing…".into(),
-                (_, 0) => "↑ Push".into(),
-                (_, ahead) => format!("↑ Push {ahead}"),
+                (Some(SyncKind::Push), _) => Some("Pushing…".into()),
+                _ if compact => None,
+                (_, 0) => Some("Push".into()),
+                (_, ahead) => Some(format!("Push {ahead}")),
             },
             push_blocked && syncing != Some(SyncKind::Push),
         );
@@ -4831,9 +4881,11 @@ impl PullRequestsPage {
                 filters::MenuKind::GitCheckout,
                 top_chip("pull-requests-git-checkout", "Checkout", theme)
                     .debug_selector(|| "pull-requests-git-checkout".into())
+                    .flex_shrink(1.0)
+                    .min_w_0()
                     .max_w(px(280.0))
                     .child(
-                        icon(icons::LUCIDE_GIT_BRANCH)
+                        icon(icons::GIT_BRANCH)
                             .size(px(14.0))
                             .flex_none()
                             .text_color(theme.text_muted),
@@ -4858,22 +4910,26 @@ impl PullRequestsPage {
                         )
                     })
                     .when_some(ahead.filter(|(a, b)| *a + *b > 0), |el, (a, b)| {
-                        let mut parts = Vec::new();
-                        if a > 0 {
-                            parts.push(format!("↑{a}"));
-                        }
-                        if b > 0 {
-                            parts.push(format!("↓{b}"));
-                        }
-                        el.child(
+                        let count = |glyph: &'static str, value: u32| {
                             div()
+                                .flex()
+                                .items_center()
+                                .gap(px(1.0))
                                 .text_size(px(12.0))
                                 .text_color(theme.text_muted)
-                                .child(SharedString::from(parts.join(" "))),
-                        )
+                                .child(
+                                    icon(glyph)
+                                        .size(px(11.0))
+                                        .flex_none()
+                                        .text_color(theme.text_muted),
+                                )
+                                .child(SharedString::from(value.to_string()))
+                        };
+                        el.when(a > 0, |el| el.child(count(icons::ARROW_UP, a)))
+                            .when(b > 0, |el| el.child(count(icons::ARROW_DOWN, b)))
                     })
                     .child(
-                        icon(icons::LUCIDE_CHEVRON_DOWN)
+                        icon(icons::ALT_ARROW_DOWN)
                             .size(px(12.0))
                             .flex_none()
                             .text_color(theme.text_muted.opacity(0.7)),

@@ -24,6 +24,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use zeron_proto::computer::ZERON_COMPUTER_TOOL_NAMES;
 use zeron_proto::html_render;
+use zeron_proto::tools::ToolSettingsState;
 use zeron_proto::view::{Indicator, effective_indicator};
 use zeron_proto::{Chat, Session, Space, UserInputAnswer};
 use zeron_rpc::{RpcClient, methods};
@@ -442,7 +443,18 @@ impl ThreadTools {
         self
     }
 
+    async fn disabled_tools(&self) -> HashSet<String> {
+        self.client
+            .call(methods::GET_TOOL_SETTINGS, json!({}))
+            .await
+            .ok()
+            .and_then(|state| serde_json::from_value::<ToolSettingsState>(state).ok())
+            .map(|state| state.disabled.into_iter().collect())
+            .unwrap_or_default()
+    }
+
     async fn tools(&self) -> Value {
+        let disabled = self.disabled_tools().await;
         let mut tools = tool_list();
         if let Some(secret) = &self.run_secret
             && let Ok(catalog) = self
@@ -456,6 +468,13 @@ impl ThreadTools {
                 (tools.as_array_mut(), catalog["tools"].as_array())
         {
             tools.extend(catalog.iter().cloned());
+        }
+        if let Some(list) = tools.as_array_mut() {
+            list.retain(|tool| {
+                tool["name"]
+                    .as_str()
+                    .is_none_or(|name| !disabled.contains(name))
+            });
         }
         tools
     }
@@ -476,10 +495,14 @@ impl ThreadTools {
         });
         let key = request_id.to_string();
         self.computer_calls.lock().unwrap().insert(key.clone());
-        let result = match self.client.call(methods::COMPUTER_ACTION, params).await {
-            Ok(result) => result,
-            Err(e) => {
-                json!({ "content": [{ "type": "text", "text": e.to_string() }], "isError": true })
+        let result = if self.disabled_tools().await.contains(tool) {
+            turned_off(tool)
+        } else {
+            match self.client.call(methods::COMPUTER_ACTION, params).await {
+                Ok(result) => result,
+                Err(e) => {
+                    json!({ "content": [{ "type": "text", "text": e.to_string() }], "isError": true })
+                }
             }
         };
         self.computer_calls.lock().unwrap().remove(&key);
@@ -1939,6 +1962,9 @@ async fn respond(request: &Value, tools: &ThreadTools) -> Option<Value> {
                 let result = tools.computer_action(secret, name, args, &id).await;
                 return Some(ok(id, result));
             }
+            if tools.disabled_tools().await.contains(name) {
+                return Some(ok(id, turned_off(name)));
+            }
             if name == "device_screenshot" {
                 return Some(ok(id, tools.device_screenshot(&args).await));
             }
@@ -1956,6 +1982,11 @@ async fn respond(request: &Value, tools: &ThreadTools) -> Option<Value> {
         }
         other => error(id, -32601, format!("method not found: {other}")),
     })
+}
+
+fn turned_off(name: &str) -> Value {
+    let text = format!("{name} is turned off in Zeron's Settings > Tools.");
+    json!({ "content": [{ "type": "text", "text": text }], "isError": true })
 }
 
 fn ok(id: Value, result: Value) -> Value {
@@ -2034,6 +2065,7 @@ mod tests {
         catalog: Vec<Value>,
         actions: Vec<(&'static str, Value)>,
         release: tokio::sync::Notify,
+        disabled: Vec<&'static str>,
     }
 
     fn timed(snapshots: Vec<Value>) -> RpcReply {
@@ -2296,6 +2328,9 @@ mod tests {
                         "message": html_render::RENDERED_MESSAGE,
                     })))
                 }
+                methods::GET_TOOL_SETTINGS => Ok(RpcReply::Value(
+                    json!({ "settings": {}, "disabled": self.disabled }),
+                )),
                 methods::GET_COMPUTER_CATALOG
                 | methods::COMPUTER_ACTION
                 | methods::CANCEL_COMPUTER_ACTION => {
@@ -2393,6 +2428,7 @@ mod tests {
             catalog: vec![],
             actions: vec![],
             release: tokio::sync::Notify::new(),
+            disabled: vec![],
         }
     }
 
@@ -3525,6 +3561,55 @@ mod tests {
             THREAD_TOOLS,
             "a refused catalog lists thread tools only"
         );
+    }
+
+    #[test]
+    fn settings_groups_cover_the_catalog() {
+        let mut grouped: Vec<&str> = zeron_proto::tools::TOOL_GROUPS
+            .iter()
+            .filter(|info| info.group != zeron_proto::tools::ToolGroup::Computer)
+            .flat_map(|info| info.tools())
+            .map(|tool| tool.name)
+            .collect();
+        let mut listed = THREAD_TOOLS.to_vec();
+        grouped.sort_unstable();
+        listed.sort_unstable();
+        assert_eq!(grouped, listed);
+        let computer: Vec<&str> =
+            zeron_proto::tools::tool_group(zeron_proto::tools::ToolGroup::Computer)
+                .tools()
+                .iter()
+                .map(|tool| tool.name)
+                .collect();
+        assert_eq!(computer, ZERON_COMPUTER_TOOL_NAMES);
+    }
+
+    #[tokio::test]
+    async fn disabled_tools_leave_the_list_and_are_refused() {
+        let mut fake = fixture();
+        fake.catalog = vec![
+            catalog_tool("computer_screenshot"),
+            catalog_tool("computer_browser_click"),
+        ];
+        fake.disabled = vec!["terminal", "computer_screenshot", "device_screenshot"];
+        let fake = Arc::new(fake);
+        let tools =
+            ThreadTools::new(memory_client(fake.clone()), "a").with_run_secret(Some("live".into()));
+        let mut pipe = Pipe::open(tools);
+        let listed = pipe.list().await;
+        let listed = names(&listed);
+        assert!(listed.contains(&"read_thread") && listed.contains(&"computer_browser_click"));
+        for name in ["terminal", "computer_screenshot", "device_screenshot"] {
+            assert!(!listed.contains(&name), "{name} listed");
+            let reply = pipe.call(json!(7), name, json!({})).await;
+            assert_eq!(reply["result"]["isError"], true, "{name}");
+            assert_eq!(
+                reply["result"]["content"][0]["text"],
+                format!("{name} is turned off in Zeron's Settings > Tools.")
+            );
+        }
+        assert!(logged(&fake, methods::COMPUTER_ACTION).is_empty());
+        assert!(logged(&fake, methods::DEVICE_TOOL_SCREENSHOT).is_empty());
     }
 
     #[tokio::test]
