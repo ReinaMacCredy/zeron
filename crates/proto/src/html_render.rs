@@ -27,6 +27,77 @@ pub struct PublishHtmlRenderParams {
     pub height: f64,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PreviewAppearance {
+    #[default]
+    Dark,
+    Light,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HtmlPreviewParams {
+    pub chat_id: String,
+    pub run_secret: String,
+    pub html: String,
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub appearance: Option<PreviewAppearance>,
+}
+
+/// A page the engine asks the desktop app to lay out and screenshot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HtmlPreviewRequest {
+    pub id: String,
+    pub html: String,
+    pub width: u32,
+    pub appearance: PreviewAppearance,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConsoleMessage {
+    /// log, info, warning or error (uncaught exceptions included).
+    pub level: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HtmlPreview {
+    pub width: u32,
+    /// The height the page needs at this width.
+    pub content_height: u32,
+    pub captured_height: u32,
+    pub console_messages: Vec<ConsoleMessage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_images: Vec<String>,
+    /// Base64 PNG of the top `captured_height` points.
+    pub png: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RespondHtmlPreviewParams {
+    pub id: String,
+    #[serde(default)]
+    pub preview: Option<HtmlPreview>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// The tallest capture a preview returns; longer pages report their full
+/// `content_height` and are cut here.
+pub const MAX_CAPTURE_HEIGHT: u32 = 4000;
+
+pub fn preview_width(width: Option<u32>) -> u32 {
+    width
+        .unwrap_or(COLUMN_WIDTH)
+        .clamp(MIN_PREVIEW_WIDTH, MAX_PREVIEW_WIDTH)
+}
+
 /// What a published page's Tool part carries so any client can show it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HtmlRenderRef {

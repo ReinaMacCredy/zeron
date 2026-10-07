@@ -9,7 +9,8 @@ use base64::Engine as _;
 use regex::Regex;
 use sha2::{Digest, Sha256};
 use zeron_proto::html_render::{
-    HtmlRenderRef, MAX_HTML_BYTES, MAX_IMAGE_BYTES, MAX_PAGE_BYTES, MAX_TITLE_CHARS, clamp_height,
+    HtmlPreview, HtmlPreviewRequest, HtmlRenderRef, MAX_HTML_BYTES, MAX_IMAGE_BYTES,
+    MAX_PAGE_BYTES, MAX_TITLE_CHARS, PreviewAppearance, clamp_height,
 };
 
 use crate::uploads::Uploads;
@@ -274,6 +275,161 @@ pub fn remove_chat_pages(uploads: &Uploads, chat_id: &str) {
     }
 }
 
+const NO_PREVIEW_HOST: &str = "html_preview needs the Zeron desktop app open on this machine, so the page was not checked. html_render still works.";
+const PREVIEW_HOST_LOST: &str =
+    "The Zeron desktop app closed before the preview finished. Try again.";
+const PREVIEW_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+type PreviewReply = Result<HtmlPreview, String>;
+
+struct LivePreviewHost {
+    id: u64,
+    items: tokio::sync::mpsc::UnboundedSender<HtmlPreviewRequest>,
+    pending: std::collections::HashMap<String, tokio::sync::oneshot::Sender<PreviewReply>>,
+}
+
+/// Hands pages to the attached desktop app, which owns the web engine, and
+/// waits for its screenshot. The newest app to attach serves previews.
+#[derive(Default)]
+pub struct PreviewHost {
+    live: std::sync::Mutex<Option<LivePreviewHost>>,
+    next_id: std::sync::atomic::AtomicU64,
+}
+
+struct PreviewRegistration {
+    host: std::sync::Arc<PreviewHost>,
+    id: u64,
+}
+
+impl PreviewHost {
+    fn live(&self) -> std::sync::MutexGuard<'_, Option<LivePreviewHost>> {
+        self.live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn fail_all(host: LivePreviewHost) {
+        for (_, pending) in host.pending {
+            let _ = pending.send(Err(PREVIEW_HOST_LOST.into()));
+        }
+    }
+
+    /// The desktop app's request stream; the registration ends with it.
+    pub fn register(
+        self: &std::sync::Arc<Self>,
+    ) -> futures::stream::BoxStream<'static, HtmlPreviewRequest> {
+        use futures::StreamExt;
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        let (items, received) = tokio::sync::mpsc::unbounded_channel();
+        if let Some(previous) = self.live().replace(LivePreviewHost {
+            id,
+            items,
+            pending: Default::default(),
+        }) {
+            Self::fail_all(previous);
+        }
+        let registration = PreviewRegistration {
+            host: self.clone(),
+            id,
+        };
+        futures::stream::unfold(
+            (received, registration),
+            |(mut received, registration)| async move {
+                received
+                    .recv()
+                    .await
+                    .map(|item| (item, (received, registration)))
+            },
+        )
+        .boxed()
+    }
+
+    pub fn respond(&self, id: &str, reply: PreviewReply) {
+        let sender = self
+            .live()
+            .as_mut()
+            .and_then(|live| live.pending.remove(id));
+        if let Some(sender) = sender {
+            let _ = sender.send(reply);
+        }
+    }
+
+    pub async fn preview(
+        &self,
+        html: String,
+        width: u32,
+        appearance: PreviewAppearance,
+    ) -> PreviewReply {
+        let id = uuid::Uuid::new_v4().to_string();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        {
+            let mut live = self.live();
+            let live = live.as_mut().ok_or(NO_PREVIEW_HOST)?;
+            let request = HtmlPreviewRequest {
+                id: id.clone(),
+                html,
+                width,
+                appearance,
+            };
+            if live.items.send(request).is_err() {
+                return Err(NO_PREVIEW_HOST.into());
+            }
+            live.pending.insert(id.clone(), tx);
+        }
+        match tokio::time::timeout(PREVIEW_TIMEOUT, rx).await {
+            Ok(Ok(reply)) => reply,
+            Ok(Err(_)) => Err(PREVIEW_HOST_LOST.into()),
+            Err(_) => {
+                if let Some(live) = self.live().as_mut() {
+                    live.pending.remove(&id);
+                }
+                Err("The preview took longer than 30 seconds. Simplify the page or check its scripts, then try again.".into())
+            }
+        }
+    }
+}
+
+impl Drop for PreviewRegistration {
+    fn drop(&mut self) {
+        let lost = {
+            let mut live = self.host.live();
+            match live.as_ref() {
+                Some(current) if current.id == self.id => live.take(),
+                _ => None,
+            }
+        };
+        if let Some(lost) = lost {
+            PreviewHost::fail_all(lost);
+        }
+    }
+}
+
+/// Inlines what images it can and lays the page out in the desktop app.
+pub async fn preview(
+    host: &PreviewHost,
+    html: String,
+    width: Option<u32>,
+    appearance: Option<PreviewAppearance>,
+) -> Result<HtmlPreview, String> {
+    validate(&html, "preview").map_err(|e| e.to_string())?;
+    let (page, missing) = tokio::task::spawn_blocking(move || inline_local_images(&html, false))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    let mut preview = host
+        .preview(
+            page,
+            zeron_proto::html_render::preview_width(width),
+            appearance.unwrap_or_default(),
+        )
+        .await?;
+    preview.missing_images = missing;
+    Ok(preview)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,6 +487,60 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "<p>hi</p>");
         remove_chat_pages(&uploads, "c/1");
         assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn previews_reach_the_newest_desktop_app_and_fail_cleanly_without_one() {
+        use futures::StreamExt;
+        let host = std::sync::Arc::new(PreviewHost::default());
+        assert_eq!(
+            preview(&host, "<p>x</p>".into(), None, None).await,
+            Err(NO_PREVIEW_HOST.into())
+        );
+        let mut first = host.register();
+        let mut second = host.register();
+        assert!(first.next().await.is_none(), "a newer app takes over");
+        let answer = {
+            let host = host.clone();
+            tokio::spawn(async move {
+                let request = second.next().await.unwrap();
+                assert_eq!(request.width, zeron_proto::html_render::MAX_PREVIEW_WIDTH);
+                assert_eq!(request.appearance, PreviewAppearance::Dark);
+                host.respond(
+                    &request.id,
+                    Ok(HtmlPreview {
+                        width: request.width,
+                        content_height: 300,
+                        captured_height: 300,
+                        console_messages: vec![],
+                        missing_images: vec![],
+                        png: "iVBOR".into(),
+                    }),
+                );
+                second
+            })
+        };
+        let shot = preview(
+            &host,
+            r#"<img src="/nope/a.png">"#.into(),
+            Some(10_000),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(shot.content_height, 300);
+        assert_eq!(shot.missing_images, vec!["/nope/a.png".to_string()]);
+        let second = answer.await.unwrap();
+        let pending = {
+            let host = host.clone();
+            tokio::spawn(async move {
+                host.preview("<p>y</p>".into(), 400, PreviewAppearance::Light)
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+        drop(second);
+        assert_eq!(pending.await.unwrap(), Err(PREVIEW_HOST_LOST.into()));
     }
 
     #[test]

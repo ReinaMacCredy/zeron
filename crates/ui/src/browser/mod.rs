@@ -15,6 +15,8 @@ pub(crate) mod control_admission;
 pub(crate) mod control_host;
 #[cfg(target_os = "macos")]
 pub(crate) mod inline;
+#[cfg(target_os = "macos")]
+pub(crate) mod preview_host;
 pub mod model;
 mod view;
 

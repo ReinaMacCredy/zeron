@@ -2687,6 +2687,8 @@ impl AppState {
         ));
         #[cfg(target_os = "macos")]
         watch_tasks.extend(crate::computer::preview::watch_events(handle.clone(), cx));
+        #[cfg(target_os = "macos")]
+        watch_tasks.push(crate::browser::preview_host::spawn(handle.clone(), cx));
         if handle
             .engine_info()
             .supports(zeron_proto::capabilities::DEVICE_HUB_V1)

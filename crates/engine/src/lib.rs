@@ -152,6 +152,7 @@ pub struct EngineCore {
     pub agent_accounts: AgentAccounts,
     pub computer: Arc<computer::runtime::ComputerRuntime>,
     pub device_hub: Arc<device_hub::DeviceHub>,
+    html_preview: Arc<html_render::PreviewHost>,
     pub harness_updates: harness_updates::HarnessUpdateCoordinator,
     pub device_id: String,
     /// Local→synced profile import (account-scoped runtimes only).
@@ -354,6 +355,7 @@ impl EngineCore {
             agent_accounts,
             computer,
             device_hub,
+            html_preview: Arc::default(),
             harness_updates,
             device_id,
             local_import,
@@ -494,6 +496,7 @@ impl EngineCore {
         .with_previews(self.previews.clone())
         .with_computer(self.computer.clone())
         .with_device_hub(self.device_hub.clone())
+        .with_html_preview(self.html_preview.clone())
         .with_harness_updates(self.harness_updates.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);

@@ -278,6 +278,21 @@ pub fn tool_list() -> Value {
             }
         },
         {
+            "name": "html_preview",
+            "description": format!("Lay out an HTML page in Zeron's own web engine (the one that shows it in the thread) and get back a PNG screenshot, contentHeight (the height the page needs at this width), and its console output: log, info, warning, error, and uncaught exceptions. console.log is a fine way to report your own checks. Use it to check and iterate on a page before html_render. Needs the Zeron desktop app open on this machine. {} The page gets the theme variables and layout described in html_render.", html_render::PAGE_RULES),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "html": { "type": "string", "maxLength": html_render::MAX_HTML_BYTES, "description": "A complete, self-contained HTML document." },
+                    "width": { "type": "integer", "minimum": html_render::MIN_PREVIEW_WIDTH, "maximum": html_render::MAX_PREVIEW_WIDTH, "description": format!("Viewport width in CSS pixels. Defaults to {}, the reply column; use about 390 to check phones.", html_render::COLUMN_WIDTH) },
+                    "appearance": { "type": "string", "enum": ["dark", "light"], "description": "Theme to preview. Defaults to dark." }
+                },
+                "required": ["html"],
+                "additionalProperties": false
+            },
+            "annotations": { "title": "Preview HTML", "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true }
+        },
+        {
             "name": "html_render",
             "description": format!("Show a finished HTML page (chart, table, diagram, collage, mockup) inline in this thread, above your final text reply; call it before writing that reply. The reader already sees the page, live, so the reply should not announce it, say where it is, or restate it: add only what the page doesn't say. Zeron fits the frame to the page's height. A height below the page's own height caps the frame there, and the rest scrolls inside it. {} {} {}", html_render::PAGE_RULES, html_render::LAYOUT_GUIDE, html_render::THEME_GUIDE),
             "inputSchema": {
@@ -1214,6 +1229,44 @@ impl ThreadTools {
         }))
     }
 
+    // Like device_screenshot: only the image block carries the PNG.
+    pub async fn html_preview(&self, args: &Value) -> Value {
+        let result = async {
+            let secret = self
+                .run_secret
+                .as_deref()
+                .ok_or("html_preview needs a live Zeron run")?;
+            let html = args["html"].as_str().ok_or("html must be a string")?;
+            let mut params = json!({ "chatId": self.chat_id, "runSecret": secret, "html": html });
+            for key in ["width", "appearance"] {
+                if let Some(value) = args.get(key).filter(|value| !value.is_null()) {
+                    params[key] = value.clone();
+                }
+            }
+            self.call_engine(methods::HTML_PREVIEW, params).await
+        }
+        .await;
+        match result {
+            Ok(mut preview) => {
+                let png = preview
+                    .as_object_mut()
+                    .and_then(|preview| preview.remove("png"))
+                    .unwrap_or_default();
+                json!({
+                    "content": [
+                        { "type": "text", "text": preview.to_string() },
+                        { "type": "image", "data": png, "mimeType": "image/png" },
+                    ],
+                    "structuredContent": preview,
+                    "isError": false,
+                })
+            }
+            Err(message) => {
+                json!({ "content": [{ "type": "text", "text": message }], "isError": true })
+            }
+        }
+    }
+
     async fn html_render(&self, args: &Value) -> Result<Value, String> {
         let secret = self
             .run_secret
@@ -1968,6 +2021,9 @@ async fn respond(request: &Value, tools: &ThreadTools) -> Option<Value> {
             if name == "device_screenshot" {
                 return Some(ok(id, tools.device_screenshot(&args).await));
             }
+            if name == html_render::PREVIEW_TOOL {
+                return Some(ok(id, tools.html_preview(&args).await));
+            }
             let (text, is_error) = match tools.call(name, &args).await {
                 Ok(value) => (
                     serde_json::to_string_pretty(&value).unwrap_or_default(),
@@ -2007,7 +2063,7 @@ mod tests {
 
     use super::*;
 
-    const THREAD_TOOLS: [&str; 24] = [
+    const THREAD_TOOLS: [&str; 25] = [
         "list_threads",
         "read_thread",
         "create_thread",
@@ -2020,6 +2076,7 @@ mod tests {
         "ask_user",
         "terminal",
         "project_actions",
+        "html_preview",
         "html_render",
         "device_list",
         "device_open",
@@ -2326,6 +2383,22 @@ mod tests {
                     Ok(RpcReply::Value(json!({
                         "htmlRender": { "path": "/u/html/c1/ab.html", "title": params["title"], "height": 420 },
                         "message": html_render::RENDERED_MESSAGE,
+                    })))
+                }
+                methods::HTML_PREVIEW => {
+                    self.calls
+                        .lock()
+                        .unwrap()
+                        .push((method.to_string(), params.clone()));
+                    if params["html"] == "<p>broken</p>" {
+                        return Err(RpcError::Failed(
+                            "html_preview needs the Zeron desktop app open on this machine".into(),
+                        ));
+                    }
+                    Ok(RpcReply::Value(json!({
+                        "width": 736, "contentHeight": 310, "capturedHeight": 310,
+                        "consoleMessages": [{ "level": "error", "text": "x is not defined" }],
+                        "png": "iVBORw0KGgo",
                     })))
                 }
                 methods::GET_TOOL_SETTINGS => Ok(RpcReply::Value(
@@ -3277,6 +3350,39 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn html_preview_returns_the_screenshot_as_an_image_block() {
+        let rig = computer_rig(Some("live"));
+        let mut pipe = Pipe::open(rig.tools);
+        let shot = pipe
+            .call(
+                json!(1),
+                "html_preview",
+                json!({ "html": "<p>x</p>", "width": 390, "appearance": "light" }),
+            )
+            .await;
+        let result = &shot["result"];
+        assert_eq!(result["isError"], false);
+        assert_eq!(result["content"][1]["type"], "image");
+        assert_eq!(result["content"][1]["data"], "iVBORw0KGgo");
+        let text: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(text["contentHeight"], 310);
+        assert_eq!(text["consoleMessages"][0]["text"], "x is not defined");
+        assert!(
+            text.get("png").is_none(),
+            "the text block never carries the image"
+        );
+        let failed = pipe
+            .call(json!(2), "html_preview", json!({ "html": "<p>broken</p>" }))
+            .await;
+        assert_eq!(failed["result"]["isError"], true);
+        let sent = logged(&rig.calls, methods::HTML_PREVIEW);
+        assert_eq!(sent[0]["width"], 390);
+        assert_eq!(sent[0]["appearance"], "light");
+        assert_eq!(sent[0]["runSecret"], "live");
     }
 
     #[tokio::test]

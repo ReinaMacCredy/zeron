@@ -276,6 +276,12 @@ pub mod methods {
     pub const DEVICE_TOOL_CLOSE: &str = "DeviceToolClose";
     /// `html_render`: store an agent's page in its chat (run-secret gated).
     pub const PUBLISH_HTML_RENDER: &str = "PublishHtmlRender";
+    /// `html_preview`: lay a page out in the desktop app and return a
+    /// screenshot (run-secret gated, never relay-forwarded).
+    pub const HTML_PREVIEW: &str = "HtmlPreview";
+    /// The desktop app's stream of pages to preview, and its answers.
+    pub const WATCH_HTML_PREVIEW_HOST: &str = "WatchHtmlPreviewHost";
+    pub const RESPOND_HTML_PREVIEW: &str = "RespondHtmlPreview";
     /// Checkout-diff stream for the target device's chats (DataRpc,
     /// relay-forwardable — diffs are produced where the checkout lives).
     pub const WATCH_CHECKOUT_DIFFS: &str = "WatchCheckoutDiffs";

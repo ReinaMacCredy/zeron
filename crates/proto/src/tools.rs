@@ -141,10 +141,16 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
         group: ToolGroup::Pages,
         title: "HTML pages",
         summary: "Show live HTML pages (charts, tables, mockups) inline in the thread.",
-        tools: &[tool(
-            "html_render",
-            "Show a finished HTML page inline in this thread, above the reply.",
-        )],
+        tools: &[
+            tool(
+                "html_preview",
+                "Screenshot a page in Zeron's web engine to check it before showing it.",
+            ),
+            tool(
+                "html_render",
+                "Show a finished HTML page inline in this thread, above the reply.",
+            ),
+        ],
     },
     ToolGroupInfo {
         group: ToolGroup::Devices,

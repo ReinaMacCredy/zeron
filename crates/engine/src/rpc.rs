@@ -768,6 +768,7 @@ pub struct EngineRpc {
     local_import: Option<crate::local_import::LocalImporter>,
     computer: Option<std::sync::Arc<ComputerRuntime>>,
     device_hub: Option<std::sync::Arc<crate::device_hub::DeviceHub>>,
+    html_preview: std::sync::Arc<crate::html_render::PreviewHost>,
     engine_info: EngineInfo,
 }
 
@@ -815,6 +816,7 @@ impl EngineRpc {
             local_import: None,
             computer: None,
             device_hub: None,
+            html_preview: Default::default(),
             engine_info,
         }
     }
@@ -863,6 +865,14 @@ impl EngineRpc {
 
     pub fn with_device_hub(mut self, hub: std::sync::Arc<crate::device_hub::DeviceHub>) -> Self {
         self.device_hub = Some(hub);
+        self
+    }
+
+    pub(crate) fn with_html_preview(
+        mut self,
+        host: std::sync::Arc<crate::html_render::PreviewHost>,
+    ) -> Self {
+        self.html_preview = host;
         self
     }
 
@@ -4809,6 +4819,34 @@ impl RpcService for EngineRpc {
                     "htmlRender": page,
                     "message": zeron_proto::html_render::RENDERED_MESSAGE,
                 }))
+            }
+            methods::HTML_PREVIEW => {
+                let p: zeron_proto::html_render::HtmlPreviewParams = parse_params(params)?;
+                if self.sessions.computer_run(&p.chat_id, &p.run_secret).is_none() {
+                    return Err(RpcError::Failed(
+                        "html_preview needs this chat's live Zeron run".into(),
+                    ));
+                }
+                let preview =
+                    crate::html_render::preview(&self.html_preview, p.html, p.width, p.appearance)
+                        .await
+                        .map_err(RpcError::Failed)?;
+                RpcReply::value(&preview)
+            }
+            methods::WATCH_HTML_PREVIEW_HOST => Ok(RpcReply::Stream(
+                self.html_preview
+                    .register()
+                    .filter_map(|item| async move { serde_json::to_value(item).ok() })
+                    .boxed(),
+            )),
+            methods::RESPOND_HTML_PREVIEW => {
+                let p: zeron_proto::html_render::RespondHtmlPreviewParams = parse_params(params)?;
+                let reply = match (p.preview, p.error) {
+                    (Some(preview), _) => Ok(preview),
+                    (None, error) => Err(error.unwrap_or_else(|| "The preview failed.".into())),
+                };
+                self.html_preview.respond(&p.id, reply);
+                RpcReply::value(&serde_json::json!({}))
             }
             methods::DEVICE_TOOL_LIST
             | methods::DEVICE_TOOL_OPEN

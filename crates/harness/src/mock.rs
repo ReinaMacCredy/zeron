@@ -367,8 +367,37 @@ impl Harness for MockHarness {
                     .unwrap_or(600);
                 let input =
                     serde_json::json!({ "html": html, "title": "Mock page", "height": height });
+                let preview_input = serde_json::json!({ "html": html });
+                let preview = mock_mcp_call(server, "html_preview", preview_input.clone()).await;
+                if let Ok(path) = std::env::var("ZERON_MOCK_HTML_PREVIEW_PNG") {
+                    let _ = std::fs::write(format!("{path}.txt"), mock_mcp_text(&preview));
+                    if let Some(png) = preview
+                        .as_ref()
+                        .ok()
+                        .and_then(|result| result["content"][1]["data"].as_str())
+                    {
+                        use base64::Engine as _;
+                        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(png) {
+                            let _ = std::fs::write(path, bytes);
+                        }
+                    }
+                }
                 let result = mock_mcp_call(server, "html_render", input.clone()).await;
                 vec![
+                    AgentEvent::ToolCall {
+                        id: "mock-html-preview".into(),
+                        call: zeron_proto::ToolCall::Mcp {
+                            server: "zeron".into(),
+                            tool: "html_preview".into(),
+                            input: Some(preview_input),
+                        },
+                    },
+                    AgentEvent::ToolResult {
+                        id: "mock-html-preview".into(),
+                        is_error: mock_mcp_failed(&preview),
+                        output: Some(mock_mcp_text(&preview)),
+                        diff: None,
+                    },
                     AgentEvent::ToolCall {
                         id: "mock-html-render".into(),
                         call: zeron_proto::ToolCall::Mcp {
@@ -379,8 +408,8 @@ impl Harness for MockHarness {
                     },
                     AgentEvent::ToolResult {
                         id: "mock-html-render".into(),
-                        is_error: result.is_err(),
-                        output: Some(result.unwrap_or_else(|error| error)),
+                        is_error: mock_mcp_failed(&result),
+                        output: Some(mock_mcp_text(&result)),
                         diff: None,
                     },
                 ]
@@ -848,7 +877,7 @@ async fn mock_mcp_call(
     server: &zeron_proto::McpServer,
     tool: &str,
     arguments: serde_json::Value,
-) -> Result<String, String> {
+) -> Result<serde_json::Value, String> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let mut child = tokio::process::Command::new(&server.command)
         .args(&server.args)
@@ -872,16 +901,24 @@ async fn mock_mcp_call(
     while let Some(line) = lines.next_line().await.map_err(|e| e.to_string())? {
         let reply: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
         if reply["id"] == 2 {
-            let text = reply["result"]["content"][0]["text"]
-                .as_str()
-                .unwrap_or_default()
-                .to_owned();
-            return if reply["result"]["isError"] == true {
-                Err(text)
-            } else {
-                Ok(text)
-            };
+            return Ok(reply["result"].clone());
         }
     }
     Err("zeron mcp exited without answering".into())
+}
+
+fn mock_mcp_failed(result: &Result<serde_json::Value, String>) -> bool {
+    result
+        .as_ref()
+        .map_or(true, |result| result["isError"] == true)
+}
+
+fn mock_mcp_text(result: &Result<serde_json::Value, String>) -> String {
+    match result {
+        Ok(result) => result["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
+        Err(error) => error.clone(),
+    }
 }
