@@ -635,6 +635,74 @@ mod tests {
             })
             .unwrap();
     }
+
+    #[gpui::test]
+    fn pane_opens_on_new_chat_canvas_and_rides_through_the_send(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, window, cx| {
+                shell
+                    .state
+                    .update(cx, |state, _| state.active_draft = Some("draft-1".into()));
+                assert!(shell.active_chat.is_empty());
+                shell.reduced_motion = true;
+
+                shell.toggle_right_pane(cx);
+                assert!(shell.right_pane_open(cx));
+                assert!(shell.right_target(cx) > 0.0);
+                assert!(!shell.files_panel_open(cx));
+                shell.right_terminal_panel(cx).update(cx, |panel, cx| {
+                    panel.reserve_tab_for_chat(
+                        crate::state::canvas_panel_key(None),
+                        "Test terminal",
+                        cx,
+                    );
+                });
+                shell.add_terminal_surface(cx);
+                assert_eq!(shell.right_surface_rows(cx).len(), 1);
+                shell.add_browser_surface(None, window, cx);
+                assert_eq!(shell.right_surface_rows(cx).len(), 2);
+                shell.toggle_right_pane(cx);
+                assert!(!shell.right_pane_open(cx));
+                shell.toggle_right_pane(cx);
+
+                shell.active_chat = "draft-1".into();
+                shell.prune_canvas_browsers(cx);
+                assert!(shell.right_pane_open(cx));
+                assert_eq!(shell.browsers.len(), 1);
+
+                shell.active_chat.clear();
+                shell
+                    .state
+                    .update(cx, |state, _| state.active_draft = Some("draft-2".into()));
+                assert!(!shell.right_pane_open(cx));
+                shell.toggle_right_pane(cx);
+                shell.adopt_canvas_terminals(cx);
+                assert_eq!(shell.right_surface_rows(cx).len(), 1);
+            })
+            .unwrap();
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
