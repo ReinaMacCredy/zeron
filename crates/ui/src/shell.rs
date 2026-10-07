@@ -75,6 +75,8 @@ mod chat_dropzone_tests;
 mod chat_rename_tests;
 #[cfg(test)]
 mod home_grid_tests;
+#[cfg(test)]
+mod type_to_focus_tests;
 mod command_palette;
 mod device_tabs;
 mod file_mutations;
@@ -11335,6 +11337,10 @@ impl Shell {
             cx.stop_propagation();
             return;
         }
+        if self.type_into_composer(event, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         // Escape targets the conversation that owns the focused composer: a
         // side chat's when its composer has focus, the main one otherwise.
         let (state, composer) = self
@@ -11374,6 +11380,53 @@ impl Shell {
             }
             ShellEscapeOutcome::OtherKey | ShellEscapeOutcome::Ignored => {}
         }
+    }
+
+    fn type_into_composer(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let modifiers = event.keystroke.modifiers;
+        if event.is_held || modifiers.platform || modifiers.control || modifiers.function {
+            return false;
+        }
+        let Some(text) = event
+            .keystroke
+            .key_char
+            .as_deref()
+            .filter(|text| !text.is_empty() && !text.chars().any(char::is_control))
+        else {
+            return false;
+        };
+        // A focused input inserts through the platform text path after this
+        // listener returns, so only the shell's parking handles qualify.
+        let in_right = self.navigation_focus.right.is_focused(window)
+            || self.navigation_focus.tabs.is_focused(window);
+        let parked = in_right
+            || window.focused(cx).is_none()
+            || self.unfocused.is_focused(window)
+            || self.shortcut_focus.is_focused(window)
+            || self.navigation_focus.main.is_focused(window);
+        if !parked {
+            return false;
+        }
+        let side_chat = match self.resolved_right_active(cx) {
+            RightSurface::SideChat(id) if in_right => {
+                self.side_chats.get(&id).map(|tab| tab.composer.clone())
+            }
+            _ => None,
+        };
+        let composer = side_chat.unwrap_or_else(|| self.composer.clone());
+        if !self
+            .shortcut_focus
+            .contains(&composer.focus_handle(cx), window)
+        {
+            return false;
+        }
+        composer.update(cx, |composer, cx| composer.type_into(text, window, cx));
+        true
     }
 
     fn render_overlays(
