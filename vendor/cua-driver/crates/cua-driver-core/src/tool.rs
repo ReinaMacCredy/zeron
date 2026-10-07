@@ -4873,7 +4873,7 @@ fn recording_args_for(tool_name: &str, args: &Value) -> Value {
                 }
             }
             "clipboard_write" => {
-                for field in ["text", "image_path", "file_path"] {
+                for field in ["text", "html", "image_path", "file_path"] {
                     if arguments.contains_key(field) {
                         arguments.insert(field.to_owned(), Value::String("[redacted]".to_owned()));
                     }

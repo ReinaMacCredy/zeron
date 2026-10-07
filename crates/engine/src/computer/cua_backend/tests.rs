@@ -22,6 +22,7 @@ use crate::computer::model_desktop_observation::with_model_desktop_observation;
 
 mod apps_windows_menus;
 mod boundary;
+mod codex_parity;
 mod hardening_preview_browser;
 mod host_transport;
 mod lock_resume;
@@ -90,6 +91,7 @@ pub(crate) struct Knobs {
     pub typing_in_flight: usize,
     pub typing_max_in_flight: usize,
     pub extra_windows: Vec<Value>,
+    pub window_state_extra: Map<String, Value>,
     pub tool_handlers: HashMap<String, ToolHandler>,
     pub set_value_swallowed: bool,
     pub action_result: Value,
@@ -307,7 +309,7 @@ impl ScriptedHost {
                 wait.wait().await;
             }
             let mut knobs = self.knobs.lock().unwrap();
-            let result = json!({
+            let mut result = json!({
                 "structuredContent": {
                     "pid": knobs.capture_pid,
                     "window_id": knobs.capture_window_id,
@@ -318,6 +320,9 @@ impl ScriptedHost {
                 },
                 "content": [{ "type": "image", "mimeType": "image/png", "data": png_header_base64() }],
             });
+            for (key, value) in &knobs.window_state_extra {
+                result["structuredContent"][key] = value.clone();
+            }
             if knobs.move_after_capture {
                 knobs.bounds["x"] = json!(-250);
             }
@@ -421,6 +426,7 @@ pub(crate) fn fixture_with(options: FixtureOptions) -> Fixture {
         typing_in_flight: 0,
         typing_max_in_flight: 0,
         extra_windows: Vec::new(),
+        window_state_extra: Map::new(),
         tool_handlers: HashMap::new(),
         set_value_swallowed: false,
         action_result: json!({

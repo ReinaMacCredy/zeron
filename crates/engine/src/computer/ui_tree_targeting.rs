@@ -516,6 +516,7 @@ pub struct ComputerActionableElementRef {
     pub window_id: Option<String>,
     pub ordinal: usize,
     pub(crate) observed: Option<Arc<ObservedComputerElement>>,
+    pub(crate) path: Vec<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -538,6 +539,15 @@ pub fn actionable_elements(
     filter: &ComputerActionableElementFilter,
     native_identity: impl Fn(&ComputerUiNode) -> Option<String>,
 ) -> ComputerActionableElements {
+    actionable_elements_limited(root, filter, native_identity, ELEMENT_DIGEST_MAX_LENGTH)
+}
+
+pub fn actionable_elements_limited(
+    root: &ComputerUiNode,
+    filter: &ComputerActionableElementFilter,
+    native_identity: impl Fn(&ComputerUiNode) -> Option<String>,
+    limit: usize,
+) -> ComputerActionableElements {
     let wanted = filter.label_contains.as_deref().map(match_key);
     let mut digest = ComputerActionableElements {
         items: Vec::new(),
@@ -547,8 +557,8 @@ pub fn actionable_elements(
         omitted: 0,
     };
     let mut ordinals: HashMap<(String, String, String), usize> = HashMap::new();
-    let mut stack = vec![root];
-    while let Some(node) = stack.pop() {
+    let mut stack = vec![(root, Vec::new())];
+    while let Some((node, path)) = stack.pop() {
         if node.truncated == Some(true) {
             digest.source_incomplete = true;
         }
@@ -573,13 +583,14 @@ pub fn actionable_elements(
             let ordinal = ordinals.entry(identity).or_insert(0);
             let current = *ordinal;
             *ordinal += 1;
-            if digest.items.len() < ELEMENT_DIGEST_MAX_LENGTH {
+            if digest.items.len() < limit {
                 digest.ref_index.push(ComputerActionableElementRef {
                     label: label.to_owned(),
                     role: node.role.clone(),
                     window_id: node.window_id.clone(),
                     ordinal: current,
                     observed: retain_computer_element(node, native_identity(node)),
+                    path: path.clone(),
                 });
                 digest.items.push(ComputerActionableElement {
                     element_ref: digest.items.len(),
@@ -596,7 +607,17 @@ pub fn actionable_elements(
                 digest.omitted += 1;
             }
         }
-        stack.extend(node.children.iter().rev());
+        stack.extend(
+            node.children
+                .iter()
+                .enumerate()
+                .rev()
+                .map(|(index, child)| {
+                    let mut child_path = path.clone();
+                    child_path.push(index as u32);
+                    (child, child_path)
+                }),
+        );
     }
     digest.complete = digest.omitted == 0 && !digest.source_incomplete;
     digest
@@ -1223,6 +1244,7 @@ mod tests {
         role: &str,
         window_id: &str,
         ordinal: usize,
+        path: &[u32],
     ) -> ComputerActionableElementRef {
         ComputerActionableElementRef {
             label: label.into(),
@@ -1230,6 +1252,7 @@ mod tests {
             window_id: Some(window_id.into()),
             ordinal,
             observed: None,
+            path: path.to_vec(),
         }
     }
 
@@ -1296,8 +1319,8 @@ mod tests {
                     element(1, "entry", "Email", Some(""), "browser"),
                 ],
                 ref_index: vec![
-                    element_ref("Reload", "push button", "browser", 0),
-                    element_ref("Email", "entry", "browser", 0),
+                    element_ref("Reload", "push button", "browser", 0, &[0]),
+                    element_ref("Email", "entry", "browser", 0, &[0, 0]),
                 ],
             }
         );
@@ -1718,8 +1741,8 @@ mod tests {
         assert_eq!(
             digest.ref_index,
             [
-                element_ref("Save", "push button", "editor", 0),
-                element_ref("Save", "push button", "editor", 1),
+                element_ref("Save", "push button", "editor", 0, &[0, 0]),
+                element_ref("Save", "push button", "editor", 1, &[0, 1]),
             ]
         );
     }

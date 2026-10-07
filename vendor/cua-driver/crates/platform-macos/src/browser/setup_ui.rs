@@ -1733,6 +1733,8 @@ mod tests {
             selected: None,
             in_web_content: false,
             placeholder: None,
+            settable: false,
+            expanded: None,
         }
     }
 

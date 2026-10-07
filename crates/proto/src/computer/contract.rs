@@ -536,6 +536,34 @@ pub struct ComputerState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screenshot: Option<ComputerScreenshot>,
     pub captured_at: String,
+    #[serde(skip)]
+    pub ax_tree: Option<ComputerAxTree>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ComputerAxTree {
+    pub url: Option<String>,
+    pub lines: Vec<ComputerAxLine>,
+    pub focused: Option<ComputerAxLine>,
+    pub selected_text: Option<String>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ComputerAxLine {
+    pub depth: u32,
+    pub role: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub value: Option<String>,
+    pub identifier: Option<String>,
+    pub help: Option<String>,
+    pub actions: Vec<String>,
+    pub settable: bool,
+    pub selected: Option<bool>,
+    pub enabled: Option<bool>,
+    pub expanded: Option<bool>,
+    pub target: Option<Vec<u32>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

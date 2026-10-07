@@ -427,6 +427,7 @@ pub(super) fn desktop_entries(dialect: ComputerAgentDialect) -> Vec<ComputerTool
     key_properties.extend(text_target.clone());
     let mut paste_properties = object(json!({
         "text": { "type": "string", "description": "The exact text to paste at the caret." },
+        "format": { "type": "string", "enum": ["text", "md", "html"] },
     }));
     paste_properties.extend(keyboard_target_property());
     let mut set_value_properties = pointer.clone();
@@ -457,6 +458,17 @@ pub(super) fn desktop_entries(dialect: ComputerAgentDialect) -> Vec<ComputerTool
             "maximum": COMPUTER_SELECT_TEXT_RANGE_MAX,
             "description": "Number of UTF-16 code units to select; 0 collapses the selection to a caret at start. A range running past the element's end is refused rather than clamped. The result's value is the text the range covered; compare it with the text you meant to select before typing over it.",
         },
+        "text": {
+            "type": "string",
+            "description": "Instead of start/length, the exact text to find in the element's current value. It must occur exactly once after prefix/suffix narrowing, or the call refuses.",
+        },
+        "prefix": { "type": "string", "description": "Text that must immediately precede the match." },
+        "suffix": { "type": "string", "description": "Text that must immediately follow the match." },
+        "selection": {
+            "type": "string",
+            "enum": ["text", "cursor_before", "cursor_after"],
+            "description": "Select the matched text (default) or place a caret before or after it.",
+        },
     })));
     let rect_properties = |window: &str| {
         object(json!({
@@ -474,12 +486,13 @@ pub(super) fn desktop_entries(dialect: ComputerAgentDialect) -> Vec<ComputerTool
         entry(
             "computer_list_windows",
             format!(
-                "List windows topmost-first with bounds, stackingIndex and occludedBy. Use app to avoid returning unrelated windows. Pass window_id to scope input; selection does not activate it. {WINDOW_FOCUS_NOTE} Use computer_activate_window within task consent when needed; never replay uncertain input.{}",
+                "List windows topmost-first with bounds, stackingIndex and occludedBy. app filters by exact appName, ignoring case. Strips (hidden or off-screen, at most 40pt tall, or zero-area) are omitted unless include_strips. Pass window_id to scope input; selection does not activate it. {WINDOW_FOCUS_NOTE} Use computer_activate_window within task consent when needed; never replay uncertain input.{}",
                 window_list_completeness_note(dialect)
             ),
             object_schema(
                 object(json!({
-                    "app": { "type": "string", "description": "Filter by exact appName, ignoring case." },
+                    "app": { "type": "string" },
+                    "include_strips": { "type": "boolean" },
                 })),
                 &[],
             ),
@@ -488,7 +501,7 @@ pub(super) fn desktop_entries(dialect: ComputerAgentDialect) -> Vec<ComputerTool
         entry(
             "computer_get_state",
             format!(
-                "Read labeled controls and values before acting; prefer semantic targets. {WINDOW_FOCUS_NOTE} Returns elements by default, without an image or duplicate text. Stable refs distinguish duplicates and remain bound to their original elements; use ref on later actions. A one-window listing hoists its id to elementWindowId. window_id scopes inspection; include_screenshot adds {overview_scope} (or that window). {SCREENSHOT_FRAME_NOTE} Use window_id or label_contains to narrow results marked elementsTruncated/elementsOmitted."
+                "Read labeled controls and values before acting; prefer semantic targets. {WINDOW_FOCUS_NOTE} Returns elements (no image) with stable refs that distinguish duplicates; use ref on later actions. A one-window listing hoists its id to elementWindowId. window_id adds tree: the window's hierarchy and values numbered by ref; repeat reads return a diff unless full:true. include_screenshot adds {overview_scope} (or that window). {SCREENSHOT_FRAME_NOTE} Narrow elementsTruncated/elementsOmitted results with window_id or label_contains."
             ),
             object_schema(
                 object(json!({
@@ -512,9 +525,10 @@ pub(super) fn desktop_entries(dialect: ComputerAgentDialect) -> Vec<ComputerTool
                         "type": "string",
                         "description": "Filter elements by case-insensitive label substring, including truncated results.",
                     },
+                    "full": { "type": "boolean" },
                     "diff": {
                         "type": "boolean",
-                        "description": "Return elementChanges (added/removed/changed) since this scope's last read (same window_id and label_contains); the first lists all as added. Position-only changes are omitted; inspect an image for layout.",
+                        "description": "Return elementChanges since this scope's last read (same window_id and label_contains); the first lists all as added.",
                     },
                 })),
                 &[],
@@ -842,7 +856,7 @@ pub(super) fn desktop_entries(dialect: ComputerAgentDialect) -> Vec<ComputerTool
             "computer_paste",
             "Paste text",
             format!(
-                "Paste text into the target control through the clipboard — the fast path for long or awkward text computer_type_text would spend many keystrokes on. It saves the current clipboard, writes the text, sends the paste shortcut, then puts the user's contents back and reports clipboardRestored. A clipboard holding an image or other non-text content cannot be saved and is replaced. {SHARED_CLIPBOARD_NOTE} {KEYBOARD_TARGET_HINT} {DELIVERY_HINT}"
+                "Paste text through the clipboard, the fast path for long or awkward text. It saves the user's clipboard, pastes, restores it and reports clipboardRestored. format md or html pastes rich text with a plain-text fallback. A clipboard holding an image or other non-text content cannot be saved and is replaced. {SHARED_CLIPBOARD_NOTE} {KEYBOARD_TARGET_HINT} {DELIVERY_HINT}"
             ),
             object_schema(paste_properties, &["text"]),
             None,
@@ -880,10 +894,10 @@ pub(super) fn desktop_entries(dialect: ComputerAgentDialect) -> Vec<ComputerTool
             "computer_select_text",
             "Select text",
             format!(
-                "Select an exact character range inside a text element, through the accessibility layer rather than by key chord or pointer drag. {}",
+                "Select an exact character range inside a text element, through the accessibility layer rather than by key chord or pointer drag. Pass start and length, or text with optional prefix, suffix and selection. {}",
                 select_text_note(dialect)
             ),
-            object_schema(select_properties, &["start", "length"]),
+            object_schema(select_properties, &[]),
             None,
         )),
         action_entry(

@@ -95,6 +95,8 @@ pub struct AXNode {
     pub in_web_content: bool,
     /// AXPlaceholderValue, reported separately so no consumer mistakes it for content.
     pub placeholder: Option<String>,
+    pub settable: bool,
+    pub expanded: Option<bool>,
 }
 
 #[derive(Default)]
@@ -689,6 +691,7 @@ unsafe fn walk_element(
         max_value: attr_max_value,
         selected: attr_selected,
         frame,
+        expanded,
         ..
     } = attrs;
 
@@ -835,6 +838,8 @@ unsafe fn walk_element(
             selected: control_state.selected,
             in_web_content,
             placeholder: placeholder.clone(),
+            settable: value_settable,
+            expanded,
         }
     } else {
         AXNode {
@@ -870,6 +875,8 @@ unsafe fn walk_element(
             selected: control_state.selected,
             in_web_content,
             placeholder: placeholder.clone(),
+            settable: value_settable,
+            expanded,
         }
     };
 
@@ -899,6 +906,71 @@ unsafe fn walk_element(
     for child in children {
         CFRelease(child as CFTypeRef);
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FocusedElement {
+    pub role: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub value: Option<String>,
+    pub identifier: Option<String>,
+    pub settable: bool,
+    pub element_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WindowFocus {
+    pub focused: Option<FocusedElement>,
+    pub selected_text: Option<String>,
+    pub url: Option<String>,
+}
+
+// Only indexed nodes are compared: display-only element pointers are released after the walk.
+pub fn read_window_focus(pid: i32, window_id: u32, nodes: &[AXNode]) -> WindowFocus {
+    let mut focus = WindowFocus::default();
+    unsafe {
+        let app = AXUIElementCreateApplication(pid);
+        if app.is_null() {
+            return focus;
+        }
+        set_messaging_timeout(app);
+        let present = |text: Option<String>| {
+            text.map(|text| text.trim().to_owned())
+                .filter(|text| !text.is_empty())
+        };
+        if let Some(element) = copy_element_attr(app, "AXFocusedUIElement") {
+            set_messaging_timeout(element);
+            if super::exact_target::element_window_id(element) == Some(window_id) {
+                let element_index = nodes
+                    .iter()
+                    .filter(|node| node.element_index.is_some())
+                    .find(|node| CFEqual(node.element_ptr as CFTypeRef, element as CFTypeRef) != 0)
+                    .and_then(|node| node.element_index);
+                focus.focused = Some(FocusedElement {
+                    role: copy_string_attr(element, "AXRole").unwrap_or_else(|| "AXUnknown".into()),
+                    title: present(copy_string_attr(element, "AXTitle")),
+                    description: present(copy_string_attr(element, "AXDescription")),
+                    value: present(copy_string_attr(element, "AXValue")),
+                    identifier: present(copy_string_attr(element, "AXIdentifier")),
+                    settable: is_attribute_settable(element, "AXValue"),
+                    element_index,
+                });
+                focus.selected_text =
+                    copy_string_attr(element, "AXSelectedText").filter(|text| !text.is_empty());
+            }
+            CFRelease(element as CFTypeRef);
+        }
+        for window in copy_ax_windows(app) {
+            if focus.url.is_none() && ax_get_window_id(window) == Some(window_id) {
+                set_messaging_timeout(window);
+                focus.url = present(copy_string_attr(window, "AXDocument"));
+            }
+            CFRelease(window as CFTypeRef);
+        }
+        CFRelease(app as CFTypeRef);
+    }
+    focus
 }
 
 fn is_web_content_role(role: &str) -> bool {
