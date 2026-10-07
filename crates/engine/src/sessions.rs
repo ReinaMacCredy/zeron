@@ -468,6 +468,10 @@ impl Inner {
             .is_some_and(|hub| hub.agent_access_enabled());
         let disabled = self.registry.tool_settings().disabled(&[]);
         let live = |group| zeron_proto::tools::group_live(group, &disabled);
+        #[cfg(target_os = "macos")]
+        let computer_guidance =
+            computer_control.then(|| crate::computer::js_tool::SESSION_GUIDANCE.to_owned());
+        #[cfg(not(target_os = "macos"))]
         let computer_guidance =
             computer_control.then(crate::computer::tools::guidance::computer_tool_instructions);
         let blocks: Vec<&str> = [
