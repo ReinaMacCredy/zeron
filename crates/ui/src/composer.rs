@@ -7714,6 +7714,11 @@ impl Composer {
     }
 
     #[cfg(test)]
+    pub(crate) fn input_text(&self, cx: &App) -> String {
+        self.input.read(cx).text().to_string()
+    }
+
+    #[cfg(test)]
     pub(crate) fn placeholder(&self, cx: &App) -> SharedString {
         self.input.read(cx).placeholder.clone()
     }
@@ -11911,6 +11916,13 @@ impl Composer {
             })
             .ok();
         }));
+    }
+
+    pub(crate) fn type_into(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.input.focus_handle(cx), cx);
+        self.input.update(cx, |input, cx| {
+            input.replace_text_in_range(None, text, window, cx);
+        });
     }
 
     pub(crate) fn interrupt_selected(&mut self, cx: &mut Context<Self>) {
