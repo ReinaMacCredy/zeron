@@ -344,23 +344,22 @@ async fn a_failed_run_never_returns_the_desktop_window_list() {
 }
 
 // Catches scoping only by successful steps: a failing step that names its
-// window must still scope the closing state to that one window.
+// window (either spelling) must still scope the closing state to that window.
 #[tokio::test]
 async fn a_failed_run_scopes_its_state_to_the_failing_steps_window() {
-    let h = harness();
-    let result = result_json(
-        &h.call(
-            "computer_run",
-            json!({ "steps": [{ "type": "click", "label": "Nowhere", "window_id": "fake-calculator" }] }),
-        )
-        .await,
-    );
-    assert_eq!(result["steps"][0]["ok"], json!(false), "{result}");
-    assert_eq!(
-        window_ids(&result["state"]["windows"]),
-        vec!["fake-calculator"]
-    );
-    h.dispose().await;
+    for key in ["window_id", "windowId"] {
+        let h = harness();
+        let mut step = json!({ "type": "click", "label": "Nowhere" });
+        step[key] = json!("fake-calculator");
+        let result = result_json(&h.call("computer_run", json!({ "steps": [step] })).await);
+        assert_eq!(result["steps"][0]["ok"], json!(false), "{result}");
+        assert_eq!(
+            window_ids(&result["state"]["windows"]),
+            vec!["fake-calculator"],
+            "{key}"
+        );
+        h.dispose().await;
+    }
 }
 
 async fn select(h: &Harness, extra: Value) -> McpToolResult {
@@ -441,7 +440,7 @@ async fn pastes_html_as_rich_text_and_restores_the_users_clipboard() {
     let pasted = h
         .call(
             "computer_paste",
-            json!({ "text": "<b>Hi</b> &amp; bye", "format": "html", "window_id": "fake-terminal", "include_screenshot": false }),
+            json!({ "text": "<p><b>Hi</b></p><p>&amp; bye</p>", "format": "html", "window_id": "fake-terminal", "include_screenshot": false }),
         )
         .await;
     assert!(!pasted.is_error, "{pasted:?}");
@@ -460,7 +459,10 @@ async fn pastes_html_as_rich_text_and_restores_the_users_clipboard() {
     );
     assert_eq!(
         calls[2].1,
-        vec![json!("Hi & bye"), json!("<b>Hi</b> &amp; bye")]
+        vec![
+            json!("Hi\n& bye"),
+            json!("<p><b>Hi</b></p><p>&amp; bye</p>")
+        ]
     );
     assert_eq!(calls[4].1, vec![json!("user copy")]);
     h.dispose().await;
