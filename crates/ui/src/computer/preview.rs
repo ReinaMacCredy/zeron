@@ -971,6 +971,27 @@ pub fn takeover_sink(cx: &App) -> Option<Box<dyn Fn(super::host::TakeoverEvent) 
     }))
 }
 
+pub fn click_landed(event: &ComputerEvent) -> Option<bool> {
+    let ComputerEvent::Action {
+        action,
+        ok: true,
+        delivery,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    matches!(
+        super::presentation::computer_tool_name(action),
+        Some("computer_click" | "computer_browser_click")
+    )
+    .then(|| {
+        delivery
+            .as_ref()
+            .is_some_and(|delivery| delivery.path.contains("foreground"))
+    })
+}
+
 pub fn watch_events(engine: EngineHandle, cx: &mut App) -> Option<Task<()>> {
     let store = store(cx)?.downgrade();
     Some(cx.spawn(async move |cx| {
@@ -1003,7 +1024,14 @@ pub fn watch_events(engine: EngineHandle, cx: &mut App) -> Option<Task<()>> {
                 let Some(live) = store.upgrade() else {
                     return;
                 };
-                cx.update(|cx| update_store(&live, cx, |store| store.apply_event(&event)));
+                cx.update(|cx| {
+                    update_store(&live, cx, |store| store.apply_event(&event));
+                    if let Some(foreground) = click_landed(&event)
+                        && crate::settings::computer_click_sounds(cx).plays(foreground)
+                    {
+                        crate::sound::play_computer_click();
+                    }
+                });
             }
             let Some(live) = store.upgrade() else {
                 return;
@@ -1117,6 +1145,131 @@ pub(crate) mod tests {
         });
     }
 
+    fn click(thread: &str, path: Option<&str>, ok: bool, action: &str) -> ComputerEvent {
+        ComputerEvent::Action {
+            window_id: Some("w1".into()),
+            delivery: path.map(|path| {
+                serde_json::from_value(serde_json::json!({ "path": path, "verified": "confirmed" }))
+                    .unwrap()
+            }),
+            action: action.into(),
+            ok,
+            message: None,
+            thread_id: Some(thread.into()),
+            restored_window_id: None,
+            restore_status: None,
+            masked: false,
+        }
+    }
+
+    #[test]
+    fn a_landed_click_reports_whether_it_was_in_the_foreground() {
+        assert_eq!(
+            click_landed(&click(
+                "a",
+                Some("foreground-cgevent"),
+                true,
+                "computer_click"
+            )),
+            Some(true)
+        );
+        assert_eq!(
+            click_landed(&click(
+                "a",
+                Some("ax-press"),
+                true,
+                "mcp__zeron__computer_click"
+            )),
+            Some(false)
+        );
+        assert_eq!(
+            click_landed(&click("a", None, true, "computer_browser_click")),
+            Some(false)
+        );
+        assert_eq!(
+            click_landed(&click(
+                "a",
+                Some("foreground-cgevent"),
+                false,
+                "computer_click"
+            )),
+            None,
+            "a failed click makes no sound"
+        );
+        assert_eq!(
+            click_landed(&click(
+                "a",
+                Some("foreground-cgevent"),
+                true,
+                "computer_type_text"
+            )),
+            None
+        );
+        let setting = crate::settings::ComputerClickSounds::Foreground;
+        assert!(setting.plays(true) && !setting.plays(false));
+    }
+
+    #[test]
+    fn hide_for_all_active_tasks_hides_only_live_previews() {
+        let mut store = ComputerPreviewStore::default();
+        for chat in ["a", "b", "c"] {
+            driving(&mut store, chat);
+            store.mark_live(chat);
+        }
+        store.apply_event(&ComputerEvent::ThreadState {
+            state: Box::new(thread_state("c", false)),
+        });
+        assert!(store.hide_all_active());
+        assert_eq!(store.view("a").phase, Some(PreviewPhase::HiddenForTask));
+        assert_eq!(store.view("b").phase, Some(PreviewPhase::HiddenForTask));
+        assert_eq!(store.view("c").phase, Some(PreviewPhase::Ended));
+        assert!(!store.hide_all_active(), "nothing left to hide");
+    }
+
+    #[test]
+    fn a_finished_drive_flashes_complete_but_a_revoked_one_does_not() {
+        let mut store = ComputerPreviewStore::default();
+        driving(&mut store, "a");
+        assert!(!store.view("a").completed);
+        store.apply_event(&ComputerEvent::ThreadState {
+            state: Box::new(thread_state("a", false)),
+        });
+        assert!(store.view("a").completed, "the turn finished");
+        driving(&mut store, "a");
+        assert!(!store.view("a").completed, "a new drive clears it");
+
+        driving(&mut store, "b");
+        let mut revoked = thread_state("b", false);
+        revoked.input_stopped = Some(true);
+        store.apply_event(&ComputerEvent::ThreadState {
+            state: Box::new(revoked),
+        });
+        assert!(!store.view("b").completed);
+    }
+
+    #[test]
+    fn driven_apps_collect_per_drive_and_a_stop_hides_one() {
+        let mut store = ComputerPreviewStore::default();
+        driving(&mut store, "a");
+        store.apply_event(&click("a", None, true, "computer_click"));
+        store.apply_event(&click("a", None, true, "computer_click"));
+        let apps = |store: &ComputerPreviewStore| {
+            crate::computer::presence::chat_presence(store, "a")
+                .map(|presence| presence.apps)
+                .unwrap_or_default()
+        };
+        assert_eq!(apps(&store).len(), 1, "one entry per app");
+        assert!(store.stop_app("a", "calculator"));
+        assert!(!store.stop_app("a", "Calculator"));
+        assert!(apps(&store).is_empty());
+        assert!(!store.stop_app("nobody", "Calculator"));
+        store.apply_event(&ComputerEvent::ThreadState {
+            state: Box::new(thread_state("a", false)),
+        });
+        driving(&mut store, "a");
+        store.apply_event(&click("a", None, true, "computer_click"));
+        assert_eq!(apps(&store).len(), 1, "the next drive starts fresh");
+    }
     #[test]
     fn the_newest_tap_frame_wins_and_older_ones_are_evicted() {
         let mut store = ComputerPreviewStore::default();
