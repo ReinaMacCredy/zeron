@@ -1,5 +1,6 @@
 mod actions;
 mod authority;
+mod browser_profile;
 mod consent_app;
 mod foreground;
 mod lease;
@@ -65,7 +66,7 @@ pub const SCROLL_PROBE_TRIGGER_PX: f64 = SCROLL_PROBE_PX;
 pub const SCROLL_SETTLE_ARRIVAL_TOLERANCE: f64 = 0.15;
 pub const SCROLL_SETTLE_ARRIVAL_MIN_PX: f64 = 4.0;
 pub const COMPUTER_ERROR_REPUBLISH_DEBOUNCE_MS: u64 = 250;
-pub const COMPUTER_CONTROL_ON_DISCLOSURE: &str = "Computer control is on for this turn. The user can take the desktop back with Stop or Escape; if a computer tool returns user_revoked, stop using computer tools and summarize.";
+pub const COMPUTER_CONTROL_ON_DISCLOSURE: &str = "Computer control is on for this turn. If the user uses an app you are driving, input pauses: read fresh state and continue. If a computer tool returns user_revoked, the user pressed Stop: stop using computer tools and summarize.";
 pub const COMPUTER_USER_PAUSE_NOTE_PREFIX: &str = "Paused while you used ";
 pub const COMPUTER_USER_REVOKED: &str = "The user took back desktop control for the rest of this turn; no input was sent. Do not call computer tools again this turn. Tell the user what you finished and what is left.";
 const COMPUTER_DENYLIST_APP_CACHE_MS: u64 = 30_000;
@@ -120,6 +121,9 @@ impl ComputerManagerEnv {
 
 #[cfg(test)]
 pub(crate) use authority::consent_params;
+pub use browser_profile::{
+    COMPUTER_BROWSER_PROFILE_CONSENT_PARAMS, COMPUTER_BROWSER_PROFILE_CONSENT_TOOL,
+};
 pub use consent_app::{
     COMPUTER_APP_CONSENT_REQUIRED_CODE, COMPUTER_APP_WINDOW_REQUIRED_CODE,
     COMPUTER_APP_WINDOW_REQUIRED_MESSAGE,
@@ -1108,6 +1112,56 @@ fn clipboard_not_restorable_error() -> ComputerError {
 
 fn clipboard_unsupported_error() -> ComputerError {
     ComputerBackendError::new("This computer backend does not support clipboard access.").into()
+}
+
+fn markdown_html(markdown: &str) -> String {
+    let mut html = String::new();
+    pulldown_cmark::html::push_html(
+        &mut html,
+        pulldown_cmark::Parser::new_ext(markdown, pulldown_cmark::Options::all()),
+    );
+    html
+}
+
+fn html_plain_text(html: &str) -> String {
+    const LINE_BREAKS: &[&str] = &[
+        "br",
+        "/p",
+        "/div",
+        "/li",
+        "/tr",
+        "/pre",
+        "/blockquote",
+        "/h1",
+        "/h2",
+        "/h3",
+        "/h4",
+        "/h5",
+        "/h6",
+    ];
+    let mut text = String::with_capacity(html.len());
+    let mut tag: Option<String> = None;
+    for character in html.chars() {
+        match tag.as_mut() {
+            None if character == '<' => tag = Some(String::new()),
+            None => text.push(character),
+            Some(name) if character == '>' => {
+                let name = name.trim().trim_end_matches('/').to_ascii_lowercase();
+                if LINE_BREAKS.contains(&name.split_whitespace().next().unwrap_or_default()) {
+                    text.push('\n');
+                }
+                tag = None;
+            }
+            Some(name) => name.push(character),
+        }
+    }
+    text.trim_end_matches('\n')
+        .replace("&nbsp;", " ")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
 }
 
 fn js_number(value: f64) -> String {

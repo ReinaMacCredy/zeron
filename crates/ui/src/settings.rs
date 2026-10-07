@@ -567,6 +567,12 @@ pub fn shortcut_combo(id: ShortcutId, cx: &App) -> String {
     }
 }
 
+pub fn computer_click_sounds(cx: &App) -> ComputerClickSounds {
+    cx.try_global::<SettingsStore>()
+        .map(|store| store.current.computer_click_sounds)
+        .unwrap_or_default()
+}
+
 pub fn compact_effort_slider(cx: &App) -> EffortSliderStyle {
     cx.try_global::<SettingsStore>()
         .map(|store| store.current.compact_effort_slider)
@@ -911,6 +917,25 @@ pub enum EffortSliderStyle {
     Stepped,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ComputerClickSounds {
+    #[default]
+    Foreground,
+    ForegroundAndBackground,
+    Off,
+}
+
+impl ComputerClickSounds {
+    pub fn plays(self, foreground: bool) -> bool {
+        match self {
+            Self::Foreground => foreground,
+            Self::ForegroundAndBackground => true,
+            Self::Off => false,
+        }
+    }
+}
+
 /// The modifier that steps the thinking level with `-` and `=`/`+`.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -1249,6 +1274,7 @@ pub struct UiSettings {
     /// Open model selection with an effort slider and a separate model list.
     pub compact_model_picker: bool,
     pub compact_effort_slider: EffortSliderStyle,
+    pub computer_click_sounds: ComputerClickSounds,
     pub sidebar_width: f32,
     pub sidebar_collapsed: bool,
     /// Legacy: the grouped-by-project toggle predates spaces (which group by
@@ -1512,6 +1538,7 @@ impl Default for UiSettings {
             skill_completion_by_harness: Default::default(),
             compact_model_picker: true,
             compact_effort_slider: EffortSliderStyle::Glass,
+            computer_click_sounds: ComputerClickSounds::Foreground,
             appshots_enabled: false,
             appshot_sound_enabled: true,
             appshot_destination: crate::appshots::AppshotDestination::Automatic,
@@ -2224,6 +2251,7 @@ impl UiSettings {
             switcher_limit,
             switcher_cycles_tabs,
             compact_effort_slider,
+            computer_click_sounds,
             open_tabs_stable,
             split_ratio,
             appshot_welcome_acknowledged,
@@ -2785,6 +2813,56 @@ mod tests {
         assert_eq!(merged.pr_chat_history, PrChatHistory::Fresh);
         assert_eq!(merged.commit_message_instruction, "Conventional please.");
         assert_eq!(merged.pr_chat_style, PrChatStyle::BottomBar);
+    }
+
+    #[test]
+    fn computer_click_sounds_default_to_foreground_persist_and_merge() {
+        let legacy: UiSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            legacy.computer_click_sounds,
+            ComputerClickSounds::Foreground
+        );
+        let edited = UiSettings {
+            computer_click_sounds: ComputerClickSounds::ForegroundAndBackground,
+            ..legacy.clone()
+        };
+        let saved = serde_json::to_string(&edited).unwrap();
+        assert!(saved.contains(r#""computerClickSounds":"foreground-and-background""#));
+        let loaded: UiSettings = serde_json::from_str(&saved).unwrap();
+        assert_eq!(
+            loaded.computer_click_sounds,
+            ComputerClickSounds::ForegroundAndBackground
+        );
+        let current = UiSettings {
+            sidebar_width: legacy.sidebar_width + 40.0,
+            ..legacy.clone()
+        };
+        let merged = UiSettings::merge_changes(&legacy, &edited, current.clone());
+        assert_eq!(
+            merged.computer_click_sounds,
+            ComputerClickSounds::ForegroundAndBackground,
+            "a stale copy's click-sound choice reaches the store"
+        );
+        assert_eq!(merged.sidebar_width, current.sidebar_width);
+        let other = UiSettings {
+            computer_click_sounds: ComputerClickSounds::Off,
+            ..legacy.clone()
+        };
+        assert_eq!(
+            UiSettings::merge_changes(&legacy, &current, other).computer_click_sounds,
+            ComputerClickSounds::Off,
+            "an untouched field keeps what another surface saved"
+        );
+        for (setting, foreground, background) in [
+            (ComputerClickSounds::Foreground, true, false),
+            (ComputerClickSounds::ForegroundAndBackground, true, true),
+            (ComputerClickSounds::Off, false, false),
+        ] {
+            assert_eq!(
+                (setting.plays(true), setting.plays(false)),
+                (foreground, background)
+            );
+        }
     }
 
     #[test]
@@ -3554,6 +3632,7 @@ mod tests {
             skill_completion_by_harness: Default::default(),
             compact_model_picker: true,
             compact_effort_slider: EffortSliderStyle::Glass,
+            computer_click_sounds: ComputerClickSounds::Foreground,
             appshots_enabled: false,
             appshot_sound_enabled: true,
             // The destination is only persisted where Appshots exist (macOS and

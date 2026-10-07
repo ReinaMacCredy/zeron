@@ -195,7 +195,7 @@ fn paint_soft_shadow(pm: &mut Pixmap, paint: &CompactPaint, alpha: f64) {
 /// Separable three-pass box blur over premultiplied RGBA bytes. Box blurs of
 /// premultiplied components preserve the color/coverage ratio of a solid
 /// silhouette, which is all this shadow needs.
-fn box_blur_rgba(data: &mut [u8], width: u32, height: u32, radius: u32) {
+pub(crate) fn box_blur_rgba(data: &mut [u8], width: u32, height: u32, radius: u32) {
     if radius == 0 {
         return;
     }

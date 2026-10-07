@@ -11,8 +11,10 @@ use super::tool_input::{
     read_required_string_arg, read_string_arg, read_string_array_arg, read_verbatim_string_arg,
 };
 use crate::computer::backend::{
-    ComputerCaptureRequest, ComputerMenuTarget, ComputerTextRange,
-    DEFAULT_COMPUTER_CAPTURE_MAX_DIMENSION, MAX_COMPUTER_CLIPBOARD_BYTES,
+    ComputerCaptureRequest, ComputerMenuTarget, ComputerPasteFormat, ComputerTextMatch,
+    ComputerTextPlacement,
+    ComputerTextRange, ComputerTextSelection, DEFAULT_COMPUTER_CAPTURE_MAX_DIMENSION,
+    MAX_COMPUTER_CLIPBOARD_BYTES,
 };
 use crate::computer::manager::{ComputerClickButton, ComputerClickGesture};
 use crate::computer::utf8_truncation::utf16_len;
@@ -215,6 +217,51 @@ pub fn read_select_text_range(args: &ToolArgs) -> Read<ComputerTextRange> {
     })
 }
 
+fn read_match_text(args: &ToolArgs, name: &str) -> Read<Option<String>> {
+    match args.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) if !text.is_empty() => Ok(Some(text.clone())),
+        Some(_) => Err(input(format!(
+            "Argument \"{name}\" must be a non-empty string."
+        ))),
+    }
+}
+
+pub fn read_select_text_selection(args: &ToolArgs) -> Read<ComputerTextSelection> {
+    let Some(text) = read_match_text(args, "text")? else {
+        if ["prefix", "suffix", "selection"]
+            .iter()
+            .any(|name| args.contains_key(*name))
+        {
+            return Err(input(
+                "prefix, suffix and selection refine a \"text\" match; pass \"text\" as well.",
+            ));
+        }
+        return read_select_text_range(args).map(Into::into);
+    };
+    if args.contains_key("start") || args.contains_key("length") {
+        return Err(input(
+            "Pass either \"text\" or \"start\" and \"length\", never both.",
+        ));
+    }
+    let placement = match read_string_arg(args, "selection", false)?.as_deref() {
+        None | Some("text") => ComputerTextPlacement::Text,
+        Some("cursor_before") => ComputerTextPlacement::CursorBefore,
+        Some("cursor_after") => ComputerTextPlacement::CursorAfter,
+        Some(_) => {
+            return Err(input(
+                "Argument \"selection\" must be \"text\", \"cursor_before\" or \"cursor_after\".",
+            ));
+        }
+    };
+    Ok(ComputerTextSelection::Match(ComputerTextMatch {
+        text,
+        prefix: read_match_text(args, "prefix")?,
+        suffix: read_match_text(args, "suffix")?,
+        placement,
+    }))
+}
+
 pub fn read_select_text_target(args: &ToolArgs) -> Read<ScreenshotTarget> {
     let target = read_screenshot_target(args)?;
     if target.target.x.is_some() || target.target.y.is_some() || target.screenshot_id.is_some() {
@@ -292,6 +339,17 @@ pub fn read_action_name(args: &ToolArgs) -> Read<String> {
         )));
     }
     Ok(value)
+}
+
+pub fn read_paste_format(args: &ToolArgs) -> Read<ComputerPasteFormat> {
+    match read_string_arg(args, "format", false)?.as_deref() {
+        None | Some("text") => Ok(ComputerPasteFormat::Text),
+        Some("md") => Ok(ComputerPasteFormat::Markdown),
+        Some("html") => Ok(ComputerPasteFormat::Html),
+        Some(_) => Err(input(
+            "Argument \"format\" must be \"text\", \"md\" or \"html\".",
+        )),
+    }
 }
 
 pub fn read_clipboard_text(args: &ToolArgs) -> Read<String> {

@@ -75,11 +75,15 @@ fn run(dir: PathBuf) -> ! {
             .cloned()
     };
     if !options.unpatched
-        && (!has("--compact-cursor") || after("--idle-hide-ms").as_deref() != Some("60000"))
+        && (!has("--compact-cursor")
+            || after("--idle-hide-ms").as_deref() != Some("60000")
+            || after("--cursor-theme").as_deref() != Some("zeron.codex"))
     {
         std::process::exit(1);
     }
-    if options.unpatched && (has("--compact-cursor") || has("--idle-hide-ms")) {
+    if options.unpatched
+        && (has("--compact-cursor") || has("--idle-hide-ms") || has("--cursor-theme"))
+    {
         std::process::exit(1);
     }
     let socket = after("--socket").unwrap();

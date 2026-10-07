@@ -29,6 +29,7 @@ mod app_consent;
 mod batch_and_diffs;
 mod browser;
 mod catalog;
+mod codex_parity;
 mod hung_host;
 mod invariants;
 mod menus_frames;

@@ -229,7 +229,7 @@ fn with_tab_screenshot(mut result: ToolResult, screenshot: BrowserTabScreenshot)
     if let Some(structured) = result.structured_content.as_mut() {
         structured["screenshot"] = json!({
             "source": "cdp_tab",
-            "scope": "viewport",
+            "scope": screenshot.scope,
             "mime_type": "image/png",
             "width": screenshot.width,
             "height": screenshot.height,
@@ -310,6 +310,11 @@ impl GetBrowserStateTool {
                         "default": false,
                         "description": "Capture the exact tab viewport as PNG through CDP without selecting the tab or foregrounding its native window. The request refuses if capture cannot be completed."
                     },
+                    "full_page": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "With include_screenshot, capture the whole scrollable page (height capped at 16384 CSS px) instead of the viewport."
+                    },
                 },
                 "additionalProperties": true
             }),
@@ -383,6 +388,16 @@ impl Tool for GetBrowserStateTool {
                     )
                 }
             };
+            let full_page = match args.get("full_page") {
+                None => false,
+                Some(Value::Bool(full_page)) => *full_page,
+                Some(_) => {
+                    return ToolResult::error("Field full_page has wrong type: expected boolean")
+                }
+            };
+            if full_page && !include_screenshot {
+                return ToolResult::error("full_page requires include_screenshot=true");
+            }
             if snapshot_format != "dom_refs_v1" && snapshot_format != "semantic_v2" {
                 return ToolResult::error(format!(
                     "snapshot_format must be \"dom_refs_v1\" or \"semantic_v2\", got {snapshot_format:?}"
@@ -471,7 +486,7 @@ impl Tool for GetBrowserStateTool {
                 if include_screenshot {
                     return match self
                         .engine
-                        .capture_tab_screenshot(&session, &target_id, &tab_id)
+                        .capture_tab_screenshot(&session, &target_id, &tab_id, full_page)
                         .await
                     {
                         Ok(screenshot) => with_tab_screenshot(snapshot, screenshot),
@@ -524,7 +539,7 @@ impl Tool for GetBrowserStateTool {
             if include_screenshot {
                 return match self
                     .engine
-                    .capture_tab_screenshot(&session, &target_id, &tab_id)
+                    .capture_tab_screenshot(&session, &target_id, &tab_id, full_page)
                     .await
                 {
                     Ok(screenshot) => with_tab_screenshot(snapshot, screenshot),
@@ -840,17 +855,22 @@ impl BrowserNavigateTool {
             name: "browser_navigate".into(),
             description: "Navigate one tab of an exactly-bound browser target to a \
                 new URL (http/https/about only). Refused for heuristic bindings. \
-                Navigation invalidates all p<snapshot>:<index> refs for the tab."
+                Navigation invalidates all p<snapshot>:<index> refs for the tab. \
+                new_tab=true instead opens url in a new background tab of the bound \
+                window and returns its tab_id; close_tab=true closes tab_id, and only \
+                when this session opened it with new_tab. A user's tab is never closed."
                 .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "target_id": schema_target_id(),
                     "tab_id": schema_tab_id(),
-                    "url": { "type": "string", "description": "Destination URL (http:, https:, or about:)." },
+                    "url": { "type": "string", "description": "Destination URL (http:, https:, or about:). Required unless close_tab is true." },
+                    "new_tab": { "type": "boolean", "description": "Open url in a new background tab of the bound window; tab_id names any live tab of the target." },
+                    "close_tab": { "type": "boolean", "description": "Close tab_id. Refused unless this session opened that tab with new_tab." },
                     "session": schema_session(),
                 },
-                "required": ["target_id", "tab_id", "url"],
+                "required": ["target_id", "tab_id"],
                 "additionalProperties": true
             }),
             read_only: false,
@@ -893,16 +913,40 @@ impl Tool for BrowserNavigateTool {
     }
 
     async fn invoke(&self, args: Value) -> ToolResult {
-        let (target_id, tab_id, url) = match (
-            args.require_str("target_id"),
-            args.require_str("tab_id"),
-            args.require_str("url"),
-        ) {
-            (Ok(t), Ok(tab), Ok(u)) => (t, tab, u),
-            (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => return e,
+        let (target_id, tab_id) = match (args.require_str("target_id"), args.require_str("tab_id"))
+        {
+            (Ok(t), Ok(tab)) => (t, tab),
+            (Err(e), _) | (_, Err(e)) => return e,
         };
         let session = match require_explicit_session(&args) {
             Ok(s) => s,
+            Err(e) => return e,
+        };
+        let new_tab = args.opt_bool("new_tab").unwrap_or(false);
+        if args.opt_bool("close_tab").unwrap_or(false) {
+            if new_tab || args.get("url").is_some() {
+                return ToolResult::error("close_tab cannot be combined with url or new_tab");
+            }
+            let _mutation = match self
+                .engine
+                .lock_mutation(&session, &target_id, &tab_id)
+                .await
+            {
+                Ok(guard) => guard,
+                Err(refusal) => return refusal.to_tool_result(),
+            };
+            return match self.engine.close_tab(&session, &target_id, &tab_id).await {
+                Ok(()) => ToolResult::text(format!("closed tab {tab_id}")).with_structured(json!({
+                    "status": "ok",
+                    "target_id": target_id,
+                    "tab_id": tab_id,
+                    "closed": true,
+                })),
+                Err(refusal) => refusal.to_tool_result(),
+            };
+        }
+        let url = match args.require_str("url") {
+            Ok(url) => url,
             Err(e) => return e,
         };
         let lower = url.to_ascii_lowercase();
@@ -923,6 +967,26 @@ impl Tool for BrowserNavigateTool {
             Ok(guard) => guard,
             Err(refusal) => return refusal.to_tool_result(),
         };
+        if new_tab {
+            return match self
+                .engine
+                .open_tab(&session, &target_id, &tab_id, &url)
+                .await
+            {
+                Ok(tab) => {
+                    ToolResult::text(format!("opened {url} in new background tab {}", tab.tab_id))
+                        .with_structured(json!({
+                            "status": "ok",
+                            "target_id": target_id,
+                            "tab_id": tab.tab_id,
+                            "opened_tab": true,
+                            "anchor_tab_id": tab_id,
+                            "url": url,
+                        }))
+                }
+                Err(refusal) => refusal.to_tool_result(),
+            };
+        }
         let validated = match self
             .engine
             .revalidate_for_mutation(&session, &target_id, Some(&tab_id))

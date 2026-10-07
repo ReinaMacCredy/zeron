@@ -143,24 +143,6 @@ async fn serve(
     Served::Lost
 }
 
-pub async fn stop_from_escape(engine: EngineHandle) {
-    super::emergency_stop_notice::notify_engine_emergency_stop(
-        || {
-            let engine = engine.clone();
-            async move {
-                engine
-                    .client()
-                    .call(methods::COMPUTER_EMERGENCY_STOP, json!({}))
-                    .await
-                    .map(drop)
-                    .map_err(|error| error.to_string())
-            }
-        },
-        |error| tracing::warn!(target: "desktop_cua", "{error}"),
-    )
-    .await;
-}
-
 #[cfg(target_os = "macos")]
 pub const DESKTOP_HOST_RETIRE_BUDGET: Duration = Duration::from_secs(5);
 
@@ -193,26 +175,10 @@ pub fn install_desktop_host(cx: &mut gpui::App) {
     let cursor_style: Arc<Mutex<Option<super::host::CuaCursorStyle>>> = Arc::default();
     let browser_sender = crate::browser::control_host::install(cx);
     let browser_admission = Arc::new(crate::browser::control_admission::Admission::default());
-    let on_emergency_stop: Arc<dyn Fn() + Send + Sync> = Arc::new({
-        let browser_sender = browser_sender.clone();
-        let engine = engine.clone();
-        let runtime = runtime.clone();
-        move || {
-            let _ = browser_sender.send(crate::browser::control_host::Message::Revoke(None));
-            let current = engine
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone();
-            if let Some(current) = current {
-                runtime.spawn(stop_from_escape(current));
-            }
-        }
-    });
     let config = super::native::NativeHostConfig {
         binary_path,
         bundle_id: bundle_id.clone(),
         preview: super::preview::native_sink(cx),
-        on_emergency_stop: Some(on_emergency_stop),
         browser_admission: browser_admission.clone(),
         cursor_style: Some(Box::new({
             let cursor_style = cursor_style.clone();
@@ -301,7 +267,6 @@ pub fn apply_cursor_colors(
 #[cfg(target_os = "macos")]
 pub fn retire_desktop_host(cx: &mut gpui::App) -> Option<gpui::Task<()>> {
     cx.try_global::<DesktopHost>()?;
-    super::native::target_ring::release_all();
     super::native::status_item::remove();
     let desktop = cx.remove_global::<DesktopHost>();
     let disposing = desktop.driver.dispose();
@@ -475,50 +440,6 @@ mod tests {
                 other => Err(RpcError::UnknownMethod(other.into())),
             }
         }
-    }
-
-    #[tokio::test]
-    async fn an_escape_reaches_the_engine_emergency_stop() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("device-id"), "device-mac").unwrap();
-        let core = EngineCore::assemble(
-            dir.path(),
-            Arc::new(HarnessRegistry::new()),
-            HarnessId::Mock,
-            None,
-        )
-        .unwrap();
-        eventually("the computer service never booted", || {
-            core.computer.service().is_some()
-        })
-        .await;
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        struct Recording {
-            inner: Arc<dyn RpcService>,
-            calls: Arc<Mutex<Vec<String>>>,
-        }
-        #[async_trait]
-        impl RpcService for Recording {
-            async fn handle(
-                &self,
-                method: &str,
-                params: serde_json::Value,
-            ) -> Result<RpcReply, RpcError> {
-                self.calls.lock().unwrap().push(method.to_owned());
-                self.inner.handle(method, params).await
-            }
-        }
-        let engine =
-            EngineHandle::from_test_client(zeron_rpc::memory_client(Arc::new(Recording {
-                inner: core.rpc_service(),
-                calls: calls.clone(),
-            })));
-        stop_from_escape(engine).await;
-        assert_eq!(
-            *calls.lock().unwrap(),
-            vec![methods::COMPUTER_EMERGENCY_STOP.to_owned()]
-        );
-        core.shutdown().await;
     }
 
     #[tokio::test]

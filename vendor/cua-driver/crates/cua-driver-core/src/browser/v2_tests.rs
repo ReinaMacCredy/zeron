@@ -74,6 +74,8 @@ struct FixtureState {
     dom_type_kind: String,
     dom_type_dispatched: bool,
     dom_type_readback_matched: bool,
+    opened_targets: Vec<String>,
+    opened_window: i64,
     /// Every incoming CDP call: (sessionId, method, params).
     calls: Vec<(Option<String>, String, Value)>,
 }
@@ -105,6 +107,8 @@ impl Default for FixtureState {
             dom_type_kind: "input".into(),
             dom_type_dispatched: true,
             dom_type_readback_matched: true,
+            opened_targets: Vec::new(),
+            opened_window: 11,
             calls: Vec::new(),
         }
     }
@@ -513,15 +517,41 @@ fn fixture_handler(state: SharedState) -> MockHandler {
         let is_oopif = sess.starts_with("oopif-sess-");
 
         match call.method.as_str() {
-            "Target.getTargets" => MockReply::ok(json!({
-                "targetInfos": [{
+            "Target.getTargets" => {
+                let mut infos = vec![json!({
                     "targetId": "T1",
                     "type": "page",
                     "title": "Fixture",
                     "url": "https://fixture.test/",
                     "attached": false,
-                }]
-            })),
+                })];
+                infos.extend(st.opened_targets.iter().map(|id| {
+                    json!({
+                        "targetId": id,
+                        "type": "page",
+                        "title": "Opened",
+                        "url": "https://fixture.test/opened",
+                        "attached": false,
+                    })
+                }));
+                MockReply::ok(json!({ "targetInfos": infos }))
+            }
+            "Target.createTarget" => {
+                let id = format!("T{}", st.opened_targets.len() + 2);
+                st.opened_targets.push(id.clone());
+                MockReply::ok(json!({ "targetId": id }))
+            }
+            "Target.closeTarget" => {
+                let closed = call.params["targetId"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned();
+                st.opened_targets.retain(|id| *id != closed);
+                MockReply::ok(json!({ "success": true }))
+            }
+            "Browser.getWindowForTarget" if call.params["targetId"] != "T1" => {
+                MockReply::ok(json!({ "windowId": st.opened_window }))
+            }
             "Browser.getWindowForTarget" => MockReply::ok(json!({ "windowId": 11 })),
             "Browser.getWindowBounds" => MockReply::ok(json!({
                 "bounds": { "left": 0.0, "top": 0.0, "width": 800.0, "height": 600.0 }
@@ -633,6 +663,12 @@ fn fixture_handler(state: SharedState) -> MockHandler {
                     "pageY": 0.0,
                     "clientWidth": st.viewport_css_width,
                     "clientHeight": st.viewport_css_height
+                },
+                "cssContentSize": {
+                    "x": 0.0,
+                    "y": 0.0,
+                    "width": st.viewport_css_width,
+                    "height": 2400.0
                 }
             })),
             "Runtime.evaluate"
@@ -1242,7 +1278,7 @@ async fn windowless_screenshot_uses_cdp_page_capture() {
     let (target_id, tab_id) = bind_windowless(&f).await;
     let shot = f
         .engine
-        .capture_tab_screenshot(SESSION, &target_id, &tab_id)
+        .capture_tab_screenshot(SESSION, &target_id, &tab_id, false)
         .await
         .expect("the headless screenshot path must stay on CDP");
     assert!(shot.width > 0 && shot.height > 0);
@@ -1452,6 +1488,168 @@ async fn approved_existing_profile_tools_stay_within_the_reviewed_cdp_surface() 
     }
 
     crate::session::fire_session_end(TRANSPORT);
+}
+
+async fn attached_existing_profile(f: &Fixture, transport: &str) -> (String, String) {
+    let prepare = BrowserPrepareTool::new(f.engine.clone())
+        .invoke(json!({
+            "pid": 1,
+            "window_id": 7,
+            "session": SESSION,
+            "_transport_session_id": transport,
+            "strategy": { "kind": "existing_profile" }
+        }))
+        .await;
+    assert_eq!(
+        structured(&prepare)["status"],
+        "ok",
+        "{}",
+        structured(&prepare)
+    );
+    let state = GetBrowserStateTool::new(f.engine.clone())
+        .invoke(json!({
+            "pid": 1,
+            "window_id": 7,
+            "session": SESSION,
+            "_transport_session_id": transport
+        }))
+        .await;
+    let bound = structured(&state);
+    assert_eq!(bound["status"], "ok", "{bound}");
+    (
+        bound["target_id"].as_str().unwrap().to_owned(),
+        bound["tabs"][0]["tab_id"].as_str().unwrap().to_owned(),
+    )
+}
+
+#[tokio::test]
+async fn existing_profile_closes_only_the_tab_the_driver_opened() {
+    const TRANSPORT: &str = "transport-v2-own-tab";
+    let (f, _) = protected_existing_profile_fixture().await;
+    let (target, user_tab) = attached_existing_profile(&f, TRANSPORT).await;
+    let navigate = BrowserNavigateTool::new(f.engine.clone());
+
+    let opened = navigate
+        .invoke(json!({
+            "target_id": target,
+            "tab_id": user_tab,
+            "url": "https://fixture.test/opened",
+            "new_tab": true,
+            "session": SESSION
+        }))
+        .await;
+    let opened = structured(&opened).clone();
+    assert_eq!(opened["status"], "ok", "{opened}");
+    assert_eq!(opened["opened_tab"], true);
+    let agent_tab = opened["tab_id"].as_str().unwrap().to_owned();
+    assert_ne!(agent_tab, user_tab);
+    let created = recorded_calls(&f, "Target.createTarget");
+    assert_eq!(created.len(), 1);
+    assert_eq!(created[0].1["background"], true);
+    assert!(recorded_calls(&f, "Page.navigate").is_empty());
+
+    let refused = navigate
+        .invoke(json!({
+            "target_id": target,
+            "tab_id": user_tab,
+            "close_tab": true,
+            "session": SESSION
+        }))
+        .await;
+    let refused = structured(&refused).clone();
+    assert_eq!(refused["status"], "refused", "{refused}");
+    assert_eq!(refused["refusal"]["code"], "browser_wrong_target_refused");
+    assert!(recorded_calls(&f, "Target.closeTarget").is_empty());
+
+    let closed = navigate
+        .invoke(json!({
+            "target_id": target,
+            "tab_id": agent_tab,
+            "close_tab": true,
+            "session": SESSION
+        }))
+        .await;
+    assert_eq!(
+        structured(&closed)["closed"],
+        true,
+        "{}",
+        structured(&closed)
+    );
+    let closes = recorded_calls(&f, "Target.closeTarget");
+    assert_eq!(closes.len(), 1);
+    assert_eq!(closes[0].1["targetId"], "T2");
+
+    let again = navigate
+        .invoke(json!({
+            "target_id": target,
+            "tab_id": agent_tab,
+            "close_tab": true,
+            "session": SESSION
+        }))
+        .await;
+    assert_eq!(structured(&again)["status"], "refused");
+    assert_eq!(recorded_calls(&f, "Target.closeTarget").len(), 1);
+
+    for method in ["Runtime.enable", "Emulation.setDeviceMetricsOverride"] {
+        assert!(recorded_calls(&f, method).is_empty(), "{method}");
+    }
+    crate::session::fire_session_end(TRANSPORT);
+}
+
+#[tokio::test]
+async fn a_new_tab_that_lands_in_another_window_is_closed_and_refused() {
+    const TRANSPORT: &str = "transport-v2-other-window";
+    let (f, _) = protected_existing_profile_fixture().await;
+    let (target, user_tab) = attached_existing_profile(&f, TRANSPORT).await;
+    f.state.lock().unwrap().opened_window = 12;
+    let opened = BrowserNavigateTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target,
+            "tab_id": user_tab,
+            "url": "https://fixture.test/opened",
+            "new_tab": true,
+            "session": SESSION
+        }))
+        .await;
+    let opened = structured(&opened).clone();
+    assert_eq!(opened["status"], "refused", "{opened}");
+    let closes = recorded_calls(&f, "Target.closeTarget");
+    assert_eq!(closes.len(), 1);
+    assert_eq!(closes[0].1["targetId"], "T2");
+    assert!(f.state.lock().unwrap().opened_targets.is_empty());
+    crate::session::fire_session_end(TRANSPORT);
+}
+
+#[tokio::test]
+async fn full_page_screenshot_captures_beyond_the_viewport() {
+    let f = fixture().await;
+    let (target_id, tab_id) = bind_windowless(&f).await;
+    let state = GetBrowserStateTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target_id,
+            "tab_id": tab_id,
+            "include_screenshot": true,
+            "full_page": true,
+            "session": SESSION
+        }))
+        .await;
+    let body = structured(&state);
+    assert_eq!(body["status"], "ok", "{body}");
+    assert_eq!(body["screenshot"]["scope"], "full_page");
+    let captures = recorded_calls(&f, "Page.captureScreenshot");
+    assert_eq!(captures.len(), 1);
+    assert_eq!(captures[0].1["captureBeyondViewport"], true);
+    assert_eq!(captures[0].1["clip"]["height"], 2400.0);
+
+    let refused = GetBrowserStateTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target_id,
+            "tab_id": tab_id,
+            "full_page": true,
+            "session": SESSION
+        }))
+        .await;
+    assert!(refused.is_error == Some(true), "{refused:?}");
 }
 
 #[tokio::test]

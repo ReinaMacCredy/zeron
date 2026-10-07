@@ -203,6 +203,8 @@ pub struct GetComputerStillFrameParams {
 #[serde(rename_all = "camelCase")]
 pub struct ComputerRevokeDesktopParams {
     pub chat_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<super::ComputerConsentApp>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,6 +244,8 @@ pub struct ComputerSettings {
     pub agent_cursor_rim_color: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub always_allowed_apps: Vec<ComputerAllowedApp>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub approved_once: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -264,6 +268,7 @@ impl Default for ComputerSettings {
             agent_cursor_fill_color: String::new(),
             agent_cursor_rim_color: String::new(),
             always_allowed_apps: Vec::new(),
+            approved_once: false,
         }
     }
 }

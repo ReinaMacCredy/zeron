@@ -49,6 +49,7 @@ pub const COMPUTER_TOOL_TITLES: &[(&str, &str)] = &[
     ("computer_browser_pointer", "Use the pointer in the browser"),
     ("computer_browser_press", "Press Enter in the browser"),
     ("computer_zeron_browser", "Use the Zeron browser"),
+    ("computer", "Use the computer"),
 ];
 
 fn title(tool: &str) -> &'static str {
@@ -684,6 +685,167 @@ pub fn computer_call_rows(tool: &str, args: Option<&Map<String, Value>>) -> Vec<
     rows
 }
 
+pub const ACTION_DETAIL_MAX: usize = 48;
+pub const JS_TITLE_MAX: usize = 80;
+const FALLBACK_APP: &str = "App";
+
+pub fn computer_action_detail(text: &str) -> String {
+    truncate(text, ACTION_DETAIL_MAX)
+}
+
+pub fn computer_action_label(
+    tool: &str,
+    args: Option<&Map<String, Value>>,
+    app: Option<&str>,
+    done: bool,
+) -> String {
+    let empty = Map::new();
+    let args = args.unwrap_or(&empty);
+    if let Some((selected, inner)) = inspect_delegate(tool, args) {
+        return computer_action_label(selected, Some(inner), app, done);
+    }
+    let app = app
+        .map(str::trim)
+        .filter(|app| !app.is_empty())
+        .unwrap_or(FALLBACK_APP);
+    let pick = |running: &str, finished: &str| if done { finished } else { running }.to_owned();
+    let quoted = |key: &str| {
+        args.get(key)
+            .and_then(Value::as_str)
+            .map(computer_action_detail)
+            .unwrap_or_default()
+    };
+    match tool {
+        "computer" => text(args, "title").map_or_else(
+            || pick("Using the computer", "Used the computer"),
+            |title| truncate(title, JS_TITLE_MAX),
+        ),
+        "computer_click" | "computer_browser_click" => {
+            format!("{} in {app}", pick("Clicking", "Clicked"))
+        }
+        "computer_get_state"
+        | "computer_screenshot"
+        | "computer_verify_state"
+        | "computer_zoom"
+        | "computer_get_accessibility_tree"
+        | "computer_list_windows"
+        | "computer_get_screen_size"
+        | "computer_get_cursor_position"
+        | "computer_browser_state" => format!("{} at {app}", pick("Looking", "Looked")),
+        "computer_type_text" | "computer_browser_type" => format!(
+            "{} text “{}” in {app}",
+            pick("Typing", "Typed"),
+            quoted("text")
+        ),
+        "computer_scroll" => {
+            let direction = describe_payload("computer_scroll", args);
+            let direction = if direction.is_empty() {
+                "down".to_owned()
+            } else {
+                direction
+            };
+            format!("{} {direction} in {app}", pick("Scrolling", "Scrolled"))
+        }
+        "computer_set_value" => format!(
+            "{} to “{}” in {app}",
+            pick("Setting", "Set"),
+            quoted("value")
+        ),
+        "computer_press_key" | "computer_browser_press" => {
+            format!("{} key in {app}", pick("Pressing", "Pressed"))
+        }
+        "computer_drag" => format!("{} in {app}", pick("Dragging", "Dragged")),
+        "computer_perform_action" | "computer_select_text" | "computer_invoke_menu" => format!(
+            "{} accessibility action in {app}",
+            pick("Performing", "Performed")
+        ),
+        "computer_list_apps" => "List Mac apps".to_owned(),
+        _ => describe_computer_call(tool, Some(args)),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComputerJsAction {
+    pub tool: &'static str,
+    pub app: Option<String>,
+    pub detail: Option<String>,
+    pub count: usize,
+}
+
+pub fn computer_js_actions(output: &str) -> Vec<ComputerJsAction> {
+    let first_line = output
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default();
+    let Ok(Value::Object(payload)) = serde_json::from_str::<Value>(first_line.trim()) else {
+        return Vec::new();
+    };
+    let Some(actions) = payload.get("actions").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let default_app = payload
+        .get("appName")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|app| !app.is_empty())
+        .map(str::to_owned);
+    actions
+        .iter()
+        .filter_map(Value::as_object)
+        .filter_map(|action| {
+            let tool = action.get("tool").and_then(Value::as_str)?;
+            let tool = computer_tool_name(tool)
+                .or_else(|| computer_tool_name(&format!("computer_{tool}")))?;
+            let field = |key: &str| {
+                action
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+            };
+            Some(ComputerJsAction {
+                tool,
+                app: field("app").or_else(|| default_app.clone()),
+                detail: field("detail"),
+                count: action
+                    .get("n")
+                    .and_then(Value::as_u64)
+                    .map_or(1, |n| n.max(1) as usize),
+            })
+        })
+        .collect()
+}
+
+pub fn computer_js_action_label(action: &ComputerJsAction, done: bool) -> String {
+    let key = match action.tool {
+        "computer_set_value" => "value",
+        _ => "text",
+    };
+    let mut args = Map::new();
+    if let Some(detail) = &action.detail {
+        args.insert(key.to_owned(), Value::String(detail.clone()));
+        if action.tool == "computer_scroll" {
+            let delta = match detail.as_str() {
+                "up" => Some(("delta_y", -1.0)),
+                "down" => Some(("delta_y", 1.0)),
+                "left" => Some(("delta_x", -1.0)),
+                "right" => Some(("delta_x", 1.0)),
+                _ => None,
+            };
+            if let Some((axis, value)) = delta {
+                args.insert(axis.to_owned(), Value::from(value));
+            }
+        }
+    }
+    let label = computer_action_label(action.tool, Some(&args), action.app.as_deref(), done);
+    if action.count > 1 {
+        format!("{label} ×{}", action.count)
+    } else {
+        label
+    }
+}
+
 const TEXT_OUTPUT_TOOLS: [&str; 6] = [
     "computer_read_clipboard",
     "computer_type_text",
@@ -990,6 +1152,232 @@ mod tests {
         assert_eq!(
             computer_call_app("computer_click", None, Some(cut_name)),
             None
+        );
+    }
+
+    #[test]
+    fn computer_rows_use_codex_label_pairs() {
+        let label = |tool: &str, args: Value, done: bool| {
+            computer_action_label(tool, args.as_object(), Some("Calculator"), done)
+        };
+        let cases = [
+            (
+                "computer_click",
+                json!({}),
+                "Clicking in Calculator",
+                "Clicked in Calculator",
+            ),
+            (
+                "computer_get_state",
+                json!({}),
+                "Looking at Calculator",
+                "Looked at Calculator",
+            ),
+            (
+                "computer_screenshot",
+                json!({}),
+                "Looking at Calculator",
+                "Looked at Calculator",
+            ),
+            (
+                "computer_type_text",
+                json!({ "text": "12 × 4" }),
+                "Typing text “12 × 4” in Calculator",
+                "Typed text “12 × 4” in Calculator",
+            ),
+            (
+                "computer_scroll",
+                json!({ "delta_y": -3 }),
+                "Scrolling up in Calculator",
+                "Scrolled up in Calculator",
+            ),
+            (
+                "computer_scroll",
+                json!({ "delta_x": 2 }),
+                "Scrolling right in Calculator",
+                "Scrolled right in Calculator",
+            ),
+            (
+                "computer_set_value",
+                json!({ "value": "42" }),
+                "Setting to “42” in Calculator",
+                "Set to “42” in Calculator",
+            ),
+            (
+                "computer_press_key",
+                json!({ "key": "cmd+c" }),
+                "Pressing key in Calculator",
+                "Pressed key in Calculator",
+            ),
+            (
+                "computer_drag",
+                json!({}),
+                "Dragging in Calculator",
+                "Dragged in Calculator",
+            ),
+            (
+                "computer_perform_action",
+                json!({ "action": "AXPress" }),
+                "Performing accessibility action in Calculator",
+                "Performed accessibility action in Calculator",
+            ),
+            (
+                "computer_list_apps",
+                json!({}),
+                "List Mac apps",
+                "List Mac apps",
+            ),
+        ];
+        for (tool, args, running, done) in cases {
+            assert_eq!(label(tool, args.clone(), false), running, "{tool}");
+            assert_eq!(label(tool, args, true), done, "{tool}");
+        }
+        assert_eq!(
+            computer_action_label("computer_click", None, None, true),
+            "Clicked in App",
+            "the fallback app name"
+        );
+        assert_eq!(
+            computer_action_label("computer_click", None, Some("  "), false),
+            "Clicking in App"
+        );
+        assert_eq!(
+            label("computer_launch_app", json!({ "app": "Safari" }), true),
+            "Open Safari",
+            "tools without a Codex pair keep the redacted summary"
+        );
+    }
+
+    #[test]
+    fn typed_detail_is_whitespace_collapsed_and_cut_at_48_characters() {
+        let long = "one  two\nthree\tfour five six seven eight nine ten eleven twelve";
+        let detail = computer_action_detail(long);
+        assert_eq!(detail.chars().count(), 48);
+        assert!(detail.ends_with('…'));
+        assert_eq!(detail, "one two three four five six seven eight nine te…");
+        assert_eq!(computer_action_detail(" short   text "), "short text");
+        let exactly = "a".repeat(48);
+        assert_eq!(computer_action_detail(&exactly), exactly, "48 fits uncut");
+        assert_eq!(
+            computer_action_label(
+                "computer_type_text",
+                json!({ "text": long }).as_object(),
+                Some("Notes"),
+                false
+            ),
+            format!("Typing text “{detail}” in Notes")
+        );
+    }
+
+    #[test]
+    fn the_js_computer_tool_is_labelled_by_its_title() {
+        let call = mcp(
+            "computer",
+            json!({ "title": "Add 12 and 30 in Calculator", "code": "await cua.getApp('Calculator')" }),
+        );
+        let found = computer_call(&call).expect("the JS computer tool is a computer call");
+        assert_eq!(found.tool, "computer");
+        assert_eq!(
+            computer_action_label(found.tool, found.args, None, false),
+            "Add 12 and 30 in Calculator"
+        );
+        let long = "x".repeat(120);
+        let titled = json!({ "title": long });
+        assert_eq!(
+            computer_action_label("computer", titled.as_object(), None, true)
+                .chars()
+                .count(),
+            JS_TITLE_MAX
+        );
+        assert_eq!(
+            computer_action_label("computer", None, None, true),
+            "Used the computer"
+        );
+        assert_eq!(computer_tool_name("mycomputer"), None);
+        assert_eq!(
+            computer_tool_name("mcp__zeron__computer_click"),
+            Some("computer_click")
+        );
+    }
+
+    #[test]
+    fn js_actions_parse_into_codex_rows_and_skip_what_they_cannot_name() {
+        let output = json!({
+            "appName": "Calculator",
+            "actions": [
+                { "tool": "click", "app": "Calculator", "n": 3 },
+                { "tool": "computer_type_text", "app": "Calculator", "detail": "12+30" },
+                { "tool": "scroll", "app": "Safari", "detail": "down" },
+                { "tool": "set_value", "detail": "Ada" },
+                { "tool": "teleport", "app": "Calculator" },
+                { "app": "Calculator" },
+                "not an object"
+            ]
+        })
+        .to_string()
+            + "\nWindow: \"Calculator\", App: Calculator.";
+        let actions = computer_js_actions(&output);
+        assert_eq!(
+            actions,
+            vec![
+                ComputerJsAction {
+                    tool: "computer_click",
+                    app: Some("Calculator".into()),
+                    detail: None,
+                    count: 3,
+                },
+                ComputerJsAction {
+                    tool: "computer_type_text",
+                    app: Some("Calculator".into()),
+                    detail: Some("12+30".into()),
+                    count: 1,
+                },
+                ComputerJsAction {
+                    tool: "computer_scroll",
+                    app: Some("Safari".into()),
+                    detail: Some("down".into()),
+                    count: 1,
+                },
+                ComputerJsAction {
+                    tool: "computer_set_value",
+                    app: Some("Calculator".into()),
+                    detail: Some("Ada".into()),
+                    count: 1,
+                },
+            ]
+        );
+        assert_eq!(
+            actions
+                .iter()
+                .map(|action| computer_js_action_label(action, true))
+                .collect::<Vec<_>>(),
+            [
+                "Clicked in Calculator ×3",
+                "Typed text “12+30” in Calculator",
+                "Scrolled down in Safari",
+                "Set to “Ada” in Calculator",
+            ]
+        );
+        for broken in [
+            "",
+            "not json",
+            "[]",
+            r#"{"actions":"nope"}"#,
+            r#"{"actions":[{"tool":"cli"#,
+        ] {
+            assert!(computer_js_actions(broken).is_empty(), "{broken}");
+        }
+    }
+
+    #[test]
+    fn the_redacted_summary_still_never_carries_typed_text() {
+        let call = mcp("computer_type_text", json!({ "text": "hunter2-secret" }));
+        let found = computer_call(&call).unwrap();
+        assert!(!describe_computer_call(found.tool, found.args).contains("hunter2"));
+        assert!(
+            !computer_call_rows(found.tool, found.args)
+                .join(" ")
+                .contains("hunter2")
         );
     }
 }

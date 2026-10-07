@@ -5,7 +5,6 @@ pub mod cursor_preference;
 pub mod desktop_lifecycle;
 #[cfg(target_os = "macos")]
 pub mod driver;
-pub mod emergency_stop_notice;
 #[cfg(target_os = "macos")]
 pub mod host;
 #[cfg(target_os = "macos")]
@@ -23,7 +22,6 @@ pub mod runtime_ownership;
 pub mod status_menu;
 #[cfg(target_os = "macos")]
 pub mod stop_native_helper;
-pub mod strip;
 pub mod thumbnail;
 
 /// Proof knob (`ZERON_CUA_PROBE=<file>`): spawn the bundled driver through the

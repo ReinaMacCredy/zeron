@@ -14,11 +14,12 @@ use zeron_proto::computer::{
 use super::args::{
     ScreenshotRequest, ScreenshotTarget, has_target_fields, read_action_name, read_capture_request,
     read_click_gesture, read_clipboard_text, read_drag_duration_ms, read_key_or_chord,
-    read_menu_path_arg, read_menu_target_arg, read_modifiers, read_nested_screenshot_target,
+    read_menu_path_arg, read_menu_target_arg, read_modifiers, read_paste_format, read_nested_screenshot_target,
     read_rect, read_required_text, read_screenshot_id_arg, read_screenshot_target,
-    read_scroll_delta, read_select_text_range, read_select_text_target, read_set_value_value,
+    read_scroll_delta, read_select_text_selection, read_select_text_target, read_set_value_value,
     read_wait_duration_ms, read_window_id_arg,
 };
+use super::ax_tree::{TREE_REF_LIMIT, build_tree, render_diff, render_full};
 use super::elements::{
     RefLookup, digest_scope_key, element_change_fields, listing_fields,
 };
@@ -45,8 +46,8 @@ use crate::computer::screenshot_frames::{
     screenshot_delta_to_desktop, screenshot_point_to_desktop, screenshot_rect_to_desktop,
 };
 use crate::computer::ui_tree_targeting::{
-    ComputerActionableElementFilter, ComputerTargetErrorCode, normalize_label_spaces,
-    resolve_computer_semantic_target,
+    ComputerActionableElementFilter, ComputerTargetErrorCode, actionable_elements_limited,
+    normalize_label_spaces, resolve_computer_semantic_target,
 };
 use crate::computer::visible_use::COMPUTER_FOREGROUND_NOT_REQUESTED_CODE;
 use crate::computer::wait_for_control::{
@@ -174,6 +175,29 @@ pub(super) enum ObservedOutcome {
 
 fn args_has(args: &ToolArgs, name: &str) -> bool {
     args.contains_key(name)
+}
+
+fn app_playbook_topic(app_name: &str) -> Option<&'static str> {
+    Some(match app_name {
+        "finder" => "finder",
+        "calculator" => "calculator",
+        "slack" => "slack",
+        "notes" | "textedit" | "bbedit" | "coteditor" | "sublime text" | "pages" => "editors",
+        "terminal" | "iterm2" | "iterm" | "ghostty" | "warp" | "alacritty" | "kitty"
+        | "wezterm" | "hyper" => "terminals",
+        "code" | "visual studio code" | "cursor" | "windsurf" | "obsidian" | "notion"
+        | "discord" | "figma" | "linear" | "microsoft teams" => "electron",
+        _ => return None,
+    })
+}
+
+pub(super) fn is_strip_window(window: &zeron_proto::computer::ComputerWindow) -> bool {
+    let Some(bounds) = window.bounds else {
+        return false;
+    };
+    bounds.width <= 0.0
+        || bounds.height <= 0.0
+        || (bounds.height <= 40.0 && (!window.visible || bounds.y < 0.0))
 }
 
 impl ComputerTools {
@@ -460,6 +484,61 @@ impl ComputerTools {
         })
     }
 
+    fn tree_text(
+        &self,
+        thread_id: &str,
+        window_id: &str,
+        windows: &[zeron_proto::computer::ComputerWindow],
+        ax_tree: Option<&zeron_proto::computer::ComputerAxTree>,
+        root: &zeron_proto::computer::ComputerUiNode,
+        full: bool,
+    ) -> Option<String> {
+        let listing = actionable_elements_limited(
+            root,
+            &ComputerActionableElementFilter {
+                window_id: Some(window_id.to_owned()),
+                label_contains: None,
+            },
+            self.native_identity(),
+            TREE_REF_LIMIT,
+        );
+        let mut tool_state = self.state();
+        let listing = tool_state.elements.sync_refs(thread_id, listing);
+        let window = windows.iter().find(|window| window.id == window_id);
+        let snapshot = build_tree(window, window_id, ax_tree, Some(root), &listing)?;
+        let key = digest_scope_key(thread_id, Some(window_id), None);
+        Some(
+            match tool_state.elements.swap_tree(&key, snapshot.clone()) {
+                Some(previous) if !full => render_diff(&previous, &snapshot),
+                _ => render_full(&snapshot),
+            },
+        )
+    }
+
+    pub(super) fn app_playbook(
+        &self,
+        thread_id: &str,
+        windows: &[zeron_proto::computer::ComputerWindow],
+        window_id: &str,
+    ) -> Option<&'static str> {
+        let app_name = windows
+            .iter()
+            .find(|window| window.id == window_id)
+            .and_then(|window| window.app_name.as_deref())
+            .map(str::to_lowercase)?;
+        let note = computer_help_section(app_playbook_topic(&app_name)?)?;
+        let seen = json!([thread_id, app_name]).to_string();
+        let mut tool_state = self.state();
+        if tool_state.app_hints_seen.contains(&seen) {
+            return None;
+        }
+        while tool_state.app_hints_seen.len() >= super::THREAD_KEYED_LIMIT {
+            tool_state.app_hints_seen.remove(0);
+        }
+        tool_state.app_hints_seen.push(seen);
+        Some(note)
+    }
+
     fn computer_id_payload(&self) -> Map<String, Value> {
         let mut payload = Map::new();
         payload.insert("computerId".into(), json!(self.manager.computer_id()));
@@ -468,7 +547,11 @@ impl ComputerTools {
 
     async fn list_windows(&self, args: &ToolArgs) -> Handled {
         let app = read_string_arg(args, "app", false)?.map(|app| app.to_lowercase());
+        let include_strips = read_boolean_arg(args, "include_strips")?.unwrap_or(false);
         let mut result = self.manager.list_windows().await?;
+        if !include_strips {
+            result.windows.retain(|window| !is_strip_window(window));
+        }
         if let Some(app) = app {
             result.windows.retain(|window| {
                 window
@@ -498,6 +581,9 @@ impl ComputerTools {
                 window_id: window_id.clone(),
             })
             .await?;
+        if window_id.is_none() {
+            state.windows.retain(|window| !is_strip_window(window));
+        }
         let text = state.text.take();
         let root = state.root.take();
         let screenshot = state.screenshot.take();
@@ -523,28 +609,27 @@ impl ComputerTools {
                 .map(|elements| tool_state.elements.remember_digest(&context.chat_id, &key, elements));
             (before, stable)
         };
-        let app_hint = window_id.as_ref().and_then(|window_id| {
-            let app_name = state
-                .windows
-                .iter()
-                .find(|window| &window.id == window_id)
-                .and_then(|window| window.app_name.as_deref())
-                .map(str::to_lowercase)?;
-            let note = (app_name == "slack").then(|| computer_help_section("slack"))??;
-            let seen = json!([context.chat_id, app_name]).to_string();
-            let mut tool_state = self.state();
-            if tool_state.app_hints_seen.contains(&seen) {
-                return None;
-            }
-            while tool_state.app_hints_seen.len() >= super::THREAD_KEYED_LIMIT {
-                tool_state.app_hints_seen.remove(0);
-            }
-            tool_state.app_hints_seen.push(seen);
-            Some(note)
-        });
+        let ax_tree = state.ax_tree.take();
+        let tree = match (window_id.as_deref(), root.as_ref()) {
+            (Some(window_id), Some(root)) => self.tree_text(
+                &context.chat_id,
+                window_id,
+                &state.windows,
+                ax_tree.as_ref(),
+                root,
+                read_boolean_arg(args, "full")?.unwrap_or(false),
+            ),
+            _ => None,
+        };
+        let app_hint = window_id
+            .as_deref()
+            .and_then(|window_id| self.app_playbook(&context.chat_id, &state.windows, window_id));
         let mut payload = to_map(&state);
         if want_text && let Some(text) = text {
             payload.insert("text".into(), json!(text));
+        }
+        if let Some(tree) = tree {
+            payload.insert("tree".into(), json!(tree));
         }
         if let Some(stable) = &stable {
             payload.extend(if want_diff {
@@ -996,7 +1081,10 @@ impl ComputerTools {
             "computer_paste" => {
                 let text = read_clipboard_text(args)?;
                 let window_id = read_window_id_arg(args)?;
-                let pasted = manager.paste(thread, &text, window_id.as_deref()).await?;
+                let format = read_paste_format(args)?;
+                let pasted = manager
+                    .paste(thread, &text, window_id.as_deref(), format)
+                    .await?;
                 let mut result = to_map(&pasted.result);
                 result.insert("clipboardRestored".into(), json!(pasted.clipboard_restored));
                 ObservedOutcome::Plain(result)
@@ -1013,8 +1101,8 @@ impl ComputerTools {
             }
             "computer_select_text" => {
                 let target = self.resolve_target(read_select_text_target(args)?, &context.chat_id)?;
-                let range = read_select_text_range(args)?;
-                plain(&manager.select_text(thread, target, range).await?)
+                let selection = read_select_text_selection(args)?;
+                plain(&manager.select_text(thread, target, selection).await?)
             }
             _ => return Err(ToolFailure::message(format!("Unknown computer tool \"{name}\"."))),
         })

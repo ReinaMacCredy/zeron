@@ -9,8 +9,8 @@ use futures::stream::BoxStream;
 use futures::{FutureExt, StreamExt};
 use tokio::sync::{broadcast, watch};
 use zeron_proto::computer::{
-    ComputerAllowedApp, ComputerEvent, ComputerHostStreamItem, ComputerSettings,
-    ComputerStillFrame, RespondComputerHostRequestParams,
+    ComputerAllowedApp, ComputerConsentApp, ComputerEvent, ComputerHostStreamItem,
+    ComputerSettings, ComputerStillFrame, RespondComputerHostRequestParams,
 };
 use zeron_rpc::ComputerHost;
 
@@ -22,7 +22,7 @@ use super::host_wire::{HostRegistration, HostSlot};
 use super::manager::{ComputerManagerSeams, ComputerManagerSubscription, left_open_note};
 use super::service::{ComputerService, ComputerServiceOptions};
 use super::tool_calls::ComputerCalls;
-use crate::sessions::SessionsEngine;
+use crate::sessions::{ComputerStoppedApp, SessionsEngine};
 
 const SETTINGS_FILE: &str = "computer-settings.json";
 const EVENT_BUFFER: usize = 256;
@@ -112,6 +112,14 @@ impl ComputerRuntime {
                     None => service.manager.clear_pending_request(chat_id, input_id),
                 }
             }));
+        let weak = Arc::downgrade(&runtime);
+        runtime.engine_seams.on_approved(Arc::new(move || {
+            if let Some(runtime) = weak.upgrade()
+                && let Err(error) = runtime.remember_approved_once()
+            {
+                tracing::warn!(%error, "computer first approval not saved");
+            }
+        }));
         tokio::spawn(runtime.clone().rebuild(None));
         runtime
     }
@@ -291,6 +299,25 @@ impl ComputerRuntime {
         true
     }
 
+    pub async fn stop_app(&self, chat_id: &str, app: &ComputerConsentApp) -> bool {
+        let Some(sessions) = self.engine_seams.sessions() else {
+            return false;
+        };
+        let key = match self.service() {
+            Some(service) => service.manager.stopped_app_key(app).await,
+            None => None,
+        };
+        sessions
+            .stop_computer_app(
+                chat_id,
+                ComputerStoppedApp {
+                    key,
+                    name: app.name.clone(),
+                },
+            )
+            .is_some()
+    }
+
     async fn finish_revoke(&self, sessions: &SessionsEngine, chat_id: &str, source: RevokeSource) {
         match self.service() {
             Some(service) => {
@@ -334,6 +361,7 @@ impl ComputerRuntime {
             {
                 tracing::warn!(chat = %chat_id, %error, "computer turn-end release failed");
             }
+            service.tools.turn_ended(&chat_id, &turn_id).await;
             let left = service.manager.left_open_windows(&chat_id, &turn_id).await;
             if let Some(sessions) = &sessions {
                 for left in &left {
@@ -386,6 +414,18 @@ impl ComputerRuntime {
         }
         let mut next = current.clone();
         next.always_allowed_apps.push(app);
+        self.write_settings(&mut current, next)
+    }
+
+    fn remember_approved_once(&self) -> Result<(), String> {
+        let mut current = self.settings.lock().unwrap_or_else(PoisonError::into_inner);
+        if current.approved_once {
+            return Ok(());
+        }
+        let next = ComputerSettings {
+            approved_once: true,
+            ..current.clone()
+        };
         self.write_settings(&mut current, next)
     }
 

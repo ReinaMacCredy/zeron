@@ -1,6 +1,8 @@
 use std::{path::Path, sync::Mutex};
 
-use clipboard_rs::{common::RustImage, Clipboard, ClipboardContext, ContentFormat};
+use clipboard_rs::{
+    common::RustImage, Clipboard, ClipboardContent, ClipboardContext, ContentFormat,
+};
 use cua_driver_core::clipboard::ClipboardBackend;
 
 pub struct MacosClipboard {
@@ -67,6 +69,15 @@ impl ClipboardBackend for MacosClipboard {
         let path = absolute_existing_file(absolute_path)?;
         self.context()?
             .set_files(vec![path])
+            .map_err(|e| e.to_string())
+    }
+
+    fn write_html(&self, html: String, text: String) -> Result<(), String> {
+        self.context()?
+            .set(vec![
+                ClipboardContent::Text(text),
+                ClipboardContent::Html(html),
+            ])
             .map_err(|e| e.to_string())
     }
 }

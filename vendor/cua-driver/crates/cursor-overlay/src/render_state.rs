@@ -34,6 +34,7 @@
 //!   element highlight — drawn inside [`render_frame`] when the caller
 //!   supplies one via the optional argument).
 
+use crate::codex_cursor::{CodexInput, CodexState};
 use crate::{
     CompactActivity, CompactMotion, CompiledTheme, CursorAction, CursorConfig, CursorFeel,
     CursorStyle, CursorVisualState, DeliveryModifier, MotionConfig, OverlayCommand, PaintChannels,
@@ -43,6 +44,8 @@ use crate::{
 use std::sync::Arc;
 
 pub const SESSION_BADGE_HOLD_SECS: f64 = 2.0;
+// Far below any global coordinate, so displays left of or above the primary still count as placed.
+pub const UNPLACED_POS: (f64, f64) = (-1.0e9, -1.0e9);
 pub const SESSION_BADGE_FADE_SECS: f64 = 0.4;
 
 /// Platform-agnostic render state shared by macOS / Windows / Linux overlays.
@@ -113,9 +116,12 @@ pub struct RenderStateCore {
     /// keeps every candidate path inside this frame; `None` means the frame
     /// is unknown (headless / tests) and the preferred arc is used.
     pub screen_size: Option<(f64, f64)>,
+    pub screen_origin: (f64, f64),
     /// Non-compact paths: set once the early-ack threshold has fired an
     /// arrival signal before the path physically ended.
     early_ack_fired: bool,
+    pub fog_tint: Option<[u8; 3]>,
+    pub codex: CodexState,
 }
 
 /// A compact-mode click ring at a point, elapsed seconds since it began.
@@ -167,7 +173,7 @@ impl RenderStateCore {
             visual,
             theme,
             theme_fallback,
-            pos: (-200.0, -200.0),
+            pos: UNPLACED_POS,
             heading: std::f64::consts::FRAC_PI_4,
             path: None,
             dist: 0.0,
@@ -188,8 +194,26 @@ impl RenderStateCore {
             compact_motion: None,
             compact_pulse: None,
             screen_size: None,
+            screen_origin: (0.0, 0.0),
             early_ack_fired: false,
+            fog_tint: None,
+            codex: CodexState::default(),
         }
+    }
+
+    pub fn is_placed(&self) -> bool {
+        self.pos.0 > UNPLACED_POS.0 / 2.0
+    }
+
+    pub fn codex_look(&self) -> bool {
+        self.cfg.compact && self.cfg.theme_id == crate::CODEX_THEME_ID
+    }
+
+    fn codex_loading(&self) -> bool {
+        !matches!(
+            self.visual.resolved_action,
+            CursorAction::Idle | CursorAction::Click | CursorAction::Drag | CursorAction::Navigate
+        ) && self.visual.elapsed_secs <= self.visual.resolved_action.duration_secs()
     }
 
     /// Where the compact arrow is painted right now: the spring-driven path
@@ -277,6 +301,9 @@ impl RenderStateCore {
         if self.compact_pulse.is_some() || activity == CompactActivity::Loading {
             return true;
         }
+        if self.codex_look() && self.codex.animating() {
+            return true;
+        }
         if self.compact_motion.is_some() && activity != CompactActivity::Paused {
             return true;
         }
@@ -299,6 +326,22 @@ impl RenderStateCore {
             if settled {
                 self.compact_motion = None;
             }
+        }
+        if self.codex_look() {
+            let feel = CursorFeel::default();
+            let input = CodexInput {
+                position: self.compact_display_pos(),
+                travelling: self.compact_motion.is_some(),
+                scoot: self.compact_motion.as_ref().is_some_and(|motion| {
+                    motion.distance() > feel.scoot_distance_threshold
+                        && motion.progress_value() < 1.0
+                }),
+                shown: self.visible && self.is_placed(),
+                pressed: self.pressed,
+                loading: self.codex_loading(),
+                reduced_motion: self.cfg.reduced_motion == ReducedMotion::On,
+            };
+            self.codex.tick(dt, &input, &feel);
         }
         if let Some(p) = &mut self.compact_pulse {
             p.t += dt;
@@ -331,7 +374,7 @@ impl RenderStateCore {
         // Chain from the currently displayed spot so a command landing
         // mid-flight continues smoothly instead of snapping to `pos` first.
         let from = self.compact_display_pos();
-        if from.0 < -100.0 {
+        if from.0 <= UNPLACED_POS.0 / 2.0 {
             self.compact_motion = None;
             return;
         }
@@ -340,17 +383,24 @@ impl RenderStateCore {
             self.compact_motion = None;
             return;
         }
-        self.compact_motion = Some(CompactMotion::new(
-            from,
-            (x, y),
-            &CursorFeel::default(),
-            self.screen_size,
-        ));
+        let (ox, oy) = self.screen_origin;
+        self.compact_motion = Some(
+            CompactMotion::new(
+                (from.0 - ox, from.1 - oy),
+                (x - ox, y - oy),
+                &CursorFeel::default(),
+                self.screen_size,
+            )
+            .with_origin(self.screen_origin),
+        );
     }
 
     /// Record the click ring for a compact ClickPulse — skipped entirely
     /// under reduced motion.
     fn compact_note_click(&mut self, x: f64, y: f64) {
+        if self.codex_look() {
+            self.codex.click();
+        }
         self.compact_pulse = if self.cfg.reduced_motion == ReducedMotion::On {
             None
         } else {
@@ -359,7 +409,7 @@ impl RenderStateCore {
     }
 
     fn cursor_is_revealed(&self) -> bool {
-        self.visible && self.pos.0 >= -100.0 && self.idle_alpha >= 0.004
+        self.visible && self.is_placed() && self.idle_alpha >= 0.004
     }
 
     fn reveal_session_badge(&mut self) {
@@ -433,9 +483,17 @@ impl RenderStateCore {
     /// Return the theme that is actually being painted, including any
     /// non-fatal fallback from an unavailable launch-time selection.
     pub fn active_theme_metadata(&self) -> (String, String, String, Option<String>) {
+        if self.codex_look() {
+            return (
+                crate::CODEX_THEME_ID.into(),
+                "1".into(),
+                "codex-fog".into(),
+                None,
+            );
+        }
         if self.cfg.compact {
             return (
-                "synara.compact".into(),
+                crate::COMPACT_THEME_ID.into(),
                 "1".into(),
                 "static-vector".into(),
                 None,
@@ -770,6 +828,17 @@ impl RenderStateCore {
         // visually (post-dispatch, zero input latency) and a click leaves a
         // brief ring. Both are recorded before the command collapses to
         // SnapTo so the variant information isn't lost.
+        if self.codex_look()
+            && !self.cursor_is_revealed()
+            && matches!(
+                cmd,
+                OverlayCommand::MoveTo { .. }
+                    | OverlayCommand::SnapTo { .. }
+                    | OverlayCommand::ClickPulse { .. }
+            )
+        {
+            self.codex.conceal();
+        }
         let cmd = if self.cfg.compact {
             match cmd {
                 OverlayCommand::MoveTo { x, y, .. } => {
@@ -824,7 +893,7 @@ impl RenderStateCore {
 
                 // macOS-only: if the cursor is still at the initial off-screen
                 // sentinel, snap it to the offset target so the path starts on-screen.
-                if move_to_snap_sentinel && self.pos.0 < -50.0 {
+                if move_to_snap_sentinel && !self.is_placed() {
                     self.pos = (tx, ty);
                 }
                 let (x0, y0) = self.pos;
@@ -887,7 +956,7 @@ impl RenderStateCore {
                 if click_pulse_sentinel_only {
                     // macOS: only snap position on first placement (sentinel state).
                     // After that the cursor stays where the animation landed.
-                    if self.pos.0 < -50.0 {
+                    if !self.is_placed() {
                         // Apply same click offset so tip lands at click point.
                         const CLICK_OFFSET: f64 = 16.0;
                         let angle = std::f64::consts::FRAC_PI_4;
@@ -1073,7 +1142,8 @@ pub fn paint_cursor(
     focus_rect: Option<FocusRect>,
     backing_scale: f32,
 ) {
-    if !core.visible || core.pos.0 < -100.0 || core.idle_alpha < 0.004 {
+    let fading_out = core.codex_look() && core.codex.reveal() > 0.0;
+    if (!core.visible && !fading_out) || !core.is_placed() || core.idle_alpha < 0.004 {
         return;
     }
 
@@ -1085,6 +1155,29 @@ pub fn paint_cursor(
     let (px, py) = ((core.pos.0 - origin_x) * s, (core.pos.1 - origin_y) * s);
     let heading = core.heading;
     let alpha_scale = core.idle_alpha as f32;
+
+    if core.codex_look() {
+        let (x, y) = core.compact_display_pos();
+        let mut channels = core.codex.channels();
+        channels.alpha *= alpha_scale as f64;
+        crate::codex_cursor::paint(
+            pm,
+            &crate::codex_cursor::CodexPaint {
+                x: (x - origin_x) * s,
+                y: (y - origin_y) * s,
+                device_scale: s,
+                channels,
+                fog: core
+                    .style
+                    .shadow
+                    .or(core.fog_tint)
+                    .unwrap_or(crate::codex_cursor::FOG_FALLBACK),
+                fill: core.style.fill,
+                rim: core.style.rim_rgb(),
+            },
+        );
+        return;
+    }
 
     if core.cfg.compact {
         // The arrow rides the spring-driven channel position so a recorded
@@ -1138,8 +1231,8 @@ pub fn paint_cursor(
         let (cr, cg, cb) = (0x5Eu8, 0xC0u8, 0xE8u8);
 
         if let Some(rect) = tiny_skia::Rect::from_xywh(
-            (fx * s) as f32,
-            (fy * s) as f32,
+            ((fx - origin_x) * s) as f32,
+            ((fy - origin_y) * s) as f32,
             (fw * s) as f32,
             (fh * s) as f32,
         ) {
@@ -1750,3 +1843,7 @@ mod backing_scale_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "render_state_codex_tests.rs"]
+mod codex_look_tests;

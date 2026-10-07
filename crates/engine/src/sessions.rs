@@ -188,6 +188,20 @@ pub struct ComputerRun {
     pub run_computer_control: bool,
     pub turn_computer_control: bool,
     pub turn_desktop_revoked: bool,
+    pub turn_stopped_apps: Vec<ComputerStoppedApp>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComputerStoppedApp {
+    pub key: Option<String>,
+    pub name: String,
+}
+
+impl ComputerStoppedApp {
+    pub fn matches(&self, key: Option<&str>, name: Option<&str>) -> bool {
+        (self.key.is_some() && self.key.as_deref() == key)
+            || name.is_some_and(|name| name.trim().eq_ignore_ascii_case(self.name.trim()))
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -201,6 +215,7 @@ struct TurnMark {
     id: String,
     computer_control: bool,
     desktop_revoked: bool,
+    stopped_apps: Vec<ComputerStoppedApp>,
     foreground: ComputerTurnForeground,
 }
 
@@ -239,6 +254,10 @@ impl RunComputer {
             id: id.to_owned(),
             computer_control,
             desktop_revoked: resumed.as_ref().is_some_and(|mark| mark.desktop_revoked),
+            stopped_apps: resumed
+                .as_ref()
+                .map(|mark| mark.stopped_apps.clone())
+                .unwrap_or_default(),
             foreground: resumed.map(|mark| mark.foreground).unwrap_or_default(),
         });
     }
@@ -247,6 +266,15 @@ impl RunComputer {
         let mut turn = lock(&self.turn);
         let turn = turn.as_mut().filter(|turn| !turn.desktop_revoked)?;
         turn.desktop_revoked = true;
+        Some(turn.id.clone())
+    }
+
+    fn stop_app(&self, app: ComputerStoppedApp) -> Option<String> {
+        let mut turn = lock(&self.turn);
+        let turn = turn.as_mut()?;
+        if !turn.stopped_apps.contains(&app) {
+            turn.stopped_apps.push(app);
+        }
         Some(turn.id.clone())
     }
 
@@ -471,6 +499,10 @@ impl Inner {
             .is_some_and(|hub| hub.agent_access_enabled());
         let disabled = self.registry.tool_settings().disabled(&[]);
         let live = |group| zeron_proto::tools::group_live(group, &disabled);
+        #[cfg(target_os = "macos")]
+        let computer_guidance =
+            computer_control.then(|| crate::computer::js_tool::SESSION_GUIDANCE.to_owned());
+        #[cfg(not(target_os = "macos"))]
         let computer_guidance =
             computer_control.then(crate::computer::tools::guidance::computer_tool_instructions);
         let blocks: Vec<&str> = [
@@ -1937,7 +1969,8 @@ impl SessionsEngine {
             permission_mode: run.runtime_config.permission_mode,
             run_computer_control: run.runtime_config.computer_control,
             turn_computer_control: turn.as_ref().is_some_and(|turn| turn.computer_control),
-            turn_desktop_revoked: turn.is_some_and(|turn| turn.desktop_revoked),
+            turn_desktop_revoked: turn.as_ref().is_some_and(|turn| turn.desktop_revoked),
+            turn_stopped_apps: turn.map(|turn| turn.stopped_apps).unwrap_or_default(),
         })
     }
 
@@ -1945,6 +1978,12 @@ impl SessionsEngine {
         lock(&self.inner.runs)
             .get(chat_id)
             .and_then(|run| run.computer.revoke_turn())
+    }
+
+    pub fn stop_computer_app(&self, chat_id: &str, app: ComputerStoppedApp) -> Option<String> {
+        lock(&self.inner.runs)
+            .get(chat_id)
+            .and_then(|run| run.computer.stop_app(app))
     }
 
     pub fn computer_turn_foreground(
@@ -2011,6 +2050,14 @@ impl SessionsEngine {
             .and_then(|handle| Ok(handle.doc().read_entries()?))
             .map_err(|err| err.to_string())?;
         Ok(crate::computer::visible_use::visible_use_entries(&entries))
+    }
+
+    pub fn tool_turned_off(&self, name: &str) -> bool {
+        self.inner
+            .registry
+            .tool_settings()
+            .disabled(&[])
+            .contains(name)
     }
 
     pub fn computer_chat_label(&self, chat_id: &str) -> Option<String> {

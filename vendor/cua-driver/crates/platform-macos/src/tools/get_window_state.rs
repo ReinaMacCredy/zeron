@@ -309,7 +309,7 @@ impl Tool for GetWindowStateTool {
             .map(|v| v.max(1) as usize)
             .unwrap_or(crate::ax::tree::DEFAULT_MAX_DEPTH);
 
-        let (tree_result, prepared_snapshot) = if want_tree {
+        let (tree_result, prepared_snapshot, window_focus) = if want_tree {
             let q = query.clone();
             // Keep the product deadline below the public client's 25-second
             // deadline so callers receive a structured driver error. The AX
@@ -324,10 +324,11 @@ impl Tool for GetWindowStateTool {
                     max_depth,
                 );
                 let payload = crate::ax::cache::CachedSnapshot::from_nodes(&tree.nodes);
-                (tree, payload)
+                let focus = crate::ax::tree::read_window_focus(pid, window_id, &tree.nodes);
+                (tree, payload, focus)
             });
             match tokio::time::timeout(std::time::Duration::from_secs(20), walk_future).await {
-                Ok(Ok((tree, payload))) => (Some(tree), Some(payload)),
+                Ok(Ok((tree, payload, focus))) => (Some(tree), Some(payload), Some(focus)),
                 Ok(Err(e)) => return ToolResult::error(format!("AX tree walk failed: {e}")),
                 Err(_elapsed) => {
                     return ToolResult::error(format!(
@@ -341,7 +342,7 @@ impl Tool for GetWindowStateTool {
                 }
             }
         } else {
-            (None, None)
+            (None, None, None)
         };
 
         // The window can close, or its CGWindow can be re-parented onto another
@@ -588,6 +589,38 @@ impl Tool for GetWindowStateTool {
         });
         if query.is_some() {
             structured["filtered_element_count"] = serde_json::json!(filtered_element_count);
+        }
+        if let (Some(r), true, None) = (tree_result.as_ref(), scope_matched, query.as_ref()) {
+            structured["tree_nodes"] = serde_json::Value::Array(build_tree_nodes(&r.nodes));
+            structured["tree_truncated"] = serde_json::json!(r.truncated);
+            if let Some(focus) = window_focus.filter(|_| !observation_only) {
+                if let Some(focused) = focus.focused {
+                    let mut entry = serde_json::json!({ "depth": 0, "role": focused.role });
+                    for (key, value) in [
+                        ("title", focused.title),
+                        ("description", focused.description),
+                        ("value", focused.value),
+                        ("identifier", focused.identifier),
+                    ] {
+                        if let Some(value) = value {
+                            entry[key] = serde_json::json!(value);
+                        }
+                    }
+                    if let Some(index) = focused.element_index {
+                        entry["element_index"] = serde_json::json!(index);
+                    }
+                    if focused.settable {
+                        entry["settable"] = serde_json::json!(true);
+                    }
+                    structured["focused_element"] = entry;
+                }
+                if let Some(text) = focus.selected_text {
+                    structured["selected_text"] = serde_json::json!(text);
+                }
+                if let Some(url) = focus.url {
+                    structured["window_url"] = serde_json::json!(url);
+                }
+            }
         }
         // Surface 6: an opaque snapshot identifier consumers can log
         // alongside the per-element tokens for debug correlation. Same value
@@ -850,6 +883,40 @@ fn degradation_for(
 /// nodes that received an `element_index` (i.e. are addressable via
 /// click(element_index=N)) appear — non-actionable display-only rows are
 /// omitted to match the contract on the tool description.
+pub(crate) fn build_tree_nodes(nodes: &[crate::ax::tree::AXNode]) -> Vec<serde_json::Value> {
+    nodes
+        .iter()
+        .map(|node| {
+            let mut entry = serde_json::json!({ "depth": node.depth, "role": node.role });
+            if let Some(index) = node.element_index {
+                entry["element_index"] = serde_json::json!(index);
+            }
+            let value = node
+                .value
+                .as_ref()
+                .filter(|value| node.placeholder.as_ref() != Some(*value));
+            for (key, value) in [
+                ("title", node.title.as_ref()),
+                ("description", node.description.as_ref()),
+                ("value", value),
+                ("identifier", node.identifier.as_ref()),
+                ("help", node.help.as_ref()),
+            ] {
+                if let Some(value) = value {
+                    entry[key] = serde_json::json!(value);
+                }
+            }
+            if node.settable {
+                entry["settable"] = serde_json::json!(true);
+            }
+            if let Some(expanded) = node.expanded {
+                entry["expanded"] = serde_json::json!(expanded);
+            }
+            entry
+        })
+        .collect()
+}
+
 pub(crate) fn build_elements_array_with_token(
     nodes: &[crate::ax::tree::AXNode],
     snapshot_id: Option<u32>,
@@ -1193,6 +1260,8 @@ mod tests {
             selected: None,
             in_web_content: false,
             placeholder: None,
+            settable: false,
+            expanded: None,
         }
     }
 
@@ -1572,6 +1641,30 @@ mod tests {
         let nodes = vec![node(Some(0), "AXButton", Some("OK"), 1, None, None, vec![])];
         let entries = build_elements_array_with_token(&nodes, None);
         assert!(entries[0].get("actions").is_none());
+    }
+
+    // Catches a tree export that drops display-only rows (Calculator's
+    // result text) or reports a placeholder as the field's value.
+    #[test]
+    fn tree_nodes_keep_display_rows_and_never_report_placeholders_as_values() {
+        let mut display = node(None, "AXStaticText", None, 2, Some(0), None, vec![]);
+        display.description = Some("Edit field".into());
+        display.value = Some("408".into());
+        let mut field = node(Some(1), "AXTextField", None, 2, Some(0), None, vec![]);
+        field.value = Some("Search".into());
+        field.placeholder = Some("Search".into());
+        field.settable = true;
+        let mut outline = node(Some(2), "AXRow", Some("Docs"), 3, Some(0), None, vec![]);
+        outline.expanded = Some(false);
+        let entries = build_tree_nodes(&[display, field, outline]);
+        assert_eq!(
+            entries[0],
+            json!({ "depth": 2, "role": "AXStaticText", "description": "Edit field", "value": "408" })
+        );
+        assert!(entries[1].get("value").is_none());
+        assert_eq!(entries[1]["settable"], json!(true));
+        assert_eq!(entries[1]["element_index"], json!(1));
+        assert_eq!(entries[2]["expanded"], json!(false));
     }
 
     #[test]

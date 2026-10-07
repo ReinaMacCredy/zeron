@@ -3,7 +3,7 @@ use gpui::{
 };
 use zeron_engine::computer::engine_seams::{
     COMPUTER_CONSENT_ALLOW, COMPUTER_CONSENT_ALWAYS_PREFIX, COMPUTER_CONSENT_DECLINE,
-    consent_always_label, consent_app_title, foreground_allowed,
+    consent_always_label, foreground_allowed,
 };
 use zeron_engine::computer::manager::{
     COMPUTER_CONTROL_ON_DISCLOSURE, COMPUTER_USER_PAUSE_NOTE_PREFIX,
@@ -227,76 +227,131 @@ pub fn consent_detail(question: &UserInputQuestion) -> String {
 
 pub fn consent_title(scope: ComputerConsentScope) -> &'static str {
     match scope {
-        ComputerConsentScope::Task => "Allow Computer for this task?",
+        ComputerConsentScope::Task => "Allow Zeron to use this Mac?",
         ComputerConsentScope::Call => "Approve this tool call?",
     }
 }
 
 pub fn consent_card_title(scope: ComputerConsentScope, app: Option<&ComputerConsentApp>) -> String {
     match (scope, app) {
-        (ComputerConsentScope::Task, Some(app)) => consent_app_title(app),
+        (ComputerConsentScope::Task, Some(app)) => format!("Allow Zeron to use {}?", app.name),
         _ => consent_title(scope).to_owned(),
     }
 }
 
-pub fn consent_allow_label(
-    scope: ComputerConsentScope,
-    app: Option<&ComputerConsentApp>,
-) -> &'static str {
-    match (scope, app) {
-        (ComputerConsentScope::Task, Some(_)) => "Allow for this task",
-        (ComputerConsentScope::Task, None) => "Allow Computer for this task",
-        (ComputerConsentScope::Call, _) => "Approve once",
-    }
-}
-
-pub fn consent_allow_description(
-    scope: ComputerConsentScope,
-    app: Option<&ComputerConsentApp>,
-) -> String {
-    match (scope, app) {
-        (ComputerConsentScope::Task, Some(app)) => format!(
-            "Continue actions in {} until this response ends. Other apps still ask. Stop cancels access.",
-            app.name
-        ),
-        (ComputerConsentScope::Task, None) => "Continue routine desktop actions until this response ends. Stop cancels access. Clipboard reads still ask separately.".to_owned(),
-        (ComputerConsentScope::Call, _) => "Allow just this request".to_owned(),
-    }
-}
+pub const COMPUTER_FIRST_USE_DISCLOSURE: &str = "Computer use lets Zeron use apps on your computer. It may take screenshots and act in the background. You can stop at any time from the menu bar.";
 
 pub fn consent_choices(
     scope: ComputerConsentScope,
     app: Option<&ComputerConsentApp>,
 ) -> Vec<(ConsentChoice, String)> {
-    let mut choices = vec![(
-        ConsentChoice::Allow,
-        consent_allow_label(scope, app).to_owned(),
-    )];
+    let allow = match scope {
+        ComputerConsentScope::Task => "Allow this conversation",
+        ComputerConsentScope::Call => "Allow once",
+    };
+    let mut choices = vec![(ConsentChoice::Allow, allow.to_owned())];
     if scope == ComputerConsentScope::Task
         && let Some(label) = app.and_then(consent_always_label)
     {
-        choices.push((ConsentChoice::AlwaysAllow(label.clone()), label));
+        choices.push((ConsentChoice::AlwaysAllow(label), "Always allow".to_owned()));
     }
     choices.push((ConsentChoice::Decline, COMPUTER_CONSENT_DECLINE.to_owned()));
     choices
 }
 
-pub fn strip_consent_choices(
-    scope: ComputerConsentScope,
-    app: Option<&ComputerConsentApp>,
-) -> Vec<(ConsentChoice, String)> {
-    consent_choices(scope, app)
-        .into_iter()
-        .map(|(choice, label)| {
-            let label = match (&choice, scope) {
-                (ConsentChoice::Allow, ComputerConsentScope::Task) => "Allow for this task".into(),
-                (ConsentChoice::Allow, ComputerConsentScope::Call) => "Allow once".into(),
-                (ConsentChoice::AlwaysAllow(_), _) => label,
-                (ConsentChoice::Decline, _) => "No".into(),
-            };
-            (choice, label)
-        })
-        .collect()
+pub fn consent_choice_key(choice: &ConsentChoice) -> &'static str {
+    match choice {
+        ConsentChoice::Allow => "allow",
+        ConsentChoice::AlwaysAllow(_) => "always",
+        ConsentChoice::Decline => "deny",
+    }
+}
+
+const TERMINALS: &[&str] = &[
+    "com.apple.terminal",
+    "com.googlecode.iterm2",
+    "com.mitchellh.ghostty",
+    "dev.warp.warp-stable",
+    "net.kovidgoyal.kitty",
+    "org.alacritty",
+    "io.alacritty",
+    "com.github.wez.wezterm",
+    "co.zeit.hyper",
+    "terminal",
+    "iterm",
+    "iterm2",
+    "ghostty",
+    "warp",
+    "kitty",
+    "alacritty",
+    "wezterm",
+    "hyper",
+];
+
+const MESSAGING: &[&str] = &[
+    "com.apple.mail",
+    "com.apple.mobilesms",
+    "com.tinyspeck.slackmacgap",
+    "com.hnc.discord",
+    "ru.keepcoder.telegram",
+    "net.whatsapp.whatsapp",
+    "com.microsoft.teams",
+    "com.microsoft.teams2",
+    "com.microsoft.outlook",
+    "org.whispersystems.signal-desktop",
+    "mail",
+    "messages",
+    "slack",
+    "discord",
+    "telegram",
+    "whatsapp",
+    "microsoft teams",
+    "microsoft outlook",
+    "outlook",
+    "signal",
+];
+
+const BROWSERS: &[&str] = &[
+    "com.apple.safari",
+    "com.google.chrome",
+    "com.google.chrome.canary",
+    "org.mozilla.firefox",
+    "com.microsoft.edgemac",
+    "company.thebrowser.browser",
+    "com.brave.browser",
+    "com.operasoftware.opera",
+    "com.vivaldi.vivaldi",
+    "safari",
+    "google chrome",
+    "chrome",
+    "firefox",
+    "microsoft edge",
+    "arc",
+    "brave browser",
+    "opera",
+    "vivaldi",
+];
+
+const FILES: &[&str] = &["com.apple.finder", "finder"];
+
+pub fn elevated_risk(app: &ComputerConsentApp) -> Option<&'static str> {
+    let bundle = app.bundle_id.as_deref().map(str::to_lowercase);
+    let name = app.name.trim().to_lowercase();
+    let listed = |list: &[&str]| {
+        list.iter()
+            .any(|entry| bundle.as_deref() == Some(*entry) || name == *entry)
+    };
+    if listed(TERMINALS) {
+        Some("Zeron could run commands that change files and settings on this Mac.")
+    } else if listed(MESSAGING) {
+        Some("Zeron could read your messages and send them as you.")
+    } else if listed(BROWSERS) {
+        Some("Zeron could act on websites where you are signed in.")
+    } else if listed(FILES) {
+        Some("Zeron could move, rename or delete your files.")
+    } else {
+        None
+    }
 }
 
 pub fn consent_event_label(
@@ -530,6 +585,173 @@ pub fn computer_card(
         .into_any_element()
 }
 
+pub struct ApprovalCard {
+    pub icon: Option<std::sync::Arc<gpui::Image>>,
+    pub title: SharedString,
+    pub detail: Option<SharedString>,
+    pub risk: Option<&'static str>,
+    pub disclosure: bool,
+    pub actions: Vec<CardAction>,
+    pub status: Option<SharedString>,
+}
+
+pub fn approval_card(card: ApprovalCard, theme: &Theme) -> AnyElement {
+    let buttons = card.actions.into_iter().map(|action| {
+        let on_click = action.on_click;
+        let selector = action.id.to_string();
+        div()
+            .id(action.id)
+            .debug_selector(move || selector)
+            .h(px(28.0))
+            .px(px(12.0))
+            .flex()
+            .items_center()
+            .rounded(px(8.0))
+            .font_weight(FontWeight::MEDIUM)
+            .cursor_pointer()
+            .map(|button| {
+                if action.primary {
+                    button
+                        .bg(theme.text)
+                        .text_color(theme.on_solid)
+                        .hover(|s| s.opacity(0.9))
+                } else {
+                    button
+                        .border_1()
+                        .border_color(crate::theme::hairline(0.12))
+                        .text_color(theme.text.opacity(0.9))
+                        .hover(|s| s.bg(crate::theme::ink(0.06)))
+                }
+            })
+            .on_click(move |event, window, cx| {
+                cx.stop_propagation();
+                on_click(event, window, cx)
+            })
+            .child(action.label)
+    });
+    let icon = match card.icon {
+        Some(icon) => gpui::img(icon).size(px(32.0)).into_any_element(),
+        None => div()
+            .size(px(32.0))
+            .rounded(px(8.0))
+            .bg(crate::theme::ink(0.09))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                crate::icons::icon(crate::icons::CURSOR)
+                    .size(px(16.0))
+                    .text_color(theme.text_muted),
+            )
+            .into_any_element(),
+    };
+    div()
+        .py(px(4.0))
+        .w_full()
+        .child(
+            div()
+                .id("computer-approval-card")
+                .debug_selector(|| "computer-approval-card".into())
+                .w_full()
+                .flex()
+                .flex_col()
+                .overflow_hidden()
+                .rounded(px(12.0))
+                .border_1()
+                .border_color(match card.risk {
+                    Some(_) => theme.warning.opacity(0.4),
+                    None => crate::theme::hairline(0.1),
+                })
+                .bg(crate::theme::ink(0.045))
+                .text_size(px(12.5))
+                .line_height(px(18.0))
+                .when_some(card.risk, |body, risk| {
+                    body.child(
+                        div()
+                            .debug_selector(|| "computer-approval-risk".into())
+                            .px(px(12.0))
+                            .py(px(8.0))
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .bg(theme.warning.opacity(0.12))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.warning)
+                                    .child(
+                                        crate::icons::icon(crate::icons::DANGER_TRIANGLE)
+                                            .size(px(13.0))
+                                            .text_color(theme.warning),
+                                    )
+                                    .child("Elevated Risk"),
+                            )
+                            .child(div().text_color(theme.text_muted).child(risk)),
+                    )
+                })
+                .child(
+                    div()
+                        .p(px(12.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(12.0))
+                        .child(div().flex_none().child(icon))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.0))
+                                .child(
+                                    div()
+                                        .text_size(px(13.5))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(theme.text)
+                                        .child(card.title),
+                                )
+                                .when_some(card.detail, |column, detail| {
+                                    column.child(div().text_color(theme.text_muted).child(detail))
+                                }),
+                        ),
+                )
+                .when(card.disclosure, |body| {
+                    body.child(
+                        div()
+                            .debug_selector(|| "computer-approval-disclosure".into())
+                            .px(px(12.0))
+                            .pb(px(10.0))
+                            .text_size(px(11.5))
+                            .text_color(theme.text_muted)
+                            .child(COMPUTER_FIRST_USE_DISCLOSURE),
+                    )
+                })
+                .child(
+                    div()
+                        .px(px(12.0))
+                        .pb(px(12.0))
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .justify_end()
+                        .gap(px(6.0))
+                        .when_some(card.status, |footer, status| {
+                            footer.child(
+                                div()
+                                    .flex_1()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.warning)
+                                    .child(status),
+                            )
+                        })
+                        .children(buttons),
+                ),
+        )
+        .into_any_element()
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -680,16 +902,20 @@ mod tests {
     }
 
     #[test]
-    fn strip_consent_labels_map_to_engine_answers() {
+    fn the_codex_consent_buttons_map_to_the_engine_answers() {
         use zeron_engine::computer::approval_gate::ApprovalDecision;
         use zeron_engine::computer::engine_seams::consent_decision;
         let verified = safari(Some("com.apple.Safari"));
-        let task = strip_consent_choices(ComputerConsentScope::Task, Some(&verified));
+        let task = consent_choices(ComputerConsentScope::Task, Some(&verified));
         assert_eq!(
             task.iter()
-                .map(|(_, label)| label.as_str())
+                .map(|(choice, label)| (consent_choice_key(choice), label.as_str()))
                 .collect::<Vec<_>>(),
-            ["Allow for this task", "Always allow Safari", "No"]
+            [
+                ("allow", "Allow this conversation"),
+                ("always", "Always allow"),
+                ("deny", "Deny")
+            ]
         );
         let decisions: Vec<_> = task
             .iter()
@@ -704,19 +930,61 @@ mod tests {
             ]
         );
         assert_eq!(
-            strip_consent_choices(ComputerConsentScope::Task, Some(&safari(None)))
+            consent_answers("consent", &task[1].0),
+            answer(&["Always allow Safari"]),
+            "the button reads Always allow; the engine still gets its own label"
+        );
+        assert_eq!(
+            consent_choices(ComputerConsentScope::Task, Some(&safari(None)))
                 .into_iter()
                 .map(|(_, label)| label)
                 .collect::<Vec<_>>(),
-            ["Allow for this task", "No"],
+            ["Allow this conversation", "Deny"],
             "Always only for a verified bundle"
         );
         assert_eq!(
-            strip_consent_choices(ComputerConsentScope::Call, None)
+            consent_choices(ComputerConsentScope::Call, None)
                 .into_iter()
                 .map(|(_, label)| label)
                 .collect::<Vec<_>>(),
-            ["Allow once", "No"]
+            ["Allow once", "Deny"]
+        );
+    }
+
+    #[test]
+    fn terminals_messaging_browsers_and_finder_carry_an_elevated_risk() {
+        let app = |name: &str, bundle: Option<&str>| ComputerConsentApp {
+            name: name.into(),
+            bundle_id: bundle.map(str::to_owned),
+            pid: None,
+        };
+        for (name, bundle) in [
+            ("Ghostty", Some("com.mitchellh.ghostty")),
+            ("Terminal", None),
+            ("iTerm2", Some("com.googlecode.iterm2")),
+            ("Messages", Some("com.apple.MobileSMS")),
+            ("Slack", None),
+            ("Discord", Some("com.hnc.Discord")),
+            ("Mail", Some("com.apple.mail")),
+            ("Safari", Some("com.apple.Safari")),
+            ("Google Chrome", None),
+            ("Finder", Some("com.apple.finder")),
+        ] {
+            assert!(
+                elevated_risk(&app(name, bundle)).is_some(),
+                "{name} is high risk"
+            );
+        }
+        for (name, bundle) in [
+            ("Calculator", Some("com.apple.calculator")),
+            ("Notes", None),
+            ("Terminally Chill", None),
+        ] {
+            assert_eq!(elevated_risk(&app(name, bundle)), None, "{name}");
+        }
+        assert_eq!(
+            elevated_risk(&app("Ghostty", Some("com.mitchellh.ghostty"))),
+            Some("Zeron could run commands that change files and settings on this Mac.")
         );
     }
 
@@ -778,19 +1046,19 @@ mod tests {
         let task = ComputerConsentScope::Task;
         assert_eq!(
             consent_card_title(task, Some(&verified)),
-            "Allow Computer to use Safari?"
+            "Allow Zeron to use Safari?"
         );
         assert_eq!(
             consent_choices(task, Some(&verified))
                 .into_iter()
                 .map(|(_, label)| label)
                 .collect::<Vec<_>>(),
-            ["Allow for this task", "Always allow Safari", "Deny"]
+            ["Allow this conversation", "Always allow", "Deny"]
         );
         let unverified = safari(None);
         assert_eq!(
             consent_card_title(task, Some(&unverified)),
-            "Allow Computer to use Safari?"
+            "Allow Zeron to use Safari?"
         );
         assert_eq!(
             consent_choices(task, Some(&unverified))
@@ -804,7 +1072,7 @@ mod tests {
                 .into_iter()
                 .map(|(_, label)| label)
                 .collect::<Vec<_>>(),
-            ["Allow Computer for this task", "Deny"]
+            ["Allow this conversation", "Deny"]
         );
     }
 

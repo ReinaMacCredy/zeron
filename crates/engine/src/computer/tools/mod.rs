@@ -1,4 +1,5 @@
 mod args;
+mod ax_tree;
 mod batch;
 pub mod browser;
 mod browser_effect;
@@ -169,7 +170,7 @@ pub fn run_step_fields(step_type: &str) -> Option<Vec<&'static str>> {
         "perform_action" => with_target(&["action"]),
         "select_text" => {
             let mut fields = semantic(&[]);
-            fields.extend_from_slice(&["start", "length"]);
+            fields.extend_from_slice(&["start", "length", "text", "prefix", "suffix", "selection"]);
             fields
         }
         "wait" => {
@@ -180,7 +181,7 @@ pub fn run_step_fields(step_type: &str) -> Option<Vec<&'static str>> {
         "activate_window" => vec!["window_id", "windowId"],
         "launch_app" => vec!["app", "arguments", "wait_for_window", "hidden"],
         "write_clipboard" => vec!["text"],
-        "paste" => vec!["text", "window_id", "windowId"],
+        "paste" => vec!["text", "format", "window_id", "windowId"],
         "set_window_frame" => vec!["window_id", "windowId", "x", "y", "width", "height"],
         "invoke_menu" => vec!["window_id", "windowId", "app", "pid", "path"],
         "kill_app" => vec!["window_id", "windowId"],
@@ -266,6 +267,8 @@ pub trait ComputerToolFamily: Send + Sync {
         args: ToolArgs,
         context: &ComputerToolContext,
     ) -> McpToolResult;
+
+    async fn turn_ended(&self, _tools: &ComputerTools, _thread_id: &str, _turn_id: &str) {}
 }
 
 pub fn computer_tool_families(manager: &ComputerManager) -> Vec<Arc<dyn ComputerToolFamily>> {
@@ -359,6 +362,12 @@ impl ComputerTools {
 
     pub fn entry(&self, name: &str) -> Option<ComputerToolEntry> {
         self.entries().into_iter().find(|entry| entry.name() == name)
+    }
+
+    pub async fn turn_ended(&self, thread_id: &str, turn_id: &str) {
+        for family in &self.families {
+            family.turn_ended(self, thread_id, turn_id).await;
+        }
     }
 
     pub fn catalog(&self) -> Vec<McpToolDefinition> {

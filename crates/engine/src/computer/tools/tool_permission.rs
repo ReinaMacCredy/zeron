@@ -301,6 +301,6 @@ mod tests {
         let mut names = ZERON_COMPUTER_TOOL_NAMES.to_vec();
         names.sort_unstable();
         names.dedup();
-        assert_eq!(names.len(), 44);
+        assert_eq!(names.len(), 45);
     }
 }

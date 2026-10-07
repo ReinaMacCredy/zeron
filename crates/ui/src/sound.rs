@@ -62,6 +62,28 @@ pub fn play_appshot() {
     play_in_background(SOUND_APPSHOT);
 }
 
+pub fn play_computer_click() {
+    if std::env::var_os(DISABLE_ENV).is_some() {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use objc::runtime::Object;
+        use objc::{class, msg_send, sel, sel_impl};
+        objc::rc::autoreleasepool(|| unsafe {
+            let name: *mut Object =
+                msg_send![class!(NSString), stringWithUTF8String: c"Tink".as_ptr()];
+            let sound: *mut Object = msg_send![class!(NSSound), soundNamed: name];
+            if sound.is_null() {
+                return;
+            }
+            let _: bool = msg_send![sound, stop];
+            let _: () = msg_send![sound, setVolume: 0.35f32];
+            let _: bool = msg_send![sound, play];
+        });
+    }
+}
+
 /// Load the macOS capture cue before the first capture, without playing it.
 pub fn prepare_appshot() {
     #[cfg(target_os = "macos")]

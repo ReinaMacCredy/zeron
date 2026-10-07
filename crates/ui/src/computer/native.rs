@@ -7,7 +7,6 @@ mod probe;
 pub mod release_held_input;
 pub mod shield;
 pub mod status_item;
-pub mod target_ring;
 pub mod window_frame_stream;
 mod window_info;
 
@@ -30,7 +29,6 @@ pub struct NativeHostConfig {
     pub binary_path: PathBuf,
     pub bundle_id: String,
     pub preview: PreviewSink,
-    pub on_emergency_stop: Option<Arc<dyn Fn() + Send + Sync>>,
     pub(crate) browser_admission: Arc<crate::browser::control_admission::Admission>,
     pub cursor_style: Option<Box<dyn Fn() -> Option<super::host::CuaCursorStyle> + Send>>,
     pub on_takeover: Option<Box<dyn Fn(super::host::TakeoverEvent) + Send>>,
@@ -39,32 +37,9 @@ pub struct NativeHostConfig {
 struct HostEvents {
     browser_admission: Arc<crate::browser::control_admission::Admission>,
     host: OnceLock<CuaDriverHost>,
-    on_emergency_stop: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl EscapeMonitorSink for HostEvents {
-    fn escape(&self) {
-        let Some(host) = self.host.get() else {
-            return;
-        };
-        let native_stopped = self.browser_admission.stop(None);
-        if native_stopped {
-            if let Some(notice) = &self.on_emergency_stop {
-                notice();
-            }
-        }
-        let stopped = host.emergency_stop_input();
-        if let Some(notice) = self.on_emergency_stop.clone() {
-            let _ = std::thread::Builder::new()
-                .name("zeron-cua-escape-notice".into())
-                .spawn(move || {
-                    if futures::executor::block_on(stopped) && !native_stopped {
-                        notice();
-                    }
-                });
-        }
-    }
-
     fn physical_input(&self, input: PhysicalComputerInput) {
         if let Some(host) = self.host.get() {
             drop(host.physical_input(input));
@@ -124,7 +99,6 @@ pub fn native_host_options(
     let events = Arc::new(HostEvents {
         browser_admission: config.browser_admission,
         host: OnceLock::new(),
-        on_emergency_stop: config.on_emergency_stop,
     });
     let monitor = Arc::new(EscapeKillSwitchMonitor::start(events.clone())?);
     let link = NativeHostLink {

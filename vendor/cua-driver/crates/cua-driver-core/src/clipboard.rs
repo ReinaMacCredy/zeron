@@ -20,6 +20,9 @@ pub trait ClipboardBackend: Send + Sync {
     fn write_text(&self, text: String) -> Result<(), String>;
     fn write_image(&self, absolute_path: &str) -> Result<(), String>;
     fn write_file_url(&self, absolute_path: &str) -> Result<(), String>;
+    fn write_html(&self, _html: String, _text: String) -> Result<(), String> {
+        Err("rich-text clipboard writes are unsupported on this platform".into())
+    }
 }
 
 pub fn register_clipboard_tools(registry: &mut ToolRegistry, backend: Arc<dyn ClipboardBackend>) {
@@ -134,10 +137,18 @@ impl Tool for ClipboardWriteTool {
                 "clipboard_write requires exactly one of text, image_path, or file_path",
             );
         }
+        if input.html.is_some() && input.text.is_none() {
+            return ToolResult::error(
+                "clipboard_write html requires text as its plain-text fallback",
+            );
+        }
 
         let backend = self.backend.clone();
         let result = tokio::task::spawn_blocking(move || {
-            let written_type = if let Some(text) = input.text {
+            let written_type = if let (Some(text), Some(html)) = (input.text.clone(), input.html) {
+                backend.write_html(html, text)?;
+                "html"
+            } else if let Some(text) = input.text {
                 backend.write_text(text)?;
                 "text"
             } else if let Some(path) = input.image_path {
@@ -242,6 +253,35 @@ mod tests {
             *self.value.lock().unwrap() = Some(("text/uri-list".into(), absolute_path.into()));
             Ok(())
         }
+
+        fn write_html(&self, html: String, _text: String) -> Result<(), String> {
+            *self.value.lock().unwrap() = Some(("text/html".into(), html));
+            Ok(())
+        }
+    }
+
+    // Catches html dropping its plain-text fallback, or html alone being
+    // accepted as the clipboard's one value.
+    #[tokio::test]
+    async fn html_writes_beside_text_and_never_alone() {
+        let backend = Arc::new(FakeClipboard::default());
+        let write = ClipboardWriteTool {
+            backend: backend.clone(),
+        }
+        .invoke(serde_json::json!({"text": "bold", "html": "<b>bold</b>"}))
+        .await;
+        assert_ne!(write.is_error, Some(true));
+        assert_eq!(write.structured_content.unwrap()["written_type"], "html");
+        assert_eq!(
+            backend.value.lock().unwrap().clone(),
+            Some(("text/html".into(), "<b>bold</b>".into()))
+        );
+        let alone = ClipboardWriteTool {
+            backend: Arc::new(FakeClipboard::default()),
+        }
+        .invoke(serde_json::json!({"html": "<b>bold</b>"}))
+        .await;
+        assert_eq!(alone.is_error, Some(true));
     }
 
     #[tokio::test]

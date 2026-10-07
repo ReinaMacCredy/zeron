@@ -4910,10 +4910,15 @@ impl RpcService for EngineRpc {
             }
             methods::COMPUTER_REVOKE_DESKTOP => {
                 let p: zeron_proto::computer::ComputerRevokeDesktopParams = parse_params(params)?;
-                let revoked = self
-                    .computer()?
-                    .revoke_desktop(&p.chat_id, crate::computer::runtime::RevokeSource::Stop)
-                    .await;
+                let computer = self.computer()?;
+                let revoked = match &p.app {
+                    Some(app) => computer.stop_app(&p.chat_id, app).await,
+                    None => {
+                        computer
+                            .revoke_desktop(&p.chat_id, crate::computer::runtime::RevokeSource::Stop)
+                            .await
+                    }
+                };
                 RpcReply::value(&serde_json::json!({ "revoked": revoked }))
             }
             methods::WATCH_COMPUTER_EVENTS => {
