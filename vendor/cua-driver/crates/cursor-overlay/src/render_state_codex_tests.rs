@@ -145,3 +145,22 @@ fn fog_uses_the_sampled_tint_and_the_style_overrides_it() {
     let styled = fog_at(&core);
     assert!(styled.red() > styled.green() + 100);
 }
+
+#[test]
+fn an_unmatched_observe_stops_spinning_at_its_nominal_duration() {
+    let mut core = codex();
+    snap(&mut core, 100.0, 100.0);
+    run(&mut core, 1.0);
+    core.apply_command_base(
+        OverlayCommand::BeginAction {
+            action: CursorAction::Observe,
+            delivery: None,
+            target: None,
+        },
+        true,
+        true,
+    );
+    run(&mut core, 4.0);
+    assert_eq!(core.codex.channels().rotation, 0.0);
+    assert!(!core.compact_animating());
+}

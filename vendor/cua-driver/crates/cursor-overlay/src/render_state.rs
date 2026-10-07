@@ -205,7 +205,7 @@ impl RenderStateCore {
         !matches!(
             self.visual.resolved_action,
             CursorAction::Idle | CursorAction::Click | CursorAction::Drag | CursorAction::Navigate
-        )
+        ) && self.visual.elapsed_secs <= self.visual.resolved_action.duration_secs()
     }
 
     /// Where the compact arrow is painted right now: the spring-driven path
