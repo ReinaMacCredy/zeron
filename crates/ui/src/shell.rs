@@ -27,7 +27,7 @@ use gpui::{
 
 use gpui_tokio::Tokio;
 use zeron_engine::InstanceLock;
-use zeron_proto::{AgentAccountsSnapshot, AuthState, WorkspaceScope};
+use zeron_proto::{AgentAccountsSnapshot, AuthState, ChatConfig, HarnessId, WorkspaceScope};
 use zeron_rpc::methods;
 
 use crate::changes::{Changes, ChangesEvent, DiscardWorkingTreeRequest};

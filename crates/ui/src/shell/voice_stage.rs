@@ -53,6 +53,7 @@ impl Shell {
                 reasoning: None,
                 model_options: Default::default(),
                 sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+                permission_mode: Default::default(),
             });
         let saved = settings::current(cx);
         let device = saved.codex_voice_device.unwrap_or(device);
@@ -416,6 +417,7 @@ impl Shell {
                     ui_settings.new_thread_background_effect,
                     &theme,
                     std::path::Path::new(&background.path),
+                    0,
                     cx,
                 )
             });

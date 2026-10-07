@@ -24,6 +24,7 @@ async fn run(harness: &ClaudeHarness, request: RunRequest) -> Outcome {
         .run(
             request,
             RunControls {
+                realtime: None,
                 execution_lease: None,
                 request_input: Box::new(|_| panic!("probe must not ask for input")),
                 steering,
