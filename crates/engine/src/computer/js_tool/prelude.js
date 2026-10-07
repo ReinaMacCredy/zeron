@@ -591,6 +591,34 @@
     },
   };
 
+  const timers = [];
+  let nextTimer = 1;
+  const schedule = (fn, ms, args, every) => {
+    if (typeof fn !== "function") throw new TypeError("Timer callback must be a function.");
+    const id = nextTimer++;
+    const delay = Math.max(0, Number(ms) || 0);
+    timers.push({ id, at: Date.now() + delay, fn, args, every: every ? delay : null });
+    return id;
+  };
+  const cancel = (id) => {
+    const index = timers.findIndex((t) => t.id === id);
+    if (index >= 0) timers.splice(index, 1);
+  };
+  g.setTimeout = (fn, ms, ...args) => schedule(fn, ms, args, false);
+  g.setInterval = (fn, ms, ...args) => schedule(fn, ms, args, true);
+  g.clearTimeout = cancel;
+  g.clearInterval = cancel;
+  g.__zeron_run_timers = () => {
+    const now = Date.now();
+    const due = timers.filter((t) => t.at <= now).sort((a, b) => a.at - b.at);
+    for (const timer of due) {
+      if (timer.every !== null) timer.at = now + Math.max(1, timer.every);
+      else cancel(timer.id);
+      timer.fn(...timer.args);
+    }
+    return due.length > 0;
+  };
+
   g.cua = cua;
   g.nodeRepl = { write, emitImage };
   g.__zeron_describe = describe;

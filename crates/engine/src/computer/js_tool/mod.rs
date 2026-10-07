@@ -311,10 +311,16 @@ impl ReplState {
                     return Some(format_error(&message));
                 }
             };
+            let run_timers: Option<Function> = ctx.globals().get("__zeron_run_timers").ok();
             loop {
                 while ctx.execute_pending_job() {}
                 match promise.state() {
                     rquickjs::promise::PromiseState::Pending => {
+                        if let Some(run_timers) = &run_timers
+                            && run_timers.call::<_, bool>(()).unwrap_or(false)
+                        {
+                            continue;
+                        }
                         if self.shared.interrupted() {
                             return Some(timeout_message(timeout, self.shared.cancelled()));
                         }

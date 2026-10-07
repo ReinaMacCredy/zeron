@@ -336,3 +336,20 @@ async fn ending_a_script_with_getaxstate_prints_the_state_once() {
     let outcome = exec("js-m", &host, "await c.getAXState();").await;
     assert_eq!(texts(&outcome).matches("7 text Value: 42").count(), 1);
 }
+
+#[tokio::test]
+async fn set_timeout_resolves_an_awaited_pause_like_node() {
+    let host = Arc::new(FakeHost::default());
+    let outcome = exec(
+        "js-n",
+        &host,
+        "const t0 = Date.now(); await new Promise((r) => setTimeout(r, 120)); let n = 0; const id = setInterval(() => n++, 10); await new Promise((r) => setTimeout(r, 60)); clearInterval(id); [Date.now() - t0 >= 120, n > 1]",
+    )
+    .await;
+    assert_eq!(outcome.error, None, "{}", texts(&outcome));
+    assert!(
+        texts(&outcome).ends_with("[true,true]"),
+        "{}",
+        texts(&outcome)
+    );
+}
