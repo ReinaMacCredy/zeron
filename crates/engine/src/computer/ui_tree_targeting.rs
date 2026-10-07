@@ -737,10 +737,21 @@ pub fn describe_target(target: &ComputerTarget) -> String {
 }
 
 fn matchable_label(node: &ComputerUiNode) -> &str {
-    node.label
+    let label = node
+        .label
         .as_deref()
         .or(node.description.as_deref())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if !label.is_empty() {
+        return label;
+    }
+    match node.role.as_str() {
+        "AXTextArea" => "text entry area",
+        "AXTextField" => "text field",
+        "AXSearchField" => "search field",
+        "AXComboBox" => "combo box",
+        _ => "",
+    }
 }
 
 pub fn normalize_label_spaces(label: &str) -> String {
@@ -1254,6 +1265,31 @@ mod tests {
             observed: None,
             path: path.to_vec(),
         }
+    }
+
+    #[test]
+    fn an_unlabelled_text_area_still_gets_a_ref_under_its_role_name() {
+        let root = node(Node {
+            role: "AXWindow",
+            children: vec![node(Node {
+                role: "AXTextArea",
+                value: Some("alpha beta"),
+                window_id: Some("editor"),
+                ..Node::default()
+            })],
+            ..Node::default()
+        });
+        let listed = digest(&root);
+        assert_eq!(
+            listed.items,
+            [element(
+                0,
+                "AXTextArea",
+                "text entry area",
+                Some("alpha beta"),
+                "editor"
+            )]
+        );
     }
 
     #[test]
