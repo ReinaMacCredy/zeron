@@ -33,14 +33,13 @@ const RUN_SLICE: Duration = Duration::from_millis(500);
 const ACTIVATION_WAIT: Duration = Duration::from_secs(1);
 
 const INPUT_MONITORING_MESSAGE: &str =
-    "Input Monitoring permission is required for Escape and human takeover detection.";
+    "Input Monitoring permission is required to notice when you use an app the agent is driving.";
 const TAP_DISABLED_MESSAGE: &str =
     "macOS disabled the computer input listener; checking access before reconnecting.";
-const TAP_CREATE_MESSAGE: &str = "macOS could not create the passive Escape listener.";
-const TAP_ATTACH_MESSAGE: &str = "macOS could not attach the Escape listener to the run loop.";
+const TAP_CREATE_MESSAGE: &str = "macOS could not create the passive input listener.";
+const TAP_ATTACH_MESSAGE: &str = "macOS could not attach the input listener to the run loop.";
 
 pub trait EscapeMonitorSink: Send + Sync + 'static {
-    fn escape(&self);
     fn physical_input(&self, input: PhysicalComputerInput);
     fn state_changed(&self, state: ComputerInputMonitorState);
     fn error(&self, message: &str);
@@ -442,16 +441,21 @@ fn handle_event(
         user_data: event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA),
     };
     let key_code = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
-    match classify(kind as u32, key_code, event.get_flags(), source, true) {
-        Classified::Escape => shared.sink.escape(),
-        Classified::Physical { keyboard: true } => {
+    match input_kind(classify(
+        kind as u32,
+        key_code,
+        event.get_flags(),
+        source,
+        true,
+    )) {
+        Some(PhysicalInputKind::Keyboard) => {
             shared.sink.physical_input(PhysicalComputerInput {
                 kind: PhysicalInputKind::Keyboard,
                 pid: frontmost_pid(),
                 window_id: None,
             });
         }
-        Classified::Physical { keyboard: false } => {
+        Some(PhysicalInputKind::Pointer) => {
             let target = window_at(&on_screen_windows(), event.location());
             shared.sink.physical_input(PhysicalComputerInput {
                 kind: PhysicalInputKind::Pointer,
@@ -459,7 +463,17 @@ fn handle_event(
                 window_id: target.map(|(_, window_id)| window_id),
             });
         }
-        Classified::Ignored => {}
+        None => {}
+    }
+}
+
+fn input_kind(classified: Classified) -> Option<PhysicalInputKind> {
+    match classified {
+        Classified::Escape | Classified::Physical { keyboard: true } => {
+            Some(PhysicalInputKind::Keyboard)
+        }
+        Classified::Physical { keyboard: false } => Some(PhysicalInputKind::Pointer),
+        Classified::Ignored => None,
     }
 }
 
@@ -471,6 +485,14 @@ fn frontmost_pid() -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn physical_escape_is_ordinary_keyboard_input_not_a_stop() {
+        assert_eq!(
+            input_kind(Classified::Escape),
+            Some(PhysicalInputKind::Keyboard)
+        );
+    }
 
     fn failed(code: &str) -> Option<ComputerInputMonitorState> {
         Some(ComputerInputMonitorState::failed(code))
@@ -604,7 +626,6 @@ mod tests {
     }
 
     impl EscapeMonitorSink for Recorder {
-        fn escape(&self) {}
         fn physical_input(&self, _input: PhysicalComputerInput) {}
         fn state_changed(&self, state: ComputerInputMonitorState) {
             self.states.lock().unwrap().push(state);

@@ -5,7 +5,6 @@ pub mod cursor_preference;
 pub mod desktop_lifecycle;
 #[cfg(target_os = "macos")]
 pub mod driver;
-pub mod emergency_stop_notice;
 #[cfg(target_os = "macos")]
 pub mod host;
 #[cfg(target_os = "macos")]

@@ -59,10 +59,6 @@ impl ProbeLog {
 }
 
 impl EscapeMonitorSink for ProbeLog {
-    fn escape(&self) {
-        self.write(json!({ "event": "escape" }));
-    }
-
     fn physical_input(&self, input: PhysicalComputerInput) {
         self.write(json!({
             "event": "physical",
