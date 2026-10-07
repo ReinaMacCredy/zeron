@@ -1375,9 +1375,15 @@ impl Shell {
                 cx,
             );
         });
+        let open = match reveal {
+            Some(t) => t,
+            None if visible => 1.0,
+            None => 0.0,
+        };
         let bar = div()
             .flex_none()
             .debug_selector(|| "pr-chat-bar".into())
+            .pt(px(Theme::SPACE_LG * (1.0 - open)))
             .child(composer.clone());
         if !visible && reveal.is_none() {
             return Some(frame.child(bar).into_any_element());
@@ -2450,6 +2456,17 @@ mod tests {
         assert!((dock.size.width - px(expected)).abs() < px(0.5), "{dock:?}");
         assert!((dock.center().x - column.center().x).abs() < px(0.5));
         assert!((column.bottom() - px(PR_CHAT_DOCK_INSET) - dock.bottom()).abs() < px(1.0));
+        let pill = cx.debug_bounds("composer-surface").expect("composer pill");
+        let top = pill.top() - dock.top();
+        let side_inset = pill.left() - dock.left();
+        assert!(
+            top > px(8.0),
+            "pill clears the top edge: {pill:?} in {dock:?}"
+        );
+        assert!(
+            (top - side_inset).abs() < px(1.0),
+            "top {top:?} side {side_inset:?}"
+        );
         for selector in [
             "composer-footer",
             "picker-permission",
