@@ -9,8 +9,8 @@ use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::pickers::{CommitModelPicked, Pickers};
 use crate::popover;
 use crate::settings::{
-    self, DEFAULT_COMMIT_INSTRUCTION, GitAgentBusyPolicy, PrChatHistory, PrChatStyle, SavePolicy,
-    UiSettings,
+    self, DEFAULT_COMMIT_INSTRUCTION, GitAgentBusyPolicy, PrChatHistory, PrChatIdleExpiry,
+    PrChatStyle, SavePolicy, UiSettings,
 };
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -349,6 +349,29 @@ impl Render for SourceControlPage {
                 ),
             )
             .into_any_element();
+        let expiry_control = keep.then(|| {
+            div()
+                .px(px(20.0))
+                .pb(px(14.0))
+                .flex()
+                .flex_wrap()
+                .gap(px(6.0))
+                .children(PrChatIdleExpiry::ALL.into_iter().map(|expiry| {
+                    let id = format!("source-control-chat-expiry-{expiry:?}");
+                    let selector = id.clone();
+                    choice_button(
+                        &theme,
+                        SharedString::from(id),
+                        expiry.label(),
+                        current.pr_chat_idle_expiry == expiry,
+                    )
+                    .debug_selector(move || selector.clone())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.write(cx, |settings| settings.pr_chat_idle_expiry = expiry)
+                    }))
+                }))
+                .into_any_element()
+        });
         let chat_card = widgets::section_card(&theme)
             .mt(px(0.0))
             .child(row(
@@ -370,7 +393,19 @@ impl Render for SourceControlPage {
                 None,
                 history_control,
                 None,
-            ));
+            ))
+            .children(expiry_control.map(|control| {
+                row(
+                    &theme,
+                    false,
+                    "New chat when idle",
+                    "Start a new chat automatically after the chat has been idle this long. Earlier chats stay in the sessions list.",
+                    None,
+                    None,
+                    div().into_any_element(),
+                    Some(control),
+                )
+            }));
 
         let git_card = widgets::section_card(&theme).mt(px(0.0)).child(row(
             &theme,
@@ -462,12 +497,25 @@ mod tests {
         cx.run_until_parked();
         click(cx, "source-control-chat-bottom-bar");
         click(cx, "source-control-busy-block-all");
+        click(cx, "source-control-chat-expiry-OneDay");
         cx.update(|_, cx| crate::settings::flush(cx));
         let saved = UiSettings::load(dir.path());
         assert_eq!(saved.commit_message_instruction, conventional);
         assert_eq!(saved.commit_message_model, Some(choice));
         assert_eq!(saved.pr_chat_style, PrChatStyle::BottomBar);
         assert_eq!(saved.git_agent_busy_policy, GitAgentBusyPolicy::BlockAll);
+        assert_eq!(saved.pr_chat_idle_expiry, PrChatIdleExpiry::OneDay);
+        click(cx, "source-control-history-fresh");
+        assert!(
+            cx.debug_bounds("source-control-chat-expiry-Never")
+                .is_none(),
+            "idle expiry only applies to Keep per PR"
+        );
+        click(cx, "source-control-history-keep");
+        assert!(
+            cx.debug_bounds("source-control-chat-expiry-Never")
+                .is_some()
+        );
 
         click(cx, "source-control-model-reset");
         click(cx, "source-control-preset-default");

@@ -94,7 +94,7 @@ impl Shell {
                 page.read(cx).chat_context(cx).index_key() == panel.context.index_key()
             }),
             None => false,
-        };
+        } && !self.open_pr_chat_idle_expired(cx);
         if restore {
             if let Some(panel) = self.pr_chat.as_mut() {
                 panel.view = PanelView::Open;
@@ -106,8 +106,11 @@ impl Shell {
             };
             let context = page.read(cx).chat_context(cx);
             self.discard_pr_chat(cx);
-            match self.newest_pr_chat_session(&context.index_key(), cx) {
-                Some(row) => self.resume_pr_chat(context, row, cx),
+            let newest = self
+                .newest_pr_chat_session(&context.index_key(), cx)
+                .filter(|(row, created_at)| !self.pr_chat_idle_expired(&row.id, *created_at, cx));
+            match newest {
+                Some((row, _)) => self.resume_pr_chat(context, row, cx),
                 None => self.start_pr_chat(context, cx),
             }
         }
@@ -115,7 +118,11 @@ impl Shell {
         cx.notify();
     }
 
-    fn newest_pr_chat_session(&self, scope: &str, cx: &App) -> Option<zeron_proto::Chat> {
+    fn newest_pr_chat_session(
+        &self,
+        scope: &str,
+        cx: &App,
+    ) -> Option<(zeron_proto::Chat, chrono::DateTime<Utc>)> {
         let mut sessions = settings::pr_chat_sessions(scope, cx);
         sessions.sort_by_key(|session| std::cmp::Reverse(session.created_at));
         let state = self.state.read(cx);
@@ -124,7 +131,47 @@ impl Shell {
                 .chats
                 .iter()
                 .find(|chat| chat.id == session.chat_id && !chat.archived)
-                .cloned()
+                .map(|chat| (chat.clone(), session.created_at))
+        })
+    }
+
+    fn pr_chat_idle_expired(
+        &self,
+        chat_id: &str,
+        created_at: chrono::DateTime<Utc>,
+        cx: &App,
+    ) -> bool {
+        let Some(limit) = settings::pr_chat_idle_limit(cx) else {
+            return false;
+        };
+        let state = self.state.read(cx);
+        let busy = state.session_for(chat_id).is_some_and(|session| {
+            matches!(
+                session.status,
+                zeron_proto::SessionStatus::Working | zeron_proto::SessionStatus::AwaitingInput
+            )
+        });
+        let last = state
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .and_then(|chat| chat.last_message_at)
+            .unwrap_or(created_at);
+        !busy && Utc::now() - last > limit
+    }
+
+    fn open_pr_chat_idle_expired(&self, cx: &App) -> bool {
+        let Some(panel) = self.pr_chat.as_ref().filter(|panel| panel.indexed) else {
+            return false;
+        };
+        if self
+            .pr_chat_tab()
+            .is_some_and(|tab| tab.composer.read(cx).is_sending())
+        {
+            return false;
+        }
+        settings::pr_chat_session(&panel.chat_id, cx).is_some_and(|session| {
+            self.pr_chat_idle_expired(&panel.chat_id, session.created_at, cx)
         })
     }
 
@@ -1809,6 +1856,7 @@ fn day_divider(label: SharedString, theme: &Theme) -> gpui::Div {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::PrChatIdleExpiry;
     use gpui::{AppContext, TestAppContext, VisualTestContext};
     use zeron_rpc::{ClientFrame, ServerFrame};
 
@@ -1929,7 +1977,9 @@ mod tests {
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
             crate::terminal::panel::init(cx);
-            settings::init(UiSettings::default(), dir.path(), cx);
+            let mut initial = UiSettings::default();
+            initial.pr_chat_idle_expiry = PrChatIdleExpiry::Never;
+            settings::init(initial, dir.path(), cx);
             crate::history::init(
                 Default::default(),
                 Default::default(),
@@ -3565,6 +3615,105 @@ mod tests {
                 settings::current(cx).pr_chat_indexed(&kept),
                 "made under Keep per PR"
             );
+        });
+    }
+
+    #[gpui::test]
+    fn an_idle_session_past_the_expiry_opens_a_new_chat_and_a_recent_one_resumes(
+        cx: &mut TestAppContext,
+    ) {
+        let (runtime, shell, cx, mut wire, _dir) = setup(cx);
+        let _guard = runtime.enter();
+        let set_last = |cx: &mut VisualTestContext, ago: chrono::Duration| {
+            shell.update(cx, |shell, cx| {
+                shell.state.update(cx, |state, _| {
+                    let chat = state
+                        .chats
+                        .iter_mut()
+                        .find(|chat| chat.id == "old")
+                        .unwrap();
+                    chat.last_message_at = Some(Utc::now() - ago);
+                })
+            })
+        };
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.chats.push(row("old", false, serde_json::json!({})))
+            })
+        });
+        index(cx, "github.com/acme/zeron#7", &[("old", 3)]);
+        cx.update(|_, cx| {
+            settings::update(SavePolicy::Debounced, cx, |settings| {
+                settings.pr_chat_idle_expiry = PrChatIdleExpiry::ThirtyMinutes
+            })
+        });
+        set_last(cx, chrono::Duration::hours(2));
+        shell.update(cx, |shell, cx| shell.open_pull_requests(cx));
+        let page = shell.read_with(cx, |shell, _| shell.pull_requests_page.clone().unwrap());
+        page.update(cx, |page, cx| page.open_linked(item(), None, cx));
+        wire.serve(&runtime, cx, |method, _| {
+            (method == methods::GET_CHANGE_REQUEST).then(detail)
+        });
+
+        shell.update(cx, |shell, cx| shell.toggle_pr_chat(cx));
+        assert_eq!(
+            serve_prepare(&runtime, cx, &mut wire),
+            1,
+            "past 30 min: a new chat"
+        );
+        shell.read_with(cx, |shell, cx| {
+            let panel = shell.pr_chat.as_ref().unwrap();
+            assert_ne!(panel.chat_id, "old");
+            assert!(panel.earlier.is_none());
+            assert!(settings::current(cx).pr_chat_indexed("old"));
+            let rows = shell.pr_chat_session_rows(cx);
+            assert!(rows.iter().any(|row| row.chat_id == "old" && !row.current));
+        });
+
+        set_last(cx, chrono::Duration::minutes(10));
+        shell.update(cx, |shell, cx| {
+            shell.discard_pr_chat(cx);
+            shell.toggle_pr_chat(cx);
+        });
+        assert_eq!(
+            serve_prepare(&runtime, cx, &mut wire),
+            0,
+            "inside 30 min: resumed"
+        );
+        shell.read_with(cx, |shell, _| {
+            let panel = shell.pr_chat.as_ref().unwrap();
+            assert_eq!(panel.chat_id, "old");
+            assert!(panel.indexed);
+        });
+
+        shell.update(cx, |shell, cx| shell.close_pr_chat(cx));
+        set_last(cx, chrono::Duration::hours(2));
+        shell.update(cx, |shell, cx| shell.toggle_pr_chat(cx));
+        assert_eq!(
+            serve_prepare(&runtime, cx, &mut wire),
+            1,
+            "the kept panel expires too"
+        );
+        shell.read_with(cx, |shell, _| {
+            assert_ne!(shell.pr_chat.as_ref().unwrap().chat_id, "old")
+        });
+
+        cx.update(|_, cx| {
+            settings::update(SavePolicy::Debounced, cx, |settings| {
+                settings.pr_chat_idle_expiry = PrChatIdleExpiry::Never
+            })
+        });
+        shell.update(cx, |shell, cx| {
+            shell.discard_pr_chat(cx);
+            shell.toggle_pr_chat(cx);
+        });
+        assert_eq!(
+            serve_prepare(&runtime, cx, &mut wire),
+            0,
+            "Never always resumes"
+        );
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.pr_chat.as_ref().unwrap().chat_id, "old")
         });
     }
 
