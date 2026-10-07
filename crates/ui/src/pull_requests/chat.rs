@@ -116,6 +116,22 @@ impl PullRequestsPage {
 }
 
 impl PullRequestsPage {
+    pub fn chat_scope(&self) -> String {
+        let found = self.active.as_ref().filter(|key| {
+            self.details.contains_key(*key)
+                || self.listing.ready().is_some_and(|listing| {
+                    listing
+                        .items
+                        .iter()
+                        .any(|item| PullRequestKey::of(item) == **key)
+                })
+        });
+        match found {
+            Some(key) => session_key(key),
+            None => list_key(self.prefs.repository.as_deref()),
+        }
+    }
+
     pub fn debug_prepare_chat(&mut self, open_first: bool, cx: &mut gpui::Context<Self>) -> bool {
         let Some(first) = self
             .listing
@@ -241,6 +257,13 @@ fn session_key(key: &PullRequestKey) -> String {
     format!("{}/{}#{}", key.host, key.repository, key.number)
 }
 
+fn list_key(repository: Option<&str>) -> String {
+    match repository {
+        Some(repository) => format!("list:{}", repository.to_ascii_lowercase()),
+        None => "list".into(),
+    }
+}
+
 const PATCH_LIMIT: usize = 32 * 1024;
 const BODY_LIMIT: usize = 4000;
 const COMMENT_LIMIT: usize = 10;
@@ -305,17 +328,17 @@ impl PrChatContext {
     pub fn index_key(&self) -> String {
         match self {
             PrChatContext::PullRequest(pr) => session_key(&pr.key),
-            PrChatContext::List(list) => match &list.repository {
-                Some(repository) => format!("list:{}", repository.to_ascii_lowercase()),
-                None => "list".into(),
-            },
+            PrChatContext::List(list) => list_key(list.repository.as_deref()),
         }
     }
 
-    pub fn subtitle(&self) -> String {
+    pub fn dock_title(&self) -> (Option<String>, String) {
         match self {
-            PrChatContext::PullRequest(pr) => format!("#{}", pr.key.number),
-            PrChatContext::List(_) => "Pull Requests".into(),
+            PrChatContext::PullRequest(pr) => (
+                Some(format!("#{}", pr.key.number)),
+                pr.item.title.trim().to_owned(),
+            ),
+            PrChatContext::List(_) => (None, "Pull requests".into()),
         }
     }
 

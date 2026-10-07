@@ -549,9 +549,9 @@ pub fn commit_message_model(cx: &App) -> Option<CommitModelChoice> {
         .and_then(|store| store.current.commit_message_model.clone())
 }
 
-pub fn pr_chat_style_and_history(cx: &App) -> (PrChatStyle, PrChatHistory) {
+pub fn pr_chat_history(cx: &App) -> PrChatHistory {
     cx.try_global::<SettingsStore>()
-        .map(|store| (store.current.pr_chat_style, store.current.pr_chat_history))
+        .map(|store| store.current.pr_chat_history)
         .unwrap_or_default()
 }
 
@@ -1189,14 +1189,6 @@ pub struct CommitModelChoice {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum PrChatStyle {
-    #[default]
-    Floating,
-    BottomBar,
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
 pub enum PrChatHistory {
     #[default]
     KeepPerPr,
@@ -1516,7 +1508,6 @@ pub struct UiSettings {
     pub commit_message_instruction: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit_message_model: Option<CommitModelChoice>,
-    pub pr_chat_style: PrChatStyle,
     pub pr_chat_history: PrChatHistory,
     pub pr_chat_idle_expiry: PrChatIdleExpiry,
     pub pr_chat_sessions: std::collections::BTreeMap<String, Vec<PrChatSession>>,
@@ -1642,7 +1633,6 @@ impl Default for UiSettings {
             pause_animations_in_background: false,
             commit_message_instruction: DEFAULT_COMMIT_INSTRUCTION.to_string(),
             commit_message_model: None,
-            pr_chat_style: PrChatStyle::default(),
             pr_chat_history: PrChatHistory::default(),
             pr_chat_idle_expiry: PrChatIdleExpiry::default(),
             pr_chat_sessions: Default::default(),
@@ -2326,7 +2316,6 @@ impl UiSettings {
             chat_background,
             commit_message_instruction,
             commit_message_model,
-            pr_chat_style,
             pr_chat_history,
             pr_chat_idle_expiry,
             pr_chat_sessions,
@@ -2743,13 +2732,30 @@ mod tests {
             "Write a short commit message for this staged diff."
         );
         assert_eq!(legacy.commit_message_model, None);
-        assert_eq!(legacy.pr_chat_style, PrChatStyle::Floating);
         assert_eq!(legacy.pr_chat_history, PrChatHistory::KeepPerPr);
         assert_eq!(legacy.pr_chat_idle_expiry, PrChatIdleExpiry::ThirtyMinutes);
         assert_eq!(legacy.git_agent_busy_policy, GitAgentBusyPolicy::SafeOnly);
         assert_eq!(legacy, UiSettings::default());
         let saved = serde_json::to_string(&legacy).unwrap();
         assert!(!saved.contains("commitMessageModel"));
+    }
+
+    #[test]
+    fn a_file_with_the_removed_pr_chat_style_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"prChatStyle":"bottom-bar","prChatHistory":"fresh","prChatIdleExpiry":"one-hour"}"#,
+        )
+        .unwrap();
+        let loaded = UiSettings::load(dir.path());
+        assert_eq!(loaded.pr_chat_history, PrChatHistory::Fresh);
+        assert_eq!(loaded.pr_chat_idle_expiry, PrChatIdleExpiry::OneHour);
+        assert!(
+            !serde_json::to_string(&loaded)
+                .unwrap()
+                .contains("prChatStyle")
+        );
     }
 
     #[test]
@@ -2857,7 +2863,6 @@ mod tests {
             model: "claude-haiku-4-5".into(),
         });
         let mut current = base.clone();
-        current.pr_chat_style = PrChatStyle::BottomBar;
         current.git_agent_busy_policy = GitAgentBusyPolicy::AllowAll;
         let merged = UiSettings::merge_changes(&base, &edited, current);
         assert_eq!(merged.commit_message_instruction, "Conventional please.");
@@ -2868,7 +2873,6 @@ mod tests {
                 .map(|m| m.model.as_str()),
             Some("claude-haiku-4-5")
         );
-        assert_eq!(merged.pr_chat_style, PrChatStyle::BottomBar);
         assert_eq!(merged.git_agent_busy_policy, GitAgentBusyPolicy::AllowAll);
         assert_eq!(merged.pr_chat_history, PrChatHistory::KeepPerPr);
 
@@ -2877,7 +2881,6 @@ mod tests {
         let merged = UiSettings::merge_changes(&base, &stale, merged);
         assert_eq!(merged.pr_chat_history, PrChatHistory::Fresh);
         assert_eq!(merged.commit_message_instruction, "Conventional please.");
-        assert_eq!(merged.pr_chat_style, PrChatStyle::BottomBar);
 
         let mut expiry = base.clone();
         expiry.pr_chat_idle_expiry = PrChatIdleExpiry::OneDay;
@@ -3804,7 +3807,6 @@ mod tests {
                 harness: zeron_proto::HarnessId::Codex,
                 model: "gpt-5.6-luna".into(),
             }),
-            pr_chat_style: PrChatStyle::BottomBar,
             pr_chat_history: PrChatHistory::Fresh,
             pr_chat_idle_expiry: PrChatIdleExpiry::OneHour,
             pr_chat_sessions: std::collections::BTreeMap::from([(
@@ -3846,7 +3848,7 @@ mod tests {
         let json = std::fs::read_to_string(UiSettings::path(dir.path())).unwrap();
         assert!(json.contains(r#""commitMessageInstruction": "Use the imperative mood.""#));
         assert!(json.contains(r#""harness": "codex""#));
-        assert!(json.contains(r#""prChatStyle": "bottom-bar""#));
+        assert!(!json.contains("prChatStyle"));
         assert!(json.contains(r#""prChatHistory": "fresh""#));
         assert!(json.contains(r#""gitAgentBusyPolicy": "block-all""#));
         assert!(json.contains(r#""deviceAutoFloat": false"#));

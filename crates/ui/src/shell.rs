@@ -2309,6 +2309,7 @@ pub struct Shell {
     pull_requests_page: Option<Entity<crate::pull_requests::PullRequestsPage>>,
     pull_requests_tab_open: bool,
     pull_requests_sub: Option<Subscription>,
+    pull_requests_observe: Option<Subscription>,
     /// Filters the settings nav; cleared when settings close.
     settings_search: Entity<ComposerInput>,
     _settings_search_sub: Subscription,
@@ -2945,6 +2946,7 @@ impl Shell {
             pull_requests_page: None,
             pull_requests_tab_open: matches!(route, Route::PullRequests),
             pull_requests_sub: None,
+            pull_requests_observe: None,
             settings_search,
             _settings_search_sub: settings_search_sub,
             shortcuts_sub: None,
@@ -11524,8 +11526,8 @@ impl Shell {
             }
             if event.keystroke.key == "escape" && self.add_space.is_none() {
                 if !self.dismiss_pull_requests_overlay(window, cx) {
-                    if self.pr_chat_open() {
-                        self.minimize_pr_chat(cx);
+                    if self.pr_chat_sheet_open(cx) {
+                        self.fold_pr_chat(cx);
                     } else {
                         self.close_pull_requests(cx);
                     }
@@ -11565,6 +11567,15 @@ impl Shell {
             return;
         }
         if self.type_into_composer(event, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
+        if event.keystroke.key == "escape"
+            && matches!(self.route, Route::PullRequests)
+            && self.pr_chat_owns_focus(window, cx)
+            && self.pr_chat_sheet_open(cx)
+        {
+            self.fold_pr_chat(cx);
             cx.stop_propagation();
             return;
         }
@@ -15434,21 +15445,21 @@ impl Render for Shell {
                 }
                 let sessions_menu = self.debug_dialog.as_deref() == Some("pr-chat-sessions");
                 let promote = self.debug_dialog.as_deref() == Some("pr-chat-promote");
-                if let Some((open_first, minimized)) = match self.debug_dialog.as_deref() {
+                if let Some((open_first, folded)) = match self.debug_dialog.as_deref() {
                     Some("pr-chat") => Some((false, false)),
                     Some("pr-chat-open" | "pr-chat-sessions" | "pr-chat-promote") => {
                         Some((true, false))
                     }
-                    Some("pr-chat-minimized") => Some((true, true)),
+                    Some("pr-chat-folded") => Some((true, true)),
                     _ => None,
                 } && matches!(self.route, Route::PullRequests)
                     && let Some(page) = self.pull_requests_page.clone()
                     && page.update(cx, |page, cx| page.debug_prepare_chat(open_first, cx))
                 {
                     self.debug_dialog = None;
-                    self.toggle_pr_chat(cx);
-                    if minimized {
-                        self.minimize_pr_chat(cx);
+                    self.reveal_pr_chat(cx);
+                    if folded {
+                        self.fold_pr_chat(cx);
                     }
                     if sessions_menu {
                         self.show_pr_chat_sessions(cx);
@@ -15716,7 +15727,7 @@ impl Render for Shell {
                     cx,
                 );
                 let main = if pr_route {
-                    self.render_pull_requests_column(column, cx)
+                    self.render_pull_requests_column(column, window, cx)
                 } else {
                     self.render_main(window, main_content_width, transcript_width, cx)
                 };

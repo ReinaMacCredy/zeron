@@ -18,6 +18,8 @@ impl Shell {
                 shell.open_settings(*section, cx);
             }
         }));
+        self.pull_requests_observe =
+            Some(cx.observe(&page, |shell, _, cx| shell.sync_pr_chat_target(false, cx)));
         self.pull_requests_page = Some(page.clone());
         page
     }
@@ -34,6 +36,7 @@ impl Shell {
         page.update(cx, |page, cx| page.set_visible(true, cx));
         self.close_user_menu(cx);
         self.close_chat_menu(cx);
+        self.sync_pr_chat_target(true, cx);
         cx.notify();
     }
 
@@ -264,6 +267,7 @@ impl Shell {
     pub(super) fn render_pull_requests_column(
         &mut self,
         width: f32,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let page = self.pull_requests_page(cx);
@@ -276,7 +280,7 @@ impl Shell {
             .relative()
             .pt(px(Theme::TITLEBAR_HEIGHT))
             .child(page)
-            .children(self.render_pr_chat(cx))
+            .children(self.render_pr_chat(width, window, cx))
             .into_any_element()
     }
 

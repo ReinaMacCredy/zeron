@@ -10,7 +10,7 @@ use crate::pickers::{CommitModelPicked, Pickers};
 use crate::popover;
 use crate::settings::{
     self, DEFAULT_COMMIT_INSTRUCTION, GitAgentBusyPolicy, PrChatHistory, PrChatIdleExpiry,
-    PrChatStyle, SavePolicy, UiSettings,
+    SavePolicy, UiSettings,
 };
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -303,29 +303,6 @@ impl Render for SourceControlPage {
                 None,
             ));
 
-        let floating = current.pr_chat_style == PrChatStyle::Floating;
-        let style_control = div()
-            .flex()
-            .gap(px(6.0))
-            .child(
-                chip("source-control-chat-floating", "Floating", floating).on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.write(cx, |settings| {
-                            settings.pr_chat_style = PrChatStyle::Floating
-                        })
-                    },
-                )),
-            )
-            .child(
-                chip("source-control-chat-bottom-bar", "Bottom bar", !floating).on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.write(cx, |settings| {
-                            settings.pr_chat_style = PrChatStyle::BottomBar
-                        })
-                    }),
-                ),
-            )
-            .into_any_element();
         let keep = current.pr_chat_history == PrChatHistory::KeepPerPr;
         let history_control = div()
             .flex()
@@ -377,18 +354,8 @@ impl Render for SourceControlPage {
             .child(row(
                 &theme,
                 true,
-                "Style",
-                "How Chat (⌘J) opens on the Pull Requests page.",
-                None,
-                None,
-                style_control,
-                None,
-            ))
-            .child(row(
-                &theme,
-                false,
                 "Chat history",
-                "Keep per PR: reopening a PR shows its earlier chats. Fresh every time: closing a chat discards it unless you turn it into a thread.",
+                "Keep per PR: reopening a PR shows its earlier chats. Fresh every time: a new chat or another PR discards the old chat unless you turn it into a thread.",
                 None,
                 None,
                 history_control,
@@ -495,14 +462,12 @@ mod tests {
             picker.update(cx, |_, cx| cx.emit(CommitModelPicked(choice.clone())));
         });
         cx.run_until_parked();
-        click(cx, "source-control-chat-bottom-bar");
         click(cx, "source-control-busy-block-all");
         click(cx, "source-control-chat-expiry-OneDay");
         cx.update(|_, cx| crate::settings::flush(cx));
         let saved = UiSettings::load(dir.path());
         assert_eq!(saved.commit_message_instruction, conventional);
         assert_eq!(saved.commit_message_model, Some(choice));
-        assert_eq!(saved.pr_chat_style, PrChatStyle::BottomBar);
         assert_eq!(saved.git_agent_busy_policy, GitAgentBusyPolicy::BlockAll);
         assert_eq!(saved.pr_chat_idle_expiry, PrChatIdleExpiry::OneDay);
         click(cx, "source-control-history-fresh");
