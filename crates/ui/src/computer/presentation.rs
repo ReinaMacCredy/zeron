@@ -783,6 +783,12 @@ pub fn computer_js_actions(output: &str) -> Vec<ComputerJsAction> {
     let Some(actions) = payload.get("actions").and_then(Value::as_array) else {
         return Vec::new();
     };
+    let default_app = payload
+        .get("appName")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|app| !app.is_empty())
+        .map(str::to_owned);
     actions
         .iter()
         .filter_map(Value::as_object)
@@ -800,7 +806,7 @@ pub fn computer_js_actions(output: &str) -> Vec<ComputerJsAction> {
             };
             Some(ComputerJsAction {
                 tool,
-                app: field("app"),
+                app: field("app").or_else(|| default_app.clone()),
                 detail: field("detail"),
                 count: action
                     .get("n")
@@ -1297,7 +1303,7 @@ mod tests {
     #[test]
     fn js_actions_parse_into_codex_rows_and_skip_what_they_cannot_name() {
         let output = json!({
-            "result": "42",
+            "appName": "Calculator",
             "actions": [
                 { "tool": "click", "app": "Calculator", "n": 3 },
                 { "tool": "computer_type_text", "app": "Calculator", "detail": "12+30" },
@@ -1334,7 +1340,7 @@ mod tests {
                 },
                 ComputerJsAction {
                     tool: "computer_set_value",
-                    app: None,
+                    app: Some("Calculator".into()),
                     detail: Some("Ada".into()),
                     count: 1,
                 },
@@ -1349,7 +1355,7 @@ mod tests {
                 "Clicked in Calculator ×3",
                 "Typed text “12+30” in Calculator",
                 "Scrolled down in Safari",
-                "Set to “Ada” in App",
+                "Set to “Ada” in Calculator",
             ]
         );
         for broken in [

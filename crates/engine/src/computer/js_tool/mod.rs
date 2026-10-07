@@ -86,7 +86,12 @@ fn action_summary(actions: &[Value]) -> Option<String> {
         .find_map(|action| action.get("app").and_then(Value::as_str))?;
     let mut runs: Vec<(Value, usize)> = Vec::new();
     for action in actions {
-        let mut key = json!({ "tool": action.get("tool"), "app": action.get("app") });
+        let mut key = json!({ "tool": action.get("tool") });
+        if let Some(app) = action.get("app").and_then(Value::as_str)
+            && app != first_app
+        {
+            key["app"] = json!(app);
+        }
         if let Some(detail) = action.get("detail").and_then(Value::as_str) {
             key["detail"] = json!(detail.chars().take(24).collect::<String>());
         }

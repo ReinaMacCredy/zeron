@@ -84,9 +84,10 @@ pub(crate) fn is_zeron_computer_tool(name: &str) -> bool {
 }
 
 pub(crate) fn is_computer_tool_name(name: &str) -> bool {
-    name.strip_prefix("computer_").is_some_and(|rest| {
-        !rest.is_empty() && rest.chars().all(|c| c.is_ascii_lowercase() || c == '_')
-    })
+    name == "computer"
+        || name.strip_prefix("computer_").is_some_and(|rest| {
+            !rest.is_empty() && rest.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+        })
 }
 
 impl ToolServer {
@@ -718,6 +719,7 @@ mod tool_server_tests {
             "mcp__zeron__computer_click",
             "mcp__zeron__computer_browser_navigate",
             "mcp__zeron__computer_spaces",
+            "mcp__zeron__computer",
             "zeron_computer_type_text",
         ] {
             assert!(is_zeron_computer_tool(name), "{name}");
@@ -727,6 +729,7 @@ mod tool_server_tests {
             "mcp__zeron__list_threads",
             "mcp__other__computer_click",
             "mcp__zeron__computer_",
+            "mcp__zeron__computers",
             "mcp__zeron__computer_click; rm -rf /",
             "Bash",
         ] {

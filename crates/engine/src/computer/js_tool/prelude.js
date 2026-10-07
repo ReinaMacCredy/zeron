@@ -172,6 +172,7 @@
       const args = { window_id: this.windowId };
       if (opts.disableDiffing) args.full = true;
       const { data } = call("computer_get_state", args);
+      action("get_state", this.appName);
       const state = renderState(data, this);
       if (opts.emit !== false) write(state);
       return state;

@@ -322,6 +322,7 @@ pub(crate) struct Normalizer {
     /// a background spawn does not), which read as a steer and doubled the
     /// subagent's opening entry (user report 2026-09-19). Consumed on match.
     seeded_prompts: std::collections::HashMap<String, String>,
+    computer_scripts: std::collections::HashSet<String>,
     /// The advisor call still awaiting its answer, per feed (`None` = the
     /// parent, `Some(spawn id)` = a subagent). The advisor is a SERVER tool:
     /// its call is a `server_tool_use` block and its answer an
@@ -356,6 +357,7 @@ impl Normalizer {
             nested_agent_tasks: std::collections::HashSet::new(),
             agent_spawn_tools: std::collections::HashSet::new(),
             seeded_prompts: std::collections::HashMap::new(),
+            computer_scripts: std::collections::HashSet::new(),
             pending_advisor: std::collections::HashMap::new(),
             assistant_message_id: new_message_id(),
             session_id: None,
@@ -791,6 +793,9 @@ impl Normalizer {
                 // Record spawn tool ids up front: `task_notification` keys on
                 // them; a task may finish before a `task_started` arrives.
                 for b in f.message.blocks() {
+                    if b.kind == "tool_use" && b.name == "mcp__zeron__computer" {
+                        self.computer_scripts.insert(b.id.clone());
+                    }
                     if b.kind == "tool_use" && matches!(b.name.as_str(), "Agent" | "Task") {
                         self.agent_spawn_tools.insert(b.id.clone());
                         if let Some(prompt) = spawn_prompt(&b) {
@@ -927,12 +932,29 @@ impl Normalizer {
                 let relisted = learned_output.then(|| AgentEvent::BackgroundTasks {
                     tasks: self.live_tasks.clone(),
                 });
-                let tool_results = results.into_iter().map(|b| AgentEvent::ToolResult {
-                    id: b.tool_use_id.clone(),
-                    is_error: b.is_error.unwrap_or(false),
-                    output: None,
-                    diff: diff.clone(),
-                });
+                let scripts: Vec<Option<String>> = results
+                    .iter()
+                    .map(|b| {
+                        self.computer_scripts
+                            .remove(&b.tool_use_id)
+                            .then(|| tool_result_text(&b.content))
+                            .and_then(|text| {
+                                text.lines()
+                                    .find(|line| !line.trim().is_empty())
+                                    .map(str::to_owned)
+                            })
+                    })
+                    .collect();
+                let tool_results =
+                    results
+                        .into_iter()
+                        .zip(scripts)
+                        .map(|(b, output)| AgentEvent::ToolResult {
+                            id: b.tool_use_id.clone(),
+                            is_error: b.is_error.unwrap_or(false),
+                            output,
+                            diff: diff.clone(),
+                        });
                 if let Some(parent) = f.parent_tool_use_id.as_deref().map(|p| self.spawn_of(p)) {
                     let parent = &parent;
                     // A subagent's tool results echo on the main channel too;
@@ -1421,6 +1443,42 @@ mod tests {
                 "{events:?}"
             );
         }
+    }
+
+    #[test]
+    fn only_the_zeron_computer_script_result_keeps_its_first_output_line() {
+        let mut normalizer = Normalizer::new();
+        let mut feed = |raw: &str| {
+            let frame = crate::claude::wire::parse_frame(raw).expect("frame parses");
+            normalizer.normalize(frame, false)
+        };
+        feed(
+            r#"{"type":"assistant","uuid":"a-9","message":{"id":"m9","role":"assistant","content":[{"type":"tool_use","id":"cu1","name":"mcp__zeron__computer","input":{"code":"1"}},{"type":"tool_use","id":"b1","name":"Bash","input":{"command":"ls"}}]}}"#,
+        );
+        let outputs = |events: Vec<AgentEvent>| {
+            events
+                .into_iter()
+                .filter_map(|event| match event {
+                    AgentEvent::ToolResult { id, output, .. } => Some((id, output)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            outputs(feed(
+                r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"cu1","content":[{"type":"text","text":"{\"appName\":\"Calculator\",\"actions\":[]}"},{"type":"text","text":"Window: Calculator"}]}]}}"#,
+            )),
+            [(
+                "cu1".to_owned(),
+                Some(r#"{"appName":"Calculator","actions":[]}"#.to_owned())
+            )]
+        );
+        assert_eq!(
+            outputs(feed(
+                r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"b1","content":"secret listing"}]}}"#,
+            )),
+            [("b1".to_owned(), None)]
+        );
     }
 
     #[test]

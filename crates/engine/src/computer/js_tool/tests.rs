@@ -160,8 +160,9 @@ async fn every_cua_action_is_one_typed_tool_call_bound_to_the_visible_window() {
     );
     assert_eq!(host.args("computer_click")[0]["ref"], json!(9));
     assert_eq!(host.args("computer_press_key")[0]["key"], json!("meta+c"));
-    assert_eq!(outcome.actions.len(), 3);
-    assert_eq!(outcome.actions[1]["detail"], json!("7*6="));
+    assert_eq!(outcome.actions.len(), 4);
+    assert_eq!(outcome.actions[0]["tool"], json!("get_state"));
+    assert_eq!(outcome.actions[2]["detail"], json!("7*6="));
     assert!(texts(&outcome).contains("7 text Value: 42"));
 }
 
@@ -327,8 +328,9 @@ async fn a_successful_result_leads_with_a_short_action_summary_and_has_no_struct
     assert_eq!(
         serde_json::from_str::<Value>(text[0]).unwrap(),
         json!({ "appName": "Calculator", "actions": [
-            { "tool": "click", "app": "Calculator", "n": 3 },
-            { "tool": "type_text", "app": "Calculator", "detail": "hello world" }
+            { "tool": "get_state" },
+            { "tool": "click", "n": 3 },
+            { "tool": "type_text", "detail": "hello world" }
         ] })
     );
 }
