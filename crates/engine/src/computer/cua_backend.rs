@@ -23,9 +23,9 @@ use zeron_proto::computer::{
     ComputerPngMimeType, ComputerPoint, ComputerRect, ComputerScreenSize, ComputerScreenshot,
     ComputerScrollDelta, ComputerSpaceErrorCode, ComputerSpaceInventory, ComputerState,
     ComputerUiNode, ComputerVerifyStateResult, ComputerVerifyStatus, ComputerWindow,
-    ComputerZoomResult, CuaComputerTask, CuaEffect, CuaReply, CuaToolResult, CuaTransportError,
-    computer_permission_setup_message, cua_computer_task_key, list_computer_permissions,
-    parse_cua_action_diagnostics,
+    ComputerZoomResult, CuaActuator, CuaComputerTask, CuaEffect, CuaReply, CuaToolResult,
+    CuaTransportError, computer_permission_setup_message, cua_computer_task_key,
+    list_computer_permissions, parse_cua_action_diagnostics,
 };
 use zeron_rpc::ComputerHost;
 
@@ -58,7 +58,7 @@ use super::still_frame_publisher::{
     StillFramePublisher, StillFramePublisherOptions, resolve_still_interval_ms,
 };
 use super::task_context::{current_computer_task, with_computer_task};
-use super::ui_tree_targeting::ComputerTargetError;
+use super::ui_tree_targeting::{ComputerTargetError, activation_point_for_node};
 use super::utf8_truncation::utf16_len;
 
 // Longer than the driver's 25 s typing budget so the lane never reports a timeout while typing runs.
@@ -71,6 +71,7 @@ pub const CUA_BROWSER_STILL_TIMEOUT_MS: u64 = 20_000;
 pub const CUA_STILL_FRAME_INTERVAL_MS: u64 = 1_000;
 const RECENT_TREE_TTL: Duration = Duration::from_millis(5_000);
 const RECENT_TREE_LIMIT: usize = 8;
+const AX_ERROR_CANNOT_COMPLETE: i32 = -25204;
 const NATIVE_ELEMENT_LIMIT: usize = RECENT_TREE_LIMIT * 1_024;
 const PREVIEW_TASK_LIMIT: usize = 256;
 const SNAPSHOT_FRESH_FOR: Duration = Duration::from_millis(1_000);
@@ -163,6 +164,48 @@ fn text(value: Option<&Value>, max: usize) -> String {
 
 fn text1024(value: Option<&Value>) -> String {
     text(value, 1024)
+}
+
+fn ax_press_cannot_complete(error: &ComputerError) -> bool {
+    error
+        .cua()
+        .and_then(|cua| cua.diagnostics.as_ref())
+        .is_some_and(|diagnostics| {
+            diagnostics.actuator == Some(CuaActuator::AxPress)
+                && diagnostics.ax_error == Some(AX_ERROR_CANNOT_COMPLETE)
+        })
+}
+
+type ObservedSurface = (
+    Option<String>,
+    Vec<(String, Option<String>, Option<String>, ComputerRect)>,
+);
+
+fn observed_surface(root: &ComputerUiNode) -> ObservedSurface {
+    (
+        root.label.clone(),
+        root.children
+            .iter()
+            .map(|child| {
+                (
+                    child.role.clone(),
+                    child.label.clone(),
+                    child.value.clone(),
+                    child.frame,
+                )
+            })
+            .collect(),
+    )
+}
+
+fn app_window_ids(windows: &[ComputerWindow], pid: Option<u32>) -> Vec<String> {
+    let mut ids: Vec<String> = windows
+        .iter()
+        .filter(|window| pid.is_some() && window.pid == pid)
+        .map(|window| window.id.clone())
+        .collect();
+    ids.sort();
+    ids
 }
 
 fn cua_ax_tree(data: &Map<String, Value>, targets: &HashMap<u64, u32>) -> Option<ComputerAxTree> {
@@ -3209,8 +3252,94 @@ impl CuaInner {
         let mut args = Map::new();
         args.insert("element_token".into(), json!(element.token));
         args.insert("action".into(), json!(spec.driver_action));
-        self.input("click", args, Some(&window_id), None, None)
-            .await
+        let outcome = self
+            .input("click", args, Some(&window_id), None, None)
+            .await;
+        match outcome {
+            Err(error) if spec.ax_action == "AXPress" && ax_press_cannot_complete(&error) => {
+                self.press_by_pointer_after_no_effect(target, &window_id, error)
+                    .await
+            }
+            outcome => outcome,
+        }
+    }
+
+    async fn press_by_pointer_after_no_effect(
+        self: &Arc<Self>,
+        target: &ComputerResolvedTarget,
+        window_id: &str,
+        error: ComputerError,
+    ) -> Result<ComputerBackendActionResult, ComputerError> {
+        let (before, pid, windows_before) = {
+            let state = self.state();
+            let before = state
+                .recent_trees
+                .iter()
+                .find(|(id, _)| id == window_id)
+                .map(|(_, tree)| observed_surface(&tree.root));
+            let pid = state
+                .windows
+                .iter()
+                .find(|window| window.id == window_id)
+                .and_then(|window| window.pid);
+            (before, pid, app_window_ids(&state.windows, pid))
+        };
+        let Some(before) = before else {
+            return Err(error);
+        };
+        let reread = self
+            .get_state(ComputerStateOptions {
+                include_screenshot: false,
+                include_tree: true,
+                window_id: Some(window_id.to_owned()),
+                reuse_recent_tree: false,
+            })
+            .await;
+        let unchanged = reread.is_ok_and(|state| {
+            state.root.as_ref().map(observed_surface) == Some(before)
+                && app_window_ids(&self.state().windows, pid) == windows_before
+        });
+        if !unchanged {
+            return Err(error);
+        }
+        let resolved = match self.target(Some(window_id), true).await {
+            Ok(resolved) => resolved,
+            Err(_) => return Err(error),
+        };
+        let Some(bounds) = resolved.window.bounds else {
+            return Err(error);
+        };
+        let previous = self
+            .state()
+            .observed_geometry
+            .insert(window_id.to_owned(), bounds);
+        let point = activation_point_for_node(&target.node);
+        let clicked = self
+            .click_gesture(point, Some(window_id), &[], Some(1), false, false)
+            .await;
+        {
+            let mut state = self.state();
+            match previous {
+                Some(previous) => state
+                    .observed_geometry
+                    .insert(window_id.to_owned(), previous),
+                None => state.observed_geometry.remove(window_id),
+            };
+        }
+        match clicked {
+            Ok(mut result) => {
+                result.delivery_path = Some(format!(
+                    "cua-ax-then-pixel-{}",
+                    match desktop_delivery_mode() {
+                        ComputerDeliveryMode::Foreground => "foreground",
+                        ComputerDeliveryMode::Background => "background",
+                    }
+                ));
+                Ok(result)
+            }
+            Err(pixel) if pixel.effect() == Some(CuaEffect::NotDispatched) => Err(error),
+            Err(pixel) => Err(pixel),
+        }
     }
 
     async fn select_text(

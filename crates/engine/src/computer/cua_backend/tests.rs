@@ -21,8 +21,8 @@ use crate::computer::desktop_operation_queue::with_desktop_delivery_mode;
 use crate::computer::model_desktop_observation::with_model_desktop_observation;
 
 mod apps_windows_menus;
-mod ax_tree;
 mod boundary;
+mod codex_parity;
 mod hardening_preview_browser;
 mod host_transport;
 mod lock_resume;
