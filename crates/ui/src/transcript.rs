@@ -11353,20 +11353,6 @@ fn device_chip_content(tool: &ToolItem) -> Option<(SharedString, String)> {
     ))
 }
 
-fn computer_row_icon(app: Option<&str>, theme: &Theme) -> AnyElement {
-    match app.and_then(|app| crate::appshots::running_app_icon(None, None, Some(app))) {
-        Some(icon) => gpui::img(icon)
-            .flex_none()
-            .size(px(14.0))
-            .into_any_element(),
-        None => crate::icons::icon(crate::icons::CURSOR)
-            .flex_none()
-            .size(px(12.0))
-            .text_color(theme.text_muted)
-            .into_any_element(),
-    }
-}
-
 fn chip_header_row(
     tool: &ToolItem,
     trail: Option<ChipTrail>,
@@ -11396,8 +11382,6 @@ fn chip_header_row(
         },
     };
     let activity = !is_agent_tool(tool);
-    let computer_icon = (tool.kind == ToolItemKind::Call && computer_call(&tool.call).is_some())
-        .then(|| computer_row_icon(tool.app.as_deref(), theme));
     let file_path = tool_file_path(&tool.call);
     let running = tool.subagent_ref.is_some()
         && matches!(tool.subagent_status, Some(SubagentStatus::Running));
@@ -11451,7 +11435,6 @@ fn chip_header_row(
                     ),
             )
         })
-        .children(computer_icon)
         .child(
             div()
                 .flex_none()
@@ -11844,8 +11827,15 @@ fn activity_rail(
             .absolute()
             .inset_0(),
         )
-        .child(
-            crate::icons::icon(match tool.kind {
+        .child(match computer_app_icon(tool) {
+            Some(icon) => gpui::img(icon)
+                .absolute()
+                .left(px(ACTIVITY_ICON_LEFT))
+                .top(px(row_height / 2.0 - ACTIVITY_ICON_SIZE / 2.0))
+                .size(px(ACTIVITY_ICON_SIZE))
+                .opacity(branch_reveal)
+                .into_any_element(),
+            None => crate::icons::icon(match tool.kind {
                 ToolItemKind::Thought => crate::icons::CHAT_ROUND_LINE,
                 ToolItemKind::Note => crate::icons::PEN,
                 ToolItemKind::Call => tool_icon_path(&tool.call),
@@ -11855,8 +11845,16 @@ fn activity_rail(
             .top(px(row_height / 2.0 - ACTIVITY_ICON_SIZE / 2.0))
             .size(px(ACTIVITY_ICON_SIZE))
             .opacity(branch_reveal)
-            .text_color(tint),
-        )
+            .text_color(tint)
+            .into_any_element(),
+        })
+}
+
+fn computer_app_icon(tool: &ToolItem) -> Option<Arc<gpui::Image>> {
+    if tool.kind != ToolItemKind::Call || computer_call(&tool.call).is_none() {
+        return None;
+    }
+    crate::appshots::running_app_icon(None, None, tool.app.as_deref())
 }
 
 /// A clockwise ribbon contour. Nonzero fill unions intersecting contours,

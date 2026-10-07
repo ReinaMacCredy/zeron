@@ -99,6 +99,53 @@ fn tool(id: &str, name: &str, input: Value, output: &str, is_error: bool) -> Val
     })
 }
 
+fn app_consent(app: &str, bundle: &str, tool: &str, params: Value) -> Value {
+    json!({
+        "id": format!("input-{app}"),
+        "kind": "input",
+        "requestId": format!("computer-consent-{app}"),
+        "questions": [{
+            "id": "consent",
+            "header": "Computer",
+            "question": format!("Allow Computer to use {app}? The agent will use {app} until this response ends."),
+            "options": ["Allow", format!("Always allow {app}"), "Deny"],
+            "multiSelect": false,
+            "kind": {
+                "type": "consent",
+                "scope": "task",
+                "app": { "name": app, "bundleId": bundle },
+                "tool": tool,
+                "params": params.to_string()
+            }
+        }],
+        "resolved": false,
+    })
+}
+
+fn foreground(app: &str) -> Value {
+    json!({
+        "id": "input-foreground",
+        "kind": "input",
+        "requestId": "computer-foreground-1",
+        "questions": [{
+            "id": "foreground",
+            "header": "Computer",
+            "question": format!("Bring {app} to the front?"),
+            "options": ["Allow for this turn", "No"],
+            "multiSelect": false,
+            "kind": { "type": "foreground", "app": { "name": app } }
+        }],
+        "resolved": false,
+    })
+}
+
+fn running(id: &str, name: &str, input: Value) -> Value {
+    let mut part = tool(id, name, input, "", false);
+    part["resolved"] = json!(false);
+    part.as_object_mut().unwrap().remove("output");
+    part
+}
+
 fn text(id: &str, text: &str) -> Value {
     json!({ "id": id, "kind": "text", "text": text })
 }
@@ -292,6 +339,117 @@ fn main() -> anyhow::Result<()> {
             1788900014000,
         ),
     ];
+    let approval = vec![
+        user(
+            "u5",
+            "/computer-use run the tests in Ghostty",
+            1788900030000,
+        ),
+        assistant(
+            "a5",
+            vec![
+                text("t", "I'll run the test suite in Ghostty."),
+                app_consent(
+                    "Ghostty",
+                    "com.mitchellh.ghostty",
+                    "computer_type_text",
+                    json!({ "window_id": "cua:4242:17", "text": "cargo test" }),
+                ),
+            ],
+            1788900031000,
+            "streaming",
+        ),
+    ];
+    let calculator = |id: &str| {
+        let mut part = app_consent(
+            "Calculator",
+            "com.apple.calculator",
+            "computer_click",
+            json!({ "label": "7" }),
+        );
+        part["id"] = json!(format!("input-{id}"));
+        part
+    };
+    let quiet = vec![
+        user("u6", "/computer-use add 7 + 5 in Calculator", 1788900040000),
+        assistant("a6", vec![calculator("calc")], 1788900041000, "streaming"),
+    ];
+    let foreground_card = vec![
+        user(
+            "u7",
+            "/computer-use type the commit message in TextEdit",
+            1788900050000,
+        ),
+        assistant(
+            "a7",
+            vec![foreground("TextEdit")],
+            1788900051000,
+            "streaming",
+        ),
+    ];
+    let codex_rows = vec![
+        user(
+            "u8",
+            "/computer-use add 7 + 5 in Calculator and paste it into TextEdit",
+            1788900060000,
+        ),
+        assistant(
+            "a8",
+            vec![
+                text("t", "Working in Calculator and TextEdit."),
+                tool(
+                    "q1",
+                    "computer_get_state",
+                    json!({ "app_name": "Calculator" }),
+                    "ok",
+                    false,
+                ),
+                tool(
+                    "q2",
+                    "computer_click",
+                    json!({ "label": "7", "app_name": "Calculator" }),
+                    "ok",
+                    false,
+                ),
+                tool(
+                    "q3",
+                    "computer_type_text",
+                    json!({ "text": "Dear team,   the release   notes for 0.2.105 are attached below", "app_name": "TextEdit" }),
+                    "ok",
+                    false,
+                ),
+                tool(
+                    "q4",
+                    "computer_scroll",
+                    json!({ "delta_y": 4, "app_name": "TextEdit" }),
+                    "ok",
+                    false,
+                ),
+                tool(
+                    "q5",
+                    "computer_set_value",
+                    json!({ "value": "12", "app_name": "Calculator" }),
+                    "ok",
+                    false,
+                ),
+                tool(
+                    "q6",
+                    "computer_press_key",
+                    json!({ "key": "cmd+s", "app_name": "TextEdit" }),
+                    "ok",
+                    false,
+                ),
+                tool("q7", "computer_list_apps", json!({}), "ok", false),
+                running(
+                    "q8",
+                    "computer_click",
+                    json!({ "label": "Save", "app_name": "TextEdit" }),
+                ),
+            ],
+            1788900061000,
+            "streaming",
+        ),
+    ];
     let failure = Arc::new(std::sync::Mutex::new(None));
     let result = failure.clone();
     gpui_platform::application()
@@ -400,6 +558,21 @@ fn main() -> anyhow::Result<()> {
                     pause(cx, 400).await;
                     capture(window.into(), cx, &output, "denied-setup-unavailable-escape-pause")?;
                     cx.update(|cx| input_pause(cx, false));
+                    for (entries, name) in [
+                        (approval, "approval-card-elevated-risk-disclosure"),
+                        (quiet, "approval-card-calculator"),
+                        (foreground_card, "foreground-card"),
+                        (codex_rows, "codex-transcript-rows"),
+                    ] {
+                        state.update(cx, |s, cx| {
+                            s.receive_transcript_frame(reset(entries), cx).unwrap();
+                            cx.notify();
+                        });
+                        pause(cx, 900).await;
+                        window.update(cx, |s, _, cx| s.fixture_appshots_transcript_start(cx))?;
+                        pause(cx, 400).await;
+                        capture(window.into(), cx, &output, name)?;
+                    }
                     let composer = window.update(cx, |s, _, _| s.fixture_appshots_composer())?;
                     composer.update(cx, |c, cx| c.fixture_type("/comp", cx));
                     pause(cx, 6000).await;

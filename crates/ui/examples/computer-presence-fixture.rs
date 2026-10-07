@@ -25,7 +25,7 @@ mod macos {
     };
     use serde_json::json;
     use std::path::{Path, PathBuf};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
     use zeron_proto::computer::{ComputerEvent, ThreadComputerState};
     use zeron_ui::computer::native::status_item;
     use zeron_ui::computer::{preview, status_menu};
@@ -93,6 +93,20 @@ mod macos {
             .map(|(_, layer, bounds)| (layer, bounds.size.width, bounds.size.height))
             .collect();
         println!("{step}: overlay panels on screen {panels:?}");
+    }
+
+    fn running_pid(name: &str) -> Option<u32> {
+        let output = std::process::Command::new("pgrep")
+            .args(["-x", name])
+            .output()
+            .ok()?;
+        String::from_utf8(output.stdout)
+            .ok()?
+            .lines()
+            .next()?
+            .trim()
+            .parse()
+            .ok()
     }
 
     fn thread_state(active: bool) -> serde_json::Value {
@@ -188,6 +202,10 @@ mod macos {
                 "archived": false, "createdAt": "2026-09-28T00:00:00Z"
             }))
             .unwrap()];
+            s.computer_settings = Some(zeron_proto::computer::ComputerSettings {
+                computer_control_enabled: true,
+                ..Default::default()
+            });
             s
         });
         status_menu::drive(
@@ -199,7 +217,7 @@ mod macos {
             status_item::apply,
             cx,
         );
-        let window = cx
+        let _window = cx
             .open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(Bounds::new(
@@ -215,66 +233,62 @@ mod macos {
         cx.spawn(async move |cx| {
             let run: anyhow::Result<()> = async {
                 pause(cx, 800).await;
-                let (wid, bounds) = own_window().ok_or_else(|| anyhow::anyhow!("own window not found"))?;
-                let target = format!("cua:{}:{wid}", std::process::id());
-                println!("target {target} bounds {bounds:?}");
-                let started = Instant::now();
-                for _ in 0..200 {
-                    own_window();
-                }
-                println!("on-screen window list: {:?} per read", started.elapsed() / 200);
+                let (_, bounds) = own_window().ok_or_else(|| anyhow::anyhow!("own window not found"))?;
+                let calculator = running_pid("Calculator").unwrap_or(std::process::id());
+                let textedit = running_pid("TextEdit").unwrap_or(std::process::id());
+                let calc_window = format!("cua:{calculator}:1");
+                let text_window = format!("cua:{textedit}:2");
+                println!("driving Calculator {calc_window} and TextEdit {text_window}");
 
-                thread(cx, thread_state(true));
-                event(cx, ComputerEvent::Action {
-                    window_id: Some(target.clone()),
-                    delivery: None,
-                    action: "computer_type_text".into(),
-                    ok: true,
-                    message: Some("typed hunter2".into()),
-                    thread_id: Some(CHAT.into()),
-                    restored_window_id: None,
-                    restore_status: None,
-                    masked: false,
-                });
-                let mut typing = thread_state(true);
-                typing["activity"] = json!("Typing");
-                thread(cx, typing.clone());
+                let mut driving = thread_state(true);
+                driving["windows"] = json!([
+                    { "id": calc_window, "title": "Calculator", "appName": "Calculator", "pid": calculator,
+                      "focused": false, "minimized": false, "visible": true },
+                    { "id": text_window, "title": "Untitled", "appName": "TextEdit", "pid": textedit,
+                      "focused": false, "minimized": false, "visible": true }
+                ]);
+                thread(cx, driving.clone());
+                for window in [&calc_window, &text_window] {
+                    event(cx, ComputerEvent::Action {
+                        window_id: Some(window.clone()),
+                        delivery: None,
+                        action: "computer_click".into(),
+                        ok: true,
+                        message: None,
+                        thread_id: Some(CHAT.into()),
+                        restored_window_id: None,
+                        restore_status: None,
+                        masked: false,
+                    });
+                }
                 pause(cx, 700).await;
-                overlays("driving");
-                capture(&output, "target-driving", bounds)?;
+                overlays("driving, no ring");
+                capture(&output, "target-driving-no-ring", bounds)?;
                 menu_bar(&output, "menubar-driving", 26.0)?;
+                status_item::export_fixture_images(output.clone(), "status-driving".into());
+                pause(cx, 300).await;
                 status_item::open_menu();
-                pause(cx, 600).await;
-                menu_bar(&output, "menu-open", 260.0)?;
+                pause(cx, 700).await;
+                menu_bar(&output, "menu-open-driving", 260.0)?;
                 status_item::close_menu();
                 pause(cx, 300).await;
-                status_item::perform("Open chat");
+                status_item::perform("Stop Using Calculator");
+                pause(cx, 500).await;
+                status_item::open_menu();
+                pause(cx, 700).await;
+                menu_bar(&output, "menu-open-after-stop-calculator", 260.0)?;
+                status_item::close_menu();
                 pause(cx, 300).await;
 
-                let mut paused = typing.clone();
-                paused["inputPause"] = json!({ "windowId": target, "pid": std::process::id(), "message": "Screen locked" });
-                thread(cx, paused);
+                thread(cx, thread_state(false));
                 pause(cx, 700).await;
-                capture(&output, "target-paused", bounds)?;
-                menu_bar(&output, "menubar-paused", 26.0)?;
-
-                thread(cx, typing.clone());
-                pause(cx, 500).await;
-                window.update(cx, |_, window, _| window.minimize_window())?;
-                pause(cx, 1200).await;
-                overlays("minimized");
-                window.update(cx, |_, window, _| window.activate_window())?;
-                pause(cx, 1200).await;
-                overlays("restored");
-                capture(&output, "target-restored", bounds)?;
-
-                let mut revoked = typing;
-                revoked["inputStopped"] = json!(true);
-                thread(cx, revoked);
+                status_item::open_menu();
                 pause(cx, 700).await;
-                overlays("revoked");
-                capture(&output, "target-revoked", bounds)?;
-                menu_bar(&output, "menubar-revoked", 26.0)?;
+                menu_bar(&output, "menu-open-idle", 200.0)?;
+                status_item::export_fixture_images(output.clone(), "status-idle".into());
+                pause(cx, 300).await;
+                status_item::close_menu();
+                pause(cx, 300).await;
                 Ok(())
             }
             .await;

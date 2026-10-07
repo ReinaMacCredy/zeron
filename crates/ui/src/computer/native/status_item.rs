@@ -316,6 +316,45 @@ pub fn close_menu() {
 }
 
 #[cfg(feature = "appshots-fixture")]
+pub fn export_fixture_images(directory: std::path::PathBuf, name: String) {
+    DispatchQueue::main().exec_async(move || {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let write = |image: &NSImage, file: String| {
+            if let Some(data) = image.TIFFRepresentation() {
+                let _ = std::fs::write(directory.join(file), data.to_vec());
+            }
+        };
+        ITEM.with(|cell| {
+            let slot = cell.borrow();
+            let Some(item) = slot.as_ref() else {
+                return;
+            };
+            if let Some(image) = item.status.button(mtm).and_then(|button| button.image()) {
+                write(&image, format!("{name}-button.tiff"));
+            }
+            if let Some(menu) = item.status.menu(mtm) {
+                for index in 0..menu.numberOfItems() {
+                    let Some(entry) = menu.itemAtIndex(index) else {
+                        continue;
+                    };
+                    let image = entry.image();
+                    println!(
+                        "menu item {:?} image {}",
+                        entry.title().to_string(),
+                        image.is_some()
+                    );
+                    if let Some(image) = image {
+                        write(&image, format!("{name}-item-{index}.tiff"));
+                    }
+                }
+            }
+        });
+    });
+}
+
+#[cfg(feature = "appshots-fixture")]
 pub fn perform(title: &str) {
     let title = title.to_owned();
     DispatchQueue::main().exec_async(move || {
