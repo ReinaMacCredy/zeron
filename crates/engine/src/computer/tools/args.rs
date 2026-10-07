@@ -11,7 +11,8 @@ use super::tool_input::{
     read_required_string_arg, read_string_arg, read_string_array_arg, read_verbatim_string_arg,
 };
 use crate::computer::backend::{
-    ComputerCaptureRequest, ComputerMenuTarget, ComputerTextMatch, ComputerTextPlacement,
+    ComputerCaptureRequest, ComputerMenuTarget, ComputerPasteFormat, ComputerTextMatch,
+    ComputerTextPlacement,
     ComputerTextRange, ComputerTextSelection, DEFAULT_COMPUTER_CAPTURE_MAX_DIMENSION,
     MAX_COMPUTER_CLIPBOARD_BYTES,
 };
@@ -338,6 +339,17 @@ pub fn read_action_name(args: &ToolArgs) -> Read<String> {
         )));
     }
     Ok(value)
+}
+
+pub fn read_paste_format(args: &ToolArgs) -> Read<ComputerPasteFormat> {
+    match read_string_arg(args, "format", false)?.as_deref() {
+        None | Some("text") => Ok(ComputerPasteFormat::Text),
+        Some("md") => Ok(ComputerPasteFormat::Markdown),
+        Some("html") => Ok(ComputerPasteFormat::Html),
+        Some(_) => Err(input(
+            "Argument \"format\" must be \"text\", \"md\" or \"html\".",
+        )),
+    }
 }
 
 pub fn read_clipboard_text(args: &ToolArgs) -> Read<String> {

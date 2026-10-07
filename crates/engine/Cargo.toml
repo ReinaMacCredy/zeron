@@ -39,6 +39,7 @@ tokio-tungstenite.workspace = true
 ignore.workspace = true
 nucleo-matcher.workspace = true
 regex = "1"
+pulldown-cmark.workspace = true
 miniz_oxide = "0.8"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 

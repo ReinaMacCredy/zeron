@@ -97,6 +97,14 @@ pub struct ComputerTextRange {
     pub length: u64,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ComputerPasteFormat {
+    #[default]
+    Text,
+    Markdown,
+    Html,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComputerTextSelection {
     Range(ComputerTextRange),
@@ -899,6 +907,10 @@ pub trait ComputerBackend: Send + Sync {
 
     async fn write_clipboard(&self, _text: &str) -> Result<(), ComputerError> {
         unsupported("writeClipboard")
+    }
+
+    async fn write_clipboard_html(&self, _text: &str, _html: &str) -> Result<(), ComputerError> {
+        unsupported("writeClipboardHtml")
     }
 
     async fn set_value(

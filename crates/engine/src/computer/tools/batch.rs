@@ -8,7 +8,7 @@ use zeron_proto::computer::{
 use super::args::{
     read_action_name, read_click_gesture, read_clipboard_text, read_delta, read_drag_duration_ms,
     read_key_or_chord, read_menu_path_arg, read_menu_target_arg, read_modifiers,
-    read_nested_screenshot_target, read_required_text, read_screenshot_target,
+    read_nested_screenshot_target, read_paste_format, read_required_text, read_screenshot_target,
     read_select_text_selection, read_select_text_target, read_set_value_value,
     read_wait_duration_ms, read_window_id_arg,
 };
@@ -321,8 +321,11 @@ impl ComputerTools {
             "paste" => {
                 let text = read_clipboard_text(step)?;
                 let window_id = read_window_id_arg(step)?;
+                let format = read_paste_format(step)?;
                 async move {
-                    let pasted = manager.paste(who, &text, window_id.as_deref()).await?;
+                    let pasted = manager
+                        .paste(who, &text, window_id.as_deref(), format)
+                        .await?;
                     let mut result = to_map(&pasted.result);
                     result.insert("clipboardRestored".into(), json!(pasted.clipboard_restored));
                     Ok(Value::Object(result))

@@ -581,6 +581,10 @@ impl ComputerBackend for Scripted {
         self.fake.write_clipboard(text).await
     }
 
+    async fn write_clipboard_html(&self, text: &str, html: &str) -> Result<(), ComputerError> {
+        self.fake.write_clipboard_html(text, html).await
+    }
+
     async fn set_value(
         &self,
         target: &ComputerResolvedTarget,

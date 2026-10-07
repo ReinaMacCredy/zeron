@@ -12899,6 +12899,7 @@ dependencies = [
  "notify",
  "nucleo-matcher",
  "portable-pty",
+ "pulldown-cmark",
  "regex",
  "reqwest",
  "rusqlite",

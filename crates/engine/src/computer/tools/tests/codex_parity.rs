@@ -415,3 +415,79 @@ async fn selects_text_by_match_in_utf16_units_and_refuses_ambiguity() {
 fn text_of(result: &McpToolResult) -> String {
     result.first_text().unwrap_or_default().to_owned()
 }
+
+fn clipboard_calls(h: &Harness) -> Vec<(String, Vec<Value>)> {
+    h.backend
+        .fake
+        .calls()
+        .into_iter()
+        .filter(|call| {
+            matches!(
+                call.method.as_str(),
+                "readClipboard" | "writeClipboard" | "writeClipboardHtml" | "hotkey"
+            )
+        })
+        .map(|call| (call.method, call.args))
+        .collect()
+}
+
+// Catches pasting HTML source as plain text, dropping the plain-text
+// fallback, and leaving the agent's content on the user's clipboard.
+#[tokio::test]
+async fn pastes_html_as_rich_text_and_restores_the_users_clipboard() {
+    use crate::computer::backend::ComputerBackend;
+    let h = harness();
+    h.backend.fake.write_clipboard("user copy").await.unwrap();
+    let pasted = h
+        .call(
+            "computer_paste",
+            json!({ "text": "<b>Hi</b> &amp; bye", "format": "html", "window_id": "fake-terminal", "include_screenshot": false }),
+        )
+        .await;
+    assert!(!pasted.is_error, "{pasted:?}");
+    assert_eq!(result_json(&pasted)["clipboardRestored"], json!(true));
+    let calls = clipboard_calls(&h);
+    let methods: Vec<&str> = calls.iter().map(|(method, _)| method.as_str()).collect();
+    assert_eq!(
+        methods,
+        [
+            "writeClipboard",
+            "readClipboard",
+            "writeClipboardHtml",
+            "hotkey",
+            "writeClipboard"
+        ]
+    );
+    assert_eq!(
+        calls[2].1,
+        vec![json!("Hi & bye"), json!("<b>Hi</b> &amp; bye")]
+    );
+    assert_eq!(calls[4].1, vec![json!("user copy")]);
+    h.dispose().await;
+}
+
+// Catches md format pasting the raw markdown with no rendered flavor.
+#[tokio::test]
+async fn pastes_markdown_rendered_to_html_beside_its_source() {
+    let h = harness();
+    let pasted = h
+        .call(
+            "computer_paste",
+            json!({ "text": "**bold** move", "format": "md", "window_id": "fake-terminal", "include_screenshot": false }),
+        )
+        .await;
+    assert!(!pasted.is_error, "{pasted:?}");
+    let calls = clipboard_calls(&h);
+    let (_, args) = calls
+        .iter()
+        .find(|(method, _)| method == "writeClipboardHtml")
+        .expect("rich write");
+    assert_eq!(args[0], json!("**bold** move"));
+    assert!(
+        args[1]
+            .as_str()
+            .is_some_and(|html| html.contains("<strong>bold</strong> move")),
+        "{args:?}"
+    );
+    h.dispose().await;
+}

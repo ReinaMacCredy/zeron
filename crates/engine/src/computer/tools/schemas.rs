@@ -427,6 +427,7 @@ pub(super) fn desktop_entries(dialect: ComputerAgentDialect) -> Vec<ComputerTool
     key_properties.extend(text_target.clone());
     let mut paste_properties = object(json!({
         "text": { "type": "string", "description": "The exact text to paste at the caret." },
+        "format": { "type": "string", "enum": ["text", "md", "html"] },
     }));
     paste_properties.extend(keyboard_target_property());
     let mut set_value_properties = pointer.clone();
@@ -855,7 +856,7 @@ pub(super) fn desktop_entries(dialect: ComputerAgentDialect) -> Vec<ComputerTool
             "computer_paste",
             "Paste text",
             format!(
-                "Paste text through the clipboard, the fast path for long or awkward text. It saves the current clipboard, writes the text, sends the paste shortcut, then puts the user's contents back and reports clipboardRestored. A clipboard holding an image or other non-text content cannot be saved and is replaced. {SHARED_CLIPBOARD_NOTE} {KEYBOARD_TARGET_HINT} {DELIVERY_HINT}"
+                "Paste text through the clipboard, the fast path for long or awkward text. It saves the user's clipboard, pastes, restores it and reports clipboardRestored. format md or html pastes rich text with a plain-text fallback. A clipboard holding an image or other non-text content cannot be saved and is replaced. {SHARED_CLIPBOARD_NOTE} {KEYBOARD_TARGET_HINT} {DELIVERY_HINT}"
             ),
             object_schema(paste_properties, &["text"]),
             None,

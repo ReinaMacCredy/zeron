@@ -15,14 +15,14 @@ use super::{
     COMPUTER_PASTE_RESTORE_MS, ComputerClickButton, ComputerClickGesture, ComputerManager,
     ComputerNotedResult, ComputerPasteResult, ComputerStateRequest, agent_thread_id,
     click_gesture_unsupported_error, clipboard_not_restorable_error, clipboard_unsupported_error,
-    error_message, menu_app_not_found_error, rects_overlap, triple_click_unsupported_error,
-    window_not_found_error,
+    error_message, html_plain_text, markdown_html, menu_app_not_found_error, rects_overlap,
+    triple_click_unsupported_error, window_not_found_error,
 };
 use crate::computer::backend::{
     ComputerAgentDialect, ComputerBackendActionResult, ComputerBackendError, ComputerBackendMethod,
     ComputerBrowserCall, ComputerBrowserCallResult, ComputerCaptureRequest, ComputerError,
-    ComputerLaunchOptions, ComputerMenuBackendTarget, ComputerMenuTarget, ComputerStateOptions,
-    ComputerTextSelection, clamp_computer_message,
+    ComputerLaunchOptions, ComputerMenuBackendTarget, ComputerMenuTarget, ComputerPasteFormat,
+    ComputerStateOptions, ComputerTextSelection, clamp_computer_message,
 };
 use crate::computer::call_context::{mark_computer_call, timed_computer_leg};
 use crate::computer::denylist::ComputerDenylistError;
@@ -1263,6 +1263,7 @@ impl ComputerManager {
         thread_id: Option<&str>,
         text: &str,
         window_id: Option<&str>,
+        format: ComputerPasteFormat,
     ) -> Result<ComputerPasteResult, ComputerError> {
         self.with_desktop_control(
             thread_id,
@@ -1286,7 +1287,22 @@ impl ComputerManager {
                         }
                         Err(_) => None,
                     };
-                timed_computer_leg("dispatch", self.backend.write_clipboard(text)).await?;
+                let write = async {
+                    match format {
+                        ComputerPasteFormat::Text => self.backend.write_clipboard(text).await,
+                        ComputerPasteFormat::Markdown => {
+                            self.backend
+                                .write_clipboard_html(text, &markdown_html(text))
+                                .await
+                        }
+                        ComputerPasteFormat::Html => {
+                            self.backend
+                                .write_clipboard_html(&html_plain_text(text), text)
+                                .await
+                        }
+                    }
+                };
+                timed_computer_leg("dispatch", write).await?;
                 let keys: Vec<String> = if self.agent_dialect() == ComputerAgentDialect::Macos {
                     vec!["meta".into(), "v".into()]
                 } else {

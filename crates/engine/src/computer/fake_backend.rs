@@ -1239,6 +1239,13 @@ impl ComputerBackend for FakeComputerBackend {
         Ok(())
     }
 
+    async fn write_clipboard_html(&self, text: &str, html: &str) -> Result<(), ComputerError> {
+        self.record("writeClipboardHtml", vec![json!(text), json!(html)]);
+        self.fail("writeClipboardHtml")?;
+        self.state().clipboard = text.to_owned();
+        Ok(())
+    }
+
     async fn set_value(
         &self,
         target: &ComputerResolvedTarget,

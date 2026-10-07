@@ -181,7 +181,7 @@ pub fn run_step_fields(step_type: &str) -> Option<Vec<&'static str>> {
         "activate_window" => vec!["window_id", "windowId"],
         "launch_app" => vec!["app", "arguments", "wait_for_window", "hidden"],
         "write_clipboard" => vec!["text"],
-        "paste" => vec!["text", "window_id", "windowId"],
+        "paste" => vec!["text", "format", "window_id", "windowId"],
         "set_window_frame" => vec!["window_id", "windowId", "x", "y", "width", "height"],
         "invoke_menu" => vec!["window_id", "windowId", "app", "pid", "path"],
         "kill_app" => vec!["window_id", "windowId"],

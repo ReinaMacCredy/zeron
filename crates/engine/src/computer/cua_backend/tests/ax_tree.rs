@@ -59,6 +59,20 @@ async fn parses_the_driver_tree_with_static_values_focus_and_root_targets() {
     assert_eq!(tree.url.as_deref(), Some("file:///tmp/calc"));
 }
 
+// Catches a rich paste reaching the driver without its plain-text fallback.
+#[tokio::test]
+async fn writes_html_beside_its_plain_text_through_clipboard_write() {
+    let f = fixture();
+    f.backend
+        .write_clipboard_html("Hi & bye", "<b>Hi</b> &amp; bye")
+        .await
+        .unwrap();
+    assert_eq!(
+        f.last_args("clipboard_write"),
+        json!({ "text": "Hi & bye", "html": "<b>Hi</b> &amp; bye" })
+    );
+}
+
 // Catches treating a driver that predates tree_nodes as an empty tree; the
 // tools layer must fall back to the actionable root instead.
 #[tokio::test]

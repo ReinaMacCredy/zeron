@@ -3272,6 +3272,20 @@ impl CuaInner {
         Ok(())
     }
 
+    async fn write_clipboard_html(
+        self: &Arc<Self>,
+        text: &str,
+        html: &str,
+    ) -> Result<(), ComputerError> {
+        assert_computer_clipboard_write_fits(text)?;
+        assert_computer_clipboard_write_fits(html)?;
+        let mut args = Map::new();
+        args.insert("text".into(), json!(text));
+        args.insert("html".into(), json!(html));
+        self.call("clipboard_write", args, true, true).await?;
+        Ok(())
+    }
+
     async fn launch_app(
         self: &Arc<Self>,
         app: &str,
@@ -4719,6 +4733,10 @@ impl ComputerBackend for CuaComputerBackend {
 
     async fn write_clipboard(&self, text: &str) -> Result<(), ComputerError> {
         self.inner.write_clipboard(text).await
+    }
+
+    async fn write_clipboard_html(&self, text: &str, html: &str) -> Result<(), ComputerError> {
+        self.inner.write_clipboard_html(text, html).await
     }
 
     async fn set_value(
