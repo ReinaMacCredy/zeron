@@ -1,8 +1,11 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use cursor_overlay::codex_cursor::{fog_from_wallpaper, WALLPAPER_SAMPLE_RADIUS};
+
+use super::display::DisplayFrame;
 
 const CELL_POINTS: f64 = 8.0;
 const THUMBNAIL_PIXELS: i32 = 384;
@@ -121,61 +124,77 @@ fn box_blur(rgb: &mut [[f32; 3]], cols: usize, rows: usize, radius: usize) {
     }
 }
 
-type Shared = Arc<Mutex<Option<Arc<Backdrop>>>>;
+type Shared = Arc<Mutex<HashMap<u32, Arc<Backdrop>>>>;
 
 pub struct WallpaperTint {
     shared: Shared,
-    refresh: mpsc::Sender<()>,
-    last_request: Option<Instant>,
+    refresh: mpsc::Sender<(u32, (f64, f64))>,
+    last_request: HashMap<u32, Instant>,
 }
 
 impl WallpaperTint {
-    pub fn spawn(screen: usize, size: (f64, f64)) -> Self {
+    pub fn spawn() -> Self {
         let shared: Shared = Arc::default();
-        let (refresh, requests) = mpsc::channel::<()>();
-        let _ = refresh.send(());
+        let (refresh, requests) = mpsc::channel::<(u32, (f64, f64))>();
         let worker = Arc::clone(&shared);
         let _ = std::thread::Builder::new()
             .name("cursor-wallpaper".into())
             .spawn(move || {
-                let mut loaded: Option<(PathBuf, Option<SystemTime>)> = None;
-                while requests.recv().is_ok() {
-                    while requests.try_recv().is_ok() {}
-                    let Some(path) = platform::desktop_image_path(screen) else {
-                        continue;
-                    };
-                    let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-                    let key = (path, modified);
-                    if loaded.as_ref() == Some(&key) {
-                        continue;
+                let mut loaded: HashMap<u32, (PathBuf, Option<SystemTime>, (f64, f64))> =
+                    HashMap::new();
+                while let Ok(first) = requests.recv() {
+                    let mut pending = vec![first];
+                    pending.extend(requests.try_iter());
+                    pending.sort_by_key(|(id, _)| *id);
+                    pending.dedup_by_key(|(id, _)| *id);
+                    for (display, size) in pending {
+                        let Some(path) = platform::desktop_image_path(display) else {
+                            continue;
+                        };
+                        let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+                        let key = (path, modified, size);
+                        if loaded.get(&display) == Some(&key) {
+                            continue;
+                        }
+                        let backdrop = platform::decode_thumbnail(&key.0)
+                            .and_then(|(w, h, rgba)| Backdrop::from_rgba(w, h, &rgba, size));
+                        let mut shared = worker.lock().unwrap_or_else(|p| p.into_inner());
+                        match backdrop {
+                            Some(backdrop) => shared.insert(display, Arc::new(backdrop)),
+                            None => shared.remove(&display),
+                        };
+                        loaded.insert(display, key);
                     }
-                    let backdrop = platform::decode_thumbnail(&key.0)
-                        .and_then(|(w, h, rgba)| Backdrop::from_rgba(w, h, &rgba, size));
-                    *worker.lock().unwrap_or_else(|p| p.into_inner()) = backdrop.map(Arc::new);
-                    loaded = Some(key);
                 }
             });
         Self {
             shared,
             refresh,
-            last_request: None,
+            last_request: HashMap::new(),
         }
     }
 
-    pub fn tint_at(&mut self, x: f64, y: f64) -> Option<[u8; 3]> {
-        if self
+    pub fn warm(&mut self, display: &DisplayFrame) {
+        let stale = self
             .last_request
-            .is_none_or(|last| last.elapsed() >= RECHECK)
-        {
-            self.last_request = Some(Instant::now());
-            let _ = self.refresh.send(());
+            .get(&display.id)
+            .is_none_or(|last| last.elapsed() >= RECHECK);
+        if stale {
+            self.last_request.insert(display.id, Instant::now());
+            let _ = self.refresh.send((display.id, display.size()));
         }
+    }
+
+    pub fn tint_at(&mut self, display: &DisplayFrame, x: f64, y: f64) -> Option<[u8; 3]> {
+        self.warm(display);
         let backdrop = self
             .shared
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .clone()?;
-        Some(fog_from_wallpaper(backdrop.sample(x, y)))
+            .get(&display.id)
+            .cloned()?;
+        let (ox, oy) = display.origin();
+        Some(fog_from_wallpaper(backdrop.sample(x - ox, y - oy)))
     }
 }
 
@@ -211,14 +230,39 @@ mod platform {
         static kCGImageSourceCreateThumbnailWithTransform: CFStringRef;
     }
 
-    pub(super) fn desktop_image_path(screen: usize) -> Option<PathBuf> {
-        if screen == 0 {
-            return None;
-        }
+    pub(super) fn desktop_image_path(display: u32) -> Option<PathBuf> {
         objc2::rc::autoreleasepool(|_| unsafe {
+            let screens: *mut AnyObject = msg_send![class!(NSScreen), screens];
+            if screens.is_null() {
+                return None;
+            }
+            let key: *mut AnyObject = msg_send![class!(NSString),
+                stringWithUTF8String: c"NSScreenNumber".as_ptr()
+            ];
+            // NSScreen.screens is Swift-bridged: count/index are NSInteger there, so enumerate instead.
+            let screens: *mut AnyObject = msg_send![screens, objectEnumerator];
+            let mut screen: *mut AnyObject = std::ptr::null_mut();
+            loop {
+                let candidate: *mut AnyObject = msg_send![screens, nextObject];
+                if candidate.is_null() {
+                    break;
+                }
+                let description: *mut AnyObject = msg_send![candidate, deviceDescription];
+                let number: *mut AnyObject = msg_send![description, objectForKey: key];
+                if number.is_null() {
+                    continue;
+                }
+                let id: u32 = msg_send![number, unsignedIntValue];
+                if id == display {
+                    screen = candidate;
+                    break;
+                }
+            }
+            if screen.is_null() {
+                return None;
+            }
             let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
-            let url: *mut AnyObject =
-                msg_send![workspace, desktopImageURLForScreen: screen as *mut AnyObject];
+            let url: *mut AnyObject = msg_send![workspace, desktopImageURLForScreen: screen];
             if url.is_null() {
                 return None;
             }
@@ -354,16 +398,17 @@ mod tests {
     #[test]
     #[ignore = "reads the live desktop wallpaper; run with --ignored on a logged-in Mac"]
     fn live_wallpaper_decodes_into_a_fog_tint() {
-        use objc2::runtime::AnyObject;
-        use objc2::{class, msg_send};
-        let screen: *mut AnyObject = unsafe { msg_send![class!(NSScreen), mainScreen] };
+        let displays = super::super::display::active_displays();
+        let display = displays
+            .iter()
+            .find(|d| d.primary)
+            .expect("primary display");
         let path = std::env::var_os("FOG_PATH")
             .map(PathBuf::from)
-            .or_else(|| platform::desktop_image_path(screen as usize))
+            .or_else(|| platform::desktop_image_path(display.id))
             .expect("desktop image path");
         let (w, h, rgba) = platform::decode_thumbnail(&path).expect("decodable wallpaper");
-        let frame: objc2_foundation::NSRect = unsafe { msg_send![screen, frame] };
-        let size = (frame.size.width, frame.size.height);
+        let size = display.size();
         let backdrop = Backdrop::from_rgba(w, h, &rgba, size).unwrap();
         let point = (
             std::env::var("FOG_X")

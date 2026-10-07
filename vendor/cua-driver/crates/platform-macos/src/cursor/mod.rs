@@ -5,6 +5,7 @@
 //! - `overlay::run_on_main_thread()` — called from `main()` on the main thread
 //! - `overlay::send_command(cmd)` — called from tool implementations
 
+pub mod display;
 pub mod overlay;
 /// System cursor shape reporting (what the OS draws, not what Cua draws).
 pub mod shape;

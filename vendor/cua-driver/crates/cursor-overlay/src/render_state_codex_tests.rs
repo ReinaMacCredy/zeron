@@ -164,3 +164,24 @@ fn an_unmatched_observe_stops_spinning_at_its_nominal_duration() {
     assert_eq!(core.codex.channels().rotation, 0.0);
     assert!(!core.compact_animating());
 }
+
+#[test]
+fn travel_on_a_display_above_the_primary_stays_on_that_display() {
+    let mut core = codex();
+    core.screen_origin = (-44.0, -1080.0);
+    core.screen_size = Some((1920.0, 1080.0));
+    snap(&mut core, 1700.0, -1000.0);
+    assert!(core.is_placed());
+    run(&mut core, 1.0);
+    snap(&mut core, 0.0, -60.0);
+    assert!(core.compact_motion.is_some());
+    for _ in 0..600 {
+        core.tick_compact(1.0 / 120.0);
+        let (x, y) = core.compact_display_pos();
+        assert!(
+            (-44.0..=1876.0).contains(&x) && (-1080.0..=0.0).contains(&y),
+            "({x}, {y}) left the display"
+        );
+    }
+    assert_eq!(core.compact_display_pos(), (0.0, -60.0));
+}
