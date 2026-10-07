@@ -1120,17 +1120,39 @@ fn markdown_html(markdown: &str) -> String {
 }
 
 fn html_plain_text(html: &str) -> String {
+    const LINE_BREAKS: &[&str] = &[
+        "br",
+        "/p",
+        "/div",
+        "/li",
+        "/tr",
+        "/pre",
+        "/blockquote",
+        "/h1",
+        "/h2",
+        "/h3",
+        "/h4",
+        "/h5",
+        "/h6",
+    ];
     let mut text = String::with_capacity(html.len());
-    let mut in_tag = false;
+    let mut tag: Option<String> = None;
     for character in html.chars() {
-        match character {
-            '<' => in_tag = true,
-            '>' if in_tag => in_tag = false,
-            _ if !in_tag => text.push(character),
-            _ => {}
+        match tag.as_mut() {
+            None if character == '<' => tag = Some(String::new()),
+            None => text.push(character),
+            Some(name) if character == '>' => {
+                let name = name.trim().trim_end_matches('/').to_ascii_lowercase();
+                if LINE_BREAKS.contains(&name.split_whitespace().next().unwrap_or_default()) {
+                    text.push('\n');
+                }
+                tag = None;
+            }
+            Some(name) => name.push(character),
         }
     }
-    text.replace("&nbsp;", " ")
+    text.trim_end_matches('\n')
+        .replace("&nbsp;", " ")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&quot;", "\"")

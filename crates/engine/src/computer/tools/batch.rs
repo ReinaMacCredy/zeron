@@ -714,7 +714,11 @@ impl ComputerTools {
     }
 
     fn step_window(&self, step: &Value, thread: &str) -> Option<String> {
-        if let Some(window_id) = step.get("window_id").and_then(Value::as_str) {
+        if let Some(window_id) = step
+            .get("window_id")
+            .or_else(|| step.get("windowId"))
+            .and_then(Value::as_str)
+        {
             return Some(window_id.to_owned());
         }
         let element_ref = step.get("ref").and_then(Value::as_u64)?;

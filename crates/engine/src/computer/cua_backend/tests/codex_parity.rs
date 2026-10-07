@@ -1,5 +1,5 @@
 use serde_json::json;
-use zeron_proto::computer::CuaEffect;
+use zeron_proto::computer::{ComputerRect, CuaEffect};
 
 use super::*;
 use crate::computer::backend::ComputerBackendActionResult;
@@ -61,7 +61,7 @@ async fn parses_the_driver_tree_with_static_values_focus_and_root_targets() {
     assert_eq!(tree.url.as_deref(), Some("file:///tmp/calc"));
 }
 
-fn press_fixture(ax_error: i64, mutate_on_press: bool) -> Fixture {
+fn press_fixture(ax_error: i64, mutate_on_press: bool, pixel_uncertain: bool) -> Fixture {
     let f = fixture();
     f.set_elements(vec![
         json!({
@@ -83,6 +83,13 @@ fn press_fixture(ax_error: i64, mutate_on_press: bool) -> Fixture {
     ]);
     let knobs = f.knobs.clone();
     f.on_tool("click", move |args| {
+        if args.get("element_token").is_none() && pixel_uncertain {
+            return json!({
+                "isError": true,
+                "structuredContent": { "verified": false, "effect": "unverifiable", "code": "pixel_uncertain" },
+                "content": [{ "type": "text", "text": "pointer delivery unknown" }],
+            });
+        }
         if args.get("element_token").is_none() {
             return json!({ "structuredContent": {
                 "route": "pixel",
@@ -137,7 +144,7 @@ fn pixel_clicks(f: &Fixture) -> usize {
 // replaced the AX press.
 #[tokio::test]
 async fn retries_a_cannot_complete_press_with_no_effect_as_one_background_pointer_click() {
-    let f = press_fixture(-25204, false);
+    let f = press_fixture(-25204, false, false);
     let result = press(&f).await.expect("fallback click");
     assert_eq!(
         result.delivery_path.as_deref(),
@@ -161,11 +168,47 @@ async fn retries_a_cannot_complete_press_with_no_effect_as_one_background_pointe
 #[tokio::test]
 async fn never_replays_a_press_that_changed_state_or_failed_differently() {
     for (ax_error, mutate) in [(-25204, true), (-25200, false)] {
-        let f = press_fixture(ax_error, mutate);
+        let f = press_fixture(ax_error, mutate, false);
         let error = press(&f).await.unwrap_err();
         assert_eq!(effect(&error), Some(CuaEffect::DispatchedUnknown));
         assert_eq!(pixel_clicks(&f), 0, "ax_error {ax_error}");
     }
+}
+
+// Catches the fallback restoring a window's observed geometry after its own
+// pointer click went uncertain, which would re-validate a stale screenshot.
+#[tokio::test]
+async fn an_uncertain_fallback_click_leaves_observed_geometry_invalidated() {
+    let f = press_fixture(-25204, false, true);
+    let state = f
+        .backend
+        .get_state(window_state("cua:10:20"))
+        .await
+        .unwrap();
+    let node = state.root.unwrap().children[0].clone();
+    f.backend.inner.state().observed_geometry.insert(
+        "cua:10:20".to_owned(),
+        ComputerRect {
+            x: -300.0,
+            y: 20.0,
+            width: 200.0,
+            height: 100.0,
+        },
+    );
+    let error = f
+        .backend
+        .perform_action(&resolved("Equals", &node), "AXPress")
+        .await
+        .unwrap_err();
+    assert_eq!(code(&error), Some("pixel_uncertain"));
+    assert!(
+        f.backend
+            .inner
+            .state()
+            .observed_geometry
+            .get("cua:10:20")
+            .is_none()
+    );
 }
 
 // Catches a rich paste reaching the driver without its plain-text fallback.

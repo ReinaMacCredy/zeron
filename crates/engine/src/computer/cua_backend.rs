@@ -3317,7 +3317,10 @@ impl CuaInner {
         let clicked = self
             .click_gesture(point, Some(window_id), &[], Some(1), false, false)
             .await;
-        {
+        let keep_invalidation = clicked
+            .as_ref()
+            .is_err_and(|pixel| pixel.effect() != Some(CuaEffect::NotDispatched));
+        if !keep_invalidation {
             let mut state = self.state();
             match previous {
                 Some(previous) => state
