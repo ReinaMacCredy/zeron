@@ -35,6 +35,14 @@ impl FakeHost {
     }
 }
 
+fn arguments_has(calls: &Mutex<Vec<(String, Value)>>, key: &str) -> bool {
+    calls
+        .lock()
+        .unwrap()
+        .last()
+        .is_some_and(|(_, args)| args.get(key).is_some())
+}
+
 fn json_result(value: Value) -> McpToolResult {
     McpToolResult::text(value.to_string())
 }
@@ -55,9 +63,21 @@ impl JsHost for FakeHost {
         }
         match tool {
             "computer_list_apps" => json_result(json!({ "apps": [
-                { "pid": 7, "name": "Calculator", "bundleId": "com.apple.calculator", "running": true }
+                { "pid": 7, "name": "Calculator", "bundleId": "com.apple.calculator", "running": true },
+                { "pid": 9, "name": "Google Chrome", "bundleId": "com.google.Chrome", "running": true }
             ] })),
+            "computer_browser_state" if arguments_has(&self.calls, "window_id") => {
+                json_result(json!({
+                    "target_id": "bt-1",
+                    "tabs": [{ "tab_id": "tab-user", "title": "Mail", "url": "https://mail.example", "active": true }]
+                }))
+            }
+            "computer_browser_navigate" => {
+                json_result(json!({ "target_id": "bt-1", "tab_id": "tab-new", "opened_tab": true }))
+            }
             "computer_list_windows" => json_result(json!({ "windows": [
+                { "id": "cua:9:3", "title": "Mail", "appName": "Google Chrome", "pid": 9, "visible": true,
+                  "bounds": { "x": 0, "y": 0, "width": 900, "height": 700 }, "stackingIndex": 2 },
                 { "id": "cua:7:1", "title": "", "appName": "Calculator", "pid": 7, "visible": false,
                   "bounds": { "x": 0, "y": 0, "width": 1512, "height": 33 }, "stackingIndex": 1 },
                 { "id": "cua:7:2", "title": "Calculator", "appName": "Calculator", "pid": 7, "visible": true,
@@ -242,4 +262,29 @@ async fn the_first_call_in_a_chat_carries_the_api_documentation_once() {
     assert!(texts(&first).contains("## Computer use"));
     let second = exec("js-i", &host, "2").await;
     assert!(!texts(&second).contains("## Computer use"));
+}
+
+#[tokio::test]
+async fn a_tab_in_the_users_chrome_attaches_through_the_profile_route_and_opens_in_the_background()
+{
+    let host = Arc::new(FakeHost::default());
+    let outcome = exec(
+        "js-j",
+        &host,
+        "var tab = await cua.createBrowserTab(\"Chrome\", \"https://example.com\"); await tab.markDeliverable();",
+    )
+    .await;
+    assert_eq!(outcome.error, None, "{}", texts(&outcome));
+    let prepare = &host.args("computer_browser_prepare")[0];
+    assert_eq!(prepare["strategy"], json!({ "kind": "existing_profile" }));
+    assert_eq!(prepare["pid"], json!(9));
+    assert!(prepare.get("allow_launch").is_none());
+    let navigate = &host.args("computer_browser_navigate")[0];
+    assert_eq!(navigate["new_tab"], json!(true));
+    assert_eq!(navigate["tab_id"], json!("tab-user"));
+    assert!(
+        host.args("computer_browser_state")
+            .iter()
+            .any(|args| args["keep"] == json!("deliverable") && args["tab_id"] == json!("tab-new"))
+    );
 }

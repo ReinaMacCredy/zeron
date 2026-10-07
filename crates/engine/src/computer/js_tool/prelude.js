@@ -32,7 +32,8 @@
     const message = errorMessage(result, data);
     if (message) throw new Error(message);
     const images = (result.content || []).filter((c) => c.type === "image");
-    return { data: data || {}, text: first ? first.text : "", images, raw: result };
+    const structured = result.structuredContent && typeof result.structuredContent === "object" ? result.structuredContent : null;
+    return { data: data || structured || {}, structured: structured || data || {}, text: first ? first.text : "", images, raw: result };
   };
 
   const write = (value) => {
@@ -312,32 +313,93 @@
     return lines.join("\n");
   };
 
+  const BROWSER_BUNDLES = {
+    "com.google.Chrome": "Chrome",
+    "com.microsoft.edgemac": "Edge",
+    "com.brave.Browser": "Brave",
+  };
+
+  const runningBrowsers = () =>
+    (call("computer_list_apps").data.apps || [])
+      .filter((a) => a.running && BROWSER_BUNDLES[a.bundleId])
+      .map((a) => ({ id: a.bundleId, name: BROWSER_BUNDLES[a.bundleId], pid: a.pid, appName: a.name }));
+
   class Browser {
-    constructor(id, name) {
-      this.browserId = id;
-      this.name = name;
+    constructor(info) {
+      this.browserId = info.id;
+      this.name = info.name;
+      this.pid = info.pid;
+      this.appName = info.appName;
+      this.binding = null;
     }
 
     documentation() {
-      return "Browser tabs support getAXState, getScreenshot, click(ref), typeText(ref, text), pressKey(ref, key), goto(url) and close().";
+      return this.browserId === "isolated"
+        ? "Isolated browser without the user's cookies. Tabs support getAXState, getScreenshot, click(ref), typeText(ref, text), pressKey(ref, \"Return\"), goto(url) and close()."
+        : `The user's signed-in ${this.name} profile. Attaching asks the user once. Tabs you open close when this turn ends unless you call tab.markDeliverable() (keep it for the user) or tab.markHandoff() (keep it through the next turn). Claim an existing tab with cua.getTab(tabId, { browser: "${this.browserId}" }).`;
+    }
+
+    attach() {
+      if (this.binding) return this.binding;
+      if (this.browserId === "isolated") {
+        const prepared = call("computer_browser_prepare", {
+          allow_launch: true,
+          profile: { mode: "isolated_named", name: "zeron" },
+        }).structured;
+        this.pid = prepared.pid || this.pid;
+        const state = call("computer_browser_state", { pid: this.pid }).structured;
+        this.binding = { target_id: state.target_id, tabs: state.tabs || [] };
+      } else {
+        const window = windowsFor(this.appName, this.pid)[0];
+        if (!window) throw new Error(`${this.name} has no open window to attach to.`);
+        call("computer_browser_prepare", {
+          pid: this.pid,
+          window_id: window.id,
+          strategy: { kind: "existing_profile" },
+        });
+        const state = call("computer_browser_state", { pid: this.pid, window_id: window.id }).structured;
+        this.binding = { target_id: state.target_id, tabs: state.tabs || [], window_id: window.id };
+      }
+      if (!this.binding.target_id) throw new Error(`Could not bind ${this.name}.`);
+      return this.binding;
+    }
+
+    tabs() {
+      this.binding = null;
+      return this.attach().tabs;
     }
   }
 
+  const browserById = (id) => {
+    if (!id || id === "isolated" || id === "iab") return new Browser({ id: "isolated", name: "Isolated browser" });
+    const wanted = String(id).toLowerCase();
+    const found = runningBrowsers().find(
+      (b) => b.id.toLowerCase() === wanted || b.name.toLowerCase() === wanted || b.appName.toLowerCase() === wanted,
+    );
+    if (!found) throw new Error(`Browser "${id}" is not running. Use cua.listBrowsers() to see what is available.`);
+    return new Browser(found);
+  };
+
   class Tab {
-    constructor(binding, title, url) {
-      this.id = binding.tab_id;
-      this.targetId = binding.target_id;
-      this.title = title;
-      this.url = url;
+    constructor(browser, tabId, title, url) {
+      this.browser = browser;
+      this.id = tabId;
+      this.targetId = browser.binding.target_id;
+      this.title = title || "";
+      this.url = url || "";
     }
 
     ids(extra) {
       return Object.assign({ target_id: this.targetId, tab_id: this.id }, extra || {});
     }
 
+    label() {
+      return this.browser.name || "Browser";
+    }
+
     getAXState(options) {
-      const { data, text } = call("computer_browser_state", this.ids());
-      const state = data.snapshot || data.tree || text;
+      const result = call("computer_browser_state", this.ids());
+      const state = result.data && typeof result.data.tree === "string" ? result.data.tree : result.text;
       if (!options || options.emit !== false) write(state);
       return state;
     }
@@ -359,13 +421,13 @@
       if (typeof ref !== "number" && typeof ref !== "string")
         throw new Error("Tab click takes an element ref from getAXState().");
       call("computer_browser_click", this.ids({ ref }));
-      action("browser_click", this.title || "Browser");
+      action("browser_click", this.label());
     }
 
     typeText(ref, text) {
-      if (ref === null) throw new Error("Pass the field ref from getAXState() to typeText.");
+      if (ref === null || ref === undefined) throw new Error("Pass the field ref from getAXState() to typeText.");
       call("computer_browser_type", this.ids({ ref, text: String(text) }));
-      action("browser_type", this.title || "Browser", text);
+      action("browser_type", this.label(), text);
     }
 
     paste(ref, text) {
@@ -376,13 +438,26 @@
       const name = normalizeKey(key);
       if (name !== "enter") throw new Error("Browser tabs support pressKey(ref, \"Return\") only.");
       call("computer_browser_press", this.ids({ ref }));
-      action("browser_press", this.title || "Browser", key);
+      action("browser_press", this.label(), key);
     }
 
     goto(url) {
       call("computer_browser_navigate", this.ids({ url: String(url) }));
       this.url = String(url);
-      action("browser_navigate", this.title || "Browser", url);
+      action("browser_navigate", this.label(), url);
+    }
+
+    close() {
+      call("computer_browser_navigate", this.ids({ close_tab: true }));
+      action("browser_close", this.label());
+    }
+
+    markDeliverable() {
+      call("computer_browser_state", this.ids({ keep: "deliverable" }));
+    }
+
+    markHandoff() {
+      call("computer_browser_state", this.ids({ keep: "handoff" }));
     }
   }
 
@@ -403,7 +478,8 @@
         const own = windows.filter((w) => w.appName === app.displayName);
         if (own.length) app.windows = own.map((w) => ({ id: w.id, app: w.appName, title: w.title }));
       }
-      const state = { apps, browsers: [] };
+      const browsers = runningBrowsers().map((b) => ({ id: b.id, name: b.name, type: "existing_profile" }));
+      const state = { apps, browsers };
       if (!options || options.emit !== false) write(state);
       return state;
     },
@@ -455,30 +531,61 @@
     },
 
     listBrowsers(options) {
-      const browsers = [{ id: "isolated", name: "Isolated browser", type: "cdp" }];
+      const browsers = runningBrowsers()
+        .map((b) => ({ id: b.id, name: b.name, family: "chrome", type: "existing_profile" }))
+        .concat([{ id: "isolated", name: "Isolated browser", type: "cdp" }]);
       if (!options || options.emit !== false) write(browsers);
       return browsers;
     },
 
     getBrowser(options) {
-      const id = (options && options.id) || "isolated";
-      const browser = new Browser(id, "Isolated browser");
+      const browser = browserById(options && options.id);
       write(browser.documentation());
       return browser;
     },
 
+    listTabs(options) {
+      const browser = browserById(options && options.browser);
+      const tabs = browser.tabs().map((t) => ({ id: t.tab_id, browserId: browser.browserId, title: t.title, url: t.url }));
+      if (!options || options.emit !== false) write(tabs);
+      return tabs;
+    },
+
+    getTab(reference, options) {
+      const browser = browserById(options && options.browser);
+      const tabs = browser.tabs();
+      const found =
+        typeof reference === "string"
+          ? tabs.find((t) => t.tab_id === reference)
+          : reference && reference.url
+            ? tabs.find((t) => t.url === reference.url) ||
+              tabs.find((t) => String(t.url || "").startsWith(reference.url))
+            : null;
+      if (!found) throw new Error("No open tab matches that reference.");
+      const tab = new Tab(browser, found.tab_id, found.title, found.url);
+      tab.getAXState();
+      return tab;
+    },
+
     createBrowserTab(browserId, url, options) {
-      const prepared = call("computer_browser_prepare", {
-        allow_launch: true,
-        profile: { mode: "isolated_named", name: "zeron" },
-      }).data;
-      const binding = prepared.binding || prepared;
-      const tab = new Tab(
-        { target_id: binding.target_id, tab_id: binding.tab_id || (binding.tabs && binding.tabs[0] && binding.tabs[0].tab_id) },
-        "",
-        url,
-      );
-      if (url) tab.goto(url);
+      const browser = browserById(browserId);
+      const binding = browser.attach();
+      const anchor = binding.tabs.find((t) => t.active) || binding.tabs[0];
+      if (!anchor) throw new Error(`${browser.name} has no tab to anchor a new tab on.`);
+      let tab;
+      if (browser.browserId === "isolated") {
+        tab = new Tab(browser, anchor.tab_id, anchor.title, anchor.url);
+        if (url) tab.goto(url);
+      } else {
+        const opened = call("computer_browser_navigate", {
+          target_id: binding.target_id,
+          tab_id: anchor.tab_id,
+          url: String(url || "about:blank"),
+          new_tab: true,
+        }).structured;
+        tab = new Tab(browser, opened.tab_id, "", url);
+        action("browser_navigate", browser.name, url);
+      }
       tab.getAXState();
       return tab;
     },

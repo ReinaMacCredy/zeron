@@ -32,12 +32,16 @@ interface App {
 }
 
 interface Tab {
+  readonly id: string;
   getAXState(options?: ObservationOptions): Promise<string>;
   getScreenshot(options?: ObservationOptions): Promise<Image>;
   click(ref: number | string): Promise<void>;
   typeText(ref: number | string, text: string): Promise<void>;
   pressKey(ref: number | string, key: "Return"): Promise<void>;
   goto(url: string): Promise<void>;
+  close(): Promise<void>;
+  markDeliverable(): Promise<void>;
+  markHandoff(): Promise<void>;
 }
 
 declare const cua: {
@@ -48,7 +52,9 @@ declare const cua: {
   computer: { target: "mac"; launch_app(input: { app: string }): Promise<void> };
   listBrowsers(options?: ObservationOptions): Promise<BrowserInfo[]>;
   getBrowser(options?: { id?: string }): Promise<Browser>;
-  createBrowserTab(browserId: string, url?: string, options?: { visible?: boolean }): Promise<Tab>;
+  listTabs(options?: { browser?: string } & ObservationOptions): Promise<TabInfo[]>;
+  getTab(reference: string | { url: string }, options?: { browser?: string }): Promise<Tab>;
+  createBrowserTab(browserId: string, url?: string): Promise<Tab>;
 };
 
 declare const nodeRepl: { write(value: unknown): void; emitImage(image: Image | string): void };
@@ -59,6 +65,17 @@ declare const nodeRepl: { write(value: unknown): void; emitImage(image: Image | 
 - `cua.getApp("Calculator")` accepts an app name, bundle id or path. It launches the app in the background if needed and binds its frontmost usable window.
 - `cua.getApp({ windowId })` binds an exact window.
 - Input goes to the app in the background, without taking the user's focus.
+
+## Browsers
+
+- Browser ids:
+  - `"com.google.Chrome"` (or `"Chrome"`), Edge and Brave are the user's running, signed-in profile. Attaching asks the user once.
+  - `"isolated"` is a separate headless browser without the user's cookies. Never swap one for the other silently.
+- `cua.createBrowserTab("Chrome", url)` opens a background tab in the user's browser.
+- Tabs you open close when the turn ends:
+  - `tab.markDeliverable()` keeps one for the user;
+  - `tab.markHandoff()` keeps it through the next turn.
+- `cua.listTabs({ browser: "Chrome" })` and `cua.getTab(tabId, { browser: "Chrome" })` claim one of the user's own tabs. The agent never closes those.
 
 ## Workflow
 
