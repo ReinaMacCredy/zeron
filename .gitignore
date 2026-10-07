@@ -14,3 +14,4 @@ xcuserdata/
 .agents
 .claude
 CLAUDE.md
+/scripts/**/__pycache__/

@@ -1473,6 +1473,12 @@ pub struct UiSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device_float_frame: Option<crate::device_panel::float::DeviceFloatFrame>,
     pub home_widgets: HomeWidgets,
+    /// Stable native Codex voice id only; devices and microphone state are never persisted.
+    #[serde(default)]
+    pub codex_voice: Option<String>,
+    /// Local preference: never transfers an active call or credentials.
+    #[serde(default)]
+    pub codex_voice_device: Option<String>,
     /// Pre-theme settings used `accentColor`. Read it once, migrate to
     /// [`Self::accent`], and never write it again.
     #[serde(default, rename = "accentColor", skip_serializing)]
@@ -1591,6 +1597,8 @@ impl Default for UiSettings {
             device_auto_float: true,
             device_float_frame: None,
             home_widgets: HomeWidgets::default(),
+            codex_voice: None,
+            codex_voice_device: None,
             legacy_accent_color: None,
         }
     }
@@ -2244,6 +2252,8 @@ impl UiSettings {
             new_thread_background_effect,
             reduce_motion,
             pause_animations_in_background,
+            codex_voice,
+            codex_voice_device,
             legacy_accent_color,
             follow_up_behavior,
             reasoning_shortcut_modifier,
@@ -3562,6 +3572,8 @@ mod tests {
             dictation_enabled: false,
             dictation_input: Some("coreaudio:usb-mic".into()),
             window_geometry: None,
+            codex_voice: Some("ember".into()),
+            codex_voice_device: Some("fedora".into()),
             sidebar_width: 300.0,
             sidebar_collapsed: true,
             sidebar_grouped: true,

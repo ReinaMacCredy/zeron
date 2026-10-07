@@ -114,6 +114,7 @@ impl ToolServer {
 
 /// Host-side controls handed to a run: input-request bridge + steering mailbox.
 pub struct RunControls {
+    pub realtime: Option<codex::realtime::RealtimeControls>,
     /// Shared execution gate held until the harness has shut down and reaped
     /// its subprocess, including when the host drops the event stream. Each
     /// detached session task must retain this lease through its cleanup.
@@ -268,6 +269,15 @@ pub trait Harness: Send + Sync {
     /// Whether the agent can see the Zeron MCP server's computer tools.
     fn computer_tools_reachable(&self) -> bool {
         true
+    }
+
+    /// Bootstrap without a synthetic user prompt; providers opt in explicitly.
+    async fn start_idle(
+        &self,
+        _request: RunRequest,
+        _controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        Err(HarnessError::Protocol("idle runtime unsupported".into()))
     }
 
     /// Run one (persistent) session; the stream ends with `AgentEvent::Done`.

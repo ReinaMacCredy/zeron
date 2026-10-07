@@ -533,6 +533,9 @@ impl Shell {
             return self.open_draft(chat_id, false, cx);
         }
         self.command_palette = None;
+        // Opening any session steps the voice stage aside — including the one
+        // already selected under it. The call keeps running in the background.
+        self.set_voice_stage_open(false, cx);
         self.route = Route::Chat;
         self.focus_composer(cx);
         self.state
@@ -639,6 +642,7 @@ impl Shell {
     pub(super) fn open_new_session(&mut self, project: Option<String>, cx: &mut Context<Self>) {
         self.snapshot_current_chat(cx);
         self.command_palette = None;
+        self.set_voice_stage_open(false, cx);
         self.route = Route::Chat;
         self.focus_composer(cx);
         // Pre-hide before the selection flips so the state change can't

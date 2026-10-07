@@ -856,6 +856,7 @@ async fn run_session(session: Session) {
         stderr_tail,
     } = session;
     let RunControls {
+        realtime: _,
         execution_lease: _execution_lease,
         request_input,
         mut steering,

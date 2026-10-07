@@ -863,6 +863,8 @@ pub(crate) async fn run_capped(
         .take()
         .ok_or_else(|| EngineError::Other("git stdout unavailable".into()))?;
     let mut out: Vec<u8> = Vec::new();
+    // Keep the read buffer out of nested async state: inline storage grows
+    // every caller's future and can overflow a standard RPC worker's stack.
     let mut buf = vec![0u8; 64 * 1024];
     let mut truncated = false;
     loop {

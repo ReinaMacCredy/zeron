@@ -556,6 +556,21 @@ impl std::fmt::Debug for Client {
 }
 
 impl Client {
+    /// Dedicated ephemeral call handle; never uses durable commands or RPC retries.
+    pub async fn voice_transport(
+        &self,
+        device_id: &str,
+    ) -> Result<Arc<zeron_voice_session::RpcTransport>> {
+        let live = self.inner.live().ok_or_else(|| {
+            ClientError::Unsupported("remote voice requires a connected account".into())
+        })?;
+        live.relay.voice_transport(device_id).await
+    }
+    /// Sign-out/shutdown closes every call created by this client.
+    pub fn voice_cancellation(&self) -> CancellationToken {
+        self.inner.cancel.child_token()
+    }
+
     /// Build and start. Never blocks on the network: live mode hydrates from
     /// `data_dir` and connects in the background; Demo seeds its dataset.
     pub fn new(

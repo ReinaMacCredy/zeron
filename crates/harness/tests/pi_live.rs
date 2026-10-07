@@ -68,6 +68,7 @@ async fn real_pi_mock_lifecycle() {
         let (steer, steering) = mpsc::channel(8);
         let interrupt = CancellationToken::new();
         let controls = RunControls {
+            realtime: None,
             execution_lease: None,
             steering,
             interrupt: interrupt.clone(),
@@ -181,6 +182,7 @@ async fn real_pi_mock_lifecycle() {
     // continues in a new session and says so instead of failing every message.
     let (_, steering) = mpsc::channel(1);
     let controls = RunControls {
+        realtime: None,
         execution_lease: None,
         steering,
         interrupt: CancellationToken::new(),
@@ -258,6 +260,7 @@ async fn real_pi_steering_bursts_share_the_next_model_call() {
     let cwd = dir.path();
     let (tx, steering) = mpsc::channel(8);
     let controls = RunControls {
+        realtime: None,
         execution_lease: None,
         steering,
         interrupt: CancellationToken::new(),

@@ -229,6 +229,7 @@ async fn exercise(prompt: &str, resume: Option<&str>) {
     let (steer_tx, steering) = mpsc::channel(4);
     let interrupt = CancellationToken::new();
     let controls = RunControls {
+        realtime: None,
         execution_lease: None,
         request_input: Box::new(|_| {
             let (tx, rx) = oneshot::channel();
@@ -324,6 +325,7 @@ async fn exercise_tree(prompt: &str, drop_stream: bool) {
     let (_steer, steering) = mpsc::channel(1);
     let interrupt = CancellationToken::new();
     let controls = RunControls {
+        realtime: None,
         execution_lease: None,
         request_input: Box::new(|_| {
             let (_, rx) = oneshot::channel();
@@ -484,6 +486,7 @@ async fn batch_overrides_launch_through_cmd() {
         unsafe { std::env::set_var("ZERON_TEST_BATCH_ARGS_FILE", &received) };
         let (_steer, steering) = mpsc::channel(1);
         let controls = RunControls {
+            realtime: None,
             execution_lease: None,
             request_input: Box::new(|_| {
                 let (tx, rx) = oneshot::channel();

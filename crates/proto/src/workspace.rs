@@ -34,6 +34,7 @@ pub mod capabilities {
         SOURCE_CONTROL_V1,
         SOURCE_CONTROL_SYNC_V1,
         SOURCE_CONTROL_COMMITS_V1,
+        crate::voice::remote::CAPABILITY,
     ];
 
     pub fn current() -> Vec<String> {
@@ -118,7 +119,8 @@ mod tests {
                     "device-hub-v1",
                     "source-control-v1",
                     "source-control-sync-v1",
-                    "source-control-commits-v1"
+                    "source-control-commits-v1",
+                    "voice-client-media-v1"
                 ],
             })
         );

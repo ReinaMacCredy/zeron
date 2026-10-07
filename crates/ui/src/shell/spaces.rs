@@ -5846,7 +5846,7 @@ impl Shell {
         let mut rows: Vec<zeron_proto::Chat> = state
             .chats
             .iter()
-            .filter(|c| c.archived)
+            .filter(|c| c.archived && !zeron_proto::voice::is_orchestrator_chat(&c.id))
             .filter(|chat| in_filter(chat))
             .cloned()
             .collect();

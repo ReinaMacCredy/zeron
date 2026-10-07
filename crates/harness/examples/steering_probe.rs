@@ -60,6 +60,7 @@ async fn main() -> anyhow::Result<()> {
         permission_mode: Default::default(),
     };
     let controls = RunControls {
+        realtime: None,
         execution_lease: None,
         steering,
         interrupt: interrupt.clone(),

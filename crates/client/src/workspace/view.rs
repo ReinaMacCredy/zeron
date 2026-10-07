@@ -566,7 +566,7 @@ pub(crate) fn derive(
     let mut active: Vec<&Chat> = state
         .chats
         .iter()
-        .filter(|c| !c.archived && c.delegated_by().is_none())
+        .filter(|c| !c.archived && c.is_top_level())
         .filter(|c| {
             c.space_id
                 .as_deref()
@@ -670,7 +670,11 @@ pub(crate) fn derive(
         }
     }
 
-    let mut archived_chats: Vec<&Chat> = state.chats.iter().filter(|c| c.archived).collect();
+    let mut archived_chats: Vec<&Chat> = state
+        .chats
+        .iter()
+        .filter(|c| c.archived && !zeron_proto::voice::is_orchestrator_chat(&c.id))
+        .collect();
     sort_recency(&mut archived_chats);
     let archived: Vec<Arc<SessionRow>> = archived_chats.iter().map(|c| row(c)).collect();
 
