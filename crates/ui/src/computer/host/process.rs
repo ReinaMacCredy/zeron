@@ -11,7 +11,7 @@ use tokio::process::{ChildStdin, Command};
 use tokio::sync::mpsc;
 
 use super::Chain;
-use super::support::CUA_CURSOR_IDLE_HIDE_MS;
+use super::support::{CUA_CURSOR_IDLE_HIDE_MS, CUA_CURSOR_THEME};
 use crate::computer::runtime_ownership::{
     RuntimeSweep, cua_host_process_is_alive, sweep_owned_cua_runtime_directories,
 };
@@ -55,6 +55,8 @@ impl SpawnPlan<'_> {
                 "--compact-cursor".into(),
                 "--idle-hide-ms".into(),
                 CUA_CURSOR_IDLE_HIDE_MS.to_string(),
+                "--cursor-theme".into(),
+                CUA_CURSOR_THEME.into(),
             ]);
         }
         args
@@ -317,7 +319,9 @@ mod tests {
                 "/t/zeron-cua-abc123/driver-1.sock",
                 "--compact-cursor",
                 "--idle-hide-ms",
-                "60000"
+                "60000",
+                "--cursor-theme",
+                "zeron.codex"
             ]
         );
         let unpatched = SpawnPlan {
