@@ -288,7 +288,7 @@ impl Shell {
             cx.notify();
             return;
         }
-        self.discard_pr_chat(cx);
+        self.release_pr_chat(cx);
         self.start_pr_chat(context, cx);
         self.sync_pr_chat_button(cx);
         cx.notify();
@@ -585,6 +585,16 @@ impl Shell {
         panel.view = PanelView::Closed;
         panel.sessions_menu = false;
         if settings::current(cx).pr_chat_history == PrChatHistory::Fresh {
+            self.release_pr_chat(cx);
+        }
+        self.sync_pr_chat_button(cx);
+        cx.notify();
+    }
+
+    fn release_pr_chat(&mut self, cx: &mut Context<Self>) {
+        if settings::current(cx).pr_chat_history == PrChatHistory::Fresh
+            && let Some(panel) = self.pr_chat.as_mut()
+        {
             let chat_id = panel.chat_id.clone();
             if panel.fresh && settings::current(cx).pr_chat_indexed(&chat_id) {
                 if let Some(side) = panel.side.take() {
@@ -592,10 +602,8 @@ impl Shell {
                 }
                 self.delete_pr_chat(chat_id, cx);
             }
-            self.discard_pr_chat(cx);
         }
-        self.sync_pr_chat_button(cx);
-        cx.notify();
+        self.discard_pr_chat(cx);
     }
 
     fn park_pr_chat(
@@ -1077,6 +1085,26 @@ impl Shell {
                     .child(icon(icons::LUCIDE_CHEVRON_DOWN).size(px(12.0)))
             }))
             .child(div().flex_1())
+            .child(
+                div()
+                    .id("pr-chat-new")
+                    .debug_selector(|| "pr-chat-new".into())
+                    .role(gpui::Role::Button)
+                    .aria_label("New chat")
+                    .size(px(26.0))
+                    .rounded(px(6.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.ink(0.06)))
+                    .on_click(cx.listener(|this, _, _, cx| this.new_pr_chat_session(cx)))
+                    .child(
+                        icon(icons::PEN_NEW_SQUARE)
+                            .size(px(14.0))
+                            .text_color(theme.text_muted),
+                    ),
+            )
             .child(
                 div()
                     .id("pr-chat-promote")
@@ -3401,6 +3429,142 @@ mod tests {
             );
             let settings = settings::current(cx);
             assert!(settings.pr_chat_indexed("gone") && settings.pr_chat_indexed("gone8"));
+        });
+    }
+
+    fn send_mock(
+        runtime: &tokio::runtime::Runtime,
+        shell: &Entity<Shell>,
+        cx: &mut VisualTestContext,
+        wire: &mut Wire,
+    ) -> String {
+        let (chat_id, composer, side_state) = shell.read_with(cx, |shell, _| {
+            let tab = shell.pr_chat_tab().expect("chat minted");
+            (
+                shell.pr_chat.as_ref().unwrap().chat_id.clone(),
+                tab.composer.clone(),
+                tab.state.clone(),
+            )
+        });
+        let config: zeron_proto::ChatConfig = serde_json::from_value(serde_json::json!({
+            "harness": "mock", "sandbox": "workspace-write",
+        }))
+        .unwrap();
+        side_state.update(cx, |state, _| state.apply_chat_config(&chat_id, config));
+        composer.update(cx, |composer, cx| composer.send_prompt("Hi".into(), cx));
+        wire.serve(runtime, cx, |method, _| {
+            matches!(method, methods::MUTATE | methods::QUEUE_COMMAND)
+                .then(|| serde_json::json!({}))
+        });
+        wire.serve(runtime, cx, |_, _| Some(serde_json::json!({})));
+        shell.read_with(cx, |_, cx| {
+            assert!(settings::current(cx).pr_chat_indexed(&chat_id))
+        });
+        chat_id
+    }
+
+    fn serve_prepare(
+        runtime: &tokio::runtime::Runtime,
+        cx: &mut VisualTestContext,
+        wire: &mut Wire,
+    ) -> usize {
+        let frames = wire.serve(runtime, cx, |method, _| {
+            (method == methods::PREPARE_CHANGE_REQUEST_CHAT).then(|| {
+                serde_json::json!({
+                    "spaceId": "s1", "root": "/repo", "cwd": "/repo",
+                    "worktree": false, "onHead": false,
+                })
+            })
+        });
+        calls(&frames, methods::PREPARE_CHANGE_REQUEST_CHAT).len()
+    }
+
+    fn deleted(frames: &[ClientFrame]) -> Vec<String> {
+        calls(frames, methods::MUTATE)
+            .into_iter()
+            .filter(|frame| frame.params["op"] == "deleteChat")
+            .map(|frame| frame.params["chatId"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    #[gpui::test]
+    fn the_header_new_chat_button_starts_a_new_session_in_both_history_modes(
+        cx: &mut TestAppContext,
+    ) {
+        let (runtime, shell, cx, mut wire, _dir) = setup(cx);
+        let _guard = runtime.enter();
+        let (unsent, _, _) = open_pr_chat(&runtime, &shell, cx, &mut wire);
+        click(cx, "pr-chat-new");
+        assert_eq!(
+            serve_prepare(&runtime, cx, &mut wire),
+            0,
+            "an unsent chat is already new"
+        );
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.pr_chat.as_ref().unwrap().chat_id, unsent)
+        });
+
+        let kept = send_mock(&runtime, &shell, cx, &mut wire);
+        click(cx, "pr-chat-new");
+        let frames = wire.serve(&runtime, cx, |method, _| {
+            (method == methods::PREPARE_CHANGE_REQUEST_CHAT).then(|| {
+                serde_json::json!({
+                    "spaceId": "s1", "root": "/repo", "cwd": "/repo",
+                    "worktree": false, "onHead": false,
+                })
+            })
+        });
+        assert_eq!(
+            calls(&frames, methods::PREPARE_CHANGE_REQUEST_CHAT).len(),
+            1
+        );
+        assert!(deleted(&frames).is_empty(), "{frames:?}");
+        shell.read_with(cx, |shell, cx| {
+            let panel = shell.pr_chat.as_ref().unwrap();
+            assert_ne!(panel.chat_id, kept);
+            assert!(!panel.indexed);
+            assert!(shell.pr_chat_open());
+            assert!(shell.pr_chat_tab().is_some());
+            assert!(settings::current(cx).pr_chat_indexed(&kept));
+        });
+
+        cx.update(|_, cx| {
+            settings::update(SavePolicy::Debounced, cx, |settings| {
+                settings.pr_chat_history = PrChatHistory::Fresh
+            })
+        });
+        shell.update(cx, |shell, cx| {
+            shell.close_pr_chat(cx);
+            shell.toggle_pr_chat(cx);
+        });
+        assert_eq!(serve_prepare(&runtime, cx, &mut wire), 1);
+        assert!(cx.debug_bounds("pr-chat-sessions").is_none());
+        let fresh = send_mock(&runtime, &shell, cx, &mut wire);
+        click(cx, "pr-chat-new");
+        let mut frames = wire.serve(&runtime, cx, |method, _| match method {
+            methods::PREPARE_CHANGE_REQUEST_CHAT => Some(serde_json::json!({
+                "spaceId": "s1", "root": "/repo", "cwd": "/repo",
+                "worktree": false, "onHead": false,
+            })),
+            _ => Some(serde_json::json!({})),
+        });
+        frames.extend(wire.serve(&runtime, cx, |_, _| Some(serde_json::json!({}))));
+        assert_eq!(
+            calls(&frames, methods::PREPARE_CHANGE_REQUEST_CHAT).len(),
+            1
+        );
+        assert_eq!(
+            deleted(&frames),
+            [fresh.clone()],
+            "Fresh discards the replaced chat"
+        );
+        shell.read_with(cx, |shell, cx| {
+            let panel = shell.pr_chat.as_ref().unwrap();
+            assert!(panel.chat_id != fresh && panel.chat_id != kept);
+            assert!(
+                settings::current(cx).pr_chat_indexed(&kept),
+                "made under Keep per PR"
+            );
         });
     }
 
